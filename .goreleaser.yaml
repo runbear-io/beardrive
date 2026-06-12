@@ -1,0 +1,46 @@
+# Release automation: `goreleaser release` on a tagged commit builds
+# macOS/Linux binaries and publishes the Homebrew formula to
+# runbear-io/homebrew-tap, enabling `brew install runbear-io/tap/sfs`.
+version: 2
+
+project_name: sfs
+
+builds:
+  - id: sfs
+    main: ./cmd/sfs
+    binary: sfs
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - name: sfs
+    repository:
+      owner: runbear-io
+      name: homebrew-tap
+    homepage: https://github.com/runbear-io/sfs
+    description: "Synced file system for AI agents: mount, sync, and track folders"
+    license: MIT
+    test: |
+      assert_match "sfs", shell_output("#{bin}/sfs version")
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
