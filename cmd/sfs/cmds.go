@@ -86,7 +86,7 @@ func statusCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if pid, ok := daemon.Running(vdir); ok {
+				if pid, ok := daemon.Running(vdir, config.MountID(folder)); ok {
 					fmt.Printf("  daemon:   running (pid %d)\n", pid)
 				} else {
 					fmt.Printf("  daemon:   stopped\n")
@@ -95,7 +95,7 @@ func statusCmd() *cobra.Command {
 				if err != nil {
 					continue
 				}
-				cache, err := sess.Store.LoadCache()
+				cache, err := sess.Store.LoadCache(config.MountID(folder))
 				if err == nil {
 					var total int64
 					for _, c := range cache {
@@ -245,7 +245,7 @@ func daemonCmd() *cobra.Command {
 		},
 	}
 	run.Flags().DurationVar(&scanInterval, "scan-interval", 3*time.Second, "local scan interval")
-	run.Flags().DurationVar(&remoteInterval, "remote-interval", 30*time.Second, "remote sync interval")
+	run.Flags().DurationVar(&remoteInterval, "remote-interval", 10*time.Second, "remote sync interval")
 	c.AddCommand(run)
 	return c
 }

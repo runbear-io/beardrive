@@ -61,12 +61,17 @@ func TestJournalAndState(t *testing.T) {
 	}
 
 	cache := map[string]CachedFile{"f": {Blob: "b", Size: 1, MTimeNS: 42}}
-	if err := s.SaveCache(cache); err != nil {
+	if err := s.SaveCache("m1", cache); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.LoadCache()
+	got, err := s.LoadCache("m1")
 	if err != nil || got["f"].MTimeNS != 42 {
 		t.Fatalf("cache roundtrip: %v %v", got, err)
+	}
+	// caches are isolated per mount
+	other, err := s.LoadCache("m2")
+	if err != nil || len(other) != 0 {
+		t.Fatalf("mount caches must be isolated: %v %v", other, err)
 	}
 
 	st := SyncState{Lamport: 7, PushedOps: 3}

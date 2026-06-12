@@ -154,7 +154,8 @@ func (s *Store) AllOps() ([]journal.Op, error) {
 
 // CachedFile records what sfs last wrote to / observed in the working folder
 // for a path. Size+MTimeNS make change detection cheap; Blob ties it back to
-// content.
+// content. The cache is per mount (one volume can be materialized into
+// several folders, each with its own stat fingerprints).
 type CachedFile struct {
 	Blob    string `json:"blob"`
 	Size    int64  `json:"size"`
@@ -162,16 +163,20 @@ type CachedFile struct {
 	MTimeNS int64  `json:"mtime_ns"`
 }
 
-func (s *Store) LoadCache() (map[string]CachedFile, error) {
+func (s *Store) cachePath(mountID string) string {
+	return filepath.Join(s.dir, "state-"+mountID+".json")
+}
+
+func (s *Store) LoadCache(mountID string) (map[string]CachedFile, error) {
 	out := map[string]CachedFile{}
-	if err := readJSON(filepath.Join(s.dir, "state.json"), &out); err != nil {
+	if err := readJSON(s.cachePath(mountID), &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (s *Store) SaveCache(c map[string]CachedFile) error {
-	return WriteJSONAtomic(filepath.Join(s.dir, "state.json"), c)
+func (s *Store) SaveCache(mountID string, c map[string]CachedFile) error {
+	return WriteJSONAtomic(s.cachePath(mountID), c)
 }
 
 // ---- sync state (sync.json) ----

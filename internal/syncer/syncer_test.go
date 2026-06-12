@@ -245,6 +245,38 @@ func TestOfflineThenReconnect(t *testing.T) {
 	}
 }
 
+func TestSameVolumeMountedAtTwoFolders(t *testing.T) {
+	// One device mounts the same volume at two folders (e.g. ./shared in two
+	// repos). They share the store (blobs+journals) but have separate mount
+	// caches, and content propagates between them even with no remote.
+	st, err := store.Open(filepath.Join(t.TempDir(), "volume"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := config.Device{ID: "dev1", Name: "dev1", Author: "dev1@test"}
+	m1 := &Session{Folder: t.TempDir(), MountID: "mount1", Store: st, Device: dev}
+	m2 := &Session{Folder: t.TempDir(), MountID: "mount2", Store: st, Device: dev}
+
+	write(t, m1.Folder, "shared.md", "from folder one")
+	cycle(t, m1)
+	res := cycle(t, m2)
+	if res.Materialized != 1 {
+		t.Fatalf("folder two should materialize the file: %+v", res)
+	}
+	if read(t, m2.Folder, "shared.md") != "from folder one" {
+		t.Fatal("content did not propagate between mounts")
+	}
+
+	// edit in folder two propagates back
+	time.Sleep(10 * time.Millisecond)
+	write(t, m2.Folder, "shared.md", "edited in folder two")
+	cycle(t, m2)
+	cycle(t, m1)
+	if read(t, m1.Folder, "shared.md") != "edited in folder two" {
+		t.Fatal("edit did not propagate back to folder one")
+	}
+}
+
 func TestExecutableBitPreserved(t *testing.T) {
 	be := sharedRemote(t)
 	a := newDevice(t, "deva", be)

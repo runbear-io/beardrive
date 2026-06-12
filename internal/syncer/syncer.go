@@ -32,9 +32,17 @@ import (
 // Session ties a working folder to its volume store and (optionally) remote.
 type Session struct {
 	Folder  string
+	MountID string // distinguishes folders sharing one volume; see config.MountID
 	Store   *store.Store
 	Device  config.Device
 	Backend remote.Backend // nil = work offline
+}
+
+func (s *Session) mountID() string {
+	if s.MountID != "" {
+		return s.MountID
+	}
+	return config.MountID(s.Folder)
 }
 
 // Result summarizes one sync cycle.
@@ -68,7 +76,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	defer unlock()
 
 	res := &Result{}
-	cache, err := s.Store.LoadCache()
+	cache, err := s.Store.LoadCache(s.mountID())
 	if err != nil {
 		return nil, fmt.Errorf("load state: %w", err)
 	}
@@ -147,7 +155,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		}
 	}
 
-	if err := s.Store.SaveCache(cache); err != nil {
+	if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
 		return nil, err
 	}
 	if err := s.Store.SaveSync(st); err != nil {

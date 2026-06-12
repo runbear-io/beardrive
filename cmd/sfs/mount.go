@@ -113,7 +113,7 @@ daemon keeps the folder in sync until "sfs umnt".`,
 	c.Flags().StringVarP(&volume, "volume", "v", "", "volume name (default: folder basename)")
 	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run the sync daemon in the foreground")
 	c.Flags().DurationVar(&scanInterval, "scan-interval", 3*time.Second, "how often to scan the folder for local changes")
-	c.Flags().DurationVar(&remoteInterval, "remote-interval", 30*time.Second, "how often to sync with the remote")
+	c.Flags().DurationVar(&remoteInterval, "remote-interval", 10*time.Second, "how often to sync with the remote")
 	return c
 }
 
@@ -142,7 +142,7 @@ volume data under ~/.sfs/volumes is still kept).`,
 			if err != nil {
 				return err
 			}
-			stopped, err := daemon.Stop(vdir)
+			stopped, err := daemon.Stop(vdir, config.MountID(folder))
 			if err != nil {
 				return err
 			}

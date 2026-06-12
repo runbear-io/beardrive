@@ -129,8 +129,9 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
   Concurrent edits keep the last writer at the path; the loser is preserved
   as a conflict-copy file by the device that detects the overlap.
 - A per-mount **daemon** scans the folder every few seconds (cheap
-  size+mtime check) and exchanges with the remote every ~30s — or
-  immediately after local edits.
+  size+mtime check) and exchanges with the remote every ~10s — or
+  immediately after local edits. Tune with --scan-interval and
+  --remote-interval on `sfs mnt`.
 
 ### What sfs does not sync
 

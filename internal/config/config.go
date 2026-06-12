@@ -5,6 +5,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -134,6 +135,15 @@ func SaveMounts(m map[string]MountInfo) error {
 		return err
 	}
 	return writeJSON(p, m)
+}
+
+// MountID derives a stable identifier for a mounted folder. One volume can
+// be mounted at several folders (even on the same device); everything
+// folder-specific — the sync daemon and the materialization cache — is keyed
+// by this ID, while blobs and journals stay shared per volume.
+func MountID(folder string) string {
+	sum := sha256.Sum256([]byte(folder))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // VolumeDir returns (and creates parents for) the local store dir of a volume.

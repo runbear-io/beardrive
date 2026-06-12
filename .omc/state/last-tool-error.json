@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"gcloud storage buckets create gs://runbear-wiki --project=runbear-local --location=us-west1 --uniform-bucket-level-access 2>&1 && gcloud config set project runbear-local 2>&1 | tail -1\",\"d...",
+  "error": "Exit code 1\nCreating gs://runbear-wiki/...\nERROR: (gcloud.storage.buckets.create) HTTPError 403: snow@runbear.io does not have storage.buckets.create access to the Google Cloud project. Permission 'storage.buckets.create' denied on resource '//storage.googleapis.com/projects/_/buckets/runbear-wiki' (or it may not exist). This command is authenticated as snow@runbear.io which is the active account specified by the [core/account] property.",
+  "timestamp": "2026-06-12T15:32:54.007Z",
+  "retry_count": 1
+}

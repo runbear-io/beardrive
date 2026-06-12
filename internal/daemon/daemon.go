@@ -26,12 +26,19 @@ import (
 	"github.com/runbear-io/sfs/internal/syncer"
 )
 
-func PidPath(volDir string) string { return filepath.Join(volDir, "daemon.pid") }
-func LogPath(volDir string) string { return filepath.Join(volDir, "daemon.log") }
+// Daemons are per mount, not per volume: one volume may be mounted at
+// several folders (each gets its own daemon), so pid/log files are keyed by
+// the mount ID.
+func PidPath(volDir, mountID string) string {
+	return filepath.Join(volDir, "daemon-"+mountID+".pid")
+}
+func LogPath(volDir, mountID string) string {
+	return filepath.Join(volDir, "daemon-"+mountID+".log")
+}
 
-// Running reports the daemon pid for a volume if one is alive.
-func Running(volDir string) (int, bool) {
-	data, err := os.ReadFile(PidPath(volDir))
+// Running reports the daemon pid for a mount if one is alive.
+func Running(volDir, mountID string) (int, bool) {
+	data, err := os.ReadFile(PidPath(volDir, mountID))
 	if err != nil {
 		return 0, false
 	}
@@ -47,14 +54,15 @@ func Running(volDir string) (int, bool) {
 
 // Start launches a detached daemon for the folder (no-op if already running).
 func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (int, error) {
-	if pid, ok := Running(volDir); ok {
+	mountID := config.MountID(folder)
+	if pid, ok := Running(volDir, mountID); ok {
 		return pid, nil
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		return 0, err
 	}
-	logf, err := os.OpenFile(LogPath(volDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logf, err := os.OpenFile(LogPath(volDir, mountID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return 0, err
 	}
@@ -69,17 +77,17 @@ func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (i
 		return 0, err
 	}
 	pid := cmd.Process.Pid
-	if err := os.WriteFile(PidPath(volDir), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(PidPath(volDir, mountID), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
 		return pid, err
 	}
 	return pid, cmd.Process.Release()
 }
 
-// Stop terminates the daemon for a volume and waits for it to exit.
-func Stop(volDir string) (bool, error) {
-	pid, ok := Running(volDir)
+// Stop terminates the daemon for a mount and waits for it to exit.
+func Stop(volDir, mountID string) (bool, error) {
+	pid, ok := Running(volDir, mountID)
 	if !ok {
-		os.Remove(PidPath(volDir))
+		os.Remove(PidPath(volDir, mountID))
 		return false, nil
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
@@ -88,13 +96,13 @@ func Stop(volDir string) (bool, error) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err != nil {
-			os.Remove(PidPath(volDir))
+			os.Remove(PidPath(volDir, mountID))
 			return true, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	syscall.Kill(pid, syscall.SIGKILL)
-	os.Remove(PidPath(volDir))
+	os.Remove(PidPath(volDir, mountID))
 	return true, nil
 }
 
@@ -124,10 +132,11 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(PidPath(volDir), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+	mountID := config.MountID(folder)
+	if err := os.WriteFile(PidPath(volDir, mountID), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
 		return err
 	}
-	defer os.Remove(PidPath(volDir))
+	defer os.Remove(PidPath(volDir, mountID))
 
 	log.Printf("daemon started: folder=%s volume=%s remote=%q device=%s(%s) scan=%s sync=%s",
 		folder, mi.Volume, mi.Remote, dev.Name, dev.ID, scanInterval, remoteInterval)
