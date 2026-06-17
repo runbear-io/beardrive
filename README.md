@@ -106,6 +106,21 @@ sfs uses each provider's standard credential chain — nothing sfs-specific:
 | `sfs remote [folder]` / `sfs remote set <folder> <url>` | Show / set the cloud remote |
 | `sfs whoami` | Device identity used in change tracking |
 
+## Claude Code skills
+
+This repo ships agent skills under [`.claude/skills/`](.claude/skills) so
+Claude Code is sfs-aware out of the box when working in a clone:
+
+- **`sfs-mount`** — mount, unmount, on-demand sync, and multi-device setup.
+- **`sfs-remote`** — picking a backend (S3, GCS, S3-compatible, `file://`)
+  and the per-provider credential chain.
+- **`sfs-status`** — `sfs status` / `sfs log` / `sfs whoami`, the per-mount
+  daemon log location, and a stepwise diagnostic flow.
+
+Claude Code auto-discovers skills in `.claude/skills/`; no configuration
+needed. To make them available globally, symlink each skill directory into
+`~/.claude/skills/`.
+
 ## How it works
 
 ```
