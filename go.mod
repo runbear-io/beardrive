@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.3
 	github.com/aws/smithy-go v1.27.2
 	github.com/spf13/cobra v1.10.2
+	github.com/yuin/goldmark v1.8.2
 	google.golang.org/api v0.284.0
 )
 

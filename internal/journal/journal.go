@@ -31,8 +31,8 @@ type Op struct {
 	Device     string    `json:"device"`
 	DeviceName string    `json:"device_name,omitempty"`
 	Author     string    `json:"author,omitempty"`
-	Kind       string    `json:"kind"` // "put" or "delete"
-	Path       string    `json:"path"` // slash-separated, relative to volume root
+	Kind       string    `json:"kind"`           // "put" or "delete"
+	Path       string    `json:"path"`           // slash-separated, relative to volume root
 	Blob       string    `json:"blob,omitempty"` // sha256 hex of content (put only)
 	Size       int64     `json:"size,omitempty"`
 	Mode       uint32    `json:"mode,omitempty"` // permission bits

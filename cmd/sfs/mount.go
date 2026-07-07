@@ -41,27 +41,46 @@ daemon keeps the folder in sync until "sfs umnt".`,
 				return err
 			}
 
+			// Settings resolution: flags win, then the folder's .sfs file,
+			// then the global registry. The result is written back to both,
+			// so the project file travels with the folder and the registry
+			// knows which mounts are active on this device.
 			mounts, err := config.LoadMounts()
 			if err != nil {
 				return err
 			}
-			mi, exists := mounts[folder]
-			if exists {
-				if volume != "" && volume != mi.Volume {
-					return fmt.Errorf("%s is already mounted as volume %q", folder, mi.Volume)
-				}
-			} else {
-				v := volume
-				if v == "" {
-					v = filepath.Base(folder)
-				}
-				mi = config.MountInfo{Volume: v}
+			reg, registered := mounts[folder]
+			proj, _, err := config.LoadProject(folder)
+			if err != nil {
+				return err
 			}
-			if remoteURL != "" {
-				mi.Remote = remoteURL
+			effVolume := proj.Volume
+			if effVolume == "" && registered {
+				effVolume = reg.Volume
 			}
+			if volume != "" && effVolume != "" && volume != effVolume {
+				return fmt.Errorf("%s is already mounted as volume %q", folder, effVolume)
+			}
+			if volume != "" {
+				effVolume = volume
+			}
+			if effVolume == "" {
+				effVolume = filepath.Base(folder)
+			}
+			effRemote := remoteURL
+			if effRemote == "" {
+				effRemote = proj.Remote
+			}
+			if effRemote == "" && registered {
+				effRemote = reg.Remote
+			}
+			mi := config.MountInfo{Volume: effVolume, Remote: effRemote}
 			mounts[folder] = mi
 			if err := config.SaveMounts(mounts); err != nil {
+				return err
+			}
+			proj.Volume, proj.Remote = effVolume, effRemote
+			if err := config.SaveProject(folder, proj); err != nil {
 				return err
 			}
 			vdir, err := config.VolumeDir(mi.Volume)
@@ -96,6 +115,8 @@ daemon keeps the folder in sync until "sfs umnt".`,
 				fmt.Printf("  remote:  (none — local only; set one with `sfs remote set %s <url>`)\n", folder)
 			}
 			fmt.Printf("  device:  %s (%s) as %s\n", dev.Name, dev.ID, dev.Author)
+			fmt.Printf("  config:  %s (volume/remote/include; add a .sfsignore next to it to exclude paths)\n",
+				filepath.Join(folder, config.ProjectFile))
 			printCycle(res)
 
 			if foreground {

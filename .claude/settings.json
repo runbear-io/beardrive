@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(go vet:*)",
+      "Bash(go run ./cmd/sfs:*)",
+      "Bash(gofmt:*)",
+      "Bash(go mod tidy)",
+      "Bash(go doc:*)",
+      "Bash(go env:*)"
+    ]
+  }
+}

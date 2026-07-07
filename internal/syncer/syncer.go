@@ -60,7 +60,9 @@ func (r *Result) Activity() bool {
 	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Materialized > 0
 }
 
-var ignoreNames = map[string]bool{".DS_Store": true}
+// config.ProjectFile (.sfs) never syncs: remotes are device-specific and
+// syncing it would let one device silently repoint another.
+var ignoreNames = map[string]bool{".DS_Store": true, config.ProjectFile: true}
 var ignoreDirs = map[string]bool{".git": true, ".sfs": true}
 
 func ignoredFile(name string) bool {
@@ -88,9 +90,17 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read own journal: %w", err)
 	}
+	proj, _, err := config.LoadProject(s.Folder)
+	if err != nil {
+		return nil, err
+	}
+	filter, err := loadFilter(s.Folder, proj.Include)
+	if err != nil {
+		return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
+	}
 
 	// 1. Scan the working folder and journal any local changes.
-	localOps, err := s.scan(cache, &st, int64(len(myOps)))
+	localOps, err := s.scan(cache, &st, int64(len(myOps)), filter)
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
@@ -139,7 +149,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("read journals: %w", err)
 	}
 	target := journal.Replay(all)
-	n, err := s.materialize(target, cache)
+	n, err := s.materialize(target, cache, filter)
 	if err != nil {
 		return nil, fmt.Errorf("materialize: %w", err)
 	}
@@ -165,8 +175,11 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 }
 
 // scan diffs the working folder against the state cache and returns ops for
-// every local change, storing new content in the blob store.
-func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64) ([]journal.Op, error) {
+// every local change, storing new content in the blob store. Filtered paths
+// are neither journaled nor deleted: a path that becomes ignored is dropped
+// from the cache without a delete op, so opting out locally never removes
+// the file from other devices.
+func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter) ([]journal.Op, error) {
 	seen := make(map[string]bool, len(cache))
 	var ops []journal.Op
 	nextOp := func(kind, rel string) journal.Op {
@@ -189,12 +202,12 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			if ignoreDirs[d.Name()] {
+			if ignoreDirs[d.Name()] || filter.PruneDir(rel) {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || ignoredFile(d.Name()) {
+		if !d.Type().IsRegular() || ignoredFile(d.Name()) || filter.Skip(rel) {
 			return nil
 		}
 		info, err := d.Info()
@@ -229,10 +242,15 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 	}
 
 	for rel := range cache {
-		if !seen[rel] {
-			ops = append(ops, nextOp(journal.KindDelete, rel))
-			delete(cache, rel)
+		if seen[rel] {
+			continue
 		}
+		if filter.Skip(rel) {
+			delete(cache, rel) // newly filtered, not deleted: stop tracking silently
+			continue
+		}
+		ops = append(ops, nextOp(journal.KindDelete, rel))
+		delete(cache, rel)
 	}
 	return ops, nil
 }
@@ -390,9 +408,14 @@ func sanitize(s string) string {
 
 // materialize applies the merged state to the working folder, never
 // clobbering files that changed since the scan earlier in this cycle.
-func (s *Session) materialize(target map[string]journal.FileState, cache map[string]store.CachedFile) (int, error) {
+// Filtered paths are not written: other devices' files that match the local
+// ignore/include rules simply don't appear here.
+func (s *Session) materialize(target map[string]journal.FileState, cache map[string]store.CachedFile, filter *Filter) (int, error) {
 	changed := 0
 	for rel, want := range target {
+		if filter.Skip(rel) {
+			continue
+		}
 		c, ok := cache[rel]
 		if ok && c.Blob == want.Blob && c.Mode == want.Mode {
 			continue

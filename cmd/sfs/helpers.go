@@ -20,14 +20,19 @@ func absFolder(args []string) (string, error) {
 	return filepath.Abs(arg)
 }
 
+// mustMount resolves a folder's settings: the .sfs project file wins over
+// the global registry, so a folder that carries its own .sfs works even
+// before it is registered on this device.
 func mustMount(folder string) (config.MountInfo, error) {
-	mounts, err := config.LoadMounts()
+	mi, _, found, err := config.EffectiveMount(folder)
 	if err != nil {
-		return config.MountInfo{}, err
+		return mi, err
 	}
-	mi, ok := mounts[folder]
-	if !ok {
+	if !found {
 		return mi, fmt.Errorf("%s is not an sfs mount (run `sfs mnt %s` first)", folder, folder)
+	}
+	if mi.Volume == "" {
+		mi.Volume = filepath.Base(folder)
 	}
 	return mi, nil
 }

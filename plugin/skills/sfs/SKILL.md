@@ -26,6 +26,36 @@ Use this skill whenever the user is working with the `sfs` CLI: mounting, unmoun
 
 `<folder>` is created if missing. Omitting it on `sync`/`status`/`log` defaults to the current working directory.
 
+## Project files
+
+Two files at the mount root control a folder's sync behavior:
+
+- **`.sfs`** — the folder's settings (JSON): `volume`, `remote`, and optional `include`. Written by `sfs mnt` / `sfs remote set`; safe to hand-edit (a running daemon picks changes up on its next tick). It is **never synced** — remotes are device-specific — and it travels with the folder: copy a folder containing `.sfs` to a new machine and plain `sfs mnt <folder>` reuses its volume and remote.
+- **`.sfsignore`** — opt-out list, gitignore-style. **Syncs like a normal file**, so all devices share the same rules. Syntax subset: `#` comments, `*` within a segment, `**` across segments, `?`, trailing `/` for directories-only, a `/` elsewhere anchors to the mount root, `!` re-includes.
+
+```jsonc
+// .sfs
+{
+  "volume": "agent-workspace",
+  "remote": "s3://acme-sfs/agent-workspace",
+  "include": ["docs/", "notes/", "*.md"]   // optional: sync ONLY these
+}
+```
+
+```gitignore
+# .sfsignore
+*.log
+node_modules/
+build/
+!build/keep.txt
+```
+
+Selective-sync semantics — important when advising users:
+
+- A path syncs when it is **not ignored** and (if `include` is non-empty) **matches an include pattern**. Ignore beats include.
+- Adding a pattern for an already-synced file makes this device **stop tracking it without deleting it anywhere** — the file stays on disk locally and on every other device. Deleting it locally after that does not propagate either.
+- Because `.sfsignore` syncs, adding a rule on one device applies it everywhere on the next cycle.
+
 ---
 
 ## 1. Mount / unmount / sync
@@ -35,7 +65,7 @@ Use this skill whenever the user is working with the `sfs` CLI: mounting, unmoun
 1. Pick a folder. New empty or with existing files — existing files are imported on the first cycle.
 2. Decide on a remote (optional at mount time; configurable later via `sfs remote set`).
 3. Run `sfs mnt`. sfs:
-   - registers the folder in `~/.sfs/mounts.json`,
+   - writes the folder's settings to `<folder>/.sfs` and registers it in `~/.sfs/mounts.json`,
    - opens/creates the volume under `~/.sfs/volumes/<volume>/`,
    - runs an initial cycle (import locals; pull remote state if a remote is set),
    - starts a background daemon (unless `-f`).
@@ -94,7 +124,7 @@ sfs umnt ./notes --forget
 
 ### What sfs does not sync
 
-`.git` directories, `.DS_Store`, sfs's own temp files, and empty directories. Don't suggest mounting a folder where `.git` is the content the user expects synced — they want git, not sfs.
+`.git` directories, `.DS_Store`, the `.sfs` settings file, sfs's own temp files, empty directories, and anything excluded by `.sfsignore` or left out of an `include` list. Don't suggest mounting a folder where `.git` is the content the user expects synced — they want git, not sfs.
 
 ---
 
@@ -320,14 +350,11 @@ To change name/author, edit `~/.sfs/device.json` and restart the daemon (`sfs um
 ### The per-mount daemon log
 
 ```sh
-# Volume contents
+# Volume contents (daemon pid + log files live here, one pair per mount)
 ls ~/.sfs/volumes/<volume>/
 
-# Daemon state + log for each mount of this volume
-ls ~/.sfs/volumes/<volume>/daemons/
-
 # Tail
-tail -F ~/.sfs/volumes/<volume>/daemons/*.log
+tail -F ~/.sfs/volumes/<volume>/daemon-*.log
 ```
 
 Useful when `pending` is stuck > 0, the daemon flips to `stopped` after a restart, or you changed credentials and want to confirm uptake.
@@ -338,7 +365,7 @@ Useful when `pending` is stuck > 0, the daemon flips to `stopped` after a restar
 2. `daemon: stopped` → `sfs mnt <folder>` to restart it.
 3. `pending` stuck → `sfs sync <folder>` and read the cycle output. Errors here point at the remote — see the cloud-storage troubleshooting table above.
 4. Sync succeeds but the other device doesn't see changes → `sfs sync` on the other device + `sfs log` to confirm the op crossed over.
-5. Daemon keeps dying → tail `~/.sfs/volumes/<volume>/daemons/*.log` for the cause.
+5. Daemon keeps dying → tail `~/.sfs/volumes/<volume>/daemon-*.log` for the cause.
 
 ---
 
@@ -351,9 +378,9 @@ Useful when `pending` is stuck > 0, the daemon flips to `stopped` after a restar
 └── volumes/<volume>/
     ├── blobs/               # content-addressed file content
     ├── journal/             # per-device append-only op logs
-    ├── state.json           # what's currently materialized
+    ├── state-<mountID>.json # what's currently materialized (per mount)
     ├── sync.json            # lamport clock + push cursor
-    └── daemons/             # one pid+log file per mount of this volume
+    └── daemon-<mountID>.pid/.log  # daemon state + log, per mount
 ```
 
 Don't suggest editing files under `volumes/` directly — sfs owns them. `device.json` and `mounts.json` are safe to inspect; `mounts.json` is safe to hand-edit if a mount entry needs surgery, but prefer `sfs umnt --forget` then `sfs mnt`.

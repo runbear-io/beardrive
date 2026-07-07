@@ -75,6 +75,9 @@ func statusCmd() *cobra.Command {
 					fmt.Println()
 				}
 				first = false
+				if eff, _, found, err := config.EffectiveMount(folder); err == nil && found {
+					mi = eff // .sfs project file wins over the registry
+				}
 				fmt.Printf("%s\n", folder)
 				fmt.Printf("  volume:   %s\n", mi.Volume)
 				if mi.Remote != "" {
@@ -203,17 +206,25 @@ func remoteCmd() *cobra.Command {
 			if err != nil || (u.Scheme != "s3" && u.Scheme != "gs" && u.Scheme != "file") {
 				return fmt.Errorf("invalid remote %q (want s3://bucket/prefix, gs://bucket/prefix, or file:///path)", raw)
 			}
+			mi, err := mustMount(folder)
+			if err != nil {
+				return err
+			}
+			mi.Remote = raw
 			mounts, err := config.LoadMounts()
 			if err != nil {
 				return err
 			}
-			mi, ok := mounts[folder]
-			if !ok {
-				return fmt.Errorf("%s is not an sfs mount (run `sfs mnt %s` first)", folder, folder)
-			}
-			mi.Remote = raw
 			mounts[folder] = mi
 			if err := config.SaveMounts(mounts); err != nil {
+				return err
+			}
+			proj, _, err := config.LoadProject(folder)
+			if err != nil {
+				return err
+			}
+			proj.Volume, proj.Remote = mi.Volume, raw
+			if err := config.SaveProject(folder, proj); err != nil {
 				return err
 			}
 			fmt.Printf("remote of %s set to %s\n", folder, raw)

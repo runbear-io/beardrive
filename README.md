@@ -45,6 +45,9 @@ $ sfs mnt ./workspace --remote s3://my-bucket/workspace
 - **Conflict-safe** — concurrent edits resolve deterministically
   (last-writer-wins), and the losing version is preserved as a
   `name.sfs-conflict-<device>-<time>` file. Nothing is silently dropped.
+- **Selective sync** — a gitignore-style `.sfsignore` opts files out, and an
+  optional `include` list in the folder's `.sfs` settings narrows sync to
+  chosen paths.
 - **macOS & Linux.**
 
 ## Install
@@ -106,16 +109,81 @@ sfs uses each provider's standard credential chain — nothing sfs-specific:
 | `sfs remote [folder]` / `sfs remote set <folder> <url>` | Show / set the cloud remote |
 | `sfs whoami` | Device identity used in change tracking |
 
-## Claude Code skill
+## Project files
 
-This repo ships an [`sfs` agent skill](.claude/skills/sfs/SKILL.md) so
-Claude Code is sfs-aware out of the box when working in a clone — covering
-mount/unmount/sync, picking a backend and credentials, and inspecting
-status/logs/identity.
+Each mounted folder carries its own settings, so configuration travels with
+the project:
 
-Claude Code auto-discovers skills in `.claude/skills/`; no configuration
-needed. To make it available globally, symlink the directory into
-`~/.claude/skills/`.
+- **`.sfs`** — the folder's settings (JSON): `volume`, `remote`, and an
+  optional `include` list. Written by `sfs mnt`, safe to hand-edit (a running
+  daemon picks changes up automatically). Never synced — remotes are
+  device-specific. Copy a folder containing `.sfs` to another machine and
+  plain `sfs mnt <folder>` reuses its volume and remote.
+- **`.sfsignore`** — gitignore-style opt-out list at the mount root. Syncs
+  like a normal file, so every device shares the same rules. Supports `#`
+  comments, `*`, `**`, `?`, trailing `/` for directories, leading `/` (or any
+  `/`) for root-anchoring, and `!` to re-include.
+
+```jsonc
+// .sfs
+{ "volume": "notes", "remote": "s3://my-bucket/notes", "include": ["docs/", "*.md"] }
+```
+
+Opting out is non-destructive: when a pattern starts matching an
+already-synced file, the file stops syncing but is deleted nowhere.
+
+## Web viewer
+
+`sfs-web` serves a read-only website for a folder or an sfs remote —
+browse folders and files, read markdown rendered Obsidian-style (including
+`[[wikilinks]]`, task lists, and tables), and download any file.
+
+```sh
+sfs-web                              # serve the current directory
+sfs-web ./notes                      # serve a folder from disk
+sfs-web s3://my-bucket/workspace     # serve an sfs remote
+```
+
+With no remote given it serves the folder straight from the local file
+system — on an sfs mount the daemon keeps those files fresh, so this is
+the simplest way to run it in production (and needs no cloud credentials
+on the serving machine). Pointing it at a remote instead reads the object
+store directly — no mount, daemon, or local sfs state — and each file
+shows who changed it last, from which device, and when: the same
+provenance as `sfs log`.
+
+Flags: `--addr` (default `:4173`), `--volume` (display name), `--refresh`
+(listing cache, default `10s`), `--dir` / `--remote` (explicit forms of
+the positional argument).
+
+Install alongside sfs, or from source:
+
+```sh
+go install github.com/runbear-io/sfs/cmd/sfs-web@latest
+```
+
+## Claude Code plugin
+
+Install sfs support in Claude Code with two commands:
+
+```
+/plugin marketplace add runbear-io/sfs
+/plugin install sfs@sfs
+```
+
+The plugin sets up everything at once:
+
+- **`/sfs:mount [folder] [remote]`** — one command that installs sfs if
+  needed, mounts the folder (daemon + `.sfs` config), and verifies the sync.
+  `/sfs:status` diagnoses problems.
+- **Turn-boundary sync hooks**, registered automatically: a blocking pull
+  when you send a message (Claude always reads fresh files) and an async
+  push when the turn ends. The hook no-ops instantly in folders that aren't
+  sfs mounts, so it's safe globally.
+- **The `sfs` skill** ([plugin/skills/sfs](plugin/skills/sfs/SKILL.md)),
+  covering mount/unmount/sync, backends and credentials, selective sync, and
+  troubleshooting. Working in a clone of this repo picks the same skill up
+  automatically via `.claude/skills/`.
 
 ## How it works
 
@@ -147,14 +215,15 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
 ### What sfs does not sync
 
 `.git` directories (per-file LWW would corrupt repositories), `.DS_Store`,
-and its own temp files. Empty directories are not tracked (like git).
+the `.sfs` settings file, its own temp files, and anything excluded by
+`.sfsignore` or omitted from an `include` list. Empty directories are not
+tracked (like git).
 
 ## Roadmap
 
 - `sfs restore <path>@<time>` — restore any file from history (all content
   is already retained)
 - FUSE/NFS mount mode for lazy-loading huge volumes
-- `.sfsignore` patterns
 - Journal compaction & blob GC policies
 - Per-path access scopes for multi-agent setups
 

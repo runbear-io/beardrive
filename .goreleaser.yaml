@@ -19,6 +19,19 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+  - id: sfs-web
+    main: ./cmd/sfs-web
+    binary: sfs-web
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
 
 archives:
   - formats: [tar.gz]

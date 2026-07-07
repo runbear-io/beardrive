@@ -106,6 +106,22 @@ func Stop(volDir, mountID string) (bool, error) {
 	return true, nil
 }
 
+// overlayProject applies the folder's .sfs settings on top of the registry
+// entry; the project file wins so hand-edits take effect on the next tick.
+func overlayProject(folder string, mi config.MountInfo) config.MountInfo {
+	proj, ok, err := config.LoadProject(folder)
+	if err != nil || !ok {
+		return mi
+	}
+	if proj.Volume != "" {
+		mi.Volume = proj.Volume
+	}
+	if proj.Remote != "" {
+		mi.Remote = proj.Remote
+	}
+	return mi
+}
+
 // Run is the daemon main loop, executed in the foreground of the (usually
 // detached) `sfs daemon run` process.
 func Run(folder string, scanInterval, remoteInterval time.Duration) error {
@@ -120,6 +136,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	if !ok {
 		return fmt.Errorf("%s is not an sfs mount", folder)
 	}
+	mi = overlayProject(folder, mi)
 	volDir, err := config.VolumeDir(mi.Volume)
 	if err != nil {
 		return err
@@ -150,13 +167,15 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	var lastRemote time.Time
 
 	for {
-		// Pick up `sfs remote set` / `sfs umnt --forget` without restarting.
+		// Pick up `sfs remote set`, .sfs edits, and `sfs umnt --forget`
+		// without restarting.
 		if m, err := config.LoadMounts(); err == nil {
 			cur, ok := m[folder]
 			if !ok {
 				log.Printf("mount unregistered; exiting")
 				return nil
 			}
+			cur = overlayProject(folder, cur)
 			if cur.Remote != mi.Remote {
 				log.Printf("remote changed: %q -> %q", mi.Remote, cur.Remote)
 				if be != nil {

@@ -1,0 +1,11 @@
+{
+  "name": "sfs",
+  "displayName": "sfs",
+  "description": "Synced file system for AI agents: mount folders that stay in sync across devices through S3/GCS/any object store, with automatic sync at turn boundaries and full change history.",
+  "version": "0.1.0",
+  "author": { "name": "runbear", "url": "https://github.com/runbear-io" },
+  "homepage": "https://github.com/runbear-io/sfs",
+  "repository": "https://github.com/runbear-io/sfs",
+  "license": "MIT",
+  "keywords": ["sync", "files", "workspace", "s3", "gcs", "memory", "agents"]
+}
