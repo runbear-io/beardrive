@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **BearDrive** is the product name; **`bdrive`** is its CLI binary (file conventions use the full name: `.beardrive`, `.beardriveignore`, `~/.beardrive`, `BEARDRIVE_HOME`). BearDrive is a Go CLI that mounts any folder as a synced volume: contents sync across devices through cloud object storage (S3, GCS, S3-compatible, or a plain directory), with per-file change history and offline support. No server — devices converge through append-only journals in a dumb object store.
 
-The repo ships two binaries from one Go module: `cmd/bdrive` (the CLI + sync daemon) and `cmd/bdrive-web` (a read-only web viewer for a remote).
+The repo ships one binary: `cmd/bdrive` — the CLI, the sync daemon, and the read-only web viewer (`bdrive web`).
 
 ## Commands
 
@@ -39,9 +39,9 @@ Package roles (`internal/`):
 - **`syncer`** — the heart: `Session.Cycle()` runs one pass: scan → commit local ops → pull peer journals → preserve conflict copies → materialize merged state → push blobs + own journal. Read the package doc comment in `syncer.go` first. `ignore.go` holds the path filter (`.beardriveignore` rules + the `.beardrive` include list), applied symmetrically in scan and materialize; a newly filtered path is dropped from the cache *without* a delete op so opting out locally never deletes remotely.
 - **`daemon`** — per-mount background loop (detached process, pidfile `daemon-<mountID>.pid` and log `daemon-<mountID>.log` in the volume dir). Scans every `--scan-interval` (3s), talks to the remote every `--remote-interval` (10s) or immediately after local edits. Re-reads `mounts.json` each tick to pick up `bdrive remote set` / `umnt --forget` without restart.
 - **`config`** — global state under `$BEARDRIVE_HOME` (default `~/.beardrive`): device identity (`device.json`), mount registry (`mounts.json`), `MountID()` (sha256 of the folder path — one volume can be mounted at several folders, and everything folder-specific is keyed by it). Also the per-folder `.beardrive` project file (`project.go`): volume/remote/include settings that live in the mounted folder itself, win over the registry (`EffectiveMount`), and are never synced.
-- **`webapp`** — the `bdrive-web` server: a `Source` interface with two implementations — `DirSource` (serves a local folder straight from disk; the default when no remote is given) and `RemoteSource` (reads journals straight from the remote, no local store, folds them into a file tree with per-file provenance). Renders markdown (goldmark + Obsidian `[[wikilinks]]`), streams/downloads content. Frontend is dependency-free vanilla JS embedded via `go:embed static`.
+- **`webapp`** — the `bdrive web` server: a `Source` interface with two implementations — `DirSource` (serves a local folder straight from disk; the default when no remote is given) and `RemoteSource` (reads journals straight from the remote, no local store, folds them into a file tree with per-file provenance). Renders markdown (goldmark + Obsidian `[[wikilinks]]`), streams/downloads content. Frontend is dependency-free vanilla JS embedded via `go:embed static`.
 
-`cmd/bdrive/` is a thin cobra CLI over these packages (`mnt`, `umnt`, `sync`, `status`, `log`, `remote`, `whoami`, `daemon`, `version`); `cmd/bdrive-web/` wraps `webapp` with flags.
+`cmd/bdrive/` is a thin cobra CLI over these packages (`mnt`, `umnt`, `sync`, `status`, `log`, `remote`, `web`, `whoami`, `daemon`, `version`).
 
 ## Invariants — do not break these
 

@@ -108,6 +108,7 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 | `bdrive status [folder]` | Mounts, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: author, device, time, file |
 | `bdrive remote [folder]` / `bdrive remote set <folder> <url>` | Show / set the cloud remote |
+| `bdrive web [folder \| remote-url]` | Read-only web viewer (rendered markdown, downloads) |
 | `bdrive whoami` | Device identity used in change tracking |
 
 ## Project files
@@ -135,14 +136,14 @@ already-synced file, the file stops syncing but is deleted nowhere.
 
 ## Web viewer
 
-`bdrive-web` serves a read-only website for a folder or a BearDrive remote —
+`bdrive web` serves a read-only website for a folder or a BearDrive remote —
 browse folders and files, read markdown rendered Obsidian-style (including
 `[[wikilinks]]`, task lists, and tables), and download any file.
 
 ```sh
-bdrive-web                              # serve the current directory
-bdrive-web ./notes                      # serve a folder from disk
-bdrive-web s3://my-bucket/workspace     # serve a BearDrive remote
+bdrive web                              # serve the current directory
+bdrive web ./notes                      # serve a folder from disk
+bdrive web s3://my-bucket/workspace     # serve a BearDrive remote
 ```
 
 With no remote given it serves the folder straight from the local file
@@ -156,12 +157,6 @@ provenance as `bdrive log`.
 Flags: `--addr` (default `:4173`), `--volume` (display name), `--refresh`
 (listing cache, default `10s`), `--dir` / `--remote` (explicit forms of
 the positional argument).
-
-Install alongside beardrive, or from source:
-
-```sh
-go install github.com/runbear-io/beardrive/cmd/bdrive-web@latest
-```
 
 ## Claude Code plugin
 

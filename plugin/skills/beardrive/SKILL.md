@@ -23,6 +23,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: mounting, unm
 | Change history | `bdrive log [<folder>] [-p path] [-n N]` |
 | Show / set remote | `bdrive remote [<folder>]` · `bdrive remote set <folder> <url>` |
 | This device's identity | `bdrive whoami` |
+| Web viewer (read-only, rendered markdown) | `bdrive web [<folder> \| <remote-url>]` (serves cwd by default, `--addr :4173`) |
 
 `<folder>` is created if missing. Omitting it on `sync`/`status`/`log` defaults to the current working directory.
 
