@@ -22,9 +22,9 @@ async function getJSON(url) {
 async function boot() {
   try {
     const v = await getJSON("api/volume");
-    $("vault-name").textContent = v.volume || "sfs";
+    $("vault-name").textContent = v.volume || "BearDrive";
     $("vault-remote").textContent = v.remote || "";
-    document.title = (v.volume || "sfs") + " — sfs";
+    document.title = (v.volume || "sfs") + " — BearDrive";
   } catch { /* non-fatal */ }
   await refreshTree();
   const p = decodeURIComponent(location.hash.slice(1));

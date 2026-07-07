@@ -1,8 +1,9 @@
-# sfs — a synced file system for AI agents
+# BearDrive — a synced file system for AI agents
 
-**sfs** mounts any folder as a synced volume: its contents stay synchronized
-across all your devices through cloud object storage, every change is
-tracked (who, when, on which device), and everything keeps working offline.
+**BearDrive** mounts any folder as a synced volume: its contents stay
+synchronized across all your devices through cloud object storage, every
+change is tracked (who, when, on which device), and everything keeps
+working offline. The CLI is `sfs` — short for synced file system.
 
 It is built for AI agent workflows — give your agents on every machine the
 same `~/agent-workspace`, and notes, plans, memory files, and artifacts
@@ -53,7 +54,7 @@ $ sfs mnt ./workspace --remote s3://my-bucket/workspace
 ## Install
 
 ```sh
-brew install runbear-io/tap/sfs        # macOS (and Linuxbrew)
+brew install runbear-io/tap/beardrive  # macOS (and Linuxbrew); installs the `sfs` CLI
 ```
 
 or from source:

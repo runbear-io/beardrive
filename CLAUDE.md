@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`sfs` is a Go CLI that mounts any folder as a synced volume: contents sync across devices through cloud object storage (S3, GCS, S3-compatible, or a plain directory), with per-file change history and offline support. No server — devices converge through append-only journals in a dumb object store.
+**BearDrive** is the product name; `sfs` is its CLI (and the historical project name — binary names, `.sfs`/`.sfsignore` files, and `~/.sfs` stay `sfs` deliberately). `sfs` is a Go CLI that mounts any folder as a synced volume: contents sync across devices through cloud object storage (S3, GCS, S3-compatible, or a plain directory), with per-file change history and offline support. No server — devices converge through append-only journals in a dumb object store.
 
 The repo ships two binaries from one Go module: `cmd/sfs` (the CLI + sync daemon) and `cmd/sfs-web` (a read-only web viewer for a remote).
 

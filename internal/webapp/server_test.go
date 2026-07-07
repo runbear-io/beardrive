@@ -199,7 +199,7 @@ func TestFrontendServed(t *testing.T) {
 	f := newFakeRemote(t)
 	h := f.server().Handler()
 	rec := get(t, h, "/")
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<title>sfs</title>") {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<title>BearDrive</title>") {
 		t.Fatalf("index: %d", rec.Code)
 	}
 }

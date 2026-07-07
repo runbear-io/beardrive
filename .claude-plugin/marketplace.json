@@ -1,12 +1,12 @@
 {
   "name": "sfs",
   "owner": { "name": "runbear", "email": "snow@runbear.io" },
-  "description": "sfs — a synced file system for AI agents",
+  "description": "BearDrive (sfs) — a synced file system for AI agents",
   "plugins": [
     {
       "name": "sfs",
       "source": "./plugin",
-      "description": "Mount folders that stay in sync across devices through S3/GCS/any object store. Installs the sfs skill, /sfs:mount and /sfs:status commands, and turn-boundary sync hooks in one step.",
+      "description": "BearDrive: mount folders that stay in sync across devices through S3/GCS/any object store. Installs the sfs skill, /sfs:mount and /sfs:status commands, and turn-boundary sync hooks in one step.",
       "category": "workflow",
       "tags": ["sync", "files", "workspace", "s3", "gcs", "agents"]
     }

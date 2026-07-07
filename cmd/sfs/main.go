@@ -18,8 +18,9 @@ var version = "0.1.0-dev"
 func main() {
 	root := &cobra.Command{
 		Use:   "sfs",
-		Short: "A synced file system for AI agents",
-		Long: `sfs — a mountable, offline-first, synced file system for AI agents.
+		Short: "BearDrive: a synced file system for AI agents",
+		Long: `sfs — the BearDrive CLI. A mountable, offline-first, synced file
+system for AI agents.
 
 Mount any folder and sfs keeps it synchronized across your devices through
 cloud object storage (Amazon S3, Google Cloud Storage, or a plain shared

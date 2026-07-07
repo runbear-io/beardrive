@@ -3,9 +3,9 @@ name: sfs
 description: Use sfs — a mountable, synced file system for AI agents. Mount any folder and it stays synced across devices through cloud object storage (S3, GCS, S3-compatible, or a shared directory) with full per-file change history and offline support. Use when the user wants to "mount a folder", "unmount", "sync now", "set up sfs cloud storage", "connect sfs to S3/GCS/R2/MinIO/NAS", "check sfs status", "see sfs logs", "see what changed", "who changed this file?", or troubleshoot a stuck sync.
 ---
 
-# sfs — synced file system for AI agents
+# sfs — synced file system for AI agents (BearDrive)
 
-`sfs` mounts any folder as a synced volume backed by an object store. Each mount runs a per-mount background daemon that scans for local changes and exchanges with the remote. Files on disk are always real files — every tool, editor, and agent works on them with no integration.
+`sfs` is the CLI of **BearDrive**. It mounts any folder as a synced volume backed by an object store. Each mount runs a per-mount background daemon that scans for local changes and exchanges with the remote. Files on disk are always real files — every tool, editor, and agent works on them with no integration.
 
 Use this skill whenever the user is working with the `sfs` CLI: mounting, unmounting, syncing, configuring a remote, inspecting state, reading change history, or debugging.
 

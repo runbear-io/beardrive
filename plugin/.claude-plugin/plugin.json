@@ -1,7 +1,7 @@
 {
   "name": "sfs",
-  "displayName": "sfs",
-  "description": "Synced file system for AI agents: mount folders that stay in sync across devices through S3/GCS/any object store, with automatic sync at turn boundaries and full change history.",
+  "displayName": "BearDrive (sfs)",
+  "description": "BearDrive: a synced file system for AI agents. Mount folders that stay in sync across devices through S3/GCS/any object store, with automatic sync at turn boundaries and full change history. CLI: sfs.",
   "version": "0.1.0",
   "author": { "name": "runbear", "url": "https://github.com/runbear-io" },
   "homepage": "https://github.com/runbear-io/sfs",
