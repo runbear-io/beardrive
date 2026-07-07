@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/runbear-io/sfs/internal/config"
-	"github.com/runbear-io/sfs/internal/remote"
-	"github.com/runbear-io/sfs/internal/store"
-	"github.com/runbear-io/sfs/internal/syncer"
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/store"
+	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
 func absFolder(args []string) (string, error) {
@@ -20,8 +20,8 @@ func absFolder(args []string) (string, error) {
 	return filepath.Abs(arg)
 }
 
-// mustMount resolves a folder's settings: the .sfs project file wins over
-// the global registry, so a folder that carries its own .sfs works even
+// mustMount resolves a folder's settings: the .beardrive project file wins over
+// the global registry, so a folder that carries its own .beardrive works even
 // before it is registered on this device.
 func mustMount(folder string) (config.MountInfo, error) {
 	mi, _, found, err := config.EffectiveMount(folder)
@@ -29,7 +29,7 @@ func mustMount(folder string) (config.MountInfo, error) {
 		return mi, err
 	}
 	if !found {
-		return mi, fmt.Errorf("%s is not an sfs mount (run `sfs mnt %s` first)", folder, folder)
+		return mi, fmt.Errorf("%s is not a beardrive mount (run `bdrive mnt %s` first)", folder, folder)
 	}
 	if mi.Volume == "" {
 		mi.Volume = filepath.Base(folder)
@@ -92,7 +92,7 @@ func printCycle(res *syncer.Result) {
 	fmt.Printf("  local changes:  %d\n", res.LocalOps)
 	fmt.Printf("  pulled changes: %d\n", res.PulledOps)
 	if res.Conflicts > 0 {
-		fmt.Printf("  conflicts:      %d (preserved as *.sfs-conflict-* files)\n", res.Conflicts)
+		fmt.Printf("  conflicts:      %d (preserved as *.beardrive-conflict-* files)\n", res.Conflicts)
 	}
 	fmt.Printf("  files updated:  %d\n", res.Materialized)
 	switch {

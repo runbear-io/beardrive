@@ -29,7 +29,7 @@ func TestDirSourceServesFolder(t *testing.T) {
 	h := dirServer(t, map[string]string{
 		"README.md":     "# Local",
 		"notes/plan.md": "content",
-		".sfs":          `{"volume":"x"}`, // settings file must be hidden
+		".beardrive":    `{"volume":"x"}`, // settings file must be hidden
 		".git/config":   "noise",          // .git must be skipped
 	})
 

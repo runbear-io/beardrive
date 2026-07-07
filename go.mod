@@ -1,4 +1,4 @@
-module github.com/runbear-io/sfs
+module github.com/runbear-io/beardrive
 
 go 1.25.8
 

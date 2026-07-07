@@ -8,9 +8,9 @@ import (
 )
 
 // IgnoreFile is the per-folder opt-out list at the mount root. It uses a
-// gitignore-style syntax and, unlike the .sfs settings file, syncs like any
+// gitignore-style syntax and, unlike the .beardrive settings file, syncs like any
 // other file so every device shares the same rules.
-const IgnoreFile = ".sfsignore"
+const IgnoreFile = ".beardriveignore"
 
 // Filter decides which paths sync. A path syncs when it is not ignored and,
 // if an include list is set, matches at least one include pattern.
@@ -31,8 +31,8 @@ type pattern struct {
 	negate bool
 }
 
-// loadFilter builds the filter for a folder from its .sfsignore (if any)
-// plus the include list from the .sfs settings file.
+// loadFilter builds the filter for a folder from its .beardriveignore (if any)
+// plus the include list from the .beardrive settings file.
 func loadFilter(folder string, include []string) (*Filter, error) {
 	f := &Filter{}
 	for _, line := range include {

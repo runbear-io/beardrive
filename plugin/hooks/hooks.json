@@ -5,9 +5,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/sfs-sync.sh\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/beardrive-sync.sh\"",
             "timeout": 30,
-            "statusMessage": "sfs: pulling latest files"
+            "statusMessage": "beardrive: pulling latest files"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/sfs-sync.sh\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/beardrive-sync.sh\"",
             "async": true
           }
         ]

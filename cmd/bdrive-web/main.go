@@ -1,20 +1,20 @@
-// sfs-web serves a read-only website for a folder or an sfs remote: browse
+// bdrive-web serves a read-only website for a folder or a beardrive remote: browse
 // folders and files, read rendered markdown (Obsidian-style, including
 // [[wikilinks]]), and download any file.
 //
 // Two sources:
 //
-//   - a local folder, served straight from disk (the default — on an sfs
+//   - a local folder, served straight from disk (the default — on a beardrive
 //     mount the daemon keeps it fresh, so this is the simplest deployment);
-//   - an sfs remote, read directly from the object store with per-file
+//   - a beardrive remote, read directly from the object store with per-file
 //     provenance from the journals — no mount, daemon, or local state needed.
 //
 // Examples:
 //
-//	sfs-web                          # serve the current directory
-//	sfs-web ./notes                  # serve a folder
-//	sfs-web s3://bucket/prefix       # serve an sfs remote
-//	sfs-web --remote gs://bucket/prefix --addr :8080
+//	bdrive-web                          # serve the current directory
+//	bdrive-web ./notes                  # serve a folder
+//	bdrive-web s3://bucket/prefix       # serve a beardrive remote
+//	bdrive-web --remote gs://bucket/prefix --addr :8080
 package main
 
 import (
@@ -29,12 +29,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runbear-io/sfs/internal/remote"
-	"github.com/runbear-io/sfs/internal/webapp"
+	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/webapp"
 )
 
 func main() {
-	remoteURL := flag.String("remote", "", "sfs remote to serve (s3://bucket/prefix, gs://bucket/prefix, file:///path)")
+	remoteURL := flag.String("remote", "", "bdrive remote to serve (s3://bucket/prefix, gs://bucket/prefix, file:///path)")
 	dir := flag.String("dir", "", "local folder to serve (default: current directory)")
 	addr := flag.String("addr", ":4173", "address to listen on")
 	volume := flag.String("volume", "", "volume display name (default: folder or remote basename)")
@@ -51,7 +51,7 @@ func main() {
 		}
 	}
 	if *remoteURL != "" && *dir != "" {
-		fmt.Fprintln(os.Stderr, "usage: sfs-web [folder | remote-url]  [--addr :4173]  (--remote and --dir are mutually exclusive)")
+		fmt.Fprintln(os.Stderr, "usage: bdrive-web [folder | remote-url]  [--addr :4173]  (--remote and --dir are mutually exclusive)")
 		os.Exit(2)
 	}
 	if *remoteURL == "" && *dir == "" {
@@ -97,7 +97,7 @@ func main() {
 	if strings.HasPrefix(shown, ":") {
 		shown = "localhost" + shown
 	}
-	fmt.Printf("sfs-web serving %s\n  volume: %s\n  url:    http://%s\n", display, name, shown)
+	fmt.Printf("bdrive-web serving %s\n  volume: %s\n  url:    http://%s\n", display, name, shown)
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -113,5 +113,5 @@ func volumeName(remoteURL string) string {
 			return u.Host
 		}
 	}
-	return "sfs"
+	return "beardrive"
 }

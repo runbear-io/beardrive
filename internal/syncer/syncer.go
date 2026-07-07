@@ -7,7 +7,7 @@
 // journal (and their content captured in the blob store) before any remote
 // state can overwrite the working folder. Concurrent edits resolve
 // deterministically last-writer-wins; the losing local version is preserved
-// as a "<name>.sfs-conflict-<device>-<time>" file that syncs like any other.
+// as a "<name>.beardrive-conflict-<device>-<time>" file that syncs like any other.
 package syncer
 
 import (
@@ -23,10 +23,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runbear-io/sfs/internal/config"
-	"github.com/runbear-io/sfs/internal/journal"
-	"github.com/runbear-io/sfs/internal/remote"
-	"github.com/runbear-io/sfs/internal/store"
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 // Session ties a working folder to its volume store and (optionally) remote.
@@ -60,13 +60,13 @@ func (r *Result) Activity() bool {
 	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Materialized > 0
 }
 
-// config.ProjectFile (.sfs) never syncs: remotes are device-specific and
+// config.ProjectFile (.beardrive) never syncs: remotes are device-specific and
 // syncing it would let one device silently repoint another.
 var ignoreNames = map[string]bool{".DS_Store": true, config.ProjectFile: true}
-var ignoreDirs = map[string]bool{".git": true, ".sfs": true}
+var ignoreDirs = map[string]bool{".git": true, ".beardrive": true}
 
 func ignoredFile(name string) bool {
-	return ignoreNames[name] || strings.HasPrefix(name, ".sfs-tmp-")
+	return ignoreNames[name] || strings.HasPrefix(name, ".beardrive-tmp-")
 }
 
 // Cycle runs one full scan/sync/materialize pass under the volume lock.
@@ -392,7 +392,7 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 }
 
 func conflictName(p, deviceName string, t time.Time) string {
-	return p + ".sfs-conflict-" + sanitize(deviceName) + "-" + t.UTC().Format("20060102T150405Z")
+	return p + ".beardrive-conflict-" + sanitize(deviceName) + "-" + t.UTC().Format("20060102T150405Z")
 }
 
 func sanitize(s string) string {
@@ -477,7 +477,7 @@ func (s *Session) writeFile(abs string, want journal.FileState) error {
 		return err
 	}
 	defer src.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(abs), ".sfs-tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(abs), ".beardrive-tmp-*")
 	if err != nil {
 		return err
 	}

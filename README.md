@@ -3,7 +3,7 @@
 **BearDrive** mounts any folder as a synced volume: its contents stay
 synchronized across all your devices through cloud object storage, every
 change is tracked (who, when, on which device), and everything keeps
-working offline. The CLI is `sfs` — short for synced file system.
+working offline. The CLI is `bdrive`.
 
 It is built for AI agent workflows — give your agents on every machine the
 same `~/agent-workspace`, and notes, plans, memory files, and artifacts
@@ -11,7 +11,7 @@ follow them everywhere, with a full audit trail of which agent or human
 changed what.
 
 ```console
-$ sfs mnt ./workspace --remote s3://my-bucket/workspace
+$ bdrive mnt ./workspace --remote s3://my-bucket/workspace
 mounted /Users/snow/workspace
   volume:  workspace
   remote:  s3://my-bucket/workspace
@@ -22,19 +22,19 @@ mounted /Users/snow/workspace
 On another machine:
 
 ```console
-$ sfs mnt ./workspace --remote s3://my-bucket/workspace
+$ bdrive mnt ./workspace --remote s3://my-bucket/workspace
 # … the same files appear, and stay in sync from now on
 ```
 
 ## Features
 
-- **Mount anywhere** — `sfs mnt ./folder` turns any folder into a synced
+- **Mount anywhere** — `bdrive mnt ./folder` turns any folder into a synced
   volume. Files are *real files on disk*: every tool, editor, and agent can
   use them with zero integration work.
 - **Multi-device sync** — devices converge through a shared remote. Each
   device only writes its own append-only journal, so no locking service or
   server is needed — any object store works.
-- **Change tracking** — `sfs log` shows which device and author changed
+- **Change tracking** — `bdrive log` shows which device and author changed
   which file, when. Content is stored content-addressed, so history is
   never lost, even for overwritten or deleted files.
 - **Cloud-provider agnostic** — Amazon S3 (`s3://`), Google Cloud Storage
@@ -45,52 +45,52 @@ $ sfs mnt ./workspace --remote s3://my-bucket/workspace
   reachable again.
 - **Conflict-safe** — concurrent edits resolve deterministically
   (last-writer-wins), and the losing version is preserved as a
-  `name.sfs-conflict-<device>-<time>` file. Nothing is silently dropped.
-- **Selective sync** — a gitignore-style `.sfsignore` opts files out, and an
-  optional `include` list in the folder's `.sfs` settings narrows sync to
+  `name.beardrive-conflict-<device>-<time>` file. Nothing is silently dropped.
+- **Selective sync** — a gitignore-style `.beardriveignore` opts files out, and an
+  optional `include` list in the folder's `.beardrive` settings narrows sync to
   chosen paths.
 - **macOS & Linux.**
 
 ## Install
 
 ```sh
-brew install runbear-io/tap/beardrive  # macOS (and Linuxbrew); installs the `sfs` CLI
+brew install runbear-io/tap/beardrive  # macOS (and Linuxbrew); installs the `bdrive` CLI
 ```
 
 or from source:
 
 ```sh
-go install github.com/runbear-io/sfs/cmd/sfs@latest
+go install github.com/runbear-io/beardrive/cmd/bdrive@latest
 ```
 
 ## Quick start
 
 ```sh
 # 1. Mount a folder, syncing through S3 (or gs://, or file://)
-sfs mnt ./notes --remote s3://my-bucket/notes
+bdrive mnt ./notes --remote s3://my-bucket/notes
 
 # 2. Work normally — create, edit, delete files with any tool.
 echo "remember this" > notes/memory.md
 
 # 3. On every other device, mount the same remote:
-sfs mnt ./notes --remote s3://my-bucket/notes
+bdrive mnt ./notes --remote s3://my-bucket/notes
 
 # See what changed, who changed it, and from which device
-sfs log ./notes
+bdrive log ./notes
 
 # Check sync state and the daemon
-sfs status
+bdrive status
 
 # Sync on demand (the daemon also syncs automatically)
-sfs sync ./notes
+bdrive sync ./notes
 
 # Stop syncing (files stay on disk; mount again any time)
-sfs umnt ./notes
+bdrive umnt ./notes
 ```
 
 ### Credentials
 
-sfs uses each provider's standard credential chain — nothing sfs-specific:
+beardrive uses each provider's standard credential chain — nothing beardrive-specific:
 
 | Remote | Credentials |
 |---|---|
@@ -102,31 +102,31 @@ sfs uses each provider's standard credential chain — nothing sfs-specific:
 
 | Command | Description |
 |---|---|
-| `sfs mnt <folder> [--remote URL]` | Mount a folder as a synced volume and start the sync daemon |
-| `sfs umnt <folder>` | Stop syncing (`--forget` also unregisters the mount) |
-| `sfs sync [folder]` | Run one sync cycle now |
-| `sfs status [folder]` | Mounts, daemon state, pending changes |
-| `sfs log [folder] [-p path] [-n N]` | Change history: author, device, time, file |
-| `sfs remote [folder]` / `sfs remote set <folder> <url>` | Show / set the cloud remote |
-| `sfs whoami` | Device identity used in change tracking |
+| `bdrive mnt <folder> [--remote URL]` | Mount a folder as a synced volume and start the sync daemon |
+| `bdrive umnt <folder>` | Stop syncing (`--forget` also unregisters the mount) |
+| `bdrive sync [folder]` | Run one sync cycle now |
+| `bdrive status [folder]` | Mounts, daemon state, pending changes |
+| `bdrive log [folder] [-p path] [-n N]` | Change history: author, device, time, file |
+| `bdrive remote [folder]` / `bdrive remote set <folder> <url>` | Show / set the cloud remote |
+| `bdrive whoami` | Device identity used in change tracking |
 
 ## Project files
 
 Each mounted folder carries its own settings, so configuration travels with
 the project:
 
-- **`.sfs`** — the folder's settings (JSON): `volume`, `remote`, and an
-  optional `include` list. Written by `sfs mnt`, safe to hand-edit (a running
+- **`.beardrive`** — the folder's settings (JSON): `volume`, `remote`, and an
+  optional `include` list. Written by `bdrive mnt`, safe to hand-edit (a running
   daemon picks changes up automatically). Never synced — remotes are
-  device-specific. Copy a folder containing `.sfs` to another machine and
-  plain `sfs mnt <folder>` reuses its volume and remote.
-- **`.sfsignore`** — gitignore-style opt-out list at the mount root. Syncs
+  device-specific. Copy a folder containing `.beardrive` to another machine and
+  plain `bdrive mnt <folder>` reuses its volume and remote.
+- **`.beardriveignore`** — gitignore-style opt-out list at the mount root. Syncs
   like a normal file, so every device shares the same rules. Supports `#`
   comments, `*`, `**`, `?`, trailing `/` for directories, leading `/` (or any
   `/`) for root-anchoring, and `!` to re-include.
 
 ```jsonc
-// .sfs
+// .beardrive
 { "volume": "notes", "remote": "s3://my-bucket/notes", "include": ["docs/", "*.md"] }
 ```
 
@@ -135,53 +135,53 @@ already-synced file, the file stops syncing but is deleted nowhere.
 
 ## Web viewer
 
-`sfs-web` serves a read-only website for a folder or an sfs remote —
+`bdrive-web` serves a read-only website for a folder or a BearDrive remote —
 browse folders and files, read markdown rendered Obsidian-style (including
 `[[wikilinks]]`, task lists, and tables), and download any file.
 
 ```sh
-sfs-web                              # serve the current directory
-sfs-web ./notes                      # serve a folder from disk
-sfs-web s3://my-bucket/workspace     # serve an sfs remote
+bdrive-web                              # serve the current directory
+bdrive-web ./notes                      # serve a folder from disk
+bdrive-web s3://my-bucket/workspace     # serve a BearDrive remote
 ```
 
 With no remote given it serves the folder straight from the local file
-system — on an sfs mount the daemon keeps those files fresh, so this is
+system — on a BearDrive mount the daemon keeps those files fresh, so this is
 the simplest way to run it in production (and needs no cloud credentials
 on the serving machine). Pointing it at a remote instead reads the object
-store directly — no mount, daemon, or local sfs state — and each file
+store directly — no mount, daemon, or local beardrive state — and each file
 shows who changed it last, from which device, and when: the same
-provenance as `sfs log`.
+provenance as `bdrive log`.
 
 Flags: `--addr` (default `:4173`), `--volume` (display name), `--refresh`
 (listing cache, default `10s`), `--dir` / `--remote` (explicit forms of
 the positional argument).
 
-Install alongside sfs, or from source:
+Install alongside beardrive, or from source:
 
 ```sh
-go install github.com/runbear-io/sfs/cmd/sfs-web@latest
+go install github.com/runbear-io/beardrive/cmd/bdrive-web@latest
 ```
 
 ## Claude Code plugin
 
-Install sfs support in Claude Code with two commands:
+Install beardrive support in Claude Code with two commands:
 
 ```
-/plugin marketplace add runbear-io/sfs
-/plugin install sfs@sfs
+/plugin marketplace add runbear-io/beardrive
+/plugin install beardrive@beardrive
 ```
 
 The plugin sets up everything at once:
 
-- **`/sfs:mount [folder] [remote]`** — one command that installs sfs if
-  needed, mounts the folder (daemon + `.sfs` config), and verifies the sync.
-  `/sfs:status` diagnoses problems.
+- **`/beardrive:mount [folder] [remote]`** — one command that installs beardrive if
+  needed, mounts the folder (daemon + `.beardrive` config), and verifies the sync.
+  `/beardrive:status` diagnoses problems.
 - **Turn-boundary sync hooks**, registered automatically: a blocking pull
   when you send a message (Claude always reads fresh files) and an async
   push when the turn ends. The hook no-ops instantly in folders that aren't
-  sfs mounts, so it's safe globally.
-- **The `sfs` skill** ([plugin/skills/sfs](plugin/skills/sfs/SKILL.md)),
+  beardrive mounts, so it's safe globally.
+- **The `beardrive` skill** ([plugin/skills/beardrive](plugin/skills/beardrive/SKILL.md)),
   covering mount/unmount/sync, backends and credentials, selective sync, and
   troubleshooting. Working in a clone of this repo picks the same skill up
   automatically via `.claude/skills/`.
@@ -190,7 +190,7 @@ The plugin sets up everything at once:
 
 ```
 working folder  ←materialize/scan→  local volume store  ←push/pull→  object store
- (real files)                       ~/.sfs/volumes/<vol>              s3:// gs:// file://
+ (real files)                       ~/.beardrive/volumes/<vol>              s3:// gs:// file://
                                     ├─ blobs/   content-addressed (sha256)
                                     ├─ journal/ one append-only op log per device
                                     ├─ state.json  what's materialized
@@ -211,18 +211,18 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
 - A per-mount **daemon** scans the folder every few seconds (cheap
   size+mtime check) and exchanges with the remote every ~10s — or
   immediately after local edits. Tune with --scan-interval and
-  --remote-interval on `sfs mnt`.
+  --remote-interval on `bdrive mnt`.
 
-### What sfs does not sync
+### What beardrive does not sync
 
 `.git` directories (per-file LWW would corrupt repositories), `.DS_Store`,
-the `.sfs` settings file, its own temp files, and anything excluded by
-`.sfsignore` or omitted from an `include` list. Empty directories are not
+the `.beardrive` settings file, its own temp files, and anything excluded by
+`.beardriveignore` or omitted from an `include` list. Empty directories are not
 tracked (like git).
 
 ## Roadmap
 
-- `sfs restore <path>@<time>` — restore any file from history (all content
+- `beardrive restore <path>@<time>` — restore any file from history (all content
   is already retained)
 - FUSE/NFS mount mode for lazy-loading huge volumes
 - Journal compaction & blob GC policies
@@ -237,7 +237,7 @@ go test ./...
 
 The integration tests in `internal/syncer` simulate multiple devices syncing
 through a `file://` remote, including offline operation and concurrent-edit
-conflicts. Set `SFS_HOME` to relocate all sfs state (used heavily in tests).
+conflicts. Set `BEARDRIVE_HOME` to relocate all beardrive state (used heavily in tests).
 
 ## License
 

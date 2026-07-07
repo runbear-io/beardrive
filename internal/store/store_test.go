@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/runbear-io/sfs/internal/journal"
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 func TestBlobRoundtrip(t *testing.T) {
@@ -12,18 +12,18 @@ func TestBlobRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum, n, err := s.PutBlobBytes([]byte("hello sfs"))
+	sum, n, err := s.PutBlobBytes([]byte("hello beardrive"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 9 {
-		t.Fatalf("size = %d, want 9", n)
+	if n != int64(len("hello beardrive")) {
+		t.Fatalf("size = %d, want %d", n, len("hello beardrive"))
 	}
 	if !s.HasBlob(sum) {
 		t.Fatal("blob not stored")
 	}
 	// dedupe: same content, same sum, no error
-	sum2, _, err := s.PutBlobBytes([]byte("hello sfs"))
+	sum2, _, err := s.PutBlobBytes([]byte("hello beardrive"))
 	if err != nil || sum2 != sum {
 		t.Fatalf("dedupe failed: %v %v", sum2, err)
 	}
@@ -34,7 +34,7 @@ func TestBlobRoundtrip(t *testing.T) {
 	defer f.Close()
 	data := make([]byte, 16)
 	k, _ := f.Read(data)
-	if string(data[:k]) != "hello sfs" {
+	if string(data[:k]) != "hello beardrive" {
 		t.Fatalf("content mismatch: %q", data[:k])
 	}
 }

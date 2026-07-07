@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runbear-io/sfs/internal/journal"
-	"github.com/runbear-io/sfs/internal/remote"
+	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/remote"
 )
 
-// fakeRemote builds an sfs remote layout (journal/<dev>.jsonl + blobs/<sha>)
+// fakeRemote builds a beardrive remote layout (journal/<dev>.jsonl + blobs/<sha>)
 // in a temp dir and returns a Server over it.
 type fakeRemote struct {
 	t   *testing.T

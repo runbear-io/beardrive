@@ -1,4 +1,4 @@
-/* sfs web viewer: file tree + obsidian-like markdown pane. No dependencies. */
+/* beardrive web viewer: file tree + obsidian-like markdown pane. No dependencies. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -24,7 +24,7 @@ async function boot() {
     const v = await getJSON("api/volume");
     $("vault-name").textContent = v.volume || "BearDrive";
     $("vault-remote").textContent = v.remote || "";
-    document.title = (v.volume || "sfs") + " — BearDrive";
+    document.title = (v.volume || "beardrive") + " — BearDrive";
   } catch { /* non-fatal */ }
   await refreshTree();
   const p = decodeURIComponent(location.hash.slice(1));

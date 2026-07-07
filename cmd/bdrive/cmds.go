@@ -7,10 +7,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/runbear-io/sfs/internal/config"
-	"github.com/runbear-io/sfs/internal/daemon"
-	"github.com/runbear-io/sfs/internal/journal"
-	"github.com/runbear-io/sfs/internal/syncer"
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/daemon"
+	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
 func syncCmd() *cobra.Command {
@@ -56,12 +56,12 @@ func statusCmd() *cobra.Command {
 				}
 				mi, ok := mounts[folder]
 				if !ok {
-					return fmt.Errorf("%s is not an sfs mount", folder)
+					return fmt.Errorf("%s is not a beardrive mount", folder)
 				}
 				mounts = map[string]config.MountInfo{folder: mi}
 			}
 			if len(mounts) == 0 {
-				fmt.Println("no sfs mounts (create one with `sfs mnt <folder>`)")
+				fmt.Println("no beardrive mounts (create one with `bdrive mnt <folder>`)")
 				return nil
 			}
 			dev, err := config.LoadDevice()
@@ -76,7 +76,7 @@ func statusCmd() *cobra.Command {
 				}
 				first = false
 				if eff, _, found, err := config.EffectiveMount(folder); err == nil && found {
-					mi = eff // .sfs project file wins over the registry
+					mi = eff // .beardrive project file wins over the registry
 				}
 				fmt.Printf("%s\n", folder)
 				fmt.Printf("  volume:   %s\n", mi.Volume)
@@ -228,7 +228,7 @@ func remoteCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("remote of %s set to %s\n", folder, raw)
-			fmt.Println("run `sfs sync` to sync now (a running daemon picks it up automatically)")
+			fmt.Println("run `bdrive sync` to sync now (a running daemon picks it up automatically)")
 			return nil
 		},
 	}

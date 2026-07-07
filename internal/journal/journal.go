@@ -1,4 +1,4 @@
-// Package journal implements sfs's append-only operation log.
+// Package journal implements beardrive's append-only operation log.
 //
 // Every change to a volume is recorded as an Op in a per-device JSONL
 // journal. Journals are append-only and each device only ever writes its

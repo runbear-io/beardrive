@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runbear-io/sfs/internal/config"
-	"github.com/runbear-io/sfs/internal/remote"
-	"github.com/runbear-io/sfs/internal/store"
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 // newDevice simulates one device: its own folder, volume store, and identity,
@@ -185,7 +185,7 @@ func TestConcurrentEditConflictPreserved(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, e := range entries {
-			if strings.Contains(e.Name(), ".sfs-conflict-") {
+			if strings.Contains(e.Name(), ".beardrive-conflict-") {
 				all[read(t, folder, e.Name())] = true
 			}
 		}

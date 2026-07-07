@@ -1,4 +1,5 @@
-/sfs
+/bdrive
+/bdrive-web
 /dist/
 .DS_Store
 .omc

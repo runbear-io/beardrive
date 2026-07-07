@@ -1,4 +1,4 @@
-// Package webapp serves a read-only web view of an sfs remote: the volume's
+// Package webapp serves a read-only web view of a beardrive remote: the volume's
 // file tree reconstructed from the journals, rendered markdown, and file
 // downloads. It talks straight to the object store — no local volume state,
 // mount, or daemon is needed.
@@ -21,15 +21,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/runbear-io/sfs/internal/journal"
-	"github.com/runbear-io/sfs/internal/remote"
+	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/remote"
 )
 
 //go:embed static
 var staticFiles embed.FS
 
 // Source supplies the file set and content the server renders. Two
-// implementations: RemoteSource (an sfs remote, the normal mode) and
+// implementations: RemoteSource (a beardrive remote, the normal mode) and
 // DirSource (a plain local folder, for debugging without any remote).
 type Source interface {
 	Files(ctx context.Context) (map[string]FileInfo, error)
@@ -81,7 +81,7 @@ func (s *Server) snapshot(ctx context.Context) (*snapshot, error) {
 	return s.snap, nil
 }
 
-// RemoteSource reads an sfs remote: it fetches every journal and folds the
+// RemoteSource reads a beardrive remote: it fetches every journal and folds the
 // ops into the current volume state (same total order as journal.Replay,
 // but keeping author/device/time of the winning op per path).
 type RemoteSource struct {

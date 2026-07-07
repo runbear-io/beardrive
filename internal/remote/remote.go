@@ -1,5 +1,5 @@
 // Package remote abstracts the cloud object store a volume syncs through.
-// sfs is provider-agnostic: any backend that can put/get/list immutable
+// beardrive is provider-agnostic: any backend that can put/get/list immutable
 // objects works. Built-in schemes:
 //
 //	file:///abs/path      local or network-drive directory (also used in tests)

@@ -1,15 +1,15 @@
 # Release automation: `goreleaser release` on a tagged commit builds
 # macOS/Linux binaries and publishes the Homebrew formula to
 # runbear-io/homebrew-tap, enabling `brew install runbear-io/tap/beardrive`.
-# The product is BearDrive; the binaries keep their short names (sfs, sfs-web).
+# The product is BearDrive; the binaries keep their short names (bdrive, bdrive-web).
 version: 2
 
 project_name: beardrive
 
 builds:
-  - id: sfs
-    main: ./cmd/sfs
-    binary: sfs
+  - id: beardrive
+    main: ./cmd/bdrive
+    binary: bdrive
     env:
       - CGO_ENABLED=0
     goos:
@@ -20,9 +20,9 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
-  - id: sfs-web
-    main: ./cmd/sfs-web
-    binary: sfs-web
+  - id: bdrive-web
+    main: ./cmd/bdrive-web
+    binary: bdrive-web
     env:
       - CGO_ENABLED=0
     goos:
@@ -46,11 +46,11 @@ brews:
     repository:
       owner: runbear-io
       name: homebrew-tap
-    homepage: https://github.com/runbear-io/sfs
+    homepage: https://github.com/runbear-io/beardrive
     description: "BearDrive: a synced file system for AI agents — mount, sync, and track folders"
     license: MIT
     test: |
-      assert_match "sfs", shell_output("#{bin}/sfs version")
+      assert_match "beardrive", shell_output("#{bin}/bdrive version")
 
 changelog:
   sort: asc

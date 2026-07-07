@@ -8,9 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/runbear-io/sfs/internal/config"
-	"github.com/runbear-io/sfs/internal/daemon"
-	"github.com/runbear-io/sfs/internal/store"
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/daemon"
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 func mntCmd() *cobra.Command {
@@ -20,17 +20,17 @@ func mntCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "mnt <folder>",
 		Aliases: []string{"mount"},
-		Short:   "Mount a folder as a synced sfs volume",
-		Long: `Mount a folder as a synced sfs volume.
+		Short:   "Mount a folder as a synced beardrive volume",
+		Long: `Mount a folder as a synced beardrive volume.
 
 Existing files in the folder are imported into the volume. If a remote is
-configured (--remote, or previously via "sfs remote set"), the volume syncs
+configured (--remote, or previously via "bdrive remote set"), the volume syncs
 with it and with every other device mounting the same remote. A background
-daemon keeps the folder in sync until "sfs umnt".`,
-		Example: `  sfs mnt ./notes
-  sfs mnt ./notes --remote s3://my-bucket/notes
-  sfs mnt ./notes --remote gs://my-bucket/notes
-  sfs mnt ./shared --remote file:///Volumes/nas/sfs/shared`,
+daemon keeps the folder in sync until "bdrive umnt".`,
+		Example: `  bdrive mnt ./notes
+  bdrive mnt ./notes --remote s3://my-bucket/notes
+  bdrive mnt ./notes --remote gs://my-bucket/notes
+  bdrive mnt ./shared --remote file:///Volumes/nas/beardrive/shared`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			folder, err := absFolder(args)
@@ -41,7 +41,7 @@ daemon keeps the folder in sync until "sfs umnt".`,
 				return err
 			}
 
-			// Settings resolution: flags win, then the folder's .sfs file,
+			// Settings resolution: flags win, then the folder's .beardrive file,
 			// then the global registry. The result is written back to both,
 			// so the project file travels with the folder and the registry
 			// knows which mounts are active on this device.
@@ -112,10 +112,10 @@ daemon keeps the folder in sync until "sfs umnt".`,
 			if mi.Remote != "" {
 				fmt.Printf("  remote:  %s\n", mi.Remote)
 			} else {
-				fmt.Printf("  remote:  (none — local only; set one with `sfs remote set %s <url>`)\n", folder)
+				fmt.Printf("  remote:  (none — local only; set one with `bdrive remote set %s <url>`)\n", folder)
 			}
 			fmt.Printf("  device:  %s (%s) as %s\n", dev.Name, dev.ID, dev.Author)
-			fmt.Printf("  config:  %s (volume/remote/include; add a .sfsignore next to it to exclude paths)\n",
+			fmt.Printf("  config:  %s (volume/remote/include; add a .beardriveignore next to it to exclude paths)\n",
 				filepath.Join(folder, config.ProjectFile))
 			printCycle(res)
 
@@ -145,10 +145,10 @@ func umntCmd() *cobra.Command {
 		Aliases: []string{"umount", "unmount"},
 		Short:   "Stop syncing a mounted folder",
 		Long: `Stop the sync daemon for a folder. Files stay on disk and the volume's
-history is kept; "sfs mnt" the folder again to resume syncing.
+history is kept; "bdrive mnt" the folder again to resume syncing.
 
 With --forget the folder is also removed from the mount registry (local
-volume data under ~/.sfs/volumes is still kept).`,
+volume data under ~/.beardrive/volumes is still kept).`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			folder, err := absFolder(args)
@@ -181,7 +181,7 @@ volume data under ~/.sfs/volumes is still kept).`,
 				if err := config.SaveMounts(mounts); err != nil {
 					return err
 				}
-				fmt.Printf("forgot mount %s (volume %q kept under ~/.sfs/volumes)\n", folder, mi.Volume)
+				fmt.Printf("forgot mount %s (volume %q kept under ~/.beardrive/volumes)\n", folder, mi.Volume)
 			}
 			return nil
 		},

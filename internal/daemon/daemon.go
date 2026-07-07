@@ -20,10 +20,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/runbear-io/sfs/internal/config"
-	"github.com/runbear-io/sfs/internal/remote"
-	"github.com/runbear-io/sfs/internal/store"
-	"github.com/runbear-io/sfs/internal/syncer"
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/store"
+	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
 // Daemons are per mount, not per volume: one volume may be mounted at
@@ -106,7 +106,7 @@ func Stop(volDir, mountID string) (bool, error) {
 	return true, nil
 }
 
-// overlayProject applies the folder's .sfs settings on top of the registry
+// overlayProject applies the folder's .beardrive settings on top of the registry
 // entry; the project file wins so hand-edits take effect on the next tick.
 func overlayProject(folder string, mi config.MountInfo) config.MountInfo {
 	proj, ok, err := config.LoadProject(folder)
@@ -123,7 +123,7 @@ func overlayProject(folder string, mi config.MountInfo) config.MountInfo {
 }
 
 // Run is the daemon main loop, executed in the foreground of the (usually
-// detached) `sfs daemon run` process.
+// detached) `bdrive daemon run` process.
 func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -134,7 +134,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	}
 	mi, ok := mounts[folder]
 	if !ok {
-		return fmt.Errorf("%s is not an sfs mount", folder)
+		return fmt.Errorf("%s is not a beardrive mount", folder)
 	}
 	mi = overlayProject(folder, mi)
 	volDir, err := config.VolumeDir(mi.Volume)
@@ -167,7 +167,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	var lastRemote time.Time
 
 	for {
-		// Pick up `sfs remote set`, .sfs edits, and `sfs umnt --forget`
+		// Pick up `bdrive remote set`, .beardrive edits, and `bdrive umnt --forget`
 		// without restarting.
 		if m, err := config.LoadMounts(); err == nil {
 			cur, ok := m[folder]

@@ -3,7 +3,7 @@
 // a volume needs works offline; the remote is only used to exchange blobs and
 // journals.
 //
-// Layout under <sfs home>/volumes/<volume>/:
+// Layout under <beardrive home>/volumes/<volume>/:
 //
 //	blobs/<aa>/<sha256>   content-addressed file contents (immutable)
 //	journal/<device>.jsonl per-device op logs (own + cached copies of peers)
@@ -24,7 +24,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/runbear-io/sfs/internal/journal"
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 type Store struct {
@@ -152,7 +152,7 @@ func (s *Store) AllOps() ([]journal.Op, error) {
 
 // ---- materialized-state cache (state.json) ----
 
-// CachedFile records what sfs last wrote to / observed in the working folder
+// CachedFile records what beardrive last wrote to / observed in the working folder
 // for a path. Size+MTimeNS make change detection cheap; Blob ties it back to
 // content. The cache is per mount (one volume can be materialized into
 // several folders, each with its own stat fingerprints).
@@ -241,7 +241,7 @@ func WriteJSONAtomic(path string, v any) error {
 
 // WriteFileAtomic writes data via a temp file in the same directory + rename.
 func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".sfs-tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".beardrive-tmp-*")
 	if err != nil {
 		return err
 	}

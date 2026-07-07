@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// DirSource serves a plain local folder straight from disk — no sfs remote
+// DirSource serves a plain local folder straight from disk — no bdrive remote
 // or volume needed. Meant for debugging the webapp (and as a quick local
 // markdown browser): the tree reflects the folder live, provenance is just
 // file mtimes, and content streams from the filesystem.
@@ -18,8 +18,8 @@ type DirSource struct {
 	Root string
 }
 
-var skipNames = map[string]bool{".DS_Store": true, ".sfs": true}
-var skipDirs = map[string]bool{".git": true, ".sfs": true}
+var skipNames = map[string]bool{".DS_Store": true, ".beardrive": true}
+var skipDirs = map[string]bool{".git": true, ".beardrive": true}
 
 func (d *DirSource) Files(_ context.Context) (map[string]FileInfo, error) {
 	files := make(map[string]FileInfo)
@@ -37,7 +37,7 @@ func (d *DirSource) Files(_ context.Context) (map[string]FileInfo, error) {
 			}
 			return nil
 		}
-		if !e.Type().IsRegular() || skipNames[e.Name()] || strings.HasPrefix(e.Name(), ".sfs-tmp-") {
+		if !e.Type().IsRegular() || skipNames[e.Name()] || strings.HasPrefix(e.Name(), ".beardrive-tmp-") {
 			return nil
 		}
 		info, err := e.Info()
