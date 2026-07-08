@@ -61,7 +61,7 @@ func TestIncludeListLimitsSync(t *testing.T) {
 	a := newDevice(t, "deva", be)
 	b := newDevice(t, "devb", be)
 
-	write(t, a.Folder, ".bdrive", `{"include": ["docs/"]}`)
+	write(t, a.Folder, ".bdrive/config.json", `{"include": ["docs/"]}`)
 	write(t, a.Folder, "docs/guide.md", "included")
 	write(t, a.Folder, "src/main.go", "excluded")
 	cycle(t, a)
@@ -70,7 +70,7 @@ func TestIncludeListLimitsSync(t *testing.T) {
 	if got := read(t, b.Folder, "docs/guide.md"); got != "included" {
 		t.Fatalf("docs/guide.md = %q", got)
 	}
-	for _, absent := range []string{"src/main.go", ".bdrive"} {
+	for _, absent := range []string{"src/main.go", ".bdrive/config.json"} {
 		if _, err := os.Stat(filepath.Join(b.Folder, absent)); !os.IsNotExist(err) {
 			t.Fatalf("%s must not sync", absent)
 		}

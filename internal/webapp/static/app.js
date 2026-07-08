@@ -22,6 +22,10 @@ const fileURL = (p) => apiBase + "file?path=" + encodeURIComponent(p);
 
 async function getJSON(url) {
   const r = await fetch(url);
+  if (r.status === 401) { // auth required: sign in, then come back here
+    location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.hash);
+    throw new Error("signing in…");
+  }
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -32,6 +36,7 @@ async function boot() {
     serverConfig = await getJSON("api/config");
   } catch { /* non-fatal */ }
   document.title = (serverConfig.volume || "beardrive") + " — BearDrive";
+  if (serverConfig.auth && serverConfig.auth.enabled) $("signout").hidden = false;
   if (serverConfig.mode === "hub") {
     await loadProjects();
     const { project, path } = parseHash();
@@ -85,6 +90,7 @@ function selectProject(p, path) {
   $("content").innerHTML = `<div class="empty">Select a file from the sidebar</div>`;
   loadProjects(); // refresh active highlight
   initUpload();
+  initHistory();
   refreshTree().then(() => { if (path) openFile(path); });
   if (!path) location.hash = p.id;
 }
@@ -138,6 +144,14 @@ function renderNode(n) {
   row.append(chev, label);
   li.appendChild(row);
   if (n.dir) {
+    if (serverConfig.mode === "hub") {
+      const hist = document.createElement("span");
+      hist.className = "dir-history";
+      hist.textContent = "⌚";
+      hist.title = "Folder history";
+      hist.onclick = (e) => { e.stopPropagation(); showHistory({ prefix: n.path + "/" }); };
+      row.appendChild(hist);
+    }
     li.appendChild(renderChildren(n.children || []));
     if (collapsed.has(n.path)) li.classList.add("collapsed");
     row.onclick = () => {
@@ -251,6 +265,82 @@ function join(dir, rel) {
     else out.push(s);
   }
   return out.join("/");
+}
+
+/* ---- history ----
+   Every change ever made, straight from the journals: who (account), when,
+   from which device (name, OS, IP as the server saw it), with view/download
+   of that exact version. Groundwork for revert/rollback. */
+function initHistory() {
+  const btn = $("history-btn");
+  btn.hidden = !(serverConfig.mode === "hub" && currentProjectOrNull());
+  btn.onclick = () => showHistory(currentPath ? { path: currentPath } : { prefix: "" });
+}
+
+function currentProjectOrNull() {
+  return serverConfig.mode === "hub" ? currentProject : null;
+}
+
+async function showHistory(q) {
+  const content = $("content");
+  const qs = "path" in q
+    ? "path=" + encodeURIComponent(q.path)
+    : "prefix=" + encodeURIComponent(q.prefix);
+  let out;
+  try {
+    out = await getJSON(apiBase + "history?" + qs + "&n=200");
+  } catch (err) {
+    $("meta").textContent = "History unavailable: " + err.message;
+    return;
+  }
+  const title = "path" in q ? q.path : (q.prefix ? q.prefix + " (folder)" : "all changes");
+  $("crumb").textContent = "History — " + title;
+  $("meta").textContent = "";
+  $("download").hidden = true;
+  content.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "history";
+  if (!out.entries || out.entries.length === 0) {
+    wrap.innerHTML = `<div class="empty">No history yet.</div>`;
+  }
+  for (const e of out.entries || []) {
+    const row = document.createElement("div");
+    row.className = "hentry " + e.kind;
+    const who = e.user_name ? `${e.user_name} <${e.user}>` : (e.user || e.author || "unknown");
+    const dev = [e.device.name || e.device.id, e.device.os, e.device.ip].filter(Boolean).join(" · ");
+    const when = new Date(e.time).toLocaleString();
+    row.innerHTML =
+      `<div class="hline"><span class="hkind"></span><span class="hpath"></span><span class="htime"></span></div>` +
+      `<div class="hmeta"><span class="hwho"></span><span class="hdev"></span><span class="hsize"></span><span class="hact"></span></div>`;
+    row.querySelector(".hkind").textContent = e.kind === "delete" ? "✕" : "●";
+    row.querySelector(".hpath").textContent = e.path;
+    row.querySelector(".htime").textContent = when;
+    row.querySelector(".hwho").textContent = who;
+    row.querySelector(".hdev").textContent = dev;
+    row.querySelector(".hsize").textContent = e.size ? humanSize(e.size) : "";
+    if (e.kind !== "delete" && e.blob) {
+      const view = document.createElement("a");
+      view.textContent = "view";
+      view.href = apiBase + "blob?sha=" + e.blob + "&name=" + encodeURIComponent(e.path);
+      view.target = "_blank";
+      const dl = document.createElement("a");
+      dl.textContent = "download";
+      dl.href = view.href + "&download=1";
+      row.querySelector(".hact").append(view, " ", dl);
+    }
+    const p = e.path;
+    row.querySelector(".hpath").onclick = () => showHistory({ path: p });
+    wrap.appendChild(row);
+  }
+  content.appendChild(wrap);
+}
+
+function humanSize(n) {
+  if (n < 1024) return n + " B";
+  const units = ["KB", "MB", "GB", "TB"];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+  return n.toFixed(1) + " " + units[i];
 }
 
 /* ---- upload ----

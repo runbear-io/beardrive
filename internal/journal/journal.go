@@ -30,10 +30,12 @@ type Op struct {
 	Time       time.Time `json:"time"`
 	Device     string    `json:"device"`
 	DeviceName string    `json:"device_name,omitempty"`
-	Author     string    `json:"author,omitempty"`
-	Kind       string    `json:"kind"`           // "put" or "delete"
-	Path       string    `json:"path"`           // slash-separated, relative to volume root
-	Blob       string    `json:"blob,omitempty"` // sha256 hex of content (put only)
+	Author     string    `json:"author,omitempty"`    // OS/git identity (offline fallback)
+	User       string    `json:"user,omitempty"`      // signed-in account email
+	UserName   string    `json:"user_name,omitempty"` // signed-in account display name
+	Kind       string    `json:"kind"`                // "put" or "delete"
+	Path       string    `json:"path"`                // slash-separated, relative to volume root
+	Blob       string    `json:"blob,omitempty"`      // sha256 hex of content (put only)
 	Size       int64     `json:"size,omitempty"`
 	Mode       uint32    `json:"mode,omitempty"` // permission bits
 	Note       string    `json:"note,omitempty"` // e.g. "conflict copy of <path>"

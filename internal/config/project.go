@@ -1,21 +1,27 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 )
 
-// ProjectFile is the name of the per-folder settings file at the mount root.
-// It travels with the project (copy the folder, `bdrive mnt .`, and the same
-// volume/remote apply) but is never synced — remotes and credentials setups
-// are often device-specific, and syncing it would let one device silently
-// repoint another.
-const ProjectFile = ".bdrive"
+// ProjectDir is the per-folder settings directory at the mount root. It
+// carries the mount's stable identity, so a project keeps syncing after the
+// folder is renamed or moved — nothing is keyed by the path. It travels with
+// the folder (copy the folder to a new machine and `bdrive init` resumes the
+// same project) but is never synced, and it holds no session credentials —
+// those stay in the bdrive home.
+const ProjectDir = ".bdrive"
 
-// Project holds the settings stored in <folder>/.bdrive.
+// Project holds the settings stored in <folder>/.bdrive/config.json.
 type Project struct {
+	// ID is the stable mount identity (m-xxxxxxxx). The volume store, the
+	// daemon, and the registry are keyed by it, never by the folder path.
+	ID     string `json:"id"`
 	Volume string `json:"volume,omitempty"`
 	Remote string `json:"remote,omitempty"`
 	// Include optionally narrows what syncs: when non-empty, only paths
@@ -24,10 +30,22 @@ type Project struct {
 	Include []string `json:"include,omitempty"`
 }
 
-// LoadProject reads <folder>/.bdrive; ok is false if the file does not exist.
+// NewMountID mints a stable mount identity.
+func NewMountID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return "m-" + hex.EncodeToString(b)
+}
+
+func projectConfigPath(folder string) string {
+	return filepath.Join(folder, ProjectDir, "config.json")
+}
+
+// LoadProject reads <folder>/.bdrive/config.json; ok is false if it does not
+// exist.
 func LoadProject(folder string) (Project, bool, error) {
 	var p Project
-	data, err := os.ReadFile(filepath.Join(folder, ProjectFile))
+	data, err := os.ReadFile(projectConfigPath(folder))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return p, false, nil
@@ -35,37 +53,41 @@ func LoadProject(folder string) (Project, bool, error) {
 		return p, false, err
 	}
 	if err := json.Unmarshal(data, &p); err != nil {
-		return p, false, fmt.Errorf("parse %s: %w", ProjectFile, err)
+		return p, false, fmt.Errorf("parse %s: %w", projectConfigPath(folder), err)
 	}
 	return p, true, nil
 }
 
-// SaveProject writes <folder>/.bdrive.
-func SaveProject(folder string, p Project) error {
-	return writeJSON(filepath.Join(folder, ProjectFile), p)
+// SaveProject writes <folder>/.bdrive/config.json, assigning a mount ID on
+// first save.
+func SaveProject(folder string, p Project) (Project, error) {
+	if p.ID == "" {
+		p.ID = NewMountID()
+	}
+	if err := os.MkdirAll(filepath.Join(folder, ProjectDir), 0o755); err != nil {
+		return p, err
+	}
+	return p, writeJSON(projectConfigPath(folder), p)
 }
 
-// EffectiveMount resolves a folder's mount settings: the project file wins
-// over the global registry, so hand-edits to .bdrive (or a folder copied with
-// its .bdrive) take effect without re-registering. Found reports whether the
-// folder is known at all (registered or carrying a project file).
-func EffectiveMount(folder string) (mi MountInfo, proj Project, found bool, err error) {
+// ResolveMount loads a folder's project settings and self-heals the
+// registry: if the folder was renamed or moved, the registry entry is
+// updated to the new path so `bdrive status` and the daemon find it again.
+func ResolveMount(folder string) (Project, bool, error) {
+	p, ok, err := LoadProject(folder)
+	if err != nil || !ok {
+		return p, ok, err
+	}
 	mounts, err := LoadMounts()
 	if err != nil {
-		return mi, proj, false, err
+		return p, true, err
 	}
-	mi, registered := mounts[folder]
-	proj, hasProj, err := LoadProject(folder)
-	if err != nil {
-		return mi, proj, false, err
-	}
-	if hasProj {
-		if proj.Volume != "" {
-			mi.Volume = proj.Volume
-		}
-		if proj.Remote != "" {
-			mi.Remote = proj.Remote
+	mi, registered := mounts[p.ID]
+	if !registered || mi.Path != folder || mi.Volume != p.Volume || mi.Remote != p.Remote {
+		mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote}
+		if err := SaveMounts(mounts); err != nil {
+			return p, true, err
 		}
 	}
-	return mi, proj, registered || hasProj, nil
+	return p, true, nil
 }

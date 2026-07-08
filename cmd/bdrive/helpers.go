@@ -20,53 +20,53 @@ func absFolder(args []string) (string, error) {
 	return filepath.Abs(arg)
 }
 
-// mustMount resolves a folder's settings: the .bdrive project file wins over
-// the global registry, so a folder that carries its own .bdrive works even
-// before it is registered on this device.
-func mustMount(folder string) (config.MountInfo, error) {
-	mi, _, found, err := config.EffectiveMount(folder)
+// mustProject resolves a folder's project settings (from .bdrive/config.json,
+// self-healing the registry when the folder moved).
+func mustProject(folder string) (config.Project, error) {
+	proj, found, err := config.ResolveMount(folder)
 	if err != nil {
-		return mi, err
+		return proj, err
 	}
 	if !found {
-		return mi, fmt.Errorf("%s is not a beardrive mount (run `bdrive mnt %s` first)", folder, folder)
+		return proj, fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", folder)
 	}
-	if mi.Volume == "" {
-		mi.Volume = filepath.Base(folder)
+	if proj.Volume == "" {
+		proj.Volume = filepath.Base(folder)
 	}
-	return mi, nil
+	return proj, nil
 }
 
-// openSession builds a syncer session for a mounted folder. When withRemote
+// openSession builds a syncer session for a project folder. When withRemote
 // is set and the remote is unreachable, it degrades to offline with a warning
 // rather than failing.
-func openSession(ctx context.Context, folder string, withRemote bool) (*syncer.Session, config.MountInfo, error) {
-	mi, err := mustMount(folder)
+func openSession(ctx context.Context, folder string, withRemote bool) (*syncer.Session, config.Project, error) {
+	proj, err := mustProject(folder)
 	if err != nil {
-		return nil, mi, err
+		return nil, proj, err
 	}
 	dev, err := config.LoadDevice()
 	if err != nil {
-		return nil, mi, err
+		return nil, proj, err
 	}
-	vdir, err := config.VolumeDir(mi.Volume)
+	vdir, err := config.VolumeDir(proj.ID)
 	if err != nil {
-		return nil, mi, err
+		return nil, proj, err
 	}
 	st, err := store.Open(vdir)
 	if err != nil {
-		return nil, mi, err
+		return nil, proj, err
 	}
-	sess := &syncer.Session{Folder: folder, Store: st, Device: dev}
-	if withRemote && mi.Remote != "" {
-		be, err := remote.Open(ctx, mi.Remote)
+	settings, _ := config.LoadSettings()
+	sess := &syncer.Session{Folder: folder, MountID: proj.ID, Store: st, Device: dev, Account: settings}
+	if withRemote && proj.Remote != "" {
+		be, err := remote.Open(ctx, proj.Remote)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: remote unavailable, working offline: %v\n", err)
 		} else {
 			sess.Backend = be
 		}
 	}
-	return sess, mi, nil
+	return sess, proj, nil
 }
 
 func closeSession(sess *syncer.Session) {

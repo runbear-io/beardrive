@@ -5,7 +5,6 @@ package config
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -92,9 +91,13 @@ func detectAuthor() string {
 	return u + "@" + hostname()
 }
 
-// MountInfo describes one mounted folder.
+// MountInfo is the registry's view of one mount: where the folder currently
+// lives. The source of truth for identity/settings is the folder's own
+// .bdrive/config.json; the registry only remembers the last-known path (for
+// `bdrive status` and the daemon) and self-heals when the folder moves.
 type MountInfo struct {
-	Volume string `json:"volume"`
+	Path   string `json:"path"`
+	Volume string `json:"volume,omitempty"`
 	Remote string `json:"remote,omitempty"`
 }
 
@@ -106,7 +109,7 @@ func mountsPath() (string, error) {
 	return filepath.Join(home, "mounts.json"), nil
 }
 
-// LoadMounts returns the abs-folder → mount registry.
+// LoadMounts returns the mount-ID → mount registry.
 func LoadMounts() (map[string]MountInfo, error) {
 	p, err := mountsPath()
 	if err != nil {
@@ -137,22 +140,14 @@ func SaveMounts(m map[string]MountInfo) error {
 	return writeJSON(p, m)
 }
 
-// MountID derives a stable identifier for a mounted folder. One volume can
-// be mounted at several folders (even on the same device); everything
-// folder-specific — the sync daemon and the materialization cache — is keyed
-// by this ID, while blobs and journals stay shared per volume.
-func MountID(folder string) string {
-	sum := sha256.Sum256([]byte(folder))
-	return hex.EncodeToString(sum[:])[:12]
-}
-
-// VolumeDir returns (and creates parents for) the local store dir of a volume.
-func VolumeDir(volume string) (string, error) {
+// VolumeDir returns the local store dir of a mount, keyed by its stable
+// mount ID (never the folder path — that's what makes renames/moves free).
+func VolumeDir(mountID string) (string, error) {
 	home, err := Home()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "volumes", volume), nil
+	return filepath.Join(home, "volumes", mountID), nil
 }
 
 func writeJSON(path string, v any) error {

@@ -55,6 +55,7 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 	if rs == nil {
 		return
 	}
+	s.observeDevice(r)
 	prefix := r.URL.Query().Get("prefix")
 	if prefix != "" && prefix != "journal/" && prefix != "blobs/" &&
 		!strings.HasPrefix(prefix, "journal/") && !strings.HasPrefix(prefix, "blobs/") {
@@ -74,6 +75,7 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	if rs == nil {
 		return
 	}
+	s.observeDevice(r)
 	key, ok := s.storeKey(w, r)
 	if !ok {
 		return
@@ -93,6 +95,7 @@ func (s *Server) handleStoreExists(v *volume, w http.ResponseWriter, r *http.Req
 	if rs == nil {
 		return
 	}
+	s.observeDevice(r)
 	key, ok := s.storeKey(w, r)
 	if !ok {
 		return
@@ -113,6 +116,7 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 	if rs == nil {
 		return
 	}
+	s.observeDevice(r)
 	if !s.Upload.Enabled {
 		http.Error(w, "uploads are disabled on this server", http.StatusForbidden)
 		return
@@ -155,6 +159,7 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	if rs == nil {
 		return
 	}
+	s.observeDevice(r)
 	if !s.Upload.Enabled {
 		http.Error(w, "uploads are disabled on this server", http.StatusForbidden)
 		return

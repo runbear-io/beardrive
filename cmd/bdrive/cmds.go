@@ -23,7 +23,7 @@ func syncCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			sess, mi, err := openSession(cmd.Context(), folder, true)
+			sess, proj, err := openSession(cmd.Context(), folder, true)
 			if err != nil {
 				return err
 			}
@@ -32,7 +32,7 @@ func syncCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("synced %s (volume %q)\n", folder, mi.Volume)
+			fmt.Printf("synced %s (project %q)\n", folder, proj.Volume)
 			printCycle(res)
 			return nil
 		},
@@ -54,14 +54,14 @@ func statusCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				mi, ok := mounts[folder]
-				if !ok {
-					return fmt.Errorf("%s is not a beardrive mount", folder)
+				proj, err := mustProject(folder) // also self-heals the registry
+				if err != nil {
+					return err
 				}
-				mounts = map[string]config.MountInfo{folder: mi}
+				mounts = map[string]config.MountInfo{proj.ID: {Path: folder, Volume: proj.Volume, Remote: proj.Remote}}
 			}
 			if len(mounts) == 0 {
-				fmt.Println("no beardrive mounts (create one with `bdrive mnt <folder>`)")
+				fmt.Println("no beardrive projects on this device (run `bdrive init` in a folder)")
 				return nil
 			}
 			dev, err := config.LoadDevice()
@@ -70,26 +70,30 @@ func statusCmd() *cobra.Command {
 			}
 			fmt.Printf("device: %s (%s) as %s\n\n", dev.Name, dev.ID, dev.Author)
 			first := true
-			for folder, mi := range mounts {
+			for id, mi := range mounts {
 				if !first {
 					fmt.Println()
 				}
 				first = false
-				if eff, _, found, err := config.EffectiveMount(folder); err == nil && found {
-					mi = eff // .bdrive project file wins over the registry
+				folder := mi.Path
+				if proj, ok, err := config.LoadProject(folder); err == nil && ok {
+					mi.Volume, mi.Remote = proj.Volume, proj.Remote // folder config wins
+				} else {
+					fmt.Printf("%s\n  (folder missing — moved or deleted; run `bdrive init` at its new location)\n", folder)
+					continue
 				}
 				fmt.Printf("%s\n", folder)
-				fmt.Printf("  volume:   %s\n", mi.Volume)
+				fmt.Printf("  project:  %s (%s)\n", mi.Volume, id)
 				if mi.Remote != "" {
 					fmt.Printf("  remote:   %s\n", mi.Remote)
 				} else {
 					fmt.Printf("  remote:   (none — local only)\n")
 				}
-				vdir, err := config.VolumeDir(mi.Volume)
+				vdir, err := config.VolumeDir(id)
 				if err != nil {
 					return err
 				}
-				if pid, ok := daemon.Running(vdir, config.MountID(folder)); ok {
+				if pid, ok := daemon.Running(vdir); ok {
 					fmt.Printf("  daemon:   running (pid %d)\n", pid)
 				} else {
 					fmt.Printf("  daemon:   stopped\n")
@@ -98,7 +102,7 @@ func statusCmd() *cobra.Command {
 				if err != nil {
 					continue
 				}
-				cache, err := sess.Store.LoadCache(config.MountID(folder))
+				cache, err := sess.Store.LoadCache(id)
 				if err == nil {
 					var total int64
 					for _, c := range cache {
@@ -180,14 +184,14 @@ func remoteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			mi, err := mustMount(folder)
+			proj, err := mustProject(folder)
 			if err != nil {
 				return err
 			}
-			if mi.Remote == "" {
+			if proj.Remote == "" {
 				fmt.Println("(none)")
 			} else {
-				fmt.Println(mi.Remote)
+				fmt.Println(proj.Remote)
 			}
 			return nil
 		},
@@ -206,25 +210,15 @@ func remoteCmd() *cobra.Command {
 			if err != nil || (u.Scheme != "s3" && u.Scheme != "gs" && u.Scheme != "file" && u.Scheme != "http" && u.Scheme != "https") {
 				return fmt.Errorf("invalid remote %q (want s3://bucket/prefix, gs://bucket/prefix, file:///path, or https://bdrive-server)", raw)
 			}
-			mi, err := mustMount(folder)
+			proj, err := mustProject(folder)
 			if err != nil {
 				return err
 			}
-			mi.Remote = raw
-			mounts, err := config.LoadMounts()
-			if err != nil {
+			proj.Remote = raw
+			if proj, err = config.SaveProject(folder, proj); err != nil {
 				return err
 			}
-			mounts[folder] = mi
-			if err := config.SaveMounts(mounts); err != nil {
-				return err
-			}
-			proj, _, err := config.LoadProject(folder)
-			if err != nil {
-				return err
-			}
-			proj.Volume, proj.Remote = mi.Volume, raw
-			if err := config.SaveProject(folder, proj); err != nil {
+			if _, _, err := config.ResolveMount(folder); err != nil { // sync the registry
 				return err
 			}
 			fmt.Printf("remote of %s set to %s\n", folder, raw)

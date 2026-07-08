@@ -8,9 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/runbear-io/beardrive/internal/config"
 )
 
 // httpBackend syncs one project through a bdrive web server instead of
@@ -27,6 +31,8 @@ import (
 type httpBackend struct {
 	base    string // scheme://host[:port]
 	project string
+	token   string // device token from `bdrive login`; empty on open servers
+	device  config.Device
 	hc      *http.Client
 }
 
@@ -42,7 +48,36 @@ func newHTTPBackend(raw string) (*httpBackend, error) {
 		return nil, fmt.Errorf("server remote %q has no project (want https://host:4173/p/<project-id>; run `bdrive init`)", raw)
 	}
 	base := (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
-	return &httpBackend{base: base, project: m[1], hc: &http.Client{Timeout: 5 * time.Minute}}, nil
+	dev, _ := config.LoadDevice()
+	return &httpBackend{base: base, project: m[1], token: deviceToken(), device: dev, hc: &http.Client{Timeout: 5 * time.Minute}}, nil
+}
+
+// deviceToken finds this device's credential for the server: BDRIVE_TOKEN
+// wins (tests, CI), otherwise the token `bdrive login` stored in settings.
+func deviceToken() string {
+	if t := os.Getenv("BDRIVE_TOKEN"); t != "" {
+		return t
+	}
+	s, err := config.LoadSettings()
+	if err != nil {
+		return ""
+	}
+	return s.Token
+}
+
+// do sends the request with this device's credential attached, plus the
+// identity headers the server's device registry records for history (name,
+// OS; the server observes the IP itself).
+func (b *httpBackend) do(req *http.Request) (*http.Response, error) {
+	if b.token != "" {
+		req.Header.Set("Authorization", "Bearer "+b.token)
+	}
+	if b.device.ID != "" {
+		req.Header.Set("X-Bdrive-Device", b.device.ID)
+		req.Header.Set("X-Bdrive-Device-Name", b.device.Name)
+		req.Header.Set("X-Bdrive-Os", runtime.GOOS+"/"+runtime.GOARCH)
+	}
+	return b.hc.Do(req)
 }
 
 func (b *httpBackend) endpoint(name string, q url.Values) string {
@@ -66,7 +101,7 @@ func (b *httpBackend) List(ctx context.Context, prefix string) ([]Object, error)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := b.hc.Do(req)
+	resp, err := b.do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +124,7 @@ func (b *httpBackend) Get(ctx context.Context, key string) (io.ReadCloser, error
 	if err != nil {
 		return nil, err
 	}
-	resp, err := b.hc.Do(req)
+	resp, err := b.do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +141,7 @@ func (b *httpBackend) Exists(ctx context.Context, key string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	resp, err := b.hc.Do(req)
+	resp, err := b.do(req)
 	if err != nil {
 		return false, err
 	}
@@ -159,7 +194,7 @@ func (b *httpBackend) sign(ctx context.Context, key string, size int64) (putPlan
 		return plan, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.hc.Do(req)
+	resp, err := b.do(req)
 	if err != nil {
 		return plan, err
 	}
@@ -202,7 +237,7 @@ func (b *httpBackend) putViaServer(ctx context.Context, key string, r io.Reader,
 		return err
 	}
 	req.ContentLength = size
-	resp, err := b.hc.Do(req)
+	resp, err := b.do(req)
 	if err != nil {
 		return err
 	}

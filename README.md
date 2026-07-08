@@ -11,32 +11,33 @@ follow them everywhere, with a full audit trail of which agent or human
 changed what.
 
 ```console
-$ bdrive mnt ./workspace --remote s3://my-bucket/workspace
-mounted /Users/snow/workspace
-  volume:  workspace
-  remote:  s3://my-bucket/workspace
-  device:  macbook (d380dea58598) as snow@runbear.io
-  daemon:  running (pid 55434, scan 3s, remote sync 30s)
+$ bdrive login                # once per device (browser sign-in)
+$ cd ~/workspace && bdrive init
+initialized /Users/snow/workspace
+  project: workspace (p-7f3a2c91)
+  daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
 
 On another machine:
 
 ```console
-$ bdrive mnt ./workspace --remote s3://my-bucket/workspace
-# … the same files appear, and stay in sync from now on
+$ bdrive login && cd ~/workspace && bdrive init
+# … connect the same project; the files appear and stay in sync
 ```
 
 ## Features
 
-- **Mount anywhere** — `bdrive mnt ./folder` turns any folder into a synced
-  volume. Files are *real files on disk*: every tool, editor, and agent can
-  use them with zero integration work.
+- **Any folder is a project** — `bdrive init` turns any folder into a synced
+  project. Files are *real files on disk*: every tool, editor, and agent can
+  use them with zero integration work. Rename or move the folder freely —
+  state is keyed by a stable id, never the path.
 - **Multi-device sync** — devices converge through a shared remote. Each
   device only writes its own append-only journal, so no locking service or
   server is needed — any object store works.
-- **Change tracking** — `bdrive log` shows which device and author changed
-  which file, when. Content is stored content-addressed, so history is
-  never lost, even for overwritten or deleted files.
+- **Change tracking** — `bdrive log` and the web UI's History view show
+  which account changed which file, when, from which device (name, OS, IP).
+  Content is stored content-addressed, so every version is retained — view
+  or download any point in a file's history.
 - **Cloud-provider agnostic** — Amazon S3 (`s3://`), Google Cloud Storage
   (`gs://`), any S3-compatible store (MinIO, Cloudflare R2 via
   `AWS_ENDPOINT_URL`), or a plain shared directory (`file://`, e.g. a NAS).
@@ -46,9 +47,9 @@ $ bdrive mnt ./workspace --remote s3://my-bucket/workspace
 - **Conflict-safe** — concurrent edits resolve deterministically
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file. Nothing is silently dropped.
-- **Selective sync** — a gitignore-style `.bdriveignore` opts files out, and an
-  optional `include` list in the folder's `.bdrive` settings narrows sync to
-  chosen paths.
+- **Selective sync** — a gitignore-style `.bdriveignore` opts files out, and
+  `bdrive init --shared <dir>` (or the interactive prompt) narrows sync to
+  one shared subfolder.
 - **macOS & Linux.**
 
 ## Install
@@ -66,27 +67,34 @@ go install github.com/runbear-io/beardrive/cmd/bdrive@latest
 ## Quick start
 
 ```sh
-# 1. Mount a folder, syncing through S3 (or gs://, or file://)
-bdrive mnt ./notes --remote s3://my-bucket/notes
+# 1. Sign this device in (once). Default server: beardrive.ai;
+#    self-hosters pass their own URL.
+bdrive login
 
-# 2. Work normally — create, edit, delete files with any tool.
-echo "remember this" > notes/memory.md
+# 2. Start syncing a project — interactive: create or connect a project,
+#    sync the whole folder or just ./shared. Re-run any time to resume.
+cd ~/my-project && bdrive init
 
-# 3. On every other device, mount the same remote:
-bdrive mnt ./notes --remote s3://my-bucket/notes
+# 3. Work normally — create, edit, delete files with any tool.
+echo "remember this" > memory.md
+
+# On every other device: bdrive login once, then bdrive init in a folder
+# and connect the same project.
 
 # See what changed, who changed it, and from which device
-bdrive log ./notes
+bdrive log
 
 # Check sync state and the daemon
 bdrive status
 
-# Sync on demand (the daemon also syncs automatically)
-bdrive sync ./notes
-
-# Stop syncing (files stay on disk; mount again any time)
-bdrive umnt ./notes
+# Stop syncing (files stay on disk; bdrive init resumes any time)
+bdrive stop
 ```
+
+Renaming or moving a project folder is safe: state is keyed by a stable
+project id, never the path. The daemon notices the move, steps aside, and
+the next `bdrive init` (or any bdrive command) at the new location resumes
+exactly where it left off — zero re-scan, zero spurious changes.
 
 ### Credentials
 
@@ -103,15 +111,14 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 
 | Command | Description |
 |---|---|
-| `bdrive mnt <folder> [--remote URL]` | Mount a folder as a synced volume and start the sync daemon |
-| `bdrive umnt <folder>` | Stop syncing (`--forget` also unregisters the mount) |
+| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai) |
+| `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
+| `bdrive stop [folder]` | Stop syncing (files stay; `bdrive init` resumes) |
 | `bdrive sync [folder]` | Run one sync cycle now |
-| `bdrive status [folder]` | Mounts, daemon state, pending changes |
-| `bdrive log [folder] [-p path] [-n N]` | Change history: author, device, time, file |
-| `bdrive remote [folder]` / `bdrive remote set <folder> <url>` | Show / set the cloud remote |
-| `bdrive login <server-url>` | Set this device's bdrive web server (verified and remembered) |
-| `bdrive init [folder]` | One-command onboarding: join/create a project on the logged-in server, seed `.bdriveignore`, mount, start syncing |
-| `bdrive web [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads), uploads, multi-project sync hub |
+| `bdrive status [folder]` | Projects, daemon state, pending changes |
+| `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
+| `bdrive remote [folder]` / `bdrive remote set <folder> <url>` | Show / set the remote (advanced, incl. direct-to-bucket) |
+| `bdrive web [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub |
 | `bdrive whoami` | Device identity used in change tracking |
 
 ## Project files
@@ -119,19 +126,22 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 Each mounted folder carries its own settings, so configuration travels with
 the project:
 
-- **`.bdrive`** — the folder's settings (JSON): `volume`, `remote`, and an
-  optional `include` list. Written by `bdrive mnt`, safe to hand-edit (a running
-  daemon picks changes up automatically). Never synced — remotes are
-  device-specific. Copy a folder containing `.bdrive` to another machine and
-  plain `bdrive mnt <folder>` reuses its volume and remote.
+- **`.bdrive/`** — the folder's settings directory: `config.json` holds the
+  **stable mount id** plus project/remote/include settings. Written by
+  `bdrive init`, safe to hand-edit (a running daemon picks changes up
+  automatically). Never synced, and it holds no credentials (the session
+  token stays in `~/.bdrive`). Because everything is keyed by the mount id,
+  the folder can be renamed or moved freely; copy it to another machine and
+  `bdrive init` resumes the same project.
 - **`.bdriveignore`** — gitignore-style opt-out list at the mount root. Syncs
   like a normal file, so every device shares the same rules. Supports `#`
   comments, `*`, `**`, `?`, trailing `/` for directories, leading `/` (or any
   `/`) for root-anchoring, and `!` to re-include.
 
 ```jsonc
-// .bdrive
-{ "volume": "notes", "remote": "s3://my-bucket/notes", "include": ["docs/", "*.md"] }
+// .bdrive/config.json
+{ "id": "m-5a10b713", "volume": "notes",
+  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["shared/"] }
 ```
 
 Opting out is non-destructive: when a pattern starts matching an
@@ -171,7 +181,13 @@ the positional argument), `--upload` (allow client writes, off by default),
   "upload": true,
   "upload_ttl": "15m",
   "refresh": "10s",
-  "projects_db": "/var/lib/bdrive/projects.json"
+  "projects_db": "/var/lib/bdrive/projects.json",
+  "auth": {                          // optional knobs; hub auth is always on
+    "allow_signup": true,
+    "users_db": "/var/lib/bdrive/auth.json",
+    "smtp": { "host": "smtp.example.com", "port": 587,
+              "user": "drive@example.com", "pass": "…", "from": "drive@example.com" }
+  }
 }
 ```
 
@@ -194,15 +210,19 @@ bdrive login https://drive.example.com:4173   # once per device
 cd ~/some-project && bdrive init              # once per project
 ```
 
-`bdrive login` verifies the server and remembers it as the device default
-(`settings.json` under the bdrive home; run it with no argument to show the
-current server). `bdrive init` then, per project: creates-or-joins
-a project named after the folder (`--name <x>` for an explicit name,
-`--project <id>` to join by id), writes the folder's `.bdrive` (project id +
-server URL), seeds a starter `.bdriveignore` (node_modules, build dirs,
-caches, `.env*`) when none exists, and mounts the folder — the daemon starts
-syncing immediately: local changes are detected within seconds, and the
-Claude Code plugin syncs at every session step.
+`bdrive login` signs the device in and remembers the server (`settings.json`
+under the bdrive home; bare `bdrive login` defaults to beardrive.ai —
+`--status` shows the current server and account). `bdrive init` then, per
+project, walks you through it on a terminal: **create a new project or
+connect an existing one** (picked from the server's list), and **sync the
+whole folder or only a shared subfolder** (e.g. `./shared`). Every question
+has a flag (`--name`, `--project`, `--shared`, `--yes`), and without a TTY
+init never prompts — it creates-or-joins a project named after the folder
+and syncs everything. It writes `.bdrive/config.json`, seeds a starter
+`.bdriveignore` (node_modules, build dirs, caches, `.env*`), and starts the
+daemon — local changes are detected within seconds, and the Claude Code
+plugin syncs at every session step. Not signed in yet? init runs the login
+flow first.
 
 Under the hood the `https://` remote speaks the hub's per-project
 `/api/p/<id>/store` API — journal reads/writes relay through the server,
@@ -213,8 +233,44 @@ server to run with `--upload`; against a read-only hub, clients still pull
 and their pushes wait (offline semantics) until allowed.
 
 The web UI lists the hub's projects in the sidebar; selecting one browses
-that project's files with full per-file provenance (who, which device,
-when — the same as `bdrive log`).
+that project's files, and the **History** view shows every change — which
+account made it, when, from which device (name, OS, and the IP the server
+observed), with view/download of any past version (content is
+content-addressed and retained forever; reverting to a version is the next
+phase and the API is already shaped for it). Folder rows have a history
+shortcut for a subtree feed; the topbar button shows the current file's
+versions or the whole project feed.
+
+### Authentication
+
+Hubs always require sign-in — every change is attributed to a real account.
+The whole API — web UI, uploads, project creation, device sync — needs a
+session; only `/api/config` and the auth pages stay open (the plain-folder
+viewer, `bdrive web ./folder`, remains auth-free). Accounts are
+email + password + name, kept in a file-backed registry (`auth.json`:
+bcrypt password hashes and SHA-256 token digests, atomically rewritten —
+no plaintext credentials ever touch disk). Sign-up is open by default;
+`"allow_signup": false` closes it once the team is onboarded.
+
+`bdrive login <url>` on a client device opens the server's sign-in page in
+a browser (sign up right there if needed); when the user signs in, the
+page bounces a one-time code to the CLI's loopback listener and the
+terminal finishes on its own, storing a long-lived per-device token
+(revocable server-side). On headless/SSH machines, `bdrive login --device`
+prints a short code to approve from any signed-in browser instead. Every
+sync and every `bdrive init` then authenticates with that token.
+
+"Forgot password" emails a one-hour reset link via the `auth.smtp` block —
+plain SMTP, so any provider works. With no SMTP configured, the link is
+printed to the server log so an admin can hand it over; reset is never
+fully broken.
+
+Two notes: put a hub behind TLS (reverse proxy
+or tailscale) — `bdrive login` warns when signing in over plain http to a
+non-localhost address. Internally all of this sits behind an
+`AuthProvider` interface; the open-source server ships the built-in
+email/password provider, and alternative identity backends can be swapped
+in without touching the CLI or the API.
 
 ### Uploads
 
@@ -287,7 +343,7 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
 - A per-mount **daemon** scans the folder every few seconds (cheap
   size+mtime check) and exchanges with the remote every ~10s — or
   immediately after local edits. Tune with --scan-interval and
-  --remote-interval on `bdrive mnt`.
+  --remote-interval on `bdrive init`.
 
 ### What beardrive does not sync
 

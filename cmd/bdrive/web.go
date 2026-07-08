@@ -31,6 +31,19 @@ type webConfig struct {
 	Upload     *bool  `json:"upload,omitempty"`
 	UploadTTL  string `json:"upload_ttl,omitempty"`  // duration, e.g. "15m"
 	ProjectsDB string `json:"projects_db,omitempty"` // hub project registry path
+	// Auth tunes the hub's (always-on) authentication; hubs require
+	// sign-in unconditionally, only these knobs are optional.
+	Auth *struct {
+		AllowSignup *bool  `json:"allow_signup,omitempty"` // default true
+		UsersDB     string `json:"users_db,omitempty"`     // default $BDRIVE_HOME/auth.json
+		SMTP        *struct {
+			Host string `json:"host"`
+			Port int    `json:"port"`
+			User string `json:"user,omitempty"`
+			Pass string `json:"pass,omitempty"`
+			From string `json:"from,omitempty"`
+		} `json:"smtp,omitempty"`
+	} `json:"auth,omitempty"`
 }
 
 func loadWebConfig(path string) (webConfig, error) {
@@ -52,6 +65,7 @@ func webCmd() *cobra.Command {
 	var addr, configPath, projectsDB string
 	var refresh, uploadTTL time.Duration
 	var upload bool
+	var cfg webConfig
 	c := &cobra.Command{
 		Use:   "web [folder | storage-root-url]",
 		Short: "Serve the bdrive web server: viewer, uploads, and sync hub",
@@ -85,6 +99,7 @@ credentials); otherwise it is relayed through this server.`,
 				if err != nil {
 					return err
 				}
+				cfg = c
 				set := cmd.Flags().Changed
 				if c.Remote != "" && !set("remote") {
 					remoteURL = c.Remote
@@ -182,6 +197,46 @@ credentials); otherwise it is relayed through this server.`,
 			}
 			if volume != "" {
 				srv.Volume = volume
+			}
+
+			// Hubs always require sign-in: every op needs a real account
+			// behind it (history, device registry). The plain-folder viewer
+			// stays auth-free.
+			if srv.Root != nil {
+				usersDB := ""
+				allowSignup := true
+				var mail *webapp.Mailer
+				if cfg.Auth != nil {
+					usersDB = cfg.Auth.UsersDB
+					if cfg.Auth.AllowSignup != nil {
+						allowSignup = *cfg.Auth.AllowSignup
+					}
+					if cfg.Auth.SMTP != nil {
+						mail = &webapp.Mailer{
+							Host: cfg.Auth.SMTP.Host, Port: cfg.Auth.SMTP.Port,
+							User: cfg.Auth.SMTP.User, Pass: cfg.Auth.SMTP.Pass,
+							From: cfg.Auth.SMTP.From,
+						}
+					}
+				}
+				home, err := config.Home()
+				if err != nil {
+					return err
+				}
+				if usersDB == "" {
+					usersDB = filepath.Join(home, "auth.json")
+				}
+				auth, err := webapp.OpenBuiltinAuth(usersDB, allowSignup, mail)
+				if err != nil {
+					return fmt.Errorf("open account registry: %w", err)
+				}
+				srv.Auth = auth
+				devices, err := webapp.OpenDeviceRegistry(filepath.Join(filepath.Dir(projectsDB), "devices.json"))
+				if err != nil {
+					return fmt.Errorf("open device registry: %w", err)
+				}
+				srv.Devices = devices
+				display += " (auth: " + usersDB + ")"
 			}
 
 			shown := addr

@@ -32,9 +32,13 @@ import (
 // Session ties a working folder to its volume store and (optionally) remote.
 type Session struct {
 	Folder  string
-	MountID string // distinguishes folders sharing one volume; see config.MountID
+	MountID string // the stable project mount id from .bdrive/config.json
 	Store   *store.Store
 	Device  config.Device
+	// Account is the signed-in user (from `bdrive login`); ops carry it so
+	// history shows who changed what. Zero on offline/no-auth setups —
+	// Device.Author remains the fallback identity.
+	Account config.Settings
 	Backend remote.Backend // nil = work offline
 }
 
@@ -42,7 +46,10 @@ func (s *Session) mountID() string {
 	if s.MountID != "" {
 		return s.MountID
 	}
-	return config.MountID(s.Folder)
+	// Fallback for sessions built without a project (tests): key the state
+	// cache by the folder path.
+	sum := sha256.Sum256([]byte(s.Folder))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // Result summarizes one sync cycle.
@@ -60,10 +67,11 @@ func (r *Result) Activity() bool {
 	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Materialized > 0
 }
 
-// config.ProjectFile (.bdrive) never syncs: remotes are device-specific and
-// syncing it would let one device silently repoint another.
-var ignoreNames = map[string]bool{".DS_Store": true, config.ProjectFile: true}
-var ignoreDirs = map[string]bool{".git": true, ".bdrive": true}
+// The .bdrive settings dir (config.ProjectDir) never syncs: it is the
+// mount's local identity, and syncing it would let one device silently
+// repoint another.
+var ignoreNames = map[string]bool{".DS_Store": true}
+var ignoreDirs = map[string]bool{".git": true, config.ProjectDir: true}
 
 func ignoredFile(name string) bool {
 	return ignoreNames[name] || strings.HasPrefix(name, ".bdrive-tmp-")
@@ -188,6 +196,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		return journal.Op{
 			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
 			Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
+			User: s.Account.Email, UserName: s.Account.Name,
 			Kind: kind, Path: rel,
 		}
 	}
@@ -383,6 +392,7 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 		out = append(out, journal.Op{
 			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
 			Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
+			User: s.Account.Email, UserName: s.Account.Name,
 			Kind: journal.KindPut, Path: conflictName(p, loser.DeviceName, loser.Time),
 			Blob: loser.Blob, Size: loser.Size, Mode: loser.Mode,
 			Note: "conflict copy of " + p,

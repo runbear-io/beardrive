@@ -35,8 +35,13 @@ body {
 #vault {
   padding: 14px 16px 10px;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
-#vault-name { display: block; font-weight: 600; font-size: 14px; }
+#vault-name { font-weight: 600; font-size: 14px; }
+#signout { color: var(--text-faint); text-decoration: none; font-size: 13px; }
+#signout:hover { color: var(--text); }
 #upload-btn {
   border: none;
   cursor: pointer;
@@ -109,6 +114,23 @@ body {
 }
 .btn:hover { background: var(--accent); }
 #content { flex: 1; overflow-y: auto; padding: 28px 48px 80px; }
+#history-btn { border: none; cursor: pointer; font: inherit; font-size: 12.5px; background: var(--bg-active); color: var(--text-dim); }
+#history-btn:hover { color: var(--text); background: var(--bg-hover); }
+.dir-history { margin-left: auto; padding: 0 4px; visibility: hidden; color: var(--text-faint); font-size: 11px; }
+#tree li > .row:hover .dir-history { visibility: visible; }
+.dir-history:hover { color: var(--text); }
+.history { max-width: 860px; }
+.hentry { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.hentry .hline { display: flex; gap: 10px; align-items: baseline; }
+.hkind { color: var(--accent); font-size: 11px; }
+.hentry.delete .hkind { color: #ff7b72; }
+.hpath { font-weight: 500; cursor: pointer; }
+.hpath:hover { color: var(--accent); }
+.htime { margin-left: auto; color: var(--text-faint); font-size: 12px; }
+.hmeta { display: flex; gap: 16px; margin-top: 3px; font-size: 12px; color: var(--text-dim); }
+.hdev, .hsize { color: var(--text-faint); }
+.hact { margin-left: auto; }
+.hact a { color: var(--accent); text-decoration: none; margin-left: 8px; }
 .empty { color: var(--text-faint); text-align: center; margin-top: 20vh; }
 
 /* ---- markdown ---- */

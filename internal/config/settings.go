@@ -7,10 +7,21 @@ import (
 	"path/filepath"
 )
 
+// DefaultServer is used wherever a server is needed and none is configured:
+// bare `bdrive login`, and `bdrive init` on a never-logged-in device.
+const DefaultServer = "https://beardrive.ai"
+
 // Settings are device-wide defaults, stored at $BDRIVE_HOME/settings.json.
 type Settings struct {
 	// Server is the default bdrive web server for `bdrive init`.
 	Server string `json:"server,omitempty"`
+	// Token authenticates this device to Server (minted by `bdrive login`).
+	// Sent as a Bearer header.
+	Token string `json:"token,omitempty"`
+	// Email and Name identify the signed-in account; journal ops carry them
+	// so history shows who changed what.
+	Email string `json:"email,omitempty"`
+	Name  string `json:"name,omitempty"`
 }
 
 func settingsPath() (string, error) {

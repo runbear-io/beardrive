@@ -26,19 +26,18 @@ import (
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
-// Daemons are per mount, not per volume: one volume may be mounted at
-// several folders (each gets its own daemon), so pid/log files are keyed by
-// the mount ID.
-func PidPath(volDir, mountID string) string {
-	return filepath.Join(volDir, "daemon-"+mountID+".pid")
+// The volume store is keyed by the mount id, so exactly one daemon runs per
+// mount and its pid/log live in the store dir.
+func PidPath(volDir string) string {
+	return filepath.Join(volDir, "daemon.pid")
 }
-func LogPath(volDir, mountID string) string {
-	return filepath.Join(volDir, "daemon-"+mountID+".log")
+func LogPath(volDir string) string {
+	return filepath.Join(volDir, "daemon.log")
 }
 
 // Running reports the daemon pid for a mount if one is alive.
-func Running(volDir, mountID string) (int, bool) {
-	data, err := os.ReadFile(PidPath(volDir, mountID))
+func Running(volDir string) (int, bool) {
+	data, err := os.ReadFile(PidPath(volDir))
 	if err != nil {
 		return 0, false
 	}
@@ -54,15 +53,14 @@ func Running(volDir, mountID string) (int, bool) {
 
 // Start launches a detached daemon for the folder (no-op if already running).
 func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (int, error) {
-	mountID := config.MountID(folder)
-	if pid, ok := Running(volDir, mountID); ok {
+	if pid, ok := Running(volDir); ok {
 		return pid, nil
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		return 0, err
 	}
-	logf, err := os.OpenFile(LogPath(volDir, mountID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logf, err := os.OpenFile(LogPath(volDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return 0, err
 	}
@@ -77,17 +75,17 @@ func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (i
 		return 0, err
 	}
 	pid := cmd.Process.Pid
-	if err := os.WriteFile(PidPath(volDir, mountID), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(PidPath(volDir), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
 		return pid, err
 	}
 	return pid, cmd.Process.Release()
 }
 
 // Stop terminates the daemon for a mount and waits for it to exit.
-func Stop(volDir, mountID string) (bool, error) {
-	pid, ok := Running(volDir, mountID)
+func Stop(volDir string) (bool, error) {
+	pid, ok := Running(volDir)
 	if !ok {
-		os.Remove(PidPath(volDir, mountID))
+		os.Remove(PidPath(volDir))
 		return false, nil
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
@@ -96,30 +94,14 @@ func Stop(volDir, mountID string) (bool, error) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err != nil {
-			os.Remove(PidPath(volDir, mountID))
+			os.Remove(PidPath(volDir))
 			return true, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	syscall.Kill(pid, syscall.SIGKILL)
-	os.Remove(PidPath(volDir, mountID))
+	os.Remove(PidPath(volDir))
 	return true, nil
-}
-
-// overlayProject applies the folder's .bdrive settings on top of the registry
-// entry; the project file wins so hand-edits take effect on the next tick.
-func overlayProject(folder string, mi config.MountInfo) config.MountInfo {
-	proj, ok, err := config.LoadProject(folder)
-	if err != nil || !ok {
-		return mi
-	}
-	if proj.Volume != "" {
-		mi.Volume = proj.Volume
-	}
-	if proj.Remote != "" {
-		mi.Remote = proj.Remote
-	}
-	return mi
 }
 
 // Run is the daemon main loop, executed in the foreground of the (usually
@@ -128,16 +110,14 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	mounts, err := config.LoadMounts()
+	proj, ok, err := config.ResolveMount(folder)
 	if err != nil {
 		return err
 	}
-	mi, ok := mounts[folder]
 	if !ok {
-		return fmt.Errorf("%s is not a beardrive mount", folder)
+		return fmt.Errorf("%s is not a beardrive project (run `bdrive init`)", folder)
 	}
-	mi = overlayProject(folder, mi)
-	volDir, err := config.VolumeDir(mi.Volume)
+	volDir, err := config.VolumeDir(proj.ID)
 	if err != nil {
 		return err
 	}
@@ -149,14 +129,15 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	if err != nil {
 		return err
 	}
-	mountID := config.MountID(folder)
-	if err := os.WriteFile(PidPath(volDir, mountID), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(PidPath(volDir), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
 		return err
 	}
-	defer os.Remove(PidPath(volDir, mountID))
+	defer os.Remove(PidPath(volDir))
 
-	log.Printf("daemon started: folder=%s volume=%s remote=%q device=%s(%s) scan=%s sync=%s",
-		folder, mi.Volume, mi.Remote, dev.Name, dev.ID, scanInterval, remoteInterval)
+	settings, _ := config.LoadSettings()
+
+	log.Printf("daemon started: folder=%s mount=%s volume=%s remote=%q device=%s(%s) scan=%s sync=%s",
+		folder, proj.ID, proj.Volume, proj.Remote, dev.Name, dev.ID, scanInterval, remoteInterval)
 
 	var be remote.Backend
 	defer func() {
@@ -167,29 +148,40 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	var lastRemote time.Time
 
 	for {
-		// Pick up `bdrive remote set`, .bdrive edits, and `bdrive umnt --forget`
-		// without restarting.
+		// Re-read the project config each tick: picks up `bdrive remote set`
+		// and hand-edits. A vanished config means the folder was moved,
+		// renamed, or deleted — exit cleanly (propagating nothing); the next
+		// bdrive command in the folder's new location resumes the daemon.
+		cur, ok, err := config.LoadProject(folder)
+		if err != nil || !ok {
+			log.Printf("project config gone (folder moved or deleted); exiting")
+			return nil
+		}
+		if cur.ID != proj.ID {
+			log.Printf("mount identity changed; exiting")
+			return nil
+		}
+		// If the registry says this mount now lives elsewhere, a new
+		// location has taken over — stand down.
 		if m, err := config.LoadMounts(); err == nil {
-			cur, ok := m[folder]
-			if !ok {
-				log.Printf("mount unregistered; exiting")
+			if mi, ok := m[proj.ID]; ok && mi.Path != folder {
+				log.Printf("mount re-registered at %s; exiting", mi.Path)
 				return nil
 			}
-			cur = overlayProject(folder, cur)
-			if cur.Remote != mi.Remote {
-				log.Printf("remote changed: %q -> %q", mi.Remote, cur.Remote)
-				if be != nil {
-					be.Close()
-					be = nil
-				}
-				lastRemote = time.Time{}
-			}
-			mi = cur
 		}
+		if cur.Remote != proj.Remote {
+			log.Printf("remote changed: %q -> %q", proj.Remote, cur.Remote)
+			if be != nil {
+				be.Close()
+				be = nil
+			}
+			lastRemote = time.Time{}
+		}
+		proj = cur
 
-		doRemote := mi.Remote != "" && time.Since(lastRemote) >= remoteInterval
+		doRemote := proj.Remote != "" && time.Since(lastRemote) >= remoteInterval
 		if doRemote && be == nil {
-			b, err := remote.Open(ctx, mi.Remote)
+			b, err := remote.Open(ctx, proj.Remote)
 			if err != nil {
 				log.Printf("remote unavailable: %v", err)
 				doRemote = false
@@ -199,7 +191,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 		}
 
-		sess := &syncer.Session{Folder: folder, Store: st, Device: dev}
+		sess := &syncer.Session{Folder: folder, MountID: proj.ID, Store: st, Device: dev, Account: settings}
 		if doRemote {
 			sess.Backend = be
 		}

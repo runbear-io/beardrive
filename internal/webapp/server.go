@@ -63,6 +63,12 @@ type Server struct {
 	Device  Identity
 	Refresh time.Duration
 	Upload  UploadConfig
+	// Auth, when set, gates the whole API behind sign-in. Nil means the
+	// historical trusted-network behavior: no accounts, everyone welcome.
+	Auth AuthProvider
+	// Devices, when set, records what the server observes about syncing
+	// devices (name, OS, public IP, last activity) for history.
+	Devices *DeviceRegistry
 
 	volOnce sync.Once
 	vol     *volume
@@ -301,6 +307,9 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(s.handleUploadCommit))
 	}
 
+	mux.HandleFunc("GET /api/p/{project}/history", proj(s.handleHistory))
+	mux.HandleFunc("GET /api/p/{project}/blob", proj(s.handleBlob))
+
 	// The sync (store) API only exists per project: hub mode is what
 	// storage-blind devices sync through.
 	mux.HandleFunc("GET /api/p/{project}/store/list", proj(s.handleStoreList))
@@ -310,7 +319,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/p/{project}/store/object", proj(s.handleStorePut))
 
 	mux.Handle("GET /", http.FileServerFS(static))
-	return mux
+	if s.Auth != nil {
+		s.Auth.Register(mux)
+	}
+	return s.authGate(mux)
 }
 
 // handleConfig tells the client how this server is configured. Deliberately
@@ -320,12 +332,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if s.Root != nil {
 		mode = "hub"
 	}
+	auth := map[string]any{"enabled": s.Auth != nil}
+	if s.Auth != nil {
+		auth["cli_login"] = s.Auth.CLILoginPath()
+	}
 	writeJSON(w, map[string]any{
 		"mode":   mode,
 		"volume": s.Volume,
 		"upload": map[string]any{
 			"enabled": s.Upload.Enabled,
 		},
+		"auth": auth,
 	})
 }
 
