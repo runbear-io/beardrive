@@ -6,6 +6,6 @@
   "author": { "name": "runbear", "url": "https://github.com/runbear-io" },
   "homepage": "https://github.com/runbear-io/beardrive",
   "repository": "https://github.com/runbear-io/beardrive",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "keywords": ["sync", "files", "workspace", "s3", "gcs", "memory", "agents"]
 }

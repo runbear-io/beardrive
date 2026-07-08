@@ -35,7 +35,7 @@ brews:
       name: homebrew-tap
     homepage: https://github.com/runbear-io/beardrive
     description: "BearDrive: a synced file system for AI agents — mount, sync, and track folders"
-    license: MIT
+    license: AGPL-3.0-only
     test: |
       assert_match "beardrive", shell_output("#{bin}/bdrive version")
 

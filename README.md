@@ -414,4 +414,12 @@ conflicts. Set `BDRIVE_HOME` to relocate all beardrive state (used heavily in te
 
 ## License
 
-MIT
+GNU AGPL-3.0 — Copyright 2026 Runbear, Inc. See [LICENSE](LICENSE).
+
+Everything in this repo is open source and self-hostable: a complete BearDrive
+server for one organization's deployment, teams included. The managed service
+at beardrive.ai is the same core plus what only makes sense as an operated
+service — hosting, PropelAuth SSO, billing and plan quotas, backups, and
+support. Provider-specific and billing code stays out of this repo permanently;
+the server exposes interfaces (`AuthProvider`, `QuotaProvider`) that the
+managed deployment fills in.
