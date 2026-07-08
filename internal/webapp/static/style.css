@@ -114,8 +114,8 @@ body {
 }
 .btn:hover { background: var(--accent); }
 #content { flex: 1; overflow-y: auto; padding: 28px 48px 80px; }
-#history-btn { border: none; cursor: pointer; font: inherit; font-size: 12.5px; background: var(--bg-active); color: var(--text-dim); }
-#history-btn:hover { color: var(--text); background: var(--bg-hover); }
+#history-btn, #share-btn { border: none; cursor: pointer; font: inherit; font-size: 12.5px; background: var(--bg-active); color: var(--text-dim); }
+#history-btn:hover, #share-btn:hover { color: var(--text); background: var(--bg-hover); }
 .dir-history { margin-left: auto; padding: 0 4px; visibility: hidden; color: var(--text-faint); font-size: 11px; }
 #tree li > .row:hover .dir-history { visibility: visible; }
 .dir-history:hover { color: var(--text); }

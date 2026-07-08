@@ -91,6 +91,7 @@ function selectProject(p, path) {
   loadProjects(); // refresh active highlight
   initUpload();
   initHistory();
+  updateShareButton();
   refreshTree().then(() => { if (path) openFile(path); });
   if (!path) location.hash = p.id;
 }
@@ -178,6 +179,7 @@ async function openFile(p) {
   setHash(p);
   markActive();
   $("crumb").textContent = p.split("/").join(" / ");
+  updateShareButton();
   const dl = $("download");
   dl.href = apiBase + "download?path=" + encodeURIComponent(p);
   dl.hidden = false;
@@ -265,6 +267,37 @@ function join(dir, rel) {
     else out.push(s);
   }
   return out.join("/");
+}
+
+/* ---- share ----
+   Mint a public URL for the open file: anyone with the link can view it
+   (rendered, sandboxed), no account needed. Always the latest content. */
+function updateShareButton() {
+  const btn = $("share-btn");
+  btn.hidden = !(serverConfig.mode === "hub" && currentProject && currentPath);
+  btn.onclick = async () => {
+    try {
+      const r = await fetch(apiBase + "shares", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: currentPath }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const share = await r.json();
+      let copied = "";
+      if (navigator.clipboard) {
+        try { await navigator.clipboard.writeText(share.url); copied = " (copied)"; } catch { /* http origin */ }
+      }
+      $("meta").innerHTML = "";
+      const a = document.createElement("a");
+      a.href = share.url;
+      a.target = "_blank";
+      a.textContent = share.url;
+      $("meta").append("public link: ", a, copied);
+    } catch (err) {
+      $("meta").textContent = "Share failed: " + err.message;
+    }
+  };
 }
 
 /* ---- history ----

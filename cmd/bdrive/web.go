@@ -236,6 +236,11 @@ credentials); otherwise it is relayed through this server.`,
 					return fmt.Errorf("open device registry: %w", err)
 				}
 				srv.Devices = devices
+				shares, err := webapp.OpenShareDB(filepath.Join(filepath.Dir(projectsDB), "shares.json"))
+				if err != nil {
+					return fmt.Errorf("open share registry: %w", err)
+				}
+				srv.Shares = shares
 				display += " (auth: " + usersDB + ")"
 			}
 

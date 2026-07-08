@@ -69,6 +69,8 @@ type Server struct {
 	// Devices, when set, records what the server observes about syncing
 	// devices (name, OS, public IP, last activity) for history.
 	Devices *DeviceRegistry
+	// Shares, when set, enables public share links (/s/<token>).
+	Shares *ShareDB
 
 	volOnce sync.Once
 	vol     *volume
@@ -309,6 +311,10 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/p/{project}/history", proj(s.handleHistory))
 	mux.HandleFunc("GET /api/p/{project}/blob", proj(s.handleBlob))
+	mux.HandleFunc("POST /api/p/{project}/shares", proj(s.handleShareCreate))
+	mux.HandleFunc("GET /api/p/{project}/shares", proj(s.handleShareList))
+	mux.HandleFunc("DELETE /api/shares/{token}", s.handleShareRevoke)
+	mux.HandleFunc("GET /s/{token}", s.handleShared)
 
 	// The sync (store) API only exists per project: hub mode is what
 	// storage-blind devices sync through.

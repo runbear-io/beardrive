@@ -114,6 +114,7 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 | `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing (files stay; `bdrive init` resumes) |
+| `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive sync [folder]` | Run one sync cycle now |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
@@ -231,6 +232,43 @@ presigned URLs browser uploads use (falling back to relaying when the
 backend can't presign). Client pushes and project creation require the
 server to run with `--upload`; against a read-only hub, clients still pull
 and their pushes wait (offline semantics) until allowed.
+
+### Sharing files by URL
+
+Any synced file can be shared with a public link — hand someone the URL
+and they see the file, no account needed:
+
+```console
+$ bdrive share wiki/report.html
+https://drive.example.com/s/eacc1df3ee6a6ebbdacc535c2796dc30
+```
+
+Links always serve the file's **latest** synced content (right for wiki
+pages and living reports), and live until revoked — `bdrive share --list`
+and `--revoke <token-or-url>` manage them, `--expires 24h` makes one
+self-destruct. The web UI has a Share button on every file.
+
+Shared HTML renders as a real page, markdown renders like the viewer, PDFs
+open inline. Rendering is sandboxed: `/s/*` responses carry a strict CSP
+and never see auth cookies, so a malicious shared file's scripts can't
+touch hub sessions. Anyone signed in can mint links, and a link is public
+to whoever has the URL — don't share folders that hold secrets, and note a
+LAN-bound hub means LAN-only links.
+
+### Claude Code integration
+
+The BearDrive plugin (`/plugin marketplace add runbear-io/beardrive`)
+makes agents fluent in all of this, and **`/beardrive:install`** sets a
+project up conversationally: installs the CLI, signs in, creates or
+connects a project (whole folder or a shared subfolder like `wiki/`),
+offers to document the shared folder in CLAUDE.md so agents proactively
+put shareable artifacts there, and registers project-level hooks in
+`.claude/settings.json` — a blocking pull when you submit a prompt (Claude
+reads fresh team files) and an async push after every file edit (artifacts
+are on the server seconds after Claude writes them), for every teammate
+whether or not they installed the plugin. The payoff: "write a report and
+share it" becomes Claude generating `wiki/report.html` and replying with a
+public URL.
 
 The web UI lists the hub's projects in the sidebar; selecting one browses
 that project's files, and the **History** view shows every change — which
