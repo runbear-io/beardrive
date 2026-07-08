@@ -37,14 +37,33 @@ body {
   border-bottom: 1px solid var(--border);
 }
 #vault-name { display: block; font-weight: 600; font-size: 14px; }
-#vault-remote {
-  display: block;
-  font-size: 11px;
-  color: var(--text-faint);
+#upload-btn {
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+}
+#projects {
+  flex: none;
+  max-height: 30%;
+  overflow-y: auto;
+  padding: 8px 6px;
+  font-size: 13.5px;
+  border-bottom: 1px solid var(--border);
+}
+#projects ul { list-style: none; margin: 0; padding-left: 4px; }
+#projects .row {
+  padding: 3px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+#projects .row::before { content: "▣ "; color: var(--text-faint); }
+#projects .row:hover { background: var(--bg-hover); color: var(--text); }
+#projects .row.active { background: var(--bg-active); color: var(--accent); }
 #tree { flex: 1; overflow-y: auto; padding: 8px 6px 24px; font-size: 13.5px; }
 #tree ul { list-style: none; margin: 0; padding-left: 14px; }
 #tree > ul { padding-left: 4px; }

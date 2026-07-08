@@ -106,7 +106,7 @@ func Stop(volDir, mountID string) (bool, error) {
 	return true, nil
 }
 
-// overlayProject applies the folder's .beardrive settings on top of the registry
+// overlayProject applies the folder's .bdrive settings on top of the registry
 // entry; the project file wins so hand-edits take effect on the next tick.
 func overlayProject(folder string, mi config.MountInfo) config.MountInfo {
 	proj, ok, err := config.LoadProject(folder)
@@ -167,7 +167,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	var lastRemote time.Time
 
 	for {
-		// Pick up `bdrive remote set`, .beardrive edits, and `bdrive umnt --forget`
+		// Pick up `bdrive remote set`, .bdrive edits, and `bdrive umnt --forget`
 		// without restarting.
 		if m, err := config.LoadMounts(); err == nil {
 			cur, ok := m[folder]

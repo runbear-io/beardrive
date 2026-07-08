@@ -115,25 +115,34 @@ func ReadFile(path string) ([]Op, error) {
 	return Parse(data)
 }
 
+// Marshal encodes ops as JSONL, the journal wire format.
+func Marshal(ops []Op) ([]byte, error) {
+	var buf bytes.Buffer
+	for _, op := range ops {
+		b, err := json.Marshal(op)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes(), nil
+}
+
 // Append appends ops to a journal file as JSONL.
 func Append(path string, ops []Op) error {
 	if len(ops) == 0 {
 		return nil
 	}
-	var buf bytes.Buffer
-	for _, op := range ops {
-		b, err := json.Marshal(op)
-		if err != nil {
-			return err
-		}
-		buf.Write(b)
-		buf.WriteByte('\n')
+	data, err := Marshal(ops)
+	if err != nil {
+		return err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	_, err = f.Write(buf.Bytes())
+	_, err = f.Write(data)
 	return err
 }

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	gcs "cloud.google.com/go/storage"
 	"google.golang.org/api/iterator"
@@ -46,6 +48,23 @@ func (b *gcsBackend) Put(ctx context.Context, key string, r io.Reader, _ int64) 
 		return err
 	}
 	return w.Close()
+}
+
+// SignPut mints a V4 signed PUT URL. Signing needs credentials that can sign
+// bytes (a service account key, or iam.serviceAccounts.signBlob rights);
+// plain end-user ADC cannot, in which case callers fall back to uploading
+// through the server.
+func (b *gcsBackend) SignPut(_ context.Context, key string, _ int64, ttl time.Duration) (*SignedPut, error) {
+	expires := time.Now().Add(ttl)
+	u, err := b.bucket.SignedURL(b.key(key), &gcs.SignedURLOptions{
+		Scheme:  gcs.SigningSchemeV4,
+		Method:  http.MethodPut,
+		Expires: expires,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sign gcs put: %w", err)
+	}
+	return &SignedPut{URL: u, Method: http.MethodPut, Expires: expires}, nil
 }
 
 func (b *gcsBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {

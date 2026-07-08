@@ -18,8 +18,8 @@ type DirSource struct {
 	Root string
 }
 
-var skipNames = map[string]bool{".DS_Store": true, ".beardrive": true}
-var skipDirs = map[string]bool{".git": true, ".beardrive": true}
+var skipNames = map[string]bool{".DS_Store": true, ".bdrive": true}
+var skipDirs = map[string]bool{".git": true, ".bdrive": true}
 
 func (d *DirSource) Files(_ context.Context) (map[string]FileInfo, error) {
 	files := make(map[string]FileInfo)
@@ -37,7 +37,7 @@ func (d *DirSource) Files(_ context.Context) (map[string]FileInfo, error) {
 			}
 			return nil
 		}
-		if !e.Type().IsRegular() || skipNames[e.Name()] || strings.HasPrefix(e.Name(), ".beardrive-tmp-") {
+		if !e.Type().IsRegular() || skipNames[e.Name()] || strings.HasPrefix(e.Name(), ".bdrive-tmp-") {
 			return nil
 		}
 		info, err := e.Info()

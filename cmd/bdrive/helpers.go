@@ -20,8 +20,8 @@ func absFolder(args []string) (string, error) {
 	return filepath.Abs(arg)
 }
 
-// mustMount resolves a folder's settings: the .beardrive project file wins over
-// the global registry, so a folder that carries its own .beardrive works even
+// mustMount resolves a folder's settings: the .bdrive project file wins over
+// the global registry, so a folder that carries its own .bdrive works even
 // before it is registered on this device.
 func mustMount(folder string) (config.MountInfo, error) {
 	mi, _, found, err := config.EffectiveMount(folder)
@@ -92,7 +92,7 @@ func printCycle(res *syncer.Result) {
 	fmt.Printf("  local changes:  %d\n", res.LocalOps)
 	fmt.Printf("  pulled changes: %d\n", res.PulledOps)
 	if res.Conflicts > 0 {
-		fmt.Printf("  conflicts:      %d (preserved as *.beardrive-conflict-* files)\n", res.Conflicts)
+		fmt.Printf("  conflicts:      %d (preserved as *.bdrive-conflict-* files)\n", res.Conflicts)
 	}
 	fmt.Printf("  files updated:  %d\n", res.Materialized)
 	switch {

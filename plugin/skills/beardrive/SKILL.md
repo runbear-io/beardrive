@@ -23,7 +23,9 @@ Use this skill whenever the user is working with the `bdrive` CLI: mounting, unm
 | Change history | `bdrive log [<folder>] [-p path] [-n N]` |
 | Show / set remote | `bdrive remote [<folder>]` · `bdrive remote set <folder> <url>` |
 | This device's identity | `bdrive whoami` |
-| Web viewer (read-only, rendered markdown) | `bdrive web [<folder> \| <remote-url>]` (serves cwd by default, `--addr :4173`) |
+| Point this device at a hub (once per device) | `bdrive login https://host:4173` — verifies the server, saves it as the device default (`$BDRIVE_HOME/settings.json`); bare `bdrive login` shows the current server |
+| One-command project onboarding (storage-blind client) | `bdrive init [<folder>]` — needs a prior `bdrive login`; creates-or-joins a hub project named after the folder (`--name <x>` explicit, `--project <id>` join by id), writes `.bdrive`, seeds a starter `.bdriveignore`, mounts, starts the daemon. No separate `mnt` needed. |
+| Web server: viewer + multi-project sync hub (read-only unless `--upload`) | `bdrive web [<folder> \| <storage-root-url>]` (serves cwd by default, `--addr :4173`; `-c config.json` reads remote/addr/upload/projects_db settings from a file, explicit flags win; a storage root URL makes it a hub hosting many projects at `<root>/<project-id>/`, registry in `--projects-db` file, default `$BDRIVE_HOME/projects.json`; `--upload` lets browsers add files, client devices push, and projects be created — direct to storage via expiring presigned URLs on S3/GCS, relayed through the server for `file://`; `--upload-ttl 15m`; clients never see the remote URL or credentials) |
 
 `<folder>` is created if missing. Omitting it on `sync`/`status`/`log` defaults to the current working directory.
 
@@ -31,11 +33,11 @@ Use this skill whenever the user is working with the `bdrive` CLI: mounting, unm
 
 Two files at the mount root control a folder's sync behavior:
 
-- **`.beardrive`** — the folder's settings (JSON): `volume`, `remote`, and optional `include`. Written by `bdrive mnt` / `bdrive remote set`; safe to hand-edit (a running daemon picks changes up on its next tick). It is **never synced** — remotes are device-specific — and it travels with the folder: copy a folder containing `.beardrive` to a new machine and plain `bdrive mnt <folder>` reuses its volume and remote.
-- **`.beardriveignore`** — opt-out list, gitignore-style. **Syncs like a normal file**, so all devices share the same rules. Syntax subset: `#` comments, `*` within a segment, `**` across segments, `?`, trailing `/` for directories-only, a `/` elsewhere anchors to the mount root, `!` re-includes.
+- **`.bdrive`** — the folder's settings (JSON): `volume`, `remote`, and optional `include`. Written by `bdrive mnt` / `bdrive remote set`; safe to hand-edit (a running daemon picks changes up on its next tick). It is **never synced** — remotes are device-specific — and it travels with the folder: copy a folder containing `.bdrive` to a new machine and plain `bdrive mnt <folder>` reuses its volume and remote.
+- **`.bdriveignore`** — opt-out list, gitignore-style. **Syncs like a normal file**, so all devices share the same rules. Syntax subset: `#` comments, `*` within a segment, `**` across segments, `?`, trailing `/` for directories-only, a `/` elsewhere anchors to the mount root, `!` re-includes.
 
 ```jsonc
-// .beardrive
+// .bdrive
 {
   "volume": "agent-workspace",
   "remote": "s3://acme-beardrive/agent-workspace",
@@ -44,7 +46,7 @@ Two files at the mount root control a folder's sync behavior:
 ```
 
 ```gitignore
-# .beardriveignore
+# .bdriveignore
 *.log
 node_modules/
 build/
@@ -55,7 +57,7 @@ Selective-sync semantics — important when advising users:
 
 - A path syncs when it is **not ignored** and (if `include` is non-empty) **matches an include pattern**. Ignore beats include.
 - Adding a pattern for an already-synced file makes this device **stop tracking it without deleting it anywhere** — the file stays on disk locally and on every other device. Deleting it locally after that does not propagate either.
-- Because `.beardriveignore` syncs, adding a rule on one device applies it everywhere on the next cycle.
+- Because `.bdriveignore` syncs, adding a rule on one device applies it everywhere on the next cycle.
 
 ---
 
@@ -66,8 +68,8 @@ Selective-sync semantics — important when advising users:
 1. Pick a folder. New empty or with existing files — existing files are imported on the first cycle.
 2. Decide on a remote (optional at mount time; configurable later via `bdrive remote set`).
 3. Run `bdrive mnt`. beardrive:
-   - writes the folder's settings to `<folder>/.beardrive` and registers it in `~/.beardrive/mounts.json`,
-   - opens/creates the volume under `~/.beardrive/volumes/<volume>/`,
+   - writes the folder's settings to `<folder>/.bdrive` and registers it in `~/.bdrive/mounts.json`,
+   - opens/creates the volume under `~/.bdrive/volumes/<volume>/`,
    - runs an initial cycle (import locals; pull remote state if a remote is set),
    - starts a background daemon (unless `-f`).
 4. Verify with `bdrive status <folder>`.
@@ -94,8 +96,8 @@ The basename `agent-workspace` becomes the volume name on each device; they conv
 
 ### Unmount
 
-- `bdrive umnt <folder>` — stop the daemon. Files stay on disk; local volume store under `~/.beardrive/volumes/<volume>/` is kept. Re-mount any time to resume.
-- `bdrive umnt <folder> --forget` — also drop from the mount registry. Local volume data is still preserved; the user must `rm -rf ~/.beardrive/volumes/<volume>/` to reclaim disk.
+- `bdrive umnt <folder>` — stop the daemon. Files stay on disk; local volume store under `~/.bdrive/volumes/<volume>/` is kept. Re-mount any time to resume.
+- `bdrive umnt <folder> --forget` — also drop from the mount registry. Local volume data is still preserved; the user must `rm -rf ~/.bdrive/volumes/<volume>/` to reclaim disk.
 
 ### On-demand sync
 
@@ -125,7 +127,7 @@ bdrive umnt ./notes --forget
 
 ### What beardrive does not sync
 
-`.git` directories, `.DS_Store`, the `.beardrive` settings file, beardrive's own temp files, empty directories, and anything excluded by `.beardriveignore` or left out of an `include` list. Don't suggest mounting a folder where `.git` is the content the user expects synced — they want git, not beardrive.
+`.git` directories, `.DS_Store`, the `.bdrive` settings file, beardrive's own temp files, empty directories, and anything excluded by `.bdriveignore` or left out of an `include` list. Don't suggest mounting a folder where `.git` is the content the user expects synced — they want git, not beardrive.
 
 ---
 
@@ -140,6 +142,7 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 | `s3://bucket/prefix` | Amazon S3, or any S3-compatible store via `AWS_ENDPOINT_URL` | `s3://acme-beardrive/agent-workspace` |
 | `gs://bucket/prefix` | Google Cloud Storage | `gs://acme-beardrive/agent-workspace` |
 | `file:///abs/path` | Plain directory (local, NAS, Dropbox folder, …) | `file:///Volumes/nas/beardrive/notes` |
+| `https://host:port/p/<project-id>` | One project on a `bdrive web` hub — the client holds **no storage credentials**; the server device owns the bucket config. Server must run with `--upload` for clients to push. Set up with `bdrive init` (never hand-write the `/p/<id>` URL) | `https://drive.example.com:4173/p/p-7f3a2c91` |
 
 `bdrive remote set` validates the scheme and rejects anything else. The prefix can be multi-segment (`s3://bucket/team/agent/workspace`); beardrive writes `blobs/` and `journal/` underneath it.
 
@@ -331,7 +334,7 @@ Answers:
 - "What did device Y do?" → `bdrive log <folder> -n 0` and filter by device name.
 - "Did my edit cross over?" → run `bdrive log` on the other device; the op appears once it has pulled the source device's journal.
 
-History is content-addressed — overwritten and deleted files are still in the log, with blobs retained under `~/.beardrive/volumes/<volume>/blobs/`.
+History is content-addressed — overwritten and deleted files are still in the log, with blobs retained under `~/.bdrive/volumes/<volume>/blobs/`.
 
 ### `bdrive whoami`
 
@@ -339,23 +342,23 @@ History is content-addressed — overwritten and deleted files are still in the 
 device id:   d380dea58598
 device name: macbook
 author:      snow@runbear.io
-beardrive home:    /Users/snow/.beardrive
+beardrive home:    /Users/snow/.bdrive
 ```
 
-- **device id** — random 12-hex, generated on first run, persisted to `~/.beardrive/device.json`.
+- **device id** — random 12-hex, generated on first run, persisted to `~/.bdrive/device.json`.
 - **device name** — hostname (without `.local`).
 - **author** — `git config user.email` if present, else `$USER@<hostname>`.
 
-To change name/author, edit `~/.beardrive/device.json` and restart the daemon (`bdrive umnt`/`bdrive mnt`).
+To change name/author, edit `~/.bdrive/device.json` and restart the daemon (`bdrive umnt`/`bdrive mnt`).
 
 ### The per-mount daemon log
 
 ```sh
 # Volume contents (daemon pid + log files live here, one pair per mount)
-ls ~/.beardrive/volumes/<volume>/
+ls ~/.bdrive/volumes/<volume>/
 
 # Tail
-tail -F ~/.beardrive/volumes/<volume>/daemon-*.log
+tail -F ~/.bdrive/volumes/<volume>/daemon-*.log
 ```
 
 Useful when `pending` is stuck > 0, the daemon flips to `stopped` after a restart, or you changed credentials and want to confirm uptake.
@@ -366,14 +369,14 @@ Useful when `pending` is stuck > 0, the daemon flips to `stopped` after a restar
 2. `daemon: stopped` → `bdrive mnt <folder>` to restart it.
 3. `pending` stuck → `bdrive sync <folder>` and read the cycle output. Errors here point at the remote — see the cloud-storage troubleshooting table above.
 4. Sync succeeds but the other device doesn't see changes → `bdrive sync` on the other device + `bdrive log` to confirm the op crossed over.
-5. Daemon keeps dying → tail `~/.beardrive/volumes/<volume>/daemon-*.log` for the cause.
+5. Daemon keeps dying → tail `~/.bdrive/volumes/<volume>/daemon-*.log` for the cause.
 
 ---
 
 ## On-disk layout
 
 ```
-~/.beardrive/
+~/.bdrive/
 ├── device.json              # identity (bdrive whoami)
 ├── mounts.json              # mount registry (bdrive status)
 └── volumes/<volume>/
@@ -386,4 +389,4 @@ Useful when `pending` is stuck > 0, the daemon flips to `stopped` after a restar
 
 Don't suggest editing files under `volumes/` directly — beardrive owns them. `device.json` and `mounts.json` are safe to inspect; `mounts.json` is safe to hand-edit if a mount entry needs surgery, but prefer `bdrive umnt --forget` then `bdrive mnt`.
 
-Override the whole tree with `BEARDRIVE_HOME=/path` (used heavily in tests and ephemeral environments).
+Override the whole tree with `BDRIVE_HOME=/path` (used heavily in tests and ephemeral environments).

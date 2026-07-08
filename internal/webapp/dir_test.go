@@ -21,7 +21,7 @@ func dirServer(t *testing.T, files map[string]string) http.Handler {
 			t.Fatal(err)
 		}
 	}
-	s := &Server{Source: &DirSource{Root: root}, Remote: root, Volume: "local", Refresh: 0}
+	s := &Server{Source: &DirSource{Root: root}, Volume: "local", Refresh: 0}
 	return s.Handler()
 }
 
@@ -29,7 +29,7 @@ func TestDirSourceServesFolder(t *testing.T) {
 	h := dirServer(t, map[string]string{
 		"README.md":     "# Local",
 		"notes/plan.md": "content",
-		".beardrive":    `{"volume":"x"}`, // settings file must be hidden
+		".bdrive":       `{"volume":"x"}`, // settings file must be hidden
 		".git/config":   "noise",          // .git must be skipped
 	})
 

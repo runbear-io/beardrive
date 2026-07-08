@@ -28,7 +28,13 @@ type fakeRemote struct {
 
 func newFakeRemote(t *testing.T) *fakeRemote {
 	t.Helper()
-	dir := t.TempDir()
+	return newFakeRemoteAt(t, t.TempDir())
+}
+
+// newFakeRemoteAt builds the remote layout at a specific directory (e.g. a
+// project prefix inside a hub's storage root).
+func newFakeRemoteAt(t *testing.T, dir string) *fakeRemote {
+	t.Helper()
 	for _, d := range []string{"journal", "blobs"} {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
 			t.Fatal(err)
@@ -74,7 +80,7 @@ func (f *fakeRemote) server() *Server {
 		f.t.Fatal(err)
 	}
 	f.t.Cleanup(func() { be.Close() })
-	return &Server{Source: &RemoteSource{Backend: be}, Remote: "file://" + f.dir, Volume: "testvol", Refresh: 0}
+	return &Server{Source: &RemoteSource{Backend: be}, Volume: "testvol", Refresh: 0}
 }
 
 func get(t *testing.T, h http.Handler, url string) *httptest.ResponseRecorder {

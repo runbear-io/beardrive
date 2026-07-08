@@ -35,7 +35,7 @@ func (b *localBackend) Put(_ context.Context, key string, r io.Reader, _ int64) 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".beardrive-tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bdrive-tmp-*")
 	if err != nil {
 		return err
 	}
@@ -60,7 +60,7 @@ func (b *localBackend) List(_ context.Context, prefix string) ([]Object, error) 
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.HasPrefix(d.Name(), ".beardrive-tmp-") {
+		if strings.HasPrefix(d.Name(), ".bdrive-tmp-") {
 			return nil
 		}
 		rel, err := filepath.Rel(b.root, p)

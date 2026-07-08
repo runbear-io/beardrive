@@ -1,5 +1,5 @@
 // Package config manages beardrive's global state under the beardrive home directory
-// (default ~/.beardrive, overridable with $BEARDRIVE_HOME): the device identity and the
+// (default ~/.bdrive, overridable with $BDRIVE_HOME): the device identity and the
 // registry of mounted folders.
 package config
 
@@ -15,16 +15,16 @@ import (
 	"strings"
 )
 
-// Home returns the beardrive home directory ($BEARDRIVE_HOME or ~/.beardrive).
+// Home returns the beardrive home directory ($BDRIVE_HOME or ~/.bdrive).
 func Home() (string, error) {
-	if h := os.Getenv("BEARDRIVE_HOME"); h != "" {
+	if h := os.Getenv("BDRIVE_HOME"); h != "" {
 		return h, nil
 	}
 	uh, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(uh, ".beardrive"), nil
+	return filepath.Join(uh, ".bdrive"), nil
 }
 
 // Device identifies this machine and its operator in journals.
@@ -160,7 +160,7 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".beardrive-tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".bdrive-tmp-*")
 	if err != nil {
 		return err
 	}

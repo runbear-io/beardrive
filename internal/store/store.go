@@ -241,7 +241,7 @@ func WriteJSONAtomic(path string, v any) error {
 
 // WriteFileAtomic writes data via a temp file in the same directory + rename.
 func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".beardrive-tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".bdrive-tmp-*")
 	if err != nil {
 		return err
 	}

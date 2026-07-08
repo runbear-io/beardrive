@@ -76,7 +76,7 @@ func statusCmd() *cobra.Command {
 				}
 				first = false
 				if eff, _, found, err := config.EffectiveMount(folder); err == nil && found {
-					mi = eff // .beardrive project file wins over the registry
+					mi = eff // .bdrive project file wins over the registry
 				}
 				fmt.Printf("%s\n", folder)
 				fmt.Printf("  volume:   %s\n", mi.Volume)
@@ -194,7 +194,7 @@ func remoteCmd() *cobra.Command {
 	}
 	set := &cobra.Command{
 		Use:   "set <folder> <url>",
-		Short: "Set the remote (s3://bucket/prefix, gs://bucket/prefix, file:///path)",
+		Short: "Set the remote (s3://bucket/prefix, gs://bucket/prefix, file:///path, https://bdrive-server)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			folder, err := absFolder(args[:1])
@@ -203,8 +203,8 @@ func remoteCmd() *cobra.Command {
 			}
 			raw := args[1]
 			u, err := url.Parse(raw)
-			if err != nil || (u.Scheme != "s3" && u.Scheme != "gs" && u.Scheme != "file") {
-				return fmt.Errorf("invalid remote %q (want s3://bucket/prefix, gs://bucket/prefix, or file:///path)", raw)
+			if err != nil || (u.Scheme != "s3" && u.Scheme != "gs" && u.Scheme != "file" && u.Scheme != "http" && u.Scheme != "https") {
+				return fmt.Errorf("invalid remote %q (want s3://bucket/prefix, gs://bucket/prefix, file:///path, or https://bdrive-server)", raw)
 			}
 			mi, err := mustMount(folder)
 			if err != nil {

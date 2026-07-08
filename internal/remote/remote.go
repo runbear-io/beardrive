@@ -5,6 +5,8 @@
 //	file:///abs/path      local or network-drive directory (also used in tests)
 //	s3://bucket/prefix    Amazon S3 (or S3-compatible via AWS_ENDPOINT_URL)
 //	gs://bucket/prefix    Google Cloud Storage
+//	https://host:4173     a bdrive web server brokering one of the above —
+//	                      the device needs no storage credentials at all
 //
 // Remote layout: blobs/<sha256> for content, journal/<device>.jsonl for op
 // logs. Each device writes only its own journal, so there are no concurrent
@@ -17,11 +19,29 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type Object struct {
 	Key  string
 	Size int64
+}
+
+// SignedPut is a presigned direct-upload request: whoever holds the URL can
+// PUT that one object until Expires, without ever seeing storage credentials.
+type SignedPut struct {
+	URL     string            // upload here
+	Method  string            // always "PUT"
+	Headers map[string]string // headers that must be sent verbatim (they are signed)
+	Expires time.Time
+}
+
+// PutSigner is implemented by backends that can mint presigned upload URLs
+// so clients write to storage directly. Backends without that capability
+// (file://) simply don't implement it, and callers fall back to uploading
+// through the server.
+type PutSigner interface {
+	SignPut(ctx context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error)
 }
 
 type Backend interface {
@@ -45,7 +65,9 @@ func Open(ctx context.Context, raw string) (Backend, error) {
 		return newS3(ctx, u.Host, strings.Trim(u.Path, "/"))
 	case "gs":
 		return newGCS(ctx, u.Host, strings.Trim(u.Path, "/"))
+	case "http", "https":
+		return newHTTPBackend(raw)
 	default:
-		return nil, fmt.Errorf("unsupported remote scheme %q (supported: file://, s3://, gs://)", u.Scheme)
+		return nil, fmt.Errorf("unsupported remote scheme %q (supported: file://, s3://, gs://, https://)", u.Scheme)
 	}
 }

@@ -185,7 +185,7 @@ func TestConcurrentEditConflictPreserved(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, e := range entries {
-			if strings.Contains(e.Name(), ".beardrive-conflict-") {
+			if strings.Contains(e.Name(), ".bdrive-conflict-") {
 				all[read(t, folder, e.Name())] = true
 			}
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,97 +38,7 @@ daemon keeps the folder in sync until "bdrive umnt".`,
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(folder, 0o755); err != nil {
-				return err
-			}
-
-			// Settings resolution: flags win, then the folder's .beardrive file,
-			// then the global registry. The result is written back to both,
-			// so the project file travels with the folder and the registry
-			// knows which mounts are active on this device.
-			mounts, err := config.LoadMounts()
-			if err != nil {
-				return err
-			}
-			reg, registered := mounts[folder]
-			proj, _, err := config.LoadProject(folder)
-			if err != nil {
-				return err
-			}
-			effVolume := proj.Volume
-			if effVolume == "" && registered {
-				effVolume = reg.Volume
-			}
-			if volume != "" && effVolume != "" && volume != effVolume {
-				return fmt.Errorf("%s is already mounted as volume %q", folder, effVolume)
-			}
-			if volume != "" {
-				effVolume = volume
-			}
-			if effVolume == "" {
-				effVolume = filepath.Base(folder)
-			}
-			effRemote := remoteURL
-			if effRemote == "" {
-				effRemote = proj.Remote
-			}
-			if effRemote == "" && registered {
-				effRemote = reg.Remote
-			}
-			mi := config.MountInfo{Volume: effVolume, Remote: effRemote}
-			mounts[folder] = mi
-			if err := config.SaveMounts(mounts); err != nil {
-				return err
-			}
-			proj.Volume, proj.Remote = effVolume, effRemote
-			if err := config.SaveProject(folder, proj); err != nil {
-				return err
-			}
-			vdir, err := config.VolumeDir(mi.Volume)
-			if err != nil {
-				return err
-			}
-			if _, err := store.Open(vdir); err != nil {
-				return err
-			}
-
-			dev, err := config.LoadDevice()
-			if err != nil {
-				return err
-			}
-
-			// Initial cycle: import existing files, pull remote state.
-			sess, _, err := openSession(cmd.Context(), folder, true)
-			if err != nil {
-				return err
-			}
-			res, err := sess.Cycle(cmd.Context())
-			closeSession(sess)
-			if err != nil {
-				return err
-			}
-
-			fmt.Printf("mounted %s\n", folder)
-			fmt.Printf("  volume:  %s\n", mi.Volume)
-			if mi.Remote != "" {
-				fmt.Printf("  remote:  %s\n", mi.Remote)
-			} else {
-				fmt.Printf("  remote:  (none — local only; set one with `bdrive remote set %s <url>`)\n", folder)
-			}
-			fmt.Printf("  device:  %s (%s) as %s\n", dev.Name, dev.ID, dev.Author)
-			fmt.Printf("  config:  %s (volume/remote/include; add a .beardriveignore next to it to exclude paths)\n",
-				filepath.Join(folder, config.ProjectFile))
-			printCycle(res)
-
-			if foreground {
-				return daemon.Run(folder, scanInterval, remoteInterval)
-			}
-			pid, err := daemon.Start(folder, vdir, scanInterval, remoteInterval)
-			if err != nil {
-				return fmt.Errorf("start sync daemon: %w", err)
-			}
-			fmt.Printf("  daemon:  running (pid %d, scan %s, remote sync %s)\n", pid, scanInterval, remoteInterval)
-			return nil
+			return runMount(cmd.Context(), folder, remoteURL, volume, foreground, scanInterval, remoteInterval)
 		},
 	}
 	c.Flags().StringVarP(&remoteURL, "remote", "r", "", "remote to sync with (s3://bucket/prefix, gs://bucket/prefix, file:///path)")
@@ -138,6 +49,101 @@ daemon keeps the folder in sync until "bdrive umnt".`,
 	return c
 }
 
+// runMount mounts a folder: resolve settings, register the mount, run the
+// initial cycle, start the daemon. Shared by `bdrive mnt` and `bdrive init`.
+func runMount(ctx context.Context, folder, remoteURL, volume string, foreground bool, scanInterval, remoteInterval time.Duration) error {
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		return err
+	}
+
+	// Settings resolution: flags win, then the folder's .bdrive file,
+	// then the global registry. The result is written back to both,
+	// so the project file travels with the folder and the registry
+	// knows which mounts are active on this device.
+	mounts, err := config.LoadMounts()
+	if err != nil {
+		return err
+	}
+	reg, registered := mounts[folder]
+	proj, _, err := config.LoadProject(folder)
+	if err != nil {
+		return err
+	}
+	effVolume := proj.Volume
+	if effVolume == "" && registered {
+		effVolume = reg.Volume
+	}
+	if volume != "" && effVolume != "" && volume != effVolume {
+		return fmt.Errorf("%s is already mounted as volume %q", folder, effVolume)
+	}
+	if volume != "" {
+		effVolume = volume
+	}
+	if effVolume == "" {
+		effVolume = filepath.Base(folder)
+	}
+	effRemote := remoteURL
+	if effRemote == "" {
+		effRemote = proj.Remote
+	}
+	if effRemote == "" && registered {
+		effRemote = reg.Remote
+	}
+	mi := config.MountInfo{Volume: effVolume, Remote: effRemote}
+	mounts[folder] = mi
+	if err := config.SaveMounts(mounts); err != nil {
+		return err
+	}
+	proj.Volume, proj.Remote = effVolume, effRemote
+	if err := config.SaveProject(folder, proj); err != nil {
+		return err
+	}
+	vdir, err := config.VolumeDir(mi.Volume)
+	if err != nil {
+		return err
+	}
+	if _, err := store.Open(vdir); err != nil {
+		return err
+	}
+
+	dev, err := config.LoadDevice()
+	if err != nil {
+		return err
+	}
+
+	// Initial cycle: import existing files, pull remote state.
+	sess, _, err := openSession(ctx, folder, true)
+	if err != nil {
+		return err
+	}
+	res, err := sess.Cycle(ctx)
+	closeSession(sess)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("mounted %s\n", folder)
+	fmt.Printf("  volume:  %s\n", mi.Volume)
+	if mi.Remote != "" {
+		fmt.Printf("  remote:  %s\n", mi.Remote)
+	} else {
+		fmt.Printf("  remote:  (none — local only; set one with `bdrive remote set %s <url>`)\n", folder)
+	}
+	fmt.Printf("  device:  %s (%s) as %s\n", dev.Name, dev.ID, dev.Author)
+	fmt.Printf("  config:  %s (volume/remote/include; add a .bdriveignore next to it to exclude paths)\n",
+		filepath.Join(folder, config.ProjectFile))
+	printCycle(res)
+
+	if foreground {
+		return daemon.Run(folder, scanInterval, remoteInterval)
+	}
+	pid, err := daemon.Start(folder, vdir, scanInterval, remoteInterval)
+	if err != nil {
+		return fmt.Errorf("start sync daemon: %w", err)
+	}
+	fmt.Printf("  daemon:  running (pid %d, scan %s, remote sync %s)\n", pid, scanInterval, remoteInterval)
+	return nil
+}
 func umntCmd() *cobra.Command {
 	var forget bool
 	c := &cobra.Command{
@@ -148,7 +154,7 @@ func umntCmd() *cobra.Command {
 history is kept; "bdrive mnt" the folder again to resume syncing.
 
 With --forget the folder is also removed from the mount registry (local
-volume data under ~/.beardrive/volumes is still kept).`,
+volume data under ~/.bdrive/volumes is still kept).`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			folder, err := absFolder(args)
@@ -181,7 +187,7 @@ volume data under ~/.beardrive/volumes is still kept).`,
 				if err := config.SaveMounts(mounts); err != nil {
 					return err
 				}
-				fmt.Printf("forgot mount %s (volume %q kept under ~/.beardrive/volumes)\n", folder, mi.Volume)
+				fmt.Printf("forgot mount %s (volume %q kept under ~/.bdrive/volumes)\n", folder, mi.Volume)
 			}
 			return nil
 		},

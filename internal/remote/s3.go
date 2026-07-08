@@ -7,6 +7,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -49,6 +50,27 @@ func (b *s3Backend) Put(ctx context.Context, key string, r io.Reader, size int64
 		ContentLength: aws.Int64(size),
 	})
 	return err
+}
+
+// SignPut presigns a PUT of exactly size bytes to the given key. Presigning
+// is a local signature computation — no network round-trip, no credentials in
+// the result.
+func (b *s3Backend) SignPut(ctx context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error) {
+	req, err := s3.NewPresignClient(b.client).PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(b.bucket),
+		Key:           aws.String(b.key(key)),
+		ContentLength: aws.Int64(size),
+	}, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return nil, fmt.Errorf("presign s3 put: %w", err)
+	}
+	headers := make(map[string]string)
+	for k, vs := range req.SignedHeader {
+		if len(vs) > 0 && !strings.EqualFold(k, "Host") {
+			headers[k] = vs[0]
+		}
+	}
+	return &SignedPut{URL: req.URL, Method: req.Method, Headers: headers, Expires: time.Now().Add(ttl)}, nil
 }
 
 func (b *s3Backend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
