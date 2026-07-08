@@ -1,13 +1,13 @@
 ---
 name: beardrive
-description: Use beardrive — a mountable, synced file system for AI agents. Mount any folder and it stays synced across devices through cloud object storage (S3, GCS, S3-compatible, or a shared directory) with full per-file change history and offline support. Use when the user wants to "mount a folder", "unmount", "sync now", "set up beardrive cloud storage", "connect beardrive to S3/GCS/R2/MinIO/NAS", "check bdrive status", "see beardrive logs", "see what changed", "who changed this file?", or troubleshoot a stuck sync.
+description: Use BearDrive — a synced file system for AI agents and teams. Start syncing any project folder (bdrive init) and it stays in sync across devices and teammates through a BearDrive server or object storage, with accounts, per-file change history, public share links, and offline support. Use when the user wants to "set up beardrive", "sync this folder", "mount a folder", "share this file by URL", "start/stop syncing", "connect to a beardrive server", "check bdrive status", "see what changed", "who changed this file?", or troubleshoot a stuck sync.
 ---
 
 # BearDrive — synced file system for AI agents
 
-**BearDrive** (CLI: `bdrive`) mounts any folder as a synced volume backed by an object store. Each mount runs a per-mount background daemon that scans for local changes and exchanges with the remote. Files on disk are always real files — every tool, editor, and agent works on them with no integration.
+**BearDrive** (CLI: `bdrive`) turns any folder into a synced project: a background daemon per project scans for local changes and exchanges with the server (or object store). Files on disk are always real files — every tool, editor, and agent works on them with no integration.
 
-Use this skill whenever the user is working with the `bdrive` CLI: mounting, unmounting, syncing, configuring a remote, inspecting state, reading change history, or debugging.
+Use this skill whenever the user is working with the `bdrive` CLI: initializing or stopping projects, syncing, sharing files by URL, configuring a remote, inspecting state, reading change history, or debugging. ("Mount" in older docs = today's `bdrive init`.)
 
 ## Command map
 

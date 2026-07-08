@@ -344,17 +344,20 @@ Install beardrive support in Claude Code with two commands:
 
 The plugin sets up everything at once:
 
-- **`/beardrive:mount [folder] [remote]`** — one command that installs beardrive if
-  needed, mounts the folder (daemon + `.bdrive` config), and verifies the sync.
-  `/beardrive:status` diagnoses problems.
+- **`/beardrive:install`** — the full team setup, conversationally: CLI,
+  sign-in, project init (whole folder or a shared subfolder like `wiki/`),
+  a consent-gated CLAUDE.md section for agents, and project-level sync
+  hooks in `.claude/settings.json`.
+- **`/beardrive:init [folder] [--name/--project/--shared]`** — just start
+  syncing a project; `/beardrive:status` diagnoses problems.
 - **Turn-boundary sync hooks**, registered automatically: a blocking pull
   when you send a message (Claude always reads fresh files) and an async
-  push when the turn ends. The hook no-ops instantly in folders that aren't
-  beardrive mounts, so it's safe globally.
+  push when the turn ends. The hook no-ops instantly in folders without a
+  `.bdrive/` project, so it's safe globally.
 - **The `beardrive` skill** ([plugin/skills/beardrive](plugin/skills/beardrive/SKILL.md)),
-  covering mount/unmount/sync, backends and credentials, selective sync, and
-  troubleshooting. Working in a clone of this repo picks the same skill up
-  automatically via `.claude/skills/`.
+  covering init/stop/sync, sharing by URL, backends and credentials,
+  selective sync, and troubleshooting. Working in a clone of this repo
+  picks the same skill up automatically via `.claude/skills/`.
 
 ## How it works
 

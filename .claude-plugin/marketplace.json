@@ -6,7 +6,7 @@
     {
       "name": "beardrive",
       "source": "./plugin",
-      "description": "BearDrive: mount folders that stay in sync across devices through S3/GCS/any object store. Installs the beardrive skill, /beardrive:mount and /beardrive:status commands, and turn-boundary sync hooks in one step.",
+      "description": "BearDrive: folders that stay in sync across your team and agents through a BearDrive server (or S3/GCS directly). Installs the beardrive skill, /beardrive:install, /beardrive:init and /beardrive:status commands, and turn-boundary sync hooks in one step.",
       "category": "workflow",
       "tags": ["sync", "files", "workspace", "s3", "gcs", "agents"]
     }
