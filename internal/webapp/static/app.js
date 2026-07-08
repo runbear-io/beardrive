@@ -486,6 +486,166 @@ function sha256Fallback(bytes) {
   return [...H].map((x) => (x >>> 0).toString(16).padStart(8, "0")).join("");
 }
 
+/* ---- command palette (⌘K / Ctrl+K) ----
+   One box for everything: fuzzy-jump to any file, switch projects, and run
+   quick actions (share, history, upload, download, sign out). */
+let paletteItems = [];
+let paletteSel = 0;
+
+function paletteOpen() {
+  buildPaletteItems("");
+  $("palette-overlay").hidden = false;
+  const input = $("palette-input");
+  input.value = "";
+  input.focus();
+}
+
+function paletteClose() {
+  $("palette-overlay").hidden = true;
+}
+
+/* Subsequence fuzzy match. Returns a score (higher = better) or -1, plus
+   the matched positions for highlighting. */
+function fuzzy(query, text) {
+  if (!query) return { score: 0, hits: [] };
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  let ti = 0, score = 0, streak = 0;
+  const hits = [];
+  for (let qi = 0; qi < q.length; qi++) {
+    const found = t.indexOf(q[qi], ti);
+    if (found === -1) return null;
+    streak = found === ti ? streak + 1 : 1;
+    score += streak * 3;                                  // consecutive runs
+    if (found === 0 || "/ -_.".includes(t[found - 1])) score += 8; // word starts
+    hits.push(found);
+    ti = found + 1;
+  }
+  score -= Math.floor(t.length / 8); // mild preference for short targets
+  return { score, hits };
+}
+
+function highlight(text, hits) {
+  const span = document.createElement("span");
+  span.className = "plabel";
+  let last = 0;
+  for (const h of hits) {
+    if (h > last) span.append(text.slice(last, h));
+    const b = document.createElement("b");
+    b.textContent = text[h];
+    span.append(b);
+    last = h + 1;
+  }
+  span.append(text.slice(last));
+  return span;
+}
+
+/* Candidate sources: context-aware actions, then projects, then files. */
+function paletteCandidates() {
+  const items = [];
+  const add = (icon, label, kind, run) => items.push({ icon, label, kind, run });
+  const hub = serverConfig.mode === "hub";
+
+  if (hub && currentProject && currentPath) {
+    add("↗", "Share: " + currentPath, "action", () => $("share-btn").click());
+    add("⌚", "History: " + currentPath, "action", () => showHistory({ path: currentPath }));
+    add("↓", "Download: " + currentPath, "action", () => $("download").click());
+  }
+  if (hub && currentProject) {
+    add("⌚", "History: whole project", "action", () => showHistory({ prefix: "" }));
+  }
+  if (!$("upload-btn").hidden) {
+    add("+", "Upload a file…", "action", () => $("upload-btn").click());
+  }
+  if (hub) {
+    for (const p of projects) {
+      if (!currentProject || p.id !== currentProject.id) {
+        add("▣", "Switch to project: " + p.name, "project", () => selectProject(p, null));
+      }
+    }
+  }
+  if (serverConfig.auth && serverConfig.auth.enabled) {
+    add("⏻", "Sign out", "action", () => { location.href = "/auth/logout"; });
+  }
+  for (const f of flatFiles) {
+    add("◦", f.path, "file", () => openFile(f.path));
+  }
+  return items;
+}
+
+function buildPaletteItems(query) {
+  const scored = [];
+  for (const c of paletteCandidates()) {
+    const m = fuzzy(query, c.label);
+    if (m) scored.push({ ...c, score: m.score, hits: m.hits });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  paletteItems = scored.slice(0, 40);
+  paletteSel = 0;
+  renderPalette();
+}
+
+function renderPalette() {
+  const ul = $("palette-results");
+  ul.innerHTML = "";
+  if (paletteItems.length === 0) {
+    const li = document.createElement("li");
+    li.className = "pempty";
+    li.textContent = "No matches";
+    ul.appendChild(li);
+    return;
+  }
+  paletteItems.forEach((item, i) => {
+    const li = document.createElement("li");
+    if (i === paletteSel) li.classList.add("selected");
+    const icon = document.createElement("span");
+    icon.className = "picon";
+    icon.textContent = item.icon;
+    const kind = document.createElement("span");
+    kind.className = "pkind";
+    kind.textContent = item.kind;
+    li.append(icon, highlight(item.label, item.hits), kind);
+    li.onclick = () => runPaletteItem(item);
+    li.onmousemove = () => { if (paletteSel !== i) { paletteSel = i; renderPalette(); } };
+    ul.appendChild(li);
+  });
+  const sel = ul.children[paletteSel];
+  if (sel) sel.scrollIntoView({ block: "nearest" });
+}
+
+function runPaletteItem(item) {
+  paletteClose();
+  item.run();
+}
+
+window.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    $("palette-overlay").hidden ? paletteOpen() : paletteClose();
+    return;
+  }
+  if ($("palette-overlay").hidden) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    paletteClose();
+  } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const n = paletteItems.length;
+    if (n) {
+      paletteSel = (paletteSel + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+      renderPalette();
+    }
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    if (paletteItems[paletteSel]) runPaletteItem(paletteItems[paletteSel]);
+  }
+});
+
+$("palette-input").addEventListener("input", (e) => buildPaletteItems(e.target.value));
+$("palette-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "palette-overlay") paletteClose();
+});
+
 window.addEventListener("hashchange", () => {
   const { project, path } = parseHash();
   if (serverConfig.mode === "hub" && project && (!currentProject || currentProject.id !== project)) {

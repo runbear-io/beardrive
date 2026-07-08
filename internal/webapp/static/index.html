@@ -30,6 +30,14 @@
     <div class="empty">Select a file from the sidebar</div>
   </article>
 </main>
+<div id="palette-overlay" hidden>
+  <div id="palette" role="dialog" aria-label="Search and quick actions">
+    <input id="palette-input" type="text" placeholder="Search files, projects, actions…"
+           autocomplete="off" spellcheck="false">
+    <ul id="palette-results"></ul>
+    <footer id="palette-hint">↑↓ navigate · ⏎ select · esc close</footer>
+  </div>
+</div>
 <script src="app.js"></script>
 </body>
 </html>
