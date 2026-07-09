@@ -101,9 +101,9 @@ async function loadProjects() {
   add.className = "nav-add";
   add.title = "New project";
   add.textContent = "+";
-  add.onclick = () => {
-    const name = prompt("New project name:");
-    if (name) createProject(name.trim());
+  add.onclick = async () => {
+    const name = await modalPrompt("New project", "Project name", "", "Create");
+    if (name) createProject(name);
   };
   head.appendChild(add);
   nav.appendChild(head);
@@ -303,7 +303,7 @@ async function showOrgAdmin(org) {
       row.appendChild(sel);
       const rm = el(row, "button", "ai-del", "Remove");
       rm.onclick = async () => {
-        if (!confirm("Remove " + m.email + " from " + org.name + "?")) return;
+        if (!(await modalConfirm("Remove member", "Remove " + m.email + " from " + org.name + "?", "Remove", true))) return;
         try { await api("DELETE", "api/orgs/" + org.id + "/members/" + encodeURIComponent(m.email)); toast("Removed."); await loadOrgs(); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); }
       };
@@ -324,14 +324,14 @@ async function showOrgAdmin(org) {
     el(row, "span", "ai-main", p.name);
     const rn = el(row, "button", "ai-btn", "Rename");
     rn.onclick = async () => {
-      const name = prompt("Rename project:", p.name);
-      if (!name || name.trim() === p.name) return;
-      try { await api("PATCH", "api/projects/" + p.id, { name: name.trim() }); toast("Renamed."); await loadProjects(); showOrgAdmin(currentOrg()); }
+      const name = await modalPrompt("Rename project", "New name", p.name, "Rename");
+      if (!name || name === p.name) return;
+      try { await api("PATCH", "api/projects/" + p.id, { name }); toast("Renamed."); await loadProjects(); showOrgAdmin(currentOrg()); }
       catch (e) { toast(e.message, true); }
     };
     const del = el(row, "button", "ai-del", "Delete");
     del.onclick = async () => {
-      if (!confirm("Delete project “" + p.name + "”? Its files stay in storage but it's removed from the hub.")) return;
+      if (!(await modalConfirm("Delete project", "Delete “" + p.name + "”? Its files stay in storage, but it's removed from the hub.", "Delete", true))) return;
       try {
         await api("DELETE", "api/projects/" + p.id);
         toast("Deleted “" + p.name + "”.");
@@ -371,7 +371,7 @@ async function showOrgAdmin(org) {
       el(row, "span", "ai-tag", meta);
       const rv = el(row, "button", "ai-del", "Revoke");
       rv.onclick = async () => {
-        if (!confirm("Revoke this invite link? Anyone still holding it won't be able to join.")) return;
+        if (!(await modalConfirm("Revoke invite", "Revoke this invite link? Anyone still holding it won't be able to join.", "Revoke", true))) return;
         try { await api("DELETE", "api/orgs/" + org.id + "/invites/" + inv.token); toast("Revoked."); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); }
       };
@@ -395,7 +395,7 @@ async function showOrgAdmin(org) {
       el(row, "span", "ai-tag", meta);
       const rv = el(row, "button", "ai-del", "Revoke");
       rv.onclick = async () => {
-        if (!confirm("Revoke the public link to “" + sh.path + "”? Anyone with the URL will lose access.")) return;
+        if (!(await modalConfirm("Revoke share link", "Revoke the public link to “" + sh.path + "”? Anyone with the URL will lose access.", "Revoke", true))) return;
         try { await api("DELETE", "api/shares/" + sh.token); toast("Share revoked."); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); }
       };
@@ -419,6 +419,64 @@ async function api(method, url, body) {
   const r = await fetch(url, opt);
   if (!r.ok) throw new Error(await r.text());
   return r.status === 204 ? {} : r.json();
+}
+
+/* In-app modal prompt (text input) — replaces native prompt(). Resolves to
+   the trimmed string, or null if cancelled. */
+function modalPrompt(title, label, value, okLabel) {
+  return new Promise((resolve) => {
+    const back = document.createElement("div");
+    back.className = "modal-back";
+    back.innerHTML = `<div class="modal">
+      <h3></h3>
+      <label class="modal-label"></label>
+      <input class="modal-input" type="text" autocomplete="off">
+      <div class="modal-actions">
+        <button class="ai-btn" data-a="cancel">Cancel</button>
+        <button class="pbtn" data-a="ok"></button>
+      </div></div>`;
+    back.querySelector("h3").textContent = title;
+    back.querySelector(".modal-label").textContent = label || "";
+    const input = back.querySelector(".modal-input");
+    input.value = value || "";
+    back.querySelector('[data-a="ok"]').textContent = okLabel || "OK";
+    const done = (v) => { back.remove(); document.removeEventListener("keydown", onKey); resolve(v); };
+    const onKey = (e) => { if (e.key === "Escape") done(null); if (e.key === "Enter") done(input.value.trim() || null); };
+    back.querySelector('[data-a="cancel"]').onclick = () => done(null);
+    back.querySelector('[data-a="ok"]').onclick = () => done(input.value.trim() || null);
+    back.onclick = (e) => { if (e.target === back) done(null); };
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(back);
+    input.focus();
+    input.select();
+  });
+}
+
+/* In-app confirm — replaces native confirm(). `danger` styles the confirm
+   button as destructive. Resolves true/false. */
+function modalConfirm(title, message, confirmLabel, danger) {
+  return new Promise((resolve) => {
+    const back = document.createElement("div");
+    back.className = "modal-back";
+    back.innerHTML = `<div class="modal">
+      <h3></h3>
+      <p class="modal-msg"></p>
+      <div class="modal-actions">
+        <button class="ai-btn" data-a="cancel">Cancel</button>
+        <button class="${danger ? "danger-btn" : "pbtn"}" data-a="ok"></button>
+      </div></div>`;
+    back.querySelector("h3").textContent = title;
+    back.querySelector(".modal-msg").textContent = message || "";
+    back.querySelector('[data-a="ok"]').textContent = confirmLabel || "Confirm";
+    const done = (v) => { back.remove(); document.removeEventListener("keydown", onKey); resolve(v); };
+    const onKey = (e) => { if (e.key === "Escape") done(false); if (e.key === "Enter") done(true); };
+    back.querySelector('[data-a="cancel"]').onclick = () => done(false);
+    back.querySelector('[data-a="ok"]').onclick = () => done(true);
+    back.onclick = (e) => { if (e.target === back) done(false); };
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(back);
+    back.querySelector('[data-a="ok"]').focus();
+  });
 }
 
 /* clipboard copy that never throws on a non-HTTPS origin (where
@@ -619,9 +677,12 @@ function renderNode(n) {
     }
     li.appendChild(renderChildren(n.children || []));
     if (collapsed.has(n.path)) li.classList.add("collapsed");
+    row.setAttribute("aria-expanded", String(!collapsed.has(n.path)));
     row.onclick = () => {
       li.classList.toggle("collapsed");
-      li.classList.contains("collapsed") ? collapsed.add(n.path) : collapsed.delete(n.path);
+      const isCollapsed = li.classList.contains("collapsed");
+      isCollapsed ? collapsed.add(n.path) : collapsed.delete(n.path);
+      row.setAttribute("aria-expanded", String(!isCollapsed));
     };
   } else {
     flatFiles.push({ path: n.path, name: n.name });
