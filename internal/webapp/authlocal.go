@@ -558,7 +558,7 @@ button:hover{background:#7c5cd6}
 button:focus-visible{outline:2px solid #c9b3ff;outline-offset:2px}
 .err{color:#ff9b91;font-size:13px;margin:10px 0 0}
 .msg{color:#8ce59a;font-size:13px;margin:10px 0 0}
-.alt{margin-top:16px;font-size:12.5px;color:#8a8a8a}
+.alt{margin-top:16px;font-size:12.5px;color:#969696}
 .alt a{color:#c9b3ff;text-decoration:none}
 .alt a:hover{text-decoration:underline}
 code{background:#1e1e1e;padding:2px 6px;border-radius:4px}

@@ -78,7 +78,7 @@ body {
 #projects .row::before { content: "◇"; margin-right: 7px; color: var(--text-faint); }
 #projects .row:hover { background: var(--bg-hover); color: var(--text); }
 #projects .row.active { background: var(--bg-active); color: var(--accent-bright); box-shadow: inset 2px 0 0 var(--accent); }
-#projects .row.active::before { color: var(--accent); }
+#projects .row.active::before { color: var(--accent-bright); }
 #tree { flex: 1; overflow-y: auto; padding: 8px 6px 24px; font-size: 13.5px; }
 #orgbar {
   display: flex;
@@ -149,8 +149,10 @@ body {
 }
 .btn:hover { background: var(--accent-press); }
 #content { flex: 1; overflow-y: auto; padding: 28px 48px 80px; }
-#history-btn, #share-btn { border: none; cursor: pointer; font: inherit; font-size: 12.5px; background: var(--bg-active); color: var(--text); }
-#history-btn:hover, #share-btn:hover { color: #fff; background: var(--bg-hover); }
+/* The per-file actions are all secondary — uniform ghost styling so no
+   single one shouts louder than the rest. */
+#history-btn, #share-btn, #upload-btn, #download { border: none; cursor: pointer; font: inherit; font-size: 12.5px; background: var(--bg-active); color: var(--text); }
+#history-btn:hover, #share-btn:hover, #upload-btn:hover, #download:hover { color: #fff; background: var(--bg-hover); }
 .dir-history { margin-left: auto; padding: 0 4px; visibility: hidden; color: var(--text-faint); font-size: 11px; }
 #tree li > .row:hover .dir-history { visibility: visible; }
 .dir-history:hover { color: var(--text); }
@@ -220,6 +222,7 @@ body {
 }
 #palette-results li.selected { background: var(--bg-active); color: var(--text); }
 #palette-results li.selected .picon, #palette-results li.selected .pkind { color: #c4c4c4; }
+#palette-results li.selected .plabel b { color: var(--accent-bright); } /* match highlight stays AA on the tinted selected row */
 #palette-results li .picon { width: 18px; flex: none; text-align: center; color: var(--text-faint); }
 #palette-results li .plabel { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #palette-results li .plabel b { color: var(--accent); font-weight: 600; }
