@@ -183,6 +183,7 @@ the positional argument), `--upload` (allow client writes, off by default),
   "upload_ttl": "15m",
   "refresh": "10s",
   "projects_db": "/var/lib/bdrive/projects.json",
+  "share_rpm": 120,                  // per-IP rate limit on public /s/* links
   "auth": {                          // optional knobs; hub auth is always on
     "allow_signup": true,
     "users_db": "/var/lib/bdrive/auth.json",
@@ -201,6 +202,17 @@ atomically on every change) maps project ids to names. Client devices sync
 whole folders through the hub without ever knowing where the storage is or
 holding any cloud credentials; the server device is the only one configured
 with the bucket.
+
+Projects are walled by **organization**: every project belongs to one org
+(file-backed `orgs.json`), and only that org's members — accounts with the
+`owner` or `member` role — can see, browse, or sync it. Your first
+`bdrive init` creates an org for you automatically; an owner invites
+teammates from the web UI (the org name in the sidebar footer — Invite
+mints an expiring join link, `/#join/<token>`, that any signed-in account
+can open to become a member). A hub upgraded from an earlier version
+sweeps its existing projects into a `default` org that all existing
+accounts join, so nothing breaks. Public share links stay outside the
+wall on purpose.
 
 ```sh
 # On the server device (knows the storage)
@@ -248,12 +260,15 @@ pages and living reports), and live until revoked — `bdrive share --list`
 and `--revoke <token-or-url>` manage them, `--expires 24h` makes one
 self-destruct. The web UI has a Share button on every file.
 
-Shared HTML renders as a real page, markdown renders like the viewer, PDFs
-open inline. Rendering is sandboxed: `/s/*` responses carry a strict CSP
-and never see auth cookies, so a malicious shared file's scripts can't
-touch hub sessions. Anyone signed in can mint links, and a link is public
-to whoever has the URL — don't share folders that hold secrets, and note a
-LAN-bound hub means LAN-only links.
+Shared HTML renders as a real page, markdown renders like the viewer
+(with a small "Shared with BearDrive" footer; raw HTML is served
+byte-for-byte), PDFs open inline. Rendering is sandboxed: `/s/*` responses
+carry a strict CSP, never see auth cookies, and sit behind a generous
+per-IP rate limit (`share_rpm`), so a malicious shared file's scripts
+can't touch hub sessions and a scraper can't turn the hub into a CDN.
+Any org member can mint links, and a link is public to whoever has the
+URL — don't share folders that hold secrets, and note a LAN-bound hub
+means LAN-only links.
 
 ### Claude Code integration
 
@@ -270,8 +285,10 @@ whether or not they installed the plugin. The payoff: "write a report and
 share it" becomes Claude generating `wiki/report.html` and replying with a
 public URL.
 
-The web UI lists the hub's projects in the sidebar; selecting one browses
-that project's files, and the **History** view shows every change — which
+The web UI lists your orgs' projects in the sidebar (⌘K opens a command
+palette: fuzzy file search, project switching, share/history/upload
+actions); selecting one browses that project's files, and the **History**
+view shows every change — which
 account made it, when, from which device (name, OS, and the IP the server
 observed), with view/download of any past version (content is
 content-addressed and retained forever; reverting to a version is the next

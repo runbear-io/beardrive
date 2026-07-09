@@ -25,7 +25,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Share a synced file publicly by URL | `bdrive share <file>` — prints a link anyone can open (HTML renders as a page, markdown rendered, PDFs inline; sandboxed; always the latest content; no account needed). `--expires 24h` for self-destructing links; `--list` / `--revoke <token-or-url>` to manage. Put generated reports in the shared folder, sync, then share. |
 | Set up a project for a Claude Code team | `/beardrive:install` — installs the CLI, signs in, runs init (whole/shared folder), offers a CLAUDE.md section about the shared folder, and registers project-level hooks (blocking pull at prompt-submit, async push after Write/Edit) in `.claude/settings.json` |
 | Per-file / folder change history in the web UI | History button (file versions or project feed) and per-folder ⌚ — each entry: account, time, device (name/OS/IP), view/download of that exact version. API: `GET /api/p/<id>/history?path=\|prefix=`, `GET /api/p/<id>/blob?sha=` |
-| Web server: viewer + multi-project sync hub (read-only unless `--upload`) | `bdrive web [<folder> \| <storage-root-url>]` (serves cwd by default, `--addr :4173`; `-c config.json` reads remote/addr/upload/projects_db settings from a file, explicit flags win; a storage root URL makes it a hub hosting many projects at `<root>/<project-id>/`, registry in `--projects-db` file, default `$BDRIVE_HOME/projects.json`; `--upload` lets browsers add files, client devices push, and projects be created — direct to storage via expiring presigned URLs on S3/GCS, relayed through the server for `file://`; `--upload-ttl 15m`; clients never see the remote URL or credentials) |
+| Web server: viewer + multi-project sync hub (read-only unless `--upload`) | `bdrive web [<folder> \| <storage-root-url>]` (serves cwd by default, `--addr :4173`; `-c config.json` reads remote/addr/upload/projects_db settings from a file, explicit flags win; a storage root URL makes it a hub hosting many projects at `<root>/<project-id>/`, registry in `--projects-db` file, default `$BDRIVE_HOME/projects.json`; `--upload` lets browsers add files, client devices push, and projects be created — direct to storage via expiring presigned URLs on S3/GCS, relayed through the server for `file://`; `--upload-ttl 15m`; clients never see the remote URL or credentials; hub projects are walled by org membership — invite teammates from the web UI; the viewer has a ⌘K palette for fuzzy file search, project switching, and quick actions) |
 
 `<folder>` is created if missing. Omitting it on `sync`/`status`/`log` defaults to the current working directory.
 
@@ -92,6 +92,8 @@ cd ~/agent-workspace && bdrive init --name agent-workspace
 ```
 
 Devices connecting the same project (by name or id) converge through the hub. Direct-to-bucket setups (no hub) remain possible via `bdrive remote set <folder> s3://…` after an offline init.
+
+Hub projects belong to an **organization**: only members of the project's org can see or sync it (project names are scoped per org too). Your first `bdrive init` creates your org automatically. To give a teammate access, an org **owner** opens the web UI and clicks **Invite** in the sidebar footer — it mints an expiring join link (`…/#join/<token>`); the teammate opens it, signs in (or up), and is in. If a teammate's `bdrive init --project <id>` gets 403/404 or the project list looks empty, the missing invite is the reason. Public share links (`bdrive share`) intentionally bypass the org wall.
 
 ### Renames and moves
 
