@@ -1,14 +1,16 @@
-# BearDrive — a synced file system for AI agents
+# BearDrive — Google Drive for AI agents
 
 **BearDrive** mounts any folder as a synced volume: its contents stay
 synchronized across all your devices through cloud object storage, every
 change is tracked (who, when, on which device), and everything keeps
 working offline. The CLI is `bdrive`.
 
-It is built for AI agent workflows — give your agents on every machine the
-same `~/agent-workspace`, and notes, plans, memory files, and artifacts
-follow them everywhere, with a full audit trail of which agent or human
-changed what.
+Two things it's for: **sharing files with people** — any synced file
+becomes a public URL that renders as a page — and **sharing context across
+AI agents**: give every agent on the team the same folder as memory, and
+your agent knows what their agent knows. Notes, plans, findings, and
+artifacts follow the team everywhere, with a full audit trail of which
+agent or human changed what.
 
 ```console
 $ bdrive login                # once per device (browser sign-in)
