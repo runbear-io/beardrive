@@ -329,11 +329,12 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 const sharedMarkdownShell = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title>
 <style>
-body{font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#24292f;
-max-width:760px;margin:0 auto;padding:48px 24px 96px}
-@media (prefers-color-scheme: dark){body{background:#1e1e24;color:#ddd}
-a{color:#8f73ff}code,pre{background:#26262e}}
-h1,h2,h3{line-height:1.25}
+body{font:16px/1.7 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",sans-serif;color:#24292f;
+max-width:720px;margin:0 auto;padding:52px 24px 96px}
+a{color:#b26a00}
+@media (prefers-color-scheme: dark){body{background:#0a0b0d;color:#c6cbd3}
+a{color:#ffcf85}code,pre{background:#15171b}h1,h2,h3{color:#f4f6f9}}
+h1,h2,h3{line-height:1.25;letter-spacing:-.018em}
 pre{padding:12px;border-radius:8px;overflow-x:auto;background:#f6f8fa}
 code{background:#f6f8fa;padding:2px 5px;border-radius:4px;font-size:.9em}
 pre code{padding:0;background:none}
