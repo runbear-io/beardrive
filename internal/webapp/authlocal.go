@@ -543,21 +543,25 @@ func authPage(w http.ResponseWriter, title, body string) {
 	fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>%s — BearDrive</title>
 <style>
-body{font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#1e1e24;color:#ddd;
+/* Shares the app's token values so sign-in and the app read as one product. */
+body{font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#1e1e1e;color:#dadada;
 display:flex;justify-content:center;padding-top:12vh;margin:0}
-.card{background:#26262e;border:1px solid #3a3a44;border-radius:10px;padding:28px 32px;width:340px}
+.card{background:#262626;border:1px solid #363636;border-radius:12px;padding:28px 32px;width:340px}
 h1{font-size:17px;margin:0 0 16px}
-label{display:block;font-size:12.5px;color:#aaa;margin:12px 0 4px}
-input{width:100%%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid #3a3a44;
-background:#1e1e24;color:#ddd;font:inherit}
-button{margin-top:18px;width:100%%;padding:9px;border:none;border-radius:6px;background:#7c5cff;
-color:#fff;font:inherit;cursor:pointer}
-button:hover{background:#8f73ff}
-.err{color:#ff7b72;font-size:13px;margin:10px 0 0}
-.msg{color:#7ee787;font-size:13px;margin:10px 0 0}
-.alt{margin-top:16px;font-size:12.5px;color:#888}
-.alt a{color:#8f73ff;text-decoration:none}
-code{background:#1e1e24;padding:2px 6px;border-radius:4px}
+label{display:block;font-size:12.5px;color:#a6a6a6;margin:12px 0 4px}
+input{width:100%%;box-sizing:border-box;padding:9px 11px;border-radius:6px;border:1px solid #363636;
+background:#1e1e1e;color:#dadada;font:inherit}
+input:focus-visible{outline:2px solid #a882ff;outline-offset:1px;border-color:#a882ff}
+button{margin-top:18px;width:100%%;padding:10px;border:none;border-radius:6px;background:#6a48e0;
+color:#fff;font:inherit;font-weight:600;cursor:pointer}
+button:hover{background:#7c5cd6}
+button:focus-visible{outline:2px solid #c9b3ff;outline-offset:2px}
+.err{color:#ff9b91;font-size:13px;margin:10px 0 0}
+.msg{color:#8ce59a;font-size:13px;margin:10px 0 0}
+.alt{margin-top:16px;font-size:12.5px;color:#8a8a8a}
+.alt a{color:#c9b3ff;text-decoration:none}
+.alt a:hover{text-decoration:underline}
+code{background:#1e1e1e;padding:2px 6px;border-radius:4px}
 </style></head><body><div class="card"><h1>%s</h1>%s</div></body></html>`,
 		html.EscapeString(title), html.EscapeString(title), body)
 }

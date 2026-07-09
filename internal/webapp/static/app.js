@@ -113,8 +113,11 @@ async function loadProjects() {
     const row = document.createElement("div");
     row.className = "row" + (currentProject && currentProject.id === p.id ? " active" : "");
     row.textContent = p.name;
-    row.title = p.id;
+    row.title = p.name;
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
     row.onclick = () => selectProject(p, null);
+    row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); row.click(); } };
     ul.appendChild(li).appendChild(row);
   }
   nav.appendChild(ul);
@@ -129,6 +132,7 @@ function selectProject(p, path) {
   $("crumb").textContent = "";
   $("meta").textContent = "";
   $("download").hidden = true;
+  $("content").className = "view";
   $("content").innerHTML = `<div class="empty">Select a file to read it.<br><span class="empty-hint">On a phone, tap ☰ to browse.</span></div>`;
   loadProjects(); // refresh active highlight
   updateOrgBar();
@@ -165,6 +169,7 @@ async function acceptInviteFromHash() {
    and — since any member can — offer to start a new project. */
 function showEmptyState() {
   $("orgbar").hidden = true;
+  $("content").className = "view";
   const auth = serverConfig.auth && serverConfig.auth.enabled;
   $("content").innerHTML = `
     <div class="onboard">
@@ -243,6 +248,7 @@ function updateOrgBar() {
   nm.textContent = org.name;
   nm.title = "Manage organization";
   nm.onclick = () => showOrgAdmin(org);
+  nm.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); nm.click(); } };
   const btn = $("invite-btn");
   btn.hidden = org.role !== "owner";
   btn.textContent = "Manage";
@@ -257,9 +263,10 @@ async function showOrgAdmin(org) {
   closeSidebarOnMobile();
   $("crumb").textContent = org.name;
   $("meta").textContent = "";
-  $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = true;
+  $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = $("more-btn").hidden = true;
   const owner = org.role === "owner";
   const box = $("content");
+  box.className = "view";
   box.innerHTML = `<div class="admin"><h1 id="org-title"></h1></div>`;
   box.querySelector("#org-title").textContent = org.name + (owner ? "" : "  ·  member");
   const panel = box.querySelector(".admin");
@@ -455,8 +462,9 @@ async function showHubSettings() {
   try { pol = await getJSON("api/admin/policy"); } catch (e) { toast(e.message, true); return; }
   currentPath = null; markActive(); closeSidebarOnMobile();
   $("crumb").textContent = "Signup & access";
-  $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = true;
+  $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = $("more-btn").hidden = true;
   const box = $("content");
+  box.className = "view";
   box.innerHTML = `<div class="admin"><h1>Signup &amp; access</h1>
     <p class="admin-sub">Who can create an account on this hub, and how new accounts are vetted.</p></div>`;
   const panel = box.querySelector(".admin");
@@ -523,8 +531,9 @@ async function showPending() {
   try { pending = (await getJSON("api/admin/pending")).pending || []; } catch { }
   currentPath = null; markActive();
   $("crumb").textContent = "Pending signups";
-  $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = true;
+  $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = $("more-btn").hidden = true;
   const box = $("content");
+  box.className = "view";
   box.innerHTML = `<div class="admin"><h1>Pending signups</h1></div>`;
   const panel = box.querySelector(".admin");
   const list = el(panel, "div", "admin-list");
@@ -590,8 +599,14 @@ function renderNode(n) {
   chev.className = "chev";
   chev.textContent = "▾"; // ▾
   const label = document.createElement("span");
+  label.className = "label";
   label.textContent = n.name;
   row.append(chev, label);
+  // Keyboard-operable: the row behaves as a button.
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.title = n.name;
+  row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); row.click(); } };
   li.appendChild(row);
   if (n.dir) {
     if (serverConfig.mode === "hub") {
@@ -633,7 +648,9 @@ async function openFile(p) {
   const dl = $("download");
   dl.href = apiBase + "download?path=" + encodeURIComponent(p);
   dl.hidden = false;
+  $("more-btn").hidden = false;
   const content = $("content");
+  content.className = "markdown"; // document view: markdown type rules apply
   content.innerHTML = "";
   $("meta").textContent = "";
   try {
@@ -803,6 +820,8 @@ async function showHistory(q) {
   $("crumb").textContent = "History — " + title;
   $("meta").textContent = "";
   $("download").hidden = true;
+  content.className = "view";
+  $("more-btn").hidden = true;
   content.innerHTML = "";
   const wrap = document.createElement("div");
   wrap.className = "history";
@@ -1136,6 +1155,35 @@ $("palette-overlay").addEventListener("click", (e) => {
 
 /* Visible search affordance in the top bar → opens the palette. */
 $("search-btn").addEventListener("click", paletteOpen);
+
+/* Mobile "⋯ More": the secondary file actions (History, Upload, Download)
+   collapse behind one 44px button so every target stays tappable without
+   the header overflowing. The menu proxies to the real buttons, so their
+   behavior and visibility rules are the single source of truth. */
+function buildMoreMenu() {
+  const menu = $("more-menu");
+  menu.innerHTML = "";
+  const items = [
+    ["History", $("history-btn")],
+    ["Upload", $("upload-btn")],
+    ["Download", $("download")],
+  ].filter(([, el]) => el && !el.hidden);
+  for (const [label, el] of items) {
+    const b = document.createElement("button");
+    b.className = "more-item";
+    b.textContent = label;
+    b.onclick = () => { $("more-menu").hidden = true; el.click(); };
+    menu.appendChild(b);
+  }
+  return items.length;
+}
+$("more-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const menu = $("more-menu");
+  if (menu.hidden) { buildMoreMenu(); menu.hidden = false; }
+  else menu.hidden = true;
+});
+document.addEventListener("click", () => { $("more-menu").hidden = true; });
 
 /* Mobile: the sidebar is off-canvas; a hamburger toggles it. */
 function toggleSidebar() { document.body.classList.toggle("sb-open"); }
