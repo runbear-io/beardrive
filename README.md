@@ -187,8 +187,13 @@ the positional argument), `--upload` (allow client writes, off by default),
   "projects_db": "/var/lib/bdrive/projects.json",
   "share_rpm": 120,                  // per-IP rate limit on public /s/* links
   "auth": {                          // optional knobs; hub auth is always on
+    // Signup is invite-only by default. To allow self-service signup,
+    // open it WITH a gate (an ungated open hub is refused at startup):
     "allow_signup": true,
+    "allowed_domains": ["example.com"],  // only these domains may sign up
+    "require_approval": true,            // …and an admin must approve each one
     "users_db": "/var/lib/bdrive/auth.json",
+    "admins": ["admin@example.com"],
     "smtp": { "host": "smtp.example.com", "port": 587,
               "user": "drive@example.com", "pass": "…", "from": "drive@example.com" }
   }
@@ -306,8 +311,22 @@ session; only `/api/config` and the auth pages stay open (the plain-folder
 viewer, `bdrive web ./folder`, remains auth-free). Accounts are
 email + password + name, kept in a file-backed registry (`auth.json`:
 bcrypt password hashes and SHA-256 token digests, atomically rewritten —
-no plaintext credentials ever touch disk). Sign-up is open by default;
-`"allow_signup": false` closes it once the team is onboarded.
+no plaintext credentials ever touch disk).
+
+**Signup is invite-only by default** — the safe posture for a hub on a
+public URL. New people get in only through an expiring invite link an owner
+mints; the link lets them create an account (bypassing the gates below) and
+join, in one step. To allow self-service signup instead, set
+`"allow_signup": true` **with a gate** — the server refuses to start an open
+hub that has none, so a fake email can never just walk in. Three postures:
+
+- **Invite-only** (default): `allow_signup` unset/false. Only invite links create accounts.
+- **Approval-gated**: `allow_signup: true` + `require_approval: true` — anyone can sign up, but a hub admin approves each new account before it works (no SMTP needed).
+- **Domain-restricted + verified**: `allow_signup: true` + `allowed_domains: ["you.com"]` + `require_verification: true` (needs `smtp`) — only your company's addresses may sign up, each confirming an emailed link. Verification without SMTP is refused (the link would otherwise only reach the server log).
+
+Admins tune verification/approval live from the web UI (**Admin → Signup &
+access**); `allowed_domains`, the admin list, and `allow_signup` are
+server-config-owned so a browser session can never widen who gets in.
 
 `bdrive login <url>` on a client device opens the server's sign-in page in
 a browser (sign up right there if needed); when the user signs in, the

@@ -37,6 +37,12 @@ type BuiltinAuth struct {
 	Admins              map[string]bool // hub admins (lowercase emails): approve users, govern shares
 	Brand               string          // optional name shown on the sign-in page
 
+	// InviteValid, when set, reports whether a token is a live org invite.
+	// It lets an invite link bootstrap an account on an invite-only hub
+	// (AllowSignup false) — the one path in without self-signup. Wired to
+	// OrgDB.ValidInvite by the server. Nil → no invite-based signup.
+	InviteValid func(token string) bool
+
 	path string
 
 	mu     sync.Mutex
@@ -200,13 +206,27 @@ func (a *BuiltinAuth) findByEmail(email string) *authUser {
 	return nil
 }
 
+// signup creates a self-service account, subject to the domain allowlist and
+// starting in the state the gating policy dictates.
 func (a *BuiltinAuth) signup(email, name, password string) (*authUser, error) {
+	return a.createAccount(email, name, password, false)
+}
+
+// signupInvited creates an account from a valid invite link. An invite is an
+// explicit grant by an owner, so it is the vetting: the domain allowlist and
+// the approval/verification gates are bypassed and the account is active. The
+// caller must have already checked the invite token is live.
+func (a *BuiltinAuth) signupInvited(email, name, password string) (*authUser, error) {
+	return a.createAccount(email, name, password, true)
+}
+
+func (a *BuiltinAuth) createAccount(email, name, password string, viaInvite bool) (*authUser, error) {
 	email = strings.TrimSpace(strings.ToLower(email))
 	name = strings.TrimSpace(name)
 	if email == "" || !strings.Contains(email, "@") {
 		return nil, fmt.Errorf("a valid email is required")
 	}
-	if !a.domainAllowed(email) {
+	if !viaInvite && !a.domainAllowed(email) {
 		return nil, fmt.Errorf("this server only accepts %s email addresses", a.domainList())
 	}
 	if name == "" {
@@ -219,6 +239,10 @@ func (a *BuiltinAuth) signup(email, name, password string) (*authUser, error) {
 	if err != nil {
 		return nil, err
 	}
+	status := a.initialStatus()
+	if viaInvite {
+		status = statusActive
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.findByEmail(email) != nil {
@@ -226,7 +250,7 @@ func (a *BuiltinAuth) signup(email, name, password string) (*authUser, error) {
 	}
 	u := &authUser{
 		ID: "u-" + randHex(4), Email: email, Name: name,
-		Pass: string(hash), Status: a.initialStatus(), Created: time.Now().UTC(),
+		Pass: string(hash), Status: status, Created: time.Now().UTC(),
 	}
 	a.users[u.ID] = u
 	if err := a.save(); err != nil {
@@ -247,6 +271,26 @@ func (a *BuiltinAuth) initialStatus() string {
 	default:
 		return statusActive
 	}
+}
+
+// ValidateSignupPolicy rejects incoherent signup configurations at startup so
+// a hub is never accidentally left open to fake-email signups. The three
+// supported postures are: invite-only (AllowSignup false — the default),
+// approval-gated, and domain-restricted with email verification.
+//
+//   - Open self-signup must carry at least one gate (allowed domains, admin
+//     approval, or email verification). Without one, anyone can register any
+//     address — the exact hole this guards.
+//   - Email verification needs a mailer: without SMTP the link only reaches
+//     the server log, so it can't actually gate real users.
+func (a *BuiltinAuth) ValidateSignupPolicy() error {
+	if a.RequireVerification && a.Mail == nil {
+		return fmt.Errorf("auth: require_verification needs an smtp mailer — without one the verification link only reaches the server log; configure auth.smtp or turn verification off")
+	}
+	if a.AllowSignup && len(a.AllowedDomains) == 0 && !a.RequireApproval && !a.RequireVerification {
+		return fmt.Errorf("auth: open self-signup has no gate, so anyone could register any email — set allow_signup:false (invite-only, the default), or add allowed_domains, require_approval, or require_verification")
+	}
+	return nil
 }
 
 // afterVerify is the state a just-verified account moves to.
@@ -536,6 +580,40 @@ func safeNext(next string) string {
 	return next
 }
 
+// inviteTokenFromNext pulls an org-invite token out of a post-login target
+// like "/join/<token>". Tokens are lowercase hex.
+func inviteTokenFromNext(next string) string {
+	const marker = "/join/"
+	i := strings.Index(next, marker)
+	if i < 0 {
+		return ""
+	}
+	tok := next[i+len(marker):]
+	if j := strings.IndexAny(tok, "/?&#"); j >= 0 {
+		tok = tok[:j]
+	}
+	if tok == "" {
+		return ""
+	}
+	for _, c := range tok {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return ""
+		}
+	}
+	return tok
+}
+
+// invitedVia returns the invite token in next when it points at a live invite,
+// so the login/signup pages can let an invitee create an account even on an
+// invite-only hub. Empty string when there's no valid invite.
+func (a *BuiltinAuth) invitedVia(next string) string {
+	tok := inviteTokenFromNext(next)
+	if tok != "" && a.InviteValid != nil && a.InviteValid(tok) {
+		return tok
+	}
+	return ""
+}
+
 // ---- pages ----
 
 func authPage(w http.ResponseWriter, title, body string) {
@@ -600,13 +678,20 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 			errMsg = `<p class="err">Wrong email or password.</p>`
 		}
 	}
+	// Offer account creation when public signup is open, or when the visitor
+	// arrived through a valid invite (the way into an invite-only hub).
 	signup := ""
-	if a.AllowSignup {
+	invited := a.invitedVia(next) != ""
+	if a.AllowSignup || invited {
 		note := ""
-		if len(a.AllowedDomains) > 0 {
+		if a.AllowSignup && len(a.AllowedDomains) > 0 {
 			note = ` <span style="color:#868b93">(` + html.EscapeString(a.domainList()) + ` only)</span>`
 		}
-		signup = fmt.Sprintf(`<p class="alt">No account? <a href="/auth/signup?next=%s">Sign up</a>%s</p>`, url.QueryEscape(next), note)
+		label := "No account?"
+		if invited && !a.AllowSignup {
+			label = "New here?"
+		}
+		signup = fmt.Sprintf(`<p class="alt">%s <a href="/auth/signup?next=%s">Sign up</a>%s</p>`, label, url.QueryEscape(next), note)
 	}
 	brand := ""
 	if a.Brand != "" {
@@ -622,14 +707,21 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 	next := safeNext(r.FormValue("next"))
-	if !a.AllowSignup {
-		authPage(w, "Sign up disabled", `<p>This server does not allow self-signup. Ask the server admin for an account.</p>
+	// An invite link authorizes account creation even when public self-signup
+	// is closed — it's the only way into an invite-only hub.
+	inviteTok := a.invitedVia(next)
+	if !a.AllowSignup && inviteTok == "" {
+		authPage(w, "Sign up disabled", `<p>This server is invite-only. Ask a team owner for an invite link, or sign in if you already have an account.</p>
 <p class="alt"><a href="/auth/login">Back to sign in</a></p>`)
 		return
 	}
 	var errMsg string
 	if r.Method == http.MethodPost {
-		u, err := a.signup(r.FormValue("email"), r.FormValue("name"), r.FormValue("password"))
+		signup := a.signup
+		if inviteTok != "" {
+			signup = a.signupInvited // invite is the vetting: skip gates, activate
+		}
+		u, err := signup(r.FormValue("email"), r.FormValue("name"), r.FormValue("password"))
 		if err == nil {
 			switch u.Status {
 			case statusUnverified:
@@ -652,9 +744,10 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 		errMsg = `<p class="err">` + html.EscapeString(err.Error()) + `</p>`
 	}
 	// State the domain restriction up front, where the stranger types their
-	// email — not only after a rejected submit.
+	// email — not only after a rejected submit. An invite bypasses the domain
+	// allowlist, so don't show it when arriving through one.
 	domainNote := ""
-	if len(a.AllowedDomains) > 0 {
+	if inviteTok == "" && len(a.AllowedDomains) > 0 {
 		domainNote = `<p class="alt" style="margin:2px 0 0">Only ` + html.EscapeString(a.domainList()) + ` email addresses can sign up here.</p>`
 	}
 	brand := ""

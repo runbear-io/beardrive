@@ -550,20 +550,21 @@ async function showHubSettings() {
 
   el(panel, "h3", null, "New-account vetting");
   const toggles = el(panel, "div", "admin-list");
-  const mkToggle = (label, desc, key, on) => {
+  const mkToggle = (label, desc, key, on, disabled) => {
     const row = el(toggles, "label", "admin-item toggle");
     const left = el(row, "span", "ai-main");
     el(left, "div", "tg-label", label);
     el(left, "div", "tg-desc", desc);
     const cb = document.createElement("input");
     cb.type = "checkbox"; cb.checked = !!on; cb.dataset.key = key;
+    if (disabled) { cb.disabled = true; row.style.opacity = ".55"; }
     row.appendChild(cb);
     return cb;
   };
   const ver = mkToggle("Require email verification",
-    pol.mailer ? "New accounts must click an emailed link before they can sign in." :
-      "New accounts must verify via a link (no mailer configured — the link is written to the server log).",
-    "require_verification", pol.require_verification);
+    pol.mailer ? "New accounts must click an emailed link before they can sign in — proves they control the address."
+      : "Configure SMTP on the server (auth.smtp) to enable email verification.",
+    "require_verification", pol.require_verification && pol.mailer, !pol.mailer);
   const app = mkToggle("Require admin approval",
     "New accounts wait for a hub admin to approve them before they gain access.",
     "require_approval", pol.require_approval);
@@ -580,10 +581,10 @@ async function showHubSettings() {
   const info = el(panel, "div", "admin-list");
   const dom = el(info, "div", "admin-item");
   el(dom, "span", "ai-main", "Allowed email domains");
-  el(dom, "span", "ai-tag", (pol.allowed_domains && pol.allowed_domains.length) ? pol.allowed_domains.map((d) => "@" + d).join(", ") : "any (open signup)");
+  el(dom, "span", "ai-tag", (pol.allowed_domains && pol.allowed_domains.length) ? pol.allowed_domains.map((d) => "@" + d).join(", ") : "any");
   const sg = el(info, "div", "admin-item");
   el(sg, "span", "ai-main", "Self-signup");
-  el(sg, "span", "ai-tag", pol.allow_signup ? "open" : "closed");
+  el(sg, "span", "ai-tag", pol.allow_signup ? "open" : "invite-only");
   const ad = el(info, "div", "admin-item");
   el(ad, "span", "ai-main", "Hub admins");
   el(ad, "span", "ai-tag", (pol.admins && pol.admins.length) ? pol.admins.join(", ") : "none");

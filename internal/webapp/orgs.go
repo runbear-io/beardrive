@@ -348,6 +348,16 @@ func (db *OrgDB) Redeem(token string) (OrgInvite, bool) {
 	return inv, true
 }
 
+// ValidInvite reports whether a token is a live invite, without consuming it.
+// It lets the signup page permit account creation from an invite link even
+// when public self-signup is closed (invite-only hubs).
+func (db *OrgDB) ValidInvite(token string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	inv, ok := db.invites[token]
+	return ok && !inv.expired()
+}
+
 // ---- migration ----
 
 // MigrateOrgs assigns every org-less project to a default org so a hub that
