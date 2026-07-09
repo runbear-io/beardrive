@@ -107,6 +107,46 @@ func TestSignupPageVerificationFlow(t *testing.T) {
 	}
 }
 
+// The policy toggles persist to auth.json and reload; the domain allowlist
+// and admin list are reported but not mutated by the policy API.
+func TestPolicyPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	a, _ := OpenBuiltinAuth(path, true, nil)
+	a.AllowedDomains = []string{"x.io"}
+	a.Admins = map[string]bool{"admin@x.io": true}
+	if err := a.SetPolicy(true, true); err != nil {
+		t.Fatal(err)
+	}
+	// reload: toggles survive, and initialStatus reflects them
+	a2, _ := OpenBuiltinAuth(path, true, nil)
+	if !a2.RequireVerification || !a2.RequireApproval {
+		t.Fatal("policy toggles did not persist across reload")
+	}
+	if a2.initialStatus() != statusUnverified {
+		t.Fatalf("initialStatus = %q", a2.initialStatus())
+	}
+}
+
+// A hub admin can read and flip the policy over HTTP; a non-admin cannot.
+func TestPolicyAPIAdminOnly(t *testing.T) {
+	srv, _, _ := newHub(t, true, nil)
+	auth := gatedAuth(t, func(a *BuiltinAuth) { a.Admins = map[string]bool{"boss@x.io": true} })
+	srv.Auth = auth
+	h := srv.Handler()
+	boss := signupAndSession(t, h, "boss@x.io", "Boss", "password1")
+	pleb := signupAndSession(t, h, "pleb@x.io", "Pleb", "password1")
+
+	if rec := doAs(t, h, "GET", "/api/admin/policy", nil, pleb); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin policy read: %d", rec.Code)
+	}
+	if rec := doAs(t, h, "POST", "/api/admin/policy", map[string]bool{"require_approval": true}, boss); rec.Code != 200 {
+		t.Fatalf("admin policy write: %d %s", rec.Code, rec.Body)
+	}
+	if !auth.RequireApproval {
+		t.Fatal("policy POST did not take effect")
+	}
+}
+
 func TestAuthRateLimit(t *testing.T) {
 	srv, _, _ := newHub(t, true, nil)
 	srv.Auth = gatedAuth(t, nil)

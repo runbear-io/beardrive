@@ -100,6 +100,7 @@ func OpenBuiltinAuth(path string, allowSignup bool, mail *Mailer) (*BuiltinAuth,
 	var file struct {
 		Users  []*authUser `json:"users"`
 		Tokens []authToken `json:"tokens"`
+		Policy *authPolicy `json:"policy,omitempty"`
 	}
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
@@ -110,7 +111,32 @@ func OpenBuiltinAuth(path string, allowSignup bool, mail *Mailer) (*BuiltinAuth,
 	for _, t := range file.Tokens {
 		a.tokens[t.Hash] = t
 	}
+	// A UI-saved policy is the persisted operational default; the server
+	// config can still override it at startup (see web.go), so a sysadmin who
+	// pins a value in the config file always wins over a browser toggle.
+	if file.Policy != nil {
+		a.RequireVerification = file.Policy.RequireVerification
+		a.RequireApproval = file.Policy.RequireApproval
+	}
 	return a, nil
+}
+
+// authPolicy is the UI-tunable slice of gating (persisted in auth.json).
+// Domain allowlist and the admin list are intentionally NOT here — they are
+// security-critical identity config owned by whoever controls the server,
+// not something a browser session should be able to widen.
+type authPolicy struct {
+	RequireVerification bool `json:"require_verification"`
+	RequireApproval     bool `json:"require_approval"`
+}
+
+// SetPolicy updates the tunable gating toggles and persists them.
+func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.RequireVerification = requireVerification
+	a.RequireApproval = requireApproval
+	return a.save()
 }
 
 // save persists users and tokens. Callers hold mu.
@@ -118,6 +144,7 @@ func (a *BuiltinAuth) save() error {
 	var file struct {
 		Users  []*authUser `json:"users"`
 		Tokens []authToken `json:"tokens"`
+		Policy *authPolicy `json:"policy,omitempty"`
 	}
 	for _, u := range a.users {
 		file.Users = append(file.Users, u)
@@ -125,6 +152,7 @@ func (a *BuiltinAuth) save() error {
 	for _, t := range a.tokens {
 		file.Tokens = append(file.Tokens, t)
 	}
+	file.Policy = &authPolicy{RequireVerification: a.RequireVerification, RequireApproval: a.RequireApproval}
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return err

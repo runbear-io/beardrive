@@ -38,8 +38,8 @@ type webConfig struct {
 		AllowSignup         *bool    `json:"allow_signup,omitempty"`         // default true
 		UsersDB             string   `json:"users_db,omitempty"`             // default $BDRIVE_HOME/auth.json
 		AllowedDomains      []string `json:"allowed_domains,omitempty"`      // signup email must match one (e.g. ["runbear.io"])
-		RequireVerification bool     `json:"require_verification,omitempty"` // new accounts verify email before activation
-		RequireApproval     bool     `json:"require_approval,omitempty"`     // new accounts await admin approval
+		RequireVerification *bool    `json:"require_verification,omitempty"` // new accounts verify email before activation
+		RequireApproval     *bool    `json:"require_approval,omitempty"`     // new accounts await admin approval
 		Admins              []string `json:"admins,omitempty"`               // hub admin emails (approve users, govern shares)
 		Brand               string   `json:"brand,omitempty"`                // name shown on the sign-in page
 		SMTP                *struct {
@@ -239,8 +239,15 @@ credentials); otherwise it is relayed through this server.`,
 				}
 				if cfg.Auth != nil {
 					auth.AllowedDomains = cfg.Auth.AllowedDomains
-					auth.RequireVerification = cfg.Auth.RequireVerification
-					auth.RequireApproval = cfg.Auth.RequireApproval
+					// Toggles: an explicit config value pins the setting each
+					// boot; otherwise the UI-saved policy (loaded from auth.json)
+					// stands.
+					if cfg.Auth.RequireVerification != nil {
+						auth.RequireVerification = *cfg.Auth.RequireVerification
+					}
+					if cfg.Auth.RequireApproval != nil {
+						auth.RequireApproval = *cfg.Auth.RequireApproval
+					}
 					auth.Brand = cfg.Auth.Brand
 					if len(cfg.Auth.Admins) > 0 {
 						auth.Admins = make(map[string]bool, len(cfg.Auth.Admins))

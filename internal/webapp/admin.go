@@ -124,6 +124,48 @@ func (s *Server) handleAdminPending(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"pending": a.PendingUsers()})
 }
 
+// handleAdminPolicy reads (GET) or updates (POST) the signup/access policy.
+// Domains and the admin list are reported read-only — they're server-config
+// owned so a browser session can't widen access — while verification and
+// approval toggles can be flipped live and are persisted.
+func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requestUser(r).Admin {
+		http.Error(w, "hub admins only", http.StatusForbidden)
+		return
+	}
+	a := s.builtinAuth()
+	if a == nil {
+		http.Error(w, "policy is not supported by this auth provider", http.StatusNotFound)
+		return
+	}
+	if r.Method == http.MethodPost {
+		var req struct {
+			RequireVerification bool `json:"require_verification"`
+			RequireApproval     bool `json:"require_approval"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := a.SetPolicy(req.RequireVerification, req.RequireApproval); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	admins := make([]string, 0, len(a.Admins))
+	for e := range a.Admins {
+		admins = append(admins, e)
+	}
+	writeJSON(w, map[string]any{
+		"require_verification": a.RequireVerification,
+		"require_approval":     a.RequireApproval,
+		"allow_signup":         a.AllowSignup,
+		"allowed_domains":      a.AllowedDomains, // read-only (server config)
+		"admins":               admins,           // read-only (server config)
+		"mailer":               a.Mail != nil,
+	})
+}
+
 // handleAdminApprove activates a pending account. Hub admins only.
 func (s *Server) handleAdminApprove(w http.ResponseWriter, r *http.Request) {
 	if !s.requestUser(r).Admin {

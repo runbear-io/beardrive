@@ -52,6 +52,13 @@ async function boot() {
     serverConfig = await getJSON("api/config");
   } catch { /* non-fatal */ }
   document.title = serverConfig.brand || serverConfig.volume || "BearDrive";
+  // If auth is on and we're not signed in, go straight to the login page
+  // rather than firing authed API calls that 401 (noisy console, and the
+  // redirect happens anyway). /api/config reports `me` only when signed in.
+  if (serverConfig.auth && serverConfig.auth.enabled && !serverConfig.me) {
+    location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.hash);
+    return;
+  }
   if (serverConfig.auth && serverConfig.auth.enabled) $("signout").hidden = false;
   if (serverConfig.mode === "hub") {
     await acceptInviteFromHash();
@@ -65,7 +72,7 @@ async function boot() {
       || (joinedOrgId && projects.find((x) => x.org === joinedOrgId))
       || projects[0];
     if (proj) selectProject(proj, path);
-    else { $("vault-name").textContent = serverConfig.volume || "BearDrive"; updateOrgBar(); showEmptyState(); }
+    else { $("vault-name").textContent = serverConfig.brand || serverConfig.volume || "BearDrive"; updateOrgBar(); showEmptyState(); }
     setInterval(loadProjects, 30000); // pick up new projects
   } else {
     $("vault-name").textContent = serverConfig.volume || "BearDrive";
@@ -283,7 +290,7 @@ async function showOrgAdmin(org) {
         if (m.role === r) o.selected = true; sel.appendChild(o);
       }
       sel.onchange = async () => {
-        try { await api("PATCH", "api/orgs/" + org.id + "/members/" + encodeURIComponent(m.email), { role: sel.value }); toast("Role updated."); await loadOrgs(); }
+        try { await api("PATCH", "api/orgs/" + org.id + "/members/" + encodeURIComponent(m.email), { role: sel.value }); toast("Role updated."); await loadOrgs(); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); showOrgAdmin(currentOrg()); }
       };
       row.appendChild(sel);
@@ -357,6 +364,7 @@ async function showOrgAdmin(org) {
       el(row, "span", "ai-tag", meta);
       const rv = el(row, "button", "ai-del", "Revoke");
       rv.onclick = async () => {
+        if (!confirm("Revoke this invite link? Anyone still holding it won't be able to join.")) return;
         try { await api("DELETE", "api/orgs/" + org.id + "/invites/" + inv.token); toast("Revoked."); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); }
       };
@@ -424,12 +432,81 @@ async function updateAdminBar() {
   if (!(serverConfig.auth && serverConfig.auth.admin)) { bar.hidden = true; return; }
   let pending = [];
   try { pending = (await getJSON("api/admin/pending")).pending || []; } catch { }
-  if (!pending.length) { bar.hidden = true; return; }
   bar.hidden = false;
-  bar.innerHTML = "";
-  const b = el(bar, "button", "adminbar-btn");
-  b.textContent = "⚑ " + pending.length + " pending signup" + (pending.length > 1 ? "s" : "");
-  b.onclick = () => showPending();
+  bar.textContent = pending.length ? "⚑ Admin · " + pending.length : "⚙ Admin";
+  bar.title = "Hub administration — signup policy" + (pending.length ? " and pending approvals" : "");
+  bar.onclick = () => showHubSettings();
+}
+
+/* Hub-admin settings: signup/access policy. Verification & approval are
+   live toggles; the domain allowlist and admin list are shown read-only
+   (they're server-config owned, deliberately not browser-editable). */
+async function showHubSettings() {
+  let pol = {};
+  try { pol = await getJSON("api/admin/policy"); } catch (e) { toast(e.message, true); return; }
+  currentPath = null; markActive(); closeSidebarOnMobile();
+  $("crumb").textContent = "Signup & access";
+  $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = true;
+  const box = $("content");
+  box.innerHTML = `<div class="admin"><h1>Signup &amp; access</h1>
+    <p class="admin-sub">Who can create an account on this hub, and how new accounts are vetted.</p></div>`;
+  const panel = box.querySelector(".admin");
+
+  el(panel, "h3", null, "New-account vetting");
+  const toggles = el(panel, "div", "admin-list");
+  const mkToggle = (label, desc, key, on) => {
+    const row = el(toggles, "label", "admin-item toggle");
+    const left = el(row, "span", "ai-main");
+    el(left, "div", "tg-label", label);
+    el(left, "div", "tg-desc", desc);
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = !!on; cb.dataset.key = key;
+    row.appendChild(cb);
+    return cb;
+  };
+  const ver = mkToggle("Require email verification",
+    pol.mailer ? "New accounts must click an emailed link before they can sign in." :
+      "New accounts must verify via a link (no mailer configured — the link is written to the server log).",
+    "require_verification", pol.require_verification);
+  const app = mkToggle("Require admin approval",
+    "New accounts wait for a hub admin to approve them before they gain access.",
+    "require_approval", pol.require_approval);
+  const save = el(panel, "button", "pbtn", "Save policy");
+  save.style.marginTop = "14px";
+  save.onclick = async () => {
+    try {
+      await postJSON("api/admin/policy", { require_verification: ver.checked, require_approval: app.checked });
+      toast("Signup policy saved.");
+    } catch (e) { toast(e.message, true); }
+  };
+
+  el(panel, "h3", null, "Who can sign up");
+  const info = el(panel, "div", "admin-list");
+  const dom = el(info, "div", "admin-item");
+  el(dom, "span", "ai-main", "Allowed email domains");
+  el(dom, "span", "ai-tag", (pol.allowed_domains && pol.allowed_domains.length) ? pol.allowed_domains.map((d) => "@" + d).join(", ") : "any (open signup)");
+  const sg = el(info, "div", "admin-item");
+  el(sg, "span", "ai-main", "Self-signup");
+  el(sg, "span", "ai-tag", pol.allow_signup ? "open" : "closed");
+  const ad = el(info, "div", "admin-item");
+  el(ad, "span", "ai-main", "Hub admins");
+  el(ad, "span", "ai-tag", (pol.admins && pol.admins.length) ? pol.admins.join(", ") : "none");
+  el(panel, "p", "admin-sub", "Domains and admins are set in the server config file (they can't be widened from the browser).");
+
+  // Pending approvals live here too, so this is the single admin home.
+  el(panel, "h3", null, "Pending signups");
+  const plist = el(panel, "div", "admin-list");
+  let pending = [];
+  try { pending = (await getJSON("api/admin/pending")).pending || []; } catch { }
+  if (!pending.length) el(plist, "div", "admin-empty", "No one is waiting for approval.");
+  for (const u of pending) {
+    const row = el(plist, "div", "admin-item");
+    el(row, "span", "ai-main", (u.name ? u.name + "  ·  " : "") + u.email);
+    const ok = el(row, "button", "pbtn", "Approve");
+    ok.onclick = async () => { try { await postJSON("api/admin/pending/" + u.id + "/approve"); toast("Approved " + u.email); updateAdminBar(); showHubSettings(); } catch (e) { toast(e.message, true); } };
+    const no = el(row, "button", "ai-del", "Deny");
+    no.onclick = async () => { try { await postJSON("api/admin/pending/" + u.id + "/deny"); toast("Denied " + u.email); updateAdminBar(); showHubSettings(); } catch (e) { toast(e.message, true); } };
+  }
 }
 
 async function showPending() {
@@ -749,6 +826,7 @@ async function showHistory(q) {
       const dl = document.createElement("a");
       dl.textContent = "download";
       dl.href = view.href + "&download=1";
+      dl.setAttribute("download", e.path.split("/").pop());
       row.querySelector(".hact").append(view, " ", dl);
     }
     const p = e.path;
@@ -963,10 +1041,24 @@ function paletteCandidates() {
   return items;
 }
 
+/* Match a query against a label, tolerating a simple English plural so
+   "ideas" still finds idea.md. Tries the raw query first, then a lightly
+   de-pluralized form (…ies→…y, …es→…, …s→…). */
+function fuzzyStemmed(query, label) {
+  const m = fuzzy(query, label);
+  if (m) return m;
+  const q = query.toLowerCase();
+  let stem = null;
+  if (q.length > 3 && q.endsWith("ies")) stem = q.slice(0, -3) + "y";
+  else if (q.length > 3 && q.endsWith("es")) stem = q.slice(0, -2);
+  else if (q.length > 2 && q.endsWith("s")) stem = q.slice(0, -1);
+  return stem ? fuzzy(stem, label) : null;
+}
+
 function buildPaletteItems(query) {
   const scored = [];
   for (const c of paletteCandidates()) {
-    const m = fuzzy(query, c.label);
+    const m = fuzzyStemmed(query, c.label);
     if (m) scored.push({ ...c, score: m.score, hits: m.hits });
   }
   scored.sort((a, b) => b.score - a.score);
@@ -981,7 +1073,7 @@ function renderPalette() {
   if (paletteItems.length === 0) {
     const li = document.createElement("li");
     li.className = "pempty";
-    li.textContent = "No matches";
+    li.textContent = "No matches — search covers file names, projects, and actions";
     ul.appendChild(li);
     return;
   }

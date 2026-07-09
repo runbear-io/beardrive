@@ -269,6 +269,11 @@ body {
 .ai-del { color: #ff9b91; }
 .ai-del:hover { background: #4a2420; color: #ff7b72; }
 .admin-empty { padding: 14px 12px; color: var(--text-faint); font-size: 13px; }
+.admin-sub { color: var(--text-dim); font-size: 13.5px; margin: -8px 0 4px; }
+.admin-item.toggle { cursor: pointer; }
+.admin-item.toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
+.tg-label { font-size: 13.5px; color: var(--text); }
+.tg-desc { font-size: 12px; color: var(--text-faint); margin-top: 2px; }
 
 /* ---- modal ---- */
 .modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 150; padding: 20px; }
@@ -296,12 +301,14 @@ body {
   #topbar { padding: 8px 14px; gap: 8px; }
   #crumb { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #search-btn kbd { display: none; }
-  #search-btn { font-size: 0; gap: 0; padding: 4px 9px; }
-  #search-btn::before { content: "🔍"; font-size: 14px; }
-  /* The per-file action buttons overflow a phone header; on mobile they
-     live in the ⌘K palette instead (which offers all of them), so the bar
-     stays to Menu · crumb · Search. */
-  #share-btn, #history-btn, #upload-btn, #download { display: none !important; }
+  /* On a phone the header shrinks every control to an icon so all the
+     per-file actions stay reachable (the R2 mistake was hiding them). */
+  #topbar .btn { font-size: 0; gap: 0; padding: 5px 8px; }
+  #search-btn::before { content: "🔍"; font-size: 15px; }
+  #share-btn::before { content: "↗"; font-size: 15px; }
+  #history-btn::before { content: "🕘"; font-size: 14px; }
+  #upload-btn::before { content: "⬆"; font-size: 14px; }
+  #download::before { content: "⬇"; font-size: 14px; }
   #meta { display: none; }
   .markdown, .admin, .onboard, .history { max-width: 100%; }
   .markdown table, pre.plain { display: block; overflow-x: auto; max-width: 100%; }

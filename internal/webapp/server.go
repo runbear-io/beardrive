@@ -340,6 +340,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/projects/{project}", s.handleProjectRename)
 	mux.HandleFunc("DELETE /api/projects/{project}", s.handleProjectDelete)
 
+	mux.HandleFunc("GET /api/admin/policy", s.handleAdminPolicy)
+	mux.HandleFunc("POST /api/admin/policy", s.handleAdminPolicy)
 	mux.HandleFunc("GET /api/admin/pending", s.handleAdminPending)
 	mux.HandleFunc("POST /api/admin/pending/{id}/approve", s.handleAdminApprove)
 	mux.HandleFunc("POST /api/admin/pending/{id}/deny", s.handleAdminDeny)
