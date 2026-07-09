@@ -134,7 +134,7 @@ func TestSignupDisabled(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "does not allow self-signup") {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "invite-only") {
 		t.Fatalf("signup while disabled: %d %s", rec.Code, rec.Body)
 	}
 	if len(auth.users) != 0 {

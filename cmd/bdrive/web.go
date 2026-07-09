@@ -211,7 +211,10 @@ credentials); otherwise it is relayed through this server.`,
 			// stays auth-free.
 			if srv.Root != nil {
 				usersDB := ""
-				allowSignup := true
+				// Invite-only by default: a fresh hub doesn't accept self-signup
+				// until an admin opts in (with a gate). Owners onboard people
+				// with /join/<token> invite links.
+				allowSignup := false
 				var mail *webapp.Mailer
 				if cfg.Auth != nil {
 					usersDB = cfg.Auth.UsersDB
@@ -256,12 +259,20 @@ credentials); otherwise it is relayed through this server.`,
 						}
 					}
 				}
+				// Refuse to boot an incoherent signup posture (open with no
+				// gate, or verification without a mailer) rather than silently
+				// leaving the door open.
+				if err := auth.ValidateSignupPolicy(); err != nil {
+					return err
+				}
 				srv.Auth = auth
 				orgs, err := webapp.OpenOrgDB(filepath.Join(filepath.Dir(projectsDB), "orgs.json"))
 				if err != nil {
 					return fmt.Errorf("open org registry: %w", err)
 				}
 				srv.Orgs = orgs
+				// Invite links can bootstrap an account on an invite-only hub.
+				auth.InviteValid = orgs.ValidInvite
 				// A hub that predates organizations: sweep its projects into
 				// a default org so it keeps working with zero manual steps.
 				if err := webapp.MigrateOrgs(srv.Projects, orgs, auth.Accounts()); err != nil {

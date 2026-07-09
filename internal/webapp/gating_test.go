@@ -147,6 +147,91 @@ func TestPolicyAPIAdminOnly(t *testing.T) {
 	}
 }
 
+// The three supported postures validate; an ungated open hub and
+// verification-without-a-mailer are refused.
+func TestValidateSignupPolicy(t *testing.T) {
+	ok := func(name string, tune func(*BuiltinAuth)) {
+		t.Helper()
+		a := gatedAuth(t, tune)
+		if err := a.ValidateSignupPolicy(); err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+	}
+	bad := func(name string, tune func(*BuiltinAuth)) {
+		t.Helper()
+		a := gatedAuth(t, tune)
+		if err := a.ValidateSignupPolicy(); err == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
+	}
+	ok("invite-only", func(a *BuiltinAuth) { a.AllowSignup = false })
+	ok("open+domain", func(a *BuiltinAuth) { a.AllowedDomains = []string{"x.io"} })
+	ok("open+approval", func(a *BuiltinAuth) { a.RequireApproval = true })
+	ok("open+verify+mailer", func(a *BuiltinAuth) { a.RequireVerification = true; a.Mail = &Mailer{Host: "smtp"} })
+	bad("open+no-gate", func(a *BuiltinAuth) { a.AllowSignup = true })
+	bad("verify-without-mailer", func(a *BuiltinAuth) { a.RequireVerification = true })
+}
+
+// On an invite-only hub, a valid invite link lets a brand-new person create an
+// account (bypassing the closed signup and the domain allowlist); an invalid
+// or absent invite still hits the disabled page.
+func TestInviteBootstrapsAccountWhenSignupClosed(t *testing.T) {
+	srv, auth, _ := authHub(t, false) // AllowSignup=false (invite-only)
+	auth.AllowedDomains = []string{"runbear.io"}
+	auth.InviteValid = func(tok string) bool { return tok == "abc123" }
+	h := srv.Handler()
+
+	signupVia := func(next, email string) *httptest.ResponseRecorder {
+		form := url.Values{"email": {email}, "name": {"New"}, "password": {"password1"}}
+		u := "/auth/signup"
+		if next != "" {
+			u += "?next=" + url.QueryEscape(next)
+		}
+		req := httptest.NewRequest("POST", u, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Valid invite → account created and active, even for an outside domain.
+	rec := signupVia("/join/abc123", "contractor@elsewhere.com")
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("invited signup: %d %s", rec.Code, rec.Body)
+	}
+	u := auth.findByEmail("contractor@elsewhere.com")
+	if u == nil || !u.active() {
+		t.Fatalf("invited account should exist and be active: %+v", u)
+	}
+
+	// No invite → disabled, no account.
+	if rec := signupVia("", "nobody@runbear.io"); !strings.Contains(rec.Body.String(), "invite-only") {
+		t.Fatalf("uninvited signup should be disabled: %s", rec.Body)
+	}
+	// Invalid/expired invite token → disabled too.
+	if rec := signupVia("/join/deadbeef", "nobody@runbear.io"); !strings.Contains(rec.Body.String(), "invite-only") {
+		t.Fatalf("bad-invite signup should be disabled: %s", rec.Body)
+	}
+	if auth.findByEmail("nobody@runbear.io") != nil {
+		t.Fatal("account created without a valid invite")
+	}
+}
+
+// Turning on email verification without a mailer is refused over the policy API.
+func TestPolicyVerificationNeedsMailer(t *testing.T) {
+	srv, auth, _ := authHub(t, true)
+	auth.Admins = map[string]bool{"boss@x.io": true}
+	h := srv.Handler()
+	boss := signupAndSession(t, h, "boss@x.io", "Boss", "password1")
+	rec := doAs(t, h, "POST", "/api/admin/policy", map[string]bool{"require_verification": true}, boss)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("verification without mailer should be refused: %d %s", rec.Code, rec.Body)
+	}
+	if auth.RequireVerification {
+		t.Fatal("verification was enabled despite having no mailer")
+	}
+}
+
 func TestAuthRateLimit(t *testing.T) {
 	srv, _, _ := newHub(t, true, nil)
 	srv.Auth = gatedAuth(t, nil)

@@ -147,6 +147,12 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Email verification is only a real gate with a mailer; refuse to turn
+		// it on without SMTP rather than silently logging links.
+		if req.RequireVerification && a.Mail == nil {
+			http.Error(w, "email verification needs SMTP configured on the server", http.StatusBadRequest)
+			return
+		}
 		if err := a.SetPolicy(req.RequireVerification, req.RequireApproval); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
