@@ -152,7 +152,7 @@ async function acceptInviteFromHash() {
     const out = await postJSON("api/invites/" + m[1]); // may redirect to login (401)
     location.hash = "";
     joinedOrgId = out.org && out.org.id;
-    toast("Welcome — you joined “" + out.org.name + "”.");
+    toast("Welcome — you joined the “" + out.org.name + "” team. Opening its projects…");
   } catch (e) {
     if (String(e.message).includes("signing in")) throw e; // redirecting; stop boot
     location.hash = "";
@@ -343,8 +343,8 @@ async function showOrgAdmin(org) {
   mk.onclick = async () => {
     try {
       const out = await postJSON("api/orgs/" + org.id + "/invites");
-      await navigator.clipboard.writeText(out.url).catch(() => {});
-      toast("Invite link copied to clipboard.");
+      const ok = await copyText(out.url);
+      toast(ok ? "Invite link copied to clipboard." : "Invite created — copy it from the list below.");
       showOrgAdmin(currentOrg());
     } catch (e) { toast(e.message, true); }
   };
@@ -357,7 +357,7 @@ async function showOrgAdmin(org) {
       const main = el(row, "span", "ai-main mono", inv.url);
       main.style.cursor = "pointer";
       main.title = "Copy";
-      main.onclick = () => { navigator.clipboard.writeText(inv.url).then(() => toast("Copied.")); };
+      main.onclick = () => copyText(inv.url).then((ok) => toast(ok ? "Copied." : "Select and copy the link."));
       const meta = (inv.creator ? "by " + inv.creator + " · " : "") +
         (inv.uses ? inv.uses + " joined · " : "unused · ") +
         "expires " + new Date(inv.expires).toLocaleDateString();
@@ -412,6 +412,15 @@ async function api(method, url, body) {
   const r = await fetch(url, opt);
   if (!r.ok) throw new Error(await r.text());
   return r.status === 204 ? {} : r.json();
+}
+
+/* clipboard copy that never throws on a non-HTTPS origin (where
+   navigator.clipboard is undefined). Returns true on success. */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* fall through */ }
+  return false;
 }
 
 /* transient toast, replacing blocking alert() */
@@ -720,7 +729,7 @@ function showShareDialog(url, copied) {
   const close = () => back.remove();
   back.onclick = (e) => { if (e.target === back) close(); };
   const token = url.split("/s/")[1];
-  back.querySelector('[data-a="copy"]').onclick = () => navigator.clipboard.writeText(url).then(() => toast("Copied."));
+  back.querySelector('[data-a="copy"]').onclick = () => copyText(url).then((ok) => toast(ok ? "Copied." : "Select and copy the link above."));
   back.querySelector('[data-a="open"]').onclick = () => window.open(url, "_blank");
   back.querySelector('[data-a="close"]').onclick = close;
   back.querySelector('[data-a="revoke"]').onclick = async () => {
@@ -756,10 +765,7 @@ function updateShareButton() {
       });
       if (!r.ok) throw new Error(await r.text());
       const share = await r.json();
-      let copied = false;
-      if (navigator.clipboard) {
-        try { await navigator.clipboard.writeText(share.url); copied = true; } catch { /* http origin */ }
-      }
+      const copied = await copyText(share.url);
       showShareDialog(share.url, copied);
     } catch (err) {
       toast("Share failed: " + err.message, true);
