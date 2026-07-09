@@ -127,8 +127,14 @@ func TestMigrateOrgs(t *testing.T) {
 // orgHub builds an auth+org hub with two accounts in two separate orgs,
 // alice owning a project in hers.
 func orgHub(t *testing.T) (h http.Handler, alice, bob *http.Cookie, pa Project) {
+	h, _, alice, bob, pa = orgHubSrv(t)
+	return
+}
+
+// orgHubSrv also exposes the Server for tests that tweak it (quota).
+func orgHubSrv(t *testing.T) (h http.Handler, srv *Server, alice, bob *http.Cookie, pa Project) {
 	t.Helper()
-	srv, _, _ := newHub(t, true, nil)
+	srv, _, _ = newHub(t, true, nil)
 	auth, err := OpenBuiltinAuth(filepath.Join(t.TempDir(), "auth.json"), true, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +169,7 @@ func orgHub(t *testing.T) (h http.Handler, alice, bob *http.Cookie, pa Project) 
 	if out.Project.Org == "" {
 		t.Fatal("project created without an org")
 	}
-	return h, alice, bob, out.Project
+	return h, srv, alice, bob, out.Project
 }
 
 // Every per-project route must reject a non-member and admit a member.
