@@ -71,6 +71,11 @@ type Server struct {
 	Devices *DeviceRegistry
 	// Shares, when set, enables public share links (/s/<token>).
 	Shares *ShareDB
+	// Orgs, when set, walls projects off by organization membership.
+	Orgs *OrgDB
+	// Quota, when set, enforces plan limits (managed deployments). Nil
+	// means UnlimitedQuota: the open-source server never says no.
+	Quota QuotaProvider
 
 	volOnce sync.Once
 	vol     *volume
@@ -282,9 +287,14 @@ func (s *Server) Handler() http.Handler {
 	}
 	proj := func(h func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			v, err := s.projectVolume(r.PathValue("project"))
+			id := r.PathValue("project")
+			v, err := s.projectVolume(id)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			if !s.projectAllowed(r, id) {
+				http.Error(w, "you are not a member of this project's organization", http.StatusForbidden)
 				return
 			}
 			h(v, w, r)
@@ -308,6 +318,10 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("PUT "+prefix+"upload/content", resolve(s.handleUploadContent))
 		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(s.handleUploadCommit))
 	}
+
+	mux.HandleFunc("GET /api/orgs", s.handleOrgList)
+	mux.HandleFunc("POST /api/orgs/{org}/invites", s.handleInviteCreate)
+	mux.HandleFunc("POST /api/invites/{token}", s.handleInviteAccept)
 
 	mux.HandleFunc("GET /api/p/{project}/history", proj(s.handleHistory))
 	mux.HandleFunc("GET /api/p/{project}/blob", proj(s.handleBlob))
@@ -357,7 +371,14 @@ func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this server does not host projects", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, map[string]any{"projects": s.Projects.List()})
+	list := s.Projects.List()
+	visible := make([]Project, 0, len(list))
+	for _, p := range list {
+		if s.projectAllowed(r, p.ID) {
+			visible = append(visible, p)
+		}
+	}
+	writeJSON(w, map[string]any{"projects": visible})
 }
 
 func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
@@ -366,7 +387,7 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, ok := s.Projects.Get(r.PathValue("project"))
-	if !ok {
+	if !ok || !s.projectAllowed(r, p.ID) {
 		http.Error(w, "no such project", http.StatusNotFound)
 		return
 	}
@@ -387,17 +408,53 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Name string `json:"name"`
+		Org  string `json:"org,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	p, created, err := s.Projects.GetOrCreate(req.Name)
+	org, err := s.orgForCreate(r, req.Org)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	p, created, err := s.Projects.GetOrCreate(req.Name, org)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, map[string]any{"project": p, "created": created})
+}
+
+// orgForCreate resolves which org a new project lands in: the explicitly
+// requested one (must be a membership), else the caller's only org, else —
+// for an account in no org yet — a fresh org named after the account, so
+// nobody is ever blocked from starting to sync. Orgs disabled → "".
+func (s *Server) orgForCreate(r *http.Request, requested string) (string, error) {
+	if s.Orgs == nil || s.Auth == nil {
+		return "", nil
+	}
+	me := s.requestUser(r)
+	if requested != "" {
+		if s.Orgs.Role(requested, me.Email) == "" {
+			return "", fmt.Errorf("you are not a member of organization %q", requested)
+		}
+		return requested, nil
+	}
+	mine := s.Orgs.OrgsFor(me.Email)
+	if len(mine) > 0 {
+		return mine[0].ID, nil
+	}
+	name := me.Name
+	if name == "" {
+		name = strings.SplitN(me.Email, "@", 2)[0]
+	}
+	o, err := s.Orgs.Create(name, me.Email)
+	if err != nil {
+		return "", err
+	}
+	return o.ID, nil
 }
 
 // Node is one entry of the file tree returned by the tree endpoint.

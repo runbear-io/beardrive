@@ -133,6 +133,10 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 		http.Error(w, fmt.Sprintf("invalid store key %q", req.Key), http.StatusBadRequest)
 		return
 	}
+	if err := s.quota().CheckWrite(s.orgOf(r.PathValue("project")), req.Size); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	// Only blobs are presigned. They are content-addressed and immutable, so
 	// a leaked URL can at worst re-upload identical bytes. Journals are
 	// mutable state and always flow through the server.
@@ -168,10 +172,16 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	org, size := s.orgOf(r.PathValue("project")), max(r.ContentLength, 0)
+	if err := s.quota().CheckWrite(org, size); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if err := rs.Backend.Put(r.Context(), key, r.Body, r.ContentLength); err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
 	}
+	s.quota().RecordUsage(org, size)
 	if strings.HasPrefix(key, "journal/") {
 		v.invalidate() // new ops should show in the viewer immediately
 	}

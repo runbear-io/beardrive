@@ -20,7 +20,7 @@ func newHub(t *testing.T, storage remote.Backend, upload bool) (*httptest.Server
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, _, err := db.GetOrCreate("vol")
+	p, _, err := db.GetOrCreate("vol", "")
 	if err != nil {
 		t.Fatal(err)
 	}

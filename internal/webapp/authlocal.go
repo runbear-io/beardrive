@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -281,6 +282,23 @@ func (a *BuiltinAuth) grantDevice(id, userID string) bool {
 	g.user, g.granted = userID, true
 	a.pending[id] = g
 	return true
+}
+
+// Accounts returns every account, oldest first (used by the org migration
+// to pick the default org's owner).
+func (a *BuiltinAuth) Accounts() []User {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	users := make([]*authUser, 0, len(a.users))
+	for _, u := range a.users {
+		users = append(users, u)
+	}
+	sort.Slice(users, func(i, j int) bool { return users[i].Created.Before(users[j].Created) })
+	out := make([]User, len(users))
+	for i, u := range users {
+		out[i] = User{ID: u.ID, Email: u.Email, Name: u.Name}
+	}
+	return out
 }
 
 // ---- AuthProvider ----

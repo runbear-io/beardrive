@@ -231,6 +231,16 @@ credentials); otherwise it is relayed through this server.`,
 					return fmt.Errorf("open account registry: %w", err)
 				}
 				srv.Auth = auth
+				orgs, err := webapp.OpenOrgDB(filepath.Join(filepath.Dir(projectsDB), "orgs.json"))
+				if err != nil {
+					return fmt.Errorf("open org registry: %w", err)
+				}
+				srv.Orgs = orgs
+				// A hub that predates organizations: sweep its projects into
+				// a default org so it keeps working with zero manual steps.
+				if err := webapp.MigrateOrgs(srv.Projects, orgs, auth.Accounts()); err != nil {
+					return fmt.Errorf("migrate projects into orgs: %w", err)
+				}
 				devices, err := webapp.OpenDeviceRegistry(filepath.Join(filepath.Dir(projectsDB), "devices.json"))
 				if err != nil {
 					return fmt.Errorf("open device registry: %w", err)

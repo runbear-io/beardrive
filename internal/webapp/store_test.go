@@ -29,7 +29,7 @@ func newHub(t *testing.T, upload bool, wrap func(remote.Backend) remote.Backend)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, _, err := db.GetOrCreate("proj")
+	p, _, err := db.GetOrCreate("proj", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestProjectDBPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p1, created, err := db.GetOrCreate("alpha")
+	p1, created, err := db.GetOrCreate("alpha", "")
 	if err != nil || !created {
 		t.Fatalf("create: %+v %v %v", p1, created, err)
 	}
@@ -130,7 +130,7 @@ func TestProjectDBPersists(t *testing.T) {
 	if !ok || got.Name != "alpha" {
 		t.Fatalf("reload = %+v %v", got, ok)
 	}
-	p2, created, err := db2.GetOrCreate("alpha")
+	p2, created, err := db2.GetOrCreate("alpha", "")
 	if err != nil || created || p2.ID != p1.ID {
 		t.Fatalf("get-or-create after reload = %+v %v %v", p2, created, err)
 	}
@@ -263,7 +263,7 @@ func TestHTTPBackendThroughServer(t *testing.T) {
 	srv, p, root := newHub(t, true, nil)
 	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
 	f.put("deva", "seed.md", "seeded")
-	other, _, err := srv.Projects.GetOrCreate("other")
+	other, _, err := srv.Projects.GetOrCreate("other", "")
 	if err != nil {
 		t.Fatal(err)
 	}

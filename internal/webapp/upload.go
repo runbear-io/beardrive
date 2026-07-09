@@ -252,6 +252,10 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
+	if err := s.quota().CheckWrite(s.orgOf(r.PathValue("project")), req.Size); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if direct, isDirect := up.(DirectUploader); isDirect {
 		if exists, err := direct.HasBlob(r.Context(), req.SHA256); err == nil && exists {
 			// Content already in the store (same file elsewhere, or a retry):
@@ -287,10 +291,16 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	org, size := s.orgOf(r.PathValue("project")), max(r.ContentLength, 0)
+	if err := s.quota().CheckWrite(org, size); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if err := up.Upload(r.Context(), p, r.Body, r.ContentLength); err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
 	}
+	s.quota().RecordUsage(org, size)
 	v.invalidate()
 	writeJSON(w, map[string]any{"ok": true, "path": p})
 }
@@ -310,6 +320,13 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
+	// The blob may already sit in storage (direct upload), but commit is
+	// what makes it part of the volume — so it is the accounting point.
+	org := s.orgOf(r.PathValue("project"))
+	if err := s.quota().CheckWrite(org, req.Size); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if err := direct.Commit(r.Context(), req.Path, req.SHA256, req.Size); err != nil {
 		code := http.StatusBadGateway
 		if err == errBlobMissing {
@@ -318,6 +335,7 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 		http.Error(w, fmt.Sprintf("commit: %v", err), code)
 		return
 	}
+	s.quota().RecordUsage(org, req.Size)
 	v.invalidate()
 	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
 }

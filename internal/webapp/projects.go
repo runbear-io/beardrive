@@ -19,6 +19,7 @@ import (
 type Project struct {
 	ID      string    `json:"id"`
 	Name    string    `json:"name"`
+	Org     string    `json:"org,omitempty"` // owning organization
 	Created time.Time `json:"created"`
 }
 
@@ -106,9 +107,10 @@ func (db *ProjectDB) Get(id string) (Project, bool) {
 	return p, ok
 }
 
-// GetOrCreate returns the project with the given name, creating it (with a
-// fresh id) if none exists. Names are matched exactly.
-func (db *ProjectDB) GetOrCreate(name string) (Project, bool, error) {
+// GetOrCreate returns the project with the given name in the org, creating
+// it (with a fresh id) if none exists. Names are matched exactly, scoped to
+// the org: two organizations can each have a "wiki".
+func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 	name = trimName(name)
 	if name == "" {
 		return Project{}, false, fmt.Errorf("project name must not be empty")
@@ -116,7 +118,7 @@ func (db *ProjectDB) GetOrCreate(name string) (Project, bool, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	for _, p := range db.byID {
-		if p.Name == name {
+		if p.Name == name && p.Org == org {
 			return p, false, nil
 		}
 	}
@@ -124,13 +126,26 @@ func (db *ProjectDB) GetOrCreate(name string) (Project, bool, error) {
 	if _, err := rand.Read(buf[:]); err != nil {
 		return Project{}, false, err
 	}
-	p := Project{ID: "p-" + hex.EncodeToString(buf[:]), Name: name, Created: time.Now().UTC()}
+	p := Project{ID: "p-" + hex.EncodeToString(buf[:]), Name: name, Org: org, Created: time.Now().UTC()}
 	db.byID[p.ID] = p
 	if err := db.save(); err != nil {
 		delete(db.byID, p.ID)
 		return Project{}, false, err
 	}
 	return p, true, nil
+}
+
+// SetOrg moves a project into an org (used by the startup migration).
+func (db *ProjectDB) SetOrg(id, org string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	p.Org = org
+	db.byID[id] = p
+	return db.save()
 }
 
 func trimName(s string) string {

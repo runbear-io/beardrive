@@ -17,12 +17,27 @@ let serverConfig = { mode: "volume", upload: { enabled: false } };
 let projects = [];
 let currentProject = null; // hub mode: the selected project
 let apiBase = "api/";      // volume-scoped endpoint prefix
+let orgs = [];             // hub mode: the orgs this account belongs to
 
 const fileURL = (p) => apiBase + "file?path=" + encodeURIComponent(p);
 
 async function getJSON(url) {
   const r = await fetch(url);
   if (r.status === 401) { // auth required: sign in, then come back here
+    location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.hash);
+    throw new Error("signing in…");
+  }
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (r.status === 401) {
     location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.hash);
     throw new Error("signing in…");
   }
@@ -38,6 +53,8 @@ async function boot() {
   document.title = (serverConfig.volume || "beardrive") + " — BearDrive";
   if (serverConfig.auth && serverConfig.auth.enabled) $("signout").hidden = false;
   if (serverConfig.mode === "hub") {
+    await acceptInviteFromHash();
+    await loadOrgs();
     await loadProjects();
     const { project, path } = parseHash();
     const proj = projects.find((x) => x.id === project) || projects[0];
@@ -89,11 +106,87 @@ function selectProject(p, path) {
   $("download").hidden = true;
   $("content").innerHTML = `<div class="empty">Select a file from the sidebar</div>`;
   loadProjects(); // refresh active highlight
+  updateOrgBar();
   initUpload();
   initHistory();
   updateShareButton();
   refreshTree().then(() => { if (path) openFile(path); });
   if (!path) location.hash = p.id;
+}
+
+/* ---- hub: organizations ---- */
+
+/* Opening "#join/<token>" while signed in joins the invite's org. */
+async function acceptInviteFromHash() {
+  const m = location.hash.match(/^#join\/([0-9a-f]+)$/);
+  if (!m) return;
+  location.hash = "";
+  try {
+    const out = await postJSON("api/invites/" + m[1]);
+    alert("Welcome — you joined “" + out.org.name + "”.");
+  } catch (e) {
+    alert("Could not accept the invite: " + e.message);
+  }
+}
+
+async function loadOrgs() {
+  try {
+    orgs = (await getJSON("api/orgs")).orgs || [];
+  } catch { orgs = []; }
+}
+
+function currentOrg() {
+  if (!currentProject || !currentProject.org) return null;
+  return orgs.find((o) => o.id === currentProject.org) || null;
+}
+
+/* The sidebar footer names the project's org; clicking it lists members,
+   and owners get an Invite button that mints a join link. */
+function updateOrgBar() {
+  const bar = $("orgbar"), org = currentOrg();
+  if (!org) { bar.hidden = true; return; }
+  bar.hidden = false;
+  $("org-name").textContent = org.name;
+  $("org-name").onclick = () => showMembers(org);
+  const btn = $("invite-btn");
+  btn.hidden = org.role !== "owner";
+  btn.onclick = async () => {
+    try {
+      const out = await postJSON("api/orgs/" + org.id + "/invites");
+      prompt("Anyone who opens this link (and signs in) joins “" + org.name + "”:", out.url);
+    } catch (e) {
+      alert("Could not create an invite: " + e.message);
+    }
+  };
+}
+
+function showMembers(org) {
+  currentPath = null;
+  markActive();
+  $("crumb").textContent = org.name + " — members";
+  $("meta").textContent = "";
+  $("download").hidden = true;
+  const box = $("content");
+  box.innerHTML = "";
+  const list = document.createElement("div");
+  list.className = "history";
+  for (const m of org.members) {
+    const row = document.createElement("div");
+    row.className = "hentry";
+    const line = document.createElement("div");
+    line.className = "hline";
+    const who = document.createElement("span");
+    who.className = "hpath";
+    who.style.cursor = "default";
+    who.textContent = m.email;
+    const role = document.createElement("span");
+    role.className = "htime";
+    role.textContent = m.role;
+    line.append(who, role);
+    row.appendChild(line);
+    list.appendChild(row);
+  }
+  box.appendChild(list);
 }
 
 /* Hash routing: "#<path>" in volume mode, "#<project-id>/<path>" in hub mode. */

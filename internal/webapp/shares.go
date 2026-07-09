@@ -226,6 +226,11 @@ func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sharing is not enabled on this server", http.StatusNotFound)
 		return
 	}
+	sh, ok := s.Shares.Get(r.PathValue("token"))
+	if ok && !s.projectAllowed(r, sh.Project) {
+		http.Error(w, "you are not a member of this project's organization", http.StatusForbidden)
+		return
+	}
 	if s.Shares.Revoke(r.PathValue("token")) {
 		writeJSON(w, map[string]any{"ok": true})
 		return
