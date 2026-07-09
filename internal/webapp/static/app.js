@@ -4,7 +4,8 @@
 const $ = (id) => document.getElementById(id);
 let flatFiles = [];   // [{path, name}] for wikilink resolution
 let currentPath = null;
-let collapsed = new Set(); // dir paths the user collapsed
+let expanded = new Set();  // dir paths that are open (folders start closed)
+let treeFirstLoad = true;  // apply the "lone root folder opens" rule once per project
 
 const MD_EXT = /\.(md|markdown)$/i;
 const IMG_EXT = /\.(png|jpe?g|gif|svg|webp|ico|bmp|avif)$/i;
@@ -21,6 +22,18 @@ let orgs = [];             // hub mode: the orgs this account belongs to
 let joinedOrgId = null;    // org just joined via an invite this page-load
 
 const fileURL = (p) => apiBase + "file?path=" + encodeURIComponent(p);
+
+/* inline SVG icon, pulled from the <symbol> sprite in index.html */
+function svgIcon(name) { return `<svg class="ico" aria-hidden="true"><use href="#i-${name}"/></svg>`; }
+
+/* Deterministic accent for a project's letter-mark, so each project keeps a
+   stable color across reloads without any server state. */
+const PROJ_COLORS = ["#5b8def", "#f5a623", "#4cc38a", "#e0679b", "#8b7bf0", "#3ec8c8", "#e6934a"];
+function projColor(s) {
+  let h = 0;
+  for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return PROJ_COLORS[h % PROJ_COLORS.length];
+}
 
 async function getJSON(url) {
   const r = await fetch(url);
@@ -112,7 +125,14 @@ async function loadProjects() {
     const li = document.createElement("li");
     const row = document.createElement("div");
     row.className = "row" + (currentProject && currentProject.id === p.id ? " active" : "");
-    row.textContent = p.name;
+    const mark = document.createElement("span");
+    mark.className = "proj-mark";
+    mark.style.background = projColor(p.name);
+    mark.textContent = (p.name.trim()[0] || "?");
+    const lab = document.createElement("span");
+    lab.className = "label";
+    lab.textContent = p.name;
+    row.append(mark, lab);
     row.title = p.name;
     row.tabIndex = 0;
     row.setAttribute("role", "button");
@@ -125,6 +145,8 @@ async function loadProjects() {
 
 function selectProject(p, path) {
   currentProject = p;
+  expanded = new Set();   // fresh collapse state for the new project's tree
+  treeFirstLoad = true;
   apiBase = "api/p/" + p.id + "/";
   $("vault-name").textContent = p.name;
   document.title = p.name + " — BearDrive";
@@ -507,7 +529,7 @@ async function updateAdminBar() {
   let pending = [];
   try { pending = (await getJSON("api/admin/pending")).pending || []; } catch { }
   bar.hidden = false;
-  bar.textContent = pending.length ? "⚑ Admin · " + pending.length : "⚙ Admin";
+  bar.innerHTML = svgIcon("shield") + `<span>Admin${pending.length ? " · " + pending.length : ""}</span>`;
   bar.title = "Hub administration — signup policy" + (pending.length ? " and pending approvals" : "");
   bar.onclick = () => showHubSettings();
 }
@@ -635,9 +657,17 @@ async function refreshTree() {
     root = await getJSON(apiBase + "tree");
   } catch { return; } // keep the last good tree
   flatFiles = [];
+  const kids = root.children || [];
+  // First render of a project's tree: every folder starts closed, except a
+  // lone root folder — opening it spares the user a single shut folder.
+  if (treeFirstLoad) {
+    treeFirstLoad = false;
+    const rootDirs = kids.filter((c) => c.dir);
+    if (rootDirs.length === 1) expanded.add(rootDirs[0].path);
+  }
   const nav = $("tree");
   nav.innerHTML = "";
-  nav.appendChild(renderChildren(root.children || []));
+  nav.appendChild(renderChildren(kids));
   markActive();
 }
 
@@ -655,11 +685,14 @@ function renderNode(n) {
   row.dataset.path = n.path;
   const chev = document.createElement("span");
   chev.className = "chev";
-  chev.textContent = "▾"; // ▾
+  chev.innerHTML = svgIcon("chevd");
+  const ticon = document.createElement("span");
+  ticon.className = "ticon";
+  ticon.innerHTML = svgIcon(n.dir ? "folder" : "doc");
   const label = document.createElement("span");
   label.className = "label";
   label.textContent = n.name;
-  row.append(chev, label);
+  row.append(chev, ticon, label);
   // Keyboard-operable: the row behaves as a button.
   row.tabIndex = 0;
   row.setAttribute("role", "button");
@@ -670,18 +703,19 @@ function renderNode(n) {
     if (serverConfig.mode === "hub") {
       const hist = document.createElement("span");
       hist.className = "dir-history";
-      hist.textContent = "⌚";
+      hist.innerHTML = svgIcon("hist");
       hist.title = "Folder history";
       hist.onclick = (e) => { e.stopPropagation(); showHistory({ prefix: n.path + "/" }); };
       row.appendChild(hist);
     }
     li.appendChild(renderChildren(n.children || []));
-    if (collapsed.has(n.path)) li.classList.add("collapsed");
-    row.setAttribute("aria-expanded", String(!collapsed.has(n.path)));
+    const open = expanded.has(n.path);
+    if (!open) li.classList.add("collapsed");
+    row.setAttribute("aria-expanded", String(open));
     row.onclick = () => {
       li.classList.toggle("collapsed");
       const isCollapsed = li.classList.contains("collapsed");
-      isCollapsed ? collapsed.add(n.path) : collapsed.delete(n.path);
+      isCollapsed ? expanded.delete(n.path) : expanded.add(n.path);
       row.setAttribute("aria-expanded", String(!isCollapsed));
     };
   } else {
@@ -698,11 +732,41 @@ function markActive() {
   if (row) row.classList.add("active");
 }
 
+/* Mark every ancestor folder of a path as open. */
+function expandTo(filePath) {
+  const parts = filePath.split("/");
+  let acc = "";
+  for (let i = 0; i < parts.length - 1; i++) {
+    acc = acc ? acc + "/" + parts[i] : parts[i];
+    expanded.add(acc);
+  }
+}
+
+/* Reflect the `expanded` set onto the already-rendered tree DOM. */
+function applyTreeExpansion() {
+  for (const li of document.querySelectorAll("#tree li.dir")) {
+    const row = li.querySelector(":scope > .row");
+    const open = row && expanded.has(row.dataset.path);
+    li.classList.toggle("collapsed", !open);
+    if (row) row.setAttribute("aria-expanded", String(!!open));
+  }
+}
+
+/* Opening a file (search, wikilink, deep link) unfolds the path to it and
+   scrolls the row into view so the selection is never hidden in a shut folder. */
+function revealInTree(p) {
+  expandTo(p);
+  applyTreeExpansion();
+  const row = document.querySelector(`#tree .row[data-path="${CSS.escape(p)}"]`);
+  if (row) row.scrollIntoView({ block: "center" });
+}
+
 /* ---- file pane ---- */
 async function openFile(p) {
   currentPath = p;
   setHash(p);
   markActive();
+  revealInTree(p);
   closeSidebarOnMobile();
   $("crumb").textContent = p.split("/").join(" / ");
   updateShareButton();
@@ -793,7 +857,7 @@ function showShareDialog(url, copied) {
   back.className = "modal-back";
   back.innerHTML = `
     <div class="modal">
-      <h3>🔗 Public link created</h3>
+      <h3>Public link created</h3>
       <p><b>Anyone with this link can view this file</b> — no account needed. It always shows the latest version until you revoke it.</p>
       <div class="modal-url"></div>
       <div class="modal-actions">
@@ -898,7 +962,7 @@ async function showHistory(q) {
     row.innerHTML =
       `<div class="hline"><span class="hkind"></span><span class="hpath"></span><span class="htime"></span></div>` +
       `<div class="hmeta"><span class="hwho"></span><span class="hdev"></span><span class="hsize"></span><span class="hact"></span></div>`;
-    row.querySelector(".hkind").textContent = e.kind === "delete" ? "✕" : "●";
+    row.querySelector(".hkind").innerHTML = svgIcon(e.kind === "delete" ? "x" : "dot");
     row.querySelector(".hpath").textContent = e.path;
     row.querySelector(".htime").textContent = when;
     row.querySelector(".hwho").textContent = who;
@@ -1101,28 +1165,28 @@ function paletteCandidates() {
   const hub = serverConfig.mode === "hub";
 
   if (hub && currentProject && currentPath) {
-    add("↗", "Share: " + currentPath, "action", () => $("share-btn").click());
-    add("⌚", "History: " + currentPath, "action", () => showHistory({ path: currentPath }));
-    add("↓", "Download: " + currentPath, "action", () => $("download").click());
+    add("share", "Share: " + currentPath, "action", () => $("share-btn").click());
+    add("hist", "History: " + currentPath, "action", () => showHistory({ path: currentPath }));
+    add("download", "Download: " + currentPath, "action", () => $("download").click());
   }
   if (hub && currentProject) {
-    add("⌚", "History: whole project", "action", () => showHistory({ prefix: "" }));
+    add("hist", "History: whole project", "action", () => showHistory({ prefix: "" }));
   }
   if (!$("upload-btn").hidden) {
-    add("+", "Upload a file…", "action", () => $("upload-btn").click());
+    add("upload", "Upload a file…", "action", () => $("upload-btn").click());
   }
   if (hub) {
     for (const p of projects) {
       if (!currentProject || p.id !== currentProject.id) {
-        add("▣", "Switch to project: " + p.name, "project", () => selectProject(p, null));
+        add("folder", "Switch to project: " + p.name, "project", () => selectProject(p, null));
       }
     }
   }
   if (serverConfig.auth && serverConfig.auth.enabled) {
-    add("⏻", "Sign out", "action", () => { location.href = "/auth/logout"; });
+    add("power", "Sign out", "action", () => { location.href = "/auth/logout"; });
   }
   for (const f of flatFiles) {
-    add("◦", f.path, "file", () => openFile(f.path));
+    add("doc", f.path, "file", () => openFile(f.path));
   }
   return items;
 }
@@ -1166,13 +1230,13 @@ function renderPalette() {
   paletteItems.forEach((item, i) => {
     const li = document.createElement("li");
     if (i === paletteSel) li.classList.add("selected");
-    const icon = document.createElement("span");
-    icon.className = "picon";
-    icon.textContent = item.icon;
+    const pic = document.createElement("span");
+    pic.className = "picon";
+    pic.innerHTML = svgIcon(item.icon);
     const kind = document.createElement("span");
     kind.className = "pkind";
     kind.textContent = item.kind;
-    li.append(icon, highlight(item.label, item.hits), kind);
+    li.append(pic, highlight(item.label, item.hits), kind);
     li.onclick = () => runPaletteItem(item);
     li.onmousemove = () => { if (paletteSel !== i) { paletteSel = i; renderPalette(); } };
     ul.appendChild(li);

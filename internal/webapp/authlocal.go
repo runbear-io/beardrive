@@ -544,25 +544,31 @@ func authPage(w http.ResponseWriter, title, body string) {
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>%s — BearDrive</title>
 <style>
 /* Shares the app's token values so sign-in and the app read as one product. */
-body{font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#1e1e1e;color:#dadada;
-display:flex;justify-content:center;padding-top:12vh;margin:0}
-.card{background:#262626;border:1px solid #363636;border-radius:12px;padding:28px 32px;width:340px}
-h1{font-size:17px;margin:0 0 16px}
-label{display:block;font-size:12.5px;color:#a6a6a6;margin:12px 0 4px}
-input{width:100%%;box-sizing:border-box;padding:9px 11px;border-radius:6px;border:1px solid #363636;
-background:#1e1e1e;color:#dadada;font:inherit}
-input:focus-visible{outline:2px solid #a882ff;outline-offset:1px;border-color:#a882ff}
-button{margin-top:18px;width:100%%;padding:10px;border:none;border-radius:6px;background:#6a48e0;
-color:#fff;font:inherit;font-weight:600;cursor:pointer}
-button:hover{background:#7c5cd6}
-button:focus-visible{outline:2px solid #c9b3ff;outline-offset:2px}
-.err{color:#ff9b91;font-size:13px;margin:10px 0 0}
-.msg{color:#8ce59a;font-size:13px;margin:10px 0 0}
-.alt{margin-top:16px;font-size:12.5px;color:#969696}
-.alt a{color:#c9b3ff;text-decoration:none}
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",sans-serif;
+background:#0a0b0d;color:#eef0f3;display:flex;justify-content:center;padding-top:13vh;margin:0;
+letter-spacing:-.006em;-webkit-font-smoothing:antialiased}
+.card{background:#0c0e10;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:28px 30px;width:344px;
+box-shadow:0 24px 70px -24px rgba(0,0,0,.7)}
+.logo{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-size:19px;line-height:1;
+background:linear-gradient(160deg,#ffcf85,#f5a623 55%%,#d3861a);
+box-shadow:0 1px 0 rgba(255,255,255,.35) inset,0 3px 10px -2px rgba(245,166,35,.45);margin-bottom:16px}
+h1{font-size:18px;font-weight:640;letter-spacing:-.02em;margin:0 0 18px}
+label{display:block;font-size:12px;color:#9aa0a9;margin:14px 0 5px;font-weight:500}
+input{width:100%%;box-sizing:border-box;height:38px;padding:0 12px;border-radius:8px;
+border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:#eef0f3;font:inherit;font-size:14px;outline:none}
+input:focus-visible{outline:2px solid #f5a623;outline-offset:1px;border-color:#f5a623}
+button{margin-top:20px;width:100%%;height:40px;border:none;border-radius:8px;background:#f5a623;
+color:#241704;font:inherit;font-size:14px;font-weight:600;cursor:pointer}
+button:hover{background:#ffcf85}
+button:focus-visible{outline:2px solid #ffcf85;outline-offset:2px}
+.err{color:#ff9b91;font-size:13px;margin:12px 0 0}
+.msg{color:#6fd699;font-size:13px;margin:12px 0 0}
+.alt{margin-top:16px;font-size:12.5px;color:#868b93}
+.alt a{color:#ffcf85;text-decoration:none}
 .alt a:hover{text-decoration:underline}
-code{background:#1e1e1e;padding:2px 6px;border-radius:4px}
-</style></head><body><div class="card"><h1>%s</h1>%s</div></body></html>`,
+code{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);padding:2px 6px;border-radius:5px;
+font-family:ui-monospace,Menlo,monospace}
+</style></head><body><div class="card"><div class="logo">🐻</div><h1>%s</h1>%s</div></body></html>`,
 		html.EscapeString(title), html.EscapeString(title), body)
 }
 
@@ -598,13 +604,13 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 	if a.AllowSignup {
 		note := ""
 		if len(a.AllowedDomains) > 0 {
-			note = ` <span style="color:#969696">(` + html.EscapeString(a.domainList()) + ` only)</span>`
+			note = ` <span style="color:#868b93">(` + html.EscapeString(a.domainList()) + ` only)</span>`
 		}
 		signup = fmt.Sprintf(`<p class="alt">No account? <a href="/auth/signup?next=%s">Sign up</a>%s</p>`, url.QueryEscape(next), note)
 	}
 	brand := ""
 	if a.Brand != "" {
-		brand = `<p class="alt" style="margin:0 0 14px;color:#aaa">` + html.EscapeString(a.Brand) + `</p>`
+		brand = `<p class="alt" style="margin:0 0 14px;color:#9aa0a9">` + html.EscapeString(a.Brand) + `</p>`
 	}
 	authPage(w, "Sign in", brand+inviteBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
 %s<p class="alt"><a href="/auth/reset">Forgot password?</a></p>`,
@@ -653,7 +659,7 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	brand := ""
 	if a.Brand != "" {
-		brand = `<p class="alt" style="margin:0 0 14px;color:#aaa">` + html.EscapeString(a.Brand) + `</p>`
+		brand = `<p class="alt" style="margin:0 0 14px;color:#9aa0a9">` + html.EscapeString(a.Brand) + `</p>`
 	}
 	authPage(w, "Create account", brand+inviteBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/signup?next=%s">%s%s%s%s%s<button>Sign up</button></form>
 <p class="alt">Have an account? <a href="/auth/login?next=%s">Sign in</a></p>`,
