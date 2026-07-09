@@ -31,6 +31,7 @@ type webConfig struct {
 	Upload     *bool  `json:"upload,omitempty"`
 	UploadTTL  string `json:"upload_ttl,omitempty"`  // duration, e.g. "15m"
 	ProjectsDB string `json:"projects_db,omitempty"` // hub project registry path
+	ShareRPM   int    `json:"share_rpm,omitempty"`   // per-IP rate on /s/* (default 120/min)
 	// Auth tunes the hub's (always-on) authentication; hubs require
 	// sign-in unconditionally, only these knobs are optional.
 	Auth *struct {
@@ -151,8 +152,9 @@ credentials); otherwise it is relayed through this server.`,
 			}
 
 			srv := &webapp.Server{
-				Refresh: refresh,
-				Upload:  webapp.UploadConfig{Enabled: upload, TTL: uploadTTL},
+				Refresh:  refresh,
+				Upload:   webapp.UploadConfig{Enabled: upload, TTL: uploadTTL},
+				ShareRPM: cfg.ShareRPM,
 			}
 			var display string
 			if dir != "" {

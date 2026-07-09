@@ -76,6 +76,12 @@ type Server struct {
 	// Quota, when set, enforces plan limits (managed deployments). Nil
 	// means UnlimitedQuota: the open-source server never says no.
 	Quota QuotaProvider
+	// ShareRPM is the per-IP request rate on public share links (/s/*);
+	// 0 means DefaultShareRPM.
+	ShareRPM int
+
+	shareLimOnce sync.Once
+	shareLim     *rateLimiter
 
 	volOnce sync.Once
 	vol     *volume

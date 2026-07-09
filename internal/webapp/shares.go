@@ -255,6 +255,10 @@ func shareJSON(r *http.Request, sh Share) map[string]any {
 // handleShared serves a share link: public, sandboxed, always the latest
 // synced content.
 func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
+	if !s.shareLimiter().allow(clientIP(r)) {
+		http.Error(w, "too many requests — slow down", http.StatusTooManyRequests)
+		return
+	}
 	sh, ok := s.Shares.Get(r.PathValue("token"))
 	if !ok {
 		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
@@ -336,4 +340,9 @@ pre code{padding:0;background:none}
 img{max-width:100%%}
 blockquote{margin:0;padding-left:16px;border-left:3px solid #d0d7de;color:#57606a}
 table{border-collapse:collapse}td,th{border:1px solid #d0d7de;padding:5px 10px}
-</style></head><body>%s</body></html>`
+footer.bdrive{margin-top:64px;padding-top:14px;border-top:1px solid #d0d7de;font-size:12.5px;color:#57606a}
+footer.bdrive a{color:inherit}
+@media (prefers-color-scheme: dark){footer.bdrive{border-color:#3a3a44;color:#888}}
+</style></head><body>%s
+<footer class="bdrive">Shared with <a href="https://github.com/runbear-io/beardrive" rel="noopener">BearDrive</a> — synced files for AI agent teams</footer>
+</body></html>`
