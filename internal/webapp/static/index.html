@@ -14,7 +14,8 @@
     <span id="vault-name">…</span>
     <div class="vault-actions">
       <button id="adminbar" class="adminbar" hidden></button>
-      <a id="signout" href="/auth/logout" hidden title="Sign out">⏻</a>
+      <button id="settings-btn" class="icon-btn2" hidden title="Manage organization">⚙</button>
+      <a id="signout" href="/auth/logout" hidden title="Sign out" aria-label="Sign out">⏻</a>
     </div>
   </header>
   <nav id="projects" aria-label="Projects" hidden></nav>
@@ -37,12 +38,12 @@
     <a id="download" class="btn" hidden download>Download</a>
   </header>
   <article id="content" class="markdown">
-    <div class="empty">Select a file from the sidebar</div>
+    <div class="empty">Select a file to read it.</div>
   </article>
 </main>
 <div id="palette-overlay" hidden>
   <div id="palette" role="dialog" aria-label="Search and quick actions">
-    <input id="palette-input" type="text" placeholder="Search files, projects, actions…"
+    <input id="palette-input" type="text" placeholder="Search file names, projects, actions…"
            autocomplete="off" spellcheck="false">
     <ul id="palette-results"></ul>
     <footer id="palette-hint">↑↓ navigate · ⏎ select · esc close</footer>

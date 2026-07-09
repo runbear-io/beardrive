@@ -152,6 +152,7 @@ body {
 .hact { margin-left: auto; }
 .hact a { color: var(--accent); text-decoration: none; margin-left: 8px; }
 .empty { color: var(--text-faint); text-align: center; margin-top: 20vh; }
+.empty-hint { font-size: 12px; color: var(--text-faint); }
 
 /* ---- command palette (⌘K) ---- */
 #palette-overlay[hidden] { display: none; }
@@ -224,6 +225,8 @@ body {
 .vault-actions { display: flex; align-items: center; gap: 8px; }
 .adminbar { border: none; cursor: pointer; font: inherit; font-size: 11.5px; padding: 2px 8px; border-radius: 5px; background: #4a3a12; color: #f5c451; }
 .adminbar:hover { background: #5c4816; }
+.icon-btn2 { border: none; background: transparent; color: var(--text-faint); font-size: 15px; cursor: pointer; padding: 0 2px; line-height: 1; }
+.icon-btn2:hover { color: var(--text); }
 
 /* ---- topbar controls ---- */
 .icon-btn { display: none; border: none; background: transparent; color: var(--text-dim); font-size: 18px; cursor: pointer; padding: 2px 6px; border-radius: 5px; }
@@ -267,6 +270,14 @@ body {
 .ai-del:hover { background: #4a2420; color: #ff7b72; }
 .admin-empty { padding: 14px 12px; color: var(--text-faint); font-size: 13px; }
 
+/* ---- modal ---- */
+.modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 150; padding: 20px; }
+.modal { background: var(--bg-side); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: min(460px, 100%); box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.modal h3 { margin: 0 0 10px; font-size: 17px; }
+.modal p { margin: 0 0 16px; font-size: 13.5px; color: var(--text-dim); }
+.modal-url { font: 12px var(--mono, ui-monospace, Menlo, monospace); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 9px 11px; color: var(--text-dim); word-break: break-all; margin-bottom: 16px; }
+.modal-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
 /* ---- toast ---- */
 #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--bg-active); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 10px 18px; font-size: 13.5px; box-shadow: 0 8px 30px rgba(0,0,0,.5); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 200; }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -287,7 +298,13 @@ body {
   #search-btn kbd { display: none; }
   #search-btn { font-size: 0; gap: 0; padding: 4px 9px; }
   #search-btn::before { content: "🔍"; font-size: 14px; }
+  /* The per-file action buttons overflow a phone header; on mobile they
+     live in the ⌘K palette instead (which offers all of them), so the bar
+     stays to Menu · crumb · Search. */
+  #share-btn, #history-btn, #upload-btn, #download { display: none !important; }
+  #meta { display: none; }
   .markdown, .admin, .onboard, .history { max-width: 100%; }
+  .markdown table, pre.plain { display: block; overflow-x: auto; max-width: 100%; }
   .ob-row { flex-direction: column; }
 }
 

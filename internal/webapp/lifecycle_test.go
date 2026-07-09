@@ -132,3 +132,28 @@ func TestMemberManagementHTTP(t *testing.T) {
 		}
 	}
 }
+
+// A joined invite bumps its use counter, visible in the owner's invite list.
+func TestInviteUseCounter(t *testing.T) {
+	h, _, alice, bob, pa := orgHubSrv(t)
+	rec := doAs(t, h, "POST", "/api/orgs/"+pa.Org+"/invites", nil, alice)
+	var inv struct{ Token string }
+	mustJSON(t, rec, &inv)
+	doAs(t, h, "POST", "/api/invites/"+inv.Token, nil, bob)
+
+	rec = doAs(t, h, "GET", "/api/orgs/"+pa.Org+"/invites", nil, alice)
+	var out struct {
+		Invites []struct {
+			Token   string `json:"token"`
+			Uses    int    `json:"uses"`
+			Creator string `json:"creator"`
+		} `json:"invites"`
+	}
+	mustJSON(t, rec, &out)
+	if len(out.Invites) != 1 || out.Invites[0].Uses != 1 {
+		t.Fatalf("invite uses = %+v, want 1 join recorded", out.Invites)
+	}
+	if out.Invites[0].Creator == "" {
+		t.Fatal("invite list should carry the creator")
+	}
+}

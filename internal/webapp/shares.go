@@ -339,7 +339,8 @@ code{background:#f6f8fa;padding:2px 5px;border-radius:4px;font-size:.9em}
 pre code{padding:0;background:none}
 img{max-width:100%%}
 blockquote{margin:0;padding-left:16px;border-left:3px solid #d0d7de;color:#57606a}
-table{border-collapse:collapse}td,th{border:1px solid #d0d7de;padding:5px 10px}
+table{border-collapse:collapse;display:block;overflow-x:auto;max-width:100%%}td,th{border:1px solid #d0d7de;padding:5px 10px}
+pre{max-width:100%%}
 footer.bdrive{margin-top:64px;padding-top:14px;border-top:1px solid #d0d7de;font-size:12.5px;color:#57606a}
 footer.bdrive a{color:inherit}
 @media (prefers-color-scheme: dark){footer.bdrive{border-color:#3a3a44;color:#888}}

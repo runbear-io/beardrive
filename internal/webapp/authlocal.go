@@ -491,6 +491,15 @@ func (a *BuiltinAuth) startSession(w http.ResponseWriter, userID string) error {
 	return nil
 }
 
+// inviteBanner shows an invitation cue when the post-login destination is a
+// join link, so a visitor who clicked an invite knows why they're here.
+func inviteBanner(next string) string {
+	if !strings.Contains(next, "join/") && !strings.Contains(next, "join%2F") {
+		return ""
+	}
+	return `<p class="msg" style="margin:0 0 14px">You've been invited to a team. Sign in (or sign up) to accept.</p>`
+}
+
 // safeNext keeps post-login redirects on this site.
 func safeNext(next string) string {
 	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
@@ -565,7 +574,7 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 	if a.Brand != "" {
 		brand = `<p class="alt" style="margin:0 0 14px;color:#aaa">` + html.EscapeString(a.Brand) + `</p>`
 	}
-	authPage(w, "Sign in", brand+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
+	authPage(w, "Sign in", brand+inviteBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
 %s<p class="alt"><a href="/auth/reset">Forgot password?</a></p>`,
 		url.QueryEscape(next),
 		field("Email", "email", "email", r.FormValue("email")),
@@ -604,11 +613,22 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 		}
 		errMsg = `<p class="err">` + html.EscapeString(err.Error()) + `</p>`
 	}
-	authPage(w, "Create account", fmt.Sprintf(`<form method="post" action="/auth/signup?next=%s">%s%s%s%s<button>Sign up</button></form>
+	// State the domain restriction up front, where the stranger types their
+	// email — not only after a rejected submit.
+	domainNote := ""
+	if len(a.AllowedDomains) > 0 {
+		domainNote = `<p class="alt" style="margin:2px 0 0">Only ` + html.EscapeString(a.domainList()) + ` email addresses can sign up here.</p>`
+	}
+	brand := ""
+	if a.Brand != "" {
+		brand = `<p class="alt" style="margin:0 0 14px;color:#aaa">` + html.EscapeString(a.Brand) + `</p>`
+	}
+	authPage(w, "Create account", brand+inviteBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/signup?next=%s">%s%s%s%s%s<button>Sign up</button></form>
 <p class="alt">Have an account? <a href="/auth/login?next=%s">Sign in</a></p>`,
 		url.QueryEscape(next),
 		field("Name", "name", "text", r.FormValue("name")),
 		field("Email", "email", "email", r.FormValue("email")),
+		domainNote,
 		field("Password (min 8 chars)", "password", "password", ""),
 		errMsg, url.QueryEscape(next)))
 }

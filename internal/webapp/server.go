@@ -380,18 +380,29 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// Tell the frontend whether self-signup is offered and whether the
 	// signed-in user is a hub admin, so it can hide the "Sign up" link and
 	// show the admin surfaces. Never leak more than these booleans.
+	me := s.requestUser(r)
+	brand := ""
 	if a := s.builtinAuth(); a != nil {
 		auth["allow_signup"] = a.AllowSignup
-		auth["admin"] = s.requestUser(r).Admin
+		auth["admin"] = me.Admin
+		brand = a.Brand
 	}
-	writeJSON(w, map[string]any{
+	if brand == "" {
+		brand = s.Volume
+	}
+	out := map[string]any{
 		"mode":   mode,
 		"volume": s.Volume,
+		"brand":  brand,
 		"upload": map[string]any{
 			"enabled": s.Upload.Enabled,
 		},
 		"auth": auth,
-	})
+	}
+	if me.Email != "" {
+		out["me"] = map[string]string{"email": me.Email, "name": me.Name}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {

@@ -43,6 +43,18 @@ type OrgInvite struct {
 	Creator string    `json:"creator,omitempty"` // account email
 	Created time.Time `json:"created"`
 	Expires time.Time `json:"expires"`
+	Uses    int       `json:"uses"` // how many accounts have joined via this link
+}
+
+// RecordInviteUse bumps the join counter for an invite (best effort).
+func (db *OrgDB) RecordInviteUse(token string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if inv, ok := db.invites[token]; ok {
+		inv.Uses++
+		db.invites[token] = inv
+		db.save()
+	}
 }
 
 func (i OrgInvite) expired() bool { return time.Now().After(i.Expires) }
@@ -500,7 +512,7 @@ func (s *Server) handleInviteList(w http.ResponseWriter, r *http.Request) {
 	for _, inv := range invs {
 		out = append(out, map[string]any{
 			"token": inv.Token, "url": requestBaseURL(r) + "/#join/" + inv.Token,
-			"creator": inv.Creator, "created": inv.Created, "expires": inv.Expires,
+			"creator": inv.Creator, "created": inv.Created, "expires": inv.Expires, "uses": inv.Uses,
 		})
 	}
 	writeJSON(w, map[string]any{"invites": out})
@@ -581,9 +593,13 @@ func (s *Server) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	newMember := org.Members[normEmail(me.Email)] == ""
 	if err := s.Orgs.AddMember(inv.Org, me.Email, RoleMember); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if newMember {
+		s.Orgs.RecordInviteUse(r.PathValue("token"))
 	}
 	writeJSON(w, map[string]any{"ok": true, "org": map[string]string{"id": org.ID, "name": org.Name}})
 }

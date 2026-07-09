@@ -18,6 +18,7 @@ let projects = [];
 let currentProject = null; // hub mode: the selected project
 let apiBase = "api/";      // volume-scoped endpoint prefix
 let orgs = [];             // hub mode: the orgs this account belongs to
+let joinedOrgId = null;    // org just joined via an invite this page-load
 
 const fileURL = (p) => apiBase + "file?path=" + encodeURIComponent(p);
 
@@ -50,7 +51,7 @@ async function boot() {
   try {
     serverConfig = await getJSON("api/config");
   } catch { /* non-fatal */ }
-  document.title = (serverConfig.volume || "beardrive") + " — BearDrive";
+  document.title = serverConfig.brand || serverConfig.volume || "BearDrive";
   if (serverConfig.auth && serverConfig.auth.enabled) $("signout").hidden = false;
   if (serverConfig.mode === "hub") {
     await acceptInviteFromHash();
@@ -58,9 +59,13 @@ async function boot() {
     await loadProjects();
     updateAdminBar();
     const { project, path } = parseHash();
-    const proj = projects.find((x) => x.id === project) || projects[0];
+    // After accepting an invite, open a project in the org you just joined
+    // rather than whatever happened to be first.
+    const proj = projects.find((x) => x.id === project)
+      || (joinedOrgId && projects.find((x) => x.org === joinedOrgId))
+      || projects[0];
     if (proj) selectProject(proj, path);
-    else { $("vault-name").textContent = serverConfig.volume || "BearDrive"; showEmptyState(); }
+    else { $("vault-name").textContent = serverConfig.volume || "BearDrive"; updateOrgBar(); showEmptyState(); }
     setInterval(loadProjects, 30000); // pick up new projects
   } else {
     $("vault-name").textContent = serverConfig.volume || "BearDrive";
@@ -117,7 +122,7 @@ function selectProject(p, path) {
   $("crumb").textContent = "";
   $("meta").textContent = "";
   $("download").hidden = true;
-  $("content").innerHTML = `<div class="empty">Select a file from the sidebar</div>`;
+  $("content").innerHTML = `<div class="empty">Select a file to read it.<br><span class="empty-hint">On a phone, tap ☰ to browse.</span></div>`;
   loadProjects(); // refresh active highlight
   updateOrgBar();
   initUpload();
@@ -139,6 +144,7 @@ async function acceptInviteFromHash() {
   try {
     const out = await postJSON("api/invites/" + m[1]); // may redirect to login (401)
     location.hash = "";
+    joinedOrgId = out.org && out.org.id;
     toast("Welcome — you joined “" + out.org.name + "”.");
   } catch (e) {
     if (String(e.message).includes("signing in")) throw e; // redirecting; stop boot
@@ -214,6 +220,16 @@ function currentOrg() {
    and owners get an Invite button that mints a join link. */
 function updateOrgBar() {
   const bar = $("orgbar"), org = currentOrg();
+  // The top-of-sidebar gear is the always-visible admin entry point: any
+  // account that owns an org (or is a hub admin) gets it, whatever project
+  // is open.
+  const owned = orgs.find((o) => o.role === "owner");
+  const gear = $("settings-btn");
+  if (gear) {
+    const target = (org && org.role === "owner") ? org : owned;
+    gear.hidden = !target;
+    gear.onclick = () => showOrgAdmin(target);
+  }
   if (!org) { bar.hidden = true; return; }
   bar.hidden = false;
   const nm = $("org-name");
@@ -255,10 +271,12 @@ async function showOrgAdmin(org) {
   // Members
   el(panel, "h3", null, "Members");
   const mlist = el(panel, "div", "admin-list");
+  const myEmail = (serverConfig.me && serverConfig.me.email) || "";
   for (const m of org.members) {
     const row = el(mlist, "div", "admin-item");
-    el(row, "span", "ai-main", m.email);
-    if (owner) {
+    const isSelf = myEmail && m.email.toLowerCase() === myEmail.toLowerCase();
+    el(row, "span", "ai-main", m.email + (isSelf ? "  (you)" : ""));
+    if (owner && !isSelf) {
       const sel = document.createElement("select");
       for (const r of ["owner", "member"]) {
         const o = document.createElement("option"); o.value = r; o.textContent = r;
@@ -333,7 +351,10 @@ async function showOrgAdmin(org) {
       main.style.cursor = "pointer";
       main.title = "Copy";
       main.onclick = () => { navigator.clipboard.writeText(inv.url).then(() => toast("Copied.")); };
-      el(row, "span", "ai-tag", "expires " + new Date(inv.expires).toLocaleDateString());
+      const meta = (inv.creator ? "by " + inv.creator + " · " : "") +
+        (inv.uses ? inv.uses + " joined · " : "unused · ") +
+        "expires " + new Date(inv.expires).toLocaleDateString();
+      el(row, "span", "ai-tag", meta);
       const rv = el(row, "button", "ai-del", "Revoke");
       rv.onclick = async () => {
         try { await api("DELETE", "api/orgs/" + org.id + "/invites/" + inv.token); toast("Revoked."); showOrgAdmin(currentOrg()); }
@@ -353,9 +374,13 @@ async function showOrgAdmin(org) {
       const main = el(row, "span", "ai-main mono", sh.path);
       main.title = sh.url; main.style.cursor = "pointer";
       main.onclick = () => window.open(sh.url, "_blank");
-      el(row, "span", "ai-tag", sh.project_name || "");
+      const meta = (sh.project_name || "") +
+        (sh.creator ? " · by " + sh.creator : "") +
+        (sh.created ? " · " + new Date(sh.created).toLocaleDateString() : "");
+      el(row, "span", "ai-tag", meta);
       const rv = el(row, "button", "ai-del", "Revoke");
       rv.onclick = async () => {
+        if (!confirm("Revoke the public link to “" + sh.path + "”? Anyone with the URL will lose access.")) return;
         try { await api("DELETE", "api/shares/" + sh.token); toast("Share revoked."); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); }
       };
@@ -597,6 +622,37 @@ function openWikilink(target) {
   if (hit) openFile(hit.path);
 }
 
+/* A clear, explicitly-public share confirmation: warns that anyone with the
+   link can view, and offers copy / open / revoke. */
+function showShareDialog(url, copied) {
+  const back = document.createElement("div");
+  back.className = "modal-back";
+  back.innerHTML = `
+    <div class="modal">
+      <h3>🔗 Public link created</h3>
+      <p><b>Anyone with this link can view this file</b> — no account needed. It always shows the latest version until you revoke it.</p>
+      <div class="modal-url"></div>
+      <div class="modal-actions">
+        <button class="pbtn" data-a="copy">${copied ? "Copied ✓" : "Copy link"}</button>
+        <button class="ai-btn" data-a="open">Open</button>
+        <button class="ai-del" data-a="revoke">Revoke</button>
+        <button class="ai-btn" data-a="close">Done</button>
+      </div>
+    </div>`;
+  back.querySelector(".modal-url").textContent = url;
+  const close = () => back.remove();
+  back.onclick = (e) => { if (e.target === back) close(); };
+  const token = url.split("/s/")[1];
+  back.querySelector('[data-a="copy"]').onclick = () => navigator.clipboard.writeText(url).then(() => toast("Copied."));
+  back.querySelector('[data-a="open"]').onclick = () => window.open(url, "_blank");
+  back.querySelector('[data-a="close"]').onclick = close;
+  back.querySelector('[data-a="revoke"]').onclick = async () => {
+    try { await api("DELETE", "api/shares/" + token); toast("Link revoked — it no longer works."); close(); }
+    catch (e) { toast(e.message, true); }
+  };
+  document.body.appendChild(back);
+}
+
 function join(dir, rel) {
   const parts = (dir ? dir.split("/") : []).concat(rel.split("/"));
   const out = [];
@@ -623,18 +679,13 @@ function updateShareButton() {
       });
       if (!r.ok) throw new Error(await r.text());
       const share = await r.json();
-      let copied = "";
+      let copied = false;
       if (navigator.clipboard) {
-        try { await navigator.clipboard.writeText(share.url); copied = " (copied)"; } catch { /* http origin */ }
+        try { await navigator.clipboard.writeText(share.url); copied = true; } catch { /* http origin */ }
       }
-      $("meta").innerHTML = "";
-      const a = document.createElement("a");
-      a.href = share.url;
-      a.target = "_blank";
-      a.textContent = share.url;
-      $("meta").append("public link: ", a, copied);
+      showShareDialog(share.url, copied);
     } catch (err) {
-      $("meta").textContent = "Share failed: " + err.message;
+      toast("Share failed: " + err.message, true);
     }
   };
 }
