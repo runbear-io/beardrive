@@ -135,6 +135,41 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 	return p, true, nil
 }
 
+// Rename changes a project's display name (its id and storage are permanent).
+func (db *ProjectDB) Rename(id, name string) error {
+	name = trimName(name)
+	if name == "" {
+		return fmt.Errorf("project name must not be empty")
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	for _, other := range db.byID {
+		if other.ID != id && other.Name == name && other.Org == p.Org {
+			return fmt.Errorf("a project named %q already exists in this organization", name)
+		}
+	}
+	p.Name = name
+	db.byID[id] = p
+	return db.save()
+}
+
+// Delete removes a project from the registry. Its storage prefix (blobs,
+// journals) is left in the object store — the id is retired, not scrubbed —
+// so the caller decides whether to reclaim that space out of band.
+func (db *ProjectDB) Delete(id string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if _, ok := db.byID[id]; !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	delete(db.byID, id)
+	return db.save()
+}
+
 // SetOrg moves a project into an org (used by the startup migration).
 func (db *ProjectDB) SetOrg(id, org string) error {
 	db.mu.Lock()

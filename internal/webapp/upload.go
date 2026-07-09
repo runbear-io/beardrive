@@ -33,8 +33,10 @@ import (
 // journal an op whose blob is not already in the store.
 
 // Uploader is implemented by sources that accept writes through the server.
+// who is the signed-in account the write should be attributed to (zero when
+// auth is off).
 type Uploader interface {
-	Upload(ctx context.Context, path string, r io.Reader, size int64) error
+	Upload(ctx context.Context, path string, r io.Reader, size int64, who User) error
 }
 
 // DirectUploader is additionally implemented by sources whose storage can
@@ -43,7 +45,7 @@ type DirectUploader interface {
 	Uploader
 	SignBlobPut(ctx context.Context, blob string, size int64, ttl time.Duration) (*remote.SignedPut, error)
 	HasBlob(ctx context.Context, blob string) (bool, error)
-	Commit(ctx context.Context, path, blob string, size int64) error
+	Commit(ctx context.Context, path, blob string, size int64, who User) error
 }
 
 // ---- RemoteSource: writes go to the object store + our own journal ----
@@ -63,7 +65,7 @@ func (r *RemoteSource) HasBlob(ctx context.Context, blob string) (bool, error) {
 
 // Upload stores content through the server: spool to disk while hashing,
 // push the blob, then journal the op.
-func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ int64) error {
+func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ int64, who User) error {
 	tmp, err := os.CreateTemp("", ".bdrive-tmp-upload-")
 	if err != nil {
 		return err
@@ -83,7 +85,7 @@ func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ in
 	if err := r.Backend.Put(ctx, "blobs/"+blob, tmp, size); err != nil {
 		return fmt.Errorf("push blob: %w", err)
 	}
-	return r.Commit(ctx, p, blob, size)
+	return r.Commit(ctx, p, blob, size, who)
 }
 
 // Commit appends a put op for path→blob to this server's own journal. It
@@ -91,7 +93,7 @@ func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ in
 // whose content is missing). Only this server writes this journal key, so
 // the read-modify-write below has a single writer; upmu serializes it across
 // concurrent requests.
-func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64) error {
+func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, who User) error {
 	if r.Device.ID == "" {
 		return fmt.Errorf("no device identity configured for uploads")
 	}
@@ -120,6 +122,7 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64) e
 	op := journal.Op{
 		Seq: mySeq + 1, Lamport: maxLamport + 1, Time: time.Now().UTC(),
 		Device: r.Device.ID, DeviceName: r.Device.Name, Author: r.Device.Author,
+		User: who.Email, UserName: who.Name,
 		Kind: journal.KindPut, Path: p, Blob: blob, Size: size, Mode: 0o644,
 	}
 
@@ -156,7 +159,7 @@ var errBlobMissing = fmt.Errorf("content not uploaded yet")
 // Upload writes the file atomically under Root. There is no journal here;
 // on a mounted folder the daemon scans, journals, and syncs it like any
 // local edit.
-func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64) error {
+func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, _ User) error {
 	dst := filepath.Join(d.Root, filepath.FromSlash(p))
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
@@ -296,7 +299,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := up.Upload(r.Context(), p, r.Body, r.ContentLength); err != nil {
+	if err := up.Upload(r.Context(), p, r.Body, r.ContentLength, s.requestUser(r)); err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -327,7 +330,7 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := direct.Commit(r.Context(), req.Path, req.SHA256, req.Size); err != nil {
+	if err := direct.Commit(r.Context(), req.Path, req.SHA256, req.Size, s.requestUser(r)); err != nil {
 		code := http.StatusBadGateway
 		if err == errBlobMissing {
 			code = http.StatusConflict

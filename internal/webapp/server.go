@@ -82,6 +82,8 @@ type Server struct {
 
 	shareLimOnce sync.Once
 	shareLim     *rateLimiter
+	authLimOnce  sync.Once
+	authLim      *rateLimiter
 
 	volOnce sync.Once
 	vol     *volume
@@ -326,8 +328,21 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	mux.HandleFunc("GET /api/orgs", s.handleOrgList)
+	mux.HandleFunc("PATCH /api/orgs/{org}", s.handleOrgRename)
 	mux.HandleFunc("POST /api/orgs/{org}/invites", s.handleInviteCreate)
+	mux.HandleFunc("GET /api/orgs/{org}/invites", s.handleInviteList)
+	mux.HandleFunc("DELETE /api/orgs/{org}/invites/{token}", s.handleInviteRevoke)
+	mux.HandleFunc("PATCH /api/orgs/{org}/members/{email}", s.handleMemberUpdate)
+	mux.HandleFunc("DELETE /api/orgs/{org}/members/{email}", s.handleMemberRemove)
+	mux.HandleFunc("GET /api/orgs/{org}/shares", s.handleOrgShares)
 	mux.HandleFunc("POST /api/invites/{token}", s.handleInviteAccept)
+
+	mux.HandleFunc("PATCH /api/projects/{project}", s.handleProjectRename)
+	mux.HandleFunc("DELETE /api/projects/{project}", s.handleProjectDelete)
+
+	mux.HandleFunc("GET /api/admin/pending", s.handleAdminPending)
+	mux.HandleFunc("POST /api/admin/pending/{id}/approve", s.handleAdminApprove)
+	mux.HandleFunc("POST /api/admin/pending/{id}/deny", s.handleAdminDeny)
 
 	mux.HandleFunc("GET /api/p/{project}/history", proj(s.handleHistory))
 	mux.HandleFunc("GET /api/p/{project}/blob", proj(s.handleBlob))
@@ -348,7 +363,7 @@ func (s *Server) Handler() http.Handler {
 	if s.Auth != nil {
 		s.Auth.Register(mux)
 	}
-	return s.authGate(mux)
+	return s.rateLimitAuth(s.authGate(mux))
 }
 
 // handleConfig tells the client how this server is configured. Deliberately
@@ -361,6 +376,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	auth := map[string]any{"enabled": s.Auth != nil}
 	if s.Auth != nil {
 		auth["cli_login"] = s.Auth.CLILoginPath()
+	}
+	// Tell the frontend whether self-signup is offered and whether the
+	// signed-in user is a hub admin, so it can hide the "Sign up" link and
+	// show the admin surfaces. Never leak more than these booleans.
+	if a := s.builtinAuth(); a != nil {
+		auth["allow_signup"] = a.AllowSignup
+		auth["admin"] = s.requestUser(r).Admin
 	}
 	writeJSON(w, map[string]any{
 		"mode":   mode,

@@ -56,10 +56,11 @@ async function boot() {
     await acceptInviteFromHash();
     await loadOrgs();
     await loadProjects();
+    updateAdminBar();
     const { project, path } = parseHash();
     const proj = projects.find((x) => x.id === project) || projects[0];
     if (proj) selectProject(proj, path);
-    else $("vault-name").textContent = serverConfig.volume || "BearDrive";
+    else { $("vault-name").textContent = serverConfig.volume || "BearDrive"; showEmptyState(); }
     setInterval(loadProjects, 30000); // pick up new projects
   } else {
     $("vault-name").textContent = serverConfig.volume || "BearDrive";
@@ -81,6 +82,19 @@ async function loadProjects() {
   const nav = $("projects");
   nav.hidden = false;
   nav.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "nav-head";
+  head.innerHTML = `<span>Projects</span>`;
+  const add = document.createElement("button");
+  add.className = "nav-add";
+  add.title = "New project";
+  add.textContent = "+";
+  add.onclick = () => {
+    const name = prompt("New project name:");
+    if (name) createProject(name.trim());
+  };
+  head.appendChild(add);
+  nav.appendChild(head);
   const ul = document.createElement("ul");
   for (const p of projects) {
     const li = document.createElement("li");
@@ -89,8 +103,7 @@ async function loadProjects() {
     row.textContent = p.name;
     row.title = p.id;
     row.onclick = () => selectProject(p, null);
-    li.appendChild(row);
-    ul.appendChild(li);
+    ul.appendChild(li).appendChild(row);
   }
   nav.appendChild(ul);
 }
@@ -116,16 +129,73 @@ function selectProject(p, path) {
 
 /* ---- hub: organizations ---- */
 
-/* Opening "#join/<token>" while signed in joins the invite's org. */
+/* Opening "#join/<token>" joins the invite's org. If the visitor isn't
+   signed in yet, postJSON's 401 handler sends them to /auth/login with the
+   #join hash intact in `next`, so after signing in they land right back
+   here and the join completes — the token is never lost. */
 async function acceptInviteFromHash() {
   const m = location.hash.match(/^#join\/([0-9a-f]+)$/);
   if (!m) return;
-  location.hash = "";
   try {
-    const out = await postJSON("api/invites/" + m[1]);
-    alert("Welcome — you joined “" + out.org.name + "”.");
+    const out = await postJSON("api/invites/" + m[1]); // may redirect to login (401)
+    location.hash = "";
+    toast("Welcome — you joined “" + out.org.name + "”.");
   } catch (e) {
-    alert("Could not accept the invite: " + e.message);
+    if (String(e.message).includes("signing in")) throw e; // redirecting; stop boot
+    location.hash = "";
+    toast("Could not accept the invite: " + e.message, true);
+  }
+}
+
+/* Onboarding: a signed-in account with no projects shouldn't hit a blank
+   sidebar. Explain that access comes from an invite, let them paste one,
+   and — since any member can — offer to start a new project. */
+function showEmptyState() {
+  $("orgbar").hidden = true;
+  const auth = serverConfig.auth && serverConfig.auth.enabled;
+  $("content").innerHTML = `
+    <div class="onboard">
+      <h1>Welcome to BearDrive</h1>
+      <p>You're signed in, but you're not part of any project yet.</p>
+      ${auth ? `
+      <div class="ob-card">
+        <h3>Have an invite link?</h3>
+        <p>A teammate can send you a join link. Paste it here:</p>
+        <div class="ob-row">
+          <input id="ob-invite" type="text" placeholder="https://…/#join/…" autocomplete="off">
+          <button id="ob-join" class="pbtn">Join</button>
+        </div>
+      </div>` : ``}
+      <div class="ob-card">
+        <h3>Or start a new project</h3>
+        <p>Create a shared space for your team's files.</p>
+        <div class="ob-row">
+          <input id="ob-name" type="text" placeholder="Project name, e.g. wiki" autocomplete="off">
+          <button id="ob-create" class="pbtn">Create</button>
+        </div>
+      </div>
+    </div>`;
+  const join = $("ob-join");
+  if (join) join.onclick = () => {
+    const v = $("ob-invite").value.trim();
+    const m = v.match(/#join\/([0-9a-f]+)/) || v.match(/^([0-9a-f]{8,})$/);
+    if (!m) { toast("That doesn't look like an invite link.", true); return; }
+    location.hash = "join/" + m[1];
+    location.reload();
+  };
+  $("ob-create").onclick = () => createProject($("ob-name").value.trim());
+}
+
+async function createProject(name) {
+  if (!name) { toast("Give the project a name.", true); return; }
+  try {
+    const out = await postJSON("api/projects", { name });
+    await loadOrgs();
+    await loadProjects();
+    selectProject(out.project, null);
+    toast("Created “" + out.project.name + "”.");
+  } catch (e) {
+    toast("Could not create the project: " + e.message, true);
   }
 }
 
@@ -146,47 +216,222 @@ function updateOrgBar() {
   const bar = $("orgbar"), org = currentOrg();
   if (!org) { bar.hidden = true; return; }
   bar.hidden = false;
-  $("org-name").textContent = org.name;
-  $("org-name").onclick = () => showMembers(org);
+  const nm = $("org-name");
+  nm.textContent = org.name;
+  nm.title = "Manage organization";
+  nm.onclick = () => showOrgAdmin(org);
   const btn = $("invite-btn");
   btn.hidden = org.role !== "owner";
-  btn.onclick = async () => {
-    try {
-      const out = await postJSON("api/orgs/" + org.id + "/invites");
-      prompt("Anyone who opens this link (and signs in) joins “" + org.name + "”:", out.url);
-    } catch (e) {
-      alert("Could not create an invite: " + e.message);
-    }
-  };
+  btn.textContent = "Manage";
+  btn.onclick = () => showOrgAdmin(org);
 }
 
-function showMembers(org) {
+/* The org admin panel: members (owners can change roles / remove), rename,
+   invite links (create / revoke), and an org-wide audit of public shares. */
+async function showOrgAdmin(org) {
   currentPath = null;
   markActive();
-  $("crumb").textContent = org.name + " — members";
+  closeSidebarOnMobile();
+  $("crumb").textContent = org.name;
   $("meta").textContent = "";
-  $("download").hidden = true;
+  $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = true;
+  const owner = org.role === "owner";
   const box = $("content");
-  box.innerHTML = "";
-  const list = document.createElement("div");
-  list.className = "history";
-  for (const m of org.members) {
-    const row = document.createElement("div");
-    row.className = "hentry";
-    const line = document.createElement("div");
-    line.className = "hline";
-    const who = document.createElement("span");
-    who.className = "hpath";
-    who.style.cursor = "default";
-    who.textContent = m.email;
-    const role = document.createElement("span");
-    role.className = "htime";
-    role.textContent = m.role;
-    line.append(who, role);
-    row.appendChild(line);
-    list.appendChild(row);
+  box.innerHTML = `<div class="admin"><h1 id="org-title"></h1></div>`;
+  box.querySelector("#org-title").textContent = org.name + (owner ? "" : "  ·  member");
+  const panel = box.querySelector(".admin");
+
+  if (owner) {
+    const rn = el(panel, "div", "admin-row");
+    rn.innerHTML = `<input id="org-rename" type="text" value=""><button class="pbtn" id="org-rename-btn">Rename org</button>`;
+    rn.querySelector("#org-rename").value = org.name;
+    rn.querySelector("#org-rename-btn").onclick = async () => {
+      const name = rn.querySelector("#org-rename").value.trim();
+      try { await api("PATCH", "api/orgs/" + org.id, { name }); toast("Renamed."); await loadOrgs(); refreshAll(); }
+      catch (e) { toast(e.message, true); }
+    };
   }
-  box.appendChild(list);
+
+  // Members
+  el(panel, "h3", null, "Members");
+  const mlist = el(panel, "div", "admin-list");
+  for (const m of org.members) {
+    const row = el(mlist, "div", "admin-item");
+    el(row, "span", "ai-main", m.email);
+    if (owner) {
+      const sel = document.createElement("select");
+      for (const r of ["owner", "member"]) {
+        const o = document.createElement("option"); o.value = r; o.textContent = r;
+        if (m.role === r) o.selected = true; sel.appendChild(o);
+      }
+      sel.onchange = async () => {
+        try { await api("PATCH", "api/orgs/" + org.id + "/members/" + encodeURIComponent(m.email), { role: sel.value }); toast("Role updated."); await loadOrgs(); }
+        catch (e) { toast(e.message, true); showOrgAdmin(currentOrg()); }
+      };
+      row.appendChild(sel);
+      const rm = el(row, "button", "ai-del", "Remove");
+      rm.onclick = async () => {
+        if (!confirm("Remove " + m.email + " from " + org.name + "?")) return;
+        try { await api("DELETE", "api/orgs/" + org.id + "/members/" + encodeURIComponent(m.email)); toast("Removed."); await loadOrgs(); showOrgAdmin(currentOrg()); }
+        catch (e) { toast(e.message, true); }
+      };
+    } else {
+      el(row, "span", "ai-tag", m.role);
+    }
+  }
+
+  if (!owner) return;
+
+  // Projects in this org (rename / delete)
+  el(panel, "h3", null, "Projects");
+  const plist = el(panel, "div", "admin-list");
+  const orgProjects = projects.filter((p) => p.org === org.id);
+  if (!orgProjects.length) el(plist, "div", "admin-empty", "No projects yet.");
+  for (const p of orgProjects) {
+    const row = el(plist, "div", "admin-item");
+    el(row, "span", "ai-main", p.name);
+    const rn = el(row, "button", "ai-btn", "Rename");
+    rn.onclick = async () => {
+      const name = prompt("Rename project:", p.name);
+      if (!name || name.trim() === p.name) return;
+      try { await api("PATCH", "api/projects/" + p.id, { name: name.trim() }); toast("Renamed."); await loadProjects(); showOrgAdmin(currentOrg()); }
+      catch (e) { toast(e.message, true); }
+    };
+    const del = el(row, "button", "ai-del", "Delete");
+    del.onclick = async () => {
+      if (!confirm("Delete project “" + p.name + "”? Its files stay in storage but it's removed from the hub.")) return;
+      try {
+        await api("DELETE", "api/projects/" + p.id);
+        toast("Deleted “" + p.name + "”.");
+        if (currentProject && currentProject.id === p.id) currentProject = null;
+        await loadProjects();
+        const next = currentOrg();
+        if (next) showOrgAdmin(next); else showEmptyState();
+      } catch (e) { toast(e.message, true); }
+    };
+  }
+
+  // Invites
+  const ih = el(panel, "div", "admin-h");
+  el(ih, "h3", null, "Invite links");
+  const mk = el(ih, "button", "pbtn", "New invite");
+  mk.onclick = async () => {
+    try {
+      const out = await postJSON("api/orgs/" + org.id + "/invites");
+      await navigator.clipboard.writeText(out.url).catch(() => {});
+      toast("Invite link copied to clipboard.");
+      showOrgAdmin(currentOrg());
+    } catch (e) { toast(e.message, true); }
+  };
+  const ilist = el(panel, "div", "admin-list");
+  try {
+    const invs = (await getJSON("api/orgs/" + org.id + "/invites")).invites || [];
+    if (!invs.length) el(ilist, "div", "admin-empty", "No active invite links.");
+    for (const inv of invs) {
+      const row = el(ilist, "div", "admin-item");
+      const main = el(row, "span", "ai-main mono", inv.url);
+      main.style.cursor = "pointer";
+      main.title = "Copy";
+      main.onclick = () => { navigator.clipboard.writeText(inv.url).then(() => toast("Copied.")); };
+      el(row, "span", "ai-tag", "expires " + new Date(inv.expires).toLocaleDateString());
+      const rv = el(row, "button", "ai-del", "Revoke");
+      rv.onclick = async () => {
+        try { await api("DELETE", "api/orgs/" + org.id + "/invites/" + inv.token); toast("Revoked."); showOrgAdmin(currentOrg()); }
+        catch (e) { toast(e.message, true); }
+      };
+    }
+  } catch { /* ignore */ }
+
+  // Org-wide share audit
+  el(panel, "h3", null, "Public share links");
+  const slist = el(panel, "div", "admin-list");
+  try {
+    const shs = (await getJSON("api/orgs/" + org.id + "/shares")).shares || [];
+    if (!shs.length) el(slist, "div", "admin-empty", "No public shares.");
+    for (const sh of shs) {
+      const row = el(slist, "div", "admin-item");
+      const main = el(row, "span", "ai-main mono", sh.path);
+      main.title = sh.url; main.style.cursor = "pointer";
+      main.onclick = () => window.open(sh.url, "_blank");
+      el(row, "span", "ai-tag", sh.project_name || "");
+      const rv = el(row, "button", "ai-del", "Revoke");
+      rv.onclick = async () => {
+        try { await api("DELETE", "api/shares/" + sh.token); toast("Share revoked."); showOrgAdmin(currentOrg()); }
+        catch (e) { toast(e.message, true); }
+      };
+    }
+  } catch { /* ignore */ }
+}
+
+/* small DOM helper */
+function el(parent, tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  parent.appendChild(n);
+  return n;
+}
+
+/* fetch wrapper for methods without a body-returning helper */
+async function api(method, url, body) {
+  const opt = { method };
+  if (body !== undefined) { opt.headers = { "Content-Type": "application/json" }; opt.body = JSON.stringify(body); }
+  const r = await fetch(url, opt);
+  if (!r.ok) throw new Error(await r.text());
+  return r.status === 204 ? {} : r.json();
+}
+
+/* transient toast, replacing blocking alert() */
+let toastTimer = null;
+function toast(msg, isErr) {
+  let t = $("toast");
+  if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.appendChild(t); }
+  t.textContent = msg;
+  t.className = "show" + (isErr ? " err" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, 3200);
+}
+
+/* Admin approval bar: a hub admin sees pending signups to approve/deny. */
+async function updateAdminBar() {
+  const bar = $("adminbar");
+  if (!bar) return;
+  if (!(serverConfig.auth && serverConfig.auth.admin)) { bar.hidden = true; return; }
+  let pending = [];
+  try { pending = (await getJSON("api/admin/pending")).pending || []; } catch { }
+  if (!pending.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.innerHTML = "";
+  const b = el(bar, "button", "adminbar-btn");
+  b.textContent = "⚑ " + pending.length + " pending signup" + (pending.length > 1 ? "s" : "");
+  b.onclick = () => showPending();
+}
+
+async function showPending() {
+  let pending = [];
+  try { pending = (await getJSON("api/admin/pending")).pending || []; } catch { }
+  currentPath = null; markActive();
+  $("crumb").textContent = "Pending signups";
+  $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = true;
+  const box = $("content");
+  box.innerHTML = `<div class="admin"><h1>Pending signups</h1></div>`;
+  const panel = box.querySelector(".admin");
+  const list = el(panel, "div", "admin-list");
+  if (!pending.length) el(list, "div", "admin-empty", "No one is waiting for approval.");
+  for (const u of pending) {
+    const row = el(list, "div", "admin-item");
+    el(row, "span", "ai-main", (u.name ? u.name + "  ·  " : "") + u.email);
+    const ok = el(row, "button", "pbtn", "Approve");
+    ok.onclick = async () => { try { await postJSON("api/admin/pending/" + u.id + "/approve"); toast("Approved " + u.email); updateAdminBar(); showPending(); } catch (e) { toast(e.message, true); } };
+    const no = el(row, "button", "ai-del", "Deny");
+    no.onclick = async () => { try { await postJSON("api/admin/pending/" + u.id + "/deny"); toast("Denied " + u.email); updateAdminBar(); showPending(); } catch (e) { toast(e.message, true); } };
+  }
+}
+
+function refreshAll() {
+  loadProjects();
+  updateOrgBar();
+  if (currentProject) refreshTree();
 }
 
 /* Hash routing: "#<path>" in volume mode, "#<project-id>/<path>" in hub mode. */
@@ -271,6 +516,7 @@ async function openFile(p) {
   currentPath = p;
   setHash(p);
   markActive();
+  closeSidebarOnMobile();
   $("crumb").textContent = p.split("/").join(" / ");
   updateShareButton();
   const dl = $("download");
@@ -738,6 +984,15 @@ $("palette-input").addEventListener("input", (e) => buildPaletteItems(e.target.v
 $("palette-overlay").addEventListener("click", (e) => {
   if (e.target.id === "palette-overlay") paletteClose();
 });
+
+/* Visible search affordance in the top bar → opens the palette. */
+$("search-btn").addEventListener("click", paletteOpen);
+
+/* Mobile: the sidebar is off-canvas; a hamburger toggles it. */
+function toggleSidebar() { document.body.classList.toggle("sb-open"); }
+function closeSidebarOnMobile() { document.body.classList.remove("sb-open"); }
+$("menu-btn").addEventListener("click", toggleSidebar);
+$("sb-backdrop").addEventListener("click", closeSidebarOnMobile);
 
 window.addEventListener("hashchange", () => {
   const { project, path } = parseHash();

@@ -35,9 +35,14 @@ type webConfig struct {
 	// Auth tunes the hub's (always-on) authentication; hubs require
 	// sign-in unconditionally, only these knobs are optional.
 	Auth *struct {
-		AllowSignup *bool  `json:"allow_signup,omitempty"` // default true
-		UsersDB     string `json:"users_db,omitempty"`     // default $BDRIVE_HOME/auth.json
-		SMTP        *struct {
+		AllowSignup         *bool    `json:"allow_signup,omitempty"`         // default true
+		UsersDB             string   `json:"users_db,omitempty"`             // default $BDRIVE_HOME/auth.json
+		AllowedDomains      []string `json:"allowed_domains,omitempty"`      // signup email must match one (e.g. ["runbear.io"])
+		RequireVerification bool     `json:"require_verification,omitempty"` // new accounts verify email before activation
+		RequireApproval     bool     `json:"require_approval,omitempty"`     // new accounts await admin approval
+		Admins              []string `json:"admins,omitempty"`               // hub admin emails (approve users, govern shares)
+		Brand               string   `json:"brand,omitempty"`                // name shown on the sign-in page
+		SMTP                *struct {
 			Host string `json:"host"`
 			Port int    `json:"port"`
 			User string `json:"user,omitempty"`
@@ -231,6 +236,18 @@ credentials); otherwise it is relayed through this server.`,
 				auth, err := webapp.OpenBuiltinAuth(usersDB, allowSignup, mail)
 				if err != nil {
 					return fmt.Errorf("open account registry: %w", err)
+				}
+				if cfg.Auth != nil {
+					auth.AllowedDomains = cfg.Auth.AllowedDomains
+					auth.RequireVerification = cfg.Auth.RequireVerification
+					auth.RequireApproval = cfg.Auth.RequireApproval
+					auth.Brand = cfg.Auth.Brand
+					if len(cfg.Auth.Admins) > 0 {
+						auth.Admins = make(map[string]bool, len(cfg.Auth.Admins))
+						for _, e := range cfg.Auth.Admins {
+							auth.Admins[strings.ToLower(strings.TrimSpace(e))] = true
+						}
+					}
 				}
 				srv.Auth = auth
 				orgs, err := webapp.OpenOrgDB(filepath.Join(filepath.Dir(projectsDB), "orgs.json"))

@@ -18,6 +18,7 @@ type User struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
 	Name  string `json:"name"`
+	Admin bool   `json:"admin,omitempty"` // hub admin (approve users, govern shares)
 }
 
 // AuthProvider is the seam between the server and an identity system.

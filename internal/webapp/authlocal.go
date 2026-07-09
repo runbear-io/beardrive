@@ -29,6 +29,14 @@ type BuiltinAuth struct {
 	AllowSignup bool
 	Mail        *Mailer // nil → reset links go to the server log
 
+	// Public-URL signup gating (all optional; set after Open). A hub reachable
+	// from the internet should use at least one of these.
+	AllowedDomains      []string        // if non-empty, signup email domain must match one
+	RequireVerification bool            // new accounts must click an email link before activation
+	RequireApproval     bool            // new accounts wait for an admin to approve them
+	Admins              map[string]bool // hub admins (lowercase emails): approve users, govern shares
+	Brand               string          // optional name shown on the sign-in page
+
 	path string
 
 	mu     sync.Mutex
@@ -45,8 +53,19 @@ type authUser struct {
 	Email   string    `json:"email"`
 	Name    string    `json:"name"`
 	Pass    string    `json:"pass"` // bcrypt hash
+	Status  string    `json:"status,omitempty"`
 	Created time.Time `json:"created"`
 }
+
+// Account status. Empty is treated as active so accounts created before
+// gating existed keep working.
+const (
+	statusActive     = "active"
+	statusUnverified = "unverified" // awaiting email verification
+	statusPending    = "pending"    // verified (or verification off) but awaiting admin approval
+)
+
+func (u *authUser) active() bool { return u.Status == "" || u.Status == statusActive }
 
 type authToken struct {
 	Hash    string    `json:"hash"` // sha256 of the token; plaintext is never stored
@@ -159,6 +178,9 @@ func (a *BuiltinAuth) signup(email, name, password string) (*authUser, error) {
 	if email == "" || !strings.Contains(email, "@") {
 		return nil, fmt.Errorf("a valid email is required")
 	}
+	if !a.domainAllowed(email) {
+		return nil, fmt.Errorf("this server only accepts %s email addresses", a.domainList())
+	}
 	if name == "" {
 		return nil, fmt.Errorf("a name is required")
 	}
@@ -176,7 +198,7 @@ func (a *BuiltinAuth) signup(email, name, password string) (*authUser, error) {
 	}
 	u := &authUser{
 		ID: "u-" + randHex(4), Email: email, Name: name,
-		Pass: string(hash), Created: time.Now().UTC(),
+		Pass: string(hash), Status: a.initialStatus(), Created: time.Now().UTC(),
 	}
 	a.users[u.ID] = u
 	if err := a.save(); err != nil {
@@ -184,6 +206,59 @@ func (a *BuiltinAuth) signup(email, name, password string) (*authUser, error) {
 		return nil, err
 	}
 	return u, nil
+}
+
+// initialStatus is the account state a new signup starts in, given the
+// server's gating config: verify first, else approve first, else active.
+func (a *BuiltinAuth) initialStatus() string {
+	switch {
+	case a.RequireVerification:
+		return statusUnverified
+	case a.RequireApproval:
+		return statusPending
+	default:
+		return statusActive
+	}
+}
+
+// afterVerify is the state a just-verified account moves to.
+func (a *BuiltinAuth) afterVerify() string {
+	if a.RequireApproval {
+		return statusPending
+	}
+	return statusActive
+}
+
+func emailDomain(email string) string {
+	if i := strings.LastIndex(email, "@"); i >= 0 {
+		return strings.ToLower(email[i+1:])
+	}
+	return ""
+}
+
+func (a *BuiltinAuth) domainAllowed(email string) bool {
+	if len(a.AllowedDomains) == 0 {
+		return true
+	}
+	d := emailDomain(email)
+	for _, allowed := range a.AllowedDomains {
+		if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(allowed), "@"), d) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *BuiltinAuth) domainList() string {
+	parts := make([]string, len(a.AllowedDomains))
+	for i, d := range a.AllowedDomains {
+		parts[i] = "@" + strings.TrimPrefix(strings.TrimSpace(d), "@")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (a *BuiltinAuth) isAdmin(email string) bool {
+	return a.Admins != nil && a.Admins[normEmail(email)]
 }
 
 func (a *BuiltinAuth) verifyPassword(email, password string) *authUser {
@@ -234,10 +309,26 @@ func (a *BuiltinAuth) userForToken(tok string) (User, bool) {
 		return User{}, false
 	}
 	u, ok := a.users[t.User]
-	if !ok {
+	if !ok || !u.active() {
 		return User{}, false
 	}
-	return User{ID: u.ID, Email: u.Email, Name: u.Name}, true
+	return User{ID: u.ID, Email: u.Email, Name: u.Name, Admin: a.isAdmin(u.Email)}, true
+}
+
+// sendVerification emails (or logs) a verification link for the account.
+func (a *BuiltinAuth) sendVerification(r *http.Request, u *authUser) {
+	tok := a.newGrant("verify", u.ID, "", true, 24*time.Hour)
+	link := requestBaseURL(r) + "/auth/verify?token=" + tok
+	subject := "Verify your BearDrive account"
+	body := "Confirm your email to activate your BearDrive account:\n\n  " + link +
+		"\n\nThis link is valid for 24 hours. If you didn't sign up, ignore this email."
+	if a.Mail == nil {
+		fmt.Printf("verification link for %s:\n  %s\n", u.Email, link)
+		return
+	}
+	if err := a.Mail.Send(u.Email, subject, body); err != nil {
+		fmt.Printf("verification link for %s (email not sent: %v):\n  %s\n", u.Email, err, link)
+	}
 }
 
 // grant helpers: single-use codes with expiry.
@@ -284,6 +375,47 @@ func (a *BuiltinAuth) grantDevice(id, userID string) bool {
 	return true
 }
 
+// PendingUsers lists accounts awaiting admin approval, oldest first.
+func (a *BuiltinAuth) PendingUsers() []User {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var us []*authUser
+	for _, u := range a.users {
+		if u.Status == statusPending {
+			us = append(us, u)
+		}
+	}
+	sort.Slice(us, func(i, j int) bool { return us[i].Created.Before(us[j].Created) })
+	out := make([]User, len(us))
+	for i, u := range us {
+		out[i] = User{ID: u.ID, Email: u.Email, Name: u.Name}
+	}
+	return out
+}
+
+// Approve activates a pending account.
+func (a *BuiltinAuth) Approve(id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	u, ok := a.users[id]
+	if !ok {
+		return fmt.Errorf("no such account")
+	}
+	u.Status = statusActive
+	return a.save()
+}
+
+// Deny removes a pending account.
+func (a *BuiltinAuth) Deny(id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.users[id]; !ok {
+		return fmt.Errorf("no such account")
+	}
+	delete(a.users, id)
+	return a.save()
+}
+
 // Accounts returns every account, oldest first (used by the org migration
 // to pick the default org's owner).
 func (a *BuiltinAuth) Accounts() []User {
@@ -291,7 +423,9 @@ func (a *BuiltinAuth) Accounts() []User {
 	defer a.mu.Unlock()
 	users := make([]*authUser, 0, len(a.users))
 	for _, u := range a.users {
-		users = append(users, u)
+		if u.active() {
+			users = append(users, u)
+		}
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i].Created.Before(users[j].Created) })
 	out := make([]User, len(users))
@@ -326,6 +460,7 @@ func (a *BuiltinAuth) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/cli", a.pageCLI)
 	mux.HandleFunc("GET /auth/device", a.pageDevice)
 	mux.HandleFunc("POST /auth/device", a.pageDevice)
+	mux.HandleFunc("GET /auth/verify", a.pageVerify)
 	mux.HandleFunc("GET /auth/reset", a.pageReset)
 	mux.HandleFunc("POST /auth/reset", a.pageReset)
 	mux.HandleFunc("GET /auth/reset/confirm", a.pageResetConfirm)
@@ -400,20 +535,37 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 	var errMsg string
 	if r.Method == http.MethodPost {
 		if u := a.verifyPassword(r.FormValue("email"), r.FormValue("password")); u != nil {
-			if err := a.startSession(w, u.ID); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+			switch u.Status {
+			case statusUnverified:
+				a.sendVerification(r, u)
+				errMsg = `<p class="err">Please verify your email first — we've re-sent the link.</p>`
+			case statusPending:
+				errMsg = `<p class="err">Your account is still awaiting administrator approval.</p>`
+			default:
+				if err := a.startSession(w, u.ID); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				http.Redirect(w, r, next, http.StatusSeeOther)
 				return
 			}
-			http.Redirect(w, r, next, http.StatusSeeOther)
-			return
+		} else {
+			errMsg = `<p class="err">Wrong email or password.</p>`
 		}
-		errMsg = `<p class="err">Wrong email or password.</p>`
 	}
 	signup := ""
 	if a.AllowSignup {
-		signup = fmt.Sprintf(`<p class="alt">No account? <a href="/auth/signup?next=%s">Sign up</a></p>`, url.QueryEscape(next))
+		note := ""
+		if len(a.AllowedDomains) > 0 {
+			note = ` <span style="color:#888">(` + html.EscapeString(a.domainList()) + ` only)</span>`
+		}
+		signup = fmt.Sprintf(`<p class="alt">No account? <a href="/auth/signup?next=%s">Sign up</a>%s</p>`, url.QueryEscape(next), note)
 	}
-	authPage(w, "Sign in", fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
+	brand := ""
+	if a.Brand != "" {
+		brand = `<p class="alt" style="margin:0 0 14px;color:#aaa">` + html.EscapeString(a.Brand) + `</p>`
+	}
+	authPage(w, "Sign in", brand+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
 %s<p class="alt"><a href="/auth/reset">Forgot password?</a></p>`,
 		url.QueryEscape(next),
 		field("Email", "email", "email", r.FormValue("email")),
@@ -432,6 +584,17 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		u, err := a.signup(r.FormValue("email"), r.FormValue("name"), r.FormValue("password"))
 		if err == nil {
+			switch u.Status {
+			case statusUnverified:
+				a.sendVerification(r, u)
+				authPage(w, "Verify your email", `<p class="msg">Almost there — we sent a verification link to <b>`+
+					html.EscapeString(u.Email)+`</b>.</p><p class="alt">Click it to activate your account. No email on this server? The link is in the server log.</p>`)
+				return
+			case statusPending:
+				authPage(w, "Awaiting approval", `<p class="msg">Thanks — your account was created and is waiting for an administrator to approve it.</p>
+<p class="alt">You'll be able to sign in once it's approved.</p>`)
+				return
+			}
 			if err := a.startSession(w, u.ID); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -503,6 +666,36 @@ func (a *BuiltinAuth) pageDevice(w http.ResponseWriter, r *http.Request) {
 	authPage(w, "Connect a device", fmt.Sprintf(`<p>Enter the code shown by <code>bdrive login</code>:</p>
 <form method="post">%s%s<button>Approve</button></form>`,
 		field("Code", "code", "text", code), msg))
+}
+
+// pageVerify activates an account from an email link, then either starts a
+// session (or explains it's now awaiting approval).
+func (a *BuiltinAuth) pageVerify(w http.ResponseWriter, r *http.Request) {
+	g, ok := a.takeGrant("verify", r.URL.Query().Get("token"))
+	if !ok {
+		authPage(w, "Link expired", `<p class="err">This verification link is invalid or expired.</p>
+<p class="alt"><a href="/auth/login">Back to sign in</a></p>`)
+		return
+	}
+	a.mu.Lock()
+	u := a.users[g.user]
+	next := a.afterVerify()
+	if u != nil && u.Status == statusUnverified {
+		u.Status = next
+		a.save()
+	}
+	a.mu.Unlock()
+	if u != nil && u.Status == statusPending {
+		authPage(w, "Email verified", `<p class="msg">Your email is verified. Your account is now waiting for an administrator to approve it.</p>`)
+		return
+	}
+	if u != nil {
+		if err := a.startSession(w, u.ID); err == nil {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+	}
+	authPage(w, "Email verified", `<p class="msg">Your email is verified.</p><p class="alt"><a href="/auth/login">Sign in</a></p>`)
 }
 
 func (a *BuiltinAuth) pageReset(w http.ResponseWriter, r *http.Request) {

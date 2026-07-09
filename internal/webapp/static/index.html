@@ -8,22 +8,28 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128193;</text></svg>">
 </head>
 <body>
+<div id="sb-backdrop"></div>
 <aside id="sidebar">
   <header id="vault">
     <span id="vault-name">…</span>
-    <a id="signout" href="/auth/logout" hidden title="Sign out">⏻</a>
+    <div class="vault-actions">
+      <button id="adminbar" class="adminbar" hidden></button>
+      <a id="signout" href="/auth/logout" hidden title="Sign out">⏻</a>
+    </div>
   </header>
   <nav id="projects" aria-label="Projects" hidden></nav>
   <nav id="tree" aria-label="Files"></nav>
   <footer id="orgbar" hidden>
-    <span id="org-name" title="Show members"></span>
-    <button id="invite-btn" hidden title="Invite a teammate to this organization">Invite</button>
+    <span id="org-name" title="Manage organization"></span>
+    <button id="invite-btn" hidden title="Manage this organization">Manage</button>
   </footer>
 </aside>
 <main id="main">
   <header id="topbar">
+    <button id="menu-btn" class="icon-btn" title="Menu" aria-label="Menu">☰</button>
     <span id="crumb"></span>
     <span id="meta"></span>
+    <button id="search-btn" class="btn ghost" title="Search (⌘K)">🔍 Search <kbd>⌘K</kbd></button>
     <button id="share-btn" class="btn" hidden>Share</button>
     <button id="history-btn" class="btn" hidden>History</button>
     <button id="upload-btn" class="btn" hidden>Upload</button>

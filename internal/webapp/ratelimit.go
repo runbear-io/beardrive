@@ -94,3 +94,27 @@ func (s *Server) shareLimiter() *rateLimiter {
 	})
 	return s.shareLim
 }
+
+// authLimiter throttles credential endpoints (login, signup) per IP to blunt
+// password brute-force and signup floods. Deliberately tight (10/min).
+func (s *Server) authLimiter() *rateLimiter {
+	s.authLimOnce.Do(func() {
+		s.authLim = newRateLimiter(10)
+	})
+	return s.authLim
+}
+
+// rateLimitAuth wraps the auth mux so POSTs to /auth/login and /auth/signup
+// are throttled per IP; GETs (rendering the forms) pass freely.
+func (s *Server) rateLimitAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if r.Method == http.MethodPost && (p == "/auth/login" || p == "/auth/signup") {
+			if !s.authLimiter().allow(clientIP(r)) {
+				http.Error(w, "too many attempts — wait a minute and try again", http.StatusTooManyRequests)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}

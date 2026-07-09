@@ -204,6 +204,104 @@ func (db *OrgDB) AddMember(orgID, email, role string) error {
 	return db.save()
 }
 
+// RemoveMember drops an account from the org. The last owner cannot be
+// removed (an org must always have someone who can administer it).
+func (db *OrgDB) RemoveMember(orgID, email string) error {
+	e := normEmail(email)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	o, ok := db.byID[orgID]
+	if !ok {
+		return fmt.Errorf("no such organization")
+	}
+	if o.Members[e] == "" {
+		return fmt.Errorf("%s is not a member", email)
+	}
+	if o.Members[e] == RoleOwner && db.ownerCount(o) <= 1 {
+		return fmt.Errorf("cannot remove the last owner")
+	}
+	delete(o.Members, e)
+	db.byID[orgID] = o
+	return db.save()
+}
+
+// SetRole changes an account's role. Demoting the last owner is refused.
+func (db *OrgDB) SetRole(orgID, email, role string) error {
+	if role != RoleOwner && role != RoleMember {
+		return fmt.Errorf("invalid role %q", role)
+	}
+	e := normEmail(email)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	o, ok := db.byID[orgID]
+	if !ok {
+		return fmt.Errorf("no such organization")
+	}
+	if o.Members[e] == "" {
+		return fmt.Errorf("%s is not a member", email)
+	}
+	if o.Members[e] == RoleOwner && role == RoleMember && db.ownerCount(o) <= 1 {
+		return fmt.Errorf("cannot demote the last owner")
+	}
+	o.Members[e] = role
+	db.byID[orgID] = o
+	return db.save()
+}
+
+// Rename changes the org's display name.
+func (db *OrgDB) Rename(orgID, name string) error {
+	name = trimName(name)
+	if name == "" {
+		return fmt.Errorf("organization name must not be empty")
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	o, ok := db.byID[orgID]
+	if !ok {
+		return fmt.Errorf("no such organization")
+	}
+	o.Name = name
+	db.byID[orgID] = o
+	return db.save()
+}
+
+// ownerCount counts owners in an org. Callers hold mu.
+func (db *OrgDB) ownerCount(o Org) int {
+	n := 0
+	for _, role := range o.Members {
+		if role == RoleOwner {
+			n++
+		}
+	}
+	return n
+}
+
+// ListInvites returns the org's live (non-expired) invites.
+func (db *OrgDB) ListInvites(orgID string) []OrgInvite {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	var out []OrgInvite
+	for _, inv := range db.invites {
+		if inv.Org == orgID && !inv.expired() {
+			out = append(out, inv)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Created.After(out[j].Created) })
+	return out
+}
+
+// RevokeInvite deletes an invite so its link stops working immediately.
+func (db *OrgDB) RevokeInvite(token string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if _, ok := db.invites[token]; !ok {
+		return false
+	}
+	delete(db.invites, token)
+	db.save()
+	return true
+}
+
 // CreateInvite mints a join link for the org.
 func (db *OrgDB) CreateInvite(orgID, creator string, ttl time.Duration) (OrgInvite, error) {
 	if ttl <= 0 {
@@ -321,6 +419,107 @@ func (s *Server) handleOrgList(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, map[string]any{"orgs": out})
+}
+
+// requireOwner returns true and the caller's email when they own the org;
+// otherwise it writes the error response and returns false.
+func (s *Server) requireOwner(w http.ResponseWriter, r *http.Request, orgID string) (string, bool) {
+	if s.Orgs == nil {
+		http.Error(w, "organizations are not enabled on this server", http.StatusNotFound)
+		return "", false
+	}
+	me := s.requestUser(r)
+	if s.Orgs.Role(orgID, me.Email) != RoleOwner {
+		http.Error(w, "only an organization owner can do that", http.StatusForbidden)
+		return "", false
+	}
+	return normEmail(me.Email), true
+}
+
+// handleOrgRename renames the org. Owners only.
+func (s *Server) handleOrgRename(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("org")
+	if _, ok := s.requireOwner(w, r, orgID); !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.Orgs.Rename(orgID, req.Name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleMemberUpdate changes a member's role. Owners only.
+func (s *Server) handleMemberUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("org")
+	if _, ok := s.requireOwner(w, r, orgID); !ok {
+		return
+	}
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.Orgs.SetRole(orgID, r.PathValue("email"), req.Role); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleMemberRemove drops a member. Owners only.
+func (s *Server) handleMemberRemove(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("org")
+	if _, ok := s.requireOwner(w, r, orgID); !ok {
+		return
+	}
+	if err := s.Orgs.RemoveMember(orgID, r.PathValue("email")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleInviteList shows an org's live invite links. Owners only.
+func (s *Server) handleInviteList(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("org")
+	if _, ok := s.requireOwner(w, r, orgID); !ok {
+		return
+	}
+	invs := s.Orgs.ListInvites(orgID)
+	out := make([]map[string]any, 0, len(invs))
+	for _, inv := range invs {
+		out = append(out, map[string]any{
+			"token": inv.Token, "url": requestBaseURL(r) + "/#join/" + inv.Token,
+			"creator": inv.Creator, "created": inv.Created, "expires": inv.Expires,
+		})
+	}
+	writeJSON(w, map[string]any{"invites": out})
+}
+
+// handleInviteRevoke kills an invite link. Owners only.
+func (s *Server) handleInviteRevoke(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("org")
+	if _, ok := s.requireOwner(w, r, orgID); !ok {
+		return
+	}
+	// Confirm the invite belongs to this org before revoking.
+	inv, ok := s.Orgs.Redeem(r.PathValue("token"))
+	if !ok || inv.Org != orgID {
+		http.Error(w, "no such invite", http.StatusNotFound)
+		return
+	}
+	s.Orgs.RevokeInvite(r.PathValue("token"))
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // handleInviteCreate mints an invite link. Owners only.
