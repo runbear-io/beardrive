@@ -239,7 +239,7 @@ func TestOrgInviteFlow(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &inv); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(inv.URL, "/#join/"+inv.Token) {
+	if !strings.Contains(inv.URL, "/join/"+inv.Token) {
 		t.Fatalf("invite URL = %q", inv.URL)
 	}
 

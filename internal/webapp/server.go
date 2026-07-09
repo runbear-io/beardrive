@@ -361,11 +361,41 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/p/{project}/store/sign", proj(s.handleStoreSign))
 	mux.HandleFunc("PUT /api/p/{project}/store/object", proj(s.handleStorePut))
 
-	mux.Handle("GET /", http.FileServerFS(static))
+	mux.Handle("GET /", s.frontend(static))
 	if s.Auth != nil {
 		s.Auth.Register(mux)
 	}
 	return s.rateLimitAuth(s.authGate(mux))
+}
+
+// frontend serves the embedded single-page app. Real asset files (app.js,
+// style.css) are served directly; every other GET that isn't an API, auth,
+// or share route returns index.html, so client-side routes like
+// /<project-id>/<path> and /join/<token> survive a deep link or refresh.
+func (s *Server) frontend(static fs.FS) http.HandlerFunc {
+	files := http.FileServerFS(static)
+	index, _ := fs.ReadFile(static, "index.html")
+	return func(w http.ResponseWriter, r *http.Request) {
+		upath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		// Reserved prefixes that fell through to the catch-all are genuine
+		// 404s — don't mask a mistyped API/auth/share URL with the app shell.
+		if strings.HasPrefix(upath, "api/") || strings.HasPrefix(upath, "auth/") || strings.HasPrefix(upath, "s/") {
+			http.NotFound(w, r)
+			return
+		}
+		if upath != "" && upath != "index.html" {
+			if f, err := static.Open(upath); err == nil {
+				fi, statErr := f.Stat()
+				f.Close()
+				if statErr == nil && !fi.IsDir() {
+					files.ServeHTTP(w, r) // a real asset
+					return
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(index)
+	}
 }
 
 // handleConfig tells the client how this server is configured. Deliberately

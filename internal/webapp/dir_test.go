@@ -65,3 +65,39 @@ func TestDirSourceServesFolder(t *testing.T) {
 		t.Fatalf("path traversal must 404, got %d", rec.Code)
 	}
 }
+
+// The frontend serves real assets directly but returns the app shell for any
+// client-side route (a deep file path, /join/<token>), so a deep link or
+// refresh doesn't 404. Reserved API/auth/share prefixes stay real 404s.
+func TestFrontendSPAFallback(t *testing.T) {
+	h := dirServer(t, map[string]string{"notes/plan.md": "content"})
+
+	shell := func(url string) {
+		t.Helper()
+		rec := get(t, h, url)
+		if rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "text/html") {
+			t.Fatalf("%s: want 200 html, got %d %s", url, rec.Code, rec.Header().Get("Content-Type"))
+		}
+		if !strings.Contains(rec.Body.String(), `id="sidebar"`) {
+			t.Fatalf("%s: expected the app shell, got %.60q", url, rec.Body.String())
+		}
+	}
+	// Client routes all resolve to the shell, not a 404 or file content.
+	shell("/")
+	shell("/notes/plan.md")            // a deep file route (not the raw file)
+	shell("/p-deadbeef/notes/plan.md") // hub-style route
+	shell("/join/abc123")              // invite route
+
+	// Real assets are served as themselves.
+	if rec := get(t, h, "/app.js"); rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("/app.js: %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if rec := get(t, h, "/style.css"); rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "css") {
+		t.Fatalf("/style.css: %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+
+	// A mistyped API path is a genuine 404, not the shell.
+	if rec := get(t, h, "/api/bogus"); rec.Code != 404 {
+		t.Fatalf("/api/bogus: want 404, got %d", rec.Code)
+	}
+}
