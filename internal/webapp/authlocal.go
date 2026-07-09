@@ -598,7 +598,7 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 	if a.AllowSignup {
 		note := ""
 		if len(a.AllowedDomains) > 0 {
-			note = ` <span style="color:#888">(` + html.EscapeString(a.domainList()) + ` only)</span>`
+			note = ` <span style="color:#969696">(` + html.EscapeString(a.domainList()) + ` only)</span>`
 		}
 		signup = fmt.Sprintf(`<p class="alt">No account? <a href="/auth/signup?next=%s">Sign up</a>%s</p>`, url.QueryEscape(next), note)
 	}

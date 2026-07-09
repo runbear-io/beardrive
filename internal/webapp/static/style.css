@@ -346,6 +346,7 @@ body {
   /* The list rows are the primary tap targets — size them to 44px too. */
   #tree li > .row, #projects .row { min-height: 44px; }
   #invite-btn { min-height: 44px; padding: 0 16px; }
+  #org-name { min-height: 44px; display: inline-flex; align-items: center; }
   .nav-add { min-width: 44px; min-height: 44px; }
   .dir-history { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
   .markdown, .admin, .onboard, .history { max-width: 100%; }
