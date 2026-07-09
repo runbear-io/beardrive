@@ -210,7 +210,7 @@ Projects are walled by **organization**: every project belongs to one org
 `owner` or `member` role — can see, browse, or sync it. Your first
 `bdrive init` creates an org for you automatically; an owner invites
 teammates from the web UI (the org name in the sidebar footer — Invite
-mints an expiring join link, `/#join/<token>`, that any signed-in account
+mints an expiring join link, `/join/<token>`, that any signed-in account
 can open to become a member). A hub upgraded from an earlier version
 sweeps its existing projects into a `default` org that all existing
 accounts join, so nothing breaks. Public share links stay outside the

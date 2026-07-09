@@ -17,7 +17,7 @@ const TEXT_EXT = /\.(txt|log|json|ya?ml|toml|csv|go|py|js|ts|jsx|tsx|sh|bash|zsh
 let serverConfig = { mode: "volume", upload: { enabled: false } };
 let projects = [];
 let currentProject = null; // hub mode: the selected project
-let apiBase = "api/";      // volume-scoped endpoint prefix
+let apiBase = "/api/";      // volume-scoped endpoint prefix
 let orgs = [];             // hub mode: the orgs this account belongs to
 let joinedOrgId = null;    // org just joined via an invite this page-load
 
@@ -38,7 +38,7 @@ function projColor(s) {
 async function getJSON(url) {
   const r = await fetch(url);
   if (r.status === 401) { // auth required: sign in, then come back here
-    location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.hash);
+    location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.search);
     throw new Error("signing in…");
   }
   if (!r.ok) throw new Error(await r.text());
@@ -52,7 +52,7 @@ async function postJSON(url, body) {
     body: JSON.stringify(body || {}),
   });
   if (r.status === 401) {
-    location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.hash);
+    location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.search);
     throw new Error("signing in…");
   }
   if (!r.ok) throw new Error(await r.text());
@@ -62,23 +62,23 @@ async function postJSON(url, body) {
 /* ---- boot ---- */
 async function boot() {
   try {
-    serverConfig = await getJSON("api/config");
+    serverConfig = await getJSON("/api/config");
   } catch { /* non-fatal */ }
   document.title = serverConfig.brand || serverConfig.volume || "BearDrive";
   // If auth is on and we're not signed in, go straight to the login page
   // rather than firing authed API calls that 401 (noisy console, and the
   // redirect happens anyway). /api/config reports `me` only when signed in.
   if (serverConfig.auth && serverConfig.auth.enabled && !serverConfig.me) {
-    location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.hash);
+    location.href = "/auth/login?next=" + encodeURIComponent(location.pathname + location.search);
     return;
   }
   if (serverConfig.auth && serverConfig.auth.enabled) $("signout").hidden = false;
   if (serverConfig.mode === "hub") {
-    await acceptInviteFromHash();
+    await acceptInviteFromURL();
     await loadOrgs();
     await loadProjects();
     updateAdminBar();
-    const { project, path } = parseHash();
+    const { project, path } = parseRoute();
     // After accepting an invite, open a project in the org you just joined
     // rather than whatever happened to be first.
     const proj = projects.find((x) => x.id === project)
@@ -91,7 +91,7 @@ async function boot() {
     $("vault-name").textContent = serverConfig.volume || "BearDrive";
     initUpload();
     await refreshTree();
-    const { path } = parseHash();
+    const { path } = parseRoute();
     if (path) openFile(path);
   }
   setInterval(refreshTree, 15000); // pick up synced changes
@@ -101,7 +101,7 @@ async function boot() {
 async function loadProjects() {
   let out;
   try {
-    out = await getJSON("api/projects");
+    out = await getJSON("/api/projects");
   } catch { return; }
   projects = out.projects || [];
   const nav = $("projects");
@@ -147,7 +147,7 @@ function selectProject(p, path) {
   currentProject = p;
   expanded = new Set();   // fresh collapse state for the new project's tree
   treeFirstLoad = true;
-  apiBase = "api/p/" + p.id + "/";
+  apiBase = "/api/p/" + p.id + "/";
   $("vault-name").textContent = p.name;
   document.title = p.name + " — BearDrive";
   currentPath = null;
@@ -162,26 +162,26 @@ function selectProject(p, path) {
   initHistory();
   updateShareButton();
   refreshTree().then(() => { if (path) openFile(path); });
-  if (!path) location.hash = p.id;
+  if (!path) pushURL("/" + p.id);
 }
 
 /* ---- hub: organizations ---- */
 
-/* Opening "#join/<token>" joins the invite's org. If the visitor isn't
+/* Opening "/join/<token>" joins the invite's org. If the visitor isn't
    signed in yet, postJSON's 401 handler sends them to /auth/login with the
-   #join hash intact in `next`, so after signing in they land right back
-   here and the join completes — the token is never lost. */
-async function acceptInviteFromHash() {
-  const m = location.hash.match(/^#join\/([0-9a-f]+)$/);
+   /join path intact in `next`, so after signing in the server re-serves the
+   app there and the join completes — the token is never lost. */
+async function acceptInviteFromURL() {
+  const m = location.pathname.match(/^\/join\/([0-9a-f]+)\/?$/);
   if (!m) return;
   try {
-    const out = await postJSON("api/invites/" + m[1]); // may redirect to login (401)
-    location.hash = "";
+    const out = await postJSON("/api/invites/" + m[1]); // may redirect to login (401)
+    history.replaceState(null, "", "/");
     joinedOrgId = out.org && out.org.id;
     toast("Welcome — you joined the “" + out.org.name + "” team. Opening its projects…");
   } catch (e) {
     if (String(e.message).includes("signing in")) throw e; // redirecting; stop boot
-    location.hash = "";
+    history.replaceState(null, "", "/");
     toast("Could not accept the invite: " + e.message, true);
   }
 }
@@ -202,7 +202,7 @@ function showEmptyState() {
         <h3>Have an invite link?</h3>
         <p>A teammate can send you a join link. Paste it here:</p>
         <div class="ob-row">
-          <input id="ob-invite" type="text" placeholder="https://…/#join/…" autocomplete="off">
+          <input id="ob-invite" type="text" placeholder="https://…/join/…" autocomplete="off">
           <button id="ob-join" class="pbtn">Join</button>
         </div>
       </div>` : ``}
@@ -218,10 +218,9 @@ function showEmptyState() {
   const join = $("ob-join");
   if (join) join.onclick = () => {
     const v = $("ob-invite").value.trim();
-    const m = v.match(/#join\/([0-9a-f]+)/) || v.match(/^([0-9a-f]{8,})$/);
+    const m = v.match(/join\/([0-9a-f]+)/) || v.match(/^([0-9a-f]{8,})$/);
     if (!m) { toast("That doesn't look like an invite link.", true); return; }
-    location.hash = "join/" + m[1];
-    location.reload();
+    location.href = "/join/" + m[1];
   };
   $("ob-create").onclick = () => createProject($("ob-name").value.trim());
 }
@@ -229,7 +228,7 @@ function showEmptyState() {
 async function createProject(name) {
   if (!name) { toast("Give the project a name.", true); return; }
   try {
-    const out = await postJSON("api/projects", { name });
+    const out = await postJSON("/api/projects", { name });
     await loadOrgs();
     await loadProjects();
     selectProject(out.project, null);
@@ -241,7 +240,7 @@ async function createProject(name) {
 
 async function loadOrgs() {
   try {
-    orgs = (await getJSON("api/orgs")).orgs || [];
+    orgs = (await getJSON("/api/orgs")).orgs || [];
   } catch { orgs = []; }
 }
 
@@ -299,7 +298,7 @@ async function showOrgAdmin(org) {
     rn.querySelector("#org-rename").value = org.name;
     rn.querySelector("#org-rename-btn").onclick = async () => {
       const name = rn.querySelector("#org-rename").value.trim();
-      try { await api("PATCH", "api/orgs/" + org.id, { name }); toast("Renamed."); await loadOrgs(); refreshAll(); }
+      try { await api("PATCH", "/api/orgs/" + org.id, { name }); toast("Renamed."); await loadOrgs(); refreshAll(); }
       catch (e) { toast(e.message, true); }
     };
   }
@@ -319,14 +318,14 @@ async function showOrgAdmin(org) {
         if (m.role === r) o.selected = true; sel.appendChild(o);
       }
       sel.onchange = async () => {
-        try { await api("PATCH", "api/orgs/" + org.id + "/members/" + encodeURIComponent(m.email), { role: sel.value }); toast("Role updated."); await loadOrgs(); showOrgAdmin(currentOrg()); }
+        try { await api("PATCH", "/api/orgs/" + org.id + "/members/" + encodeURIComponent(m.email), { role: sel.value }); toast("Role updated."); await loadOrgs(); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); showOrgAdmin(currentOrg()); }
       };
       row.appendChild(sel);
       const rm = el(row, "button", "ai-del", "Remove");
       rm.onclick = async () => {
         if (!(await modalConfirm("Remove member", "Remove " + m.email + " from " + org.name + "?", "Remove", true))) return;
-        try { await api("DELETE", "api/orgs/" + org.id + "/members/" + encodeURIComponent(m.email)); toast("Removed."); await loadOrgs(); showOrgAdmin(currentOrg()); }
+        try { await api("DELETE", "/api/orgs/" + org.id + "/members/" + encodeURIComponent(m.email)); toast("Removed."); await loadOrgs(); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); }
       };
     } else {
@@ -348,14 +347,14 @@ async function showOrgAdmin(org) {
     rn.onclick = async () => {
       const name = await modalPrompt("Rename project", "New name", p.name, "Rename");
       if (!name || name === p.name) return;
-      try { await api("PATCH", "api/projects/" + p.id, { name }); toast("Renamed."); await loadProjects(); showOrgAdmin(currentOrg()); }
+      try { await api("PATCH", "/api/projects/" + p.id, { name }); toast("Renamed."); await loadProjects(); showOrgAdmin(currentOrg()); }
       catch (e) { toast(e.message, true); }
     };
     const del = el(row, "button", "ai-del", "Delete");
     del.onclick = async () => {
       if (!(await modalConfirm("Delete project", "Delete “" + p.name + "”? Its files stay in storage, but it's removed from the hub.", "Delete", true))) return;
       try {
-        await api("DELETE", "api/projects/" + p.id);
+        await api("DELETE", "/api/projects/" + p.id);
         toast("Deleted “" + p.name + "”.");
         if (currentProject && currentProject.id === p.id) currentProject = null;
         await loadProjects();
@@ -371,7 +370,7 @@ async function showOrgAdmin(org) {
   const mk = el(ih, "button", "pbtn", "New invite");
   mk.onclick = async () => {
     try {
-      const out = await postJSON("api/orgs/" + org.id + "/invites");
+      const out = await postJSON("/api/orgs/" + org.id + "/invites");
       const ok = await copyText(out.url);
       toast(ok ? "Invite link copied to clipboard." : "Invite created — copy it from the list below.");
       showOrgAdmin(currentOrg());
@@ -379,7 +378,7 @@ async function showOrgAdmin(org) {
   };
   const ilist = el(panel, "div", "admin-list");
   try {
-    const invs = (await getJSON("api/orgs/" + org.id + "/invites")).invites || [];
+    const invs = (await getJSON("/api/orgs/" + org.id + "/invites")).invites || [];
     if (!invs.length) el(ilist, "div", "admin-empty", "No active invite links.");
     for (const inv of invs) {
       const row = el(ilist, "div", "admin-item");
@@ -394,7 +393,7 @@ async function showOrgAdmin(org) {
       const rv = el(row, "button", "ai-del", "Revoke");
       rv.onclick = async () => {
         if (!(await modalConfirm("Revoke invite", "Revoke this invite link? Anyone still holding it won't be able to join.", "Revoke", true))) return;
-        try { await api("DELETE", "api/orgs/" + org.id + "/invites/" + inv.token); toast("Revoked."); showOrgAdmin(currentOrg()); }
+        try { await api("DELETE", "/api/orgs/" + org.id + "/invites/" + inv.token); toast("Revoked."); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); }
       };
     }
@@ -404,7 +403,7 @@ async function showOrgAdmin(org) {
   el(panel, "h3", null, "Public share links");
   const slist = el(panel, "div", "admin-list");
   try {
-    const shs = (await getJSON("api/orgs/" + org.id + "/shares")).shares || [];
+    const shs = (await getJSON("/api/orgs/" + org.id + "/shares")).shares || [];
     if (!shs.length) el(slist, "div", "admin-empty", "No public shares.");
     for (const sh of shs) {
       const row = el(slist, "div", "admin-item");
@@ -418,7 +417,7 @@ async function showOrgAdmin(org) {
       const rv = el(row, "button", "ai-del", "Revoke");
       rv.onclick = async () => {
         if (!(await modalConfirm("Revoke share link", "Revoke the public link to “" + sh.path + "”? Anyone with the URL will lose access.", "Revoke", true))) return;
-        try { await api("DELETE", "api/shares/" + sh.token); toast("Share revoked."); showOrgAdmin(currentOrg()); }
+        try { await api("DELETE", "/api/shares/" + sh.token); toast("Share revoked."); showOrgAdmin(currentOrg()); }
         catch (e) { toast(e.message, true); }
       };
     }
@@ -527,7 +526,7 @@ async function updateAdminBar() {
   if (!bar) return;
   if (!(serverConfig.auth && serverConfig.auth.admin)) { bar.hidden = true; return; }
   let pending = [];
-  try { pending = (await getJSON("api/admin/pending")).pending || []; } catch { }
+  try { pending = (await getJSON("/api/admin/pending")).pending || []; } catch { }
   bar.hidden = false;
   bar.innerHTML = svgIcon("shield") + `<span>Admin${pending.length ? " · " + pending.length : ""}</span>`;
   bar.title = "Hub administration — signup policy" + (pending.length ? " and pending approvals" : "");
@@ -539,7 +538,7 @@ async function updateAdminBar() {
    (they're server-config owned, deliberately not browser-editable). */
 async function showHubSettings() {
   let pol = {};
-  try { pol = await getJSON("api/admin/policy"); } catch (e) { toast(e.message, true); return; }
+  try { pol = await getJSON("/api/admin/policy"); } catch (e) { toast(e.message, true); return; }
   currentPath = null; markActive(); closeSidebarOnMobile();
   $("crumb").textContent = "Signup & access";
   $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = $("more-btn").hidden = true;
@@ -572,7 +571,7 @@ async function showHubSettings() {
   save.style.marginTop = "14px";
   save.onclick = async () => {
     try {
-      await postJSON("api/admin/policy", { require_verification: ver.checked, require_approval: app.checked });
+      await postJSON("/api/admin/policy", { require_verification: ver.checked, require_approval: app.checked });
       toast("Signup policy saved.");
     } catch (e) { toast(e.message, true); }
   };
@@ -594,21 +593,21 @@ async function showHubSettings() {
   el(panel, "h3", null, "Pending signups");
   const plist = el(panel, "div", "admin-list");
   let pending = [];
-  try { pending = (await getJSON("api/admin/pending")).pending || []; } catch { }
+  try { pending = (await getJSON("/api/admin/pending")).pending || []; } catch { }
   if (!pending.length) el(plist, "div", "admin-empty", "No one is waiting for approval.");
   for (const u of pending) {
     const row = el(plist, "div", "admin-item");
     el(row, "span", "ai-main", (u.name ? u.name + "  ·  " : "") + u.email);
     const ok = el(row, "button", "pbtn", "Approve");
-    ok.onclick = async () => { try { await postJSON("api/admin/pending/" + u.id + "/approve"); toast("Approved " + u.email); updateAdminBar(); showHubSettings(); } catch (e) { toast(e.message, true); } };
+    ok.onclick = async () => { try { await postJSON("/api/admin/pending/" + u.id + "/approve"); toast("Approved " + u.email); updateAdminBar(); showHubSettings(); } catch (e) { toast(e.message, true); } };
     const no = el(row, "button", "ai-del", "Deny");
-    no.onclick = async () => { try { await postJSON("api/admin/pending/" + u.id + "/deny"); toast("Denied " + u.email); updateAdminBar(); showHubSettings(); } catch (e) { toast(e.message, true); } };
+    no.onclick = async () => { try { await postJSON("/api/admin/pending/" + u.id + "/deny"); toast("Denied " + u.email); updateAdminBar(); showHubSettings(); } catch (e) { toast(e.message, true); } };
   }
 }
 
 async function showPending() {
   let pending = [];
-  try { pending = (await getJSON("api/admin/pending")).pending || []; } catch { }
+  try { pending = (await getJSON("/api/admin/pending")).pending || []; } catch { }
   currentPath = null; markActive();
   $("crumb").textContent = "Pending signups";
   $("share-btn").hidden = $("history-btn").hidden = $("download").hidden = $("more-btn").hidden = true;
@@ -622,9 +621,9 @@ async function showPending() {
     const row = el(list, "div", "admin-item");
     el(row, "span", "ai-main", (u.name ? u.name + "  ·  " : "") + u.email);
     const ok = el(row, "button", "pbtn", "Approve");
-    ok.onclick = async () => { try { await postJSON("api/admin/pending/" + u.id + "/approve"); toast("Approved " + u.email); updateAdminBar(); showPending(); } catch (e) { toast(e.message, true); } };
+    ok.onclick = async () => { try { await postJSON("/api/admin/pending/" + u.id + "/approve"); toast("Approved " + u.email); updateAdminBar(); showPending(); } catch (e) { toast(e.message, true); } };
     const no = el(row, "button", "ai-del", "Deny");
-    no.onclick = async () => { try { await postJSON("api/admin/pending/" + u.id + "/deny"); toast("Denied " + u.email); updateAdminBar(); showPending(); } catch (e) { toast(e.message, true); } };
+    no.onclick = async () => { try { await postJSON("/api/admin/pending/" + u.id + "/deny"); toast("Denied " + u.email); updateAdminBar(); showPending(); } catch (e) { toast(e.message, true); } };
   }
 }
 
@@ -634,20 +633,39 @@ function refreshAll() {
   if (currentProject) refreshTree();
 }
 
-/* Hash routing: "#<path>" in volume mode, "#<project-id>/<path>" in hub mode. */
-function parseHash() {
-  const h = decodeURIComponent(location.hash.slice(1));
-  if (serverConfig.mode !== "hub") return { path: h };
-  const slash = h.indexOf("/");
-  if (slash === -1) return { project: h, path: "" };
-  return { project: h.slice(0, slash), path: h.slice(slash + 1) };
+/* Native path routing (no hash, no %2F):
+     volume mode:  /<path>
+     hub mode:     /<project-id>/<path>
+     invite:       /join/<token>
+   Each path segment is percent-encoded for odd characters, but the "/"
+   separators stay literal so the URL reads like a real file path. */
+function encodePath(p) { return p.split("/").map(encodeURIComponent).join("/"); }
+function decodePath(p) { return p.split("/").map(decodeURIComponent).join("/"); }
+
+function parseRoute() {
+  const raw = location.pathname.replace(/^\/+/, "");
+  if (serverConfig.mode !== "hub") return { path: raw ? decodePath(raw) : "" };
+  const slash = raw.indexOf("/");
+  if (slash === -1) return { project: raw, path: "" };
+  return { project: raw.slice(0, slash), path: decodePath(raw.slice(slash + 1)) };
 }
 
-function setHash(path) {
-  location.hash = serverConfig.mode === "hub" && currentProject
-    ? currentProject.id + "/" + encodeURIComponent(path)
-    : encodeURIComponent(path);
+/* The URL for a file within the current context. */
+function urlForPath(path) {
+  const enc = encodePath(path);
+  if (serverConfig.mode === "hub" && currentProject) {
+    return "/" + currentProject.id + (enc ? "/" + enc : "");
+  }
+  return "/" + enc;
 }
+
+/* Push a route without reloading, skipping a no-op that would just stack a
+   duplicate history entry (e.g. when boot opens the file already in the URL). */
+function pushURL(url) {
+  if (location.pathname === url) return;
+  history.pushState(null, "", url);
+}
+function syncURL(path) { pushURL(urlForPath(path)); }
 
 /* ---- tree ---- */
 async function refreshTree() {
@@ -764,7 +782,7 @@ function revealInTree(p) {
 /* ---- file pane ---- */
 async function openFile(p) {
   currentPath = p;
-  setHash(p);
+  syncURL(p);
   markActive();
   revealInTree(p);
   closeSidebarOnMobile();
@@ -875,7 +893,7 @@ function showShareDialog(url, copied) {
   back.querySelector('[data-a="open"]').onclick = () => window.open(url, "_blank");
   back.querySelector('[data-a="close"]').onclick = close;
   back.querySelector('[data-a="revoke"]').onclick = async () => {
-    try { await api("DELETE", "api/shares/" + token); toast("Link revoked — it no longer works."); close(); }
+    try { await api("DELETE", "/api/shares/" + token); toast("Link revoked — it no longer works."); close(); }
     catch (e) { toast(e.message, true); }
   };
   document.body.appendChild(back);
@@ -1316,11 +1334,13 @@ function closeSidebarOnMobile() { document.body.classList.remove("sb-open"); }
 $("menu-btn").addEventListener("click", toggleSidebar);
 $("sb-backdrop").addEventListener("click", closeSidebarOnMobile);
 
-window.addEventListener("hashchange", () => {
-  const { project, path } = parseHash();
+/* Back/forward: re-resolve the route from the URL. selectProject/openFile
+   dedup against the current URL, so replaying it here never stacks history. */
+window.addEventListener("popstate", () => {
+  const { project, path } = parseRoute();
   if (serverConfig.mode === "hub" && project && (!currentProject || currentProject.id !== project)) {
     const proj = projects.find((x) => x.id === project);
-    if (proj) { selectProject(proj, path); return; }
+    if (proj) { selectProject(proj, path || null); return; }
   }
   if (path && path !== currentPath) openFile(path);
 });

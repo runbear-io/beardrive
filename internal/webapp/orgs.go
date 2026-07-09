@@ -511,7 +511,7 @@ func (s *Server) handleInviteList(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0, len(invs))
 	for _, inv := range invs {
 		out = append(out, map[string]any{
-			"token": inv.Token, "url": requestBaseURL(r) + "/#join/" + inv.Token,
+			"token": inv.Token, "url": requestBaseURL(r) + "/join/" + inv.Token,
 			"creator": inv.Creator, "created": inv.Created, "expires": inv.Expires, "uses": inv.Uses,
 		})
 	}
@@ -565,7 +565,7 @@ func (s *Server) handleInviteCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		"token":   inv.Token,
-		"url":     requestBaseURL(r) + "/#join/" + inv.Token,
+		"url":     requestBaseURL(r) + "/join/" + inv.Token,
 		"expires": inv.Expires,
 	})
 }
