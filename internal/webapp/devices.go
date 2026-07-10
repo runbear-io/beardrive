@@ -1,12 +1,8 @@
 package webapp
 
 import (
-	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,64 +22,31 @@ type DeviceInfo struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
-// DeviceRegistry is the file-backed device table (devices.json), same
-// load-at-open / atomic-rewrite discipline as the project registry.
+// DeviceRegistry is the in-memory device table over a MetaStore DeviceRepo.
 type DeviceRegistry struct {
-	path string
+	repo DeviceRepo
 
 	mu      sync.Mutex
 	byID    map[string]DeviceInfo
-	lastSav map[string]time.Time // throttle disk writes per device
+	lastSav map[string]time.Time // throttle writes per device
 }
 
-func OpenDeviceRegistry(path string) (*DeviceRegistry, error) {
-	r := &DeviceRegistry{path: path, byID: make(map[string]DeviceInfo), lastSav: make(map[string]time.Time)}
-	data, err := os.ReadFile(path)
+// NewDeviceRegistry builds the registry over a repo, loading its contents.
+func NewDeviceRegistry(repo DeviceRepo) (*DeviceRegistry, error) {
+	r := &DeviceRegistry{repo: repo, byID: make(map[string]DeviceInfo), lastSav: make(map[string]time.Time)}
+	list, err := repo.Load()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return r, nil
-		}
 		return nil, err
 	}
-	var file struct {
-		Devices []DeviceInfo `json:"devices"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	for _, d := range file.Devices {
+	for _, d := range list {
 		r.byID[d.ID] = d
 	}
 	return r, nil
 }
 
-func (r *DeviceRegistry) save() error {
-	var file struct {
-		Devices []DeviceInfo `json:"devices"`
-	}
-	for _, d := range r.byID {
-		file.Devices = append(file.Devices, d)
-	}
-	data, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(r.path), ".bdrive-tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), r.path)
+// OpenDeviceRegistry loads the file-backed registry at path.
+func OpenDeviceRegistry(path string) (*DeviceRegistry, error) {
+	return NewDeviceRegistry(newFileDeviceRepo(path))
 }
 
 // Observe merges what a request revealed about a device. Disk writes are
@@ -113,7 +76,7 @@ func (r *DeviceRegistry) Observe(d DeviceInfo) {
 	cur.LastSeen = time.Now().UTC()
 	r.byID[d.ID] = cur
 	if changed || time.Since(r.lastSav[d.ID]) > time.Minute {
-		if r.save() == nil {
+		if r.repo.Put(cur) == nil {
 			r.lastSav[d.ID] = time.Now()
 		}
 	}

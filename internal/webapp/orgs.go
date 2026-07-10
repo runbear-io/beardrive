@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -53,7 +51,7 @@ func (db *OrgDB) RecordInviteUse(token string) {
 	if inv, ok := db.invites[token]; ok {
 		inv.Uses++
 		db.invites[token] = inv
-		db.save()
+		db.repo.PutInvite(inv)
 	}
 }
 
@@ -62,76 +60,34 @@ func (i OrgInvite) expired() bool { return time.Now().After(i.Expires) }
 // DefaultInviteTTL bounds invite links that don't ask for an expiry.
 const DefaultInviteTTL = 7 * 24 * time.Hour
 
-// OrgDB is the file-backed org registry (orgs.json).
+// OrgDB is the in-memory org registry over a MetaStore OrgRepo (orgs + invites).
 type OrgDB struct {
-	path string
+	repo OrgRepo
 
 	mu      sync.Mutex
 	byID    map[string]Org
 	invites map[string]OrgInvite
 }
 
-func OpenOrgDB(path string) (*OrgDB, error) {
-	db := &OrgDB{path: path, byID: make(map[string]Org), invites: make(map[string]OrgInvite)}
-	data, err := os.ReadFile(path)
+// NewOrgDB builds the registry over a repo, loading orgs and invites.
+func NewOrgDB(repo OrgRepo) (*OrgDB, error) {
+	db := &OrgDB{repo: repo, byID: make(map[string]Org), invites: make(map[string]OrgInvite)}
+	orgs, invites, err := repo.Load()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return db, nil
-		}
 		return nil, err
 	}
-	var file struct {
-		Orgs    []Org       `json:"orgs"`
-		Invites []OrgInvite `json:"invites"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	for _, o := range file.Orgs {
+	for _, o := range orgs {
 		db.byID[o.ID] = o
 	}
-	for _, i := range file.Invites {
+	for _, i := range invites {
 		db.invites[i.Token] = i
 	}
 	return db, nil
 }
 
-// save persists the registry. Callers hold mu.
-func (db *OrgDB) save() error {
-	var file struct {
-		Orgs    []Org       `json:"orgs"`
-		Invites []OrgInvite `json:"invites"`
-	}
-	for _, o := range db.byID {
-		file.Orgs = append(file.Orgs, o)
-	}
-	sort.Slice(file.Orgs, func(i, j int) bool { return file.Orgs[i].ID < file.Orgs[j].ID })
-	for _, i := range db.invites {
-		if !i.expired() {
-			file.Invites = append(file.Invites, i)
-		}
-	}
-	sort.Slice(file.Invites, func(i, j int) bool { return file.Invites[i].Token < file.Invites[j].Token })
-	data, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(db.path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(db.path), ".bdrive-tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), db.path)
+// OpenOrgDB loads the file-backed registry at path.
+func OpenOrgDB(path string) (*OrgDB, error) {
+	return NewOrgDB(newFileOrgRepo(path))
 }
 
 func normEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
@@ -152,7 +108,7 @@ func (db *OrgDB) Create(name, ownerEmail string) (Org, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.byID[o.ID] = o
-	if err := db.save(); err != nil {
+	if err := db.repo.PutOrg(o); err != nil {
 		delete(db.byID, o.ID)
 		return Org{}, err
 	}
@@ -213,7 +169,7 @@ func (db *OrgDB) AddMember(orgID, email, role string) error {
 	}
 	o.Members[e] = role
 	db.byID[orgID] = o
-	return db.save()
+	return db.repo.PutOrg(o)
 }
 
 // RemoveMember drops an account from the org. The last owner cannot be
@@ -234,7 +190,7 @@ func (db *OrgDB) RemoveMember(orgID, email string) error {
 	}
 	delete(o.Members, e)
 	db.byID[orgID] = o
-	return db.save()
+	return db.repo.PutOrg(o)
 }
 
 // SetRole changes an account's role. Demoting the last owner is refused.
@@ -257,7 +213,7 @@ func (db *OrgDB) SetRole(orgID, email, role string) error {
 	}
 	o.Members[e] = role
 	db.byID[orgID] = o
-	return db.save()
+	return db.repo.PutOrg(o)
 }
 
 // Rename changes the org's display name.
@@ -274,7 +230,7 @@ func (db *OrgDB) Rename(orgID, name string) error {
 	}
 	o.Name = name
 	db.byID[orgID] = o
-	return db.save()
+	return db.repo.PutOrg(o)
 }
 
 // ownerCount counts owners in an org. Callers hold mu.
@@ -310,7 +266,7 @@ func (db *OrgDB) RevokeInvite(token string) bool {
 		return false
 	}
 	delete(db.invites, token)
-	db.save()
+	db.repo.DeleteInvite(token)
 	return true
 }
 
@@ -329,7 +285,7 @@ func (db *OrgDB) CreateInvite(orgID, creator string, ttl time.Duration) (OrgInvi
 		Created: time.Now().UTC(), Expires: time.Now().UTC().Add(ttl),
 	}
 	db.invites[inv.Token] = inv
-	if err := db.save(); err != nil {
+	if err := db.repo.PutInvite(inv); err != nil {
 		delete(db.invites, inv.Token)
 		return OrgInvite{}, err
 	}

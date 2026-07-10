@@ -34,7 +34,7 @@ func TestRateLimiterBucket(t *testing.T) {
 
 // /s/* answers 429 once an IP exhausts its bucket; other IPs are unaffected.
 func TestSharedRouteRateLimited(t *testing.T) {
-	srv, p, _, h := shareHub(t)
+	srv, p, _, _, h := shareHub(t)
 	srv.ShareRPM = 60 // burst 15
 	_, shareURL := authedShare(t, srv, h, p.ID, "wiki/notes.md")
 	path := shareURL[strings.Index(shareURL, "/s/"):]
@@ -59,7 +59,7 @@ func TestSharedRouteRateLimited(t *testing.T) {
 // Rendered markdown share pages carry the BearDrive footer; shared raw HTML
 // is served byte-for-byte, never injected into.
 func TestSharedFooterOnMarkdownOnly(t *testing.T) {
-	srv, p, _, h := shareHub(t)
+	srv, p, _, _, h := shareHub(t)
 	const footer = "Shared with"
 
 	_, mdURL := authedShare(t, srv, h, p.ID, "wiki/notes.md")

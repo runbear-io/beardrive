@@ -22,7 +22,7 @@ func doHTTP(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 }
 
 // shareHub returns an auth-enabled hub with sharing on and one synced file.
-func shareHub(t *testing.T) (*Server, Project, *fakeRemote, http.Handler) {
+func shareHub(t *testing.T) (*Server, Project, string, *fakeRemote, http.Handler) {
 	t.Helper()
 	srv, p, root := newHub(t, true, nil)
 	auth, err := OpenBuiltinAuth(filepath.Join(t.TempDir(), "auth.json"), true, nil)
@@ -30,14 +30,15 @@ func shareHub(t *testing.T) (*Server, Project, *fakeRemote, http.Handler) {
 		t.Fatal(err)
 	}
 	srv.Auth = auth
-	srv.Shares, err = OpenShareDB(filepath.Join(t.TempDir(), "shares.json"))
+	sharesPath := filepath.Join(t.TempDir(), "shares.json")
+	srv.Shares, err = OpenShareDB(sharesPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
 	f.put("dev1", "wiki/report.html", "<h1>Q3</h1><script>alert(1)</script>")
 	f.put("dev1", "wiki/notes.md", "# Notes\n\nhello **team**")
-	return srv, p, f, srv.Handler()
+	return srv, p, sharesPath, f, srv.Handler()
 }
 
 // authedShare creates a share as a signed-in user and returns its token+url.
@@ -77,7 +78,7 @@ func authedShare(t *testing.T, srv *Server, h http.Handler, project, path string
 }
 
 func TestShareLinks(t *testing.T) {
-	srv, p, f, h := shareHub(t)
+	srv, p, _, f, h := shareHub(t)
 
 	// creating a share requires sign-in
 	if rec := do(t, h, "POST", "/api/p/"+p.ID+"/shares", map[string]string{"path": "wiki/report.html"}); rec.Code != http.StatusUnauthorized {
@@ -137,7 +138,7 @@ func TestShareLinks(t *testing.T) {
 }
 
 func TestShareMarkdownRendersAndExpires(t *testing.T) {
-	srv, p, _, h := shareHub(t)
+	srv, p, sharesPath, _, h := shareHub(t)
 
 	// markdown renders as a full page
 	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
@@ -175,7 +176,7 @@ func TestShareMarkdownRendersAndExpires(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), token) || strings.Contains(rec.Body.String(), out.Token) {
 		t.Fatalf("list = %s", rec.Body)
 	}
-	db2, err := OpenShareDB(srv.Shares.path)
+	db2, err := OpenShareDB(sharesPath)
 	if err != nil {
 		t.Fatal(err)
 	}
