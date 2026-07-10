@@ -1,9 +1,11 @@
 # BearDrive — Google Drive for AI agents
 
 **BearDrive** mounts any folder as a synced volume: its contents stay
-synchronized across all your devices through cloud object storage, every
-change is tracked (who, when, on which device), and everything keeps
-working offline. The CLI is `bdrive`.
+synchronized across all your devices and teammates through a BearDrive
+**hub**, every change is tracked (who, when, on which device), and
+everything keeps working offline. The CLI is `bdrive`; a hub is a
+`bdrive web` server you (or we) run on an object store — clients sync
+through it over HTTPS and never touch the storage directly.
 
 Two things it's for: **sharing files with people** — any synced file
 becomes a public URL that renders as a page — and **sharing context across
@@ -33,16 +35,17 @@ $ bdrive login && cd ~/workspace && bdrive init
   project. Files are *real files on disk*: every tool, editor, and agent can
   use them with zero integration work. Rename or move the folder freely —
   state is keyed by a stable id, never the path.
-- **Multi-device sync** — devices converge through a shared remote. Each
-  device only writes its own append-only journal, so no locking service or
-  server is needed — any object store works.
+- **Multi-device sync** — devices converge through a shared hub. Each
+  device only writes its own append-only journal, so no locking service is
+  needed; the hub can be backed by any object store.
 - **Change tracking** — `bdrive log` and the web UI's History view show
   which account changed which file, when, from which device (name, OS, IP).
   Content is stored content-addressed, so every version is retained — view
   or download any point in a file's history.
-- **Cloud-provider agnostic** — Amazon S3 (`s3://`), Google Cloud Storage
-  (`gs://`), any S3-compatible store (MinIO, Cloudflare R2 via
-  `AWS_ENDPOINT_URL`), or a plain shared directory (`file://`, e.g. a NAS).
+- **Cloud-provider agnostic** — a hub can store on Amazon S3 (`s3://`),
+  Google Cloud Storage (`gs://`), any S3-compatible store (MinIO, Cloudflare
+  R2 via `AWS_ENDPOINT_URL`), or a plain shared directory (`file://`, e.g. a
+  NAS). Clients never see it.
 - **Offline-first** — the working folder is always fully usable with no
   network. Changes are journaled locally and pushed when the remote becomes
   reachable again.
@@ -121,7 +124,6 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 | `bdrive sync [folder]` | Run one sync cycle now |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
-| `bdrive remote [folder]` / `bdrive remote set <folder> <url>` | Show / set the remote (advanced, incl. direct-to-bucket) |
 | `bdrive web [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub |
 | `bdrive whoami` | Device identity used in change tracking |
 

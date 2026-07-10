@@ -1,13 +1,13 @@
 ---
 name: beardrive
-description: Use BearDrive — a synced file system for AI agents and teams. Start syncing any project folder (bdrive init) and it stays in sync across devices and teammates through a BearDrive server or object storage, with accounts, per-file change history, public share links, and offline support. Use when the user wants to "set up beardrive", "sync this folder", "mount a folder", "share this file by URL", "start/stop syncing", "connect to a beardrive server", "check bdrive status", "see what changed", "who changed this file?", or troubleshoot a stuck sync.
+description: Use BearDrive — a synced file system for AI agents and teams. Start syncing any project folder (bdrive init) and it stays in sync across devices and teammates through a BearDrive hub, with accounts, per-file change history, public share links, and offline support. Use when the user wants to "set up beardrive", "sync this folder", "share this file by URL", "start/stop syncing", "connect to a beardrive server", "switch to a different hub", "check bdrive status", "see what changed", "who changed this file?", or troubleshoot a stuck sync.
 ---
 
 # BearDrive — synced file system for AI agents
 
-**BearDrive** (CLI: `bdrive`) turns any folder into a synced project: a background daemon per project scans for local changes and exchanges with the server (or object store). Files on disk are always real files — every tool, editor, and agent works on them with no integration.
+**BearDrive** (CLI: `bdrive`) turns any folder into a synced project: a background daemon per project scans for local changes and exchanges them with a **hub** (a `bdrive web` server). Files on disk are always real files — every tool, editor, and agent works on them with no integration.
 
-Use this skill whenever the user is working with the `bdrive` CLI: initializing or stopping projects, syncing, sharing files by URL, configuring a remote, inspecting state, reading change history, or debugging. ("Mount" in older docs = today's `bdrive init`.)
+Use this skill whenever the user is working with the `bdrive` CLI: initializing or stopping projects, syncing, sharing files by URL, signing in / switching hubs, inspecting state, reading change history, or debugging. ("Mount" in older docs = today's `bdrive init`.)
 
 ## Command map
 
@@ -19,7 +19,6 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | One sync cycle now | `bdrive sync [<folder>]` |
 | Mounts + daemon + pending state | `bdrive status [<folder>]` |
 | Change history | `bdrive log [<folder>] [-p path] [-n N]` |
-| Show / set remote | `bdrive remote [<folder>]` · `bdrive remote set <folder> <url>` |
 | This device's identity | `bdrive whoami` |
 | Sign this device in (once per device) | `bdrive login [url]` — bare form uses the remembered server or beardrive.ai. Opens the sign-in page in a browser (sign-up available there); the terminal completes on its own and stores a per-device token. `--device` prints a code to approve from any browser (SSH/headless); `--status` shows server + account. Password reset: "Forgot password?" on the sign-in page (emailed via the server's SMTP config, or the link appears in the server log). **Switch hubs** with `bdrive login <new-url>`, then re-run `bdrive init` in each folder. |
 | Sign this device out | `bdrive logout` — clears the saved token + account (folders untouched); `--forget` also drops the remembered server. The device token stays valid server-side until it expires — revoke it from the hub's device list to be sure. |
@@ -92,7 +91,7 @@ bdrive login https://drive.example.com:4173
 cd ~/agent-workspace && bdrive init --name agent-workspace
 ```
 
-Devices connecting the same project (by name or id) converge through the hub. Direct-to-bucket setups (no hub) remain possible via `bdrive remote set <folder> s3://…` after an offline init.
+Devices connecting the same project (by name or id) converge through the hub. A hub is required — clients always sync through a `bdrive web` server and never talk to the object store directly.
 
 Hub projects belong to an **organization**: only members of the project's org can see or sync it (project names are scoped per org too). Your first `bdrive init` creates your org automatically. **Hubs are invite-only by default** — the safe posture for a public URL. To give a teammate access, an org **owner** opens the web UI and clicks **Invite** in the sidebar footer — it mints an expiring join link (`…/join/<token>`); the teammate opens it and creates an account through the link (invites bootstrap signup even when public self-signup is closed), and is in. An admin can instead open self-service signup with a gate (admin approval, or allowed-domains + email verification) under **Admin → Signup & access** / the config's `auth` block.
 
@@ -140,9 +139,9 @@ bdrive stop ./notes --forget
 
 ---
 
-## 2. Cloud storage setup
+## 2. Storing a hub's data (object storage)
 
-beardrive uses each provider's standard credential chain — nothing beardrive-specific.
+This section is about the **hub** (`bdrive web <storage-root>`), which keeps its blobs + journals in an object store you point it at — **clients never touch storage**; they sync through the hub over `https://`. The credentials below live on the hub's machine, not on client devices. beardrive uses each provider's standard credential chain — nothing beardrive-specific.
 
 ### Supported URL schemes
 
@@ -153,22 +152,19 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 | `file:///abs/path` | Plain directory (local, NAS, Dropbox folder, …) | `file:///Volumes/nas/beardrive/notes` |
 | `https://host:port/p/<project-id>` | One project on a `bdrive web` hub — the client holds **no storage credentials**; the server device owns the bucket config. Server must run with `--upload` for clients to push. Set up with `bdrive init` (never hand-write the `/p/<id>` URL) | `https://drive.example.com:4173/p/p-7f3a2c91` |
 
-`bdrive remote set` validates the scheme and rejects anything else. The prefix can be multi-segment (`s3://bucket/team/agent/workspace`); beardrive writes `blobs/` and `journal/` underneath it.
+The `s3://`/`gs://`/`file://` URL is the **hub's** storage root; the prefix can be multi-segment (`s3://bucket/team/agent/workspace`), and beardrive writes `blobs/` and `journal/` underneath it. The `https://…/p/<id>` scheme is what a **client** folder uses, wired automatically by `bdrive init` (never hand-written).
 
-### Setting the remote
+### Pointing a hub at storage (server-side)
 
 ```sh
-# At mount time
-bdrive init ./workspace --remote s3://acme-beardrive/workspace
+# Start a hub on an S3 bucket; clients then `bdrive login` + `bdrive init`
+bdrive web s3://acme-beardrive/root --upload
 
-# After mounting
-bdrive remote set ./workspace s3://acme-beardrive/workspace
-
-# Inspect
-bdrive remote ./workspace
+# Or from a config file
+bdrive web -c config.json    # { "remote": "s3://acme-beardrive/root", "upload": true, … }
 ```
 
-After `remote set`, run `bdrive sync ./workspace` to push immediately. A running daemon picks up the change on its next interval.
+Clients never set storage: they run `bdrive login <hub-url>` once, then `bdrive init` per folder.
 
 ### Amazon S3 (`s3://`)
 
@@ -207,14 +203,14 @@ export AWS_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
 export AWS_REGION=auto
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
-bdrive init ./workspace --remote s3://my-r2-bucket/workspace
+bdrive web s3://my-r2-bucket/workspace --upload
 
 # MinIO
 export AWS_ENDPOINT_URL=http://minio.local:9000
 export AWS_REGION=us-east-1
 export AWS_ACCESS_KEY_ID=minioadmin
 export AWS_SECRET_ACCESS_KEY=minioadmin
-bdrive init ./workspace --remote s3://beardrive/workspace
+bdrive web s3://beardrive/workspace --upload
 ```
 
 Persist these in the user's shell rc or a systemd/launchd unit so the daemon also has them.
@@ -230,7 +226,7 @@ gcloud auth application-default login
 # Service account
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 
-bdrive init ./workspace --remote gs://acme-beardrive/workspace
+bdrive web gs://acme-beardrive/workspace --upload
 ```
 
 Service account needs `storage.objects.{get,list,create,delete}` on the bucket (`roles/storage.objectAdmin` bucket-scoped works).
