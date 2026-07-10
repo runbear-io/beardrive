@@ -27,6 +27,7 @@ func syncCmd() *cobra.Command {
 				return err
 			}
 			defer closeSession(sess)
+			sess.OnProgress = progressReporter()
 			res, err := sess.Cycle(cmd.Context())
 			if err != nil {
 				return err

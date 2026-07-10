@@ -2,9 +2,11 @@ package syncer
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +14,40 @@ import (
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
 )
+
+// TestPushProgress verifies the push phase reports upload progress: the total
+// is the number of unique blobs, Done climbs to that total, and byte totals
+// are populated. (Done isn't strictly ordered across the parallel workers, so
+// we only assert it reaches the total.)
+func TestPushProgress(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+	const n = 25
+	for i := 0; i < n; i++ {
+		write(t, a.Folder, fmt.Sprintf("f%02d.txt", i), fmt.Sprintf("unique content for file %d — pad pad pad", i))
+	}
+	var mu sync.Mutex
+	var total, maxDone int
+	var toBytes int64
+	a.OnProgress = func(p Progress) {
+		mu.Lock()
+		defer mu.Unlock()
+		total = p.Total
+		toBytes = p.ToBytes
+		if p.Done > maxDone {
+			maxDone = p.Done
+		}
+	}
+	cycle(t, a)
+	if total != n {
+		t.Fatalf("progress Total = %d, want %d", total, n)
+	}
+	if maxDone != n {
+		t.Fatalf("progress reached Done = %d, want %d", maxDone, n)
+	}
+	if toBytes == 0 {
+		t.Fatal("progress ToBytes should be > 0")
+	}
+}
 
 // newDevice simulates one device: its own folder, volume store, and identity,
 // all syncing through a shared file:// remote.

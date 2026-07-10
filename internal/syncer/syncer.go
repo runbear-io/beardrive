@@ -21,13 +21,29 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
 )
+
+// pushConcurrency bounds how many blobs upload at once. The initial import of
+// many files is latency-bound on serial round-trips, so uploading in parallel
+// is the main speedup.
+const pushConcurrency = 16
+
+// Progress reports upload progress during a cycle's push phase, so the CLI can
+// draw a bar. Total/TotalBytes are set once when the push starts; Done/Bytes
+// climb as blobs finish. Nil OnProgress means no reporting (the daemon).
+type Progress struct {
+	Done, Total    int
+	Bytes, ToBytes int64
+}
 
 // Session ties a working folder to its volume store and (optionally) remote.
 type Session struct {
@@ -40,6 +56,10 @@ type Session struct {
 	// Device.Author remains the fallback identity.
 	Account config.Settings
 	Backend remote.Backend // nil = work offline
+	// OnProgress, when set, is called during push with upload progress. It may
+	// be invoked concurrently from upload workers, so it must be safe to call
+	// from multiple goroutines.
+	OnProgress func(Progress)
 }
 
 func (s *Session) mountID() string {
@@ -516,18 +536,44 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 	if st.PushedOps > int64(len(myOps)) {
 		st.PushedOps = int64(len(myOps))
 	}
-	uploaded := map[string]bool{}
+	// Collect the unique, not-yet-pushed blobs to upload (deduped by content
+	// hash). The backend's Put is idempotent and already skips content that's
+	// present remotely (the hub reports it during signing), so we don't pay a
+	// separate existence round-trip per blob.
+	seen := map[string]bool{}
+	type blobJob struct {
+		blob string
+		size int64
+	}
+	var jobs []blobJob
+	var totalBytes int64
 	for _, op := range myOps[st.PushedOps:] {
-		if op.Kind != journal.KindPut || op.Blob == "" || uploaded[op.Blob] {
+		if op.Kind != journal.KindPut || op.Blob == "" || seen[op.Blob] {
 			continue
 		}
-		key := "blobs/" + op.Blob
-		ok, err := s.Backend.Exists(ctx, key)
-		if err != nil {
-			return err
+		seen[op.Blob] = true
+		jobs = append(jobs, blobJob{op.Blob, op.Size})
+		totalBytes += op.Size
+	}
+
+	var done, bytesDone int64
+	report := func() {
+		if s.OnProgress != nil {
+			s.OnProgress(Progress{
+				Done: int(atomic.LoadInt64(&done)), Total: len(jobs),
+				Bytes: atomic.LoadInt64(&bytesDone), ToBytes: totalBytes,
+			})
 		}
-		if !ok {
-			f, err := s.Store.OpenBlob(op.Blob)
+	}
+	report() // announce the total up front (0 / N)
+
+	// Upload blobs in parallel — the initial import is bound on serial
+	// round-trips, not bandwidth, so concurrency is the win.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(pushConcurrency)
+	for _, j := range jobs {
+		g.Go(func() error {
+			f, err := s.Store.OpenBlob(j.blob)
 			if err != nil {
 				return err
 			}
@@ -536,13 +582,19 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 				f.Close()
 				return err
 			}
-			err = s.Backend.Put(ctx, key, f, fi.Size())
+			err = s.Backend.Put(gctx, "blobs/"+j.blob, f, fi.Size())
 			f.Close()
 			if err != nil {
 				return err
 			}
-		}
-		uploaded[op.Blob] = true
+			atomic.AddInt64(&done, 1)
+			atomic.AddInt64(&bytesDone, fi.Size())
+			report()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
 	}
 
 	jp := s.Store.JournalPath(s.Device.ID)
