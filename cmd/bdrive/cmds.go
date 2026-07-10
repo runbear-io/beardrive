@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net/url"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -171,62 +170,6 @@ func logCmd() *cobra.Command {
 	}
 	c.Flags().IntVarP(&limit, "limit", "n", 50, "max entries to show (0 = all)")
 	c.Flags().StringVarP(&pathFilter, "path", "p", "", "only show history for this file or directory")
-	return c
-}
-
-func remoteCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "remote [folder]",
-		Short: "Show or set the cloud remote of a mounted folder",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			folder, err := absFolder(args)
-			if err != nil {
-				return err
-			}
-			proj, err := mustProject(folder)
-			if err != nil {
-				return err
-			}
-			if proj.Remote == "" {
-				fmt.Println("(none)")
-			} else {
-				fmt.Println(proj.Remote)
-			}
-			return nil
-		},
-	}
-	set := &cobra.Command{
-		Use:   "set <folder> <url>",
-		Short: "Set the remote (s3://bucket/prefix, gs://bucket/prefix, file:///path, https://bdrive-server)",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			folder, err := absFolder(args[:1])
-			if err != nil {
-				return err
-			}
-			raw := args[1]
-			u, err := url.Parse(raw)
-			if err != nil || (u.Scheme != "s3" && u.Scheme != "gs" && u.Scheme != "file" && u.Scheme != "http" && u.Scheme != "https") {
-				return fmt.Errorf("invalid remote %q (want s3://bucket/prefix, gs://bucket/prefix, file:///path, or https://bdrive-server)", raw)
-			}
-			proj, err := mustProject(folder)
-			if err != nil {
-				return err
-			}
-			proj.Remote = raw
-			if proj, err = config.SaveProject(folder, proj); err != nil {
-				return err
-			}
-			if _, _, err := config.ResolveMount(folder); err != nil { // sync the registry
-				return err
-			}
-			fmt.Printf("remote of %s set to %s\n", folder, raw)
-			fmt.Println("run `bdrive sync` to sync now (a running daemon picks it up automatically)")
-			return nil
-		},
-	}
-	c.AddCommand(set)
 	return c
 }
 
