@@ -1,0 +1,10 @@
+.git
+bdrive
+deploy
+example
+website
+*.md
+.goreleaser.yaml
+.claude
+plugin
+/private

@@ -348,6 +348,33 @@ non-localhost address. Internally all of this sits behind an
 email/password provider, and alternative identity backends can be swapped
 in without touching the CLI or the API.
 
+### Choosing a database
+
+A hub keeps a little **metadata** — accounts, projects, orgs, invites,
+shares, devices — separate from your files. (File content and the sync
+journals always live in the object store; the database never holds them.)
+You choose where that metadata lives with the `database` block:
+
+```jsonc
+"database": { "driver": "file" }                       // default — JSON under BDRIVE_HOME
+"database": { "driver": "sqlite",   "dsn": "/var/lib/bdrive/hub.db" }
+"database": { "driver": "postgres", "dsn": "postgres://…@…pooler.supabase.com:6543/postgres" }
+```
+
+- **file** (default): zero dependencies, human-readable JSON, perfect for a
+  laptop or a small self-hosted hub.
+- **sqlite**: one embedded database file — a real DB locally with no server
+  to run.
+- **postgres**: a managed Postgres such as **Supabase** for production —
+  just point `dsn` at its connection string (use the transaction pooler for
+  many connections). Since Supabase *is* Postgres, this stays fully
+  open-source with no managed-only lock-in.
+
+`file` and `sqlite` are single-writer (run one hub instance); Postgres is
+transactional and can back more than one instance. Switching backends
+doesn't migrate existing data — pick one when you set the hub up. Both SQL
+drivers are pure Go, so the binary stays a CGO-free static build.
+
 ### Uploads
 
 The browser client is deliberately storage-blind: it never sees the remote

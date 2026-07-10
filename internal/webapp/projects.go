@@ -3,10 +3,7 @@ package webapp
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"sync"
@@ -25,63 +22,33 @@ type Project struct {
 
 var projectIDRe = regexp.MustCompile(`^p-[0-9a-f]{8}$`)
 
-// ProjectDB is the server's project registry, persisted as a JSON file that
-// is loaded on open and rewritten atomically on every change.
+// ProjectDB is the server's project registry: an in-memory index over a
+// MetaStore ProjectRepo. Reads are served from memory; every change is
+// persisted as one record through the repo (file or SQL).
 type ProjectDB struct {
-	path string
+	repo ProjectRepo
 
 	mu   sync.Mutex
 	byID map[string]Project
 }
 
-// OpenProjectDB loads the registry at path; a missing file is an empty
-// registry.
-func OpenProjectDB(path string) (*ProjectDB, error) {
-	db := &ProjectDB{path: path, byID: make(map[string]Project)}
-	data, err := os.ReadFile(path)
+// NewProjectDB builds the registry over a repo, loading its current contents.
+func NewProjectDB(repo ProjectRepo) (*ProjectDB, error) {
+	db := &ProjectDB{repo: repo, byID: make(map[string]Project)}
+	list, err := repo.Load()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return db, nil
-		}
 		return nil, err
 	}
-	var file struct {
-		Projects []Project `json:"projects"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	for _, p := range file.Projects {
+	for _, p := range list {
 		db.byID[p.ID] = p
 	}
 	return db, nil
 }
 
-// save persists the registry. Callers hold mu.
-func (db *ProjectDB) save() error {
-	list := db.list()
-	data, err := json.MarshalIndent(struct {
-		Projects []Project `json:"projects"`
-	}{list}, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(db.path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(db.path), ".bdrive-tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), db.path)
+// OpenProjectDB loads the file-backed registry at path (a missing file is an
+// empty registry) — the zero-dependency default.
+func OpenProjectDB(path string) (*ProjectDB, error) {
+	return NewProjectDB(newFileProjectRepo(path))
 }
 
 // list returns projects sorted by name. Callers hold mu.
@@ -128,7 +95,7 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 	}
 	p := Project{ID: "p-" + hex.EncodeToString(buf[:]), Name: name, Org: org, Created: time.Now().UTC()}
 	db.byID[p.ID] = p
-	if err := db.save(); err != nil {
+	if err := db.repo.Put(p); err != nil {
 		delete(db.byID, p.ID)
 		return Project{}, false, err
 	}
@@ -154,7 +121,7 @@ func (db *ProjectDB) Rename(id, name string) error {
 	}
 	p.Name = name
 	db.byID[id] = p
-	return db.save()
+	return db.repo.Put(p)
 }
 
 // Delete removes a project from the registry. Its storage prefix (blobs,
@@ -167,7 +134,7 @@ func (db *ProjectDB) Delete(id string) error {
 		return fmt.Errorf("no such project %q", id)
 	}
 	delete(db.byID, id)
-	return db.save()
+	return db.repo.Delete(id)
 }
 
 // SetOrg moves a project into an org (used by the startup migration).
@@ -180,7 +147,7 @@ func (db *ProjectDB) SetOrg(id, org string) error {
 	}
 	p.Org = org
 	db.byID[id] = p
-	return db.save()
+	return db.repo.Put(p)
 }
 
 func trimName(s string) string {

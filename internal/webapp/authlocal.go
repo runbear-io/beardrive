@@ -10,8 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -43,7 +41,7 @@ type BuiltinAuth struct {
 	// OrgDB.ValidInvite by the server. Nil → no invite-based signup.
 	InviteValid func(token string) bool
 
-	path string
+	store AccountRepo
 
 	mu     sync.Mutex
 	users  map[string]*authUser // by id
@@ -88,43 +86,38 @@ type pendingGrant struct {
 	expires time.Time
 }
 
-// OpenBuiltinAuth loads (or starts) the account registry at path.
-func OpenBuiltinAuth(path string, allowSignup bool, mail *Mailer) (*BuiltinAuth, error) {
+// NewBuiltinAuth builds the account service over an AccountRepo, loading its
+// accounts, tokens, and persisted policy.
+func NewBuiltinAuth(store AccountRepo, allowSignup bool, mail *Mailer) (*BuiltinAuth, error) {
 	a := &BuiltinAuth{
-		AllowSignup: allowSignup, Mail: mail, path: path,
+		AllowSignup: allowSignup, Mail: mail, store: store,
 		users:   make(map[string]*authUser),
 		tokens:  make(map[string]authToken),
 		pending: make(map[string]pendingGrant),
 	}
-	data, err := os.ReadFile(path)
+	users, tokens, policy, err := store.Load()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return a, nil
-		}
 		return nil, err
 	}
-	var file struct {
-		Users  []*authUser `json:"users"`
-		Tokens []authToken `json:"tokens"`
-		Policy *authPolicy `json:"policy,omitempty"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	for _, u := range file.Users {
+	for _, u := range users {
 		a.users[u.ID] = u
 	}
-	for _, t := range file.Tokens {
+	for _, t := range tokens {
 		a.tokens[t.Hash] = t
 	}
 	// A UI-saved policy is the persisted operational default; the server
 	// config can still override it at startup (see web.go), so a sysadmin who
 	// pins a value in the config file always wins over a browser toggle.
-	if file.Policy != nil {
-		a.RequireVerification = file.Policy.RequireVerification
-		a.RequireApproval = file.Policy.RequireApproval
+	if policy != nil {
+		a.RequireVerification = policy.RequireVerification
+		a.RequireApproval = policy.RequireApproval
 	}
 	return a, nil
+}
+
+// OpenBuiltinAuth loads (or starts) the file-backed account registry at path.
+func OpenBuiltinAuth(path string, allowSignup bool, mail *Mailer) (*BuiltinAuth, error) {
+	return NewBuiltinAuth(newFileAccountRepo(path), allowSignup, mail)
 }
 
 // authPolicy is the UI-tunable slice of gating (persisted in auth.json).
@@ -142,46 +135,7 @@ func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error
 	defer a.mu.Unlock()
 	a.RequireVerification = requireVerification
 	a.RequireApproval = requireApproval
-	return a.save()
-}
-
-// save persists users and tokens. Callers hold mu.
-func (a *BuiltinAuth) save() error {
-	var file struct {
-		Users  []*authUser `json:"users"`
-		Tokens []authToken `json:"tokens"`
-		Policy *authPolicy `json:"policy,omitempty"`
-	}
-	for _, u := range a.users {
-		file.Users = append(file.Users, u)
-	}
-	for _, t := range a.tokens {
-		file.Tokens = append(file.Tokens, t)
-	}
-	file.Policy = &authPolicy{RequireVerification: a.RequireVerification, RequireApproval: a.RequireApproval}
-	data, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(a.path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(a.path), ".bdrive-tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp.Name(), 0o600); err != nil { // holds password hashes
-		return err
-	}
-	return os.Rename(tmp.Name(), a.path)
+	return a.store.PutPolicy(authPolicy{RequireVerification: requireVerification, RequireApproval: requireApproval})
 }
 
 func randHex(n int) string {
@@ -253,7 +207,7 @@ func (a *BuiltinAuth) createAccount(email, name, password string, viaInvite bool
 		Pass: string(hash), Status: status, Created: time.Now().UTC(),
 	}
 	a.users[u.ID] = u
-	if err := a.save(); err != nil {
+	if err := a.store.PutAccount(u); err != nil {
 		delete(a.users, u.ID)
 		return nil, err
 	}
@@ -354,11 +308,10 @@ func (a *BuiltinAuth) issueToken(userID, device string) (string, error) {
 	tok := "bdt_" + randHex(20)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.tokens[hashToken(tok)] = authToken{
-		Hash: hashToken(tok), User: userID, Device: device, Created: time.Now().UTC(),
-	}
-	if err := a.save(); err != nil {
-		delete(a.tokens, hashToken(tok))
+	t := authToken{Hash: hashToken(tok), User: userID, Device: device, Created: time.Now().UTC()}
+	a.tokens[t.Hash] = t
+	if err := a.store.PutToken(t); err != nil {
+		delete(a.tokens, t.Hash)
 		return "", err
 	}
 	return tok, nil
@@ -369,7 +322,7 @@ func (a *BuiltinAuth) revokeToken(tok string) {
 	defer a.mu.Unlock()
 	if _, ok := a.tokens[hashToken(tok)]; ok {
 		delete(a.tokens, hashToken(tok))
-		a.save()
+		a.store.DeleteToken(hashToken(tok))
 	}
 }
 
@@ -474,7 +427,7 @@ func (a *BuiltinAuth) Approve(id string) error {
 		return fmt.Errorf("no such account")
 	}
 	u.Status = statusActive
-	return a.save()
+	return a.store.PutAccount(u)
 }
 
 // Deny removes a pending account.
@@ -485,7 +438,7 @@ func (a *BuiltinAuth) Deny(id string) error {
 		return fmt.Errorf("no such account")
 	}
 	delete(a.users, id)
-	return a.save()
+	return a.store.DeleteAccount(id)
 }
 
 // Accounts returns every account, oldest first (used by the org migration
@@ -833,7 +786,7 @@ func (a *BuiltinAuth) pageVerify(w http.ResponseWriter, r *http.Request) {
 	next := a.afterVerify()
 	if u != nil && u.Status == statusUnverified {
 		u.Status = next
-		a.save()
+		a.store.PutAccount(u)
 	}
 	a.mu.Unlock()
 	if u != nil && u.Status == statusPending {
@@ -896,7 +849,7 @@ func (a *BuiltinAuth) pageResetConfirm(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		if u := a.users[g.user]; u != nil {
 			u.Pass = string(hash)
-			a.save()
+			a.store.PutAccount(u)
 		}
 		a.mu.Unlock()
 		authPage(w, "Password updated", `<p class="msg">Your password is updated.</p>

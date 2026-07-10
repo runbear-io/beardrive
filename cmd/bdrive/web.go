@@ -50,6 +50,13 @@ type webConfig struct {
 			From string `json:"from,omitempty"`
 		} `json:"smtp,omitempty"`
 	} `json:"auth,omitempty"`
+	// Database selects where hub metadata (accounts, projects, orgs, invites,
+	// shares, devices) lives. Default "file" (JSON under BDRIVE_HOME). Blobs
+	// and journals always stay in the object store, never the database.
+	Database *struct {
+		Driver string `json:"driver,omitempty"` // file (default) | sqlite | postgres
+		DSN    string `json:"dsn,omitempty"`    // sqlite file path, or a Postgres/Supabase URL
+	} `json:"database,omitempty"`
 }
 
 func loadWebConfig(path string) (webConfig, error) {
@@ -162,6 +169,7 @@ credentials); otherwise it is relayed through this server.`,
 				ShareRPM: cfg.ShareRPM,
 			}
 			var display string
+			var meta webapp.MetaStore // hub metadata store; nil means the file backend
 			if dir != "" {
 				// Single-volume viewer over a plain folder.
 				abs, err := filepath.Abs(dir)
@@ -188,7 +196,31 @@ credentials); otherwise it is relayed through this server.`,
 					}
 					projectsDB = filepath.Join(home, "projects.json")
 				}
-				db, err := webapp.OpenProjectDB(projectsDB)
+				// Pick the metadata backend: file (default) or a SQL database
+				// (sqlite locally, Postgres/Supabase in production).
+				if cfg.Database != nil {
+					switch cfg.Database.Driver {
+					case "", "file":
+					case "sqlite", "postgres", "pgx":
+						drv := cfg.Database.Driver
+						if drv == "postgres" {
+							drv = "pgx"
+						}
+						meta, err = webapp.OpenSQLStore(drv, cfg.Database.DSN)
+						if err != nil {
+							return fmt.Errorf("open database: %w", err)
+						}
+						defer meta.Close()
+					default:
+						return fmt.Errorf("unknown database driver %q (use file, sqlite, or postgres)", cfg.Database.Driver)
+					}
+				}
+				var db *webapp.ProjectDB
+				if meta != nil {
+					db, err = webapp.NewProjectDB(meta.Projects())
+				} else {
+					db, err = webapp.OpenProjectDB(projectsDB)
+				}
 				if err != nil {
 					return fmt.Errorf("open project registry: %w", err)
 				}
@@ -236,7 +268,12 @@ credentials); otherwise it is relayed through this server.`,
 				if usersDB == "" {
 					usersDB = filepath.Join(home, "auth.json")
 				}
-				auth, err := webapp.OpenBuiltinAuth(usersDB, allowSignup, mail)
+				var auth *webapp.BuiltinAuth
+				if meta != nil {
+					auth, err = webapp.NewBuiltinAuth(meta.Accounts(), allowSignup, mail)
+				} else {
+					auth, err = webapp.OpenBuiltinAuth(usersDB, allowSignup, mail)
+				}
 				if err != nil {
 					return fmt.Errorf("open account registry: %w", err)
 				}
@@ -266,7 +303,12 @@ credentials); otherwise it is relayed through this server.`,
 					return err
 				}
 				srv.Auth = auth
-				orgs, err := webapp.OpenOrgDB(filepath.Join(filepath.Dir(projectsDB), "orgs.json"))
+				var orgs *webapp.OrgDB
+				if meta != nil {
+					orgs, err = webapp.NewOrgDB(meta.Orgs())
+				} else {
+					orgs, err = webapp.OpenOrgDB(filepath.Join(filepath.Dir(projectsDB), "orgs.json"))
+				}
 				if err != nil {
 					return fmt.Errorf("open org registry: %w", err)
 				}
@@ -278,17 +320,31 @@ credentials); otherwise it is relayed through this server.`,
 				if err := webapp.MigrateOrgs(srv.Projects, orgs, auth.Accounts()); err != nil {
 					return fmt.Errorf("migrate projects into orgs: %w", err)
 				}
-				devices, err := webapp.OpenDeviceRegistry(filepath.Join(filepath.Dir(projectsDB), "devices.json"))
+				var devices *webapp.DeviceRegistry
+				if meta != nil {
+					devices, err = webapp.NewDeviceRegistry(meta.Devices())
+				} else {
+					devices, err = webapp.OpenDeviceRegistry(filepath.Join(filepath.Dir(projectsDB), "devices.json"))
+				}
 				if err != nil {
 					return fmt.Errorf("open device registry: %w", err)
 				}
 				srv.Devices = devices
-				shares, err := webapp.OpenShareDB(filepath.Join(filepath.Dir(projectsDB), "shares.json"))
+				var shares *webapp.ShareDB
+				if meta != nil {
+					shares, err = webapp.NewShareDB(meta.Shares())
+				} else {
+					shares, err = webapp.OpenShareDB(filepath.Join(filepath.Dir(projectsDB), "shares.json"))
+				}
 				if err != nil {
 					return fmt.Errorf("open share registry: %w", err)
 				}
 				srv.Shares = shares
-				display += " (auth: " + usersDB + ")"
+				if meta != nil {
+					display += " (db: " + cfg.Database.Driver + ")"
+				} else {
+					display += " (auth: " + usersDB + ")"
+				}
 			}
 
 			shown := addr

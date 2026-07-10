@@ -6,9 +6,7 @@ import (
 	"html"
 	"io"
 	"net/http"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -39,64 +37,30 @@ func (s Share) expired() bool {
 	return !s.Expires.IsZero() && time.Now().After(s.Expires)
 }
 
-// ShareDB is the file-backed share registry (shares.json), same discipline
-// as the project registry.
+// ShareDB is the in-memory share registry over a MetaStore ShareRepo.
 type ShareDB struct {
-	path string
+	repo ShareRepo
 
 	mu      sync.Mutex
 	byToken map[string]Share
 }
 
-func OpenShareDB(path string) (*ShareDB, error) {
-	db := &ShareDB{path: path, byToken: make(map[string]Share)}
-	data, err := os.ReadFile(path)
+// NewShareDB builds the registry over a repo, loading its contents.
+func NewShareDB(repo ShareRepo) (*ShareDB, error) {
+	db := &ShareDB{repo: repo, byToken: make(map[string]Share)}
+	list, err := repo.Load()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return db, nil
-		}
 		return nil, err
 	}
-	var file struct {
-		Shares []Share `json:"shares"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	for _, s := range file.Shares {
+	for _, s := range list {
 		db.byToken[s.Token] = s
 	}
 	return db, nil
 }
 
-// save persists the registry. Callers hold mu.
-func (db *ShareDB) save() error {
-	var file struct {
-		Shares []Share `json:"shares"`
-	}
-	for _, s := range db.byToken {
-		file.Shares = append(file.Shares, s)
-	}
-	data, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(db.path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(db.path), ".bdrive-tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), db.path)
+// OpenShareDB loads the file-backed registry at path.
+func OpenShareDB(path string) (*ShareDB, error) {
+	return NewShareDB(newFileShareRepo(path))
 }
 
 // Create returns a share for (project, path), reusing an existing live one
@@ -117,7 +81,7 @@ func (db *ShareDB) Create(project, p, creator string, ttl time.Duration) (Share,
 		s.Expires = time.Now().UTC().Add(ttl)
 	}
 	db.byToken[s.Token] = s
-	if err := db.save(); err != nil {
+	if err := db.repo.Put(s); err != nil {
 		delete(db.byToken, s.Token)
 		return Share{}, err
 	}
@@ -145,7 +109,7 @@ func (db *ShareDB) Revoke(token string) bool {
 		return false
 	}
 	delete(db.byToken, token)
-	db.save()
+	db.repo.Delete(token)
 	return true
 }
 
