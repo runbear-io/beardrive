@@ -198,8 +198,23 @@ func remoteCmd() *cobra.Command {
 	}
 	set := &cobra.Command{
 		Use:   "set <folder> <url>",
-		Short: "Set the remote (s3://bucket/prefix, gs://bucket/prefix, file:///path, https://bdrive-server)",
-		Args:  cobra.ExactArgs(2),
+		Short: "Set where a folder syncs (object storage, or a bdrive hub)",
+		Long: `Point a folder at where it syncs. Two kinds of remote:
+
+  Object storage — sync straight to a bucket you own (you hold the creds):
+    s3://bucket/prefix    gs://bucket/prefix    file:///abs/path
+
+  A bdrive hub — sync through a bdrive web server that holds the storage
+  credentials for you (sign in first with "bdrive login <url>"):
+    https://your-hub.example.com
+
+Switching hubs is usually done with "bdrive login <url>" then "bdrive init",
+which wires the folder to a project on that hub for you. Use "remote set" for
+object storage, or to re-point a folder by hand.`,
+		Example: `  bdrive remote set ./notes s3://acme-bdrive/notes
+  bdrive remote set ./notes gs://acme-bdrive/notes
+  bdrive remote set ./notes https://drive.example.com`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			folder, err := absFolder(args[:1])
 			if err != nil {

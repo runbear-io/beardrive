@@ -113,7 +113,8 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai) |
+| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai). Switch hubs with `bdrive login <new-url>` |
+| `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing (files stay; `bdrive init` resumes) |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
@@ -232,7 +233,10 @@ cd ~/some-project && bdrive init              # once per project
 
 `bdrive login` signs the device in and remembers the server (`settings.json`
 under the bdrive home; bare `bdrive login` defaults to beardrive.ai —
-`--status` shows the current server and account). `bdrive init` then, per
+`--status` shows the current server and account). To move to a **different
+hub**, run `bdrive login <new-url>` and then re-run `bdrive init` in each
+folder to connect it to a project there; `bdrive logout` signs out entirely.
+`bdrive init` then, per
 project, walks you through it on a terminal: **create a new project or
 connect an existing one** (picked from the server's list), and **sync the
 whole folder or only a shared subfolder** (e.g. `./shared`). Every question

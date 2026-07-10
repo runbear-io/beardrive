@@ -31,6 +31,7 @@ everything keeps working offline; changes sync when the remote is reachable.`,
 	}
 	root.AddCommand(
 		loginCmd(),
+		logoutCmd(),
 		initCmd(),
 		shareCmd(),
 		stopCmd(),

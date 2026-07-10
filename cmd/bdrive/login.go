@@ -106,6 +106,56 @@ With no argument the remembered server is used, or ` + config.DefaultServer + `.
 	return c
 }
 
+func logoutCmd() *cobra.Command {
+	var forget bool
+	c := &cobra.Command{
+		Use:   "logout",
+		Short: "Sign this device out (clear the saved token)",
+		Long: `Clear this device's saved sign-in — the token and account — so it is no
+longer authenticated to the bdrive server. The remembered server is kept so
+"bdrive login" re-authenticates to it; pass --forget to clear that too.
+
+To switch to a different server, just run "bdrive login <new-server-url>".
+Your synced folders are untouched; this only affects this device's session.`,
+		Example: `  bdrive logout            # sign out, keep the server remembered
+  bdrive logout --forget   # sign out and forget the server`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			settings, err := config.LoadSettings()
+			if err != nil {
+				return err
+			}
+			if settings.Token == "" && settings.Email == "" && !(forget && settings.Server != "") {
+				fmt.Println("already signed out")
+				return nil
+			}
+			who, server := settings.Email, settings.Server
+			settings.Token, settings.Email, settings.Name = "", "", ""
+			if forget {
+				settings.Server = ""
+			}
+			if err := config.SaveSettings(settings); err != nil {
+				return err
+			}
+			switch {
+			case who != "" && server != "" && !forget:
+				fmt.Printf("signed out %s from %s\n", who, server)
+			case who != "":
+				fmt.Printf("signed out %s\n", who)
+			default:
+				fmt.Println("signed out")
+			}
+			if forget {
+				fmt.Println("forgot the remembered server (run `bdrive login <url>` to set a new one)")
+			}
+			fmt.Println("note: the device token stays valid on the server until it expires — revoke it from the hub's device list if needed")
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&forget, "forget", false, "also forget the remembered server")
+	return c
+}
+
 // runLogin executes the sign-in flow against a server known to require auth
 // and persists server + token + account to settings.
 func runLogin(server string, cfg serverConfig, useDevice bool) error {
