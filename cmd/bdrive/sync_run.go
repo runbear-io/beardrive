@@ -32,6 +32,7 @@ func startSync(ctx context.Context, folder string, proj config.Project, foregrou
 	if err != nil {
 		return err
 	}
+	sess.OnProgress = progressReporter() // the initial import is the slow one
 	res, err := sess.Cycle(ctx)
 	closeSession(sess)
 	if err != nil {
