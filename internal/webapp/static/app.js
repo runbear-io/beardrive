@@ -3,6 +3,7 @@
 
 const $ = (id) => document.getElementById(id);
 let flatFiles = [];   // [{path, name}] for wikilink resolution
+let dirIndex = new Map(); // dir path → tree node, for folder listings
 let currentPath = null;
 let expanded = new Set();  // dir paths that are open (folders start closed)
 let treeFirstLoad = true;  // apply the "lone root folder opens" rule once per project
@@ -92,7 +93,7 @@ async function boot() {
     initUpload();
     await refreshTree();
     const { path } = parseRoute();
-    if (path) openFile(path);
+    if (path) openPath(path);
   }
   setInterval(refreshTree, 15000); // pick up synced changes
 }
@@ -161,7 +162,7 @@ function selectProject(p, path) {
   initUpload();
   initHistory();
   updateShareButton();
-  refreshTree().then(() => { if (path) openFile(path); });
+  refreshTree().then(() => { if (path) openPath(path); });
   if (!path) pushURL("/" + p.id);
 }
 
@@ -676,6 +677,7 @@ async function refreshTree() {
     root = await getJSON(apiBase + "tree");
   } catch { return; } // keep the last good tree
   flatFiles = [];
+  dirIndex = new Map();
   const kids = root.children || [];
   // First render of a project's tree: every folder starts closed, except a
   // lone root folder — opening it spares the user a single shut folder.
@@ -688,6 +690,10 @@ async function refreshTree() {
   nav.innerHTML = "";
   nav.appendChild(renderChildren(kids));
   markActive();
+  // A folder listing shows live tree data — keep it in step with the tree.
+  if (currentPath && dirIndex.has(currentPath) && $("content").querySelector(".dirlist")) {
+    renderFolderListing(currentPath);
+  }
 }
 
 function renderChildren(children) {
@@ -719,6 +725,7 @@ function renderNode(n) {
   row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); row.click(); } };
   li.appendChild(row);
   if (n.dir) {
+    dirIndex.set(n.path, n);
     if (serverConfig.mode === "hub") {
       const hist = document.createElement("span");
       hist.className = "dir-history";
@@ -731,11 +738,20 @@ function renderNode(n) {
     const open = expanded.has(n.path);
     if (!open) li.classList.add("collapsed");
     row.setAttribute("aria-expanded", String(open));
-    row.onclick = () => {
+    const toggle = () => {
       li.classList.toggle("collapsed");
       const isCollapsed = li.classList.contains("collapsed");
       isCollapsed ? expanded.delete(n.path) : expanded.add(n.path);
       row.setAttribute("aria-expanded", String(!isCollapsed));
+    };
+    // The chevron only folds; the row selects the folder (opens it in the
+    // tree and lists its contents in the main pane). Clicking the folder
+    // whose listing is already showing folds/unfolds it, like a plain tree;
+    // from any other view (file, history) it brings the listing back.
+    chev.onclick = (e) => { e.stopPropagation(); toggle(); };
+    row.onclick = () => {
+      if (currentPath === n.path && $("content").querySelector(".dirlist")) { toggle(); return; }
+      openFolder(n.path);
     };
   } else {
     flatFiles.push({ path: n.path, name: n.name });
@@ -780,6 +796,122 @@ function revealInTree(p) {
   if (row) row.scrollIntoView({ block: "center" });
 }
 
+/* ---- breadcrumb ----
+   Every ancestor segment is a link to that folder's listing; the last
+   segment is the current page. */
+function setCrumb(p) {
+  const c = $("crumb");
+  c.innerHTML = "";
+  const parts = p.split("/");
+  let acc = "";
+  parts.forEach((seg, i) => {
+    acc = acc ? acc + "/" + seg : seg;
+    if (i) el(c, "span", "crumb-sep", "/");
+    const last = i === parts.length - 1;
+    const s = el(c, "span", last ? null : "crumb-seg", seg);
+    if (!last) {
+      const target = acc;
+      s.title = target;
+      s.onclick = () => { if (dirIndex.has(target)) openFolder(target); };
+    }
+  });
+}
+
+/* ---- folder pane ---- */
+
+/* Open a path of either kind — a route or link doesn't know which it is
+   until the tree has loaded. */
+function openPath(p) {
+  if (dirIndex.has(p)) openFolder(p);
+  else openFile(p);
+}
+
+/* Selecting a folder: unfold it in the tree, highlight it, and list what's
+   inside it in the main pane. */
+function openFolder(p) {
+  if (!dirIndex.has(p)) return;
+  currentPath = p;
+  syncURL(p);
+  expandTo(p);
+  expanded.add(p); // the selected folder itself opens, not just its ancestors
+  applyTreeExpansion();
+  markActive();
+  const row = document.querySelector(`#tree .row[data-path="${CSS.escape(p)}"]`);
+  if (row) row.scrollIntoView({ block: "nearest" });
+  closeSidebarOnMobile();
+  setCrumb(p);
+  $("meta").textContent = "";
+  $("download").hidden = true;
+  $("more-btn").hidden = !(serverConfig.mode === "hub" && currentProject);
+  updateShareButton();
+  renderFolderListing(p);
+}
+
+function renderFolderListing(p) {
+  const node = dirIndex.get(p);
+  if (!node) return;
+  const content = $("content");
+  content.className = "view";
+  content.innerHTML = "";
+  const wrap = el(content, "div", "dirlist");
+  const head = el(wrap, "h1", "dl-title");
+  const hicon = el(head, "span", "dl-title-icon");
+  hicon.innerHTML = svgIcon("folder");
+  el(head, "span", null, node.name);
+  const kids = (node.children || []).slice()
+    .sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name));
+  const dirs = kids.filter((c) => c.dir).length;
+  const files = kids.length - dirs;
+  const counts = [];
+  if (dirs) counts.push(dirs + (dirs === 1 ? " folder" : " folders"));
+  if (files) counts.push(files + (files === 1 ? " file" : " files"));
+  el(wrap, "p", "dl-sub", counts.join(" · ") || "Empty folder");
+  if (!kids.length) {
+    el(wrap, "div", "dl-empty", "Nothing in this folder yet.");
+    renderFolderHistory(wrap, p);
+    return;
+  }
+  const list = el(wrap, "div", "dl-items");
+  for (const c of kids) {
+    const row = el(list, "div", "dl-row");
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.title = c.path;
+    const icon = el(row, "span", "ticon");
+    icon.innerHTML = svgIcon(c.dir ? "folder" : "doc");
+    el(row, "span", "dl-name", c.name);
+    let meta = "";
+    if (c.dir) {
+      const n = (c.children || []).length;
+      meta = n + (n === 1 ? " item" : " items");
+    } else {
+      meta = [c.size ? humanSize(c.size) : "", c.time ? new Date(c.time).toLocaleDateString() : ""]
+        .filter(Boolean).join(" · ");
+    }
+    el(row, "span", "dl-meta", meta);
+    row.onclick = () => openPath(c.path);
+    row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); row.click(); } };
+  }
+  renderFolderHistory(wrap, p);
+}
+
+/* The folder's change feed, straight from the journals: files added, edited,
+   and deleted anywhere under it, newest first. Hub-only — a plain-folder
+   viewer has no journals to read. */
+function renderFolderHistory(wrap, p) {
+  if (!(serverConfig.mode === "hub" && currentProject)) return;
+  const sec = el(wrap, "div", "dl-history");
+  getJSON(apiBase + "history?prefix=" + encodeURIComponent(p + "/") + "&n=20").then((out) => {
+    const entries = out.entries || [];
+    if (!entries.length) return sec.remove();
+    el(sec, "h3", "dl-h3", "Recent changes");
+    const list = el(sec, "div", "history dl-hlist");
+    for (const e of entries) list.appendChild(historyEntryRow(e));
+    const more = el(sec, "button", "ai-btn dl-more", "Full history");
+    more.onclick = () => showHistory({ prefix: p + "/" });
+  }).catch(() => sec.remove());
+}
+
 /* ---- file pane ---- */
 async function openFile(p) {
   currentPath = p;
@@ -787,7 +919,7 @@ async function openFile(p) {
   markActive();
   revealInTree(p);
   closeSidebarOnMobile();
-  $("crumb").textContent = p.split("/").join(" / ");
+  setCrumb(p);
   updateShareButton();
   const dl = $("download");
   dl.href = apiBase + "download?path=" + encodeURIComponent(p);
@@ -916,7 +1048,8 @@ function join(dir, rel) {
    (rendered, sandboxed), no account needed. Always the latest content. */
 function updateShareButton() {
   const btn = $("share-btn");
-  btn.hidden = !(serverConfig.mode === "hub" && currentProject && currentPath);
+  // Shares are per-file; a selected folder has nothing to mint.
+  btn.hidden = !(serverConfig.mode === "hub" && currentProject && currentPath && !dirIndex.has(currentPath));
   btn.onclick = async () => {
     try {
       const r = await fetch(apiBase + "shares", {
@@ -941,7 +1074,11 @@ function updateShareButton() {
 function initHistory() {
   const btn = $("history-btn");
   btn.hidden = !(serverConfig.mode === "hub" && currentProjectOrNull());
-  btn.onclick = () => showHistory(currentPath ? { path: currentPath } : { prefix: "" });
+  btn.onclick = () => {
+    if (!currentPath) return showHistory({ prefix: "" });
+    if (dirIndex.has(currentPath)) return showHistory({ prefix: currentPath + "/" });
+    showHistory({ path: currentPath });
+  };
 }
 
 function currentProjectOrNull() {
@@ -972,37 +1109,61 @@ async function showHistory(q) {
   if (!out.entries || out.entries.length === 0) {
     wrap.innerHTML = `<div class="empty">No history yet.</div>`;
   }
-  for (const e of out.entries || []) {
-    const row = document.createElement("div");
-    row.className = "hentry " + e.kind;
-    const who = e.user_name ? `${e.user_name} <${e.user}>` : (e.user || e.author || "unknown");
-    const dev = [e.device.name || e.device.id, e.device.os, e.device.ip].filter(Boolean).join(" · ");
-    const when = new Date(e.time).toLocaleString();
-    row.innerHTML =
-      `<div class="hline"><span class="hkind"></span><span class="hpath"></span><span class="htime"></span></div>` +
-      `<div class="hmeta"><span class="hwho"></span><span class="hdev"></span><span class="hsize"></span><span class="hact"></span></div>`;
-    row.querySelector(".hkind").innerHTML = svgIcon(e.kind === "delete" ? "x" : "dot");
-    row.querySelector(".hpath").textContent = e.path;
-    row.querySelector(".htime").textContent = when;
-    row.querySelector(".hwho").textContent = who;
-    row.querySelector(".hdev").textContent = dev;
-    row.querySelector(".hsize").textContent = e.size ? humanSize(e.size) : "";
-    if (e.kind !== "delete" && e.blob) {
-      const view = document.createElement("a");
-      view.textContent = "view";
-      view.href = apiBase + "blob?sha=" + e.blob + "&name=" + encodeURIComponent(e.path);
-      view.target = "_blank";
-      const dl = document.createElement("a");
-      dl.textContent = "download";
-      dl.href = view.href + "&download=1";
-      dl.setAttribute("download", e.path.split("/").pop());
-      row.querySelector(".hact").append(view, " ", dl);
-    }
-    const p = e.path;
-    row.querySelector(".hpath").onclick = () => showHistory({ path: p });
-    wrap.appendChild(row);
-  }
+  for (const e of out.entries || []) wrap.appendChild(historyEntryRow(e));
   content.appendChild(wrap);
+}
+
+/* One change as a row: what happened (added / edited / deleted), to which
+   file, by whom, from where — with view/download of that exact version. */
+const KIND_ICON = { add: "plus", edit: "edit", delete: "x" };
+const KIND_LABEL = { add: "added", edit: "edited", delete: "deleted" };
+function historyEntryRow(e) {
+  const kind = e.kind === "put" ? "edit" : e.kind; // older servers report raw "put" ops
+  const row = document.createElement("div");
+  row.className = "hentry " + kind;
+  const who = e.user_name ? `${e.user_name} <${e.user}>` : (e.user || e.author || "unknown");
+  const dev = [e.device.name || e.device.id, e.device.os, e.device.ip].filter(Boolean).join(" · ");
+  const when = new Date(e.time).toLocaleString();
+  row.innerHTML =
+    `<div class="hline"><span class="hkind"></span><span class="hpath"></span><span class="htag"></span><span class="htime"></span></div>` +
+    `<div class="hmeta"><span class="hwho"></span><span class="hdev"></span><span class="hsize"></span><span class="hact"></span></div>`;
+  row.querySelector(".hkind").innerHTML = svgIcon(KIND_ICON[kind] || "dot");
+  row.querySelector(".hpath").textContent = e.path;
+  row.querySelector(".htag").textContent = KIND_LABEL[kind] || kind;
+  row.querySelector(".htime").textContent = when;
+  row.querySelector(".hwho").textContent = who;
+  row.querySelector(".hdev").textContent = dev;
+  row.querySelector(".hsize").textContent = e.size ? humanSize(e.size) : "";
+  if (kind !== "delete" && e.blob) {
+    const view = document.createElement("a");
+    view.textContent = "view";
+    view.href = apiBase + "blob?sha=" + e.blob + "&name=" + encodeURIComponent(e.path);
+    view.target = "_blank";
+    const dl = document.createElement("a");
+    dl.textContent = "download";
+    dl.href = view.href + "&download=1";
+    dl.setAttribute("download", e.path.split("/").pop());
+    row.querySelector(".hact").append(view, " ", dl);
+  }
+  if (e.note) {
+    const note = document.createElement("div");
+    note.className = "hnote";
+    // Linkify http(s) URLs (e.g. a Claude session link); everything else
+    // stays plain text — notes are user/agent input, never markup.
+    for (const tok of e.note.split(/(https?:\/\/\S+)/)) {
+      if (/^https?:\/\//.test(tok)) {
+        const a = document.createElement("a");
+        a.href = tok; a.textContent = tok; a.target = "_blank"; a.rel = "noopener";
+        note.appendChild(a);
+      } else if (tok) {
+        note.append(tok);
+      }
+    }
+    row.appendChild(note);
+  }
+  const p = e.path;
+  row.querySelector(".hpath").onclick = () => showHistory({ path: p });
+  return row;
 }
 
 function humanSize(n) {
@@ -1029,8 +1190,10 @@ function initUpload() {
     const file = input.files[0];
     input.value = "";
     if (!file) return;
-    const dir = currentPath && currentPath.includes("/")
-      ? currentPath.slice(0, currentPath.lastIndexOf("/")) : "";
+    // A selected folder receives the upload; a selected file means "next to it".
+    const dir = !currentPath ? ""
+      : dirIndex.has(currentPath) ? currentPath
+      : currentPath.includes("/") ? currentPath.slice(0, currentPath.lastIndexOf("/")) : "";
     const dest = dir ? dir + "/" + file.name : file.name;
     const status = $("meta");
     try {
@@ -1204,6 +1367,9 @@ function paletteCandidates() {
   if (serverConfig.auth && serverConfig.auth.enabled) {
     add("power", "Sign out", "action", () => { location.href = "/auth/logout"; });
   }
+  for (const d of dirIndex.keys()) {
+    add("folder", d, "folder", () => openFolder(d));
+  }
   for (const f of flatFiles) {
     add("doc", f.path, "file", () => openFile(f.path));
   }
@@ -1343,7 +1509,7 @@ window.addEventListener("popstate", () => {
     const proj = projects.find((x) => x.id === project);
     if (proj) { selectProject(proj, path || null); return; }
   }
-  if (path && path !== currentPath) openFile(path);
+  if (path && path !== currentPath) openPath(path);
 });
 
 boot();

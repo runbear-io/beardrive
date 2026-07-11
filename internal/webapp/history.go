@@ -20,7 +20,7 @@ import (
 // HistoryEntry is one change as the history API reports it.
 type HistoryEntry struct {
 	Time     string     `json:"time"`
-	Kind     string     `json:"kind"` // put | delete
+	Kind     string     `json:"kind"` // add | edit | delete
 	Path     string     `json:"path"`
 	Size     int64      `json:"size,omitempty"`
 	Blob     string     `json:"blob,omitempty"` // sha256; fetch via the blob endpoint
@@ -59,6 +59,24 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		return
 	}
 	journal.Sort(all)
+	// A put is an "add" when the path didn't exist just before it (first
+	// version, or first after a delete), an "edit" otherwise. Existence is
+	// replayed over ALL ops in journal order, before any path/prefix filter,
+	// so a filtered view classifies the same as the full feed.
+	kinds := make([]string, len(all))
+	exists := make(map[string]bool, len(all))
+	for i, op := range all {
+		switch {
+		case op.Kind == journal.KindDelete:
+			kinds[i] = "delete"
+			exists[op.Path] = false
+		case exists[op.Path]:
+			kinds[i] = "edit"
+		default:
+			kinds[i] = "add"
+			exists[op.Path] = true
+		}
+	}
 	entries := make([]HistoryEntry, 0, n)
 	for i := len(all) - 1; i >= 0 && len(entries) < n; i-- { // newest first
 		op := all[i]
@@ -73,7 +91,7 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			dev = DeviceInfo{ID: op.Device, Name: op.DeviceName}
 		}
 		entries = append(entries, HistoryEntry{
-			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: op.Kind,
+			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: kinds[i],
 			Path: op.Path, Size: op.Size, Blob: op.Blob,
 			User: op.User, UserName: op.UserName, Author: op.Author,
 			Device: dev, Note: op.Note,
