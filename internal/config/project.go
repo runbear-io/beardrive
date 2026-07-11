@@ -41,6 +41,14 @@ func projectConfigPath(folder string) string {
 	return filepath.Join(folder, ProjectDir, "config.json")
 }
 
+// IsMount reports whether folder is a BearDrive mount root, i.e. has a
+// .bdrive/config.json — even an unparseable one, so callers that must not
+// treat a mount as plain files (e.g. a parent mount's scanner) stay safe.
+func IsMount(folder string) bool {
+	_, err := os.Stat(projectConfigPath(folder))
+	return err == nil
+}
+
 // LoadProject reads <folder>/.bdrive/config.json; ok is false if it does not
 // exist.
 func LoadProject(folder string) (Project, bool, error) {

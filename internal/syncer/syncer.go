@@ -234,6 +234,11 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			if ignoreDirs[d.Name()] || filter.PruneDir(rel) {
 				return fs.SkipDir
 			}
+			if config.IsMount(p) {
+				// A mount of its own: it syncs through its own project.
+				filter.addNestedMount(rel)
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if !d.Type().IsRegular() || ignoredFile(d.Name()) || filter.Skip(rel) {

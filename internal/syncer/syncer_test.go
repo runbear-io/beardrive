@@ -330,3 +330,55 @@ func TestExecutableBitPreserved(t *testing.T) {
 		t.Fatalf("exec bit lost: %v", fi.Mode())
 	}
 }
+
+// TestNestedMountExcluded verifies that a subdirectory which is a BearDrive
+// mount of its own (has .bdrive/config.json) is fenced off from the parent
+// mount: the parent scanner never journals its files, dropping it emits no
+// delete ops toward peers, and remote state is never materialized into it.
+func TestNestedMountExcluded(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+
+	// Both devices converge on a folder that includes team/.
+	write(t, a.Folder, "readme.md", "root")
+	write(t, a.Folder, "team/notes.md", "v1")
+	cycle(t, a)
+	cycle(t, b)
+	if got := read(t, b.Folder, "team/notes.md"); got != "v1" {
+		t.Fatalf("b team/notes.md = %q, want v1", got)
+	}
+
+	// team/ becomes a nested mount on A (its own project).
+	write(t, a.Folder, "team/.bdrive/config.json", `{"mount_id":"m-nested"}`)
+	write(t, a.Folder, "team/local.md", "only for the nested project")
+	res := cycle(t, a)
+	if res.LocalOps != 0 {
+		t.Fatalf("a journaled %d ops for nested-mount content, want 0", res.LocalOps)
+	}
+
+	// B must keep its copy (no delete propagated) and never see new files.
+	res = cycle(t, b)
+	if got := read(t, b.Folder, "team/notes.md"); got != "v1" {
+		t.Fatalf("b team/notes.md = %q after a's cycle, want v1 (no deletes)", got)
+	}
+	if _, err := os.Stat(filepath.Join(b.Folder, "team/local.md")); !os.IsNotExist(err) {
+		t.Fatal("nested-mount file leaked to peer")
+	}
+
+	// B edits inside team/; A must not materialize over its nested mount.
+	write(t, b.Folder, "team/notes.md", "v2")
+	cycle(t, b)
+	cycle(t, a)
+	if got := read(t, a.Folder, "team/notes.md"); got != "v1" {
+		t.Fatalf("a team/notes.md = %q, want v1 (nested mount not written)", got)
+	}
+
+	// Paths outside the nested mount keep syncing both ways.
+	write(t, a.Folder, "readme.md", "root v2")
+	cycle(t, a)
+	cycle(t, b)
+	if got := read(t, b.Folder, "readme.md"); got != "root v2" {
+		t.Fatalf("b readme.md = %q, want root v2", got)
+	}
+}

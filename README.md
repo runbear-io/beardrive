@@ -460,9 +460,11 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
 ### What beardrive does not sync
 
 `.git` directories (per-file LWW would corrupt repositories), `.DS_Store`,
-the `.bdrive` settings file, its own temp files, and anything excluded by
-`.bdriveignore` or omitted from an `include` list. Empty directories are not
-tracked (like git).
+the `.bdrive` settings file, its own temp files, nested mounts (a
+subdirectory with its own `.bdrive/config.json` syncs only through its own
+project — the parent never scans into it, writes over it, or propagates
+deletes for it), and anything excluded by `.bdriveignore` or omitted from an
+`include` list. Empty directories are not tracked (like git).
 
 ## Roadmap
 
