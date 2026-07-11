@@ -52,6 +52,20 @@ type Backend interface {
 	Close() error
 }
 
+// ReadEvent is one agent file read reported to the hub for its read heatmap.
+type ReadEvent struct {
+	Path string    `json:"path"`
+	Time time.Time `json:"time,omitzero"`
+}
+
+// ReadReporter is the optional read-telemetry capability, in the PutSigner
+// mold: backends that sync through a hub report the device's agent reads so
+// the heat view can split human from agent traffic. Object-store backends
+// simply don't implement it — there is no hub to tell.
+type ReadReporter interface {
+	ReportReads(ctx context.Context, reads []ReadEvent) error
+}
+
 // Open creates a backend from a remote URL.
 func Open(ctx context.Context, raw string) (Backend, error) {
 	u, err := url.Parse(raw)

@@ -248,4 +248,28 @@ func (b *httpBackend) putViaServer(ctx context.Context, key string, r io.Reader,
 	return nil
 }
 
+// ReportReads sends the device's queued agent reads to the hub's read
+// ledger, where they count as agent traffic (actor = this device).
+func (b *httpBackend) ReportReads(ctx context.Context, reads []ReadEvent) error {
+	body, err := json.Marshal(map[string]any{"reads": reads})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		b.base+"/api/p/"+b.project+"/reads", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return httpError(resp)
+	}
+	return nil
+}
+
 func (b *httpBackend) Close() error { return nil }
