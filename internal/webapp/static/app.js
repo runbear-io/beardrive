@@ -812,7 +812,7 @@ function renderNode(n) {
       openFolder(n.path);
     };
   } else {
-    flatFiles.push({ path: n.path, name: n.name });
+    flatFiles.push({ path: n.path, name: n.name, time: n.time });
     row.onclick = () => openFile(n.path);
   }
   return li;
@@ -1133,6 +1133,132 @@ function updateShareButton() {
       toast("Share failed: " + err.message, true);
     }
   };
+}
+
+/* ---- insights: the read×write matrix ----
+   Every file plotted by how much it is read (30 days, from the heat API)
+   against how long since it last changed (from the tree). The hot-but-stale
+   quadrant is the danger zone: knowledge people still rely on that nobody
+   maintains. Admin/org-owner only — members get the ambient heat dots. */
+
+const HOT_READS = 3;    // ≥ this many reads/30d = hot
+const STALE_DAYS = 30;  // ≥ this many days since last write = stale
+
+function canSeeInsights() {
+  if (!(serverConfig.mode === "hub" && currentProject)) return false;
+  if (!(serverConfig.reads && serverConfig.reads.enabled)) return false;
+  if (serverConfig.auth && serverConfig.auth.admin) return true;
+  const org = currentOrg();
+  return !!(org && org.role === "owner");
+}
+
+async function showInsights() {
+  if (!canSeeInsights()) return;
+  await refreshHeat(true);
+  currentPath = null;
+  markActive();
+  $("crumb").textContent = "Insights — " + currentProject.name;
+  $("meta").textContent = "";
+  $("download").hidden = true;
+  $("more-btn").hidden = true;
+  const content = $("content");
+  content.className = "view";
+  renderInsights(content, "all");
+}
+
+function renderInsights(content, lens) {
+  content.innerHTML = "";
+  const wrap = el(content, "div", "insights");
+  el(wrap, "h1", "in-title", "Reads × freshness");
+  el(wrap, "p", "dl-sub",
+    "Every file by 30-day reads and days since its last change. " +
+    "Hot but stale (top right) is the danger zone — read a lot, maintained by nobody.");
+  const bar = el(wrap, "div", "in-lens");
+  for (const l of ["all", "human", "agent"]) {
+    const label = l === "all" ? "All reads" : l === "human" ? "Human reads" : "Agent reads";
+    const b = el(bar, "button", "in-lens-btn" + (l === lens ? " active" : ""), label);
+    b.onclick = () => renderInsights(content, lens = l);
+  }
+
+  const readsOf = (e) => (lens === "all" ? heatTotal(e) : e[lens] || 0);
+  const now = Date.now();
+  const pts = flatFiles.map((f) => {
+    const e = (heatMap && heatMap[f.path]) || {};
+    const days = f.time ? Math.max(0, (now - new Date(f.time).getTime()) / 86400000) : 0;
+    const reads = readsOf(e);
+    return { path: f.path, reads, days, danger: reads >= HOT_READS && days >= STALE_DAYS };
+  });
+
+  wrap.appendChild(insightsChart(pts));
+
+  const danger = pts.filter((p) => p.danger)
+    .sort((a, b) => b.reads - a.reads || b.days - a.days).slice(0, 15);
+  el(wrap, "h3", "dl-h3", "Danger zone — fix these first");
+  if (!danger.length) {
+    el(wrap, "div", "dl-empty", "No hot-but-stale files. The knowledge base is healthy.");
+    return;
+  }
+  const list = el(wrap, "div", "dl-items");
+  for (const p of danger) {
+    const row = el(list, "div", "dl-row");
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    const icon = el(row, "span", "ticon");
+    icon.innerHTML = svgIcon("alert");
+    el(row, "span", "dl-name", p.path);
+    el(row, "span", "dl-meta",
+      p.reads + (p.reads === 1 ? " read" : " reads") + " · untouched " + Math.round(p.days) + "d");
+    row.onclick = () => openFile(p.path);
+    row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); row.click(); } };
+  }
+}
+
+/* Dependency-free SVG scatter: x = days since last write, y = reads, both
+   log-scaled; threshold lines split the quadrants. */
+function insightsChart(pts) {
+  const W = 720, H = 360, M = { l: 44, r: 16, t: 20, b: 34 };
+  const maxDays = Math.max(STALE_DAYS * 2, ...pts.map((p) => p.days));
+  const maxReads = Math.max(HOT_READS * 2, ...pts.map((p) => p.reads));
+  const lx = (d) => Math.log10(d + 1) / Math.log10(maxDays + 1);
+  const ly = (r) => Math.log10(r + 1) / Math.log10(maxReads + 1);
+  const X = (d) => M.l + lx(d) * (W - M.l - M.r);
+  const Y = (r) => H - M.b - ly(r) * (H - M.t - M.b);
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("class", "in-chart");
+  const add = (tag, attrs, text) => {
+    const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    if (text != null) n.textContent = text;
+    svg.appendChild(n);
+    return n;
+  };
+
+  // danger quadrant shading + threshold lines
+  add("rect", { x: X(STALE_DAYS), y: M.t, width: W - M.r - X(STALE_DAYS), height: Y(HOT_READS) - M.t, class: "in-danger-zone" });
+  add("line", { x1: X(STALE_DAYS), y1: M.t, x2: X(STALE_DAYS), y2: H - M.b, class: "in-threshold" });
+  add("line", { x1: M.l, y1: Y(HOT_READS), x2: W - M.r, y2: Y(HOT_READS), class: "in-threshold" });
+  // axes
+  add("line", { x1: M.l, y1: H - M.b, x2: W - M.r, y2: H - M.b, class: "in-axis" });
+  add("line", { x1: M.l, y1: M.t, x2: M.l, y2: H - M.b, class: "in-axis" });
+  add("text", { x: (M.l + W - M.r) / 2, y: H - 8, class: "in-label" }, "days since last change →");
+  add("text", { x: 12, y: (M.t + H - M.b) / 2, class: "in-label", transform: `rotate(-90 12 ${(M.t + H - M.b) / 2})` }, "reads / 30d →");
+  add("text", { x: W - M.r - 6, y: M.t + 14, class: "in-quad in-quad-danger", "text-anchor": "end" }, "hot + stale");
+  add("text", { x: M.l + 6, y: M.t + 14, class: "in-quad" }, "hot + fresh");
+  add("text", { x: W - M.r - 6, y: H - M.b - 8, class: "in-quad", "text-anchor": "end" }, "cold + stale");
+
+  for (const p of pts) {
+    const c = add("circle", {
+      cx: X(p.days).toFixed(1), cy: Y(p.reads).toFixed(1), r: 5,
+      class: "in-pt" + (p.danger ? " danger" : p.reads ? "" : " cold"),
+    });
+    const tip = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    tip.textContent = `${p.path} — ${p.reads} read${p.reads === 1 ? "" : "s"} / 30d · changed ${Math.round(p.days)}d ago`;
+    c.appendChild(tip);
+    c.onclick = () => openFile(p.path);
+  }
+  return svg;
 }
 
 /* ---- history ----
@@ -1552,6 +1678,14 @@ function buildMoreMenu() {
     b.textContent = label;
     b.onclick = () => { $("more-menu").hidden = true; el.click(); };
     menu.appendChild(b);
+  }
+  if (canSeeInsights()) {
+    const b = document.createElement("button");
+    b.className = "more-item";
+    b.textContent = "Insights";
+    b.onclick = () => { $("more-menu").hidden = true; showInsights(); };
+    menu.appendChild(b);
+    return items.length + 1;
   }
   return items.length;
 }

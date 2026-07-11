@@ -56,10 +56,12 @@ Follow these steps:
    detects the agent platforms in use (Claude Code, Codex, Gemini CLI,
    Hermes — by their config dirs in the project or home) and idempotently
    merges beardrive's sync hooks into each platform's own hook config, so
-   files pull at every turn start, push after edits, and every change is
-   stamped with the agent session that made it. Tell the user which
-   platforms got hooks; if Codex is among them, mention they must run
-   `/hooks` inside Codex once to trust the project's `.codex` layer.
+   files pull at every turn start, push after edits, every change is
+   stamped with the agent session that made it, and agent file reads feed
+   the hub's read heatmap (queued locally by `bdrive read-log`, reported
+   on the next sync). Tell the user which platforms got hooks; if Codex is
+   among them, mention they must run `/hooks` inside Codex once to trust
+   the project's `.codex` layer.
 
 6. **Verify**: run `bdrive status <folder>` and confirm the daemon is
    running and pending is 0. Summarize: project name/id, what syncs, and

@@ -1,6 +1,6 @@
 # Read heatmap — design
 
-Status: proposed (2026-07-11) · Owner: snow · Prior art: session-linked notes (shipped), history API
+Status: implemented (2026-07-11, all three phases) · Owner: snow · Prior art: session-linked notes (shipped), history API
 
 ## Problem
 

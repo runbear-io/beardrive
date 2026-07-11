@@ -17,7 +17,8 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Run the daemon in the foreground | `bdrive init -f` |
 | Stop syncing | `bdrive stop [<folder>]` (`--forget` also unregisters) |
 | One sync cycle now | `bdrive sync [<folder>]` |
-| Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install [<folder>]` — auto-detects the platforms in use and merges pull/push/session-note hooks into each one's own hook config, idempotently; bare `bdrive hooks` shows the status table |
+| Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install [<folder>]` — auto-detects the platforms in use and merges pull/push/session-note/read-tracking hooks into each one's own hook config, idempotently; bare `bdrive hooks` shows the status table |
+| Record agent file reads (hook plumbing) | `bdrive read-log [<folder>]` — parses a hook event JSON from stdin and queues in-project reads locally; drained to the hub on the next sync as agent traffic in the read heatmap. Registered automatically by `bdrive hooks install`; rarely run by hand |
 | Mounts + daemon + pending state | `bdrive status [<folder>]` |
 | Change history | `bdrive log [<folder>] [-p path] [-n N]` |
 | This device's identity | `bdrive whoami` |
@@ -130,19 +131,34 @@ conflict-copy ops keep their own `conflict copy of <path>` note.
 `bdrive hooks install [<folder>]` registers turn-boundary sync for every
 agent platform it detects (by config dir, in the project or home):
 
-| Platform | Config it writes | Pull / push events |
+| Platform | Config it writes | Pull / push / read events |
 |---|---|---|
-| Claude Code (& Cowork) | `<project>/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse` (Write\|Edit) |
-| Codex (ChatGPT) | `<project>/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse` (apply_patch) — user must `/hooks`-trust the layer once |
-| Gemini CLI | `<project>/.gemini/settings.json` | `BeforeAgent` / `AfterTool` (write_file\|replace) |
-| Hermes | `~/.hermes/config.yaml` (per-user) | `pre_llm_call` / `post_tool_call` (write_file\|patch) |
+| Claude Code (& Cowork) | `<project>/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse` (Write\|Edit) / `PostToolUse` (Read) |
+| Codex (ChatGPT) | `<project>/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse` (apply_patch) / `PostToolUse` (read_file, best-effort) — user must `/hooks`-trust the layer once |
+| Gemini CLI | `<project>/.gemini/settings.json` | `BeforeAgent` / `AfterTool` (write_file\|replace) / `AfterTool` (read_file\|read_many_files) |
+| Hermes | `~/.hermes/config.yaml` (per-user) | `pre_llm_call` / `post_tool_call` (write_file\|patch) / `post_tool_call` (read_file) |
 
 Every platform pipes hook JSON with a `session_id`, so one hook command
 serves all four: it syncs the project (fast no-op outside bdrive folders)
-and stamps changes with `<agent> session <id>`. Merging is idempotent and
-preserves existing hooks; `--agent claude,codex,gemini,hermes` overrides
+and stamps changes with `<agent> session <id>`. The read hook runs `bdrive
+read-log`, which queues the read locally (no network) for the hub's read
+heatmap. Merging is idempotent and preserves existing hooks — each hook
+carries its own marker, so configs from before the read hook gain just the
+missing group on re-install; `--agent claude,codex,gemini,hermes` overrides
 detection; bare `bdrive hooks` prints the detection/registration table.
 Project-level configs ride the repo, so hooks reach the whole team.
+
+### Read heat (who actually reads what)
+
+Hubs aggregate reads per file — viewer opens and downloads count as human
+reads, share-link hits as share reads, and hook-reported agent reads as
+agent reads; `/store` sync replication never counts. The web UI shows heat
+dots and read counts on folder listings (all members), and admins / org
+owners get an **Insights** view (⋯ menu) plotting every file by 30-day
+reads × days since last change — the hot-but-stale quadrant is the list of
+files to fix first. Counts only, never reader identities. API:
+`GET /api/p/<id>/heat?prefix=&days=30`. Server config: `"reads":
+{"enabled": true, "retention_days": 400}` (on by default in hub mode).
 
 ### Examples to walk a user through
 
