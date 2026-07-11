@@ -72,6 +72,10 @@ func TestHistoryAPI(t *testing.T) {
 	if newest.Size != int64(len("v2 longer")) || oldest.Size != int64(len("v1")) {
 		t.Fatalf("order wrong: %+v", out.Entries)
 	}
+	// puts are classified: first version = add, later versions = edit
+	if oldest.Kind != "add" || newest.Kind != "edit" {
+		t.Fatalf("kinds = %q, %q; want add, edit", oldest.Kind, newest.Kind)
+	}
 	if newest.User != "alice@x.io" || newest.UserName != "Alice" {
 		t.Fatalf("user = %+v", newest)
 	}
@@ -93,6 +97,10 @@ func TestHistoryAPI(t *testing.T) {
 	}
 	if out.Entries[0].Kind != "delete" || out.Entries[0].Path != "notes/other.md" {
 		t.Fatalf("newest notes/ entry = %+v, want the delete", out.Entries[0])
+	}
+	// the put that created other.md is an add, even in the filtered view
+	if out.Entries[1].Kind != "add" || out.Entries[1].Path != "notes/other.md" {
+		t.Fatalf("entry before the delete = %+v, want other.md's add", out.Entries[1])
 	}
 	// a device the registry never saw falls back to the op's own info
 	if out.Entries[0].Device.Name != "dev2" {

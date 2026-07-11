@@ -17,13 +17,14 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Run the daemon in the foreground | `bdrive init -f` |
 | Stop syncing | `bdrive stop [<folder>]` (`--forget` also unregisters) |
 | One sync cycle now | `bdrive sync [<folder>]` |
+| Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install [<folder>]` — auto-detects the platforms in use and merges pull/push/session-note hooks into each one's own hook config, idempotently; bare `bdrive hooks` shows the status table |
 | Mounts + daemon + pending state | `bdrive status [<folder>]` |
 | Change history | `bdrive log [<folder>] [-p path] [-n N]` |
 | This device's identity | `bdrive whoami` |
 | Sign this device in (once per device) | `bdrive login [url]` — bare form uses the remembered server or beardrive.ai. Opens the sign-in page in a browser (sign-up available there); the terminal completes on its own and stores a per-device token. `--device` prints a code to approve from any browser (SSH/headless); `--status` shows server + account. Password reset: "Forgot password?" on the sign-in page (emailed via the server's SMTP config, or the link appears in the server log). **Switch hubs** with `bdrive login <new-url>`, then re-run `bdrive init` in each folder. |
 | Sign this device out | `bdrive logout` — clears the saved token + account (folders untouched); `--forget` also drops the remembered server. The device token stays valid server-side until it expires — revoke it from the hub's device list to be sure. |
 | Share a synced file publicly by URL | `bdrive share <file>` — prints a link anyone can open (HTML renders as a page, markdown rendered, PDFs inline; sandboxed; always the latest content; no account needed). `--expires 24h` for self-destructing links; `--list` / `--revoke <token-or-url>` to manage. Put generated reports in the shared folder, sync, then share. |
-| Set up a project for a Claude Code team | `/beardrive:install` — installs the CLI, signs in, runs init (whole/shared folder), offers a CLAUDE.md section about the shared folder, and registers project-level hooks (blocking pull at prompt-submit, async push after Write/Edit) in `.claude/settings.json` |
+| Set up a project for a Claude Code team | `/beardrive:install` — installs the CLI, signs in, runs init (whole/shared folder), offers a CLAUDE.md section about the shared folder, and registers agent sync hooks via `bdrive hooks install` (pull at turn start, push after edits, session-note stamping — for every detected platform, not just Claude) |
 | Per-file / folder change history in the web UI | History button (file versions or project feed) and per-folder ⌚ — each entry: account, time, device (name/OS/IP), view/download of that exact version. API: `GET /api/p/<id>/history?path=\|prefix=`, `GET /api/p/<id>/blob?sha=` |
 | Web server: viewer + multi-project sync hub (read-only unless `--upload`) | `bdrive web [<folder> \| <storage-root-url>]` (serves cwd by default, `--addr :4173`; `-c config.json` reads remote/addr/upload/projects_db/database/auth settings from a file, explicit flags win; a storage root URL makes it a hub hosting many projects at `<root>/<project-id>/`, registry in `--projects-db` file, default `$BDRIVE_HOME/projects.json`; `--upload` lets browsers add files, client devices push, and projects be created — direct to storage via expiring presigned URLs on S3/GCS, relayed through the server for `file://`; `--upload-ttl 15m`; clients never see the remote URL or credentials; hub projects are walled by org membership — invite teammates from the web UI; the viewer has a ⌘K palette for fuzzy file search, project switching, and quick actions) |
 
@@ -113,6 +114,35 @@ Renaming/moving a project folder is safe: the daemon notices its folder vanished
 - Push a change immediately instead of waiting for the next interval.
 - Verify credentials and the remote end-to-end.
 - Sync once even when the daemon is stopped.
+
+**Session-linked notes**: `bdrive sync --note "<text>"` stamps the text onto
+every change this cycle commits — and persists it (in the mount's volume
+store, never synced) so changes the background daemon commits over the next
+`--note-ttl` (default 30m) carry it too. Notes appear in `bdrive log` (as
+`[note]`) and under each entry in the hub's history views. The plugin's sync
+hooks pass `--note "claude-code session <session-id>"` automatically, so
+every change made during a Claude Code session is traceable to the session
+that made it. An explicit empty `--note ""` clears the persisted note;
+conflict-copy ops keep their own `conflict copy of <path>` note.
+
+### Agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes)
+
+`bdrive hooks install [<folder>]` registers turn-boundary sync for every
+agent platform it detects (by config dir, in the project or home):
+
+| Platform | Config it writes | Pull / push events |
+|---|---|---|
+| Claude Code (& Cowork) | `<project>/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse` (Write\|Edit) |
+| Codex (ChatGPT) | `<project>/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse` (apply_patch) — user must `/hooks`-trust the layer once |
+| Gemini CLI | `<project>/.gemini/settings.json` | `BeforeAgent` / `AfterTool` (write_file\|replace) |
+| Hermes | `~/.hermes/config.yaml` (per-user) | `pre_llm_call` / `post_tool_call` (write_file\|patch) |
+
+Every platform pipes hook JSON with a `session_id`, so one hook command
+serves all four: it syncs the project (fast no-op outside bdrive folders)
+and stamps changes with `<agent> session <id>`. Merging is idempotent and
+preserves existing hooks; `--agent claude,codex,gemini,hermes` overrides
+detection; bare `bdrive hooks` prints the detection/registration table.
+Project-level configs ride the repo, so hooks reach the whole team.
 
 ### Examples to walk a user through
 

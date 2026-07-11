@@ -13,7 +13,9 @@ import (
 )
 
 func syncCmd() *cobra.Command {
-	return &cobra.Command{
+	var note string
+	var noteTTL time.Duration
+	c := &cobra.Command{
 		Use:   "sync [folder]",
 		Short: "Sync a mounted folder with its remote now",
 		Args:  cobra.MaximumNArgs(1),
@@ -27,6 +29,16 @@ func syncCmd() *cobra.Command {
 				return err
 			}
 			defer closeSession(sess)
+			if cmd.Flags().Changed("note") {
+				// Persist the note so the daemon's own scans stamp it too —
+				// history then links every change from this working session
+				// to its context, not just the ones this invocation catches.
+				// An explicit empty --note clears it. Expires after --note-ttl.
+				if err := sess.Store.SaveNote(note, noteTTL); err != nil {
+					return err
+				}
+				sess.Note = note
+			}
 			sess.OnProgress = progressReporter()
 			res, err := sess.Cycle(cmd.Context())
 			if err != nil {
@@ -37,6 +49,9 @@ func syncCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().StringVar(&note, "note", "", "session context stamped onto changes (e.g. an agent session id); shown in history; empty clears")
+	c.Flags().DurationVar(&noteTTL, "note-ttl", 30*time.Minute, "how long the note keeps applying to daemon-committed changes")
+	return c
 }
 
 func statusCmd() *cobra.Command {

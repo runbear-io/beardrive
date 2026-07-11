@@ -52,7 +52,16 @@ Follow these steps:
    bdrive init --name <project> --shared wiki    # in a repo: only ./wiki syncs
    ```
 
-5. **Verify**: run `bdrive status <folder>` and confirm the daemon is
+5. **Register agent sync hooks**: run `bdrive hooks install <folder>`. It
+   detects the agent platforms in use (Claude Code, Codex, Gemini CLI,
+   Hermes — by their config dirs in the project or home) and idempotently
+   merges beardrive's sync hooks into each platform's own hook config, so
+   files pull at every turn start, push after edits, and every change is
+   stamped with the agent session that made it. Tell the user which
+   platforms got hooks; if Codex is among them, mention they must run
+   `/hooks` inside Codex once to trust the project's `.codex` layer.
+
+6. **Verify**: run `bdrive status <folder>` and confirm the daemon is
    running and pending is 0. Summarize: project name/id, what syncs, and
    that edits propagate to every team member within seconds. Offer a
    consent-gated CLAUDE.md note and tell the user how teammates connect

@@ -174,6 +174,9 @@ button, input, a.btn { font-family: inherit; }
 .icon-btn { display: none; width: 34px; height: 34px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; border-radius: 7px; align-items: center; justify-content: center; }
 .icon-btn:hover { color: var(--text); background: var(--hover); }
 #crumb { font-size: 12.5px; color: var(--text); font-weight: 500; letter-spacing: -.01em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#crumb .crumb-seg { color: var(--text-dim); cursor: pointer; }
+#crumb .crumb-seg:hover { color: var(--accent-bright); }
+#crumb .crumb-sep { color: var(--text-ghost); margin: 0 5px; }
 #meta { flex: 1; min-width: 0; font-size: 12px; color: var(--text-faint); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .btn {
@@ -251,6 +254,27 @@ button, input, a.btn { font-family: inherit; }
 .tg-desc { font-size: 12px; color: var(--text-faint); margin-top: 3px; line-height: 1.5; }
 .admin-item.toggle input { width: 16px; height: 16px; margin-top: 2px; accent-color: var(--accent); flex: none; }
 
+/* ---- folder listing ---- */
+.dirlist { max-width: 704px; margin: 0 auto; }
+.dl-title { display: flex; align-items: center; gap: 10px; font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
+.dl-title-icon { display: flex; color: var(--accent); }
+.dl-title-icon .ico { width: 20px; height: 20px; }
+.dl-sub { color: var(--text-faint); font-size: 12.5px; margin: 0 0 18px; }
+.dl-items { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; background: var(--bg-side); }
+.dl-row { display: flex; align-items: center; gap: 11px; padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.dl-row:last-child { border-bottom: none; }
+.dl-row:hover { background: var(--hover); }
+.dl-row .ticon { flex: none; display: flex; color: var(--text-ghost); }
+.dl-row .ticon .ico { width: 16px; height: 16px; }
+.dl-row:hover .ticon { color: var(--text-faint); }
+.dl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; color: var(--text); }
+.dl-meta { flex: none; font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.dl-empty { padding: 24px 14px; color: var(--text-faint); font-size: 13px; border: 1px dashed var(--border); border-radius: var(--r-card); text-align: center; }
+.dl-h3 { margin: 28px 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-ghost); font-weight: 600; }
+.dl-hlist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); overflow: hidden; max-width: none; }
+.dl-hlist .hentry:last-child { border-bottom: none; }
+.dl-more { margin-top: 10px; }
+
 /* ---- history ---- */
 .history { max-width: 860px; }
 .hentry { padding: 11px 12px; border-bottom: 1px solid var(--border); }
@@ -258,7 +282,12 @@ button, input, a.btn { font-family: inherit; }
 .hline { display: flex; gap: 10px; align-items: center; }
 .hkind { display: inline-flex; color: var(--add); }
 .hkind .ico { width: 13px; height: 13px; }
+.hentry.edit .hkind { color: var(--accent); }
 .hentry.delete .hkind { color: var(--del); }
+.htag { flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: 1px 6px; border-radius: 4px; }
+.hentry.add .htag { color: var(--add); background: rgba(76,195,138,.12); }
+.hentry.edit .htag { color: var(--accent-bright); background: var(--glow); }
+.hentry.delete .htag { color: #ff8b8b; background: rgba(242,109,109,.12); }
 .hpath { font-weight: 500; cursor: pointer; color: var(--text); font-size: 13px; }
 .hpath:hover { color: var(--accent-bright); }
 .htime { margin-left: auto; color: var(--text-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -268,6 +297,10 @@ button, input, a.btn { font-family: inherit; }
 .hact { margin-left: auto; }
 .hact a { color: var(--accent-bright); text-decoration: none; margin-left: 10px; }
 .hact a:hover { text-decoration: underline; }
+.hnote { margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hnote::before { content: "› "; color: var(--text-ghost); }
+.hnote a { color: var(--accent-bright); text-decoration: none; }
+.hnote a:hover { text-decoration: underline; }
 
 /* ---- command palette ---- */
 #palette-overlay { position: fixed; inset: 0; background: rgba(6,7,9,.62); backdrop-filter: blur(3px); display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; z-index: 100; }
@@ -330,7 +363,7 @@ button, input, a.btn { font-family: inherit; }
   #invite-btn { min-height: 40px; padding: 0 14px; }
   #org-name { min-height: 44px; }
   .nav-add { min-width: 44px; min-height: 44px; }
-  .markdown, .admin, .onboard, .history { max-width: 100%; }
+  .markdown, .admin, .onboard, .history, .dirlist { max-width: 100%; }
   .markdown table, pre.plain { display: block; overflow-x: auto; max-width: 100%; }
   .ob-row { flex-direction: column; }
 }

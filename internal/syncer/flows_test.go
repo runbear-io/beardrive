@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
 )
@@ -205,5 +206,72 @@ func TestConflictCopyNameMatchesDocumentedGlob(t *testing.T) {
 	}
 	if strings.ContainsAny(filepath.Base(name), " '") {
 		t.Fatalf("conflict copy name %q should sanitize device names", name)
+	}
+}
+
+// Session-linked notes: a note set for the session (explicitly, or persisted
+// in the store by `bdrive sync --note`) is stamped onto every op that scan
+// commits, travels through the remote to peers, and expires with its TTL —
+// so history can link each change to the agent session that made it.
+func TestSessionNoteStampsOps(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+
+	// Explicit note on the session (one-shot `bdrive sync --note`).
+	a.Note = "claude-code session s-123"
+	write(t, a.Folder, "wiki/plan.md", "v1")
+	cycle(t, a)
+	cycle(t, b)
+	ops, err := b.Store.DeviceOps("deva")
+	if err != nil || len(ops) != 1 {
+		t.Fatalf("peer copy of deva journal: %v (%d ops)", err, len(ops))
+	}
+	if ops[0].Note != "claude-code session s-123" {
+		t.Fatalf("note on peer = %q", ops[0].Note)
+	}
+
+	// Persisted note: an empty Session.Note falls back to the store note, the
+	// path the daemon takes after a one-shot sync persisted it.
+	a.Note = ""
+	if err := a.Store.SaveNote("claude-code session s-456", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	write(t, a.Folder, "wiki/plan.md", "v2")
+	cycle(t, a)
+	ops, _ = a.Store.DeviceOps("deva")
+	if got := ops[len(ops)-1].Note; got != "claude-code session s-456" {
+		t.Fatalf("persisted-note op = %q", got)
+	}
+
+	// Deletes carry the note too.
+	if err := os.Remove(filepath.Join(a.Folder, "wiki", "plan.md")); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	ops, _ = a.Store.DeviceOps("deva")
+	last := ops[len(ops)-1]
+	if last.Kind != journal.KindDelete || last.Note != "claude-code session s-456" {
+		t.Fatalf("delete op = %+v", last)
+	}
+
+	// An expired note stops applying: later edits stay unlabeled.
+	if err := a.Store.SaveNote("stale", time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	write(t, a.Folder, "wiki/new.md", "x")
+	cycle(t, a)
+	ops, _ = a.Store.DeviceOps("deva")
+	if got := ops[len(ops)-1].Note; got != "" {
+		t.Fatalf("expired note leaked onto op: %q", got)
+	}
+
+	// Clearing removes the note file entirely.
+	if err := a.Store.SaveNote("", 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Store.LoadNote(); got != "" {
+		t.Fatalf("cleared note = %q", got)
 	}
 }
