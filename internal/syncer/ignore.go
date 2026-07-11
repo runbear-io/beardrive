@@ -24,6 +24,28 @@ type Filter struct {
 	ignore  []pattern
 	include []pattern
 	negated bool // any `!` rules → directory pruning is unsafe
+
+	// nested holds subdirectories that are BearDrive mounts of their own
+	// (they contain .bdrive/config.json), discovered during the scan walk.
+	// A nested mount syncs through its own project: the parent never scans
+	// into it, never materializes over it, and drops cached paths under it
+	// without a delete op (same posture as newly ignored paths).
+	nested []string
+}
+
+// addNestedMount records a nested mount root (slash-relative to the parent
+// mount) so Skip excludes everything under it for the rest of the cycle.
+func (f *Filter) addNestedMount(rel string) {
+	f.nested = append(f.nested, rel+"/")
+}
+
+func (f *Filter) underNestedMount(rel string) bool {
+	for _, root := range f.nested {
+		if strings.HasPrefix(rel, root) {
+			return true
+		}
+	}
+	return false
 }
 
 type pattern struct {
@@ -117,7 +139,7 @@ func compile(line string) (pattern, bool) {
 
 // Skip reports whether a file path should not sync.
 func (f *Filter) Skip(rel string) bool {
-	if f.ignoredFile(rel) {
+	if f.underNestedMount(rel) || f.ignoredFile(rel) {
 		return true
 	}
 	if len(f.include) == 0 {

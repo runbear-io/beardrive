@@ -18,20 +18,46 @@ Follow these steps:
    coming; it completes by itself). Default server is beardrive.ai; pass a
    self-hosted URL if the user mentioned one.
 
-3. **Initialize**: if the folder already contains `.bdrive/`, just run
-   `bdrive init --yes` there — it resumes syncing (including after a
-   rename/move). Otherwise decide the project name (argument, or ask, or
-   default to the folder name) and scope (whole folder, or only a shared
-   subfolder like `./wiki` via `--shared`), then run it non-interactively:
+3. **Detect knowledge tooling** (skip if the folder already contains
+   `.bdrive/` — then just run `bdrive init --yes`; it resumes syncing,
+   including after a rename/move). Check, in order — first match wins,
+   ask if two match (full playbook: the beardrive skill's "Connecting
+   knowledge tooling" section):
+
+   - **gbrain** (`gbrain.yml`, or a gbrain MCP server / brain-first
+     CLAUDE.md block) → offer to sync the brain's shared subfolder as its
+     own project; never a brain root.
+   - **OKF wiki** (markdown with OKF frontmatter) → offer: connect the
+     wiki dir via `--shared`, or keep it PR-gated and create a new shared
+     folder.
+   - **Wiki-ish folder** (`docs`/`wiki`/`notes` full of markdown) → check
+     `git log -- <dir>`; dormant → recommend connecting it, active PR
+     traffic → recommend a new shared folder. Offer an OKF upgrade
+     (`openknowledge from`) after connecting, as a separate consent.
+   - **Nothing / empty** → offer a starting point in this order:
+     OKF (recommended), gbrain, blank, describe-it.
+
+4. **Initialize** — two hard rules:
+
+   - **Never sync a repo root**: inside a repo, knowledge syncs as a
+     scoped subfolder via `--shared`. A dedicated knowledge folder
+     (empty dir, standalone vault) may be the mount itself.
+   - **One transport per folder**: a git-tracked dir must leave git
+     tracking before it syncs (`git rm -r --cached <dir>` + gitignore;
+     stage it, let the user commit). Offer one-way git snapshots if they
+     want a git record; `bdrive log -p <path>` covers history for most.
 
    ```sh
-   bdrive init --name <project> --yes            # whole folder
-   bdrive init --name <project> --shared wiki    # only ./wiki syncs
+   bdrive init --name <project> --yes            # dedicated knowledge folder
+   bdrive init --name <project> --shared wiki    # in a repo: only ./wiki syncs
    ```
 
-4. **Verify**: run `bdrive status <folder>` and confirm the daemon is
+5. **Verify**: run `bdrive status <folder>` and confirm the daemon is
    running and pending is 0. Summarize: project name/id, what syncs, and
-   that edits propagate to every team member within seconds.
+   that edits propagate to every team member within seconds. Offer a
+   consent-gated CLAUDE.md note and tell the user how teammates connect
+   (invite link → `bdrive init` → same `--shared` scope, which is
+   per-device).
 
 For the full team setup (CLAUDE.md guidance + per-project sync hooks in
 `.claude/settings.json`), suggest `/beardrive:install` instead.

@@ -133,9 +133,32 @@ bdrive stop ~/agent-workspace
 bdrive stop ./notes --forget
 ```
 
+### Connecting knowledge tooling (gbrain, OKF, docs folders)
+
+When guiding `bdrive init`, detect existing knowledge tooling and connect it instead of blind-syncing the folder. Two rules govern every case:
+
+- **One transport per folder.** Never sync a folder that has another writer. Git-tracked paths: a teammate's `git pull` or branch switch rewrites files with older content, and sync broadcasts that as a fresh edit — silently reverting the team's latest pages. A gbrain brain root: every private capture and overnight enrichment would become team-visible, and each member's cron rewriting the same pages fills the project with conflict copies. Moving a folder from git to beardrive is a **handoff**: `git rm -r --cached <dir>` + add `<dir>/` to `.gitignore`, stage the change but let the user commit it (teammates then pull and re-init; identical content converges with no conflicts). If they want a git record anyway, offer **one-way snapshots** (a scheduled job commits the synced folder's state to an archive branch — git only ever reads the folder) and note that hub history (`bdrive log -p <path>`) usually covers the need.
+- **Knowledge syncs as a scoped folder.** Inside a repo, always `--shared <dir>` — never the repo root. A dedicated knowledge folder (an empty dir, a standalone vault) may be the mount itself. The sync scope is per-device (`.bdrive/` never syncs), so recommend the same `--shared <dir>` when each teammate connects.
+
+Detection ladder — first match wins; if two rungs match, ask which to connect:
+
+1. **gbrain** — `gbrain.yml` in the folder, or a gbrain MCP server in `.mcp.json` / a brain-first protocol block in CLAUDE.md (brain root is then found via `~/.gbrain/config.json` or the MCP config). gbrain's own architecture states the markdown repo is the system of record and the DB a derived cache — beardrive replaces the git hop as the brain's sync transport:
+   - The shared team folder is **never anyone's brain root**. First user: share a subfolder of their brain (e.g. `~/brain/team/`) as its own project. Followers: mount that project as a subfolder of their own brain (or a sibling dir) — never merge roots; "merge my existing brain into it" is a manual migration, not an init option.
+   - Register the shared folder as its **own gbrain source** (`gbrain sources add`; `.gbrain-source` dotfile routes writes) — slugs are per-source, the `federated` flag controls blending into personal search, and the schema pack is settable per source so team pages keep their types (`person`, `company`, …) instead of degrading to untyped notes.
+   - Recommend `gbrain config set link_resolution.global_basename true` so the team's `[[wikilinks]]` resolve from any mount path (`gbrain doctor` reports the edge gain first).
+   - Mirror the brain's `db_only` dirs from `gbrain.yml` into `.bdriveignore` (machine-generated, restorable from the DB — and often a privacy fence; ask before syncing them).
+   - gbrain's sync cron keeps re-indexing what beardrive pulls in; suggest switching it to `gbrain sync --no-pull` (ask before editing a crontab). On PGLite, remind: stop `gbrain serve` before large syncs (single-writer contention).
+2. **OKF** — markdown with OKF v0.1 frontmatter (confirm with `openknowledge validate` if the CLI is present; don't install just to detect). Offer: (a) connect the wiki dir via `--shared` — with the git handoff if tracked — or (b) keep the wiki PR-gated in git and create a new shared folder (starting-point menu below). Recommend (a) when the wiki is the team's knowledge, (b) when it's review-gated repo documentation.
+3. **Wiki-ish folder** — a markdown-dense dir named `docs`/`wiki`/`notes`/`kb` with no knowledge tooling. Check `git log -- <dir>`: dormant → recommend connecting it as the live team space (handoff included); active PR traffic → recommend a new shared folder instead, and say why. After connecting, offer — as a separate consent, it rewrites their files — an in-place upgrade to OKF (`openknowledge from <dir>`) for validation and agent-readability.
+4. **Nothing** — empty or unstructured folder: offer a starting point, in this order: **(a) OKF (recommended** — open spec, plain files, zero runtime, upgradeable to gbrain later**)**, (b) gbrain (full agent brain; heavier — per-member local DB), (c) blank, (d) describe-it (user describes the purpose; scaffold a custom OKF shape, redirecting to gbrain if the description is graph-shaped: entities, relationships, "who/what" queries).
+
+Conflict copies are named `<file>.bdrive-conflict-<device>-<timestamp>` and sync like normal files. `openknowledge validate` does **not** flag them (they aren't `.md`) — pair validate with a `*.bdrive-conflict-*` glob check when offering a post-edit validation hook.
+
+Every branch ends the same way: verify (`bdrive status`, pending 0), a consent-gated CLAUDE.md note describing what syncs and how teammates connect, and the teammate onboarding sentence (invite link → `bdrive init` → same `--shared` scope).
+
 ### What beardrive does not sync
 
-`.git` directories, `.DS_Store`, the `.bdrive` settings file, beardrive's own temp files, empty directories, and anything excluded by `.bdriveignore` or left out of an `include` list. Don't suggest mounting a folder where `.git` is the content the user expects synced — they want git, not beardrive.
+`.git` directories, `.DS_Store`, the `.bdrive` settings file, beardrive's own temp files, empty directories, nested mounts (a subdirectory with its own `.bdrive/config.json` syncs only through its own project — the parent never scans into it, materializes over it, or propagates deletes for it), and anything excluded by `.bdriveignore` or left out of an `include` list. Don't suggest mounting a folder where `.git` is the content the user expects synced — they want git, not beardrive.
 
 ---
 
