@@ -55,7 +55,7 @@ func metaBackends(t *testing.T) []metaBackend {
 					t.Fatalf("postgres reset: %v", err)
 				}
 				defer db.Close()
-				db.Exec(`DROP TABLE IF EXISTS accounts, tokens, auth_policy, projects, orgs, org_members, invites, shares, devices`)
+				db.Exec(`DROP TABLE IF EXISTS accounts, tokens, auth_policy, projects, orgs, org_members, invites, shares, devices, read_stats`)
 			},
 			open: func(t *testing.T) MetaStore {
 				s, err := OpenSQLStore("pgx", dsn)
@@ -176,6 +176,17 @@ func TestMetaStoreConformance(t *testing.T) {
 			}
 			devices.Observe(DeviceInfo{ID: "d1", Name: "laptop", OS: "mac", User: "dev@x.io", IP: "1.2.3.4"})
 
+			reads, err := NewReadLedger(st.Reads(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reads.Record(p1.ID, "handbook.md", ReadKindHuman, "dev@x.io")
+			reads.Record(p1.ID, "handbook.md", ReadKindHuman, "boss@x.io")
+			reads.Record(p1.ID, "wiki/deep.md", ReadKindAgent, "d1")
+			if err := reads.Close(); err != nil {
+				t.Fatal(err)
+			}
+
 			if err := st.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -235,6 +246,21 @@ func TestMetaStoreConformance(t *testing.T) {
 			d, ok := devices2.Get("d1")
 			if !ok || d.Name != "laptop" || d.IP != "1.2.3.4" {
 				t.Fatalf("device lost across reload: %+v", d)
+			}
+
+			reads2, err := NewReadLedger(st2.Reads(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			heat := reads2.Heat(p1.ID, "", time.Time{})
+			if e := heat["handbook.md"]; e.Human != 2 || e.Readers != 2 {
+				t.Fatalf("read buckets lost across reload: %+v", e)
+			}
+			if e := heat["wiki/deep.md"]; e.Agent != 1 || e.Readers != 0 {
+				t.Fatalf("agent read bucket lost across reload: %+v", e)
+			}
+			if sub := reads2.Heat(p1.ID, "wiki", time.Time{}); len(sub) != 1 {
+				t.Fatalf("prefix heat = %+v, want only wiki/deep.md", sub)
 			}
 		})
 	}

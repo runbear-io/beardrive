@@ -21,6 +21,8 @@ let currentProject = null; // hub mode: the selected project
 let apiBase = "/api/";      // volume-scoped endpoint prefix
 let orgs = [];             // hub mode: the orgs this account belongs to
 let joinedOrgId = null;    // org just joined via an invite this page-load
+let heatMap = null;        // hub: path → 30-day read counts, from the heat API
+let heatAt = 0;            // when heatMap was last fetched (ms)
 
 const fileURL = (p) => apiBase + "file?path=" + encodeURIComponent(p);
 
@@ -148,6 +150,8 @@ function selectProject(p, path) {
   currentProject = p;
   expanded = new Set();   // fresh collapse state for the new project's tree
   treeFirstLoad = true;
+  heatMap = null;         // the old project's heat means nothing here
+  heatAt = 0;
   apiBase = "/api/p/" + p.id + "/";
   $("vault-name").textContent = p.name;
   document.title = p.name + " — BearDrive";
@@ -694,6 +698,60 @@ async function refreshTree() {
   if (currentPath && dirIndex.has(currentPath) && $("content").querySelector(".dirlist")) {
     renderFolderListing(currentPath);
   }
+  refreshHeat();
+}
+
+/* ---- read heat ----
+   30-day read counts per path from the heat API (hub only). Counts only —
+   the server never says who read what. Fetched lazily alongside the tree. */
+async function refreshHeat(force) {
+  if (!(serverConfig.mode === "hub" && currentProject)) return;
+  if (!(serverConfig.reads && serverConfig.reads.enabled)) return;
+  if (!force && Date.now() - heatAt < 60000) return;
+  heatAt = Date.now(); // set before the fetch so failures don't hammer
+  let out;
+  try {
+    out = await getJSON(apiBase + "heat?days=30");
+  } catch { return; } // keep the last good heat
+  heatMap = out.entries || {};
+  if (currentPath && dirIndex.has(currentPath) && $("content").querySelector(".dirlist")) {
+    renderFolderListing(currentPath);
+  }
+}
+
+/* Heat for one listing entry: a file's own bucket, or the subtree sum for a
+   folder. Null when there is nothing to show. */
+function heatFor(path, isDir) {
+  if (!heatMap) return null;
+  if (!isDir) return heatMap[path] || null;
+  const agg = { human: 0, agent: 0, share: 0 };
+  for (const [p, e] of Object.entries(heatMap)) {
+    if (!p.startsWith(path + "/")) continue;
+    agg.human += e.human || 0;
+    agg.agent += e.agent || 0;
+    agg.share += e.share || 0;
+  }
+  return agg.human || agg.agent || agg.share ? agg : null;
+}
+
+function heatTotal(e) { return (e.human || 0) + (e.agent || 0) + (e.share || 0); }
+
+function heatText(e) {
+  const total = heatTotal(e);
+  if (!total) return "";
+  let s = total + (total === 1 ? " read" : " reads");
+  if (e.agent) s += " (" + e.agent + " agent)";
+  return s;
+}
+
+/* Dot intensity 1–4, log-ish steps: 1–2, 3–9, 10–29, 30+ reads. */
+function heatLevel(e) {
+  const total = heatTotal(e);
+  if (!total) return 0;
+  if (total < 3) return 1;
+  if (total < 10) return 2;
+  if (total < 30) return 3;
+  return 4;
 }
 
 function renderChildren(children) {
@@ -865,6 +923,8 @@ function renderFolderListing(p) {
   const counts = [];
   if (dirs) counts.push(dirs + (dirs === 1 ? " folder" : " folders"));
   if (files) counts.push(files + (files === 1 ? " file" : " files"));
+  const folderHeat = heatFor(p, true);
+  if (folderHeat) counts.push(heatText(folderHeat) + " in 30 days");
   el(wrap, "p", "dl-sub", counts.join(" · ") || "Empty folder");
   if (!kids.length) {
     el(wrap, "div", "dl-empty", "Nothing in this folder yet.");
@@ -887,6 +947,12 @@ function renderFolderListing(p) {
     } else {
       meta = [c.size ? humanSize(c.size) : "", c.time ? new Date(c.time).toLocaleDateString() : ""]
         .filter(Boolean).join(" · ");
+    }
+    const he = heatFor(c.path, !!c.dir);
+    if (he) {
+      const dot = el(row, "span", "heatdot lvl" + heatLevel(he));
+      dot.title = heatText(he) + " in 30 days";
+      meta = heatText(he) + (meta ? " · " + meta : "");
     }
     el(row, "span", "dl-meta", meta);
     row.onclick = () => openPath(c.path);
@@ -964,6 +1030,8 @@ function showMeta(doc) {
   const parts = [];
   if (doc.author) parts.push(doc.author + (doc.device ? " on " + doc.device : ""));
   if (doc.time) parts.push(new Date(doc.time).toLocaleString());
+  const he = heatMap && heatMap[doc.path];
+  if (he && heatTotal(he)) parts.push(heatText(he) + " / 30d");
   $("meta").textContent = parts.join(" · ");
 }
 

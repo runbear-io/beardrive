@@ -61,6 +61,7 @@ type fileMetaStore struct {
 	orgs     *fileOrgRepo
 	shares   *fileShareRepo
 	devices  *fileDeviceRepo
+	reads    *fileReadRepo
 }
 
 // OpenFileStore builds the file backend over dir, using the historical
@@ -72,6 +73,7 @@ func OpenFileStore(dir string) (MetaStore, error) {
 		orgs:     newFileOrgRepo(filepath.Join(dir, "orgs.json")),
 		shares:   newFileShareRepo(filepath.Join(dir, "shares.json")),
 		devices:  newFileDeviceRepo(filepath.Join(dir, "devices.json")),
+		reads:    newFileReadRepo(filepath.Join(dir, "reads.json")),
 	}, nil
 }
 
@@ -80,6 +82,7 @@ func (s *fileMetaStore) Projects() ProjectRepo { return s.projects }
 func (s *fileMetaStore) Orgs() OrgRepo         { return s.orgs }
 func (s *fileMetaStore) Shares() ShareRepo     { return s.shares }
 func (s *fileMetaStore) Devices() DeviceRepo   { return s.devices }
+func (s *fileMetaStore) Reads() ReadRepo       { return s.reads }
 func (s *fileMetaStore) Close() error          { return nil }
 
 // ---- accounts (auth.json: users + tokens + policy) ----
@@ -417,5 +420,74 @@ func (r *fileDeviceRepo) Put(d DeviceInfo) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.byID[d.ID] = d
+	return r.write()
+}
+
+// ---- reads (reads.json) ----
+
+type fileReadRepo struct {
+	path  string
+	mu    sync.Mutex
+	byKey map[ReadStatKey]ReadStat
+}
+
+func newFileReadRepo(path string) *fileReadRepo {
+	return &fileReadRepo{path: path, byKey: map[ReadStatKey]ReadStat{}}
+}
+
+func (r *fileReadRepo) Load() ([]ReadStat, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var f struct {
+		Reads []ReadStat `json:"reads"`
+	}
+	if _, err := readJSONFile(r.path, &f); err != nil {
+		return nil, err
+	}
+	r.byKey = map[ReadStatKey]ReadStat{}
+	for _, st := range f.Reads {
+		r.byKey[st.key()] = st
+	}
+	return f.Reads, nil
+}
+
+func (r *fileReadRepo) write() error {
+	var f struct {
+		Reads []ReadStat `json:"reads"`
+	}
+	f.Reads = make([]ReadStat, 0, len(r.byKey))
+	for _, st := range r.byKey {
+		f.Reads = append(f.Reads, st)
+	}
+	sort.Slice(f.Reads, func(i, j int) bool {
+		a, b := f.Reads[i], f.Reads[j]
+		if a.Path != b.Path {
+			return a.Path < b.Path
+		}
+		return a.Day < b.Day
+	})
+	data, err := json.Marshal(f) // telemetry: compact beats pretty
+	if err != nil {
+		return err
+	}
+	// 0700 dir: buckets carry actor emails, like auth.json carries accounts.
+	return writeFileAtomic(r.path, append(data, '\n'), 0o700)
+}
+
+func (r *fileReadRepo) PutBatch(stats []ReadStat) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, st := range stats {
+		r.byKey[st.key()] = st
+	}
+	return r.write()
+}
+
+func (r *fileReadRepo) DeleteBatch(keys []ReadStatKey) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, k := range keys {
+		delete(r.byKey, k)
+	}
 	return r.write()
 }

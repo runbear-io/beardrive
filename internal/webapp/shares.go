@@ -243,6 +243,9 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the shared file no longer exists", http.StatusNotFound)
 		return
 	}
+	// A share hit is external consumption. Actor is token+IP: one audience
+	// member reloading is debounced to a visit, distinct visitors still count.
+	s.Reads.Record(sh.Project, sh.Path, ReadKindShare, sh.Token+"/"+clientIP(r))
 
 	// Sandbox everything under /s/: shared content executes in an opaque
 	// origin (scripts allowed — charts in reports — but no cookies, no

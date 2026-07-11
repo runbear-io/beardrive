@@ -269,6 +269,12 @@ button, input, a.btn { font-family: inherit; }
 .dl-row:hover .ticon { color: var(--text-faint); }
 .dl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; color: var(--text); }
 .dl-meta { flex: none; font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+/* read-heat dot: intensity grows with 30-day reads (heatLevel in app.js) */
+.heatdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.heatdot.lvl1 { opacity: .3; }
+.heatdot.lvl2 { opacity: .55; }
+.heatdot.lvl3 { opacity: .8; }
+.heatdot.lvl4 { opacity: 1; box-shadow: 0 0 6px rgba(245, 166, 35, .55); }
 .dl-empty { padding: 24px 14px; color: var(--text-faint); font-size: 13px; border: 1px dashed var(--border); border-radius: var(--r-card); text-align: center; }
 .dl-h3 { margin: 28px 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-ghost); font-weight: 600; }
 .dl-hlist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); overflow: hidden; max-width: none; }
