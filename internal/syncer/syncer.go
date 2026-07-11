@@ -55,6 +55,12 @@ type Session struct {
 	// history shows who changed what. Zero on offline/no-auth setups —
 	// Device.Author remains the fallback identity.
 	Account config.Settings
+	// Note, when set, is stamped into every op this session commits — session
+	// context like "claude-code session <id>". Empty means fall back to the
+	// store's persisted session note (store.LoadNote), which lets a one-shot
+	// `bdrive sync --note` leave context that the daemon's later scans also
+	// stamp. Conflict-copy ops keep their own explanatory note.
+	Note    string
 	Backend remote.Backend // nil = work offline
 	// OnProgress, when set, is called during push with upload progress. It may
 	// be invoked concurrently from upload workers, so it must be safe to call
@@ -210,6 +216,10 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter) ([]journal.Op, error) {
 	seen := make(map[string]bool, len(cache))
 	var ops []journal.Op
+	note := s.Note
+	if note == "" {
+		note = s.Store.LoadNote()
+	}
 	nextOp := func(kind, rel string) journal.Op {
 		st.Lamport++
 		seqBase++
@@ -217,7 +227,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
 			Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
 			User: s.Account.Email, UserName: s.Account.Name,
-			Kind: kind, Path: rel,
+			Kind: kind, Path: rel, Note: note,
 		}
 	}
 
