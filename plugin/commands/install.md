@@ -61,49 +61,28 @@ every change is tracked (who, when, from which device).
   the URL.
 ```
 
-## 5. Register project-level sync hooks (ask first)
+## 5. Register agent sync hooks
 
-Ask: "Want me to register sync hooks in `.claude/settings.json` so files
-sync automatically during Claude sessions — for every teammate, plugin or
-not?" If yes, merge this into the project's `.claude/settings.json`
-(create it if missing; preserve existing hooks — append to the arrays,
-never overwrite them):
+Run `bdrive hooks install` in the project. It detects the agent platforms
+in use — Claude Code (`.claude/`), Codex (`.codex/`), Gemini CLI
+(`.gemini/`), Hermes (`~/.hermes/`) — and idempotently merges beardrive's
+sync hooks into each platform's own hook config, preserving any hooks
+already there. Project-level files (`.claude/settings.json`,
+`.codex/hooks.json`, `.gemini/settings.json`) ride the repo, so every
+teammate gets them — plugin or not, whatever agent they use; Hermes hooks
+are per-user (`~/.hermes/config.yaml`).
 
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'cd \"${CLAUDE_PROJECT_DIR:-.}\" && [ -d .bdrive ] && command -v bdrive >/dev/null && bdrive sync . >/dev/null 2>&1 || true'",
-            "timeout": 30,
-            "statusMessage": "beardrive: pulling latest files"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'cd \"${CLAUDE_PROJECT_DIR:-.}\" && [ -d .bdrive ] && command -v bdrive >/dev/null && bdrive sync . >/dev/null 2>&1 || true'",
-            "async": true
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+The registered hooks pull before every turn (the agent always reads the
+team's latest files), push right after edits (artifacts land on the server
+seconds after they're created — daemon or no daemon), and stamp every
+change with the agent session that made it (`bdrive sync --note "<agent>
+session <id>"` — visible in `bdrive log` and the hub's history views).
+They are fast no-ops in folders without `.bdrive/`.
 
-The pull at prompt-submit means Claude always reads the team's latest
-files; the async push after each Write/Edit means artifacts land on the
-server seconds after Claude creates them — daemon or no daemon. Both are
-fast no-ops in folders without `.bdrive/`.
+Tell the user which platforms got hooks (`bdrive hooks` shows the status
+table). If Codex is among them, mention they must run `/hooks` inside
+Codex once to trust the project's `.codex` layer. To register a platform
+that wasn't detected: `bdrive hooks install --agent claude,codex,gemini,hermes`.
 
 ## 6. Verify and summarize
 
