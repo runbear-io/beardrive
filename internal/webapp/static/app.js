@@ -64,6 +64,9 @@ async function postJSON(url, body) {
 
 /* ---- boot ---- */
 async function boot() {
+  // The app restores per-route scroll itself (scrollMemo); the browser's own
+  // restoration would fight it on back/forward.
+  if ("scrollRestoration" in history) history.scrollRestoration = "manual";
   try {
     serverConfig = await getJSON("/api/config");
   } catch { /* non-fatal */ }
@@ -81,13 +84,13 @@ async function boot() {
     await loadOrgs();
     await loadProjects();
     updateAdminBar();
-    const { project, path } = parseRoute();
+    const route = parseRoute();
     // After accepting an invite, open a project in the org you just joined
     // rather than whatever happened to be first.
-    const proj = projects.find((x) => x.id === project)
+    const proj = projects.find((x) => x.id === route.project)
       || (joinedOrgId && projects.find((x) => x.org === joinedOrgId))
       || projects[0];
-    if (proj) selectProject(proj, path);
+    if (proj) selectProject(proj, route);
     else { $("vault-name").textContent = serverConfig.brand || serverConfig.volume || "BearDrive"; updateOrgBar(); showEmptyState(); }
     setInterval(loadProjects, 30000); // pick up new projects
   } else {
@@ -146,12 +149,14 @@ async function loadProjects() {
   nav.appendChild(ul);
 }
 
-function selectProject(p, path) {
+function selectProject(p, route) {
   currentProject = p;
   expanded = new Set();   // fresh collapse state for the new project's tree
   treeFirstLoad = true;
   heatMap = null;         // the old project's heat means nothing here
   heatAt = 0;
+  lastTreeJSON = "";
+  lastHeatJSON = "";
   apiBase = "/api/p/" + p.id + "/";
   $("vault-name").textContent = p.name;
   document.title = p.name + " — BearDrive";
@@ -166,13 +171,10 @@ function selectProject(p, path) {
   initUpload();
   initHistory();
   updateShareButton();
-  refreshTree().then(() => {
-    if (path) openPath(path);
-    // Landing view: admins/owners get the Insights dashboard instead of an
-    // empty "select a file" pane; members keep the placeholder.
-    else if (canSeeInsights()) showInsights();
-  });
-  if (!path) pushURL("/" + p.id);
+  // Landing view (applyRoute with an empty route): admins/owners get the
+  // Insights dashboard instead of an empty "select a file" pane.
+  refreshTree().then(() => applyRoute(route || {}));
+  if (!route || (!route.path && !route.view)) pushURL("/" + p.id);
 }
 
 /* ---- hub: organizations ---- */
@@ -653,12 +655,28 @@ function refreshAll() {
 function encodePath(p) { return p.split("/").map(encodeURIComponent).join("/"); }
 function decodePath(p) { return p.split("/").map(decodeURIComponent).join("/"); }
 
+/* Special views are RESTful routes under the project — the first segment
+   after the project id is reserved when it names a view:
+     /<project-id>/insights                 the Insights dashboard
+     /<project-id>/history[/<path>]        change feed (whole project / subtree / file)
+   (Root-level files literally named "insights" or "history" lose the URL
+   shortcut and remain reachable through the tree.) */
+const VIEW_ROUTES = new Set(["insights", "history"]);
+
 function parseRoute() {
   const raw = location.pathname.replace(/^\/+/, "");
   if (serverConfig.mode !== "hub") return { path: raw ? decodePath(raw) : "" };
   const slash = raw.indexOf("/");
   if (slash === -1) return { project: raw, path: "" };
-  return { project: raw.slice(0, slash), path: decodePath(raw.slice(slash + 1)) };
+  const r = { project: raw.slice(0, slash), path: decodePath(raw.slice(slash + 1)) };
+  const seg = r.path.indexOf("/");
+  const head = seg === -1 ? r.path : r.path.slice(0, seg);
+  if (VIEW_ROUTES.has(head)) {
+    r.view = head;
+    r.viewTarget = seg === -1 ? "" : r.path.slice(seg + 1).replace(/\/+$/, "");
+    r.path = "";
+  }
+  return r;
 }
 
 /* The URL for a file within the current context. */
@@ -670,21 +688,73 @@ function urlForPath(path) {
   return "/" + enc;
 }
 
+/* The URL for a special view of the current project. */
+function urlForView(view, q) {
+  let s = (serverConfig.mode === "hub" && currentProject ? "/" + currentProject.id : "") + "/" + view;
+  if (view === "history" && q) {
+    const target = "path" in q ? q.path : (q.prefix || "").replace(/\/+$/, "");
+    if (target) s += "/" + encodePath(target);
+  }
+  return s;
+}
+
+/* Dispatch a parsed route to the right view (after the tree has loaded). */
+function applyRoute(r) {
+  if (r.view === "insights") return showInsights(false);
+  if (r.view === "history") {
+    // The route stores one target; the tree says whether it is a folder
+    // (subtree feed) or a file (version list).
+    const t = r.viewTarget || "";
+    const hq = !t ? { prefix: "" } : dirIndex.has(t) ? { prefix: t + "/" } : { path: t };
+    return showHistory(hq, false);
+  }
+  if (r.path) return openPath(r.path);
+  if (canSeeInsights()) showInsights("replace");
+}
+
+/* Per-route scroll positions of the content pane, so back/forward returns
+   to where the user was (e.g. deep in a folder's change feed). */
+const scrollMemo = new Map();
+let routeKey = location.pathname + location.search;
+let pendingScroll = null; // set by popstate, consumed by the next render
+function rememberScroll() { scrollMemo.set(routeKey, $("content").scrollTop); }
+function applyPendingScroll(final) {
+  if (pendingScroll == null) return;
+  $("content").scrollTo({ top: pendingScroll, behavior: "instant" });
+  if (final) pendingScroll = null;
+}
+
 /* Push a route without reloading, skipping a no-op that would just stack a
    duplicate history entry (e.g. when boot opens the file already in the URL). */
 function pushURL(url) {
-  if (location.pathname === url) return;
+  if (location.pathname + location.search === url) return;
+  rememberScroll();
   history.pushState(null, "", url);
+  routeKey = url;
+}
+/* Replace the current entry (landing views that shouldn't stack). */
+function replaceURL(url) {
+  history.replaceState(null, "", url);
+  routeKey = url;
 }
 function syncURL(path) { pushURL(urlForPath(path)); }
 
 /* ---- tree ---- */
+let lastTreeJSON = ""; // skip re-rendering when nothing changed (no flicker)
 async function refreshTree() {
   if (serverConfig.mode === "hub" && !currentProject) return;
   let root;
   try {
     root = await getJSON(apiBase + "tree");
   } catch { return; } // keep the last good tree
+  // The 15s poll usually returns the same tree — rebuilding the DOM anyway
+  // makes the sidebar (and any open folder listing) visibly flicker.
+  const json = JSON.stringify(root);
+  if (json === lastTreeJSON) {
+    refreshHeat();
+    return;
+  }
+  lastTreeJSON = json;
   flatFiles = [];
   dirIndex = new Map();
   const kids = root.children || [];
@@ -709,6 +779,7 @@ async function refreshTree() {
 /* ---- read heat ----
    30-day read counts per path from the heat API (hub only). Counts only —
    the server never says who read what. Fetched lazily alongside the tree. */
+let lastHeatJSON = "";
 async function refreshHeat(force) {
   if (!(serverConfig.mode === "hub" && currentProject)) return;
   if (!(serverConfig.reads && serverConfig.reads.enabled)) return;
@@ -718,6 +789,9 @@ async function refreshHeat(force) {
   try {
     out = await getJSON(apiBase + "heat?days=30");
   } catch { return; } // keep the last good heat
+  const json = JSON.stringify(out.entries || {});
+  if (json === lastHeatJSON) return; // unchanged: no re-render, no flicker
+  lastHeatJSON = json;
   heatMap = out.entries || {};
   if (currentPath && dirIndex.has(currentPath) && $("content").querySelector(".dirlist")) {
     renderFolderListing(currentPath);
@@ -789,14 +863,6 @@ function renderNode(n) {
   li.appendChild(row);
   if (n.dir) {
     dirIndex.set(n.path, n);
-    if (serverConfig.mode === "hub") {
-      const hist = document.createElement("span");
-      hist.className = "dir-history";
-      hist.innerHTML = svgIcon("hist");
-      hist.title = "Folder history";
-      hist.onclick = (e) => { e.stopPropagation(); showHistory({ prefix: n.path + "/" }); };
-      row.appendChild(hist);
-    }
     li.appendChild(renderChildren(n.children || []));
     const open = expanded.has(n.path);
     if (!open) li.classList.add("collapsed");
@@ -907,6 +973,7 @@ function openFolder(p) {
   $("download").hidden = true;
   $("more-btn").hidden = !(serverConfig.mode === "hub" && currentProject);
   updateShareButton();
+  if (pendingScroll == null) $("content").scrollTop = 0; // fresh navigation starts at the top
   renderFolderListing(p);
 }
 
@@ -914,6 +981,11 @@ function renderFolderListing(p) {
   const node = dirIndex.get(p);
   if (!node) return;
   const content = $("content");
+  // Scroll intent: a back/forward restore wins; an in-place refresh (tree or
+  // heat poll re-render) keeps the reader where they are; openFolder resets
+  // to the top before calling us.
+  const keepTop = pendingScroll != null ? pendingScroll : content.scrollTop;
+  pendingScroll = null;
   content.className = "view";
   content.innerHTML = "";
   const wrap = el(content, "div", "dirlist");
@@ -933,7 +1005,8 @@ function renderFolderListing(p) {
   el(wrap, "p", "dl-sub", counts.join(" · ") || "Empty folder");
   if (!kids.length) {
     el(wrap, "div", "dl-empty", "Nothing in this folder yet.");
-    renderFolderHistory(wrap, p);
+    if (keepTop) content.scrollTo({ top: keepTop, behavior: "instant" });
+    renderFolderHistory(wrap, p, keepTop);
     return;
   }
   const list = el(wrap, "div", "dl-items");
@@ -963,13 +1036,14 @@ function renderFolderListing(p) {
     row.onclick = () => openPath(c.path);
     row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); row.click(); } };
   }
-  renderFolderHistory(wrap, p);
+  if (keepTop) content.scrollTo({ top: keepTop, behavior: "instant" });
+  renderFolderHistory(wrap, p, keepTop);
 }
 
 /* The folder's change feed, straight from the journals: files added, edited,
    and deleted anywhere under it, newest first. Hub-only — a plain-folder
    viewer has no journals to read. */
-function renderFolderHistory(wrap, p) {
+function renderFolderHistory(wrap, p, restoreTop) {
   if (!(serverConfig.mode === "hub" && currentProject)) return;
   const sec = el(wrap, "div", "dl-history");
   getJSON(apiBase + "history?prefix=" + encodeURIComponent(p + "/") + "&n=20").then((out) => {
@@ -980,11 +1054,16 @@ function renderFolderHistory(wrap, p) {
     for (const e of entries) list.appendChild(historyEntryRow(e));
     const more = el(sec, "button", "ai-btn dl-more", "Full history");
     more.onclick = () => showHistory({ prefix: p + "/" });
+    // The feed adds height after the listing rendered; a restored scroll
+    // position (back/forward) may only fit now.
+    if (restoreTop) $("content").scrollTo({ top: restoreTop, behavior: "instant" });
   }).catch(() => sec.remove());
 }
 
 /* ---- file pane ---- */
 async function openFile(p) {
+  const restoreTop = pendingScroll != null ? pendingScroll : 0;
+  pendingScroll = null;
   currentPath = p;
   syncURL(p);
   markActive();
@@ -1029,6 +1108,7 @@ async function openFile(p) {
     content.innerHTML = `<div class="empty"></div>`;
     content.querySelector(".empty").textContent = "Could not load file: " + err.message;
   }
+  content.scrollTo({ top: restoreTop, behavior: "instant" });
 }
 
 function showMeta(doc) {
@@ -1159,8 +1239,13 @@ function canSeeInsights() {
 
 let insightsDevices = null; // /heat?by=device breakdown, fetched per Insights open
 
-async function showInsights() {
+async function showInsights(push = true) {
   if (!canSeeInsights()) return;
+  // A real route (?v=insights): refresh, deep links, and back/forward work.
+  if (push === "replace") replaceURL(urlForView("insights"));
+  else if (push) pushURL(urlForView("insights"));
+  const restoreTop = pendingScroll != null ? pendingScroll : 0;
+  pendingScroll = null;
   await refreshHeat(true);
   insightsDevices = null;
   try {
@@ -1175,6 +1260,7 @@ async function showInsights() {
   const content = $("content");
   content.className = "view";
   renderInsights(content, "all");
+  content.scrollTo({ top: restoreTop, behavior: "instant" });
 }
 
 /* SVG element helper for the insights charts. */
@@ -1345,8 +1431,10 @@ function renderHotPath(wrap, pts, lens) {
     const row = el(list, "div", "in-hp-row");
     row.tabIndex = 0;
     row.setAttribute("role", "button");
-    row.title = p.path + (p.danger ? " — hot + stale" : "");
-    el(row, "span", "in-hp-name" + (p.danger ? " danger" : ""), (p.danger ? "⚠ " : "") + p.path);
+    row.title = p.danger
+      ? `${p.reads} read${p.reads === 1 ? "" : "s"}/30d · unchanged ${Math.round(p.days)}d — review this file`
+      : p.path;
+    el(row, "span", "in-hp-name" + (p.danger ? " danger" : ""), p.path + (p.danger ? " ⚠" : ""));
     const barw = el(row, "span", "in-hp-bar");
     // Split of the lens reads: pure lenses are single-color by definition.
     const aFrac = lens === "agent" ? 1 : lens === "human" ? 0 : (p.total ? p.agent / p.total : 0);
@@ -1474,7 +1562,11 @@ function currentProjectOrNull() {
   return serverConfig.mode === "hub" ? currentProject : null;
 }
 
-async function showHistory(q) {
+async function showHistory(q, push = true) {
+  // A real route (?v=history&path=|prefix=): refresh and back/forward work.
+  if (push) pushURL(urlForView("history", q));
+  const restoreTop = pendingScroll != null ? pendingScroll : 0;
+  pendingScroll = null;
   const content = $("content");
   const qs = "path" in q
     ? "path=" + encodeURIComponent(q.path)
@@ -1500,6 +1592,7 @@ async function showHistory(q) {
   }
   for (const e of out.entries || []) wrap.appendChild(historyEntryRow(e));
   content.appendChild(wrap);
+  content.scrollTo({ top: restoreTop, behavior: "instant" });
 }
 
 /* One change as a row: what happened (added / edited / deleted), to which
@@ -1515,7 +1608,7 @@ function historyEntryRow(e) {
   const when = new Date(e.time).toLocaleString();
   row.innerHTML =
     `<div class="hline"><span class="hkind"></span><span class="hpath"></span><span class="htag"></span><span class="htime"></span></div>` +
-    `<div class="hmeta"><span class="hwho"></span><span class="hdev"></span><span class="hsize"></span><span class="hact"></span></div>`;
+    `<div class="hmeta"><span class="hwho"></span><span class="hdev"></span><span class="hsize"></span></div>`;
   row.querySelector(".hkind").innerHTML = svgIcon(KIND_ICON[kind] || "dot");
   row.querySelector(".hpath").textContent = e.path;
   row.querySelector(".htag").textContent = KIND_LABEL[kind] || kind;
@@ -1523,17 +1616,6 @@ function historyEntryRow(e) {
   row.querySelector(".hwho").textContent = who;
   row.querySelector(".hdev").textContent = dev;
   row.querySelector(".hsize").textContent = e.size ? humanSize(e.size) : "";
-  if (kind !== "delete" && e.blob) {
-    const view = document.createElement("a");
-    view.textContent = "view";
-    view.href = apiBase + "blob?sha=" + e.blob + "&name=" + encodeURIComponent(e.path);
-    view.target = "_blank";
-    const dl = document.createElement("a");
-    dl.textContent = "download";
-    dl.href = view.href + "&download=1";
-    dl.setAttribute("download", e.path.split("/").pop());
-    row.querySelector(".hact").append(view, " ", dl);
-  }
   if (e.note) {
     const note = document.createElement("div");
     note.className = "hnote";
@@ -1554,6 +1636,7 @@ function historyEntryRow(e) {
     note.setAttribute("role", "button");
     note.title = "Show full note";
     note.onclick = (ev) => {
+      ev.stopPropagation(); // expanding a note is not a navigation
       if (ev.target.tagName === "A") return;
       const open = note.classList.toggle("open");
       note.title = open ? "Collapse note" : "Show full note";
@@ -1562,8 +1645,17 @@ function historyEntryRow(e) {
     note.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); note.click(); } };
     row.appendChild(note);
   }
+  // The whole row opens the file it names (deleted files have nothing to
+  // open). Old versions stay retrievable via the blob API; a proper version
+  // viewer is the planned time-travel phase.
   const p = e.path;
-  row.querySelector(".hpath").onclick = () => showHistory({ path: p });
+  if (kind !== "delete") {
+    row.classList.add("clickable");
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.onclick = (ev) => { if (ev.target.tagName !== "A") openFile(p); };
+    row.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openFile(p); } };
+  }
   return row;
 }
 
@@ -1913,12 +2005,15 @@ $("sb-backdrop").addEventListener("click", closeSidebarOnMobile);
 /* Back/forward: re-resolve the route from the URL. selectProject/openFile
    dedup against the current URL, so replaying it here never stacks history. */
 window.addEventListener("popstate", () => {
-  const { project, path } = parseRoute();
-  if (serverConfig.mode === "hub" && project && (!currentProject || currentProject.id !== project)) {
-    const proj = projects.find((x) => x.id === project);
-    if (proj) { selectProject(proj, path || null); return; }
+  rememberScroll(); // routeKey still names the route we are leaving
+  routeKey = location.pathname + location.search;
+  pendingScroll = scrollMemo.has(routeKey) ? scrollMemo.get(routeKey) : null;
+  const r = parseRoute();
+  if (serverConfig.mode === "hub" && r.project && (!currentProject || currentProject.id !== r.project)) {
+    const proj = projects.find((x) => x.id === r.project);
+    if (proj) { selectProject(proj, r); return; }
   }
-  if (path && path !== currentPath) openPath(path);
+  applyRoute(r);
 });
 
 boot();

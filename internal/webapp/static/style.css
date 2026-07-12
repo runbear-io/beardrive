@@ -137,14 +137,6 @@ button, input, a.btn { font-family: inherit; }
 #tree .file .chev { visibility: hidden; }
 #tree li.collapsed > ul { display: none; }
 #tree li.collapsed > .row .chev { transform: rotate(-90deg); }
-.dir-history {
-  margin-left: auto; flex: none; visibility: hidden;
-  width: 24px; height: 24px; border-radius: 5px;
-  display: inline-flex; align-items: center; justify-content: center; color: var(--text-ghost);
-}
-.dir-history .ico { width: 14px; height: 14px; }
-#tree li > .row:hover .dir-history { visibility: visible; }
-.dir-history:hover { color: var(--text); background: var(--hover); }
 
 /* org bar */
 #orgbar { display: flex; align-items: center; gap: 9px; padding: 9px 12px 9px 14px; border-top: 1px solid var(--border); }
@@ -279,6 +271,8 @@ button, input, a.btn { font-family: inherit; }
 .dl-h3 { margin: 28px 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-ghost); font-weight: 600; }
 .dl-hlist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); overflow: hidden; max-width: none; }
 .dl-hlist .hentry:last-child { border-bottom: none; }
+.hentry.clickable { cursor: pointer; }
+.hentry.clickable:hover { background: var(--hover); }
 .dl-more { margin-top: 10px; }
 
 /* ---- insights (read×write matrix) ---- */
@@ -312,7 +306,7 @@ button, input, a.btn { font-family: inherit; }
 .in-hp-row:last-child { border-bottom: none; }
 .in-hp-row:hover { background: var(--hover); }
 .in-hp-name { flex: 0 0 300px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--text); }
-.in-hp-name.danger { color: #e07070; }
+.in-hp-name.danger { color: var(--accent); }
 .in-hp-bar { flex: 1; display: flex; height: 10px; border-radius: 3px; overflow: hidden; }
 .in-hp-agent { background: var(--accent); }
 .in-hp-human { background: #5b8def; }
@@ -344,9 +338,6 @@ button, input, a.btn { font-family: inherit; }
 .hmeta { display: flex; gap: 14px; margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-dim); }
 .hdev, .hsize { color: var(--text-faint); }
 .hsize { font-variant-numeric: tabular-nums; }
-.hact { margin-left: auto; }
-.hact a { color: var(--accent-bright); text-decoration: none; margin-left: 10px; }
-.hact a:hover { text-decoration: underline; }
 .hnote { margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .hnote:hover { color: var(--text); }
 .hnote.open { white-space: normal; overflow-wrap: anywhere; }
