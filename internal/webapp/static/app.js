@@ -159,20 +159,23 @@ function selectProject(p, route) {
   lastHeatJSON = "";
   apiBase = "/api/p/" + p.id + "/";
   $("vault-name").textContent = p.name;
+  // The project name doubles as a "home" link back to the index page.
+  $("vault-name").classList.add("vault-link");
+  $("vault-name").onclick = () => { showProjectHome(); closeSidebarOnMobile(); };
   document.title = p.name + " — BearDrive";
   currentPath = null;
   $("crumb").textContent = "";
   $("meta").textContent = "";
   $("download").hidden = true;
   $("content").className = "view";
-  $("content").innerHTML = `<div class="empty">Select a file to read it.<br><span class="empty-hint">On a phone, tap ☰ to browse.</span></div>`;
+  $("content").innerHTML = `<div class="empty">Loading…</div>`;
   loadProjects(); // refresh active highlight
   updateOrgBar();
   initUpload();
   initHistory();
   updateShareButton();
-  // Landing view (applyRoute with an empty route): admins/owners get the
-  // Insights dashboard instead of an empty "select a file" pane.
+  // Landing view (applyRoute with an empty route): the project home page —
+  // the connect-an-agent guide, with Insights below for admins/owners.
   refreshTree().then(() => applyRoute(route || {}));
   if (!route || (!route.path && !route.view)) pushURL("/" + p.id);
 }
@@ -709,7 +712,7 @@ function applyRoute(r) {
     return showHistory(hq, false);
   }
   if (r.path) return openPath(r.path);
-  if (canSeeInsights()) showInsights("replace");
+  if (serverConfig.mode === "hub" && currentProject) showProjectHome("replace");
 }
 
 /* Per-route scroll positions of the content pane, so back/forward returns
@@ -1218,6 +1221,140 @@ function updateShareButton() {
       toast("Share failed: " + err.message, true);
     }
   };
+}
+
+/* ---- project home ----
+   The index page of a project (/<project-id>): how to mount the project as a
+   local folder and connect a coding agent, with the Insights dashboard
+   embedded below for admins/org-owners. The guide shows real, copyable
+   commands with this hub's URL and this project's id filled in. */
+
+const GUIDE_AGENTS = [
+  { key: "claude", label: "Claude Code & Cowork" },
+  { key: "hermes", label: "Hermes", hook: "hermes",
+    note: "Registers BearDrive's hooks in Hermes's config: pull before every turn, push after edits " +
+      "with a session note, and report file reads to Insights." },
+  { key: "codex", label: "Codex", hook: "codex",
+    note: "Registers hooks in .codex/hooks.json.",
+    extra: "Run /hooks inside Codex once to trust the project's .codex layer — after that every turn " +
+      "pulls, edits push automatically, and reads are reported to Insights." },
+];
+
+let guideAgent = "claude";
+try { guideAgent = localStorage.getItem("bdrive-guide-agent") || "claude"; } catch { /* private mode */ }
+
+function guideSteps(agent) {
+  const origin = location.origin, pid = currentProject.id;
+
+  // Claude Code and Claude Cowork share one plugin: install it once, then
+  // /beardrive:install does the whole setup conversationally.
+  if (agent.key === "claude") {
+    return [
+      { title: "Add the BearDrive plugin",
+        desc: "One time, in any Claude Code session. The plugin ships the beardrive skill, the /beardrive " +
+          "commands, and turn-boundary sync hooks — and Claude Cowork shares the same plugins, so " +
+          "installing it once covers both.",
+        code: "/plugin marketplace add runbear-io/beardrive\n/plugin install beardrive@beardrive" },
+      { title: "Set up this project conversationally",
+        desc: "In a Claude Code or Cowork session in the folder where you want the files, run:",
+        code: "/beardrive:install connect to " + origin + ", project " + pid,
+        extra: "Claude installs the CLI, signs this machine in, mounts the project, and registers the " +
+          "sync hooks — pull the latest before every turn, push after edits (stamped with the session " +
+          "that made them), and report file reads to Insights. It asks before anything it changes." },
+    ];
+  }
+
+  const slug = (currentProject.name || "project").toLowerCase().replace(/[^a-z0-9._-]+/g, "-") || "project";
+  return [
+    { title: "Install the BearDrive CLI",
+      desc: "One static binary. Homebrew on macOS and Linux; releases and `go install` also work.",
+      code: "brew install runbear-io/tap/beardrive" },
+    { title: "Sign in to this hub",
+      desc: "Opens the browser once and stores a device token on this machine — the synced folder itself never holds credentials.",
+      code: "bdrive login " + origin },
+    { title: "Mount the project into a local folder",
+      desc: "Run it where you want the files. An existing folder works too — contents merge, and re-running init later (or after moving the folder) just resumes.",
+      code: "mkdir -p ~/" + slug + " && cd ~/" + slug + "\nbdrive init --project " + pid },
+    { title: "Connect " + agent.label,
+      desc: agent.note,
+      code: "bdrive hooks install --agent " + agent.hook,
+      extra: agent.extra },
+  ];
+}
+
+function renderConnectGuide(content) {
+  const wrap = el(content, "div", "guide");
+  el(wrap, "h1", "in-title", currentProject.name);
+  el(wrap, "p", "dl-sub",
+    "Mount this project as a folder on any machine and connect your coding agent: files sync both " +
+    "ways in the background, every change is journaled with who made it, and agent reads feed Insights.");
+  const tabs = el(wrap, "div", "gd-tabs");
+  const body = el(wrap, "div", "gd-body");
+  const render = () => {
+    const agent = GUIDE_AGENTS.find((a) => a.key === guideAgent) || GUIDE_AGENTS[0];
+    for (const b of tabs.children) b.classList.toggle("active", b.dataset.key === agent.key);
+    body.innerHTML = "";
+    guideSteps(agent).forEach((s, i) => {
+      const step = el(body, "div", "gd-step");
+      const head = el(step, "div", "gd-step-head");
+      el(head, "span", "gd-num", String(i + 1));
+      el(head, "span", "gd-step-title", s.title);
+      if (s.desc) el(step, "p", "gd-desc", s.desc);
+      if (s.code) {
+        const pre = el(step, "pre", "gd-code");
+        el(pre, "code", null, s.code);
+        const btn = el(pre, "button", "gd-copy", "Copy");
+        btn.onclick = async () => {
+          btn.textContent = (await copyText(s.code)) ? "Copied" : "Copy failed";
+          setTimeout(() => { btn.textContent = "Copy"; }, 1400);
+        };
+      }
+      if (s.extra) el(step, "p", "gd-desc gd-extra", s.extra);
+    });
+    el(body, "p", "gd-done",
+      "That's it — the folder now syncs on its own. Every agent turn starts from the latest state, " +
+      "edits appear here (and on every teammate's mount) within seconds, and what your agents read " +
+      "shows up in Insights.");
+  };
+  for (const a of GUIDE_AGENTS) {
+    const b = el(tabs, "button", "gd-tab", a.label);
+    b.dataset.key = a.key;
+    b.onclick = () => {
+      guideAgent = a.key;
+      try { localStorage.setItem("bdrive-guide-agent", a.key); } catch { /* private mode */ }
+      render();
+    };
+  }
+  render();
+}
+
+async function showProjectHome(push = true) {
+  if (!(serverConfig.mode === "hub" && currentProject)) return;
+  if (push === "replace") replaceURL("/" + currentProject.id);
+  else if (push) pushURL("/" + currentProject.id);
+  const restoreTop = pendingScroll != null ? pendingScroll : 0;
+  pendingScroll = null;
+  currentPath = null;
+  markActive();
+  $("crumb").textContent = currentProject.name;
+  $("meta").textContent = "";
+  $("download").hidden = true;
+  $("more-btn").hidden = true;
+  const content = $("content");
+  content.className = "view";
+  content.innerHTML = "";
+  renderConnectGuide(content);
+  if (canSeeInsights()) {
+    const host = el(content, "div", "home-insights");
+    await refreshHeat(true);
+    insightsDevices = null;
+    try {
+      insightsDevices = (await getJSON(apiBase + "heat?by=device&days=30")).devices || [];
+    } catch { /* older server: the coverage section simply doesn't render */ }
+    if (!host.isConnected) return; // user navigated away during the fetches
+    renderInsights(host, "all");
+  }
+  content.scrollTo({ top: restoreTop, behavior: "instant" });
 }
 
 /* ---- insights: the read×write matrix ----

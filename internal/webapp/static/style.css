@@ -275,6 +275,26 @@ button, input, a.btn { font-family: inherit; }
 .hentry.clickable:hover { background: var(--hover); }
 .dl-more { margin-top: 10px; }
 
+/* ---- project home: the connect-an-agent guide ---- */
+#vault-name.vault-link { cursor: pointer; }
+#vault-name.vault-link:hover { color: var(--accent-bright); }
+.guide { max-width: 760px; margin: 0 auto; }
+.gd-tabs { display: flex; gap: 2px; margin: 20px 0 16px; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.gd-tab { font: inherit; font-size: 13px; font-weight: 600; padding: 7px 12px 9px; background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--text-faint); cursor: pointer; white-space: nowrap; }
+.gd-tab:hover { color: var(--text); }
+.gd-tab.active { color: var(--accent-bright); border-bottom-color: var(--accent); }
+.gd-step { margin: 0 0 18px; }
+.gd-step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 3px; }
+.gd-num { flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--glow); color: var(--accent-bright); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.gd-step-title { font-weight: 600; font-size: 14px; color: var(--text); }
+.gd-desc { margin: 2px 0 8px 32px; color: var(--text-faint); font-size: 13px; line-height: 1.5; }
+.gd-extra { font-size: 12.5px; margin-top: 6px; }
+.gd-code { position: relative; margin: 6px 0 6px 32px; padding: 10px 72px 10px 12px; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6; color: var(--text); overflow-x: auto; white-space: pre; }
+.gd-copy { position: absolute; top: 7px; right: 7px; font: inherit; font-family: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-2); background: var(--surface); color: var(--text-faint); cursor: pointer; }
+.gd-copy:hover { color: var(--accent-bright); border-color: var(--accent-dim); }
+.gd-done { margin: 22px 0 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); color: var(--text-faint); font-size: 13px; line-height: 1.5; }
+.home-insights { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--border); }
+
 /* ---- insights (read×write matrix) ---- */
 .insights { max-width: 760px; margin: 0 auto; }
 .in-title { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
