@@ -75,6 +75,10 @@ func TestInstallJSONPlatforms(t *testing.T) {
 	if !strings.Contains(string(raw), `"async":true`) {
 		t.Fatal("claude push hook should be async")
 	}
+	// …and the read hook, on its own matcher.
+	if !strings.Contains(string(raw), "bdrive read-log") || !strings.Contains(string(raw), `"matcher":"Read"`) {
+		t.Fatalf("claude read hook missing: %s", raw)
+	}
 
 	// Codex: same schema, its own label and matcher, no async field.
 	cx, _ := json.Marshal(readJSON(t, filepath.Join(folder, ".codex", "hooks.json")))
@@ -84,10 +88,13 @@ func TestInstallJSONPlatforms(t *testing.T) {
 	if strings.Contains(string(cx), "async") {
 		t.Fatal("codex should not get the claude-only async field")
 	}
+	if !strings.Contains(string(cx), "bdrive read-log") || !strings.Contains(string(cx), `"matcher":"read_file"`) {
+		t.Fatalf("codex read hook missing: %s", cx)
+	}
 
 	// Gemini: its own event names and ms timeout.
 	gm, _ := json.Marshal(readJSON(t, filepath.Join(folder, ".gemini", "settings.json")))
-	for _, want := range []string{"BeforeAgent", "AfterTool", "gemini session $s", "30000"} {
+	for _, want := range []string{"BeforeAgent", "AfterTool", "gemini session $s", "30000", "bdrive read-log", "read_file|read_many_files"} {
 		if !strings.Contains(string(gm), want) {
 			t.Fatalf("gemini hooks missing %q: %s", want, gm)
 		}
@@ -114,8 +121,8 @@ func TestInstallIdempotentAndPreserving(t *testing.T) {
 	if _, ok := cfg["permissions"]; !ok {
 		t.Fatal("merge dropped unrelated settings keys")
 	}
-	if got := len(cfg["hooks"].(map[string]any)["PostToolUse"].([]any)); got != 2 {
-		t.Fatalf("PostToolUse groups = %d, want user's + ours", got)
+	if got := len(cfg["hooks"].(map[string]any)["PostToolUse"].([]any)); got != 3 {
+		t.Fatalf("PostToolUse groups = %d, want user's + our push + our read", got)
 	}
 
 	// Second install: no change, byte-identical file.
@@ -130,6 +137,38 @@ func TestInstallIdempotentAndPreserving(t *testing.T) {
 	after, _ := os.ReadFile(filepath.Join(folder, ".claude", "settings.json"))
 	if string(before) != string(after) {
 		t.Fatal("re-install rewrote the file")
+	}
+}
+
+// A config from before the read hook existed (sync hooks only) gains just
+// the read group on re-install — the sync hooks are not duplicated.
+func TestInstallUpgradesSyncOnlyConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	folder := t.TempDir()
+	old := `{"hooks":{
+		"UserPromptSubmit":[{"hooks":[{"type":"command","command":"sh -c 'bdrive sync .'"}]}],
+		"PostToolUse":[{"matcher":"Write|Edit|MultiEdit","hooks":[{"type":"command","command":"sh -c 'bdrive sync .'"}]}]}}`
+	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)
+	os.WriteFile(filepath.Join(folder, ".claude", "settings.json"), []byte(old), 0o644)
+
+	results, err := Install(folder, []string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !results[0].Changed {
+		t.Fatal("upgrade install reported unchanged")
+	}
+	cfg := readJSON(t, filepath.Join(folder, ".claude", "settings.json"))
+	hooks := cfg["hooks"].(map[string]any)
+	if got := len(hooks["UserPromptSubmit"].([]any)); got != 1 {
+		t.Fatalf("UserPromptSubmit groups = %d, want the old one only", got)
+	}
+	if got := len(hooks["PostToolUse"].([]any)); got != 2 {
+		t.Fatalf("PostToolUse groups = %d, want old push + new read", got)
+	}
+	raw, _ := json.Marshal(cfg)
+	if !strings.Contains(string(raw), "bdrive read-log") {
+		t.Fatal("upgrade did not add the read hook")
 	}
 }
 
@@ -162,8 +201,14 @@ func TestInstallHermesYAML(t *testing.T) {
 			t.Fatalf("hermes missing %s", ev)
 		}
 	}
+	if got := len(hooks["post_tool_call"].([]any)); got != 2 {
+		t.Fatalf("hermes post_tool_call groups = %d, want push + read", got)
+	}
 	if !strings.Contains(string(data), "hermes session $s") {
 		t.Fatal("hermes hook lacks its session-note label")
+	}
+	if !strings.Contains(string(data), "bdrive read-log") {
+		t.Fatal("hermes read hook missing")
 	}
 
 	// Idempotent.
@@ -228,6 +273,47 @@ func TestHookCommandExtraction(t *testing.T) {
 		if !strings.Contains(string(got), want) {
 			t.Fatalf("%s: bdrive argv = %q, want it to contain %q", label, got, want)
 		}
+	}
+}
+
+// The read hook must hand the event JSON through to `bdrive read-log`
+// untouched — the binary does the parsing, the shell only guards.
+func TestReadHookCommand(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".bdrive"), 0o755)
+	bin := filepath.Join(dir, "bin")
+	os.MkdirAll(bin, 0o755)
+	fake := "#!/bin/sh\necho \"$@\" > \"" + dir + "/args.txt\"\ncat > \"" + dir + "/stdin.txt\"\n"
+	os.WriteFile(filepath.Join(bin, "bdrive"), []byte(fake), 0o755)
+
+	payload := `{"session_id":"abc","tool_name":"Read","tool_input":{"file_path":"/x/wiki/a.md"}}`
+	sh := "cd " + dir + " && PATH=" + bin + ":$PATH " + readHookCommand()
+	if err := runShell(t, sh, payload); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(filepath.Join(dir, "args.txt"))
+	if err != nil {
+		t.Fatalf("read hook never called bdrive: %v", err)
+	}
+	if !strings.Contains(string(args), "read-log .") {
+		t.Fatalf("bdrive argv = %q, want read-log .", args)
+	}
+	stdin, _ := os.ReadFile(filepath.Join(dir, "stdin.txt"))
+	if string(stdin) != payload {
+		t.Fatalf("event JSON not passed through: %q", stdin)
+	}
+
+	// Outside a bdrive project the hook exits before invoking anything.
+	os.Remove(filepath.Join(dir, "args.txt"))
+	os.RemoveAll(filepath.Join(dir, ".bdrive"))
+	if err := runShell(t, sh, payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "args.txt")); !os.IsNotExist(err) {
+		t.Fatal("hook invoked bdrive outside a project")
 	}
 }
 

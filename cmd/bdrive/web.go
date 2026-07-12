@@ -57,6 +57,13 @@ type webConfig struct {
 		Driver string `json:"driver,omitempty"` // file (default) | sqlite | postgres
 		DSN    string `json:"dsn,omitempty"`    // sqlite file path, or a Postgres/Supabase URL
 	} `json:"database,omitempty"`
+	// Reads tunes read telemetry (the heat API): aggregate view counts per
+	// file, split human/agent/share. On by default in hub mode; counts only,
+	// no reader identities in any API.
+	Reads *struct {
+		Enabled       *bool `json:"enabled,omitempty"`        // default true
+		RetentionDays int   `json:"retention_days,omitempty"` // default 400; older days fold into all-time
+	} `json:"reads,omitempty"`
 }
 
 func loadWebConfig(path string) (webConfig, error) {
@@ -340,6 +347,26 @@ credentials); otherwise it is relayed through this server.`,
 					return fmt.Errorf("open share registry: %w", err)
 				}
 				srv.Shares = shares
+				readsOn, retention := true, 0
+				if cfg.Reads != nil {
+					if cfg.Reads.Enabled != nil {
+						readsOn = *cfg.Reads.Enabled
+					}
+					retention = cfg.Reads.RetentionDays
+				}
+				if readsOn {
+					var reads *webapp.ReadLedger
+					if meta != nil {
+						reads, err = webapp.NewReadLedger(meta.Reads(), retention)
+					} else {
+						reads, err = webapp.OpenReadLedger(filepath.Join(filepath.Dir(projectsDB), "reads.json"), retention)
+					}
+					if err != nil {
+						return fmt.Errorf("open read ledger: %w", err)
+					}
+					defer reads.Close()
+					srv.Reads = reads
+				}
 				if meta != nil {
 					display += " (db: " + cfg.Database.Driver + ")"
 				} else {

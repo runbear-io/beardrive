@@ -18,6 +18,7 @@ type MetaStore interface {
 	Orgs() OrgRepo
 	Shares() ShareRepo
 	Devices() DeviceRepo
+	Reads() ReadRepo
 	Close() error
 }
 
@@ -55,4 +56,14 @@ type ShareRepo interface {
 type DeviceRepo interface {
 	Load() ([]DeviceInfo, error)
 	Put(d DeviceInfo) error
+}
+
+// ReadRepo persists read-telemetry buckets (see ReadStat). Unlike the other
+// repos it is batch-oriented: reads are telemetry, and the ledger flushes many
+// dirty buckets at once — one file rewrite / one SQL transaction per flush,
+// not one write per bucket.
+type ReadRepo interface {
+	Load() ([]ReadStat, error)
+	PutBatch(stats []ReadStat) error // upsert by (project, path, day, kind, actor)
+	DeleteBatch(keys []ReadStatKey) error
 }

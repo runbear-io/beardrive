@@ -122,7 +122,8 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 | `bdrive stop [folder]` | Stop syncing (files stay; `bdrive init` resumes) |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires |
-| `bdrive hooks [install]` | Register turn-boundary sync hooks with detected agent platforms (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping; idempotent (`--agent` overrides detection) |
+| `bdrive hooks [install]` | Register turn-boundary sync hooks with detected agent platforms (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking; idempotent (`--agent` overrides detection) |
+| `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap; drained on the next sync. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
 | `bdrive web [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub |
@@ -200,6 +201,10 @@ the positional argument), `--upload` (allow client writes, off by default),
     "admins": ["admin@example.com"],
     "smtp": { "host": "smtp.example.com", "port": 587,
               "user": "drive@example.com", "pass": "…", "from": "drive@example.com" }
+  },
+  "reads": {                         // read heatmap telemetry (hub mode)
+    "enabled": true,                 // default true; aggregate counts only
+    "retention_days": 400            // daily buckets older than this fold into all-time totals
   }
 }
 ```
@@ -309,6 +314,16 @@ content-addressed and retained forever; reverting to a version is the next
 phase and the API is already shaped for it). Folder rows have a history
 shortcut for a subtree feed; the topbar button shows the current file's
 versions or the whole project feed.
+
+Hubs also track **read heat**: viewer opens and downloads count as human
+reads, share-link hits as share reads, and agent tool reads (reported by
+the sync hooks via `bdrive read-log`) as agent reads — sync replication
+never counts. Folder listings show heat dots and 30-day read counts to
+every member, and admins / org owners get an **Insights** view (⋯ menu)
+plotting each file by reads × days since last change: the hot-but-stale
+quadrant is the knowledge people rely on that nobody maintains. The API
+(`GET /api/p/<id>/heat?prefix=&days=`) exposes only aggregate counts,
+distinct-reader counts, and last-read times — never who read what.
 
 ### Authentication
 

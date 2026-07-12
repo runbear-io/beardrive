@@ -199,6 +199,21 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		}
 	}
 
+	// 6. Drain the agent read spool to the hub (read heatmap telemetry).
+	// Strictly best-effort: a failed report keeps the batch queued for the
+	// next cycle and never fails — or even marks offline — this one.
+	if rr, ok := s.Backend.(remote.ReadReporter); ok && !res.Offline {
+		if evs, err := s.Store.PendingReads(); err == nil && len(evs) > 0 {
+			reads := make([]remote.ReadEvent, len(evs))
+			for i, e := range evs {
+				reads[i] = remote.ReadEvent{Path: e.Path, Time: e.Time}
+			}
+			if rr.ReportReads(ctx, reads) == nil {
+				s.Store.ClearPendingReads()
+			}
+		}
+	}
+
 	if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
 		return nil, err
 	}

@@ -33,6 +33,7 @@ type sqlMetaStore struct {
 	orgs     *sqlOrgRepo
 	shares   *sqlShareRepo
 	devices  *sqlDeviceRepo
+	reads    *sqlReadRepo
 }
 
 // OpenSQLStore opens (and migrates) a SQL metadata store. driver is "sqlite"
@@ -66,6 +67,7 @@ func OpenSQLStore(driver, dsn string) (MetaStore, error) {
 	s.orgs = &sqlOrgRepo{s}
 	s.shares = &sqlShareRepo{s}
 	s.devices = &sqlDeviceRepo{s}
+	s.reads = &sqlReadRepo{s}
 	return s, nil
 }
 
@@ -74,6 +76,7 @@ func (s *sqlMetaStore) Projects() ProjectRepo { return s.projects }
 func (s *sqlMetaStore) Orgs() OrgRepo         { return s.orgs }
 func (s *sqlMetaStore) Shares() ShareRepo     { return s.shares }
 func (s *sqlMetaStore) Devices() DeviceRepo   { return s.devices }
+func (s *sqlMetaStore) Reads() ReadRepo       { return s.reads }
 func (s *sqlMetaStore) Close() error          { return s.db.Close() }
 
 // q rebinds ?-placeholders to $1,$2,… for Postgres; SQLite keeps ?.
@@ -153,6 +156,11 @@ func (s *sqlMetaStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS devices (
 			id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '',
 			user_email TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '', last_seen TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS read_stats (
+			project TEXT NOT NULL, path TEXT NOT NULL, day TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL, actor TEXT NOT NULL,
+			count INTEGER NOT NULL DEFAULT 0, last TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (project, path, day, kind, actor))`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
@@ -461,4 +469,60 @@ func (r *sqlDeviceRepo) Put(d DeviceInfo) error {
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, os=excluded.os, user_email=excluded.user_email,
 		ip=excluded.ip, last_seen=excluded.last_seen`,
 		d.ID, d.Name, d.OS, d.User, d.IP, tenc(d.LastSeen))
+}
+
+// ---- reads ----
+
+type sqlReadRepo struct{ s *sqlMetaStore }
+
+func (r *sqlReadRepo) Load() ([]ReadStat, error) {
+	rows, err := r.s.db.Query(`SELECT project, path, day, kind, actor, count, last FROM read_stats`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReadStat
+	for rows.Next() {
+		var st ReadStat
+		var last string
+		if err := rows.Scan(&st.Project, &st.Path, &st.Day, &st.Kind, &st.Actor, &st.Count, &last); err != nil {
+			return nil, err
+		}
+		st.Last = tdec(last)
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+func (r *sqlReadRepo) PutBatch(stats []ReadStat) error {
+	tx, err := r.s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, st := range stats {
+		if _, err := tx.Exec(r.s.q(`INSERT INTO read_stats (project,path,day,kind,actor,count,last)
+			VALUES (?,?,?,?,?,?,?)
+			ON CONFLICT(project,path,day,kind,actor) DO UPDATE SET count=excluded.count, last=excluded.last`),
+			st.Project, st.Path, st.Day, st.Kind, st.Actor, st.Count, tenc(st.Last)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (r *sqlReadRepo) DeleteBatch(keys []ReadStatKey) error {
+	tx, err := r.s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, k := range keys {
+		if _, err := tx.Exec(r.s.q(`DELETE FROM read_stats
+			WHERE project = ? AND path = ? AND day = ? AND kind = ? AND actor = ?`),
+			k.Project, k.Path, k.Day, k.Kind, k.Actor); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

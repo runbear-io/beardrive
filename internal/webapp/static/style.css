@@ -269,11 +269,36 @@ button, input, a.btn { font-family: inherit; }
 .dl-row:hover .ticon { color: var(--text-faint); }
 .dl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; color: var(--text); }
 .dl-meta { flex: none; font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+/* read-heat dot: intensity grows with 30-day reads (heatLevel in app.js) */
+.heatdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.heatdot.lvl1 { opacity: .3; }
+.heatdot.lvl2 { opacity: .55; }
+.heatdot.lvl3 { opacity: .8; }
+.heatdot.lvl4 { opacity: 1; box-shadow: 0 0 6px rgba(245, 166, 35, .55); }
 .dl-empty { padding: 24px 14px; color: var(--text-faint); font-size: 13px; border: 1px dashed var(--border); border-radius: var(--r-card); text-align: center; }
 .dl-h3 { margin: 28px 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-ghost); font-weight: 600; }
 .dl-hlist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); overflow: hidden; max-width: none; }
 .dl-hlist .hentry:last-child { border-bottom: none; }
 .dl-more { margin-top: 10px; }
+
+/* ---- insights (read×write matrix) ---- */
+.insights { max-width: 760px; margin: 0 auto; }
+.in-title { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
+.in-lens { display: flex; gap: 6px; margin: 0 0 14px; }
+.in-lens-btn { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--text-faint); cursor: pointer; }
+.in-lens-btn:hover { color: var(--text); }
+.in-lens-btn.active { color: var(--accent); border-color: var(--accent); }
+.in-chart { width: 100%; height: auto; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); margin-bottom: 6px; }
+.in-axis { stroke: var(--border); stroke-width: 1; }
+.in-threshold { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 4; }
+.in-danger-zone { fill: rgba(242, 109, 109, .05); }
+.in-label { fill: var(--text-ghost); font-size: 11px; }
+.in-quad { fill: var(--text-ghost); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
+.in-quad-danger { fill: #e07070; }
+.in-pt { fill: var(--accent); opacity: .75; cursor: pointer; }
+.in-pt:hover { opacity: 1; }
+.in-pt.cold { fill: var(--text-ghost); opacity: .35; }
+.in-pt.danger { fill: #e05d5d; }
 
 /* ---- history ---- */
 .history { max-width: 860px; }

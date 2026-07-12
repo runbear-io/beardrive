@@ -71,6 +71,9 @@ type Server struct {
 	Devices *DeviceRegistry
 	// Shares, when set, enables public share links (/s/<token>).
 	Shares *ShareDB
+	// Reads, when set, aggregates read telemetry (viewer, share, and agent
+	// reads) for the heat API. Nil means read tracking is off.
+	Reads *ReadLedger
 	// Orgs, when set, walls projects off by organization membership.
 	Orgs *OrgDB
 	// Quota, when set, enforces plan limits (managed deployments). Nil
@@ -305,7 +308,9 @@ func (s *Server) Handler() http.Handler {
 				http.Error(w, "you are not a member of this project's organization", http.StatusForbidden)
 				return
 			}
-			h(v, w, r)
+			// Read recording (and anything else downstream) finds the project
+			// id in the context; membership has already passed at this point.
+			h(v, w, withProjectID(r, id))
 		}
 	}
 
@@ -348,6 +353,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/p/{project}/history", proj(s.handleHistory))
 	mux.HandleFunc("GET /api/p/{project}/blob", proj(s.handleBlob))
+	mux.HandleFunc("GET /api/p/{project}/heat", proj(s.handleHeat))
+	mux.HandleFunc("POST /api/p/{project}/reads", proj(s.handleReadReport))
 	mux.HandleFunc("POST /api/p/{project}/shares", proj(s.handleShareCreate))
 	mux.HandleFunc("GET /api/p/{project}/shares", proj(s.handleShareList))
 	mux.HandleFunc("DELETE /api/shares/{token}", s.handleShareRevoke)
@@ -429,7 +436,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"upload": map[string]any{
 			"enabled": s.Upload.Enabled,
 		},
-		"auth": auth,
+		"auth":  auth,
+		"reads": map[string]any{"enabled": s.Reads != nil},
 	}
 	if me.Email != "" {
 		out["me"] = map[string]string{"email": me.Email, "name": me.Name}
@@ -607,12 +615,15 @@ func lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
 	return p, fi, 0, nil
 }
 
-func serveBlob(v *volume, w http.ResponseWriter, r *http.Request, attach bool) {
+func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, attach bool) {
 	p, fi, code, err := lookup(v, r)
 	if err != nil {
 		http.Error(w, err.Error(), code)
 		return
 	}
+	// Count the read before the ETag check: a 304 render is still a person
+	// reading the file, and skipping it would undercount the hottest pages.
+	s.recordRead(r, p)
 	etag := `"` + fi.Blob + `"`
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -634,11 +645,11 @@ func serveBlob(v *volume, w http.ResponseWriter, r *http.Request, attach bool) {
 }
 
 func (s *Server) handleFile(v *volume, w http.ResponseWriter, r *http.Request) {
-	serveBlob(v, w, r, false)
+	s.serveBlob(v, w, r, false)
 }
 
 func (s *Server) handleDownload(v *volume, w http.ResponseWriter, r *http.Request) {
-	serveBlob(v, w, r, true)
+	s.serveBlob(v, w, r, true)
 }
 
 func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -647,6 +658,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), code)
 		return
 	}
+	s.recordRead(r, p)
 	rc, err := v.source.Open(r.Context(), p, fi)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("fetch content: %v", err), http.StatusBadGateway)

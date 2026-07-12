@@ -53,6 +53,14 @@ type pattern struct {
 	negate bool
 }
 
+// LoadFilter builds the filter for a folder from its .bdriveignore (if any)
+// plus the include list from the .bdrive settings file — the exact rules the
+// sync cycle applies, for callers outside the cycle (e.g. `bdrive read-log`
+// deciding whether an agent-read path is part of the project).
+func LoadFilter(folder string, include []string) (*Filter, error) {
+	return loadFilter(folder, include)
+}
+
 // loadFilter builds the filter for a folder from its .bdriveignore (if any)
 // plus the include list from the .bdrive settings file.
 func loadFilter(folder string, include []string) (*Filter, error) {
