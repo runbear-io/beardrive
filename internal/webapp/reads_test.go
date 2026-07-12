@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -232,5 +233,68 @@ func TestHeatAPI(t *testing.T) {
 	srv.Reads = nil
 	if rec := do(t, h, "GET", base+"heat", nil); rec.Code != 404 {
 		t.Fatalf("disabled heat: %d, want 404", rec.Code)
+	}
+}
+
+// TestHeatByDevice covers the coverage-matrix breakdown: agent reads per
+// device per top-level folder, device-registry joined — and, critically,
+// that human actor identities never appear in the response.
+func TestHeatByDevice(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	f.putAs("dev1", "alice@x.io", "Alice", "wiki/plan.md", "# plan")
+	var err error
+	srv.Reads, err = OpenReadLedger(filepath.Join(t.TempDir(), "reads.json"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Devices, _ = OpenDeviceRegistry(filepath.Join(t.TempDir(), "devices.json"))
+	srv.Devices.Observe(DeviceInfo{ID: "dev1", Name: "ci-agent", OS: "linux/amd64"})
+
+	// Agent reads from two devices, human reads carrying real emails.
+	srv.Reads.Record(p.ID, "wiki/plan.md", ReadKindAgent, "dev1")
+	srv.Reads.Record(p.ID, "wiki/deep.md", ReadKindAgent, "dev1")
+	srv.Reads.Record(p.ID, "top.md", ReadKindAgent, "dev2")
+	srv.Reads.Record(p.ID, "wiki/plan.md", ReadKindHuman, "alice@x.io")
+	srv.Reads.Record(p.ID, "wiki/plan.md", ReadKindShare, "tok123/1.2.3.4")
+
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/"
+	rec := do(t, h, "GET", base+"heat?by=device&days=30", nil)
+	if rec.Code != 200 {
+		t.Fatalf("by=device: %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Devices []deviceHeat `json:"devices"`
+		Since   string       `json:"since"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Devices) != 2 || out.Since == "" {
+		t.Fatalf("devices = %+v", out)
+	}
+	// Sorted by total: dev1 (2 reads, registry-joined) first.
+	d1 := out.Devices[0]
+	if d1.ID != "dev1" || d1.Name != "ci-agent" || d1.OS != "linux/amd64" || d1.Total != 2 {
+		t.Fatalf("dev1 row = %+v", d1)
+	}
+	if d1.Folders["wiki"] != 2 {
+		t.Fatalf("dev1 folders = %+v, want wiki:2", d1.Folders)
+	}
+	// Root files land under the "" folder.
+	if d2 := out.Devices[1]; d2.ID != "dev2" || d2.Folders[""] != 1 {
+		t.Fatalf("dev2 row = %+v", d2)
+	}
+	// The privacy line: human and share actors are invisible here.
+	body := rec.Body.String()
+	for _, leak := range []string{"alice@x.io", "tok123", "1.2.3.4", "human", "share"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("by=device leaked %q: %s", leak, body)
+		}
+	}
+
+	if rec := do(t, h, "GET", base+"heat?by=path", nil); rec.Code != 400 {
+		t.Fatalf("invalid by: %d, want 400", rec.Code)
 	}
 }

@@ -154,10 +154,14 @@ Hubs aggregate reads per file — viewer opens and downloads count as human
 reads, share-link hits as share reads, and hook-reported agent reads as
 agent reads; `/store` sync replication never counts. The web UI shows heat
 dots and read counts on folder listings (all members), and admins / org
-owners get an **Insights** view (⋯ menu) plotting every file by 30-day
-reads × days since last change — the hot-but-stale quadrant is the list of
-files to fix first. Counts only, never reader identities. API:
-`GET /api/p/<id>/heat?prefix=&days=30`. Server config: `"reads":
+owners get an **Insights** dashboard (⋯ menu, all/human/agent lens): a
+treemap of every file (size = 30-day reads, color = staleness, ⚠ =
+hot+stale, click-through), a reads × freshness scatter (hot-but-stale
+quadrant = fix first), the hot path (top files by reads, agent/human
+split), and an agent coverage matrix (agent devices × folders). Counts
+only, never human reader identities. API:
+`GET /api/p/<id>/heat?prefix=&days=30`, plus `?by=device` for the
+agent-only per-device folder breakdown. Server config: `"reads":
 {"enabled": true, "retention_days": 400}` (on by default in hub mode).
 
 ### Examples to walk a user through

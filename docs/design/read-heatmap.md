@@ -235,3 +235,40 @@ Phase 3 is the point of the feature, not tail work: human view counts are a
 commodity (every Confluence app has them); *agent* read visibility is the
 part nobody else can build. Phases are ordered by dependency, not value —
 ship 1 and 3 before polishing 2 if time is short.
+
+## Addendum (2026-07-12): layered Insights dashboard
+
+Chart research against 500-file synthetic data (CodeScene hotspots,
+Obsidian heatmap plugins, disk-usage treemaps) reshaped the Insights view
+into four stacked sections, all admin/org-owner gated as before, all driven
+by ONE heat fetch plus the tree the client already holds, with the
+all/human/agent lens applied to every section:
+
+1. **Treemap** (the new landing view, CodeScene-hotspot style): every file
+   at once, top-level folder groups labeled; cell area = reads in the
+   window, cell color = days since last write (fresh→stale), ⚠ on
+   hot+stale cells. Click a file cell → open the file; click a group
+   label → open the folder. Squarified treemap implemented in vanilla JS
+   (the frontend's no-dependency rule stands); labels only on cells that
+   fit them; a single SVG with one delegated click handler so 5,000 files
+   stay cheap.
+2. **Quadrant scatter**, demoted to the drill-down: unchanged semantics,
+   density-handled (translucent dots, radius = agent share of reads).
+3. **Agent hot-path**: top-20 files by reads as horizontal stacked bars
+   (agent = accent, human = blue), count at the bar end, click to open,
+   ⚠ marker on danger-zone rows. Replaces the plain danger list.
+4. **Coverage matrix**: agent devices × top-level folders, cell intensity
+   = reads. Needs the one API addition below.
+
+**API**: `GET /api/p/<id>/heat?by=device&days=N` returns the agent-kind
+breakdown — per device (id + registry-joined name/OS), reads per top-level
+folder. Privacy line, unmoved: agent *device* identity is already public
+via history, so exposing it here is consistent; **human actor identities
+(emails) still never appear in any response** — the breakdown is computed
+from agent-kind buckets only, and the handler test asserts no email
+leaks.
+
+**Future work, deliberately not built**: calendar heatmap (human vs agent
+reads/day) and folder read-share streamgraph. Both need a group-by-day
+variant of the heat query; the daily buckets already exist server-side, so
+that is an aggregation parameter, not a schema change.
