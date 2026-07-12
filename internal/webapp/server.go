@@ -383,6 +383,9 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 	files := http.FileServerFS(static)
 	index, _ := fs.ReadFile(static, "index.html")
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Embedded assets carry no modtime, so without this browsers cache
+		// them heuristically and users see a stale frontend after upgrades.
+		w.Header().Set("Cache-Control", "no-cache")
 		upath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 		// Reserved prefixes that fell through to the catch-all are genuine
 		// 404s — don't mask a mistyped API/auth/share URL with the app shell.
