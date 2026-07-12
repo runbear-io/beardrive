@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -218,6 +219,47 @@ func (l *ReadLedger) Heat(project, prefix string, since time.Time) map[string]He
 	return out
 }
 
+// AgentHeat aggregates agent reads per device per top-level folder ("" for
+// root files) — the coverage-matrix data. Agent buckets only, by design:
+// agent actors are device ids, which history already exposes; human actors
+// (emails) must never leave the server, so human/share buckets are not
+// consulted at all.
+func (l *ReadLedger) AgentHeat(project string, since time.Time) map[string]map[string]int64 {
+	if l == nil {
+		return nil
+	}
+	sinceDay := ""
+	if !since.IsZero() {
+		sinceDay = since.UTC().Format("2006-01-02")
+	}
+	out := map[string]map[string]int64{}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for key, st := range l.byKey {
+		if key.Project != project || key.Kind != ReadKindAgent {
+			continue
+		}
+		if key.Day == "" {
+			if sinceDay != "" {
+				continue
+			}
+		} else if key.Day < sinceDay {
+			continue
+		}
+		folder := ""
+		if i := strings.IndexByte(key.Path, '/'); i >= 0 {
+			folder = key.Path[:i]
+		}
+		m := out[key.Actor]
+		if m == nil {
+			m = map[string]int64{}
+			out[key.Actor] = m
+		}
+		m[folder] += st.Count
+	}
+	return out
+}
+
 // Close flushes any pending buckets.
 func (l *ReadLedger) Close() error {
 	if l == nil {
@@ -337,8 +379,11 @@ func (s *Server) recordRead(r *http.Request, path string) {
 }
 
 // handleHeat serves per-path read aggregates: ?prefix= bounds to a folder,
-// ?days= bounds the window (default 30, 0 = all time). Counts only — actor
-// identities never leave the server.
+// ?days= bounds the window (default 30, 0 = all time). With ?by=device it
+// returns the agent-kind breakdown instead: per device (registry-joined),
+// reads per top-level folder. In both shapes, counts only — human actor
+// identities never leave the server (agent devices are already public via
+// history, so naming them here is consistent).
 func (s *Server) handleHeat(v *volume, w http.ResponseWriter, r *http.Request) {
 	if s.Reads == nil {
 		http.Error(w, "read tracking is not enabled on this server", http.StatusNotFound)
@@ -358,8 +403,52 @@ func (s *Server) handleHeat(v *volume, w http.ResponseWriter, r *http.Request) {
 	if days > 0 {
 		since = time.Now().UTC().AddDate(0, 0, -days)
 	}
+	switch q.Get("by") {
+	case "":
+	case "device":
+		s.heatByDevice(w, projectID(r), since)
+		return
+	default:
+		http.Error(w, "invalid by (use device)", http.StatusBadRequest)
+		return
+	}
 	entries := s.Reads.Heat(projectID(r), q.Get("prefix"), since)
 	out := map[string]any{"entries": entries}
+	if !since.IsZero() {
+		out["since"] = since.Format("2006-01-02")
+	}
+	writeJSON(w, out)
+}
+
+// deviceHeat is one row of the ?by=device response.
+type deviceHeat struct {
+	ID      string           `json:"id"`
+	Name    string           `json:"name,omitempty"`
+	OS      string           `json:"os,omitempty"`
+	Folders map[string]int64 `json:"folders"`
+	Total   int64            `json:"total"`
+}
+
+func (s *Server) heatByDevice(w http.ResponseWriter, project string, since time.Time) {
+	byDevice := s.Reads.AgentHeat(project, since)
+	devices := make([]deviceHeat, 0, len(byDevice))
+	for id, folders := range byDevice {
+		d := deviceHeat{ID: id, Folders: folders}
+		if info, ok := s.Devices.Get(id); ok {
+			d.Name, d.OS = info.Name, info.OS
+		}
+		for _, n := range folders {
+			d.Total += n
+		}
+		devices = append(devices, d)
+	}
+	sort.Slice(devices, func(i, j int) bool {
+		if devices[i].Total != devices[j].Total {
+			return devices[i].Total > devices[j].Total
+		}
+		return devices[i].ID < devices[j].ID
+	})
+	out := map[string]any{"devices": devices}
 	if !since.IsZero() {
 		out["since"] = since.Format("2006-01-02")
 	}
