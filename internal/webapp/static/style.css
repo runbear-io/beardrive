@@ -347,7 +347,9 @@ button, input, a.btn { font-family: inherit; }
 .hact { margin-left: auto; }
 .hact a { color: var(--accent-bright); text-decoration: none; margin-left: 10px; }
 .hact a:hover { text-decoration: underline; }
-.hnote { margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hnote { margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.hnote:hover { color: var(--text); }
+.hnote.open { white-space: normal; overflow-wrap: anywhere; }
 .hnote::before { content: "› "; color: var(--text-ghost); }
 .hnote a { color: var(--accent-bright); text-decoration: none; }
 .hnote a:hover { text-decoration: underline; }

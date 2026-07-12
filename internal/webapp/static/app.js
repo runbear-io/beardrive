@@ -166,7 +166,12 @@ function selectProject(p, path) {
   initUpload();
   initHistory();
   updateShareButton();
-  refreshTree().then(() => { if (path) openPath(path); });
+  refreshTree().then(() => {
+    if (path) openPath(path);
+    // Landing view: admins/owners get the Insights dashboard instead of an
+    // empty "select a file" pane; members keep the placeholder.
+    else if (canSeeInsights()) showInsights();
+  });
   if (!path) pushURL("/" + p.id);
 }
 
@@ -1543,6 +1548,18 @@ function historyEntryRow(e) {
         note.append(tok);
       }
     }
+    // Long notes clamp to one line; clicking the note (links still work)
+    // expands to the full text and back.
+    note.tabIndex = 0;
+    note.setAttribute("role", "button");
+    note.title = "Show full note";
+    note.onclick = (ev) => {
+      if (ev.target.tagName === "A") return;
+      const open = note.classList.toggle("open");
+      note.title = open ? "Collapse note" : "Show full note";
+      note.setAttribute("aria-expanded", String(open));
+    };
+    note.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); note.click(); } };
     row.appendChild(note);
   }
   const p = e.path;
