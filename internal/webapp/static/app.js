@@ -1152,9 +1152,15 @@ function canSeeInsights() {
   return !!(org && org.role === "owner");
 }
 
+let insightsDevices = null; // /heat?by=device breakdown, fetched per Insights open
+
 async function showInsights() {
   if (!canSeeInsights()) return;
   await refreshHeat(true);
+  insightsDevices = null;
+  try {
+    insightsDevices = (await getJSON(apiBase + "heat?by=device&days=30")).devices || [];
+  } catch { /* older server: the coverage section simply doesn't render */ }
   currentPath = null;
   markActive();
   $("crumb").textContent = "Insights — " + currentProject.name;
@@ -1166,18 +1172,36 @@ async function showInsights() {
   renderInsights(content, "all");
 }
 
+/* SVG element helper for the insights charts. */
+function svgEl(parent, tag, attrs, text) {
+  const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (text != null) n.textContent = text;
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+/* Staleness color: fresh green → amber → red over 0..300 days. */
+function staleColor(days) {
+  const stops = [[76, 195, 138], [232, 196, 84], [224, 93, 93]];
+  const t = Math.min(1, Math.max(0, days / 300)) * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(t)), f = t - i;
+  const c = stops[i].map((v, k) => Math.round(v + (stops[i + 1][k] - v) * f));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
 function renderInsights(content, lens) {
   content.innerHTML = "";
   const wrap = el(content, "div", "insights");
-  el(wrap, "h1", "in-title", "Reads × freshness");
+  el(wrap, "h1", "in-title", "Knowledge insights");
   el(wrap, "p", "dl-sub",
-    "Every file by 30-day reads and days since its last change. " +
-    "Hot but stale (top right) is the danger zone — read a lot, maintained by nobody.");
+    "Reads over the last 30 days × how long since each file changed. " +
+    "Hot but stale knowledge — read a lot, maintained by nobody — is the danger zone.");
   const bar = el(wrap, "div", "in-lens");
   for (const l of ["all", "human", "agent"]) {
     const label = l === "all" ? "All reads" : l === "human" ? "Human reads" : "Agent reads";
     const b = el(bar, "button", "in-lens-btn" + (l === lens ? " active" : ""), label);
-    b.onclick = () => renderInsights(content, lens = l);
+    b.onclick = () => renderInsights(content, l);
   }
 
   const readsOf = (e) => (lens === "all" ? heatTotal(e) : e[lens] || 0);
@@ -1186,31 +1210,193 @@ function renderInsights(content, lens) {
     const e = (heatMap && heatMap[f.path]) || {};
     const days = f.time ? Math.max(0, (now - new Date(f.time).getTime()) / 86400000) : 0;
     const reads = readsOf(e);
-    return { path: f.path, reads, days, danger: reads >= HOT_READS && days >= STALE_DAYS };
+    return { path: f.path, reads, agent: e.agent || 0, total: heatTotal(e), days,
+             danger: reads >= HOT_READS && days >= STALE_DAYS };
   });
 
+  el(wrap, "h3", "dl-h3", "Map — cell size = reads, color = freshness");
+  wrap.appendChild(insightsTreemap(pts));
+
+  el(wrap, "h3", "dl-h3", "Reads × freshness");
   wrap.appendChild(insightsChart(pts));
 
-  const danger = pts.filter((p) => p.danger)
-    .sort((a, b) => b.reads - a.reads || b.days - a.days).slice(0, 15);
-  el(wrap, "h3", "dl-h3", "Danger zone — fix these first");
-  if (!danger.length) {
-    el(wrap, "div", "dl-empty", "No hot-but-stale files. The knowledge base is healthy.");
+  el(wrap, "h3", "dl-h3", "Hot path — top files by reads");
+  renderHotPath(wrap, pts, lens);
+
+  if (insightsDevices && insightsDevices.length) {
+    el(wrap, "h3", "dl-h3", "Agent coverage — which agents read which areas");
+    wrap.appendChild(insightsMatrix(insightsDevices));
+  }
+}
+
+/* ---- treemap (the landing chart) ----
+   Squarified treemap (Bruls et al.), dependency-free: items sorted by value
+   fill a rect in rows along the shorter side, keeping cells near-square.
+   Returns [{item, x, y, w, h}]. */
+function squarify(items, x, y, w, h) {
+  const total = items.reduce((s, it) => s + it.value, 0);
+  if (!total || w <= 0 || h <= 0) return [];
+  let rest = items.slice().sort((a, b) => b.value - a.value)
+    .map((it) => ({ it, a: (it.value / total) * w * h }));
+  const worst = (row, side) => {
+    const sum = row.reduce((t, r) => t + r.a, 0);
+    const d = sum / side;
+    let m = 0;
+    for (const r of row) {
+      const l = r.a / d;
+      m = Math.max(m, l / d, d / l);
+    }
+    return m;
+  };
+  const out = [];
+  while (rest.length) {
+    const horiz = w >= h;          // row = a strip along the shorter side
+    const side = horiz ? h : w;
+    const row = [rest.shift()];
+    while (rest.length && worst(row.concat(rest[0]), side) <= worst(row, side)) {
+      row.push(rest.shift());
+    }
+    const d = row.reduce((t, r) => t + r.a, 0) / side;
+    let off = 0;
+    for (const r of row) {
+      const l = r.a / d;
+      if (horiz) out.push({ item: r.it, x, y: y + off, w: d, h: l });
+      else out.push({ item: r.it, x: x + off, y, w: l, h: d });
+      off += l;
+    }
+    if (horiz) { x += d; w -= d; } else { y += d; h -= d; }
+  }
+  return out;
+}
+
+const TM_HEADER = 15; // group label strip height
+
+function insightsTreemap(pts) {
+  const W = 720, H = 480;
+  const svg = svgEl(null, "svg", { viewBox: `0 0 ${W} ${H}`, class: "in-chart in-treemap" });
+  // Two levels: top-level folder groups, files within each.
+  const groups = new Map();
+  for (const p of pts) {
+    const top = p.path.includes("/") ? p.path.split("/")[0] : "/";
+    let g = groups.get(top);
+    if (!g) groups.set(top, g = { name: top, files: [], value: 0 });
+    g.files.push(p);
+    g.value += p.reads + 1;        // +1: unread files still occupy a sliver
+  }
+  for (const gc of squarify([...groups.values()], 0, 0, W, H)) {
+    const g = gc.item;
+    const dir = g.name === "/" ? "" : g.name;
+    svgEl(svg, "rect", {
+      x: gc.x + 1, y: gc.y + 1, width: Math.max(0, gc.w - 2), height: Math.max(0, gc.h - 2),
+      rx: 3, class: "in-tm-group", "data-dir": dir,
+    });
+    if (gc.w > 46 && gc.h > TM_HEADER + 10) {
+      let label = g.name === "/" ? "(root)" : g.name;
+      const fit = Math.floor((gc.w - 8) / 6);
+      if (label.length > fit) label = label.slice(0, Math.max(1, fit - 1)) + "…";
+      svgEl(svg, "text", { x: gc.x + 5, y: gc.y + 12, class: "in-tm-glabel", "data-dir": dir }, label);
+    }
+    const cells = squarify(
+      g.files.map((f) => ({ ...f, name: f.path.split("/").pop(), value: f.reads + 1 })),
+      gc.x + 2, gc.y + TM_HEADER, Math.max(0, gc.w - 4), Math.max(0, gc.h - TM_HEADER - 2));
+    for (const c of cells) {
+      const cell = svgEl(svg, "rect", {
+        x: c.x + 0.6, y: c.y + 0.6, width: Math.max(0.4, c.w - 1.2), height: Math.max(0.4, c.h - 1.2),
+        rx: 1.5, fill: staleColor(c.item.days), class: "in-tm-cell", "data-path": c.item.path,
+      });
+      svgEl(cell, "title", {},
+        `${c.item.path} — ${c.item.reads} read${c.item.reads === 1 ? "" : "s"}/30d · changed ${Math.round(c.item.days)}d ago`);
+      if (c.w > 54 && c.h > 16) {
+        const fit = Math.floor((c.w - 8) / 6);
+        let label = (c.item.danger ? "⚠ " : "") + c.item.name;
+        if (label.length > fit) label = label.slice(0, Math.max(1, fit - 1)) + "…";
+        if (fit >= 5) svgEl(svg, "text", { x: c.x + 4.5, y: c.y + 12.5, class: "in-tm-label", "data-path": c.item.path }, label);
+      }
+    }
+  }
+  // One delegated click handler for thousands of cells.
+  svg.addEventListener("click", (e) => {
+    const t = e.target.closest("[data-path], [data-dir]");
+    if (!t) return;
+    const path = t.getAttribute("data-path");
+    if (path) return openFile(path);
+    const dir = t.getAttribute("data-dir");
+    if (dir && dirIndex.has(dir)) openFolder(dir);
+  });
+  return svg;
+}
+
+/* ---- hot path: top-20 files by reads, agent/human split ---- */
+function renderHotPath(wrap, pts, lens) {
+  const top = pts.filter((p) => p.reads > 0)
+    .sort((a, b) => b.reads - a.reads || b.days - a.days).slice(0, 20);
+  if (!top.length) {
+    el(wrap, "div", "dl-empty", "No reads in the window yet.");
     return;
   }
-  const list = el(wrap, "div", "dl-items");
-  for (const p of danger) {
-    const row = el(list, "div", "dl-row");
+  const max = top[0].reads;
+  const list = el(wrap, "div", "in-hotpath");
+  for (const p of top) {
+    const row = el(list, "div", "in-hp-row");
     row.tabIndex = 0;
     row.setAttribute("role", "button");
-    const icon = el(row, "span", "ticon");
-    icon.innerHTML = svgIcon("alert");
-    el(row, "span", "dl-name", p.path);
-    el(row, "span", "dl-meta",
-      p.reads + (p.reads === 1 ? " read" : " reads") + " · untouched " + Math.round(p.days) + "d");
+    row.title = p.path + (p.danger ? " — hot + stale" : "");
+    el(row, "span", "in-hp-name" + (p.danger ? " danger" : ""), (p.danger ? "⚠ " : "") + p.path);
+    const barw = el(row, "span", "in-hp-bar");
+    // Split of the lens reads: pure lenses are single-color by definition.
+    const aFrac = lens === "agent" ? 1 : lens === "human" ? 0 : (p.total ? p.agent / p.total : 0);
+    const pct = (p.reads / max) * 100;
+    el(barw, "span", "in-hp-agent").style.width = (pct * aFrac).toFixed(1) + "%";
+    el(barw, "span", "in-hp-human").style.width = (pct * (1 - aFrac)).toFixed(1) + "%";
+    el(row, "span", "in-hp-count", p.reads);
     row.onclick = () => openFile(p.path);
     row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); row.click(); } };
   }
+  const lg = el(wrap, "p", "in-legend");
+  el(lg, "span", "in-sw agent");
+  lg.append(" agent reads ");
+  el(lg, "span", "in-sw human");
+  lg.append(" human reads");
+}
+
+/* ---- agent coverage matrix: devices × top-level folders ---- */
+function insightsMatrix(devices) {
+  const totals = new Map();
+  for (const d of devices) {
+    for (const [f, n] of Object.entries(d.folders || {})) totals.set(f, (totals.get(f) || 0) + n);
+  }
+  const cols = [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map((e) => e[0]);
+  const rows = devices.slice(0, 12); // server sorts by total desc
+  const left = 140, top = 6, cw = Math.min(76, Math.max(34, (720 - left - 8) / cols.length)), ch = 26;
+  const W = 720, H = top + rows.length * ch + 58;
+  const svg = svgEl(null, "svg", { viewBox: `0 0 ${W} ${H}`, class: "in-chart in-matrix" });
+  const max = Math.max(1, ...rows.flatMap((d) => cols.map((c) => (d.folders || {})[c] || 0)));
+  const shade = (t) => { // #17191f → amber by intensity
+    const a = [23, 25, 31], b = [245, 166, 35];
+    const c = a.map((v, i) => Math.round(v + (b[i] - v) * t));
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  };
+  rows.forEach((d, i) => {
+    let label = d.name || d.id;
+    if (label.length > 20) label = label.slice(0, 19) + "…";
+    svgEl(svg, "text", { x: left - 8, y: top + i * ch + 17, "text-anchor": "end", class: "in-label" }, label);
+    cols.forEach((c, j) => {
+      const v = (d.folders || {})[c] || 0;
+      const cell = svgEl(svg, "rect", {
+        x: left + j * cw, y: top + i * ch, width: cw - 4, height: ch - 4, rx: 3,
+        fill: shade(Math.sqrt(v / max)),
+      });
+      svgEl(cell, "title", {}, `${d.name || d.id} × ${c || "(root)"}: ${v} read${v === 1 ? "" : "s"}/30d`);
+    });
+  });
+  cols.forEach((c, j) => {
+    const cx = left + j * cw + (cw - 4) / 2, cy = top + rows.length * ch + 14;
+    svgEl(svg, "text", {
+      x: cx, y: cy, class: "in-label", "text-anchor": "end",
+      transform: `rotate(-28 ${cx} ${cy})`,
+    }, c || "(root)");
+  });
+  return svg;
 }
 
 /* Dependency-free SVG scatter: x = days since last write, y = reads, both
@@ -1247,10 +1433,14 @@ function insightsChart(pts) {
   add("text", { x: W - M.r - 6, y: M.t + 14, class: "in-quad in-quad-danger", "text-anchor": "end" }, "hot + stale");
   add("text", { x: M.l + 6, y: M.t + 14, class: "in-quad" }, "hot + fresh");
   add("text", { x: W - M.r - 6, y: H - M.b - 8, class: "in-quad", "text-anchor": "end" }, "cold + stale");
+  add("text", { x: W - M.r - 6, y: M.t + 28, class: "in-label", "text-anchor": "end" }, "dot size = agent share of reads");
 
   for (const p of pts) {
+    // Radius encodes the agent share of the file's reads; translucent dots
+    // keep the cloud readable at hundreds of files.
+    const share = p.total ? (p.agent || 0) / p.total : 0;
     const c = add("circle", {
-      cx: X(p.days).toFixed(1), cy: Y(p.reads).toFixed(1), r: 5,
+      cx: X(p.days).toFixed(1), cy: Y(p.reads).toFixed(1), r: (3 + 4 * share).toFixed(1),
       class: "in-pt" + (p.danger ? " danger" : p.reads ? "" : " cold"),
     });
     const tip = document.createElementNS("http://www.w3.org/2000/svg", "title");
