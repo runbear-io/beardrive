@@ -383,10 +383,16 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 	files := http.FileServerFS(static)
 	index, _ := fs.ReadFile(static, "index.html")
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Embedded assets carry no modtime, so without this browsers cache
-		// them heuristically and users see a stale frontend after upgrades.
-		w.Header().Set("Cache-Control", "no-cache")
 		upath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		// Vite emits content-hashed filenames under assets/, safe to cache
+		// forever. Everything else (index.html above all) must revalidate:
+		// embedded files carry no modtime, so without no-cache browsers
+		// cache heuristically and users see a stale frontend after upgrades.
+		if strings.HasPrefix(upath, "assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		// Reserved prefixes that fell through to the catch-all are genuine
 		// 404s — don't mask a mistyped API/auth/share URL with the app shell.
 		if strings.HasPrefix(upath, "api/") || strings.HasPrefix(upath, "auth/") || strings.HasPrefix(upath, "s/") {

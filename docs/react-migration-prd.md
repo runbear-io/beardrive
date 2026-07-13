@@ -1,0 +1,273 @@
+# PRD: Migrate the bdrive web frontend to React + TypeScript
+
+This is the authoritative spec for rewriting `internal/webapp/static/`
+(vanilla JS: `app.js` ~2,150 lines, `style.css`, `index.html`) as a React +
+TypeScript app. Implement the phases in order; a phase is done only when
+every acceptance box in its checklist is checked. Record progress and
+blockers in §Status at the bottom.
+
+## Goals
+
+- Feature-for-feature parity with the current SPA — same routes, same
+  behaviors, same visual design (port `style.css` verbatim; do not redesign).
+- Maintainable component/hook structure replacing the 90-function single file.
+- Keep the product's single-binary story fully intact.
+
+## Non-goals (do NOT do these)
+
+- No Go API changes. No new endpoints, no changed response shapes.
+- No visual redesign, no CSS framework, no CSS modules — global stylesheet.
+- `/auth/*` pages and `/s/<token>` share pages stay server-rendered Go.
+- Markdown stays rendered server-side (`/api/.../render`); the frontend
+  injects the returned HTML. Never add a client-side markdown renderer.
+- No SSR, no Next.js. Vite static build only.
+
+## Hard invariants (violating any of these fails the phase)
+
+1. **`go build ./...` must work with no Node installed.** Built assets are
+   committed at `internal/webapp/static/` (the existing `go:embed static`
+   target in `internal/webapp/server.go`). Frontend source lives in
+   `internal/webapp/frontend/` and `vite build` writes to `../static/`.
+2. **Routing semantics unchanged**: native History-API paths —
+   `/<project-id>/<url-encoded path>` (hub), `/<path>` (volume mode),
+   `/<project-id>/insights`, `/<project-id>/history`, `/join/<token>`. No
+   hash routing; slashes stay literal; all API/asset URLs root-absolute.
+   Reserved prefixes `/api/`, `/auth/`, `/s/` must still 404 rather than
+   fall back to the SPA shell (server behavior — keep it).
+3. **Storage-blind + privacy**: the frontend learns everything from
+   `/api/config` (+ `/api/projects` in hub mode). Never surface storage
+   details; never expect or display human actor emails from the heat API.
+4. **Never commit `internal/webapp/manual_serve_test.go`** (untracked local
+   demo harness). Check `git status` before every commit.
+5. Runtime deps allowed: `react`, `react-dom`, `@tanstack/react-query`.
+   (`react-router-dom` was allowed, adopted, then REMOVED in Phase 3: v7
+   wraps navigation in React.startTransition, which left the old view on
+   screen for seconds after the URL changed. Routing is `src/nav.ts` — a
+   ~40-line synchronous history router — plus the hand-ported `parseRoute`
+   in `src/router.ts`. Do not reintroduce a router library.) Anything
+   beyond these requires updating this PRD with a justification first.
+   Dev deps: `vite`, `typescript`, `@vitejs/plugin-react`,
+   `@playwright/test` (+ types).
+
+## Toolchain & layout
+
+```
+internal/webapp/frontend/        # source (committed)
+  package.json  vite.config.ts  tsconfig.json  index.html
+  src/          # components, hooks, api types
+  e2e/          # Playwright parity suite + hub harness
+internal/webapp/static/          # vite build output (committed, generated)
+```
+
+- Vite `build.outDir: ../static`, `emptyOutDir: true`, hashed asset
+  filenames under `static/assets/`.
+- Dev: `vite dev` with `server.proxy` for `/api`, `/auth`, `/s` →
+  `http://localhost:8080`.
+- Freshness: add `internal/webapp/frontend/check-dist.sh` (npm ci && npm
+  run build && `git diff --exit-code ../static`) and document it in
+  CLAUDE.md as a pre-release step.
+- TS API types: hand-write `src/api/types.ts` for the JSON shapes of
+  `/api/config`, `/api/projects`, `tree`, `heat`, `history`, orgs, shares,
+  admin. Derive them from the Go handler structs in `internal/webapp/`.
+
+## Server-side changes (the ONLY Go changes allowed)
+
+- `server.go frontend()`: serve `assets/*` (hashed filenames) with
+  `Cache-Control: public, max-age=31536000, immutable`; keep `no-cache` for
+  `index.html`/everything else. Adjust the embedded-asset test if any.
+- A committed e2e hub harness (see §Verification).
+
+## Component map (port targets)
+
+| Current (app.js) | React module |
+|---|---|
+| boot, loadProjects, loadOrgs, acceptInviteFromURL | `App.tsx`, `useConfig`, `useProjects`, `useOrgs`, `InviteAccept` |
+| selectProject, updateOrgBar, updateAdminBar, sidebar DOM | `Layout`, `Sidebar`, `OrgBar`, `AdminBar` |
+| parseRoute/applyRoute/pushURL/urlFor* | React Router routes + `usePathRoute` helper (path encoding per current encodePath/decodePath) |
+| refreshTree, renderNode/renderChildren, expandTo, applyTreeExpansion, markActive, revealInTree | `FileTree` (+ expansion state persisted as today) |
+| openFolder, renderFolderListing, renderFolderHistory | `FolderListing` |
+| openFile, showMeta, fixLinks, openWikilink | `FileView` (dangerouslySetInnerHTML on server HTML + link-rewrite effect that re-runs on content change) |
+| setCrumb | `Breadcrumbs` |
+| refreshHeat, heatFor/heatText/heatLevel | `useHeat` + heat dot components |
+| showProjectHome, renderConnectGuide, guideSteps, GUIDE_AGENTS | `ProjectHome`, `ConnectGuide` (tabs; localStorage key `bdrive-guide-agent`; stale value falls back to first tab; pre-filled origin + project id) |
+| showInsights, renderInsights, squarify, insightsTreemap/Matrix/Chart, renderHotPath, staleColor | `Insights` + SVG components (port math as-is) |
+| showHistory, historyEntryRow, initHistory | `HistoryView` |
+| showOrgAdmin, showHubSettings, showPending | `OrgAdmin`, `HubSettings`, `PendingApprovals` |
+| modalPrompt/modalConfirm, toast, showShareDialog, updateShareButton | `Modal`, `Toaster`, `ShareDialog` |
+| initUpload, uploadFile, sha256Hex | `UploadDropzone` + `useUpload` (init→content→commit flow, presign or relay) |
+| showEmptyState, createProject | `EmptyState` |
+| scrollMemo/pendingScroll/rememberScroll | per-route scroll restoration hook |
+
+Server state through TanStack Query (poll interval from `/api/config`
+refresh; invalidate after uploads/renames/admin actions — mirror today's
+`refreshAll`). Reuse the SVG icon sprite from the current `index.html`.
+
+## Phases
+
+### Phase 0 — scaffold & pipeline
+- [x] Vite+React+TS workspace at `internal/webapp/frontend/`; build lands in
+      `internal/webapp/static/` and is committed. The branch's `static/` is
+      the React build from Phase 0 on (the old files live on `main` /
+      `git show main:internal/webapp/static/app.js` for porting reference);
+      the parity gate in Phase 5 is what makes the branch mergeable.
+- [x] `style.css` ported verbatim as global stylesheet; SVG sprite ported
+      (kept inline in `index.html`, as before).
+- [x] Dev proxy works against a local hub (`BDRIVE_DEV_PROXY` overrides the
+      `localhost:8080` default).
+- [x] Cache-header change in `frontend()` + assets served hashed
+      (covered by `TestFrontendSPAFallback`).
+- [x] `check-dist.sh` works.
+- [x] e2e harness committed (`e2e_serve_test.go`, gated by
+      `BDRIVE_E2E_SERVE=1`, port 8993, fresh state each run) and wired as
+      Playwright's webServer; 4 shell specs green. Also ported in Phase 0
+      (the e2e login flow needed it): the `getJSON`/`postJSON` layer with
+      401→login redirect, `/api/config` boot, and the title/vault-name
+      wiring (`src/api/http.ts`, `src/hooks/useConfig.ts`).
+- [x] `go build ./...`, `go vet ./...`, `go test ./...` green.
+
+### Phase 1 — shell: boot, session, projects, routing
+- [x] Boot from `/api/config`; volume vs hub mode both render (hub via the
+      e2e suite; volume verified against a live `bdrive web <dir>`).
+- [x] Project list + selection; project color chips (port `projColor`).
+- [x] Empty state + create project; `/join/<token>` invite accept (token
+      survives the login redirect — covered by e2e).
+- [x] Deep link + refresh on every route resolves (SPA fallback); unknown
+      project ids fall back to a real project.
+- [x] Sign-out link, admin bar (with pending count), org bar render per
+      session flags (admin vs member covered by e2e).
+      Architecture note: the URL is the source of truth — `parseRoute`
+      ported verbatim into `src/router.ts`, a single catch-all route, no
+      route-matching library (encoded slashes must survive). Mutations
+      must `await useHubRefresh()` before navigating to a new project id,
+      or the unknown-id fallback bounces off the stale list.
+
+### Phase 2 — file browsing (long pole)
+- [x] Tree with expansion persistence, active marking, reveal-in-tree
+      (deep links unfold the way to the file — e2e covered).
+- [x] Folder listing incl. heat dots (members) + folder history strip.
+- [x] File view: server-rendered markdown; wikilinks + relative links;
+      meta/provenance line. LESSON (do not regress): never patch the
+      dangerouslySetInnerHTML subtree after commit (the classic fixLinks
+      approach) — React re-applies the markup on unrelated updates and
+      silently discards DOM patches. Instead: transform the HTML string
+      before rendering (img src, target=_blank) and handle link clicks by
+      delegation on the container (`FileView.tsx`).
+- [x] Breadcrumbs; per-route scroll restoration (location.key memo,
+      restore on POP, re-applied as async sections grow).
+- [x] Download + raw file view; share button state; share dialog (e2e:
+      mint → public fetch → revoke → 404).
+- [x] Upload via the topbar button + file picker (direct/relay per
+      upload/init) with tree refresh + open after commit.
+- [x] Command palette (⌘K fuzzy files/projects/actions) and the topbar
+      overflow menu.
+      Harness note: helpers.login caches one session cookie per identity —
+      the server rate-limits credential POSTs (10/min/IP) and per-spec
+      form logins trip it with flaky timeouts.
+
+### Phase 3 — project home, insights, history
+- [x] Project home at `/<pid>`: connect guide (3 tabs: "Claude Code &
+      Cowork" plugin flow, Hermes CLI, Codex CLI; copy buttons; persisted
+      tab with stale-value fallback; commands pre-filled with hub origin +
+      project id).
+- [x] Insights embedded below the guide for admins/org-owners only
+      (`canInsights` = hub admin or project-org owner), plus dedicated
+      `/insights` route; members see neither.
+- [x] Insights views: squarified treemap, reads×freshness scatter with
+      danger quadrant, hot-path list with agent/human split, agent
+      coverage matrix — math ported as-is into JSX SVG.
+- [x] History view: whole-project / subtree (`prefix`) / per-file (`path`)
+      modes, newest first, add/edit/delete tags, device attribution,
+      expandable linkified notes; folder listings link into the subtree
+      feed. (Blob version links remain server-side; the classic app had
+      no version-viewer UI either.)
+- [x] Vault-name click returns to project home.
+      NOTE (structural, discovered here): react-router-dom removed — see
+      invariant 5. The original 17 parity checks are ported in
+      `e2e/home.spec.ts`; suite is 34 specs, ~13s, stable across runs.
+
+### Phase 4 — admin surfaces
+- [x] Org admin: rename, members (role change/remove, self marked),
+      projects (rename/delete), invite create/list/revoke with expiry +
+      uses, org-wide share audit with revoke; member view is read-only.
+- [x] Hub settings + pending-approval queue (approve/deny), policy
+      toggles (verification disabled without SMTP), read-only
+      domains/self-signup/admins rows.
+- [x] Destructive actions confirm via modal; toasts on success/error.
+      Design note: panels are NOT routes (parity with the classic app) —
+      Browser takes a `panel` prop that replaces the content pane and
+      hides file actions; HubApp owns the state and clears it on any
+      pathname change. Known accepted deviation: deleting the currently
+      open project closes the panel (the URL fallback redirect fires).
+
+### Phase 5 — parity gate & swap
+- [x] The 17 original smoke checks ported (`e2e/home.spec.ts`) and
+      extended: login→browse→markdown, upload roundtrip, share
+      create/revoke (+public fetch), org admin flows, history views,
+      404 on `/api/nope`. 42 specs total, ~16s, stable.
+- [x] Full e2e suite green against the harness hub.
+- [x] Old `app.js`/`index.html`/`style.css` gone; `git grep
+      renderConnectGuide` outside frontend/ matches only this PRD.
+- [x] Docs updated: README §Development gains a "Web frontend" section;
+      CLAUDE.md Commands + `webapp` package description rewritten for the
+      React/Vite reality (committed dist, check-dist, the no-router and
+      no-DOM-patching lessons); plugin docs mention no frontend internals
+      (verified — nothing to change).
+- [x] `go build` from a clean `git archive` checkout with no
+      `frontend/` tooling succeeds and serves the React app (hashed
+      assets 200, immutable).
+- [x] Visual parity pass: screenshots of home/guide, embedded insights,
+      file view, folder listing, history, org admin, palette, mobile —
+      after fixing `#root { display: contents }` (body's flex layout must
+      see through the React mount point).
+
+## Verification (every phase)
+
+1. `cd internal/webapp/frontend && npm run build` — clean.
+2. `go build ./... && go vet ./... && go test ./...` — green.
+3. Playwright checks for all surfaces finished so far.
+
+**e2e harness** (build in Phase 0, commit it): `frontend/e2e/hub.mjs` —
+builds `bdrive` (`go build -o /tmp/... ./cmd/bdrive`), then starts it with a
+scratch `BDRIVE_HOME`, hub mode on `file://<scratch>/storage`, uploads
+enabled, builtin auth with one pre-seeded account (write the auth users_db
+JSON directly, or reuse the approach in the untracked
+`manual_serve_test.go` — programmatic seeding — in a small committed Go
+helper under `internal/webapp/` guarded by an env var, e.g.
+`BDRIVE_E2E_SERVE=1 go test -run TestE2EServe`). Seed a handful of files
+(markdown with wikilinks, nested dirs, one binary) and some read-heat data.
+Wire it as Playwright's `webServer`. Port: 8993. Test account:
+`e2e@example.com` / a fixed password.
+
+The 17 existing parity checks (from the previous smoke suite) cover:
+landing URL is `/<pid>` (no insights redirect); 3 guide tabs in order;
+one active tab; claude tab installs plugin (marketplace add + install);
+claude tab `/beardrive:install connect to <origin>, project <pid>`; claude
+tab has no raw CLI; claude tab mentions Cowork; stale saved "cowork" tab
+falls back safely; codex tab full CLI flow (brew, login origin, init
+--project, hooks install --agent codex); tab choice persisted in
+localStorage; insights embedded on home for admins; guide renders above
+insights; dedicated `/insights` route still works; vault-name click goes
+home; browser back/forward across home↔file↔insights; reload on a deep
+file path; reload on `/insights`.
+
+## Git conventions
+
+- Branch: `feat/react-frontend` off `main`. One PR at the end; do not
+  merge/deploy/push to `main`.
+- Commit per phase (more is fine), message prefix `feat(webapp): [phase N]`.
+- Never commit: `manual_serve_test.go`, `node_modules/`, scratch dirs.
+  Add `.gitignore` entries in `frontend/` for node_modules etc.
+
+## Status
+
+- [x] Phase 0
+- [x] Phase 1
+- [x] Phase 2
+- [x] Phase 3
+- [x] Phase 4
+- [x] Phase 5
+
+Blockers / deviations: none open. Two documented deviations, both
+deliberate: react-router-dom replaced by the in-repo synchronous router
+(invariant 5), and deleting the currently-open project closes the org
+admin panel (Phase 4 note).
