@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
 import { parseRoute } from "../router";
+import { navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Topbar, VaultHeader } from "../components/shell";
 import { ProjectNav } from "../components/ProjectNav";
 import { OrgBar } from "../components/OrgBar";
@@ -12,27 +12,23 @@ import { toast } from "../toast";
 import Browser from "./Browser";
 
 export default function HubApp({ config }: { config: ServerConfig }) {
-  const location = useLocation();
-  const navigate = useNavigate();
+  const pathname = useLocationPath();
   const refresh = useHubRefresh();
   // Org just joined via an invite this page-load: prefer its projects over
   // whatever happens to be first in the list.
   const [joinedOrgId, setJoinedOrgId] = useState<string | null>(null);
 
   const joinToken = useMemo(() => {
-    const m = location.pathname.match(/^\/join\/([0-9a-f]+)\/?$/);
+    const m = pathname.match(/^\/join\/([0-9a-f]+)\/?$/);
     return m ? m[1] : null;
-  }, [location.pathname]);
+  }, [pathname]);
 
   const { data: projects } = useProjects(!joinToken);
   const { data: orgs } = useOrgs(!joinToken);
   const isAdmin = !!config.auth.admin;
   const { data: pending } = usePending(isAdmin);
 
-  const route = useMemo(
-    () => parseRoute(location.pathname, "hub"),
-    [location.pathname],
-  );
+  const route = useMemo(() => parseRoute(pathname, "hub"), [pathname]);
 
   const current: Project | null = useMemo(() => {
     if (!projects) return null;
@@ -124,7 +120,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // Landing ("/") and unknown project ids both resolve to a real project
   // URL; replace so back/forward never bounces through the redirect.
   if (route.project !== current.id) {
-    return <Navigate to={"/" + current.id} replace />;
+    return <Redirect to={"/" + current.id} />;
   }
 
   return (

@@ -1,4 +1,4 @@
-import { useNavigate } from "react-router-dom";
+import { navigate } from "../nav";
 import { postJSON } from "../api/http";
 import type { Project, ProjectCreated } from "../api/types";
 import { modalPrompt } from "../modal";
@@ -16,7 +16,6 @@ export function projColor(s: string): string {
 }
 
 export function ProjectNav({ projects, currentId }: { projects: Project[]; currentId?: string }) {
-  const navigate = useNavigate();
   const refresh = useHubRefresh();
 
   const create = async () => {

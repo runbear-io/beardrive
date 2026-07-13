@@ -5,11 +5,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { urlForPath, urlForView, type Route } from "../router";
+import { currentNavType, navigate, useLocationPath } from "../nav";
 import { uploadFile } from "../upload";
 import { copyText } from "../util";
 import { toast } from "../toast";
@@ -20,6 +20,9 @@ import { FolderListing } from "../components/FolderListing";
 import { FileView } from "../components/FileView";
 import { ShareDialog } from "../components/ShareDialog";
 import { Palette, type PaletteItem } from "../components/Palette";
+import { ConnectGuide } from "../components/ConnectGuide";
+import { Insights, useInsightsDevices } from "../components/Insights";
+import { HistoryView, historyTitle } from "../components/HistoryView";
 
 // The browsing surface shared by hub projects and single-volume mode: the
 // file tree, folder listings, file views, and every topbar action. Sidebar
@@ -34,16 +37,21 @@ export default function Browser(props: {
   projects?: Project[];
   canInsights?: boolean;
   sidebar: { vault: ReactNode; projectsNav?: ReactNode; orgBar?: ReactNode };
-  home?: ReactNode; // hub landing view (project home); default prompt otherwise
 }) {
   const { config, apiBase, route, hub, project } = props;
-  const navigate = useNavigate();
-  const location = useLocation();
-  const navType = useNavigationType();
+  const routeKey = useLocationPath(); // scroll memo key, one slot per URL
   const qc = useQueryClient();
 
   const { tree, flatFiles, dirIndex, loaded } = useTree(apiBase, !hub || !!project);
   const heatMap = useHeat(apiBase, hub && !!project && !!config.reads?.enabled);
+  // Insights data: the per-device breakdown, plus a fresh heat fetch when
+  // an insights surface opens (the ambient heat cache may be a minute old).
+  const isHome = hub && !!project && !route.path && !route.view;
+  const insightsOpen = !!props.canInsights && (route.view === "insights" || isHome);
+  const devices = useInsightsDevices(apiBase, insightsOpen);
+  useEffect(() => {
+    if (insightsOpen) qc.invalidateQueries({ queryKey: ["heat", apiBase] });
+  }, [insightsOpen, apiBase, qc]);
 
   const path = route.path;
   const isDir = !!path && dirIndex.has(path);
@@ -92,21 +100,21 @@ export default function Browser(props: {
   const scrollGoal = useRef({ key: "", want: 0, attempts: 0 });
   useEffect(() => {
     scrollGoal.current = {
-      key: location.key,
-      want: navType === "POP" ? (memo.current.get(location.key) ?? 0) : 0,
+      key: routeKey,
+      want: currentNavType() === "POP" ? (memo.current.get(routeKey) ?? 0) : 0,
       attempts: 0,
     };
-  }, [location.key, navType]);
+  }, [routeKey]);
   const onRendered = useCallback(() => {
     const c = contentRef.current;
     const g = scrollGoal.current;
-    if (!c || g.key !== location.key || g.attempts >= 3) return;
+    if (!c || g.key !== routeKey || g.attempts >= 3) return;
     g.attempts++;
     c.scrollTo({ top: g.want, behavior: "instant" });
-  }, [location.key]);
+  }, [routeKey]);
   const onScroll = useCallback(() => {
-    if (contentRef.current) memo.current.set(location.key, contentRef.current.scrollTop);
-  }, [location.key]);
+    if (contentRef.current) memo.current.set(routeKey, contentRef.current.scrollTop);
+  }, [routeKey]);
 
   /* ---- navigation ---- */
   const openPath = useCallback(
@@ -114,11 +122,11 @@ export default function Browser(props: {
       navigate(urlForPath(p, project?.id));
       closeSidebarOnMobile();
     },
-    [navigate, project?.id],
+    [project?.id],
   );
   const openHistory = useCallback(
     (target: string) => navigate(urlForView("history", project?.id, target)),
-    [navigate, project?.id],
+    [project?.id],
   );
 
   /* ---- topbar state + actions ---- */
@@ -183,7 +191,7 @@ export default function Browser(props: {
   useEffect(() => {
     // Any navigation clears a stale upload status from the meta slot.
     setUploadStatus("");
-  }, [location.key]);
+  }, [routeKey]);
 
   /* ---- ⌘K palette ---- */
   useEffect(() => {
@@ -221,7 +229,7 @@ export default function Browser(props: {
     for (const d of dirIndex.keys()) add("folder", d, "folder", () => openPath(d));
     for (const f of flatFiles) add("doc", f.path, "file", () => openPath(f.path));
     return items;
-  }, [hub, project, path, isFile, canUpload, config.auth?.enabled, dirIndex, flatFiles, props.projects, shareNow, historyNow, uploadNow, openHistory, openPath, navigate]);
+  }, [hub, project, path, isFile, canUpload, config.auth?.enabled, dirIndex, flatFiles, props.projects, shareNow, historyNow, uploadNow, openHistory, openPath]);
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
   useEffect(() => {
@@ -232,12 +240,35 @@ export default function Browser(props: {
   }, [moreOpen]);
 
   /* ---- content view ---- */
+  const isFolderFn = useCallback((p: string) => dirIndex.has(p), [dirIndex]);
   let contentClass = "markdown";
   let view: ReactNode;
-  if (route.view === "insights" || route.view === "history") {
-    // Phase 3 delivers these views.
+  if (route.view === "insights") {
     contentClass = "view";
-    view = <div className="empty">{route.view} view is on its way.</div>;
+    view = props.canInsights ? (
+      <Insights
+        flatFiles={flatFiles}
+        heatMap={heatMap}
+        devices={devices}
+        onOpenFile={openPath}
+        onOpenFolder={openPath}
+        isFolder={isFolderFn}
+      />
+    ) : (
+      <div className="empty">Insights is for hub admins and org owners.</div>
+    );
+  } else if (route.view === "history") {
+    contentClass = "view";
+    view = (
+      <HistoryView
+        apiBase={apiBase}
+        target={route.viewTarget || ""}
+        isFolder={isFolderFn}
+        onOpen={openPath}
+        onMeta={setMeta}
+        onRendered={onRendered}
+      />
+    );
   } else if (path) {
     if (!loaded) {
       view = <div className="empty">Loading…</div>;
@@ -267,14 +298,40 @@ export default function Browser(props: {
         />
       );
     }
-  } else if (props.home) {
+  } else if (isHome) {
+    // The project's index page: the connect-an-agent guide, with Insights
+    // below for admins/owners.
     contentClass = "view";
-    view = props.home;
+    view = (
+      <>
+        <ConnectGuide project={project!} />
+        {props.canInsights && (
+          <div className="home-insights">
+            <Insights
+              flatFiles={flatFiles}
+              heatMap={heatMap}
+              devices={devices}
+              onOpenFile={openPath}
+              onOpenFolder={openPath}
+              isFolder={isFolderFn}
+            />
+          </div>
+        )}
+      </>
+    );
   } else {
     view = <div className="empty">Select a file to read it.</div>;
   }
 
-  const crumb = path ? <Breadcrumbs path={path} onOpenFolder={openPath} /> : null;
+  const crumb = path ? (
+    <Breadcrumbs path={path} onOpenFolder={openPath} />
+  ) : route.view === "insights" ? (
+    "Insights — " + (project?.name ?? "")
+  ) : route.view === "history" ? (
+    "History — " + historyTitle(route.viewTarget || "", isFolderFn)
+  ) : isHome ? (
+    project!.name
+  ) : null;
 
   const topbar = (
     <Topbar

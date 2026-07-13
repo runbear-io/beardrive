@@ -39,10 +39,15 @@ blockers in §Status at the bottom.
    details; never expect or display human actor emails from the heat API.
 4. **Never commit `internal/webapp/manual_serve_test.go`** (untracked local
    demo harness). Check `git status` before every commit.
-5. Runtime deps allowed: `react`, `react-dom`, `react-router-dom`,
-   `@tanstack/react-query`. Anything beyond these requires updating this
-   PRD with a justification first. Dev deps: `vite`, `typescript`,
-   `@vitejs/plugin-react`, `@playwright/test` (+ types).
+5. Runtime deps allowed: `react`, `react-dom`, `@tanstack/react-query`.
+   (`react-router-dom` was allowed, adopted, then REMOVED in Phase 3: v7
+   wraps navigation in React.startTransition, which left the old view on
+   screen for seconds after the URL changed. Routing is `src/nav.ts` — a
+   ~40-line synchronous history router — plus the hand-ported `parseRoute`
+   in `src/router.ts`. Do not reintroduce a router library.) Anything
+   beyond these requires updating this PRD with a justification first.
+   Dev deps: `vite`, `typescript`, `@vitejs/plugin-react`,
+   `@playwright/test` (+ types).
 
 ## Toolchain & layout
 
@@ -160,16 +165,25 @@ refresh; invalidate after uploads/renames/admin actions — mirror today's
       form logins trip it with flaky timeouts.
 
 ### Phase 3 — project home, insights, history
-- [ ] Project home at `/<pid>`: connect guide (3 tabs: "Claude Code &
+- [x] Project home at `/<pid>`: connect guide (3 tabs: "Claude Code &
       Cowork" plugin flow, Hermes CLI, Codex CLI; copy buttons; persisted
-      tab; commands pre-filled with hub origin + project id).
-- [ ] Insights embedded below the guide for admins/org-owners only
-      (`canSeeInsights` logic), plus dedicated `/insights` route.
-- [ ] Insights views: treemap (squarify), device matrix, chart, hot-path
-      list — visually equivalent.
-- [ ] History view: `?path=`/`?prefix=` modes, newest-first entries, blob
-      version links, device attribution.
-- [ ] Vault-name click returns to project home.
+      tab with stale-value fallback; commands pre-filled with hub origin +
+      project id).
+- [x] Insights embedded below the guide for admins/org-owners only
+      (`canInsights` = hub admin or project-org owner), plus dedicated
+      `/insights` route; members see neither.
+- [x] Insights views: squarified treemap, reads×freshness scatter with
+      danger quadrant, hot-path list with agent/human split, agent
+      coverage matrix — math ported as-is into JSX SVG.
+- [x] History view: whole-project / subtree (`prefix`) / per-file (`path`)
+      modes, newest first, add/edit/delete tags, device attribution,
+      expandable linkified notes; folder listings link into the subtree
+      feed. (Blob version links remain server-side; the classic app had
+      no version-viewer UI either.)
+- [x] Vault-name click returns to project home.
+      NOTE (structural, discovered here): react-router-dom removed — see
+      invariant 5. The original 17 parity checks are ported in
+      `e2e/home.spec.ts`; suite is 34 specs, ~13s, stable across runs.
 
 ### Phase 4 — admin surfaces
 - [ ] Org admin: rename, members (role change/remove), invite create/list/
@@ -238,7 +252,7 @@ file path; reload on `/insights`.
 - [x] Phase 0
 - [x] Phase 1
 - [x] Phase 2
-- [ ] Phase 3
+- [x] Phase 3
 - [ ] Phase 4
 - [ ] Phase 5
 
