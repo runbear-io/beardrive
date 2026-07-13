@@ -1,14 +1,9 @@
-import { test, expect, Page } from "@playwright/test";
-import { login, MEMBER, PASSWORD } from "./helpers";
+import { test, expect } from "@playwright/test";
+import { login, wikiId, MEMBER, PASSWORD } from "./helpers";
 
 // Phase 1: shell, session flags, project list/selection, routing, empty
 // state, invite accept. Mutating specs (project creation) run last —
 // specs share one seeded hub per run.
-
-async function wikiId(page: Page): Promise<string> {
-  const out = await (await page.request.get("/api/projects")).json();
-  return out.projects.find((p: { name: string }) => p.name === "wiki").id;
-}
 
 test("landing selects the first project and rewrites the URL", async ({ page }) => {
   await login(page);

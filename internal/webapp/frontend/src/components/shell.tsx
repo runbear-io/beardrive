@@ -26,6 +26,8 @@ export function AppShell(props: {
   orgBar?: ReactNode;
   topbar: ReactNode;
   contentClass?: string;
+  contentRef?: React.Ref<HTMLElement>;
+  onContentScroll?: () => void;
   children: ReactNode;
 }) {
   return (
@@ -39,7 +41,12 @@ export function AppShell(props: {
       </aside>
       <main id="main">
         {props.topbar}
-        <article id="content" className={props.contentClass ?? "markdown"}>
+        <article
+          id="content"
+          className={props.contentClass ?? "markdown"}
+          ref={props.contentRef}
+          onScroll={props.onContentScroll}
+        >
           {props.children}
         </article>
       </main>

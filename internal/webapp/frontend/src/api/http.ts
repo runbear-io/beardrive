@@ -16,6 +16,18 @@ export async function getJSON<T>(url: string): Promise<T> {
   return r.json();
 }
 
+/* fetch wrapper for methods without a body-returning helper */
+export async function api<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
+  const opt: RequestInit = { method };
+  if (body !== undefined) {
+    opt.headers = { "Content-Type": "application/json" };
+    opt.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opt);
+  if (!r.ok) throw new Error(await r.text());
+  return r.status === 204 ? ({} as T) : r.json();
+}
+
 export async function postJSON<T>(url: string, body?: unknown): Promise<T> {
   const r = await fetch(url, {
     method: "POST",

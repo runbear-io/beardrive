@@ -1,21 +1,30 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
+import { useLocation } from "react-router-dom";
 import type { ServerConfig } from "../api/types";
-import { AppShell, Topbar, VaultHeader } from "../components/shell";
+import { VaultHeader } from "../components/shell";
+import { parseRoute } from "../router";
+import Browser from "./Browser";
 
-// Single-volume mode: one folder, no projects or orgs. File browsing
-// arrives in Phase 2.
+// Single-volume mode: one folder, no projects or orgs — but the full
+// browsing surface (tree, listings, files, upload when enabled).
 export default function VolumeApp({ config }: { config: ServerConfig }) {
+  const location = useLocation();
   const name = config.volume || "BearDrive";
   useEffect(() => {
     document.title = config.brand || name;
   }, [config, name]);
+  const route = useMemo(
+    () => parseRoute(location.pathname, "volume"),
+    [location.pathname],
+  );
 
   return (
-    <AppShell
-      vault={<VaultHeader name={name} showSignout={config.auth.enabled} />}
-      topbar={<Topbar />}
-    >
-      <div className="empty">Select a file to read it.</div>
-    </AppShell>
+    <Browser
+      config={config}
+      apiBase="/api/"
+      route={route}
+      hub={false}
+      sidebar={{ vault: <VaultHeader name={name} showSignout={config.auth.enabled} /> }}
+    />
   );
 }

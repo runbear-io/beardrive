@@ -65,3 +65,70 @@ export interface InviteAccepted {
 export interface PendingList {
   pending: Array<{ id: string; email: string; name: string }>;
 }
+
+// GET .../tree (handleTree → Node, server.go)
+export interface Node {
+  name: string;
+  path: string;
+  dir?: boolean;
+  size?: number;
+  time?: string;
+  author?: string;
+  device?: string;
+  children?: Node[];
+}
+
+// GET .../render (handleRender, server.go)
+export interface RenderDoc {
+  path: string;
+  html: string;
+  size: number;
+  time?: string;
+  author?: string;
+  device?: string;
+}
+
+// GET .../heat (handleHeat, reads.go) — counts only, never who.
+export interface HeatEntry {
+  human?: number;
+  agent?: number;
+  share?: number;
+  readers?: number;
+  last?: string;
+}
+export type HeatMap = Record<string, HeatEntry>;
+
+// GET .../history (HistoryEntry, history.go)
+export interface DeviceInfo {
+  id?: string;
+  name?: string;
+  os?: string;
+  ip?: string;
+}
+export interface HistoryEntry {
+  time: string;
+  kind: string; // add | edit | delete (older servers: raw "put")
+  path: string;
+  size?: number;
+  blob?: string;
+  user?: string;
+  user_name?: string;
+  author?: string;
+  device: DeviceInfo;
+  note?: string;
+}
+
+// POST .../shares (handleShareCreate, shares.go)
+export interface ShareCreated {
+  token: string;
+  url: string;
+}
+
+// POST .../upload/init (handleUploadInit, upload.go)
+export interface UploadPlan {
+  mode: "direct" | "server";
+  exists?: boolean;
+  url?: string;
+  method?: string;
+  headers?: Record<string, string>;
+}

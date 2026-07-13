@@ -9,6 +9,7 @@ import { ProjectNav } from "../components/ProjectNav";
 import { OrgBar } from "../components/OrgBar";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "../toast";
+import Browser from "./Browser";
 
 export default function HubApp({ config }: { config: ServerConfig }) {
   const location = useLocation();
@@ -69,6 +70,9 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // account that owns an org (or is a hub admin) gets it, whatever project
   // is open. The panels it opens arrive in Phase 4.
   const gearTarget = org && org.role === "owner" ? org : ownedOrg;
+  // Insights (embedded on the project home and behind the ⋯ menu) is for
+  // hub admins and owners of the project's org.
+  const canInsights = isAdmin || (org ? org.role === "owner" : false);
 
   const vault = (
     <VaultHeader
@@ -124,16 +128,21 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   }
 
   return (
-    <AppShell
-      vault={vault}
-      projectsNav={<ProjectNav projects={projects} currentId={current.id} />}
-      orgBar={<OrgBar org={org} onManage={() => {}} />}
-      topbar={<Topbar />}
-    >
-      {/* Content views (project home, files, insights, history) arrive in
-          Phases 2–3. */}
-      <div className="empty">Select a file to read it.</div>
-    </AppShell>
+    <Browser
+      key={current.id} // fresh tree/fold state per project
+      config={config}
+      apiBase={"/api/p/" + current.id + "/"}
+      route={route}
+      hub
+      project={current}
+      projects={projects}
+      canInsights={canInsights}
+      sidebar={{
+        vault,
+        projectsNav: <ProjectNav projects={projects} currentId={current.id} />,
+        orgBar: <OrgBar org={org} onManage={() => {}} />,
+      }}
+    />
   );
 }
 

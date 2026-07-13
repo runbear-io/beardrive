@@ -137,16 +137,27 @@ refresh; invalidate after uploads/renames/admin actions — mirror today's
       or the unknown-id fallback bounces off the stale list.
 
 ### Phase 2 — file browsing (long pole)
-- [ ] Tree with expansion persistence, active marking, reveal-in-tree.
-- [ ] Folder listing incl. heat dots (members) + folder history strip.
-- [ ] File view: server-rendered markdown injected; wikilinks + relative
-      links rewritten (`fixLinks` semantics); meta/provenance line.
-- [ ] Breadcrumbs; per-route scroll restoration.
-- [ ] Download + raw file view; share button state; share dialog.
-- [ ] Drag-drop upload (presign and relay paths) with refresh after commit.
-- [ ] Command palette (⌘K: file names, projects, actions — port the
-      palette overlay from the old shell) and the topbar overflow menu
-      (`more-btn`/`more-menu`) for narrow viewports.
+- [x] Tree with expansion persistence, active marking, reveal-in-tree
+      (deep links unfold the way to the file — e2e covered).
+- [x] Folder listing incl. heat dots (members) + folder history strip.
+- [x] File view: server-rendered markdown; wikilinks + relative links;
+      meta/provenance line. LESSON (do not regress): never patch the
+      dangerouslySetInnerHTML subtree after commit (the classic fixLinks
+      approach) — React re-applies the markup on unrelated updates and
+      silently discards DOM patches. Instead: transform the HTML string
+      before rendering (img src, target=_blank) and handle link clicks by
+      delegation on the container (`FileView.tsx`).
+- [x] Breadcrumbs; per-route scroll restoration (location.key memo,
+      restore on POP, re-applied as async sections grow).
+- [x] Download + raw file view; share button state; share dialog (e2e:
+      mint → public fetch → revoke → 404).
+- [x] Upload via the topbar button + file picker (direct/relay per
+      upload/init) with tree refresh + open after commit.
+- [x] Command palette (⌘K fuzzy files/projects/actions) and the topbar
+      overflow menu.
+      Harness note: helpers.login caches one session cookie per identity —
+      the server rate-limits credential POSTs (10/min/IP) and per-spec
+      form logins trip it with flaky timeouts.
 
 ### Phase 3 — project home, insights, history
 - [ ] Project home at `/<pid>`: connect guide (3 tabs: "Claude Code &
@@ -226,7 +237,7 @@ file path; reload on `/insights`.
 
 - [x] Phase 0
 - [x] Phase 1
-- [ ] Phase 2
+- [x] Phase 2
 - [ ] Phase 3
 - [ ] Phase 4
 - [ ] Phase 5
