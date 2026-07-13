@@ -58,9 +58,10 @@ Follow these steps:
    Hermes — by their config dirs in the project or home) and idempotently
    merges beardrive's sync hooks into each platform's own hook config, so
    files pull at every turn start, push after edits, every change is
-   stamped with the agent session that made it, and agent file reads feed
-   the hub's read heatmap (queued locally by `bdrive read-log`, reported
-   on the next sync). Tell the user which platforms got hooks; if Codex is
+   stamped with the agent session that made it, and agent file reads — native
+   reads, grep matches, and files named in shell commands — feed the hub's
+   read heatmap (queued locally by `bdrive read-log`, reported on the next
+   sync). Tell the user which platforms got hooks; if Codex is
    among them, mention they must run `/hooks` inside Codex once to trust
    the project's `.codex` layer.
 
