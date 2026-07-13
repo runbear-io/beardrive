@@ -440,7 +440,8 @@ The plugin sets up everything at once:
 
 - **`/beardrive:install`** — the full team setup, conversationally: CLI,
   sign-in, project init (whole folder or a shared subfolder like `wiki/`),
-  a consent-gated CLAUDE.md section for agents, and project-level sync
+  a consent-gated agent orientation — a synced `AGENTS.md` mapping the
+  shared folder plus a repo-root pointer to it — and project-level sync
   hooks in `.claude/settings.json`.
 - **`/beardrive:init [folder] [--name/--project/--shared]`** — just start
   syncing a project; `/beardrive:status` diagnoses problems.

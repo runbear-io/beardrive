@@ -29,37 +29,57 @@ Otherwise ask the user two questions (or infer from their request):
   isn't needed here — `bdrive init --name <name>` creates-or-joins by name;
   `bdrive init --project <p-id>` connects by id.)
 - **Sync the whole folder, or only a shared subfolder** (e.g. `./wiki` or
-  `./shared`)? A shared subfolder is right when only part of the repo — a
-  company wiki, a deliverables folder — should be shared across the team.
+  `./shared`)? Hard rule: **never sync a repo root** — inside a repo,
+  knowledge always syncs as a scoped subfolder via `--shared`. Whole-folder
+  is only for a dedicated knowledge folder (an empty dir, a standalone
+  vault) that is the mount itself.
 
 Then run it non-interactively, e.g.:
 ```sh
-bdrive init --name <project-name> --yes            # whole folder
-bdrive init --name <project-name> --shared wiki    # only ./wiki syncs
+bdrive init --name <project-name> --yes            # dedicated knowledge folder
+bdrive init --name <project-name> --shared wiki    # in a repo: only ./wiki syncs
 ```
 Re-running `bdrive init --yes` later is always safe: it resumes syncing
 (including after the folder was renamed or moved).
 
-## 4. Offer to update CLAUDE.md (ask first — never do this silently)
+## 4. Teach agents about the shared folder (ask first — never do this silently)
 
-Ask: "Want me to add a section to CLAUDE.md so agents know about the shared
-folder?" If yes, append a section shaped like this (adapt folder name and
-wording to the project; create CLAUDE.md if missing):
+Two files with different jobs (full rationale: the beardrive skill's
+"Teaching agents the folder" section). Offer each as its own consent:
+
+**a. The folder's own map — `<shared>/AGENTS.md` (synced, team-wide).**
+If the shared folder already has an `AGENTS.md`, read it and follow it —
+it is the team's source of truth; do not rewrite it while onboarding.
+If it has none and this user is creating the project, offer to draft one:
+explore the folder (top-level dirs, naming patterns, what's actually
+there) and write a short map — what each area is for, naming conventions,
+where agents should put their output, what not to touch. Keep it under a
+screen; it syncs to every member, so write it for the whole team, not
+this machine.
+
+**b. A root pointer in this repo (per machine, never synced).** For a
+`--shared` mount inside a repo, append a short section to the repo root's
+`AGENTS.md` and/or `CLAUDE.md` — both if both exist; `AGENTS.md` is what
+Codex and Hermes read (Codex never discovers nested instruction files,
+and no platform knows the folder *matters* until told). Shape it like
+this (adapt the folder name; create the file if missing):
 
 ```markdown
 ## Shared folder (BearDrive)
 
-`wiki/` is the company wiki, synced across all team members and agents via
-BearDrive. Anything saved there propagates to everyone within seconds, and
-every change is tracked (who, when, from which device).
-
-- Put shareable artifacts — generated HTML/PDF/markdown reports, notes,
-  plans — in `wiki/` so the team can see them.
-- To hand someone a public link to a file: `bdrive share wiki/<file>` —
-  prints a URL anyone can open (rendered, no account needed).
-- Do not put secrets in `wiki/`; share links are public to whoever has
-  the URL.
+`wiki/` is the team's shared folder, synced via BearDrive — changes
+propagate to everyone within seconds and every change is tracked (who,
+when, which device). Read `wiki/AGENTS.md` before working there. Put
+shareable artifacts — reports, notes, plans — in `wiki/` so the team
+sees them; never secrets (`bdrive share wiki/<file>` mints public URLs).
 ```
+
+Point at the synced `AGENTS.md` rather than duplicating its conventions —
+the pointer is for awareness and routing; the conventions live in the
+folder, stay current for everyone, and are versioned by the hub. For a
+standalone knowledge mount (dedicated folder, no enclosing repo) skip the
+pointer: `AGENTS.md` at the mount root is loaded natively by every
+platform.
 
 ## 5. Register agent sync hooks
 

@@ -25,7 +25,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Sign this device in (once per device) | `bdrive login [url]` — bare form uses the remembered server or beardrive.ai. Opens the sign-in page in a browser (sign-up available there); the terminal completes on its own and stores a per-device token. `--device` prints a code to approve from any browser (SSH/headless); `--status` shows server + account. Password reset: "Forgot password?" on the sign-in page (emailed via the server's SMTP config, or the link appears in the server log). **Switch hubs** with `bdrive login <new-url>`, then re-run `bdrive init` in each folder. |
 | Sign this device out | `bdrive logout` — clears the saved token + account (folders untouched); `--forget` also drops the remembered server. The device token stays valid server-side until it expires — revoke it from the hub's device list to be sure. |
 | Share a synced file publicly by URL | `bdrive share <file>` — prints a link anyone can open (HTML renders as a page, markdown rendered, PDFs inline; sandboxed; always the latest content; no account needed). `--expires 24h` for self-destructing links; `--list` / `--revoke <token-or-url>` to manage. Put generated reports in the shared folder, sync, then share. |
-| Set up a project for a Claude Code team | `/beardrive:install` — installs the CLI, signs in, runs init (whole/shared folder), offers a CLAUDE.md section about the shared folder, and registers agent sync hooks via `bdrive hooks install` (pull at turn start, push after edits, session-note stamping — for every detected platform, not just Claude) |
+| Set up a project for a Claude Code team | `/beardrive:install` — installs the CLI, signs in, runs init (whole/shared folder), offers the two-file agent orientation (synced `<shared>/AGENTS.md` map + repo-root pointer), and registers agent sync hooks via `bdrive hooks install` (pull at turn start, push after edits, session-note stamping — for every detected platform, not just Claude) |
 | Per-file / folder change history in the web UI | History button (file versions or project feed) and per-folder ⌚ — each entry: account, time, device (name/OS/IP), view/download of that exact version. API: `GET /api/p/<id>/history?path=\|prefix=`, `GET /api/p/<id>/blob?sha=` |
 | Web server: viewer + multi-project sync hub (read-only unless `--upload`) | `bdrive web [<folder> \| <storage-root-url>]` (serves cwd by default, `--addr :4173`; `-c config.json` reads remote/addr/upload/projects_db/database/auth settings from a file, explicit flags win; a storage root URL makes it a hub hosting many projects at `<root>/<project-id>/`, registry in `--projects-db` file, default `$BDRIVE_HOME/projects.json`; `--upload` lets browsers add files, client devices push, and projects be created — direct to storage via expiring presigned URLs on S3/GCS, relayed through the server for `file://`; `--upload-ttl 15m`; clients never see the remote URL or credentials; hub projects are walled by org membership — invite teammates from the web UI; the viewer has a ⌘K palette for fuzzy file search, project switching, and quick actions) |
 
@@ -206,7 +206,26 @@ Detection ladder — first match wins; if two rungs match, ask which to connect:
 
 Conflict copies are named `<file>.bdrive-conflict-<device>-<timestamp>` and sync like normal files. `openknowledge validate` does **not** flag them (they aren't `.md`) — pair validate with a `*.bdrive-conflict-*` glob check when offering a post-edit validation hook.
 
-Every branch ends the same way: verify (`bdrive status`, pending 0), a consent-gated CLAUDE.md note describing what syncs and how teammates connect, and the teammate onboarding sentence (invite link → `bdrive init` → same `--shared` scope).
+Every branch ends the same way: verify (`bdrive status`, pending 0), the consent-gated two-file agent orientation (next section), and the teammate onboarding sentence (invite link → `bdrive init` → same `--shared` scope).
+
+### Teaching agents the folder (AGENTS.md)
+
+A newly mounted shared folder is hundreds of opaque files to an agent. Two files with different jobs fix that — offer each as its own consent, never write either silently:
+
+1. **The folder's own map — `<shared>/AGENTS.md` (synced, team-wide).** The single source of truth for conventions: what each area is for, naming patterns, where agents should *write* (e.g. reports → `reports/`), what not to touch. Because the folder syncs, the map travels with it — every member on every platform gets it, and hub history tracks who changed the rules. It is scaffolded **once, by the project creator** (explore the folder, draft it, keep it under a screen); joiners read it and follow it — a new member's agent must not rewrite team conventions on day one.
+2. **A root pointer (per machine, never synced).** For `--shared` mounts inside a repo, append 2–3 lines to the repo root's `AGENTS.md` and/or `CLAUDE.md` (both if both exist): the folder is shared via BearDrive, read `<shared>/AGENTS.md` before working there, put shareable artifacts there, no secrets. Point at the synced map — don't duplicate its conventions, or the copy goes stale.
+
+The pointer is not optional politeness — platform discovery differs:
+
+| Platform | Finds `<shared>/AGENTS.md` on its own? |
+|---|---|
+| Claude Code / Cowork | Lazily — loaded when a file in that subtree is first read |
+| Hermes | Lazily — progressive discovery; walks up from files it touches |
+| Codex | **Never** — only loads `AGENTS.md` along the root→cwd path |
+
+And even where lazy loading works, it fires only *after* the agent decides to enter the folder; only the root pointer gives it the awareness to go there ("save the report where the team sees it"). A standalone knowledge mount (a dedicated folder, no enclosing repo) needs only the synced `AGENTS.md`: at the mount root every platform loads it at session start.
+
+**Orientation ritual** — your own behavior in any synced folder: on first contact, read its `AGENTS.md` before substantive work. If there is none, orient from the tree plus `bdrive log <folder>` (recent changes show which areas are alive), and — if this device created the project — offer to draft `AGENTS.md` for the team.
 
 ### What beardrive does not sync
 
