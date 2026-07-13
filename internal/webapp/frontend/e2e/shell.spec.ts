@@ -9,7 +9,7 @@ test("unauthenticated visit redirects to the login page", async ({ page }) => {
 
 test("login lands in the app shell", async ({ page }) => {
   await login(page);
-  await expect(page).toHaveTitle("BearDrive");
+  await expect(page).toHaveTitle(/BearDrive/); // "<project> — BearDrive" in hub mode
   await expect(page.locator("#sidebar")).toBeVisible();
   await expect(page.locator("#topbar")).toBeVisible();
 });

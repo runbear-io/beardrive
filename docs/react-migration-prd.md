@@ -121,11 +121,20 @@ refresh; invalidate after uploads/renames/admin actions — mirror today's
 - [x] `go build ./...`, `go vet ./...`, `go test ./...` green.
 
 ### Phase 1 — shell: boot, session, projects, routing
-- [ ] Boot from `/api/config`; volume vs hub mode both render.
-- [ ] Project list + selection; project color chips (port `projColor`).
-- [ ] Empty state + create project; `/join/<token>` invite accept.
-- [ ] Deep link + refresh on every route resolves (SPA fallback).
-- [ ] Sign-out link, admin bar, org bar render per session flags.
+- [x] Boot from `/api/config`; volume vs hub mode both render (hub via the
+      e2e suite; volume verified against a live `bdrive web <dir>`).
+- [x] Project list + selection; project color chips (port `projColor`).
+- [x] Empty state + create project; `/join/<token>` invite accept (token
+      survives the login redirect — covered by e2e).
+- [x] Deep link + refresh on every route resolves (SPA fallback); unknown
+      project ids fall back to a real project.
+- [x] Sign-out link, admin bar (with pending count), org bar render per
+      session flags (admin vs member covered by e2e).
+      Architecture note: the URL is the source of truth — `parseRoute`
+      ported verbatim into `src/router.ts`, a single catch-all route, no
+      route-matching library (encoded slashes must survive). Mutations
+      must `await useHubRefresh()` before navigating to a new project id,
+      or the unknown-id fallback bounces off the stale list.
 
 ### Phase 2 — file browsing (long pole)
 - [ ] Tree with expansion persistence, active marking, reveal-in-tree.
@@ -216,7 +225,7 @@ file path; reload on `/insights`.
 ## Status
 
 - [x] Phase 0
-- [ ] Phase 1
+- [x] Phase 1
 - [ ] Phase 2
 - [ ] Phase 3
 - [ ] Phase 4

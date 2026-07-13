@@ -30,3 +30,38 @@ export interface Project {
 export interface ProjectList {
   projects: Project[];
 }
+
+// POST /api/projects (handleProjectCreate) — create-or-join by name.
+export interface ProjectCreated {
+  project: Project;
+  created: boolean;
+}
+
+// GET /api/orgs (handleOrgList, orgs.go)
+export interface OrgMember {
+  email: string;
+  role: string; // "owner" | "member"
+}
+
+export interface Org {
+  id: string;
+  name: string;
+  role: string; // the signed-in account's role in this org
+  members: OrgMember[];
+  created?: string;
+}
+
+export interface OrgList {
+  orgs: Org[];
+}
+
+// POST /api/invites/{token} (handleInviteAccept, orgs.go)
+export interface InviteAccepted {
+  ok: boolean;
+  org: { id: string; name: string };
+}
+
+// GET /api/admin/pending (handleAdminPending, admin.go)
+export interface PendingList {
+  pending: Array<{ id: string; email: string; name: string }>;
+}

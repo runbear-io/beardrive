@@ -28,6 +28,7 @@ const (
 	e2eAddr     = "0.0.0.0:8993"
 	e2eAdmin    = "e2e@example.com"
 	e2eMember   = "member@example.com"
+	e2eSolo     = "solo@example.com"
 	e2ePassword = "e2e-pass-1"
 )
 
@@ -74,6 +75,11 @@ func TestE2EServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := auth.signup(e2eMember, "E2E Member", e2ePassword); err != nil {
+		t.Fatal(err)
+	}
+	// In no org: sees the onboarding empty state (and creating a project
+	// from it mints a fresh org via orgForCreate).
+	if _, err := auth.signup(e2eSolo, "E2E Solo", e2ePassword); err != nil {
 		t.Fatal(err)
 	}
 	auth.Admins = map[string]bool{e2eAdmin: true}
