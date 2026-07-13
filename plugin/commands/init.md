@@ -66,10 +66,16 @@ Follow these steps:
 
 6. **Verify**: run `bdrive status <folder>` and confirm the daemon is
    running and pending is 0. Summarize: project name/id, what syncs, and
-   that edits propagate to every team member within seconds. Offer a
-   consent-gated CLAUDE.md note and tell the user how teammates connect
-   (invite link → `bdrive init` → same `--shared` scope, which is
-   per-device).
+   that edits propagate to every team member within seconds. Offer the
+   two-file agent orientation, each part as its own consent (full flow:
+   the skill's "Teaching agents the folder" section): a synced
+   `<shared>/AGENTS.md` mapping the folder — draft it if this user is
+   creating the project, read and follow it if joining — and, for
+   `--shared` mounts inside a repo, a short pointer to it in the repo
+   root's `AGENTS.md`/`CLAUDE.md` (the only file Codex loads, and what
+   makes any agent aware the folder matters). Then tell the user how
+   teammates connect (invite link → `bdrive init` → same `--shared`
+   scope, which is per-device).
 
-For the full team setup (CLAUDE.md guidance + per-project sync hooks in
-`.claude/settings.json`), suggest `/beardrive:install` instead.
+For the full team setup (the AGENTS.md orientation + per-project sync
+hooks in `.claude/settings.json`), suggest `/beardrive:install` instead.
