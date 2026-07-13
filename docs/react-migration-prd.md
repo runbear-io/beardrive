@@ -186,11 +186,18 @@ refresh; invalidate after uploads/renames/admin actions — mirror today's
       `e2e/home.spec.ts`; suite is 34 specs, ~13s, stable across runs.
 
 ### Phase 4 — admin surfaces
-- [ ] Org admin: rename, members (role change/remove), invite create/list/
-      revoke with expiry, org shares list + revoke.
-- [ ] Hub settings + pending-approval queue (approve/deny), policy toggles.
-- [ ] All actions confirm via modal where the current UI does; toasts on
-      success/error.
+- [x] Org admin: rename, members (role change/remove, self marked),
+      projects (rename/delete), invite create/list/revoke with expiry +
+      uses, org-wide share audit with revoke; member view is read-only.
+- [x] Hub settings + pending-approval queue (approve/deny), policy
+      toggles (verification disabled without SMTP), read-only
+      domains/self-signup/admins rows.
+- [x] Destructive actions confirm via modal; toasts on success/error.
+      Design note: panels are NOT routes (parity with the classic app) —
+      Browser takes a `panel` prop that replaces the content pane and
+      hides file actions; HubApp owns the state and clears it on any
+      pathname change. Known accepted deviation: deleting the currently
+      open project closes the panel (the URL fallback redirect fires).
 
 ### Phase 5 — parity gate & swap
 - [ ] Port the 17 checks from the pre-existing smoke suite (see
@@ -253,7 +260,7 @@ file path; reload on `/insights`.
 - [x] Phase 1
 - [x] Phase 2
 - [x] Phase 3
-- [ ] Phase 4
+- [x] Phase 4
 - [ ] Phase 5
 
 Blockers / deviations: (record here; stop rather than deviate silently)

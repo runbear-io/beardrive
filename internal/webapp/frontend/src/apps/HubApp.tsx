@@ -4,7 +4,9 @@ import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../a
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
 import { parseRoute } from "../router";
 import { navigate, Redirect, useLocationPath } from "../nav";
-import { AppShell, Topbar, VaultHeader } from "../components/shell";
+import { AppShell, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
+import { OrgAdmin } from "../components/OrgAdmin";
+import { HubSettings } from "../components/HubSettings";
 import { ProjectNav } from "../components/ProjectNav";
 import { OrgBar } from "../components/OrgBar";
 import { EmptyState } from "../components/EmptyState";
@@ -17,6 +19,10 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // Org just joined via an invite this page-load: prefer its projects over
   // whatever happens to be first in the list.
   const [joinedOrgId, setJoinedOrgId] = useState<string | null>(null);
+  // Admin panels replace the content pane without touching the URL (they
+  // were never routes in the classic app); any navigation closes them.
+  const [panel, setPanel] = useState<null | { kind: "hub" } | { kind: "org"; orgId: string }>(null);
+  useEffect(() => setPanel(null), [pathname]);
 
   const joinToken = useMemo(() => {
     const m = pathname.match(/^\/join\/([0-9a-f]+)\/?$/);
@@ -75,8 +81,27 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       name={projects ? (current ? current.name : brand) : "…"}
       onHome={current ? () => navigate("/" + current.id) : undefined}
       showSignout={config.auth.enabled}
-      admin={isAdmin ? { pending: pending?.length || 0, onClick: () => {} } : undefined}
-      gear={gearTarget ? { onClick: () => {} } : undefined}
+      admin={
+        isAdmin
+          ? {
+              pending: pending?.length || 0,
+              onClick: () => {
+                setPanel({ kind: "hub" });
+                closeSidebarOnMobile();
+              },
+            }
+          : undefined
+      }
+      gear={
+        gearTarget
+          ? {
+              onClick: () => {
+                setPanel({ kind: "org", orgId: gearTarget.id });
+                closeSidebarOnMobile();
+              },
+            }
+          : undefined
+      }
     />
   );
 
@@ -117,6 +142,24 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     );
   }
 
+  const panelOrg = panel?.kind === "org" ? orgs.find((o) => o.id === panel.orgId) : null;
+  const activePanel =
+    panel?.kind === "hub"
+      ? { crumb: "Signup & access", body: <HubSettings /> }
+      : panelOrg
+        ? {
+            crumb: panelOrg.name,
+            body: (
+              <OrgAdmin
+                org={panelOrg}
+                projects={projects}
+                myEmail={config.me?.email || ""}
+                onProjectsChanged={refresh}
+              />
+            ),
+          }
+        : null;
+
   // Landing ("/") and unknown project ids both resolve to a real project
   // URL; replace so back/forward never bounces through the redirect.
   if (route.project !== current.id) {
@@ -136,8 +179,17 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       sidebar={{
         vault,
         projectsNav: <ProjectNav projects={projects} currentId={current.id} />,
-        orgBar: <OrgBar org={org} onManage={() => {}} />,
+        orgBar: (
+          <OrgBar
+            org={org}
+            onManage={(o) => {
+              setPanel({ kind: "org", orgId: o.id });
+              closeSidebarOnMobile();
+            }}
+          />
+        ),
       }}
+      panel={activePanel}
     />
   );
 }

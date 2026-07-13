@@ -37,6 +37,10 @@ export default function Browser(props: {
   projects?: Project[];
   canInsights?: boolean;
   sidebar: { vault: ReactNode; projectsNav?: ReactNode; orgBar?: ReactNode };
+  // Admin panels (org admin, hub settings) replace the content pane without
+  // touching the URL — matching the classic app, where they were never
+  // routes. Any navigation closes them (the caller owns that state).
+  panel?: { crumb: string; body: ReactNode } | null;
 }) {
   const { config, apiBase, route, hub, project } = props;
   const routeKey = useLocationPath(); // scroll memo key, one slot per URL
@@ -138,11 +142,12 @@ export default function Browser(props: {
   const uploadInput = useRef<HTMLInputElement>(null);
   const downloadRef = useRef<HTMLAnchorElement>(null);
 
-  const canShare = hub && !!project && isFile;
-  const canHistory = hub && !!project;
+  const panel = props.panel ?? null;
+  const canShare = !panel && hub && !!project && isFile;
+  const canHistory = !panel && hub && !!project;
   const canUpload = !!config.upload?.enabled && (!hub || !!project);
-  const canDownload = isFile;
-  const canMore = isFile || (hub && !!project && isDir);
+  const canDownload = !panel && isFile;
+  const canMore = !panel && (isFile || (hub && !!project && isDir));
   const downloadURL = apiBase + "download?path=" + encodeURIComponent(path);
 
   const shareNow = useCallback(async () => {
@@ -243,7 +248,10 @@ export default function Browser(props: {
   const isFolderFn = useCallback((p: string) => dirIndex.has(p), [dirIndex]);
   let contentClass = "markdown";
   let view: ReactNode;
-  if (route.view === "insights") {
+  if (panel) {
+    contentClass = "view";
+    view = panel.body;
+  } else if (route.view === "insights") {
     contentClass = "view";
     view = props.canInsights ? (
       <Insights
@@ -323,7 +331,9 @@ export default function Browser(props: {
     view = <div className="empty">Select a file to read it.</div>;
   }
 
-  const crumb = path ? (
+  const crumb = panel ? (
+    panel.crumb
+  ) : path ? (
     <Breadcrumbs path={path} onOpenFolder={openPath} />
   ) : route.view === "insights" ? (
     "Insights — " + (project?.name ?? "")

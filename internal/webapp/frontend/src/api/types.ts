@@ -124,6 +124,36 @@ export interface ShareCreated {
   url: string;
 }
 
+// GET /api/orgs/{org}/invites (handleInviteList, orgs.go)
+export interface OrgInviteInfo {
+  token: string;
+  url: string;
+  creator?: string;
+  created?: string;
+  expires: string;
+  uses: number;
+}
+
+// GET /api/orgs/{org}/shares (handleOrgShares, admin.go)
+export interface OrgShareInfo {
+  token: string;
+  url: string;
+  path: string;
+  project_name?: string;
+  creator?: string;
+  created?: string;
+}
+
+// GET/POST /api/admin/policy (handleAdminPolicy, admin.go)
+export interface AdminPolicy {
+  require_verification: boolean;
+  require_approval: boolean;
+  allow_signup: boolean;
+  allowed_domains?: string[]; // read-only (server config)
+  admins?: string[]; // read-only (server config)
+  mailer: boolean;
+}
+
 // POST .../upload/init (handleUploadInit, upload.go)
 export interface UploadPlan {
   mode: "direct" | "server";
