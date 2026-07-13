@@ -26,7 +26,8 @@ Follow these steps:
 
    - **gbrain** (`gbrain.yml`, or a gbrain MCP server / brain-first
      CLAUDE.md block) → offer to sync the brain's shared subfolder as its
-     own project; never a brain root.
+     own project; never a brain root, and one enrichment owner per shared
+     folder (everyone else indexes read-only — see the skill).
    - **OKF wiki** (markdown with OKF frontmatter) → offer: connect the
      wiki dir via `--shared`, or keep it PR-gated and create a new shared
      folder.
