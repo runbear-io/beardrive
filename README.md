@@ -509,6 +509,26 @@ The integration tests in `internal/syncer` simulate multiple devices syncing
 through a `file://` remote, including offline operation and concurrent-edit
 conflicts. Set `BDRIVE_HOME` to relocate all beardrive state (used heavily in tests).
 
+### Web frontend
+
+The hub's web UI is a React + TypeScript app in `internal/webapp/frontend`
+(Vite; runtime dependencies are just react, react-dom, and
+@tanstack/react-query — routing is a small in-repo history router). Its
+**built output is committed** at `internal/webapp/static`, the `go:embed`
+target, so building or `go install`-ing the binary never needs Node.
+
+Only when changing `frontend/src`:
+
+```sh
+cd internal/webapp/frontend
+npm install
+npm run dev       # hot-reload dev server, proxying /api to a local hub
+                  # (BDRIVE_DEV_PROXY=http://localhost:8993 to point elsewhere)
+npm run build     # rebuild internal/webapp/static — commit the result
+npm run e2e       # Playwright suite; starts its own seeded hub on :8993
+./check-dist.sh   # verify the committed static/ is fresh (pre-release check)
+```
+
 ## License
 
 GNU AGPL-3.0 — Copyright 2026 Runbear, Inc. See [LICENSE](LICENSE).

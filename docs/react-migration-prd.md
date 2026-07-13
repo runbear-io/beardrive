@@ -200,21 +200,25 @@ refresh; invalidate after uploads/renames/admin actions — mirror today's
       open project closes the panel (the URL fallback redirect fires).
 
 ### Phase 5 — parity gate & swap
-- [ ] Port the 17 checks from the pre-existing smoke suite (see
-      §Verification) into `frontend/e2e/` as Playwright tests; extend with:
-      login→browse→open markdown file, upload roundtrip, share create/
-      revoke, org admin invite flow, history view, 404 on `/api/nope`.
-- [ ] Full e2e suite green against the harness hub.
-- [ ] Old `app.js`/old `index.html`/old `style.css` gone from the repo
-      (replaced by build output); `git grep renderConnectGuide` finds only
-      frontend/src.
-- [ ] Docs updated: README (frontend dev section), CLAUDE.md (`webapp`
-      package description — replace "dependency-free vanilla JS" with the
-      React/Vite reality, build + check-dist instructions),
-      `plugin/skills/beardrive/SKILL.md` only if it mentions frontend
-      internals (it likely doesn't — verify).
-- [ ] `go build ./...` from a clean checkout with no Node succeeds and
-      serves the React app.
+- [x] The 17 original smoke checks ported (`e2e/home.spec.ts`) and
+      extended: login→browse→markdown, upload roundtrip, share
+      create/revoke (+public fetch), org admin flows, history views,
+      404 on `/api/nope`. 42 specs total, ~16s, stable.
+- [x] Full e2e suite green against the harness hub.
+- [x] Old `app.js`/`index.html`/`style.css` gone; `git grep
+      renderConnectGuide` outside frontend/ matches only this PRD.
+- [x] Docs updated: README §Development gains a "Web frontend" section;
+      CLAUDE.md Commands + `webapp` package description rewritten for the
+      React/Vite reality (committed dist, check-dist, the no-router and
+      no-DOM-patching lessons); plugin docs mention no frontend internals
+      (verified — nothing to change).
+- [x] `go build` from a clean `git archive` checkout with no
+      `frontend/` tooling succeeds and serves the React app (hashed
+      assets 200, immutable).
+- [x] Visual parity pass: screenshots of home/guide, embedded insights,
+      file view, folder listing, history, org admin, palette, mobile —
+      after fixing `#root { display: contents }` (body's flex layout must
+      see through the React mount point).
 
 ## Verification (every phase)
 
@@ -261,6 +265,9 @@ file path; reload on `/insights`.
 - [x] Phase 2
 - [x] Phase 3
 - [x] Phase 4
-- [ ] Phase 5
+- [x] Phase 5
 
-Blockers / deviations: (record here; stop rather than deviate silently)
+Blockers / deviations: none open. Two documented deviations, both
+deliberate: react-router-dom replaced by the in-repo synchronous router
+(invariant 5), and deleting the currently-open project closes the org
+admin panel (Phase 4 note).
