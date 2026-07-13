@@ -100,19 +100,25 @@ refresh; invalidate after uploads/renames/admin actions — mirror today's
 ## Phases
 
 ### Phase 0 — scaffold & pipeline
-- [ ] Vite+React+TS workspace at `internal/webapp/frontend/`; build lands in
-      `internal/webapp/static/` and is committed; old files removed only in
-      Phase 5 (until then keep building the new app; parity gate flips the
-      switch — see note below).
-- [ ] NOTE: to keep `main`-mergeable states shippable, do the whole
-      migration on ONE branch; each phase is a commit (or a few), and the
-      committed `static/` on the branch is the React build from Phase 0 on.
-- [ ] `style.css` ported verbatim as global stylesheet; SVG sprite ported.
-- [ ] Dev proxy works against a local hub.
-- [ ] Cache-header change in `frontend()` + assets served hashed.
-- [ ] `check-dist.sh` works.
-- [ ] e2e harness (§Verification) committed and starts a seeded hub.
-- [ ] `go build ./...`, `go vet ./...`, `go test ./...` green.
+- [x] Vite+React+TS workspace at `internal/webapp/frontend/`; build lands in
+      `internal/webapp/static/` and is committed. The branch's `static/` is
+      the React build from Phase 0 on (the old files live on `main` /
+      `git show main:internal/webapp/static/app.js` for porting reference);
+      the parity gate in Phase 5 is what makes the branch mergeable.
+- [x] `style.css` ported verbatim as global stylesheet; SVG sprite ported
+      (kept inline in `index.html`, as before).
+- [x] Dev proxy works against a local hub (`BDRIVE_DEV_PROXY` overrides the
+      `localhost:8080` default).
+- [x] Cache-header change in `frontend()` + assets served hashed
+      (covered by `TestFrontendSPAFallback`).
+- [x] `check-dist.sh` works.
+- [x] e2e harness committed (`e2e_serve_test.go`, gated by
+      `BDRIVE_E2E_SERVE=1`, port 8993, fresh state each run) and wired as
+      Playwright's webServer; 4 shell specs green. Also ported in Phase 0
+      (the e2e login flow needed it): the `getJSON`/`postJSON` layer with
+      401→login redirect, `/api/config` boot, and the title/vault-name
+      wiring (`src/api/http.ts`, `src/hooks/useConfig.ts`).
+- [x] `go build ./...`, `go vet ./...`, `go test ./...` green.
 
 ### Phase 1 — shell: boot, session, projects, routing
 - [ ] Boot from `/api/config`; volume vs hub mode both render.
@@ -129,6 +135,9 @@ refresh; invalidate after uploads/renames/admin actions — mirror today's
 - [ ] Breadcrumbs; per-route scroll restoration.
 - [ ] Download + raw file view; share button state; share dialog.
 - [ ] Drag-drop upload (presign and relay paths) with refresh after commit.
+- [ ] Command palette (⌘K: file names, projects, actions — port the
+      palette overlay from the old shell) and the topbar overflow menu
+      (`more-btn`/`more-menu`) for narrow viewports.
 
 ### Phase 3 — project home, insights, history
 - [ ] Project home at `/<pid>`: connect guide (3 tabs: "Claude Code &
@@ -206,7 +215,7 @@ file path; reload on `/insights`.
 
 ## Status
 
-- [ ] Phase 0
+- [x] Phase 0
 - [ ] Phase 1
 - [ ] Phase 2
 - [ ] Phase 3

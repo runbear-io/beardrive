@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -78,8 +79,11 @@ func TestFrontendSPAFallback(t *testing.T) {
 		if rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "text/html") {
 			t.Fatalf("%s: want 200 html, got %d %s", url, rec.Code, rec.Header().Get("Content-Type"))
 		}
-		if !strings.Contains(rec.Body.String(), `id="sidebar"`) {
+		if !strings.Contains(rec.Body.String(), `id="root"`) {
 			t.Fatalf("%s: expected the app shell, got %.60q", url, rec.Body.String())
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("%s: the shell must revalidate, got Cache-Control %q", url, cc)
 		}
 	}
 	// Client routes all resolve to the shell, not a 404 or file content.
@@ -88,12 +92,18 @@ func TestFrontendSPAFallback(t *testing.T) {
 	shell("/p-deadbeef/notes/plan.md") // hub-style route
 	shell("/join/abc123")              // invite route
 
-	// Real assets are served as themselves.
-	if rec := get(t, h, "/app.js"); rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "javascript") {
-		t.Fatalf("/app.js: %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	// Real assets are served as themselves, cacheable forever: Vite emits
+	// content-hashed filenames, so find one instead of hardcoding a hash.
+	assets, err := fs.Glob(staticFiles, "static/assets/*.js")
+	if err != nil || len(assets) == 0 {
+		t.Fatalf("no built js asset embedded (run npm run build in frontend/): %v", err)
 	}
-	if rec := get(t, h, "/style.css"); rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "css") {
-		t.Fatalf("/style.css: %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	rec := get(t, h, strings.TrimPrefix(assets[0], "static"))
+	if rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("%s: %d %s", assets[0], rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+		t.Fatalf("hashed assets must be immutable, got Cache-Control %q", cc)
 	}
 
 	// A mistyped API path is a genuine 404, not the shell.
