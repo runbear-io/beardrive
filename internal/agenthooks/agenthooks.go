@@ -13,10 +13,15 @@
 //
 // The hook syncs the project and stamps changes with "<agent> session <id>"
 // (see `bdrive sync --note`), so hub history links every change to the agent
-// session that made it. A third hook on each platform's read-tool matcher
-// runs `bdrive read-log`, queueing agent file reads for the hub's read
-// heatmap (drained on the next sync — the hook itself never touches the
-// network). Hooks are fast no-ops outside bdrive projects.
+// session that made it. A third hook runs `bdrive read-log` on each
+// platform's read-shaped tools — native file reads, grep-style searches
+// (the files the matches came from), and shell commands (the existing files
+// they name) — queueing agent file reads for the hub's read heatmap
+// (drained on the next sync — the hook itself never touches the network).
+// Listing tools (glob, ls) are deliberately unmatched: seeing a file's name
+// is not reading it. Hooks are fast no-ops outside bdrive projects, and
+// reinstalling upgrades a registered hook's matcher in place when coverage
+// grows.
 package agenthooks
 
 import (
@@ -84,18 +89,22 @@ var platforms = map[string]platform{
 		label:      "claude-code",
 		projectDir: ".claude",
 		install: func(folder string) (string, bool, error) {
+			// Reads happen through more than the Read tool: Grep consumes
+			// the files its matches come from, and Bash reads whatever
+			// files the command names (`read-log` mines both payloads).
+			// Glob stays unmatched on purpose — listing names isn't reading.
 			return mergeJSONHooks(filepath.Join(folder, ".claude", "settings.json"),
-				"UserPromptSubmit", "PostToolUse", "Write|Edit|MultiEdit", "Read", "claude-code", 30, true)
+				"UserPromptSubmit", "PostToolUse", "Write|Edit|MultiEdit", "Read|Grep|Bash", "claude-code", 30, true)
 		},
 	},
 	"codex": {
 		label:      "codex",
 		projectDir: ".codex",
 		install: func(folder string) (string, bool, error) {
-			// Codex reads mostly happen through shell commands, so the
-			// read_file matcher is best-effort coverage.
+			// Codex reads mostly happen through shell commands; read-log
+			// mines the command line for the files it names.
 			return mergeJSONHooks(filepath.Join(folder, ".codex", "hooks.json"),
-				"UserPromptSubmit", "PostToolUse", "apply_patch", "read_file", "codex", 30, false)
+				"UserPromptSubmit", "PostToolUse", "apply_patch", "read_file|shell", "codex", 30, false)
 		},
 		note: "run /hooks inside Codex once to trust the project's .codex layer",
 	},
@@ -105,7 +114,8 @@ var platforms = map[string]platform{
 		install: func(folder string) (string, bool, error) {
 			// Gemini uses its own event names and millisecond timeouts.
 			return mergeJSONHooks(filepath.Join(folder, ".gemini", "settings.json"),
-				"BeforeAgent", "AfterTool", "write_file|replace|edit", "read_file|read_many_files", "gemini", 30000, false)
+				"BeforeAgent", "AfterTool", "write_file|replace|edit",
+				"read_file|read_many_files|search_file_content|run_shell_command", "gemini", 30000, false)
 		},
 	},
 	"hermes": {
@@ -214,16 +224,24 @@ func mergeJSONHooks(path, pullEvent, pushEvent, pushMatcher, readMatcher, label 
 
 	changed := false
 	for _, g := range []struct {
-		event  string
-		group  map[string]any
-		marker string
+		event   string
+		group   map[string]any
+		marker  string
+		matcher string // non-empty: keep an already-registered group's matcher current
 	}{
-		{pullEvent, pull, marker},
-		{pushEvent, push, marker},
-		{pushEvent, read, readMarker},
+		{pullEvent, pull, marker, ""},
+		{pushEvent, push, marker, pushMatcher},
+		{pushEvent, read, readMarker, readMatcher},
 	} {
 		arr, _ := hooks[g.event].([]any)
-		if containsMarker(arr, g.marker) {
+		if grp := findMarkerGroup(arr, g.marker); grp != nil {
+			// Already registered — but upgrade a stale matcher in place so
+			// coverage improvements reach existing projects on reinstall
+			// (e.g. the read hook growing from "Read" to "Read|Grep|Bash").
+			if g.matcher != "" && grp["matcher"] != g.matcher {
+				grp["matcher"] = g.matcher
+				changed = true
+			}
 			continue
 		}
 		hooks[g.event] = append(arr, g.group)
@@ -256,18 +274,23 @@ func installHermes(string) (string, bool, error) {
 	}
 	cmd := hookCommand("hermes")
 	groups := []struct {
-		event  string
-		group  map[string]any
-		marker string
+		event   string
+		group   map[string]any
+		marker  string
+		matcher string
 	}{
-		{"pre_llm_call", map[string]any{"command": cmd, "timeout": 30}, marker},
-		{"post_tool_call", map[string]any{"matcher": "write_file|patch", "command": cmd, "timeout": 30}, marker},
-		{"post_tool_call", map[string]any{"matcher": "read_file", "command": readHookCommand(), "timeout": 30}, readMarker},
+		{"pre_llm_call", map[string]any{"command": cmd, "timeout": 30}, marker, ""},
+		{"post_tool_call", map[string]any{"matcher": "write_file|patch", "command": cmd, "timeout": 30}, marker, "write_file|patch"},
+		{"post_tool_call", map[string]any{"matcher": "read_file|grep|bash", "command": readHookCommand(), "timeout": 30}, readMarker, "read_file|grep|bash"},
 	}
 	changed := false
 	for _, g := range groups {
 		arr, _ := hooks[g.event].([]any)
-		if containsMarker(arr, g.marker) {
+		if grp := findMarkerGroup(arr, g.marker); grp != nil {
+			if g.matcher != "" && grp["matcher"] != g.matcher {
+				grp["matcher"] = g.matcher
+				changed = true
+			}
 			continue
 		}
 		hooks[g.event] = append(arr, g.group)
@@ -287,6 +310,18 @@ func installHermes(string) (string, bool, error) {
 func containsMarker(v any, m string) bool {
 	data, err := json.Marshal(v)
 	return err == nil && strings.Contains(string(data), m)
+}
+
+// findMarkerGroup returns the hook group in the array that carries the
+// marker (so its matcher can be upgraded in place), or nil.
+func findMarkerGroup(arr []any, m string) map[string]any {
+	for _, it := range arr {
+		grp, ok := it.(map[string]any)
+		if ok && containsMarker(grp, m) {
+			return grp
+		}
+	}
+	return nil
 }
 
 func writeConfig(path string, marshal func() ([]byte, error)) error {

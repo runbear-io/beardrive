@@ -76,7 +76,7 @@ func TestInstallJSONPlatforms(t *testing.T) {
 		t.Fatal("claude push hook should be async")
 	}
 	// …and the read hook, on its own matcher.
-	if !strings.Contains(string(raw), "bdrive read-log") || !strings.Contains(string(raw), `"matcher":"Read"`) {
+	if !strings.Contains(string(raw), "bdrive read-log") || !strings.Contains(string(raw), `"matcher":"Read|Grep|Bash"`) {
 		t.Fatalf("claude read hook missing: %s", raw)
 	}
 
@@ -88,13 +88,13 @@ func TestInstallJSONPlatforms(t *testing.T) {
 	if strings.Contains(string(cx), "async") {
 		t.Fatal("codex should not get the claude-only async field")
 	}
-	if !strings.Contains(string(cx), "bdrive read-log") || !strings.Contains(string(cx), `"matcher":"read_file"`) {
+	if !strings.Contains(string(cx), "bdrive read-log") || !strings.Contains(string(cx), `"matcher":"read_file|shell"`) {
 		t.Fatalf("codex read hook missing: %s", cx)
 	}
 
 	// Gemini: its own event names and ms timeout.
 	gm, _ := json.Marshal(readJSON(t, filepath.Join(folder, ".gemini", "settings.json")))
-	for _, want := range []string{"BeforeAgent", "AfterTool", "gemini session $s", "30000", "bdrive read-log", "read_file|read_many_files"} {
+	for _, want := range []string{"BeforeAgent", "AfterTool", "gemini session $s", "30000", "bdrive read-log", "read_file|read_many_files|search_file_content|run_shell_command"} {
 		if !strings.Contains(string(gm), want) {
 			t.Fatalf("gemini hooks missing %q: %s", want, gm)
 		}
@@ -169,6 +169,47 @@ func TestInstallUpgradesSyncOnlyConfig(t *testing.T) {
 	raw, _ := json.Marshal(cfg)
 	if !strings.Contains(string(raw), "bdrive read-log") {
 		t.Fatal("upgrade did not add the read hook")
+	}
+}
+
+// A config registered when the read hook only matched "Read" gets its
+// matcher upgraded in place on re-install — coverage improvements must
+// reach existing projects without duplicating groups.
+func TestInstallUpgradesReadMatcher(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	folder := t.TempDir()
+	old := `{"hooks":{
+		"UserPromptSubmit":[{"hooks":[{"type":"command","command":"sh -c 'bdrive sync .'"}]}],
+		"PostToolUse":[
+			{"matcher":"Write|Edit|MultiEdit","hooks":[{"type":"command","command":"sh -c 'bdrive sync .'"}]},
+			{"matcher":"Read","hooks":[{"type":"command","command":"sh -c 'bdrive read-log .'"}]}]}}`
+	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)
+	os.WriteFile(filepath.Join(folder, ".claude", "settings.json"), []byte(old), 0o644)
+
+	results, err := Install(folder, []string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !results[0].Changed {
+		t.Fatal("matcher upgrade reported unchanged")
+	}
+	cfg := readJSON(t, filepath.Join(folder, ".claude", "settings.json"))
+	hooks := cfg["hooks"].(map[string]any)
+	if got := len(hooks["PostToolUse"].([]any)); got != 2 {
+		t.Fatalf("PostToolUse groups = %d, want push + read (no duplicates)", got)
+	}
+	raw, _ := json.Marshal(cfg)
+	if !strings.Contains(string(raw), `"matcher":"Read|Grep|Bash"`) {
+		t.Fatalf("read matcher not upgraded: %s", raw)
+	}
+	if strings.Contains(string(raw), `"matcher":"Read"`+",") {
+		t.Fatalf("old matcher left behind: %s", raw)
+	}
+
+	// And it settles: the next install is a no-op.
+	results, _ = Install(folder, []string{"claude"})
+	if results[0].Changed {
+		t.Fatal("re-install after upgrade reported a change")
 	}
 }
 

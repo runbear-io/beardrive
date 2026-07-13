@@ -97,10 +97,11 @@ team's latest files), push right after edits (artifacts land on the server
 seconds after they're created — daemon or no daemon), and stamp every
 change with the agent session that made it (`bdrive sync --note "<agent>
 session <id>"` — visible in `bdrive log` and the hub's history views).
-A third hook on each platform's read tool (`bdrive read-log`) queues which
-files the agent read, so the hub's read heatmap can show admins what the
-team's agents actually consume — reads are reported on the next sync,
-never from the hook itself. They are fast no-ops in folders without
+A third hook (`bdrive read-log`) queues which files the agent read — via
+the native read tool, grep-style searches (the files the matches came
+from), or shell commands that name project files — so the hub's read
+heatmap can show admins what the team's agents actually consume. Reads
+are reported on the next sync, never from the hook itself. They are fast no-ops in folders without
 `.bdrive/`.
 
 Tell the user which platforms got hooks (`bdrive hooks` shows the status

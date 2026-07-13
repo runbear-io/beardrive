@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,8 +12,21 @@ import (
 )
 
 // Real hook payload shapes from the supported platforms — read-log must find
-// the file paths wherever each platform puts them.
+// the file paths wherever each platform puts them. Shell and search events
+// are mined heuristically, so the folder holds real files to stat against.
 func TestExtractEventPaths(t *testing.T) {
+	folder := t.TempDir()
+	for _, f := range []string{"wiki/a.md", "wiki/b.md", "notes.md", "out.md"} {
+		p := filepath.Join(folder, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	abs := func(rel string) string { return filepath.Join(folder, rel) }
+
 	cases := map[string]struct {
 		payload string
 		want    []string
@@ -46,9 +60,37 @@ func TestExtractEventPaths(t *testing.T) {
 			`plain text`,
 			nil,
 		},
+		// Shell commands: existing files named as arguments count as reads;
+		// flags, missing files, and redirect targets don't.
+		"bash cat and grep": {
+			`{"tool_name":"Bash","tool_input":{"command":"cat wiki/a.md && grep -n foo notes.md missing.md > out.md"}}`,
+			[]string{"wiki/a.md", "notes.md"},
+		},
+		"bash pipeline with quotes": {
+			`{"tool_name":"Bash","tool_input":{"command":"tail -20 'wiki/b.md' | head -5"}}`,
+			[]string{"wiki/b.md"},
+		},
+		// Search tools: reads are the files the MATCHES came from, mined
+		// from the response; the scope dir in tool_input.path must not leak.
+		"grep content lines": {
+			`{"tool_name":"Grep","tool_input":{"pattern":"foo","path":"` + folder + `"},
+			  "tool_response":{"content":"wiki/a.md:3:foo bar\nwiki/b.md:9:foo"}}`,
+			[]string{"wiki/a.md", "wiki/b.md"},
+		},
+		"grep filenames list": {
+			`{"tool_name":"Grep","tool_input":{"pattern":"foo","path":"` + folder + `"},
+			  "tool_response":{"filenames":["` + abs("notes.md") + `"]}}`,
+			[]string{abs("notes.md")},
+		},
+		// Listing tools: seeing a file's name is not reading it.
+		"glob ignored": {
+			`{"tool_name":"Glob","tool_input":{"pattern":"**/*.md"},
+			  "tool_response":{"filenames":["` + abs("wiki/a.md") + `"]}}`,
+			nil,
+		},
 	}
 	for name, c := range cases {
-		got := extractEventPaths([]byte(c.payload))
+		got := extractEventPaths([]byte(c.payload), folder)
 		if strings.Join(got, ",") != strings.Join(c.want, ",") {
 			t.Errorf("%s: paths = %v, want %v", name, got, c.want)
 		}
