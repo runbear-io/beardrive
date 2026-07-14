@@ -79,6 +79,7 @@ spot-checked each round — no regressions introduced by mobile fixes.
 
 | Round | layout | readability | tap-targets | navigation | polish | high-sev findings |
 |---|---|---|---|---|---|---|
+| 1 (before fixes) | 5 | 7 | 6 | 8 | 7 | 1 (topbar overflow at 768/844 — breakpoint gap) |
 
 ## Won't-fix / disputed
 

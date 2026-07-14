@@ -294,7 +294,7 @@ button, input, a.btn { font-family: inherit; }
 .gd-desc { margin: 2px 0 8px 32px; color: var(--text-faint); font-size: 13px; line-height: 1.5; }
 .gd-extra { font-size: 12.5px; margin-top: 6px; }
 .gd-code { position: relative; margin: 6px 0 6px 32px; padding: 10px 72px 10px 12px; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6; color: var(--text); overflow-x: auto; white-space: pre; }
-.gd-copy { position: absolute; top: 7px; right: 7px; font: inherit; font-family: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-2); background: var(--surface); color: var(--text-faint); cursor: pointer; }
+.gd-copy { position: absolute; top: 7px; right: 7px; font: inherit; font-family: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-2); background: var(--bg-raise); color: var(--text-faint); cursor: pointer; box-shadow: -14px 0 12px -6px var(--bg-raise); }
 .gd-copy:hover { color: var(--accent-bright); border-color: var(--accent-dim); }
 .gd-done { margin: 22px 0 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); color: var(--text-faint); font-size: 13px; line-height: 1.5; }
 .home-insights { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--border); }
@@ -410,8 +410,12 @@ button, input, a.btn { font-family: inherit; }
 
 #sb-backdrop { display: none; }
 
-/* ---- responsive ---- */
-@media (max-width: 760px) {
+/* ---- responsive ----
+   900px covers tablet portrait (768) and phone landscape (844): with the
+   fixed 264px sidebar plus the full topbar those widths overflow the page
+   (measured 849px needed at 768) — they need the off-canvas/collapsed
+   chrome just like phones. */
+@media (max-width: 900px) {
   #sidebar { position: fixed; z-index: 60; top: 0; left: 0; height: 100%; transform: translateX(-100%); transition: transform .2s ease; box-shadow: 0 0 40px rgba(0,0,0,.6); }
   body.sb-open #sidebar { transform: translateX(0); }
   body.sb-open #sb-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 50; }
@@ -427,12 +431,34 @@ button, input, a.btn { font-family: inherit; }
   #vault { padding: 0 8px 0 12px; }
   .icon-btn2, #signout, .adminbar { min-width: 44px; min-height: 44px; }
   #tree li > .row, #projects .row { height: 44px; }
-  #invite-btn { min-height: 40px; padding: 0 14px; }
+  #invite-btn { min-height: 44px; padding: 0 14px; }
   #org-name { min-height: 44px; }
   .nav-add { min-width: 44px; min-height: 44px; }
   .markdown, .admin, .onboard, .history, .dirlist { max-width: 100%; }
   .markdown table, pre.plain { display: block; overflow-x: auto; max-width: 100%; }
   .ob-row { flex-direction: column; }
+  /* Admin rows: 27-28px selects/buttons are too small to tap; let rows
+     wrap so the controls keep room next to long names/URLs. */
+  .admin-item { flex-wrap: wrap; row-gap: 8px; padding: 12px 14px; }
+  .admin-item select { height: 40px; }
+  .ai-btn, .ai-del { height: auto; min-height: 40px; padding: 0 12px; }
+  .modal-actions button { height: auto; min-height: 44px; }
+  .pbtn { height: auto; min-height: 44px; }
+  #palette-results li { height: auto; min-height: 44px; }
+}
+
+/* The destructive Revoke must not sit flush against the safe Done on a
+   touch row — push it to the far side (share dialog only; prompts and
+   confirms have no .ai-del). */
+.modal-actions .ai-del { margin-right: auto; }
+
+@media (max-width: 430px) {
+  /* The name wins the row: drop the verbose meta (the heat dot still
+     conveys activity) instead of truncating "readme.md" to "readme...." */
+  .dl-meta { display: none; }
+  .ai-tag { font-size: 11px; }
+  .htime { white-space: nowrap; font-size: 11px; }
+  .hline { flex-wrap: wrap; }
 }
 
 /* ---- markdown reading view ---- */
