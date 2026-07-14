@@ -453,6 +453,9 @@ button, input, a.btn { font-family: inherit; }
      blocks the height to hold it. */
   .gd-code { min-height: 62px; padding-top: 12px; padding-bottom: 12px; }
   .gd-copy { min-height: 44px; padding: 0 14px; }
+  .gd-tab { min-height: 44px; }
+  .in-lens-btn { min-height: 44px; padding: 0 14px; }
+  .modal-input { height: 44px; }
   .modal-actions button { height: auto; min-height: 44px; }
   .pbtn { height: auto; min-height: 44px; }
   #palette-results li { height: auto; min-height: 44px; }
@@ -471,6 +474,9 @@ button, input, a.btn { font-family: inherit; }
   .ai-tag { font-size: 11px; }
   .htime { white-space: nowrap; font-size: 12px; }
   .hline { flex-wrap: wrap; }
+  /* Four share-dialog buttons don't fit one row at 360 — the destructive
+     Revoke takes its own line rather than sitting 9px from Done. */
+  .modal-actions .ai-del { flex: 0 0 100%; }
 }
 
 /* ---- markdown reading view ---- */
