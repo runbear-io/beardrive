@@ -349,7 +349,7 @@ export default function Browser(props: {
       meta={uploadStatus || meta}
       actions={
         <>
-          <button className="btn ghost" title="Search (⌘K)" onClick={() => setPaletteOpen(true)}>
+          <button id="search-btn" className="btn ghost" title="Search (⌘K)" onClick={() => setPaletteOpen(true)}>
             <Icon name="search" /> <span className="lbl">Search</span> <kbd>⌘K</kbd>
           </button>
           {canShare && (

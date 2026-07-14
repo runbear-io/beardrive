@@ -83,10 +83,30 @@ spot-checked each round — no regressions introduced by mobile fixes.
 | 2 (after round-1 fixes) | 9 | 8 | 8 | 9 | 8 | 0 (5 low cosmetics, fixed before round 3) |
 | 3 (after low-fixes) | 6 | 6 | 7 | 9 | 6 | 1 (REGRESSION: URL rows collapsed by the wrap fix — streak reset, fixed for round 4) |
 | 4 (after round-3 fixes) | 9 | 9 | 8 | 9 | 8 | 0 (4 lows: chips/tabs/modal-input heights + share row at 360, fixed before round 5) |
+| 5 (confirmation) | 9 | 9 | 9 | 9 | 8 | 0 — EXIT BAR MET (rounds 4+5 consecutive passes) |
 
 ## Won't-fix / disputed
 
-(none yet)
+- **Palette footer shows keyboard hints ("↑↓ · ↵ · esc") on touch** (round-5
+  low #1, second half): cosmetic copy noise; tap interaction fully works.
+  Changing the hint per-viewport adds conditional copy for no functional
+  gain. (The ⌘K badge half of the finding was a real bug — the React port
+  dropped `id="search-btn"`, so the existing hide rule never matched; fixed
+  post-exit, e2e green.)
+- **Share dialog's Done sits alone on its last row at ≤430** (round-5 low
+  #2): reviewer marked it "intended destructive-isolation behavior…
+  subjective/taste — no action needed".
+- **Server auth pages use 44px controls via their own inline CSS**
+  (`authlocal.go`), the one fix outside `frontend/` — the login page is a
+  spec surface but is server-rendered, unreachable from the frontend
+  stylesheet.
+
+## Status
+
+GOAL COMPLETE (2026-07-14): rounds 4 and 5 both scored every category ≥8
+with zero high-severity findings. Five designer rounds total; round 3
+caught and reset on a regression the loop itself introduced — the
+independent-scoring design worked as intended.
 
 ## Status / blockers
 
