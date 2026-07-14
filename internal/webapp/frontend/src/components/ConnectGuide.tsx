@@ -100,18 +100,11 @@ function guideSteps(agent: GuideAgent, project: Project): Step[] {
   ];
 }
 
-function savedAgent(): string {
-  try {
-    return localStorage.getItem("bdrive-guide-agent") || "claude";
-  } catch {
-    return "claude"; // private mode
-  }
-}
-
 export function ConnectGuide({ project }: { project: Project }) {
-  const [agentKey, setAgentKey] = useState(savedAgent);
-  // A stale saved key (e.g. a tab that no longer exists) falls back to the
-  // first tab rather than rendering nothing.
+  // Always open on the first tab (Claude Code & Cowork) — the tab choice
+  // is per visit, deliberately not persisted: a one-time click on another
+  // agent shouldn't change what every future page load leads with.
+  const [agentKey, setAgentKey] = useState(GUIDE_AGENTS[0].key);
   const agent = GUIDE_AGENTS.find((a) => a.key === agentKey) || GUIDE_AGENTS[0];
 
   return (
@@ -128,14 +121,7 @@ export function ConnectGuide({ project }: { project: Project }) {
             key={a.key}
             className={"gd-tab" + (a.key === agent.key ? " active" : "")}
             data-key={a.key}
-            onClick={() => {
-              setAgentKey(a.key);
-              try {
-                localStorage.setItem("bdrive-guide-agent", a.key);
-              } catch {
-                /* private mode */
-              }
-            }}
+            onClick={() => setAgentKey(a.key)}
           >
             {a.label}
           </button>

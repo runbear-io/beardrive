@@ -13,14 +13,11 @@ test("landing is the project home (guide), not an insights redirect", async ({ p
   await expect(page.locator("#crumb")).toHaveText("wiki");
 });
 
-test("guide: three agent tabs, one active, choice persisted", async ({ page }) => {
+test("guide: three agent tabs, Claude Code & Cowork selected by default", async ({ page }) => {
   await login(page);
   await page.waitForSelector(".guide");
   await expect(page.locator(".gd-tab")).toHaveText(["Claude Code & Cowork", "Hermes", "Codex"]);
-  await expect(page.locator(".gd-tab.active")).toHaveCount(1);
-  await page.click('.gd-tab[data-key="codex"]');
-  expect(await page.evaluate(() => localStorage.getItem("bdrive-guide-agent"))).toBe("codex");
-  await page.click('.gd-tab[data-key="claude"]');
+  await expect(page.locator(".gd-tab.active")).toHaveText("Claude Code & Cowork");
 });
 
 test("claude tab: plugin flow with real hub origin and project id, no raw CLI", async ({ page }) => {
@@ -48,14 +45,14 @@ test("codex tab keeps the full CLI flow", async ({ page }) => {
   await page.click('.gd-tab[data-key="claude"]');
 });
 
-test("a stale saved tab choice falls back to the first tab", async ({ page }) => {
+test("a tab choice is per visit: reload returns to the default", async ({ page }) => {
   await login(page);
   await page.waitForSelector(".guide");
-  await page.evaluate(() => localStorage.setItem("bdrive-guide-agent", "cowork"));
+  await page.click('.gd-tab[data-key="hermes"]');
+  await expect(page.locator(".gd-tab.active")).toHaveText("Hermes");
   await page.reload();
   await page.waitForSelector(".guide");
   await expect(page.locator(".gd-tab.active")).toHaveText("Claude Code & Cowork");
-  await page.evaluate(() => localStorage.setItem("bdrive-guide-agent", "claude"));
 });
 
 test("admin home embeds insights below the guide; member home does not", async ({ page, browser }) => {
