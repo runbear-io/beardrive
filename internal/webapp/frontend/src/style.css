@@ -427,7 +427,11 @@ button, input, a.btn { font-family: inherit; }
   #topbar .btn .ico { width: 18px; height: 18px; }
   #more-btn:not([hidden]) { display: inline-flex; }
   #history-btn, #upload-btn, #download { display: none !important; }
+  /* Desktop right-aligns the actions via #meta's flex:1 — with meta
+     hidden here, the crumb becomes the spacer so Search/Share/⋯ pin to
+     the top-right corner. */
   #meta { display: none; }
+  #crumb { flex: 1; }
   #vault { padding: 0 8px 0 12px; }
   .icon-btn2, #signout, .adminbar { min-width: 44px; min-height: 44px; }
   #tree li > .row, #projects .row { height: 44px; }
