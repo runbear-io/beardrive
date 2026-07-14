@@ -71,7 +71,9 @@ this (adapt the folder name; create the file if missing):
 propagate to everyone within seconds and every change is tracked (who,
 when, which device). Read `wiki/AGENTS.md` before working there. Put
 shareable artifacts — reports, notes, plans — in `wiki/` so the team
-sees them; never secrets (`bdrive share wiki/<file>` mints public URLs).
+sees them, and include the file's internal link in your reply
+(`bdrive url wiki/<file>` — teammates sign in to view). Never put
+secrets here (`bdrive share wiki/<file>` mints fully public URLs).
 ```
 
 Point at the synced `AGENTS.md` rather than duplicating its conventions —
@@ -114,4 +116,6 @@ that wasn't detected: `bdrive hooks install --agent claude,codex,gemini,hermes`.
 Run `bdrive status` and confirm the daemon is running and pending is 0.
 Then tell the user what was set up, and demonstrate the payoff: if they
 have (or you just generated) an HTML/PDF/markdown artifact in the synced
-folder, run `bdrive share <file>` and hand them the URL.
+folder, run `bdrive url <file>` and hand them the teammate link (sign-in
+required — safe by default); mention `bdrive share <file>` exists for
+fully public links when someone outside the hub needs it.
