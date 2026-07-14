@@ -81,6 +81,7 @@ spot-checked each round — no regressions introduced by mobile fixes.
 |---|---|---|---|---|---|---|
 | 1 (before fixes) | 5 | 7 | 6 | 8 | 7 | 1 (topbar overflow at 768/844 — breakpoint gap) |
 | 2 (after round-1 fixes) | 9 | 8 | 8 | 9 | 8 | 0 (5 low cosmetics, fixed before round 3) |
+| 3 (after low-fixes) | 6 | 6 | 7 | 9 | 6 | 1 (REGRESSION: URL rows collapsed by the wrap fix — streak reset, fixed for round 4) |
 
 ## Won't-fix / disputed
 

@@ -597,6 +597,7 @@ button:focus-visible{outline:2px solid #ffcf85;outline-offset:2px}
 .alt{margin-top:16px;font-size:12.5px;color:#868b93}
 .alt a{color:#ffcf85;text-decoration:none}
 .alt a:hover{text-decoration:underline}
+@media (max-width:900px){input{height:44px}button{height:44px}}
 code{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);padding:2px 6px;border-radius:5px;
 font-family:ui-monospace,Menlo,monospace}
 </style></head><body><div class="card"><div class="logo">🐻</div><h1>%s</h1>%s</div></body></html>`,

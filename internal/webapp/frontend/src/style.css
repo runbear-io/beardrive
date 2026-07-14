@@ -359,7 +359,7 @@ button, input, a.btn { font-family: inherit; }
 .hpath { font-weight: 500; cursor: pointer; color: var(--text); font-size: 13px; }
 .hpath:hover { color: var(--accent-bright); }
 .htime { margin-left: auto; color: var(--text-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
-.hmeta { display: flex; gap: 14px; margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-dim); }
+.hmeta { display: flex; align-items: center; gap: 14px; margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-dim); }
 .hdev, .hsize { color: var(--text-faint); }
 .hsize { font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
 .hnote { margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
@@ -437,13 +437,18 @@ button, input, a.btn { font-family: inherit; }
   .markdown, .admin, .onboard, .history, .dirlist { max-width: 100%; }
   .markdown table, pre.plain { display: block; overflow-x: auto; max-width: 100%; }
   .ob-row { flex-direction: column; }
+  .ob-row input { flex: none; min-height: 44px; }
   /* Admin rows: 27-28px selects/buttons are too small to tap; let rows
      wrap so the controls keep room next to long names/URLs. */
   .admin-item { flex-wrap: wrap; row-gap: 8px; padding: 12px 14px; }
   .admin-item select { height: 44px; }
   .ai-btn, .ai-del { height: auto; min-height: 44px; padding: 0 12px; }
-  /* No hover on touch: a truncated email/URL would be unreadable — wrap it. */
-  .ai-main { white-space: normal; overflow-wrap: anywhere; }
+  /* No hover on touch: a truncated email/URL would be unreadable — wrap
+     it. The name/URL takes the whole row (tag + buttons drop below):
+     without full-row basis, a long flex:none .ai-tag starves the URL down
+     to one character per line. break-word prefers natural break points
+     (@, .) and still splits long unbroken URLs when it must. */
+  .admin-item .ai-main { flex: 1 1 100%; white-space: normal; overflow-wrap: break-word; }
   /* The code-block Copy button needs a real touch target; give one-line
      blocks the height to hold it. */
   .gd-code { min-height: 62px; padding-top: 12px; padding-bottom: 12px; }
@@ -451,6 +456,7 @@ button, input, a.btn { font-family: inherit; }
   .modal-actions button { height: auto; min-height: 44px; }
   .pbtn { height: auto; min-height: 44px; }
   #palette-results li { height: auto; min-height: 44px; }
+  .more-item { min-height: 44px; }
 }
 
 /* The destructive Revoke must not sit flush against the safe Done on a
@@ -468,7 +474,7 @@ button, input, a.btn { font-family: inherit; }
 }
 
 /* ---- markdown reading view ---- */
-.markdown { max-width: 704px; margin: 0 auto; }
+.markdown { max-width: 704px; width: 100%; margin: 0 auto; }
 .markdown h1, .markdown h2, .markdown h3, .markdown h4 { color: #f4f6f9; line-height: 1.25; letter-spacing: -.018em; margin: 1.5em 0 .5em; text-wrap: balance; }
 .markdown h1:first-child { margin-top: 0; }
 .markdown h1 { font-size: 1.85em; font-weight: 660; letter-spacing: -.024em; }
