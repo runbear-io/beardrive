@@ -120,6 +120,7 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing (files stay; `bdrive init` resumes) |
+| `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires |
 | `bdrive hooks [install]` | Register turn-boundary sync hooks with detected agent platforms (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking; idempotent (`--agent` overrides detection) |
@@ -266,8 +267,22 @@ and their pushes wait (offline semantics) until allowed.
 
 ### Sharing files by URL
 
-Any synced file can be shared with a public link — hand someone the URL
-and they see the file, no account needed:
+For teammates, every synced file already has an internal link — the hub
+viewer URL, gated by sign-in and the project's org membership:
+
+```console
+$ bdrive url wiki/report.html
+https://drive.example.com/p-1a2b3c4d/wiki/report.html
+```
+
+It's computed locally (no network), always shows the latest synced
+content, and is the link agents should drop in their replies when they
+create an artifact in the shared folder (`--sync` pushes first so a
+just-created file resolves immediately).
+
+For people **outside** the hub, any synced file can instead be shared
+with a public link — hand someone the URL and they see the file, no
+account needed:
 
 ```console
 $ bdrive share wiki/report.html
