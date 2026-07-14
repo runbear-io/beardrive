@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { api } from "../api/http";
 import { copyText } from "../util";
 import { toast } from "../toast";
@@ -14,6 +15,13 @@ export function ShareDialog({
   onClose: () => void;
 }) {
   const token = url.split("/s/")[1];
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
   return (
     <div className="modal-back" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal">
