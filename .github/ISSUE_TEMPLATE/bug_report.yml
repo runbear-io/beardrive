@@ -1,0 +1,47 @@
+name: Bug report
+description: Something misbehaved — a sync, the CLI, the hub, or the web UI
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: bdrive version
+      description: Output of `bdrive version`
+      placeholder: beardrive v0.7.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+      placeholder: macOS 15.2 (arm64) / Ubuntu 24.04
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Where does it happen?
+      options:
+        - Syncing client (bdrive CLI / daemon)
+        - Self-hosted hub (bdrive web)
+        - Web UI in the browser
+        - Claude Code plugin / agent hooks
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: What happened, and how do we reproduce it?
+      description: |
+        Steps, expected vs actual. For sync issues, `bdrive status` and
+        `bdrive log -n 20` output help a lot. Never paste tokens or the
+        contents of settings.json.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: Daemon log lives at `~/.bdrive/volumes/<mount-id>/daemon.log`.
+      render: text

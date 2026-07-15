@@ -4,10 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BearDrive — Google Drive for AI agents</title>
-<meta name="description" content="Google Drive for AI agents: one synced folder for your whole team. Share any file with people as a public URL; share context across agents, so your agent knows what their agent knows. Open source, no server required.">
+<meta name="description" content="Google Drive for AI agents: one synced folder for your whole team. Share any file with people as a public URL; share context across agents, so your agent knows what their agent knows. Open source and self-hostable.">
 <meta property="og:title" content="BearDrive — Google Drive for AI agents">
-<meta property="og:description" content="One synced folder for humans and agents: files become public URLs for people, and shared memory for every teammate's agent. Open source, no server required.">
+<meta property="og:description" content="One synced folder for humans and agents: files become public URLs for people, and shared memory for every teammate's agent. Open source, self-host in one binary.">
 <meta property="og:type" content="website">
+<meta property="og:image" content="https://raw.githubusercontent.com/runbear-io/beardrive/main/website/assets/insights.png">
+<meta property="og:image:width" content="2720">
+<meta property="og:image:height" content="1700">
+<meta name="twitter:card" content="summary_large_image">
 <meta property="og:url" content="https://beardrive.ai">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128059;</text></svg>">
 <style>
@@ -276,7 +280,7 @@ footer a:hover { color: var(--text); }
       <a href="#claude">Claude Code</a>
       <a href="#get">Open source</a>
       <a href="https://github.com/runbear-io/beardrive" title="GitHub">GitHub</a>
-      <a class="btn" href="#get">Start syncing</a>
+      <a class="btn" href="https://github.com/runbear-io/beardrive">Star on GitHub</a>
     </div>
   </div>
 </nav>
@@ -287,7 +291,7 @@ footer a:hover { color: var(--text); }
     <h1>Google Drive for AI agents.<span class="green">Your agent knows what their agent knows.</span></h1>
     <p class="sub">One synced folder for your whole team — humans and agents.
     <b>Share any file with people</b> as a public URL; <b>give every agent the same
-    memory</b>, synced across machines in seconds. Real files. No server required.</p>
+    memory</b>, synced across machines in seconds. Real files. Self-host the whole thing in one Go binary.</p>
     <div class="cta-row">
       <a class="btn" href="#get">Start syncing</a>
       <button class="install" id="install" title="Copy">
@@ -303,10 +307,10 @@ footer a:hover { color: var(--text); }
     </div>
   </div>
   <div class="strip">
-    <p>Works with the storage you already have</p>
+    <p>Your hub stores on the object storage you already have</p>
     <div class="names">
       <span>Amazon S3</span><span>Google Cloud Storage</span><span>Cloudflare R2</span>
-      <span>MinIO</span><span>any folder</span><span>— or a BearDrive hub</span>
+      <span>MinIO</span><span>any folder</span>
     </div>
   </div>
 </header>
@@ -333,11 +337,15 @@ footer a:hover { color: var(--text); }
         <p><b>Share by URL.</b> <code>bdrive share wiki/report.md</code> prints a
         public link that renders the file as a page — always the latest synced
         version, no account needed, revocable any time.</p>
+        <img src="assets/share.png" alt="A shared markdown runbook rendered as a public page" loading="lazy" style="display:block;width:100%;margin-top:12px;border-radius:8px;border:1px solid rgba(255,255,255,.09)">
       </div>
       <div class="card wide">
-        <div class="arch"><b>your folder</b>  ←scan/materialize→  <b>local volume</b>  ←push/pull→  <span class="a">object storage or a BearDrive hub</span>
-<span class="dim">real files                per-device journals,      devices converge through dumb storage:
+        <div class="arch"><b>your folder</b>  ←scan/materialize→  <b>local volume</b>  ←push/pull→  <span class="a">a BearDrive hub (on S3 / GCS / R2 / a folder)</span>
+<span class="dim">real files                per-device journals,      devices converge through the hub's dumb storage:
 every tool works          content-addressed blobs    append-only, no locks, offline-safe</span></div>
+      </div>
+      <div class="card wide" style="padding:0;overflow:hidden">
+        <img src="assets/browse.png" alt="The hub web UI browsing a project — per-file agent read counts, heat dots, and the folder's change feed" loading="lazy" style="display:block;width:100%">
       </div>
     </div>
   </div>
@@ -348,13 +356,6 @@ every tool works          content-addressed blobs    append-only, no locks, offl
     <p class="kicker">WHY BEARDRIVE</p>
     <h2>Two superpowers, one folder.</h2>
     <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr))">
-      <div class="card"><div class="ico">🧑‍🤝‍🧑</div>
-        <p style="font-size:15px"><b>Share files with people.</b> Anything in the folder is a
-        <code>bdrive share</code> away from being a public URL that renders as a page —
-        markdown, HTML, PDFs. No accounts for viewers, no "can you re-send that?",
-        always the latest version, revocable any time. Dropbox-link simplicity for
-        everything your team produces.</p>
-      </div>
       <div class="card"><div class="ico">🧠</div>
         <p style="font-size:15px"><b>Share context across agents.</b> The folder is shared
         memory. What your agent learns today — findings, plans, decisions, notes —
@@ -362,7 +363,21 @@ every tool works          content-addressed blobs    append-only, no locks, offl
         session already knowing it</b>. Context stops being siloed per laptop;
         every agent on the team reads from, and writes to, the same brain.</p>
       </div>
+      <div class="card"><div class="ico">🧑‍🤝‍🧑</div>
+        <p style="font-size:15px"><b>Share files with people.</b> Anything in the folder is a
+        <code>bdrive share</code> away from being a public URL that renders as a page —
+        markdown, HTML, PDFs. No accounts for viewers, no "can you re-send that?",
+        always the latest version, revocable any time. Dropbox-link simplicity for
+        everything your team produces.</p>
+      </div>
+      <div class="card"><div class="ico">📊</div>
+        <p style="font-size:15px"><b>See what your agents actually read.</b> Every change is
+        attributed to the human, agent, or device that made it — and BearDrive's Insights
+        show which files your agents lean on and which "hot but stale" docs the team relies
+        on that nobody maintains. Agents aren't just users of the folder; they're measured.</p>
+      </div>
     </div>
+    <p style="margin-top:28px"><img src="assets/insights.png" alt="BearDrive Insights — every file plotted by agent and human reads versus staleness" loading="lazy" style="width:100%;border-radius:12px;border:1px solid rgba(255,255,255,.09)"></p>
   </div>
 </section>
 
@@ -400,9 +415,10 @@ every tool works          content-addressed blobs    append-only, no locks, offl
         concurrent edits keep both versions as conflict copies.</p>
       </div>
       <div class="card"><div class="ico">🪣</div>
-        <p><b>Bring your own storage.</b> S3, GCS, R2, MinIO, or a plain shared
-        directory — BearDrive needs nothing but dumb object storage. Or sync
-        through a hub and devices never hold cloud credentials at all.</p>
+        <p><b>Bring your own storage.</b> Your hub is backed by S3, GCS, R2,
+        MinIO, or a plain shared directory — nothing but dumb object storage.
+        Clients sync through the hub over HTTPS and never hold cloud
+        credentials at all.</p>
       </div>
     </div>
   </div>
@@ -432,7 +448,7 @@ every tool works          content-addressed blobs    append-only, no locks, offl
       <div class="msg claude"><div class="who">Your Claude</div>
         <div class="bubble">Done — I saved the report to <code>wiki/q3-findings.md</code>
         (synced to the team) and here's a public link for anyone outside it:<br><br>
-        <span class="url">https://beardrive.ai/s/1aad3327224e408d…</span></div>
+        <span class="url">https://acme-hub.example/s/1aad3327224e408d…</span></div>
       </div>
       <div class="msg"><div class="who">Your teammate, to their Claude</div>
         <div class="bubble">What did we learn from the Q3 numbers?</div>
@@ -464,7 +480,7 @@ every tool works          content-addressed blobs    append-only, no locks, offl
         </ul>
         <div class="cta-row" style="justify-content:flex-start">
           <a class="btn" href="https://github.com/runbear-io/beardrive">View on GitHub</a>
-          <a class="btn ghost" href="https://github.com/runbear-io/beardrive#the-sync-hub-and-bdrive-init">Self-hosting guide</a>
+          <a class="btn ghost" href="https://github.com/runbear-io/beardrive/blob/main/docs/self-hosting.md">Self-hosting guide</a>
         </div>
       </div>
       <div class="oss-card cloud">
@@ -486,8 +502,8 @@ every tool works          content-addressed blobs    append-only, no locks, offl
 
 <section class="closer">
   <div class="wrap">
-    <h2>Share files. Share context.<br><span class="green">Set up in under a minute.</span></h2>
-    <p>brew install, bdrive init, done. Files travel to people as URLs; context travels to every agent on the team.</p>
+    <h2>Share files. Share context.<br><span class="green">Self-host in one binary.</span></h2>
+    <p>brew install, run one hub, bdrive init. Files travel to people as URLs; context travels to every agent on the team. Cloud — zero-setup — is on the waitlist.</p>
     <div class="cta-row">
       <a class="btn" href="https://github.com/runbear-io/beardrive">Start on GitHub</a>
       <button class="install" id="install2" title="Copy">
@@ -537,12 +553,12 @@ for (const [btn, cmd] of [["install", "install-cmd"], ["install2", "install-cmd2
 const LINES = [
   { t: "$ ", cls: "p" }, { t: "bdrive init\n", type: true },
   { t: "✓", cls: "ok" }, { t: " project ", cls: "dim" }, { t: "acme-wiki" },
-  { t: " syncing → beardrive.ai\n\n", cls: "dim" },
+  { t: " syncing → your team's hub\n\n", cls: "dim" },
   { t: "  (your agent writes wiki/q3-report.md…)\n\n", cls: "dim", pause: 900 },
   { t: "$ ", cls: "p" }, { t: "bdrive status\n", type: true },
   { t: "  daemon:   running\n  files:    142 (3.4 MiB)\n  pending:  0 — everything synced\n\n", cls: "dim" },
   { t: "$ ", cls: "p" }, { t: "bdrive share wiki/q3-report.md\n", type: true },
-  { t: "https://beardrive.ai/s/1aad3327224e408d\n", cls: "url" },
+  { t: "https://acme-hub.example/s/1aad3327224e408d\n", cls: "url" },
   { t: "  anyone can open it — no account needed\n", cls: "dim" },
 ];
 const body = document.getElementById("term-body");

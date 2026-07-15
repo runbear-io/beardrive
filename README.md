@@ -7,25 +7,38 @@ everything keeps working offline. The CLI is `bdrive`; a hub is a
 `bdrive web` server you (or we) run on an object store — clients sync
 through it over HTTPS and never touch the storage directly.
 
-Two things it's for: **sharing files with people** — any synced file
-becomes a public URL that renders as a page — and **sharing context across
-AI agents**: give every agent on the team the same folder as memory, and
-your agent knows what their agent knows. Notes, plans, findings, and
-artifacts follow the team everywhere, with a full audit trail of which
-agent or human changed what.
+What it's for, first and foremost: **sharing context across AI agents** —
+give every agent on the team the same folder as memory, and your agent
+knows what their agent knows. (People are covered too: any synced file
+becomes a public URL that renders as a page.) Notes, plans, findings, and
+artifacts follow the team everywhere — and unlike a memory API, they stay
+**real files with provenance**: every change is attributed to the human,
+agent, and device that made it, and the hub's Insights show what your
+agents actually read (and which hot-but-stale docs nobody maintains).
+
+<p align="center">
+  <img src="docs/assets/insights.png" alt="Knowledge Insights — every file plotted by agent/human reads vs staleness; hot-but-stale docs are the danger zone" width="820">
+</p>
+
+| Browse with read heat | Public share pages |
+|---|---|
+| ![Folder listing with per-file agent read counts and change feed](docs/assets/browse.png) | ![A shared markdown file rendered as a public page](docs/assets/share.png) |
 
 ```console
-$ bdrive login                # once per device (browser sign-in)
+$ bdrive login https://your-hub   # once per device — self-host a hub in ~10 min (docs/self-hosting.md)
 $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
   project: workspace (p-7f3a2c91)
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
 
+> BearDrive Cloud — zero-setup, bare `bdrive login` — is on the waitlist
+> at [beardrive.ai](https://beardrive.ai). Self-host to try it today.
+
 On another machine:
 
 ```console
-$ bdrive login && cd ~/workspace && bdrive init
+$ bdrive login https://your-hub && cd ~/workspace && bdrive init
 # … connect the same project; the files appear and stay in sync
 ```
 
@@ -72,9 +85,11 @@ go install github.com/runbear-io/beardrive/cmd/bdrive@latest
 ## Quick start
 
 ```sh
-# 1. Sign this device in (once). Default server: beardrive.ai;
-#    self-hosters pass their own URL.
-bdrive login
+# 1. Sign this device in against your hub (once per device).
+#    Self-host a hub in ~10 minutes (docs/self-hosting.md), then:
+bdrive login https://your-hub
+#    (BearDrive Cloud — zero-setup, bare `bdrive login` — is coming;
+#    join the waitlist at beardrive.ai. Self-host to try it today.)
 
 # 2. Start syncing a project — interactive: create or connect a project,
 #    sync the whole folder or just ./shared. Re-run any time to resume.
@@ -83,7 +98,7 @@ cd ~/my-project && bdrive init
 # 3. Work normally — create, edit, delete files with any tool.
 echo "remember this" > memory.md
 
-# On every other device: bdrive login once, then bdrive init in a folder
+# On every other device: `bdrive login https://your-hub` once, then bdrive init in a folder
 # and connect the same project.
 
 # See what changed, who changed it, and from which device
@@ -103,7 +118,10 @@ exactly where it left off — zero re-scan, zero spurious changes.
 
 ### Credentials
 
-beardrive uses each provider's standard credential chain — nothing beardrive-specific:
+beardrive uses each provider's standard credential chain — nothing beardrive-specific.
+Note: **client devices always use an `https://` hub remote** — the
+`s3`/`gs`/`file` rows below are how the *hub operator* configures the
+hub's own storage, never something a syncing client points at directly:
 
 | Remote | Credentials |
 |---|---|
@@ -116,7 +134,7 @@ beardrive uses each provider's standard credential chain — nothing beardrive-s
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai). Switch hubs with `bdrive login <new-url>` |
+| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai — the managed cloud, waitlist-only: pass your hub URL). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing (files stay; `bdrive init` resumes) |
@@ -241,7 +259,8 @@ cd ~/some-project && bdrive init              # once per project
 ```
 
 `bdrive login` signs the device in and remembers the server (`settings.json`
-under the bdrive home; bare `bdrive login` defaults to beardrive.ai —
+under the bdrive home; bare `bdrive login` defaults to beardrive.ai — the
+managed cloud, currently waitlist-only, so pass your hub's URL —
 `--status` shows the current server and account). To move to a **different
 hub**, run `bdrive login <new-url>` and then re-run `bdrive init` in each
 folder to connect it to a project there; `bdrive logout` signs out entirely.
@@ -347,77 +366,18 @@ distinct-reader counts, and last-read times — never who read what;
 `?by=device` adds the agent-only per-device folder breakdown (device
 identity is already public via history; human emails never appear).
 
-### Authentication
+### Authentication & database
 
-Hubs always require sign-in — every change is attributed to a real account.
-The whole API — web UI, uploads, project creation, device sync — needs a
-session; only `/api/config` and the auth pages stay open (the plain-folder
-viewer, `bdrive web ./folder`, remains auth-free). Accounts are
-email + password + name, kept in a file-backed registry (`auth.json`:
-bcrypt password hashes and SHA-256 token digests, atomically rewritten —
-no plaintext credentials ever touch disk).
+Hubs always require sign-in — every change is attributed to a real
+account. **Signup is invite-only by default** (the safe posture for a
+public URL); self-service signup opens only with a gate (admin approval,
+or allowed domains + email verification). Hub metadata (accounts,
+projects, orgs, shares) lives in a file-backed store by default, or
+SQLite/Postgres (incl. Supabase) via the `database` config block.
 
-**Signup is invite-only by default** — the safe posture for a hub on a
-public URL. New people get in only through an expiring invite link an owner
-mints; the link lets them create an account (bypassing the gates below) and
-join, in one step. To allow self-service signup instead, set
-`"allow_signup": true` **with a gate** — the server refuses to start an open
-hub that has none, so a fake email can never just walk in. Three postures:
+Full reference — the three signup postures, SMTP, admins, CLI device
+sign-in, and database selection: **[docs/self-hosting.md](docs/self-hosting.md)**.
 
-- **Invite-only** (default): `allow_signup` unset/false. Only invite links create accounts.
-- **Approval-gated**: `allow_signup: true` + `require_approval: true` — anyone can sign up, but a hub admin approves each new account before it works (no SMTP needed).
-- **Domain-restricted + verified**: `allow_signup: true` + `allowed_domains: ["you.com"]` + `require_verification: true` (needs `smtp`) — only your company's addresses may sign up, each confirming an emailed link. Verification without SMTP is refused (the link would otherwise only reach the server log).
-
-Admins tune verification/approval live from the web UI (**Admin → Signup &
-access**); `allowed_domains`, the admin list, and `allow_signup` are
-server-config-owned so a browser session can never widen who gets in.
-
-`bdrive login <url>` on a client device opens the server's sign-in page in
-a browser (sign up right there if needed); when the user signs in, the
-page bounces a one-time code to the CLI's loopback listener and the
-terminal finishes on its own, storing a long-lived per-device token
-(revocable server-side). On headless/SSH machines, `bdrive login --device`
-prints a short code to approve from any signed-in browser instead. Every
-sync and every `bdrive init` then authenticates with that token.
-
-"Forgot password" emails a one-hour reset link via the `auth.smtp` block —
-plain SMTP, so any provider works. With no SMTP configured, the link is
-printed to the server log so an admin can hand it over; reset is never
-fully broken.
-
-Two notes: put a hub behind TLS (reverse proxy
-or tailscale) — `bdrive login` warns when signing in over plain http to a
-non-localhost address. Internally all of this sits behind an
-`AuthProvider` interface; the open-source server ships the built-in
-email/password provider, and alternative identity backends can be swapped
-in without touching the CLI or the API.
-
-### Choosing a database
-
-A hub keeps a little **metadata** — accounts, projects, orgs, invites,
-shares, devices — separate from your files. (File content and the sync
-journals always live in the object store; the database never holds them.)
-You choose where that metadata lives with the `database` block:
-
-```jsonc
-"database": { "driver": "file" }                       // default — JSON under BDRIVE_HOME
-"database": { "driver": "sqlite",   "dsn": "/var/lib/bdrive/hub.db" }
-"database": { "driver": "postgres", "dsn": "postgres://…@…pooler.supabase.com:6543/postgres" }
-```
-
-- **file** (default): zero dependencies, human-readable JSON, perfect for a
-  laptop or a small self-hosted hub.
-- **sqlite**: one embedded database file — a real DB locally with no server
-  to run.
-- **postgres**: a managed Postgres such as **Supabase** for production —
-  just point `dsn` at its connection string (use the transaction pooler for
-  many connections). Since Supabase *is* Postgres, this stays fully
-  open-source with no managed-only lock-in.
-
-`file` and `sqlite` are single-writer (run one hub instance); Postgres is
-transactional and can back more than one instance. Switching backends
-doesn't migrate existing data — pick one when you set the hub up. Both SQL
-drivers are pure Go, so the binary stays a CGO-free static build.
 
 ### Uploads
 
@@ -507,13 +467,18 @@ deletes for it), and anything excluded by `.bdriveignore` or omitted from an
 
 ## Roadmap
 
-- `beardrive restore <path>@<time>` — restore any file from history (all content
-  is already retained)
-- FUSE/NFS mount mode for lazy-loading huge volumes
-- Journal compaction & blob GC policies
-- Per-path access scopes for multi-agent setups
+See [ROADMAP.md](ROADMAP.md) — the public, dated roadmap, including the
+items we'd love help with. Highlights: `beardrive restore <path>@<time>`
+(time travel — all content is already retained), FUSE/NFS mount mode,
+journal compaction & blob GC, per-path access scopes for multi-agent
+setups.
 
 ## Development
+
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+build/test workflow and the rules that matter, [ROADMAP.md](ROADMAP.md)
+for where help is wanted, and [CHANGELOG.md](CHANGELOG.md) for what
+shipped when. Self-hosting a hub: [docs/self-hosting.md](docs/self-hosting.md).
 
 ```sh
 go build ./...
@@ -547,6 +512,11 @@ npm run e2e       # Playwright suite; starts its own seeded hub on :8993
 ## License
 
 GNU AGPL-3.0 — Copyright 2026 Runbear, Inc. See [LICENSE](LICENSE).
+
+We chose AGPL-3.0 deliberately: it keeps BearDrive fully open and
+self-hostable forever while preventing a cloud provider from offering a
+closed BearDrive-as-a-service. The managed service at beardrive.ai funds
+the project; the code stays open.
 
 Everything in this repo is open source and self-hostable: a complete BearDrive
 server for one organization's deployment, teams included. The managed service

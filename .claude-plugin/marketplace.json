@@ -1,14 +1,24 @@
 {
   "name": "beardrive",
-  "owner": { "name": "runbear", "email": "snow@runbear.io" },
-  "description": "BearDrive (beardrive) — a synced file system for AI agents",
+  "owner": {
+    "name": "runbear",
+    "email": "snow@runbear.io"
+  },
+  "description": "BearDrive — the open-source Google Drive for AI agents: one folder your team and their agents share, with per-change attribution and read analytics.",
   "plugins": [
     {
       "name": "beardrive",
       "source": "./plugin",
-      "description": "BearDrive: folders that stay in sync across your team and agents through a BearDrive server (or S3/GCS directly). Installs the beardrive skill, /beardrive:install, /beardrive:init and /beardrive:status commands, and turn-boundary sync hooks in one step.",
+      "description": "BearDrive: folders that stay in sync across your team and agents through a self-hostable BearDrive hub, with per-file history and public share links. Installs the beardrive skill, /beardrive:install, /beardrive:init and /beardrive:status commands, and turn-boundary sync hooks in one step.",
       "category": "workflow",
-      "tags": ["sync", "files", "workspace", "s3", "gcs", "agents"]
+      "tags": [
+        "sync",
+        "files",
+        "workspace",
+        "agents",
+        "memory",
+        "claude-code"
+      ]
     }
   ]
 }

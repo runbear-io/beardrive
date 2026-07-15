@@ -1,9 +1,9 @@
 ---
 name: beardrive
-description: Use BearDrive — a synced file system for AI agents and teams. Start syncing any project folder (bdrive init) and it stays in sync across devices and teammates through a BearDrive hub, with accounts, per-file change history, public share links, and offline support. Use when the user wants to "set up beardrive", "sync this folder", "share this file by URL", "start/stop syncing", "connect to a beardrive server", "switch to a different hub", "check bdrive status", "see what changed", "who changed this file?", or troubleshoot a stuck sync.
+description: Use BearDrive — the open-source Google Drive for AI agents and their teams. Start syncing any project folder (bdrive init) and it stays in sync across devices and teammates through a BearDrive hub, with accounts, per-file change history, public share links, and offline support. Use when the user wants to "set up beardrive", "sync this folder", "share this file by URL", "start/stop syncing", "connect to a beardrive server", "switch to a different hub", "check bdrive status", "see what changed", "who changed this file?", or troubleshoot a stuck sync.
 ---
 
-# BearDrive — synced file system for AI agents
+# BearDrive — Google Drive for AI agents
 
 **BearDrive** (CLI: `bdrive`) turns any folder into a synced project: a background daemon per project scans for local changes and exchanges them with a **hub** (a `bdrive web` server). Files on disk are always real files — every tool, editor, and agent works on them with no integration.
 
@@ -13,7 +13,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 
 | Action | Command |
 |---|---|
-| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dir>` / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs `bdrive login` first if the device has no session. |
+| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dir>` / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
 | Run the daemon in the foreground | `bdrive init -f` |
 | Stop syncing | `bdrive stop [<folder>]` (`--forget` also unregisters) |
 | One sync cycle now | `bdrive sync [<folder>]` |
@@ -22,7 +22,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Mounts + daemon + pending state | `bdrive status [<folder>]` |
 | Change history | `bdrive log [<folder>] [-p path] [-n N]` |
 | This device's identity | `bdrive whoami` |
-| Sign this device in (once per device) | `bdrive login [url]` — bare form uses the remembered server or beardrive.ai. Opens the sign-in page in a browser (sign-up available there); the terminal completes on its own and stores a per-device token. `--device` prints a code to approve from any browser (SSH/headless); `--status` shows server + account. Password reset: "Forgot password?" on the sign-in page (emailed via the server's SMTP config, or the link appears in the server log). **Switch hubs** with `bdrive login <new-url>`, then re-run `bdrive init` in each folder. |
+| Sign this device in (once per device) | `bdrive login [url]` — bare form uses the remembered server or beardrive.ai — currently waitlist-only; pass your hub URL. Opens the sign-in page in a browser (sign-up available there); the terminal completes on its own and stores a per-device token. `--device` prints a code to approve from any browser (SSH/headless); `--status` shows server + account. Password reset: "Forgot password?" on the sign-in page (emailed via the server's SMTP config, or the link appears in the server log). **Switch hubs** with `bdrive login <new-url>`, then re-run `bdrive init` in each folder. |
 | Sign this device out | `bdrive logout` — clears the saved token + account (folders untouched); `--forget` also drops the remembered server. The device token stays valid server-side until it expires — revoke it from the hub's device list to be sure. |
 | Link a synced file for teammates | `bdrive url <file>` — prints the file's hub viewer URL (sign-in + project membership required; always the latest content). Computed locally, no network; `--sync` pushes first so a just-created file's link resolves immediately; no arg = the project home page. **After creating a shareable artifact (.md/.html/.csv/report/plan) in the shared folder, include this link in your reply** so teammates can open it. |
 | Share a synced file publicly by URL | `bdrive share <file>` — prints a link anyone can open (HTML renders as a page, markdown rendered, PDFs inline; sandboxed; always the latest content; no account needed). `--expires 24h` for self-destructing links; `--list` / `--revoke <token-or-url>` to manage. Put generated reports in the shared folder, sync, then share. |
@@ -69,7 +69,7 @@ Selective-sync semantics — important when advising users:
 
 ### Init flow
 
-1. `bdrive login` once per device (browser sign-in; default server beardrive.ai; sign-up available on the page).
+1. `bdrive login https://your-hub` once per device (browser sign-in; sign-up available on the page). Bare `bdrive login` targets BearDrive Cloud, which is not open yet — use the team's hub URL.
 2. Run `bdrive init` in the folder. Interactive on a TTY (create new / connect existing project; whole folder / shared subfolder); with flags or without a TTY it creates-or-joins a project named after the folder and syncs everything. It:
    - writes `<folder>/.bdrive/config.json` (mount id + project + remote) and registers the mount id in `~/.bdrive/mounts.json`,
    - seeds a starter `.bdriveignore` (node_modules, build dirs, caches, `.env*`) when none exists,
@@ -260,7 +260,7 @@ The `s3://`/`gs://`/`file://` URL is the **hub's** storage root; the prefix can 
 ### Pointing a hub at storage (server-side)
 
 ```sh
-# Start a hub on an S3 bucket; clients then `bdrive login` + `bdrive init`
+# Start a hub on an S3 bucket; clients then `bdrive login https://this-hub` + `bdrive init`
 bdrive web s3://acme-beardrive/root --upload
 
 # Or from a config file

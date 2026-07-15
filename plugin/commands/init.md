@@ -13,10 +13,12 @@ Follow these steps:
    or `go install github.com/runbear-io/beardrive/cmd/bdrive@latest`) and
    wait for the user's choice before installing.
 
-2. **Sign in if needed**: run `bdrive login --status`. With no server or a
-   stale token, run `bdrive login` (tell the user a browser window is
-   coming; it completes by itself). Default server is beardrive.ai; pass a
-   self-hosted URL if the user mentioned one.
+2. **Sign in if needed**: run `bdrive login --status`. With no valid
+   session, ask the user for their team's hub URL and run
+   `bdrive login https://their-hub` (tell the user a browser window is
+   coming; it completes by itself). Bare `bdrive login` targets BearDrive
+   Cloud, which is not open yet — only use it if the user says their team
+   is on the cloud beta.
 
 3. **Detect knowledge tooling** (skip if the folder already contains
    `.bdrive/` — then just run `bdrive init --yes`; it resumes syncing,
