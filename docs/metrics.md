@@ -17,8 +17,8 @@ within a week. Everything else is upstream of it.
 
 | # | Metric | Source | Stage |
 |---|---|---|---|
-| 1 | README/landing views → GitHub stars | GitHub Insights → Traffic (handoff #11) | attention |
-| 2 | Installs: brew + `go install` | brew analytics (handoff #12); go proxy stats are noisy — treat as directional | acquisition |
+| 1 | README/landing views → GitHub stars | GitHub Insights → Traffic (handoff #13) | attention |
+| 2 | Installs: brew + `go install` | brew analytics (handoff #14); go proxy stats are noisy — treat as directional | acquisition |
 | 3 | Activation: `bdrive init` → first successful sync | today: anecdotal/self-reported; future: opt-in telemetry (below) | activation |
 | 4 | Team formation: project gains a 2nd member (invite redeemed) | hub data (self-hosted: invisible to us; beardrive.ai once live) | expansion |
 | 5 | Wedge proof: first agent read-telemetry event in a project | hub read ledger (same visibility caveat) | wedge |
