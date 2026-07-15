@@ -8,7 +8,9 @@
 <meta property="og:title" content="BearDrive — Google Drive for AI agents">
 <meta property="og:description" content="One synced folder for humans and agents: files become public URLs for people, and shared memory for every teammate's agent. Open source, self-host in one binary.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="https://beardrive.ai/assets/insights.png">
+<meta property="og:image" content="https://raw.githubusercontent.com/runbear-io/beardrive/main/website/assets/insights.png">
+<meta property="og:image:width" content="2720">
+<meta property="og:image:height" content="1700">
 <meta name="twitter:card" content="summary_large_image">
 <meta property="og:url" content="https://beardrive.ai">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128059;</text></svg>">
@@ -335,11 +337,15 @@ footer a:hover { color: var(--text); }
         <p><b>Share by URL.</b> <code>bdrive share wiki/report.md</code> prints a
         public link that renders the file as a page — always the latest synced
         version, no account needed, revocable any time.</p>
+        <img src="assets/share.png" alt="A shared markdown runbook rendered as a public page" loading="lazy" style="display:block;width:100%;margin-top:12px;border-radius:8px;border:1px solid rgba(255,255,255,.09)">
       </div>
       <div class="card wide">
         <div class="arch"><b>your folder</b>  ←scan/materialize→  <b>local volume</b>  ←push/pull→  <span class="a">a BearDrive hub (on S3 / GCS / R2 / a folder)</span>
 <span class="dim">real files                per-device journals,      devices converge through the hub's dumb storage:
 every tool works          content-addressed blobs    append-only, no locks, offline-safe</span></div>
+      </div>
+      <div class="card wide" style="padding:0;overflow:hidden">
+        <img src="assets/browse.png" alt="The hub web UI browsing a project — per-file agent read counts, heat dots, and the folder's change feed" loading="lazy" style="display:block;width:100%">
       </div>
     </div>
   </div>
