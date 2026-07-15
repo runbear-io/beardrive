@@ -70,11 +70,17 @@ fabricated proof) — record such rejections under Won't-fix with reasons.
 | 3 | 9 | 7 | 9 | 8 | 7 | 9 | 1 major (quickstart defaulted into the not-yet-live beardrive.ai — quickstart/closer rewritten to self-host-first, first-run gate added to handoff) + README trimmed 583→524, starter-issues & waitlist handoffs added |
 | 4 | 9 | 6 | 9 | 9 | 7 | 9 | 2 majors: bare-login default survived in the README HERO and both plugin commands (+ SKILL walkthrough, website terminal animation) — all four surfaces now self-host-first, fixed this round |
 | 5 | 9 | 8 | 9 | 9 | 8 | 9 | 0 — PASS #1 (two optional one-line minors applied after the round) |
+| 6 (confirmation) | 9 | 8 | 9 | 9 | 8 | 9 | 0 — PASS #2, EXIT BAR MET (truth-verified against code; two optional minors — og:image, SKILL parity — applied post-exit) |
 
 ## Won't-fix / disputed
 
 (none yet)
 
-## Status / blockers
+## Status
 
-(record and stop rather than deviate)
+GOAL COMPLETE (2026-07-15): rounds 5 and 6 both scored every dimension
+≥8 with zero repo-fixable blocker/major findings. Six reviewer rounds
+total. The loop's own copy was audited for truth-overreach each round —
+rounds 3 and 4 caught the loop routing strangers into the not-yet-live
+cloud, which is exactly what independent review is for. Remaining work
+is Snow's external checklist: docs/gtm-handoff.md (P0 first).
