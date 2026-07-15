@@ -134,7 +134,7 @@ hub's own storage, never something a syncing client points at directly:
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai). Switch hubs with `bdrive login <new-url>` |
+| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai — the managed cloud, waitlist-only: pass your hub URL). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing (files stay; `bdrive init` resumes) |

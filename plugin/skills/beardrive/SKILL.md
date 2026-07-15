@@ -13,7 +13,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 
 | Action | Command |
 |---|---|
-| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dir>` / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs `bdrive login` first if the device has no session. |
+| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dir>` / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
 | Run the daemon in the foreground | `bdrive init -f` |
 | Stop syncing | `bdrive stop [<folder>]` (`--forget` also unregisters) |
 | One sync cycle now | `bdrive sync [<folder>]` |
