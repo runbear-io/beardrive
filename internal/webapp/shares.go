@@ -308,6 +308,11 @@ pre code{padding:0;background:none}
 img{max-width:100%%}
 blockquote{margin:0;padding-left:16px;border-left:3px solid #d0d7de;color:#57606a}
 table{border-collapse:collapse;display:block;overflow-x:auto;max-width:100%%}td,th{border:1px solid #d0d7de;padding:5px 10px}
+table.frontmatter{display:table;font-size:12px;color:#57606a;background:#f6f8fa;border-radius:8px;margin-bottom:24px}
+table.frontmatter th,table.frontmatter td{border:none;border-bottom:1px solid #d8dee4;text-align:left;vertical-align:top}
+table.frontmatter th{white-space:nowrap;color:#6e7781}
+table.frontmatter tr:last-child th,table.frontmatter tr:last-child td{border-bottom:none}
+table.frontmatter code{white-space:pre-wrap}
 pre{max-width:100%%}
 footer.bdrive{margin-top:64px;padding-top:14px;border-top:1px solid #d0d7de;font-size:12.5px;color:#57606a}
 footer.bdrive a{color:inherit}

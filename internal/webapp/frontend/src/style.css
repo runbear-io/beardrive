@@ -509,6 +509,12 @@ button, input, a.btn { font-family: inherit; }
 .markdown tr:hover td { background: rgba(255,255,255,.02); }
 .markdown img { max-width: 100%; border-radius: 8px; border: 1px solid var(--border); }
 .markdown hr { border: none; border-top: 1px solid var(--border); margin: 2.2em 0; }
+/* Frontmatter key/value table (server-rendered from a doc's YAML header). */
+.markdown table.frontmatter { margin: 0 0 1.8em; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; border-collapse: separate; border-spacing: 0; }
+.markdown table.frontmatter th { text-transform: none; letter-spacing: 0; font-size: 11.5px; color: var(--text-faint); font-weight: 600; text-align: left; white-space: nowrap; vertical-align: top; padding: 6px 14px 6px 12px; border-bottom: 1px solid var(--border); }
+.markdown table.frontmatter td { color: var(--text-dim); padding: 6px 12px 6px 0; border-bottom: 1px solid var(--border); }
+.markdown table.frontmatter tr:last-child th, .markdown table.frontmatter tr:last-child td { border-bottom: none; }
+.markdown table.frontmatter code { white-space: pre-wrap; font-size: 11px; }
 .markdown input[type="checkbox"] { accent-color: var(--accent); }
 
 /* plain file / binary views */
