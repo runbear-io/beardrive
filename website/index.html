@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BearDrive — Google Drive for AI agents</title>
-<meta name="description" content="Google Drive for AI agents: one synced folder for your whole team. Share any file with people as a public URL; share context across agents, so your agent knows what their agent knows. Open source, no server required.">
+<meta name="description" content="Google Drive for AI agents: one synced folder for your whole team. Share any file with people as a public URL; share context across agents, so your agent knows what their agent knows. Open source and self-hostable.">
 <meta property="og:title" content="BearDrive — Google Drive for AI agents">
-<meta property="og:description" content="One synced folder for humans and agents: files become public URLs for people, and shared memory for every teammate's agent. Open source, no server required.">
+<meta property="og:description" content="One synced folder for humans and agents: files become public URLs for people, and shared memory for every teammate's agent. Open source, self-host in one binary.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://beardrive.ai">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128059;</text></svg>">
@@ -276,7 +276,7 @@ footer a:hover { color: var(--text); }
       <a href="#claude">Claude Code</a>
       <a href="#get">Open source</a>
       <a href="https://github.com/runbear-io/beardrive" title="GitHub">GitHub</a>
-      <a class="btn" href="#get">Start syncing</a>
+      <a class="btn" href="https://github.com/runbear-io/beardrive">Star on GitHub</a>
     </div>
   </div>
 </nav>
@@ -287,7 +287,7 @@ footer a:hover { color: var(--text); }
     <h1>Google Drive for AI agents.<span class="green">Your agent knows what their agent knows.</span></h1>
     <p class="sub">One synced folder for your whole team — humans and agents.
     <b>Share any file with people</b> as a public URL; <b>give every agent the same
-    memory</b>, synced across machines in seconds. Real files. No server required.</p>
+    memory</b>, synced across machines in seconds. Real files. Self-host the whole thing in one Go binary.</p>
     <div class="cta-row">
       <a class="btn" href="#get">Start syncing</a>
       <button class="install" id="install" title="Copy">
@@ -362,7 +362,14 @@ every tool works          content-addressed blobs    append-only, no locks, offl
         session already knowing it</b>. Context stops being siloed per laptop;
         every agent on the team reads from, and writes to, the same brain.</p>
       </div>
+      <div class="card"><div class="ico">📊</div>
+        <p style="font-size:15px"><b>See what your agents actually read.</b> Every change is
+        attributed to the human, agent, or device that made it — and BearDrive's Insights
+        show which files your agents lean on and which "hot but stale" docs the team relies
+        on that nobody maintains. Agents aren't just users of the folder; they're measured.</p>
+      </div>
     </div>
+    <p style="margin-top:28px"><img src="assets/insights.png" alt="BearDrive Insights — every file plotted by agent and human reads versus staleness" loading="lazy" style="width:100%;border-radius:12px;border:1px solid rgba(255,255,255,.09)"></p>
   </div>
 </section>
 
@@ -464,7 +471,7 @@ every tool works          content-addressed blobs    append-only, no locks, offl
         </ul>
         <div class="cta-row" style="justify-content:flex-start">
           <a class="btn" href="https://github.com/runbear-io/beardrive">View on GitHub</a>
-          <a class="btn ghost" href="https://github.com/runbear-io/beardrive#the-sync-hub-and-bdrive-init">Self-hosting guide</a>
+          <a class="btn ghost" href="https://github.com/runbear-io/beardrive/blob/main/docs/self-hosting.md">Self-hosting guide</a>
         </div>
       </div>
       <div class="oss-card cloud">

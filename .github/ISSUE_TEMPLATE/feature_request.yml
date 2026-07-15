@@ -1,0 +1,27 @@
+name: Feature request
+description: An idea for BearDrive — check ROADMAP.md first, it might already be planned
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The workflow or problem, not just the feature — context makes better designs.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like BearDrive to do?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Sync engine / CLI
+        - Hub / web UI
+        - Agent integration (hooks, plugin, skills)
+        - Sharing / permissions
+        - Other

@@ -1,11 +1,21 @@
 {
   "name": "beardrive",
   "displayName": "BearDrive",
-  "description": "BearDrive: a synced file system for AI agents. Mount folders that stay in sync across devices through S3/GCS/any object store, with automatic sync at turn boundaries and full change history. CLI: bdrive.",
+  "description": "BearDrive — the open-source Google Drive for AI agents: mount folders that stay in sync across devices and teammates through a self-hostable BearDrive hub (backed by S3/GCS/any object store), with turn-boundary sync, per-change attribution, and full change history. CLI: bdrive.",
   "version": "0.1.0",
-  "author": { "name": "runbear", "url": "https://github.com/runbear-io" },
+  "author": {
+    "name": "runbear",
+    "url": "https://github.com/runbear-io"
+  },
   "homepage": "https://github.com/runbear-io/beardrive",
   "repository": "https://github.com/runbear-io/beardrive",
   "license": "AGPL-3.0-only",
-  "keywords": ["sync", "files", "workspace", "s3", "gcs", "memory", "agents"]
+  "keywords": [
+    "sync",
+    "files",
+    "workspace",
+    "memory",
+    "agents",
+    "claude-code"
+  ]
 }

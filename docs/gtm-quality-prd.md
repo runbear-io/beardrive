@@ -65,6 +65,7 @@ fabricated proof) — record such rejections under Won't-fix with reasons.
 
 | Round | positioning | funnel | open-paid | community | launch | metrics | repo-fixable blockers/majors |
 |---|---|---|---|---|---|---|---|
+| 1 (baseline) | 6 | 4 | 8 | 3 | 3 | 2 | 3 blockers, 3 majors (all fixed this round; screenshots captured from the live demo hub — real UI, not fabricated) |
 
 ## Won't-fix / disputed
 

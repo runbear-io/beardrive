@@ -1,9 +1,9 @@
 ---
 name: beardrive
-description: Use BearDrive — a synced file system for AI agents and teams. Start syncing any project folder (bdrive init) and it stays in sync across devices and teammates through a BearDrive hub, with accounts, per-file change history, public share links, and offline support. Use when the user wants to "set up beardrive", "sync this folder", "share this file by URL", "start/stop syncing", "connect to a beardrive server", "switch to a different hub", "check bdrive status", "see what changed", "who changed this file?", or troubleshoot a stuck sync.
+description: Use BearDrive — the open-source Google Drive for AI agents and their teams. Start syncing any project folder (bdrive init) and it stays in sync across devices and teammates through a BearDrive hub, with accounts, per-file change history, public share links, and offline support. Use when the user wants to "set up beardrive", "sync this folder", "share this file by URL", "start/stop syncing", "connect to a beardrive server", "switch to a different hub", "check bdrive status", "see what changed", "who changed this file?", or troubleshoot a stuck sync.
 ---
 
-# BearDrive — synced file system for AI agents
+# BearDrive — Google Drive for AI agents
 
 **BearDrive** (CLI: `bdrive`) turns any folder into a synced project: a background daemon per project scans for local changes and exchanges them with a **hub** (a `bdrive web` server). Files on disk are always real files — every tool, editor, and agent works on them with no integration.
 
