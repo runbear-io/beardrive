@@ -69,7 +69,7 @@ Selective-sync semantics — important when advising users:
 
 ### Init flow
 
-1. `bdrive login` once per device (browser sign-in; default server beardrive.ai; sign-up available on the page).
+1. `bdrive login https://your-hub` once per device (browser sign-in; sign-up available on the page). Bare `bdrive login` targets BearDrive Cloud, which is not open yet — use the team's hub URL.
 2. Run `bdrive init` in the folder. Interactive on a TTY (create new / connect existing project; whole folder / shared subfolder); with flags or without a TTY it creates-or-joins a project named after the folder and syncs everything. It:
    - writes `<folder>/.bdrive/config.json` (mount id + project + remote) and registers the mount id in `~/.bdrive/mounts.json`,
    - seeds a starter `.bdriveignore` (node_modules, build dirs, caches, `.env*`) when none exists,
@@ -260,7 +260,7 @@ The `s3://`/`gs://`/`file://` URL is the **hub's** storage root; the prefix can 
 ### Pointing a hub at storage (server-side)
 
 ```sh
-# Start a hub on an S3 bucket; clients then `bdrive login` + `bdrive init`
+# Start a hub on an S3 bucket; clients then `bdrive login https://this-hub` + `bdrive init`
 bdrive web s3://acme-beardrive/root --upload
 
 # Or from a config file

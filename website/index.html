@@ -440,7 +440,7 @@ every tool works          content-addressed blobs    append-only, no locks, offl
       <div class="msg claude"><div class="who">Your Claude</div>
         <div class="bubble">Done — I saved the report to <code>wiki/q3-findings.md</code>
         (synced to the team) and here's a public link for anyone outside it:<br><br>
-        <span class="url">https://beardrive.ai/s/1aad3327224e408d…</span></div>
+        <span class="url">https://acme-hub.example/s/1aad3327224e408d…</span></div>
       </div>
       <div class="msg"><div class="who">Your teammate, to their Claude</div>
         <div class="bubble">What did we learn from the Q3 numbers?</div>
@@ -545,12 +545,12 @@ for (const [btn, cmd] of [["install", "install-cmd"], ["install2", "install-cmd2
 const LINES = [
   { t: "$ ", cls: "p" }, { t: "bdrive init\n", type: true },
   { t: "✓", cls: "ok" }, { t: " project ", cls: "dim" }, { t: "acme-wiki" },
-  { t: " syncing → beardrive.ai\n\n", cls: "dim" },
+  { t: " syncing → your team's hub\n\n", cls: "dim" },
   { t: "  (your agent writes wiki/q3-report.md…)\n\n", cls: "dim", pause: 900 },
   { t: "$ ", cls: "p" }, { t: "bdrive status\n", type: true },
   { t: "  daemon:   running\n  files:    142 (3.4 MiB)\n  pending:  0 — everything synced\n\n", cls: "dim" },
   { t: "$ ", cls: "p" }, { t: "bdrive share wiki/q3-report.md\n", type: true },
-  { t: "https://beardrive.ai/s/1aad3327224e408d\n", cls: "url" },
+  { t: "https://acme-hub.example/s/1aad3327224e408d\n", cls: "url" },
   { t: "  anyone can open it — no account needed\n", cls: "dim" },
 ];
 const body = document.getElementById("term-body");

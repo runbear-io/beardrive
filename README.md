@@ -25,17 +25,20 @@ agents actually read (and which hot-but-stale docs nobody maintains).
 | ![Folder listing with per-file agent read counts and change feed](docs/assets/browse.png) | ![A shared markdown file rendered as a public page](docs/assets/share.png) |
 
 ```console
-$ bdrive login                # once per device (browser sign-in)
+$ bdrive login https://your-hub   # once per device — self-host a hub in ~10 min (docs/self-hosting.md)
 $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
   project: workspace (p-7f3a2c91)
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
 
+> BearDrive Cloud — zero-setup, bare `bdrive login` — is on the waitlist
+> at [beardrive.ai](https://beardrive.ai). Self-host to try it today.
+
 On another machine:
 
 ```console
-$ bdrive login && cd ~/workspace && bdrive init
+$ bdrive login https://your-hub && cd ~/workspace && bdrive init
 # … connect the same project; the files appear and stay in sync
 ```
 
@@ -95,7 +98,7 @@ cd ~/my-project && bdrive init
 # 3. Work normally — create, edit, delete files with any tool.
 echo "remember this" > memory.md
 
-# On every other device: bdrive login once, then bdrive init in a folder
+# On every other device: `bdrive login https://your-hub` once, then bdrive init in a folder
 # and connect the same project.
 
 # See what changed, who changed it, and from which device
@@ -256,7 +259,8 @@ cd ~/some-project && bdrive init              # once per project
 ```
 
 `bdrive login` signs the device in and remembers the server (`settings.json`
-under the bdrive home; bare `bdrive login` defaults to beardrive.ai —
+under the bdrive home; bare `bdrive login` defaults to beardrive.ai — the
+managed cloud, currently waitlist-only, so pass your hub's URL —
 `--status` shows the current server and account). To move to a **different
 hub**, run `bdrive login <new-url>` and then re-run `bdrive init` in each
 folder to connect it to a project there; `bdrive logout` signs out entirely.

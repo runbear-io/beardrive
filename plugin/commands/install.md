@@ -15,11 +15,13 @@ If neither works, stop and tell the user how to install manually.
 
 ## 2. Sign in if needed
 
-Run `bdrive login --status`. If there is no server or the token is invalid,
-run `bdrive login` — it opens the user's browser to sign in (or sign up) and
-completes by itself. Default server is beardrive.ai; if the user mentioned a
-self-hosted server, pass its URL: `bdrive login https://their-server`.
-Tell the user a browser window is coming before you run it.
+Run `bdrive login --status`. If there is no valid session, sign in against
+the team's hub: ask the user for their hub URL and run
+`bdrive login https://their-hub` — it opens the browser to sign in (or
+sign up) and completes by itself. (Bare `bdrive login` targets BearDrive
+Cloud, which is not open yet — don't use it unless the user says their
+team is on the cloud beta.) Tell the user a browser window is coming
+before you run it.
 
 ## 3. Initialize the project
 

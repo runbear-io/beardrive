@@ -68,6 +68,7 @@ fabricated proof) — record such rejections under Won't-fix with reasons.
 | 1 (baseline) | 6 | 4 | 8 | 3 | 3 | 2 | 3 blockers, 3 majors (all fixed this round; screenshots captured from the live demo hub — real UI, not fabricated) |
 | 2 | 8 | 7 | 9 | 8 | 8 | 8 | 1 major (residual dead-deployment-mode copy ×3 on the site — fixed) + 4 minors fixed; share.png re-captured with real rendered content |
 | 3 | 9 | 7 | 9 | 8 | 7 | 9 | 1 major (quickstart defaulted into the not-yet-live beardrive.ai — quickstart/closer rewritten to self-host-first, first-run gate added to handoff) + README trimmed 583→524, starter-issues & waitlist handoffs added |
+| 4 | 9 | 6 | 9 | 9 | 7 | 9 | 2 majors: bare-login default survived in the README HERO and both plugin commands (+ SKILL walkthrough, website terminal animation) — all four surfaces now self-host-first, fixed this round |
 
 ## Won't-fix / disputed
 
