@@ -37,7 +37,9 @@ Product Hunt → Launch-Week-style feature cadence as Cloud approaches.
 device appends to its own journal; replay is deterministic," + link to
 CLAUDE.md's invariants. Answer every comment for the first 3 hours.
 
-**Prep checklist:** demo GIF live in README (handoff #5), Discussions
+**Prep checklist:** install path verified from a clean machine
+(`brew install runbear-io/tap/beardrive && bdrive version` — a 404 tap on
+launch day is fatal), demo GIF live in README (handoff #6), Discussions
 enabled, `docs/self-hosting.md` linked from README, hub demo instance
 warm (expect self-host attempts within minutes).
 

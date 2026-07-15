@@ -7,10 +7,10 @@ everything keeps working offline. The CLI is `bdrive`; a hub is a
 `bdrive web` server you (or we) run on an object store — clients sync
 through it over HTTPS and never touch the storage directly.
 
-Two things it's for: **sharing files with people** — any synced file
-becomes a public URL that renders as a page — and **sharing context across
-AI agents**: give every agent on the team the same folder as memory, and
-your agent knows what their agent knows. Notes, plans, findings, and
+What it's for, first and foremost: **sharing context across AI agents** —
+give every agent on the team the same folder as memory, and your agent
+knows what their agent knows. (People are covered too: any synced file
+becomes a public URL that renders as a page.) Notes, plans, findings, and
 artifacts follow the team everywhere — and unlike a memory API, they stay
 **real files with provenance**: every change is attributed to the human,
 agent, and device that made it, and the hub's Insights show what your
@@ -113,7 +113,10 @@ exactly where it left off — zero re-scan, zero spurious changes.
 
 ### Credentials
 
-beardrive uses each provider's standard credential chain — nothing beardrive-specific:
+beardrive uses each provider's standard credential chain — nothing beardrive-specific.
+Note: **client devices always use an `https://` hub remote** — the
+`s3`/`gs`/`file` rows below are how the *hub operator* configures the
+hub's own storage, never something a syncing client points at directly:
 
 | Remote | Credentials |
 |---|---|

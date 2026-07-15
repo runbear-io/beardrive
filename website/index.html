@@ -303,10 +303,10 @@ footer a:hover { color: var(--text); }
     </div>
   </div>
   <div class="strip">
-    <p>Works with the storage you already have</p>
+    <p>Your hub stores on the object storage you already have</p>
     <div class="names">
       <span>Amazon S3</span><span>Google Cloud Storage</span><span>Cloudflare R2</span>
-      <span>MinIO</span><span>any folder</span><span>— or a BearDrive hub</span>
+      <span>MinIO</span><span>any folder</span>
     </div>
   </div>
 </header>
@@ -335,8 +335,8 @@ footer a:hover { color: var(--text); }
         version, no account needed, revocable any time.</p>
       </div>
       <div class="card wide">
-        <div class="arch"><b>your folder</b>  ←scan/materialize→  <b>local volume</b>  ←push/pull→  <span class="a">object storage or a BearDrive hub</span>
-<span class="dim">real files                per-device journals,      devices converge through dumb storage:
+        <div class="arch"><b>your folder</b>  ←scan/materialize→  <b>local volume</b>  ←push/pull→  <span class="a">a BearDrive hub (on S3 / GCS / R2 / a folder)</span>
+<span class="dim">real files                per-device journals,      devices converge through the hub's dumb storage:
 every tool works          content-addressed blobs    append-only, no locks, offline-safe</span></div>
       </div>
     </div>
@@ -348,19 +348,19 @@ every tool works          content-addressed blobs    append-only, no locks, offl
     <p class="kicker">WHY BEARDRIVE</p>
     <h2>Two superpowers, one folder.</h2>
     <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr))">
-      <div class="card"><div class="ico">🧑‍🤝‍🧑</div>
-        <p style="font-size:15px"><b>Share files with people.</b> Anything in the folder is a
-        <code>bdrive share</code> away from being a public URL that renders as a page —
-        markdown, HTML, PDFs. No accounts for viewers, no "can you re-send that?",
-        always the latest version, revocable any time. Dropbox-link simplicity for
-        everything your team produces.</p>
-      </div>
       <div class="card"><div class="ico">🧠</div>
         <p style="font-size:15px"><b>Share context across agents.</b> The folder is shared
         memory. What your agent learns today — findings, plans, decisions, notes —
         is on your teammate's disk in seconds, so <b>their agent starts tomorrow's
         session already knowing it</b>. Context stops being siloed per laptop;
         every agent on the team reads from, and writes to, the same brain.</p>
+      </div>
+      <div class="card"><div class="ico">🧑‍🤝‍🧑</div>
+        <p style="font-size:15px"><b>Share files with people.</b> Anything in the folder is a
+        <code>bdrive share</code> away from being a public URL that renders as a page —
+        markdown, HTML, PDFs. No accounts for viewers, no "can you re-send that?",
+        always the latest version, revocable any time. Dropbox-link simplicity for
+        everything your team produces.</p>
       </div>
       <div class="card"><div class="ico">📊</div>
         <p style="font-size:15px"><b>See what your agents actually read.</b> Every change is
@@ -407,9 +407,10 @@ every tool works          content-addressed blobs    append-only, no locks, offl
         concurrent edits keep both versions as conflict copies.</p>
       </div>
       <div class="card"><div class="ico">🪣</div>
-        <p><b>Bring your own storage.</b> S3, GCS, R2, MinIO, or a plain shared
-        directory — BearDrive needs nothing but dumb object storage. Or sync
-        through a hub and devices never hold cloud credentials at all.</p>
+        <p><b>Bring your own storage.</b> Your hub is backed by S3, GCS, R2,
+        MinIO, or a plain shared directory — nothing but dumb object storage.
+        Clients sync through the hub over HTTPS and never hold cloud
+        credentials at all.</p>
       </div>
     </div>
   </div>
