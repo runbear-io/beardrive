@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
-import { IMG_EXT, MD_EXT, TEXT_EXT, joinPath } from "../util";
+import { HTML_EXT, IMG_EXT, MD_EXT, TEXT_EXT, joinPath } from "../util";
 
 export function FileView(props: {
   apiBase: string;
@@ -20,6 +20,20 @@ export function FileView(props: {
   useEffect(() => () => onMeta(""), [path, onMeta]); // leaving a file clears its meta line
 
   if (MD_EXT.test(path)) return <MarkdownView {...props} />;
+  if (HTML_EXT.test(path)) {
+    // Rendered, not shown as source — inside a sandboxed iframe so synced
+    // HTML never runs with the hub origin's session (the server also
+    // stamps the response with a sandbox CSP; this is belt and braces).
+    return (
+      <iframe
+        className="htmlview"
+        sandbox="allow-scripts"
+        src={fileURL}
+        title={path}
+        onLoad={props.onRendered}
+      />
+    );
+  }
   if (IMG_EXT.test(path)) {
     return <ImgView src={fileURL} alt={path} onRendered={props.onRendered} />;
   }

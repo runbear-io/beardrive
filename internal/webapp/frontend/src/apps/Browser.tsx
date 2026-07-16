@@ -59,7 +59,10 @@ export default function Browser(props: {
 
   const path = route.path;
   const isDir = !!path && dirIndex.has(path);
-  const isFile = !!path && loaded && !dirIndex.has(path);
+  // A file only counts as one when the tree actually contains it — a
+  // missing path gets the not-found view, not a broken file view.
+  const isFile = !!path && loaded && !isDir && flatFiles.some((f) => f.path === path);
+  const isMissing = !!path && loaded && !isDir && !isFile;
   const listingShowing = isDir && !route.view;
 
   /* ---- tree expansion ---- */
@@ -280,6 +283,29 @@ export default function Browser(props: {
   } else if (path) {
     if (!loaded) {
       view = <div className="empty">Loading…</div>;
+    } else if (isMissing) {
+      // The tree polls every few seconds, so a file that's mid-upload (or
+      // mid-sync from a teammate's device) appears here on its own.
+      contentClass = "view";
+      view = (
+        <div className="notfound">
+          <h1>Couldn't find that</h1>
+          <p>
+            <code>{path}</code> isn't in this project right now.
+          </p>
+          <p className="nf-sub">
+            If it was just created, it may still be uploading or syncing
+            from a teammate's device — this page checks again automatically
+            every few seconds, so refresh or come back in a moment.
+          </p>
+          <button
+            className="pbtn"
+            onClick={() => qc.invalidateQueries({ queryKey: ["tree", apiBase] })}
+          >
+            Check again
+          </button>
+        </div>
+      );
     } else if (isDir) {
       contentClass = "view";
       view = (

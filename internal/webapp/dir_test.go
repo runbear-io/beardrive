@@ -67,6 +67,35 @@ func TestDirSourceServesFolder(t *testing.T) {
 	}
 }
 
+// Synced HTML served inline must never run with the hub origin's session:
+// the file endpoint sandboxes it (same posture as /s/* shares). Downloads
+// are exempt — an attachment never executes in the hub's origin.
+func TestInlineHTMLIsSandboxed(t *testing.T) {
+	h := dirServer(t, map[string]string{
+		"page.html": "<h1>hi</h1><script>1</script>",
+		"pic.svg":   "<svg xmlns='http://www.w3.org/2000/svg'/>",
+		"plan.md":   "# md",
+	})
+	for path, wantCSP := range map[string]bool{
+		"/api/file?path=page.html":     true,
+		"/api/file?path=pic.svg":       true,
+		"/api/file?path=plan.md":       false,
+		"/api/download?path=page.html": false, // attachment, not rendered
+	} {
+		rec := get(t, h, path)
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d", path, rec.Code)
+		}
+		csp := rec.Header().Get("Content-Security-Policy")
+		if wantCSP && csp != "sandbox allow-scripts" {
+			t.Errorf("%s: CSP = %q, want sandbox", path, csp)
+		}
+		if !wantCSP && csp != "" {
+			t.Errorf("%s: unexpected CSP %q", path, csp)
+		}
+	}
+}
+
 // The frontend serves real assets directly but returns the app shell for any
 // client-side route (a deep file path, /join/<token>), so a deep link or
 // refresh doesn't 404. Reserved API/auth/share prefixes stay real 404s.

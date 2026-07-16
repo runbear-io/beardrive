@@ -1,7 +1,8 @@
 export const MD_EXT = /\.(md|markdown)$/i;
 export const IMG_EXT = /\.(png|jpe?g|gif|svg|webp|ico|bmp|avif)$/i;
+export const HTML_EXT = /\.html?$/i;
 export const TEXT_EXT =
-  /\.(txt|log|json|ya?ml|toml|csv|go|py|js|ts|jsx|tsx|sh|bash|zsh|rb|rs|c|h|cpp|java|kt|swift|sql|html|css|xml|ini|conf|env|mod|sum|jsonl)$/i;
+  /\.(txt|log|json|ya?ml|toml|csv|go|py|js|ts|jsx|tsx|sh|bash|zsh|rb|rs|c|h|cpp|java|kt|swift|sql|css|xml|ini|conf|env|mod|sum|jsonl)$/i;
 
 export function humanSize(n: number): string {
   if (n < 1024) return n + " B";

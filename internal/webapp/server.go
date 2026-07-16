@@ -645,10 +645,18 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	}
 	defer rc.Close()
 	w.Header().Set("ETag", etag)
-	w.Header().Set("Content-Type", contentType(p))
+	ct := contentType(p)
+	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Content-Length", fmt.Sprint(fi.Size))
 	if attach {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(p)))
+	} else if strings.HasPrefix(ct, "text/html") || strings.HasPrefix(ct, "image/svg") {
+		// Synced HTML (and scriptable SVG) served inline must never run
+		// with the hub origin's session — same posture as /s/* share
+		// pages: an opaque sandboxed origin that can't touch the API or
+		// cookies. The viewer renders these in a sandboxed iframe; direct
+		// navigation gets the same wall.
+		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
 	}
 	io.Copy(w, rc)
 }
