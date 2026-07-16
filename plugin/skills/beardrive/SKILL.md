@@ -16,7 +16,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dir>` / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
 | Run the daemon in the foreground | `bdrive init -f` |
 | Stop syncing | `bdrive stop [<folder>]` (`--forget` also unregisters) |
-| One sync cycle now | `bdrive sync [<folder>]` |
+| One sync cycle now | `bdrive sync [<folder>]` — `--note <text>` stamps session context; `--hook <label>` is the Claude turn-start hook's plumbing (event JSON in, sync + note, gated-link formula out) |
 | Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install [<folder>]` — auto-detects the platforms in use and merges pull/push/session-note/read-tracking hooks into each one's own hook config, idempotently; bare `bdrive hooks` shows the status table |
 | Record agent file reads (hook plumbing) | `bdrive read-log [<folder>]` — parses a hook event JSON from stdin and queues in-project reads locally (native reads, grep matches, and files named in shell commands); drained to the hub on the next sync as agent traffic in the read heatmap. Registered automatically by `bdrive hooks install`; rarely run by hand |
 | Mounts + daemon + pending state | `bdrive status [<folder>]` |
