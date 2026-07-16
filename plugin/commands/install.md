@@ -73,9 +73,10 @@ this (adapt the folder name; create the file if missing):
 propagate to everyone within seconds and every change is tracked (who,
 when, which device). Read `wiki/AGENTS.md` before working there. Put
 shareable artifacts — reports, notes, plans — in `wiki/` so the team
-sees them, and include the file's internal link in your reply
-(`bdrive url wiki/<file>` — teammates sign in to view). Never put
-secrets here (`bdrive share wiki/<file>` mints fully public URLs).
+sees them, and whenever you mention a synced file's path, append its
+gated link on an emoji: `` `wiki/<file>` `` [🔗](\<hub link>) —
+`bdrive url wiki/<file>` prints the link (teammates sign in to view).
+Never put secrets here (`bdrive share` mints fully public URLs).
 ```
 
 Point at the synced `AGENTS.md` rather than duplicating its conventions —

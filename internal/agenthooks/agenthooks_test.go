@@ -72,6 +72,9 @@ func TestInstallJSONPlatforms(t *testing.T) {
 	if !strings.Contains(string(raw), "claude-code session $s") {
 		t.Fatal("claude hook lacks its session-note label")
 	}
+	if !strings.Contains(string(raw), "bdrive sync . --hook claude-code") {
+		t.Fatal("claude pull hook should use --hook mode (link-formula injection)")
+	}
 	if !strings.Contains(string(raw), `"async":true`) {
 		t.Fatal("claude push hook should be async")
 	}
@@ -207,6 +210,47 @@ func TestInstallUpgradesReadMatcher(t *testing.T) {
 	}
 
 	// And it settles: the next install is a no-op.
+	results, _ = Install(folder, []string{"claude"})
+	if results[0].Changed {
+		t.Fatal("re-install after upgrade reported a change")
+	}
+}
+
+// A config registered before the link-formula hook existed gets its pull
+// command converged in place on re-install — no duplicate groups, and the
+// next install settles to a no-op.
+func TestInstallUpgradesPullCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	folder := t.TempDir()
+	old := `{"hooks":{
+		"UserPromptSubmit":[{"hooks":[{"type":"command","command":"sh -c 'bdrive sync .'","timeout":30}]}],
+		"PostToolUse":[
+			{"matcher":"Write|Edit|MultiEdit","hooks":[{"type":"command","command":"sh -c 'bdrive sync .'","timeout":30,"async":true}]},
+			{"matcher":"Read|Grep|Bash","hooks":[{"type":"command","command":"sh -c 'bdrive read-log .'","timeout":30,"async":true}]}]}}`
+	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)
+	os.WriteFile(filepath.Join(folder, ".claude", "settings.json"), []byte(old), 0o644)
+
+	results, err := Install(folder, []string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !results[0].Changed {
+		t.Fatal("pull-command upgrade reported unchanged")
+	}
+	cfg := readJSON(t, filepath.Join(folder, ".claude", "settings.json"))
+	hooks := cfg["hooks"].(map[string]any)
+	if got := len(hooks["UserPromptSubmit"].([]any)); got != 1 {
+		t.Fatalf("UserPromptSubmit groups = %d, want converged single group", got)
+	}
+	if got := len(hooks["PostToolUse"].([]any)); got != 2 {
+		t.Fatalf("PostToolUse groups = %d, want push + read (no duplicates)", got)
+	}
+	raw, _ := json.Marshal(cfg)
+	if !strings.Contains(string(raw), "bdrive sync . --hook claude-code") {
+		t.Fatalf("pull command not upgraded: %s", raw)
+	}
+
+	// Settles: the next install is a no-op.
 	results, _ = Install(folder, []string{"claude"})
 	if results[0].Changed {
 		t.Fatal("re-install after upgrade reported a change")

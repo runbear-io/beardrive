@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/beardrive-sync.sh\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/beardrive-pull.sh\"",
             "timeout": 30,
             "statusMessage": "beardrive: pulling latest files"
           }

@@ -100,7 +100,7 @@ Hub projects belong to an **organization**: only members of the project's org ca
 
 A hub stores its metadata (accounts, projects, orgs, invites, shares, devices — never files or journals, which stay in object storage) in a database chosen by the config's `database` block: `{"driver":"file"}` (default, JSON under `$BDRIVE_HOME`), `{"driver":"sqlite","dsn":"…/hub.db"}`, or `{"driver":"postgres","dsn":"postgres://…"}` for a managed Postgres such as Supabase. file/sqlite are single-writer; Postgres backs multiple instances. If a teammate's `bdrive init --project <id>` gets 403/404 or the project list looks empty, the missing invite is the reason. Public share links (`bdrive share`) intentionally bypass the org wall; internal links (`bdrive url`) stay behind it — prefer them for teammates, and reserve `bdrive share` for people outside the hub.
 
-**Share what you make**: whenever you create a shareable artifact in the synced folder — a report, plan, analysis, or export (.md, .html, .csv, .pdf, …) — get its internal link with `bdrive url <file>` and include it in your reply. The sync hooks push within seconds so the link resolves almost immediately; use `bdrive url <file> --sync` when the reader will click right away. Never mint a public `bdrive share` link for this unless the user asks for one.
+**Link what you mention** (and especially what you make): whenever you mention a synced file's path in prose, append its gated hub link on an emoji, formatted exactly as — `` `<path>` `` [🔗](\<hub>/\<project-id>/\<url-encoded path>) — the path stays plain text (it is the local path), the hyperlink goes on the emoji only. The base URL comes from `.bdrive/config.json`: the `remote` is `<hub>/p/<project-id>`, so file links are `<hub>/<project-id>/<path>` (drop the `/p`); `bdrive url <file>` computes any single link for you. These links require hub sign-in + project membership — safe to paste anywhere internal. Rules: only link files that actually sync (inside the shared scope, not ignored); keep paths inside code blocks/commands plain; when you just created the file, the sync hooks push within seconds (`bdrive url <file> --sync` if the reader will click immediately); give a raw URL only when the user needs to paste it outside the conversation. On Claude Code the turn-start hook injects this formula automatically. Never mint a public `bdrive share` link unless the user explicitly asks for one.
 
 ### Renames and moves
 
@@ -136,7 +136,7 @@ agent platform it detects (by config dir, in the project or home):
 
 | Platform | Config it writes | Pull / push / read events |
 |---|---|---|
-| Claude Code (& Cowork) | `<project>/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse` (Write\|Edit) / `PostToolUse` (Read\|Grep\|Bash) |
+| Claude Code (& Cowork) | `<project>/.claude/settings.json` | `UserPromptSubmit` (pull + injects the gated-link formula) / `PostToolUse` (Write\|Edit) / `PostToolUse` (Read\|Grep\|Bash) |
 | Codex (ChatGPT) | `<project>/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse` (apply_patch) / `PostToolUse` (read_file\|shell, best-effort) — user must `/hooks`-trust the layer once |
 | Gemini CLI | `<project>/.gemini/settings.json` | `BeforeAgent` / `AfterTool` (write_file\|replace) / `AfterTool` (read_file\|read_many_files\|search\|shell) |
 | Hermes | `~/.hermes/config.yaml` (per-user) | `pre_llm_call` / `post_tool_call` (write_file\|patch) / `post_tool_call` (read_file\|grep\|bash) |
