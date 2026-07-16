@@ -15,6 +15,7 @@ import (
 func syncCmd() *cobra.Command {
 	var note string
 	var noteTTL time.Duration
+	var hookLabel string
 	c := &cobra.Command{
 		Use:   "sync [folder]",
 		Short: "Sync a mounted folder with its remote now",
@@ -23,6 +24,11 @@ func syncCmd() *cobra.Command {
 			folder, err := absFolder(args)
 			if err != nil {
 				return err
+			}
+			if hookLabel != "" {
+				// Agent-hook mode: event JSON on stdin, silent best-effort
+				// sync, link-formula context on stdout. Never fails.
+				return runHookSync(cmd, folder, hookLabel)
 			}
 			sess, proj, err := openSession(cmd.Context(), folder, true)
 			if err != nil {
@@ -51,6 +57,7 @@ func syncCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&note, "note", "", "session context stamped onto changes (e.g. an agent session id); shown in history; empty clears")
 	c.Flags().DurationVar(&noteTTL, "note-ttl", 30*time.Minute, "how long the note keeps applying to daemon-committed changes")
+	c.Flags().StringVar(&hookLabel, "hook", "", "agent-hook mode: read the platform's hook event JSON from stdin, sync with a session note labeled by this value, and emit the project's link-formula context (Claude Code hook JSON) on stdout")
 	return c
 }
 

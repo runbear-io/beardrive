@@ -67,6 +67,17 @@ func hookCommand(label string) string {
 		`else bdrive sync . >/dev/null 2>&1 || true; fi'`
 }
 
+// hookPullCommand is Claude Code's turn-start hook: `bdrive sync --hook`
+// pulls, stamps the session note, and emits the project's gated-link
+// formula as additionalContext (hookSpecificOutput JSON on stdout — which
+// is why stdout must NOT be discarded here). Claude-only: the JSON
+// contract is Claude Code's.
+func hookPullCommand(label string) string {
+	return `sh -c '` +
+		`cd "${CLAUDE_PROJECT_DIR:-.}" && [ -d .bdrive ] && command -v bdrive >/dev/null || exit 0; ` +
+		`bdrive sync . --hook ` + label + ` 2>/dev/null'`
+}
+
 // readHookCommand queues agent file reads for the hub's read heatmap:
 // `bdrive read-log` parses the hook's stdin JSON itself and only appends to
 // a local spool, so this stays cheap enough to run on every read-tool call.
@@ -94,7 +105,8 @@ var platforms = map[string]platform{
 			// files the command names (`read-log` mines both payloads).
 			// Glob stays unmatched on purpose — listing names isn't reading.
 			return mergeJSONHooks(filepath.Join(folder, ".claude", "settings.json"),
-				"UserPromptSubmit", "PostToolUse", "Write|Edit|MultiEdit", "Read|Grep|Bash", "claude-code", 30, true)
+				"UserPromptSubmit", "PostToolUse", "Write|Edit|MultiEdit", "Read|Grep|Bash", "claude-code", 30, true,
+				hookPullCommand("claude-code"))
 		},
 	},
 	"codex": {
@@ -104,7 +116,7 @@ var platforms = map[string]platform{
 			// Codex reads mostly happen through shell commands; read-log
 			// mines the command line for the files it names.
 			return mergeJSONHooks(filepath.Join(folder, ".codex", "hooks.json"),
-				"UserPromptSubmit", "PostToolUse", "apply_patch", "read_file|shell", "codex", 30, false)
+				"UserPromptSubmit", "PostToolUse", "apply_patch", "read_file|shell", "codex", 30, false, "")
 		},
 		note: "run /hooks inside Codex once to trust the project's .codex layer",
 	},
@@ -115,7 +127,7 @@ var platforms = map[string]platform{
 			// Gemini uses its own event names and millisecond timeouts.
 			return mergeJSONHooks(filepath.Join(folder, ".gemini", "settings.json"),
 				"BeforeAgent", "AfterTool", "write_file|replace|edit",
-				"read_file|read_many_files|search_file_content|run_shell_command", "gemini", 30000, false)
+				"read_file|read_many_files|search_file_content|run_shell_command", "gemini", 30000, false, "")
 		},
 	},
 	"hermes": {
@@ -194,7 +206,7 @@ func Install(folder string, agents []string) ([]Result, error) {
 // hooks.<Event> is an array of {matcher?, hooks: [{type: "command", ...}]}
 // groups). Push and read share the tool-use event under different matchers,
 // each idempotent on its own marker.
-func mergeJSONHooks(path, pullEvent, pushEvent, pushMatcher, readMatcher, label string, timeout int, async bool) (string, bool, error) {
+func mergeJSONHooks(path, pullEvent, pushEvent, pushMatcher, readMatcher, label string, timeout int, async bool, pullCmd string) (string, bool, error) {
 	root := map[string]any{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &root); err != nil {
@@ -209,8 +221,11 @@ func mergeJSONHooks(path, pullEvent, pushEvent, pushMatcher, readMatcher, label 
 		root["hooks"] = hooks
 	}
 	cmd := hookCommand(label)
+	if pullCmd == "" {
+		pullCmd = cmd
+	}
 	pull := map[string]any{"hooks": []any{map[string]any{
-		"type": "command", "command": cmd, "timeout": timeout,
+		"type": "command", "command": pullCmd, "timeout": timeout,
 		"statusMessage": "beardrive: pulling latest files",
 	}}}
 	pushHook := map[string]any{"type": "command", "command": cmd, "timeout": timeout}
@@ -224,22 +239,23 @@ func mergeJSONHooks(path, pullEvent, pushEvent, pushMatcher, readMatcher, label 
 
 	changed := false
 	for _, g := range []struct {
-		event   string
-		group   map[string]any
-		marker  string
-		matcher string // non-empty: keep an already-registered group's matcher current
+		event  string
+		group  map[string]any
+		marker string
 	}{
-		{pullEvent, pull, marker, ""},
-		{pushEvent, push, marker, pushMatcher},
-		{pushEvent, read, readMarker, readMatcher},
+		{pullEvent, pull, marker},
+		{pushEvent, push, marker},
+		{pushEvent, read, readMarker},
 	} {
 		arr, _ := hooks[g.event].([]any)
-		if grp := findMarkerGroup(arr, g.marker); grp != nil {
-			// Already registered — but upgrade a stale matcher in place so
-			// coverage improvements reach existing projects on reinstall
-			// (e.g. the read hook growing from "Read" to "Read|Grep|Bash").
-			if g.matcher != "" && grp["matcher"] != g.matcher {
-				grp["matcher"] = g.matcher
+		if idx := indexOfMarkerGroup(arr, g.marker); idx >= 0 {
+			// Already registered. These are OUR managed groups (marker-
+			// identified): converge them to the current shape so command,
+			// matcher, and flag improvements reach existing projects on
+			// reinstall instead of being frozen by the idempotency check.
+			if !jsonEqual(arr[idx], g.group) {
+				arr[idx] = g.group
+				hooks[g.event] = arr
 				changed = true
 			}
 			continue
@@ -274,21 +290,21 @@ func installHermes(string) (string, bool, error) {
 	}
 	cmd := hookCommand("hermes")
 	groups := []struct {
-		event   string
-		group   map[string]any
-		marker  string
-		matcher string
+		event  string
+		group  map[string]any
+		marker string
 	}{
-		{"pre_llm_call", map[string]any{"command": cmd, "timeout": 30}, marker, ""},
-		{"post_tool_call", map[string]any{"matcher": "write_file|patch", "command": cmd, "timeout": 30}, marker, "write_file|patch"},
-		{"post_tool_call", map[string]any{"matcher": "read_file|grep|bash", "command": readHookCommand(), "timeout": 30}, readMarker, "read_file|grep|bash"},
+		{"pre_llm_call", map[string]any{"command": cmd, "timeout": 30}, marker},
+		{"post_tool_call", map[string]any{"matcher": "write_file|patch", "command": cmd, "timeout": 30}, marker},
+		{"post_tool_call", map[string]any{"matcher": "read_file|grep|bash", "command": readHookCommand(), "timeout": 30}, readMarker},
 	}
 	changed := false
 	for _, g := range groups {
 		arr, _ := hooks[g.event].([]any)
-		if grp := findMarkerGroup(arr, g.marker); grp != nil {
-			if g.matcher != "" && grp["matcher"] != g.matcher {
-				grp["matcher"] = g.matcher
+		if idx := indexOfMarkerGroup(arr, g.marker); idx >= 0 {
+			if !jsonEqual(arr[idx], g.group) {
+				arr[idx] = g.group
+				hooks[g.event] = arr
 				changed = true
 			}
 			continue
@@ -312,16 +328,23 @@ func containsMarker(v any, m string) bool {
 	return err == nil && strings.Contains(string(data), m)
 }
 
-// findMarkerGroup returns the hook group in the array that carries the
-// marker (so its matcher can be upgraded in place), or nil.
-func findMarkerGroup(arr []any, m string) map[string]any {
-	for _, it := range arr {
-		grp, ok := it.(map[string]any)
-		if ok && containsMarker(grp, m) {
-			return grp
+// indexOfMarkerGroup returns the index of the hook group carrying the
+// marker (so the group can be converged in place), or -1.
+func indexOfMarkerGroup(arr []any, m string) int {
+	for i, it := range arr {
+		if grp, ok := it.(map[string]any); ok && containsMarker(grp, m) {
+			return i
 		}
 	}
-	return nil
+	return -1
+}
+
+// jsonEqual compares two values by canonical JSON (map keys sorted), so a
+// group loaded from disk and a freshly-built one compare structurally.
+func jsonEqual(a, b any) bool {
+	da, err1 := json.Marshal(a)
+	db, err2 := json.Marshal(b)
+	return err1 == nil && err2 == nil && string(da) == string(db)
 }
 
 func writeConfig(path string, marshal func() ([]byte, error)) error {
