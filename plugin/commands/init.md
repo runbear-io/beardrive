@@ -14,11 +14,12 @@ Follow these steps:
    wait for the user's choice before installing.
 
 2. **Sign in if needed**: run `bdrive login --status`. With no valid
-   session, ask the user for their team's hub URL and run
-   `bdrive login https://their-hub` (tell the user a browser window is
-   coming; it completes by itself). Bare `bdrive login` targets BearDrive
-   Cloud, which is not open yet — only use it if the user says their team
-   is on the cloud beta.
+   session, tell the user a browser window is coming, then run bare
+   `bdrive login` (BearDrive Cloud — signing up auto-creates a free
+   personal workspace; a pending team invite routes them into that team).
+   If the user says their team runs its own hub, use
+   `bdrive login https://their-hub` instead. Either way it completes by
+   itself.
 
 3. **Detect knowledge tooling** (skip if the folder already contains
    `.bdrive/` — then just run `bdrive init --yes`; it resumes syncing,

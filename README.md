@@ -32,8 +32,9 @@ initialized /Users/snow/workspace
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
 
-> BearDrive Cloud — zero-setup, bare `bdrive login` — is on the waitlist
-> at [beardrive.ai](https://beardrive.ai). Self-host to try it today.
+> BearDrive Cloud — zero-setup, bare `bdrive login`, free personal
+> workspace on signup — at [beardrive.ai](https://beardrive.ai). Or
+> self-host your own hub.
 
 On another machine:
 
@@ -87,9 +88,9 @@ go install github.com/runbear-io/beardrive/cmd/bdrive@latest
 ```sh
 # 1. Sign this device in against your hub (once per device).
 #    Self-host a hub in ~10 minutes (docs/self-hosting.md), then:
-bdrive login https://your-hub
-#    (BearDrive Cloud — zero-setup, bare `bdrive login` — is coming;
-#    join the waitlist at beardrive.ai. Self-host to try it today.)
+bdrive login
+#    (BearDrive Cloud: sign up in the browser, get a free personal
+#    workspace automatically. Self-hosting? bdrive login https://your-hub)
 
 # 2. Start syncing a project — interactive: create or connect a project,
 #    sync the whole folder or just ./shared. Re-run any time to resume.
@@ -134,7 +135,7 @@ hub's own storage, never something a syncing client points at directly:
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai — the managed cloud, waitlist-only: pass your hub URL). Switch hubs with `bdrive login <new-url>` |
+| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` for headless; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing (files stay; `bdrive init` resumes) |
@@ -260,8 +261,9 @@ cd ~/some-project && bdrive init              # once per project
 
 `bdrive login` signs the device in and remembers the server (`settings.json`
 under the bdrive home; bare `bdrive login` defaults to beardrive.ai — the
-managed cloud, currently waitlist-only, so pass your hub's URL —
-`--status` shows the current server and account). To move to a **different
+managed cloud, where signup auto-creates a free personal workspace; pass
+your hub's URL to use a self-hosted hub instead — `--status` shows the
+current server and account). To move to a **different
 hub**, run `bdrive login <new-url>` and then re-run `bdrive init` in each
 folder to connect it to a project there; `bdrive logout` signs out entirely.
 `bdrive init` then, per

@@ -15,13 +15,15 @@ If neither works, stop and tell the user how to install manually.
 
 ## 2. Sign in if needed
 
-Run `bdrive login --status`. If there is no valid session, sign in against
-the team's hub: ask the user for their hub URL and run
-`bdrive login https://their-hub` — it opens the browser to sign in (or
-sign up) and completes by itself. (Bare `bdrive login` targets BearDrive
-Cloud, which is not open yet — don't use it unless the user says their
-team is on the cloud beta.) Tell the user a browser window is coming
-before you run it.
+Run `bdrive login --status`. If there is no valid session, tell the user a
+browser window is coming, then sign in:
+- **Default: BearDrive Cloud.** Run bare `bdrive login` — the browser opens
+  beardrive.ai where they sign in or sign up. A brand-new account gets a
+  free personal workspace automatically (no forms beyond signup itself); a
+  pending team invite lands them in that team instead. No prior signup is
+  needed — this step IS the signup.
+- **Self-hosted team:** if the user says their team runs its own hub, ask
+  for the URL and run `bdrive login https://their-hub`.
 
 ## 3. Initialize the project
 
@@ -30,11 +32,14 @@ Otherwise ask the user two questions (or infer from their request):
 - **Create a new project or connect an existing one?** (`bdrive share --list`
   isn't needed here — `bdrive init --name <name>` creates-or-joins by name;
   `bdrive init --project <p-id>` connects by id.)
-- **Sync the whole folder, or only a shared subfolder** (e.g. `./wiki` or
-  `./shared`)? Hard rule: **never sync a repo root** — inside a repo,
-  knowledge always syncs as a scoped subfolder via `--shared`. Whole-folder
-  is only for a dedicated knowledge folder (an empty dir, a standalone
-  vault) that is the mount itself.
+- **Sync the whole folder, or only a shared subfolder?** Hard rule:
+  **never sync a repo root** — inside a repo, knowledge always syncs as a
+  scoped subfolder via `--shared`. Whole-folder is only for a dedicated
+  knowledge folder (an empty dir, a standalone vault) that is the mount
+  itself. Don't ask open-endedly: scan the repo for an existing knowledge
+  folder (`wiki/`, `docs/`, `notes/`, `handbook/`, an Obsidian vault —
+  markdown-heavy, not source code) and propose the best candidate for
+  confirmation, e.g. "I found `./wiki` — sync that?".
 
 Then run it non-interactively, e.g.:
 ```sh
@@ -117,8 +122,10 @@ that wasn't detected: `bdrive hooks install --agent claude,codex,gemini,hermes`.
 ## 6. Verify and summarize
 
 Run `bdrive status` and confirm the daemon is running and pending is 0.
-Then tell the user what was set up, and demonstrate the payoff: if they
-have (or you just generated) an HTML/PDF/markdown artifact in the synced
-folder, run `bdrive url <file>` and hand them the teammate link (sign-in
-required — safe by default); mention `bdrive share <file>` exists for
-fully public links when someone outside the hub needs it.
+Then tell the user what was set up — and ALWAYS finish with the payoff:
+pick a representative file in the synced folder (the wiki's index/README,
+or an artifact you just generated), run `bdrive url <file>`, and hand the
+user the link with an invitation to open it — seeing their folder rendered
+in the browser is the moment the setup clicks. Teammate links require
+sign-in (safe by default); mention `bdrive share <file>` exists for fully
+public links when someone outside the hub needs it.
