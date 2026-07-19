@@ -21,7 +21,7 @@ export default function VolumeApp({ config }: { config: ServerConfig }) {
       apiBase="/api/"
       route={route}
       hub={false}
-      sidebar={{ vault: <VaultHeader name={name} showSignout={config.auth.enabled} /> }}
+      sidebar={{ vault: <VaultHeader name={name} showSignout={config.auth.enabled} search /> }}
     />
   );
 }

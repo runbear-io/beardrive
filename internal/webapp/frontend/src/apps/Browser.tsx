@@ -12,6 +12,7 @@ import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
 import { copyText } from "../util";
 import { toast } from "../toast";
+import { onSearchRequest } from "../search";
 import { AppShell, Icon, Topbar, closeSidebarOnMobile } from "../components/shell";
 import { FileTree, ancestorsOf } from "../components/FileTree";
 import { Breadcrumbs } from "../components/Breadcrumbs";
@@ -141,6 +142,7 @@ export default function Browser(props: {
   const [share, setShare] = useState<{ url: string; copied: boolean } | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => onSearchRequest(() => setPaletteOpen(true)), []);
   const downloadRef = useRef<HTMLAnchorElement>(null);
 
   const panel = props.panel ?? null;
@@ -348,9 +350,6 @@ export default function Browser(props: {
       meta={meta}
       actions={
         <>
-          <button id="search-btn" className="btn ghost" title="Search (⌘K)" onClick={() => setPaletteOpen(true)}>
-            <Icon name="search" /> <span className="lbl">Search</span> <kbd>⌘K</kbd>
-          </button>
           {canShare && (
             <button id="share-btn" className="btn icon-only" title="Share" aria-label="Share" onClick={shareNow}>
               <Icon name="share" />

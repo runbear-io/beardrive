@@ -217,17 +217,27 @@ button, input, a.btn { font-family: inherit; }
 .btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-2); }
 .btn .ico { width: 15px; height: 15px; }
 .btn.ghost { color: var(--text-dim); }
-/* The search control sits dead-center in the topbar, twice its natural
-   width, reading as an input field. */
-#search-btn {
-  position: absolute; left: 50%; transform: translateX(-50%);
-  width: 260px; justify-content: flex-start;
+/* Hover tooltip for icon-only controls (the header search): label + kbd
+   chip in a floating card below the button, arrow pointing up. */
+.has-tip { position: relative; }
+.has-tip .tip {
+  position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 7px; white-space: nowrap;
+  padding: 6px 9px; border-radius: 8px; border: 1px solid var(--border-2);
+  background: var(--surface); color: var(--text); font-size: 12.5px; font-weight: 500;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+  opacity: 0; visibility: hidden; transition: opacity .12s ease .15s; z-index: 40;
 }
-#search-btn kbd { margin-left: auto; }
-#search-btn kbd {
+.has-tip .tip::before {
+  content: ""; position: absolute; top: -4.5px; left: 50%;
+  width: 8px; height: 8px; transform: translateX(-50%) rotate(45deg);
+  background: var(--surface); border-left: 1px solid var(--border-2); border-top: 1px solid var(--border-2);
+}
+.has-tip:hover .tip, .has-tip:focus-visible .tip { opacity: 1; visibility: visible; }
+.has-tip .tip kbd {
   font: 11px var(--ui); color: var(--text-faint);
   background: var(--hover); border: 1px solid var(--border-2); border-radius: 5px;
-  padding: 1px 5px; margin-left: 2px;
+  padding: 1px 5px;
 }
 #more-menu {
   position: absolute; right: 12px; top: calc(100% - 4px); z-index: 80;
@@ -463,8 +473,7 @@ button, input, a.btn { font-family: inherit; }
   .icon-btn { display: inline-flex; width: 44px; height: 44px; }
   #content { padding: 24px 18px 70px; }
   #topbar { padding: 0 8px; gap: 4px; }
-  #search-btn { position: static; transform: none; width: auto; justify-content: center; }
-  #search-btn kbd, .btn .lbl { display: none; }
+  .btn .lbl { display: none; }
   #topbar .btn { min-width: 44px; min-height: 44px; padding: 0; justify-content: center; gap: 0; }
   #topbar .btn .ico { width: 18px; height: 18px; }
   #more-btn:not([hidden]) { display: inline-flex; }

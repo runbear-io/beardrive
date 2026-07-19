@@ -220,6 +220,35 @@ h2 { font-size: clamp(26px, 3.2vw, 34px); margin: 0 0 12px; letter-spacing: -.02
 .claude ul li::before { content: "✓"; position: absolute; left: 0; color: var(--brand); font-weight: 600; }
 .claude ul b { color: var(--text); font-weight: 600; }
 
+/* auto-share reply mock */
+.autoshare { text-align: center; }
+.autoshare .lede { margin-left: auto; margin-right: auto; }
+.reply {
+  max-width: 660px; margin: 6px auto 0; text-align: left;
+  background: #101010; border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 0 0 1px rgba(245,166,35,.05), 0 24px 64px rgba(0,0,0,.55);
+  overflow: hidden;
+}
+.reply-line {
+  padding: 24px 26px; font: 15px/1.7 var(--mono); color: var(--text);
+  display: flex; gap: 13px; align-items: baseline;
+}
+.reply-dot { color: var(--brand); font-size: 11px; line-height: 1.7; }
+.reply-path { color: #6fbfff; word-break: break-all; }
+.reply-link {
+  color: var(--brand); text-decoration: none; cursor: pointer;
+  padding: 1px 4px; border-radius: 5px; transition: background .15s;
+}
+.reply-link:hover { background: rgba(245,166,35,.16); }
+.reply-cap {
+  border-top: 1px solid #1e1e1e; background: #0c0c0c;
+  padding: 13px 26px; font: 12.5px/1.6 var(--mono); color: var(--text-faint);
+}
+.reply-cap code {
+  font: 11.5px var(--mono); background: var(--card);
+  border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--text-dim);
+}
+
 /* open source / cloud */
 .oss { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
 .oss-card {
@@ -341,6 +370,25 @@ every tool works          content-addressed blobs    append-only, no locks, offl
       <div class="card wide" style="padding:0;overflow:hidden">
         <img src="assets/browse.png" alt="The hub web UI browsing a project — per-file agent read counts, heat dots, and the folder's change feed" loading="lazy" style="display:block;width:100%">
       </div>
+    </div>
+  </div>
+</section>
+
+<section id="autoshare" class="autoshare">
+  <div class="wrap">
+    <p class="kicker">SHARE WITHOUT A SHARE STEP</p>
+    <h2>The link is born with the file.</h2>
+    <p class="lede">The moment your agent writes a file, the path in its reply is
+    already a clickable, members-only hub link. You didn't run a command, you didn't
+    copy a path — any teammate who's signed in opens it in one click, rendered and at
+    the latest version. It's gated to your project, so it's safe to paste in any
+    internal channel.</p>
+    <div class="reply" aria-label="Example agent reply with an auto-generated hub link">
+      <div class="reply-line">
+        <span class="reply-dot">●</span>
+        <span>Deal page written to <span class="reply-path">shared/wiki/deals/motive.md</span> <span class="reply-link" role="link" tabindex="0" title="Opens for signed-in teammates on the project">🔗</span></span>
+      </div>
+      <div class="reply-cap">↑ your agent's own reply — the <span class="reply-link" style="cursor:default">🔗</span> is a live hub link it added automatically. No <code>bdrive share</code>, no copy-paste, nobody asking you to resend it.</div>
     </div>
   </div>
 </section>

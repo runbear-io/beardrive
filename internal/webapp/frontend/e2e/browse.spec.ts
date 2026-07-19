@@ -88,6 +88,14 @@ test("back/forward walks file → folder → file", async ({ page }) => {
   await expect(page.locator(".dl-title")).toContainText("notes");
 });
 
+test("header search button opens the palette", async ({ page }) => {
+  await login(page);
+  await wikiId(page);
+  await page.click("#search-btn");
+  await expect(page.locator("#palette")).toBeVisible();
+  await page.keyboard.press("Escape");
+});
+
 test("palette (⌘K) fuzzy-jumps to a file", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);

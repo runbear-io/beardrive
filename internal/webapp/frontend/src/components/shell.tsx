@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { requestSearch } from "../search";
 import {
   Check,
   ChevronDown,
@@ -118,8 +119,9 @@ export function VaultHeader(props: {
   name: string;
   onHome?: () => void; // hub: the project name doubles as a home link
   showSignout?: boolean; // volume mode: sign-out stays in the header (no account bar)
+  search?: boolean; // icon-only ⌘K search trigger beside the brand
 }) {
-  const { name, onHome, showSignout } = props;
+  const { name, onHome, showSignout, search } = props;
   return (
     <header id="vault">
       <span id="vault-badge" aria-hidden="true">
@@ -141,6 +143,22 @@ export function VaultHeader(props: {
         {name}
       </span>
       <div className="vault-actions">
+        {search && (
+          <button
+            id="search-btn"
+            className="icon-btn2 has-tip"
+            aria-label="Search"
+            onClick={() => {
+              requestSearch();
+              closeSidebarOnMobile();
+            }}
+          >
+            <Icon name="search" />
+            <span className="tip" role="tooltip">
+              Search <kbd>⌘K</kbd>
+            </span>
+          </button>
+        )}
         {showSignout && (
           <a id="signout" href="/auth/logout" title="Sign out" aria-label="Sign out">
             <Icon name="power" />

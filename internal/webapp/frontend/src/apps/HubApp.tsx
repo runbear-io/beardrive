@@ -75,7 +75,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
 
   // Top of the sidebar is the brand; project and account actions live in
   // their own sections below (PropelAuth-style layout).
-  const vault = <VaultHeader name={brand} onHome={() => navigate("/")} />;
+  const vault = <VaultHeader name={brand} onHome={() => navigate("/")} search={!!current} />;
 
   const accountBar = config.me ? (
     <AccountBar
