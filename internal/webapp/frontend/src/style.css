@@ -199,7 +199,7 @@ button, input, a.btn { font-family: inherit; }
 }
 #account-btn .acct { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 #account-btn .acct b { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#account-btn .acct small { font-size: 11px; color: var(--text-ghost); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#account-btn .acct small { font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #account-btn > .ico { width: 14px; height: 14px; color: var(--text-ghost); }
 #account-menu {
   min-width: var(--radix-dropdown-menu-trigger-width, 220px);
@@ -270,7 +270,7 @@ button, input, a.btn { font-family: inherit; }
 
 #content { flex: 1; overflow-y: auto; padding: 44px 40px 110px; scroll-behavior: smooth; }
 .empty { color: var(--text-faint); text-align: center; margin-top: 22vh; }
-.empty-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--text-ghost); }
+.empty-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--text-faint); }
 
 /* ---- onboarding ---- */
 .onboard { max-width: 560px; margin: 8vh auto 0; }
@@ -556,7 +556,7 @@ button, input, a.btn { font-family: inherit; }
   .hline { flex-wrap: wrap; }
   /* Four share-dialog buttons don't fit one row at 360 — the destructive
      Revoke takes its own line rather than sitting 9px from Done. */
-  .modal-actions .ai-del { flex: 0 0 100%; }
+  .modal-actions .ai-del { flex: 0 0 100%; justify-content: center; text-align: center; }
 }
 
 /* ---- markdown reading view ---- */
