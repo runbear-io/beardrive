@@ -1,8 +1,8 @@
 import type { Org, Project } from "../api/types";
-import { ConnectGuide } from "./ConnectGuide";
 
-// Settings for the open project (the header gear). Today: identity facts
-// plus the connect guide; per-project knobs land here as they grow.
+// Settings for the open project (sidebar menu). Today: identity facts;
+// per-project knobs land here as they grow. Install/connect lives on the
+// Installation page.
 export function ProjectSettings({ project, org }: { project: Project; org: Org | null }) {
   return (
     <div className="project-settings">
@@ -25,8 +25,6 @@ export function ProjectSettings({ project, org }: { project: Project; org: Org |
           </>
         )}
       </dl>
-      <h3>Connect a device</h3>
-      <ConnectGuide project={project} />
     </div>
   );
 }

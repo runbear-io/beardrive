@@ -163,3 +163,17 @@ test("insights scopes to the selected folder via the ⋯ menu", async ({ page })
   // Scope note in the subtitle is the stable assertion.
   await expect(page.locator(".insights .dl-sub")).toContainText("notes and everything in it");
 });
+
+test("project menu: Dashboard, Installation, Settings", async ({ page }) => {
+  await login(page);
+  await wikiId(page);
+  await page.click("#nav-dashboard");
+  await expect(page.locator(".insights .in-title")).toContainText("Knowledge insights");
+  await expect(page.locator("#nav-dashboard")).toHaveClass(/active/);
+  await page.click("#nav-install");
+  await expect(page.locator("#crumb")).toHaveText("Installation");
+  await expect(page.locator("#nav-install")).toHaveClass(/active/);
+  await page.click("#nav-settings");
+  await expect(page.locator("#crumb")).toHaveText("Project settings");
+  await expect(page.locator(".project-settings h2")).toHaveText("wiki");
+});

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
-import { parseRoute } from "../router";
+import { parseRoute, urlForView } from "../router";
 import { navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
@@ -10,6 +10,7 @@ import { HubSettings } from "../components/HubSettings";
 import { ProjectNav } from "../components/ProjectNav";
 import { AccountBar } from "../components/AccountBar";
 import { ProjectSettings } from "../components/ProjectSettings";
+import { ConnectGuide } from "../components/ConnectGuide";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "../toast";
 import Browser from "./Browser";
@@ -22,7 +23,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   const [joinedOrgId, setJoinedOrgId] = useState<string | null>(null);
   // Admin panels replace the content pane without touching the URL (they
   // were never routes in the classic app); any navigation closes them.
-  const [panel, setPanel] = useState<null | { kind: "hub" } | { kind: "org"; orgId: string } | { kind: "project" }>(null);
+  const [panel, setPanel] = useState<null | { kind: "hub" } | { kind: "org"; orgId: string } | { kind: "project" } | { kind: "install" }>(null);
   useEffect(() => setPanel(null), [pathname]);
 
   const joinToken = useMemo(() => {
@@ -142,7 +143,9 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       ? { crumb: "Signup & access", body: <HubSettings /> }
       : panel?.kind === "project"
         ? { crumb: "Project settings", body: <ProjectSettings project={current} org={org} /> }
-        : panelOrg
+        : panel?.kind === "install"
+          ? { crumb: "Installation", body: <div className="onboard"><ConnectGuide project={current} /></div> }
+          : panelOrg
         ? {
             crumb: panelOrg.name,
             body: (
@@ -178,9 +181,27 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           <ProjectNav
             projects={projects}
             currentId={current.id}
-            onOpenSettings={() => {
-              setPanel({ kind: "project" });
-              closeSidebarOnMobile();
+            menu={{
+              active:
+                panel?.kind === "project"
+                  ? "settings"
+                  : panel?.kind === "install"
+                    ? "install"
+                    : !panel && route.view === "insights"
+                      ? "dashboard"
+                      : null,
+              onDashboard: () => {
+                navigate(urlForView("insights", current.id));
+                closeSidebarOnMobile();
+              },
+              onInstall: () => {
+                setPanel({ kind: "install" });
+                closeSidebarOnMobile();
+              },
+              onSettings: () => {
+                setPanel({ kind: "project" });
+                closeSidebarOnMobile();
+              },
             }}
           />
         ),

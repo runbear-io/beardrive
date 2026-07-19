@@ -16,14 +16,21 @@ export function projColor(s: string): string {
   return PROJ_COLORS[h % PROJ_COLORS.length];
 }
 
+export interface ProjectMenu {
+  active: "dashboard" | "install" | "settings" | null;
+  onDashboard: () => void;
+  onInstall: () => void;
+  onSettings: () => void;
+}
+
 export function ProjectNav({
   projects,
   currentId,
-  onOpenSettings,
+  menu,
 }: {
   projects: Project[];
   currentId?: string;
-  onOpenSettings?: () => void;
+  menu?: ProjectMenu;
 }) {
   const refresh = useHubRefresh();
 
@@ -77,18 +84,37 @@ export function ProjectNav({
           </select>
           <Icon name="chevd" />
         </span>
-        {onOpenSettings && (
-          <button
-            id="project-settings-btn"
-            className="icon-btn2"
-            title="Project settings"
-            aria-label="Project settings"
-            onClick={onOpenSettings}
-          >
-            <Icon name="gear" />
-          </button>
-        )}
       </div>
+      {menu && (
+        <ul className="nav-menu" aria-label="Project pages">
+          {(
+            [
+              ["dashboard", "Dashboard", "dashboard", menu.onDashboard],
+              ["install", "Installation", "terminal", menu.onInstall],
+              ["settings", "Settings", "gear", menu.onSettings],
+            ] as const
+          ).map(([key, label, icon, onClick]) => (
+            <li key={key}>
+              <div
+                id={"nav-" + key}
+                className={"row" + (menu.active === key ? " active" : "")}
+                role="button"
+                tabIndex={0}
+                onClick={onClick}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onClick();
+                  }
+                }}
+              >
+                <Icon name={icon} />
+                <span className="label">{label}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </nav>
   );
 }
