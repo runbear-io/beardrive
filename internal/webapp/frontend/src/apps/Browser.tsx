@@ -232,6 +232,7 @@ export default function Browser(props: {
         flatFiles={flatFiles}
         heatMap={heatMap}
         devices={devices}
+        scope={route.viewTarget || ""}
         onOpenFile={openPath}
         onOpenFolder={openPath}
         isFolder={isFolderFn}
@@ -333,7 +334,7 @@ export default function Browser(props: {
   ) : path ? (
     <Breadcrumbs path={path} onOpenFolder={openPath} />
   ) : route.view === "insights" ? (
-    "Insights — " + (project?.name ?? "")
+    "Insights — " + (route.viewTarget || project?.name || "")
   ) : route.view === "history" ? (
     "History — " + historyTitle(route.viewTarget || "", isFolderFn)
   ) : isHome ? (
@@ -393,7 +394,7 @@ export default function Browser(props: {
               {props.canInsights && (
                 <button
                   className="more-item"
-                  onClick={() => navigate(urlForView("insights", project?.id))}
+                  onClick={() => navigate(urlForView("insights", project?.id, path))}
                 >
                   Insights
                 </button>

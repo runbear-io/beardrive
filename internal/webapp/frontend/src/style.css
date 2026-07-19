@@ -330,6 +330,7 @@ button, input, a.btn { font-family: inherit; }
 /* ---- insights (read×write matrix) ---- */
 .insights { max-width: 760px; margin: 0 auto; }
 .in-title { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
+.in-title .in-scope { color: var(--text-ghost); font-weight: 500; font-size: 15px; }
 .in-lens { display: flex; gap: 6px; margin: 0 0 14px; }
 .in-lens-btn { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--text-faint); cursor: pointer; }
 .in-lens-btn:hover { color: var(--text); }

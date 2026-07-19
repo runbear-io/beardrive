@@ -59,6 +59,6 @@ export function urlForView(
   target?: string,
 ): string {
   let s = (projectId ? "/" + projectId : "") + "/" + view;
-  if (view === "history" && target) s += "/" + encodePath(target.replace(/\/+$/, ""));
+  if (target) s += "/" + encodePath(target.replace(/\/+$/, ""));
   return s;
 }
