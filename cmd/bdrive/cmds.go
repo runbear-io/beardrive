@@ -90,7 +90,15 @@ func statusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("device: %s (%s) as %s\n\n", dev.Name, dev.ID, dev.Author)
+			if settings, _ := config.LoadSettings(); settings.Email != "" {
+				who := settings.Email
+				if settings.Name != "" {
+					who = settings.Name + " <" + settings.Email + ">"
+				}
+				fmt.Printf("device: %s (%s) signed in as %s\n\n", dev.Name, dev.ID, who)
+			} else {
+				fmt.Printf("device: %s (%s) as %s\n\n", dev.Name, dev.ID, dev.Author)
+			}
 			first := true
 			for id, mi := range mounts {
 				if !first {
@@ -179,7 +187,16 @@ func logCmd() *cobra.Command {
 				} else {
 					kind = "delete"
 				}
-				line := fmt.Sprintf("%s  %s  %-40s  %s on %s", when, kind, op.Path, op.Author, op.DeviceName)
+				// Prefer the signed-in account over the git/OS author fallback,
+				// so team history shows hub identities.
+				who := op.UserName
+				if who == "" {
+					who = op.User
+				}
+				if who == "" {
+					who = op.Author
+				}
+				line := fmt.Sprintf("%s  %s  %-40s  %s on %s", when, kind, op.Path, who, op.DeviceName)
 				if op.Kind == journal.KindPut {
 					line += fmt.Sprintf("  (%s)", humanBytes(op.Size))
 				}
