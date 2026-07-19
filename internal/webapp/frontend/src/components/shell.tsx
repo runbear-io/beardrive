@@ -84,9 +84,17 @@ export function Icon({ name }: { name: string }) {
 /* The column system, in one place. `#content` owns scrolling and the page
    gutter; `<Page>` owns width and centering — nothing else may set either.
    Three widths cover every view: `read` for prose and listings (line length
-   rules), `app` for structured views, `wide` for data-dense ones. Views used
-   to declare their own max-width (560px to unbounded, half of them
-   uncentered), so no two routes shared a column. */
+   rules), `app` for structured views, `wide` for content that is itself a
+   page (a rendered HTML file in its frame). Views used to declare their own
+   max-width (560px to unbounded, half of them uncentered), so no two routes
+   shared a column.
+
+   The line: <Page> sets the COLUMN, a view may still cap its own MEASURE
+   (`.nf-sub`, a chart's design width). What a view must never do is declare
+   a page-level width — that is how the tiers drifted apart the first time.
+   Widening a column also never means scaling content up: Insights sits at
+   `app` and its charts cap themselves, because at `wide` the viewBox SVGs
+   just zoomed (a 10.5px label painted at 21px). */
 export type PageWidth = "read" | "app" | "wide";
 
 export function Page(props: {

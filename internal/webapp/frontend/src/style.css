@@ -35,7 +35,7 @@
   --page-read: 704px;   /* prose + listings: line length rules */
   --page-app: 880px;    /* structured views: guide, history, settings, admin */
   --page-wide: 1200px;  /* data-dense: treemap, coverage matrix, big tables */
-  --hero-top: 10vh;     /* one vertical start for short centered states */
+  --hero-top: clamp(32px, 8vh, 88px); /* one vertical start for short centered states */
 }
 
 * { box-sizing: border-box; }
@@ -376,8 +376,9 @@ button, input, a.btn { font-family: inherit; }
 .gd-step-title { font-weight: 600; font-size: 14px; color: var(--text); }
 .gd-desc { margin: 2px 0 8px 32px; color: var(--text-faint); font-size: 13px; line-height: 1.5; }
 .gd-extra { font-size: 12.5px; margin-top: 6px; }
-.gd-code { position: relative; margin: 6px 0 6px 32px; padding: 10px 72px 10px 12px; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6; color: var(--text); overflow-x: auto; white-space: pre; }
-.gd-copy { position: absolute; top: 7px; right: 7px; font: inherit; font-family: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-2); background: var(--bg-raise); color: var(--text-faint); cursor: pointer; box-shadow: -14px 0 12px -6px var(--bg-raise); }
+.gd-code { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 10px; margin: 6px 0 6px 32px; padding: 10px 12px; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6; color: var(--text); }
+.gd-code > code { display: block; min-width: 0; overflow-x: auto; white-space: pre; }
+.gd-copy { align-self: start; font: inherit; font-family: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-2); background: var(--bg-raise); color: var(--text-faint); cursor: pointer; }
 .gd-copy:hover { color: var(--accent-bright); border-color: var(--accent-dim); }
 /* A single unnumbered step has no badge to indent under. */
 .gd-solo .gd-desc, .gd-solo .gd-code { margin-left: 0; }
@@ -396,7 +397,7 @@ button, input, a.btn { font-family: inherit; }
 .in-lens-btn { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--text-faint); cursor: pointer; }
 .in-lens-btn:hover { color: var(--text); }
 .in-lens-btn.active { color: var(--accent); border-color: var(--accent); }
-.in-chart { width: 100%; height: auto; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); margin-bottom: 6px; }
+.in-chart { width: 100%; max-width: 760px; height: auto; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); margin-bottom: 6px; }
 .in-axis { stroke: var(--border); stroke-width: 1; }
 .in-threshold { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 4; }
 .in-danger-zone { fill: rgba(242, 109, 109, .05); }

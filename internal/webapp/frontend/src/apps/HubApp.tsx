@@ -163,12 +163,11 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       ? { crumb: "Project settings", body: <ProjectSettings project={current} org={org} /> }
       : route.view === "install"
         ? {
+            // The same guide the project home shows, in the same column —
+            // it used to sit in the .onboard card, 320px narrower and 90px
+            // lower than home, two sidebar items apart.
             crumb: "Installation",
-            body: (
-              <div className="onboard">
-                <ConnectGuide project={current} />
-              </div>
-            ),
+            body: <ConnectGuide project={current} />,
           }
         : null;
 

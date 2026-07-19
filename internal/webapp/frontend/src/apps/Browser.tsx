@@ -236,7 +236,6 @@ export default function Browser(props: {
   if (panel) {
     view = panel.body;
   } else if (route.view === "insights") {
-    pageWidth = "wide"; // treemap + coverage matrix need the room
     view = props.canInsights ? (
       <Insights
         flatFiles={flatFiles}
@@ -251,6 +250,7 @@ export default function Browser(props: {
       <div className="empty">Insights is for hub admins and org owners.</div>
     );
   } else if (route.view === "history") {
+    pageWidth = "read"; // a scannable list, like the folder listing it shares rows with
     view = (
       <HistoryView
         apiBase={apiBase}

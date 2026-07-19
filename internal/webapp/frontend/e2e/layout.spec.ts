@@ -42,12 +42,48 @@ test("every view shares one column system", async ({ page }) => {
     }
   };
 
-  await visit("", "app"); // project home / install guide
-  await visit("/history", "app");
+  await visit("", "app"); // project home
+  await visit("/install", "app"); // the same guide, so the same column
   await visit("/settings", "app");
-  await visit("/insights", "wide");
+  await visit("/insights", "app"); // charts cap their own measure; the column is normal
+  await visit("/history", "read"); // a listing, like the folder view it shares rows with
   await visit("/index.md", "read"); // rendered markdown
   await visit("/notes", "read"); // folder listing
+});
+
+test("the install route and the project home render the guide identically", async ({ page }) => {
+  // They are two sidebar items apart and show the same component; /install
+  // used to wrap it in the .onboard card — 320px narrower, 90px lower.
+  await login(page);
+  const pid = await wikiId(page);
+  const box = async (path: string) => {
+    await page.goto(`http://localhost:8993/${pid}${path}`);
+    await page.waitForSelector(".guide");
+    return page.evaluate(() => {
+      const r = (document.querySelector(".guide") as HTMLElement).getBoundingClientRect();
+      return { left: Math.round(r.left), width: Math.round(r.width), top: Math.round(r.top) };
+    });
+  };
+  expect(await box("/install")).toEqual(await box(""));
+});
+
+test("charts never scale past the size they were drawn at", async ({ page }) => {
+  // .in-chart SVGs are viewBox="0 0 720 …" at width:100%, so an unbounded
+  // column magnifies them — labels ended up larger than the page title.
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`http://localhost:8993/${pid}/insights`);
+  await page.waitForSelector(".in-chart");
+  const worst = await page.evaluate(() => {
+    let max = 0;
+    for (const el of document.querySelectorAll(".in-chart")) {
+      const vb = (el.getAttribute("viewBox") || "0 0 720 0").split(/\s+/);
+      max = Math.max(max, el.getBoundingClientRect().width / Number(vb[2]));
+    }
+    return max;
+  });
+  expect(worst, "chart scale factor").toBeLessThanOrEqual(1.06);
 });
 
 test("the gutter belongs to the scroll container, not the column", async ({ page }) => {
