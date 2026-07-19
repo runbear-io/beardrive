@@ -23,7 +23,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   const [joinedOrgId, setJoinedOrgId] = useState<string | null>(null);
   // Admin panels replace the content pane without touching the URL (they
   // were never routes in the classic app); any navigation closes them.
-  const [panel, setPanel] = useState<null | { kind: "hub" } | { kind: "org"; orgId: string } | { kind: "project" } | { kind: "install" }>(null);
+  const [panel, setPanel] = useState<null | { kind: "hub" } | { kind: "org"; orgId: string }>(null);
   useEffect(() => setPanel(null), [pathname]);
 
   const joinToken = useMemo(() => {
@@ -141,11 +141,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   const activePanel =
     panel?.kind === "hub"
       ? { crumb: "Signup & access", body: <HubSettings /> }
-      : panel?.kind === "project"
-        ? { crumb: "Project settings", body: <ProjectSettings project={current} org={org} /> }
-        : panel?.kind === "install"
-          ? { crumb: "Installation", body: <div className="onboard"><ConnectGuide project={current} /></div> }
-          : panelOrg
+      : panelOrg
         ? {
             crumb: panelOrg.name,
             body: (
@@ -155,6 +151,20 @@ export default function HubApp({ config }: { config: ServerConfig }) {
                 myEmail={config.me?.email || ""}
                 onProjectsChanged={refresh}
               />
+            ),
+          }
+        : null;
+
+  const routePage =
+    route.view === "settings"
+      ? { crumb: "Project settings", body: <ProjectSettings project={current} org={org} /> }
+      : route.view === "install"
+        ? {
+            crumb: "Installation",
+            body: (
+              <div className="onboard">
+                <ConnectGuide project={current} />
+              </div>
             ),
           }
         : null;
@@ -182,28 +192,30 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             projects={projects}
             currentId={current.id}
             menu={{
-              active:
-                panel?.kind === "project"
-                  ? "settings"
-                  : panel?.kind === "install"
+              active: panel
+                ? null
+                : route.view === "insights"
+                  ? "dashboard"
+                  : route.view === "install"
                     ? "install"
-                    : !panel && route.view === "insights"
-                      ? "dashboard"
+                    : route.view === "settings"
+                      ? "settings"
                       : null,
+              // Each page is a URL; explicitly close overlay panels because
+              // same-path navigation doesn't change pathname.
               onDashboard: () => {
-                // Explicitly close any panel: navigating to the SAME url
-                // (already on /insights) doesn't change pathname, so the
-                // route-change effect can't do it.
                 setPanel(null);
                 navigate(urlForView("insights", current.id));
                 closeSidebarOnMobile();
               },
               onInstall: () => {
-                setPanel({ kind: "install" });
+                setPanel(null);
+                navigate(urlForView("install", current.id));
                 closeSidebarOnMobile();
               },
               onSettings: () => {
-                setPanel({ kind: "project" });
+                setPanel(null);
+                navigate(urlForView("settings", current.id));
                 closeSidebarOnMobile();
               },
             }}
@@ -211,7 +223,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         ),
         orgBar: accountBar,
       }}
-      panel={activePanel}
+      panel={activePanel || routePage}
       onClosePanel={() => setPanel(null)}
     />
   );

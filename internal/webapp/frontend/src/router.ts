@@ -16,16 +16,21 @@ export function decodePath(p: string): string {
 
 // Special views are RESTful routes under the project — the first segment
 // after the project id is reserved when it names a view:
-//   /<project-id>/insights            the Insights dashboard
+//   /<project-id>/insights[/<path>]   the Insights dashboard (optionally scoped)
 //   /<project-id>/history[/<path>]    change feed (project / subtree / file)
-// (Root-level files literally named "insights" or "history" lose the URL
-// shortcut and remain reachable through the tree.)
-export const VIEW_ROUTES = new Set(["insights", "history"]);
+//   /<project-id>/install             connect-a-device guide
+//   /<project-id>/settings            project settings
+// Rule: every page gets its own URL path (see CLAUDE.md) — new surfaces are
+// view routes here, not ephemeral panel state. (Root-level files literally
+// named like a view lose the URL shortcut and remain reachable via the tree.)
+export const VIEW_ROUTES = new Set(["insights", "history", "install", "settings"]);
+
+export type ViewName = "insights" | "history" | "install" | "settings";
 
 export interface Route {
   project?: string;
   path: string;
-  view?: "insights" | "history";
+  view?: ViewName;
   viewTarget?: string;
 }
 
@@ -38,7 +43,7 @@ export function parseRoute(pathname: string, mode: "volume" | "hub"): Route {
   const seg = r.path.indexOf("/");
   const head = seg === -1 ? r.path : r.path.slice(0, seg);
   if (VIEW_ROUTES.has(head)) {
-    r.view = head as "insights" | "history";
+    r.view = head as ViewName;
     r.viewTarget = seg === -1 ? "" : r.path.slice(seg + 1).replace(/\/+$/, "");
     r.path = "";
   }
@@ -53,11 +58,7 @@ export function urlForPath(path: string, projectId?: string): string {
 }
 
 // The URL for a special view of a project.
-export function urlForView(
-  view: "insights" | "history",
-  projectId?: string,
-  target?: string,
-): string {
+export function urlForView(view: ViewName, projectId?: string, target?: string): string {
   let s = (projectId ? "/" + projectId : "") + "/" + view;
   if (target) s += "/" + encodePath(target.replace(/\/+$/, ""));
   return s;

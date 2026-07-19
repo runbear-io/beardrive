@@ -164,21 +164,26 @@ test("insights scopes to the selected folder via the ⋯ menu", async ({ page })
   await expect(page.locator(".insights .dl-sub")).toContainText("notes and everything in it");
 });
 
-test("project menu: Dashboard, Installation, Settings", async ({ page }) => {
+test("project menu pages each own a URL: Dashboard, Installation, Settings", async ({ page }) => {
   await login(page);
-  await wikiId(page);
+  const pid = await wikiId(page);
   await page.click("#nav-dashboard");
+  await page.waitForURL(`/${pid}/insights`);
   await expect(page.locator(".insights .in-title")).toContainText("Knowledge insights");
   await expect(page.locator("#nav-dashboard")).toHaveClass(/active/);
   await page.click("#nav-install");
+  await page.waitForURL(`/${pid}/install`);
   await expect(page.locator("#crumb")).toHaveText("Installation");
   await expect(page.locator("#nav-install")).toHaveClass(/active/);
   await page.click("#nav-settings");
+  await page.waitForURL(`/${pid}/settings`);
   await expect(page.locator("#crumb")).toHaveText("Project settings");
   await expect(page.locator(".project-settings h2")).toHaveText("wiki");
-  // Regression: from a panel, Dashboard must work even when the URL is
-  // already /insights (same-path navigation can't rely on route change).
   await page.click("#nav-dashboard");
-  await expect(page.locator(".insights .in-title")).toContainText("Knowledge insights");
+  await page.waitForURL(`/${pid}/insights`);
   await expect(page.locator("#nav-dashboard")).toHaveClass(/active/);
+  // Deep link + reload land on the page, like any URL.
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator(".project-settings h2")).toHaveText("wiki");
+  await expect(page.locator("#nav-settings")).toHaveClass(/active/);
 });
