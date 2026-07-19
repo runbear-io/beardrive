@@ -36,15 +36,25 @@ test("claude tab: plugin flow with real hub origin and project id, no raw CLI", 
   await expect(page.locator(".gd-body")).toContainText("Cowork");
 });
 
-test("codex tab keeps the full CLI flow", async ({ page }) => {
+test("codex tab is one paste that hands the whole setup to the agent", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.click('.gd-tab[data-key="codex"]');
-  const codes = await page.$$eval(".gd-code code", (els) => els.map((e) => e.textContent).join("\n"));
-  expect(codes).toContain("brew install runbear-io/tap/beardrive");
-  expect(codes).toContain("bdrive login http://localhost:8993");
-  expect(codes).toContain(`bdrive init --project ${pid}`);
-  expect(codes).toContain("bdrive hooks install --agent codex");
+  await expect(page.locator(".gd-step")).toHaveCount(1);
+  const prompt = await page.$$eval(".gd-step .gd-code code", (els) =>
+    els.map((e) => e.textContent).join("\n"),
+  );
+  // Everything the agent needs rides inside the pasted prompt.
+  expect(prompt).toContain("brew install runbear-io/tap/beardrive");
+  expect(prompt).toContain("bdrive skill install --agent codex");
+  expect(prompt).toContain("bdrive login --device http://localhost:8993");
+  expect(prompt).toContain(`bdrive init --project ${pid}`);
+  expect(prompt).toContain("bdrive hooks install");
+  const manual = await page.$$eval(".gd-manual .gd-code code", (els) =>
+    els.map((e) => e.textContent).join("\n"),
+  );
+  expect(manual).toContain("bdrive login http://localhost:8993");
+  expect(manual).toContain("bdrive hooks install --agent codex");
   await page.click('.gd-tab[data-key="claude"]');
 });
 

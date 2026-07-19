@@ -366,6 +366,12 @@ button, input, a.btn { font-family: inherit; }
 .gd-code { position: relative; margin: 6px 0 6px 32px; padding: 10px 72px 10px 12px; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6; color: var(--text); overflow-x: auto; white-space: pre; }
 .gd-copy { position: absolute; top: 7px; right: 7px; font: inherit; font-family: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-2); background: var(--bg-raise); color: var(--text-faint); cursor: pointer; box-shadow: -14px 0 12px -6px var(--bg-raise); }
 .gd-copy:hover { color: var(--accent-bright); border-color: var(--accent-dim); }
+/* A single unnumbered step has no badge to indent under. */
+.gd-solo .gd-desc, .gd-solo .gd-code { margin-left: 0; }
+.gd-manual { margin: 10px 0 0; }
+.gd-manual > summary { display: inline-block; font-size: 12.5px; font-weight: 600; color: var(--text-faint); cursor: pointer; padding: 4px 0; }
+.gd-manual > summary:hover { color: var(--text); }
+.gd-manual .gd-desc, .gd-manual .gd-code { margin-left: 0; }
 .gd-done { margin: 22px 0 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); color: var(--text-faint); font-size: 13px; line-height: 1.5; }
 .home-insights { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--border); }
 

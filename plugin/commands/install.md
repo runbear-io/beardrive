@@ -133,6 +133,24 @@ Heads-up before installing: Hermes hooks are PER-USER (`~/.hermes/config.yaml`,
 outside the repo) — mention that when it's among the targets, and skip it
 unless the user actually uses Hermes.
 
+If the user mentions teammates on other agents (Codex, Gemini CLI, Hermes),
+tell them those teammates need no terminal either — they paste one prompt
+into their own agent (the hub's project home page shows it filled in):
+
+```
+Set up BearDrive in this folder.
+1. If `bdrive` is missing, install it: brew install runbear-io/tap/beardrive
+2. bdrive skill install   # so you know the CLI next time
+3. bdrive login --device <hub-url>   # show me the code and the URL
+4. bdrive init --project <project-id>
+5. bdrive hooks install   # don't skip this - it's what syncs every turn
+```
+
+Step 2 leaves the beardrive skill in that agent's skills dir
+(`~/.codex/skills/beardrive/` and friends) so their later sessions are
+conversational. Handing teammates loose commands is how the hooks step gets
+skipped.
+
 ## 6. Verify and summarize
 
 Run `bdrive status` and confirm the daemon is running and pending is 0.
