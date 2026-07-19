@@ -4,6 +4,26 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## v0.8.0 — 2026-07-16
+
+- **Gated links on every mentioned file path**: Claude Code's turn-start
+  hook (`bdrive sync --hook`) now injects the project's link formula each
+  turn, so agents append `` `path` `` [🔗](hub link) to any synced path
+  they mention — sign-in + membership required, safe to paste internally.
+  Works even with stale skill copies; other platforms get the same
+  convention via the skill. Plugin 0.3.0.
+- `bdrive hooks install` now converges its managed hook groups to the
+  current shape on reinstall — improvements reach existing projects
+  instead of being frozen by the idempotency marker.
+
+## v0.7.1 — 2026-07-15
+
+- **Markdown frontmatter renders as a key/value table** in the viewer and
+  on public share pages (author key order, escaped, strict fallthrough
+  for anything that isn't a well-formed YAML mapping).
+- Landing-page copy: the Claude chat mockup demonstrates the gated team
+  link, matching the shipped default.
+
 ## v0.7.0 — 2026-07-14
 
 - **`bdrive url <file>`** — internal, permission-walled links (sign-in +
