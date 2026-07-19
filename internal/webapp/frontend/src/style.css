@@ -114,29 +114,26 @@ button, input, a.btn { font-family: inherit; }
 
 /* file tree */
 #tree { flex: 1; overflow-y: auto; padding: 8px 8px 24px; }
-#tree ul { list-style: none; margin: 0; padding-left: 13px; position: relative; }
-#tree > ul { padding-left: 0; }
-#tree ul ul::before { content: ""; position: absolute; left: 5px; top: 0; bottom: 0; width: 1px; background: var(--border); }
-#tree li > .row {
+.tguide { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border); pointer-events: none; }
+#tree .row {
   display: flex; align-items: center; gap: 6px;
   height: 28px; padding: 0 8px; border-radius: 7px;
   color: var(--text-dim); cursor: pointer; position: relative;
   white-space: nowrap; overflow: hidden;
 }
-#tree li > .row:hover { background: var(--hover); color: var(--text); }
-#tree li > .row.active { background: var(--glow); color: var(--accent-bright); }
-#tree li > .row.active::before { content: ""; position: absolute; left: 0; top: 5px; bottom: 5px; width: 2px; border-radius: 2px; background: var(--accent); }
+#tree .row:hover { background: var(--hover); color: var(--text); }
+#tree .row.active { background: var(--glow); color: var(--accent-bright); }
+#tree .row.active::before { content: ""; position: absolute; left: 0; top: 5px; bottom: 5px; width: 2px; border-radius: 2px; background: var(--accent); }
 #tree .chev { width: 14px; height: 14px; flex: none; color: var(--text-ghost); transition: transform .12s; display: flex; align-items: center; justify-content: center; }
 #tree .chev .ico { width: 13px; height: 13px; }
 #tree .ticon { flex: none; display: flex; color: var(--text-ghost); }
 #tree .ticon .ico { width: 15px; height: 15px; }
-#tree li > .row:hover .ticon, #tree li > .row:hover .chev { color: var(--text-faint); }
-#tree li > .row.active .ticon, #tree li > .row.active .chev { color: var(--accent); }
+#tree .row:hover .ticon, #tree .row:hover .chev { color: var(--text-faint); }
+#tree .row.active .ticon, #tree .row.active .chev { color: var(--accent); }
 #tree .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 #tree .file .label { font-size: 12.5px; }
 #tree .file .chev { visibility: hidden; }
-#tree li.collapsed > ul { display: none; }
-#tree li.collapsed > .row .chev { transform: rotate(-90deg); }
+#tree .row.collapsed .chev { transform: rotate(-90deg); }
 
 /* org bar */
 /* ---- project menu ---- */
@@ -488,7 +485,7 @@ button, input, a.btn { font-family: inherit; }
   #meta { display: none; }
   #crumb { flex: 1; }
   #vault { padding: 0 8px 0 12px; }
-  .icon-btn2, #signout,   #tree li > .row, #projects .row { height: 44px; }
+  .icon-btn2, #signout,   #tree .row, #projects .row { height: 44px; }
   #account-btn { min-height: 44px; }
   #project-select { min-height: 44px; }
   .nav-add { min-width: 44px; min-height: 44px; }

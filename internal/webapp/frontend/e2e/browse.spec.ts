@@ -176,3 +176,16 @@ test("missing path gets the not-found view; Check again finds a late upload", as
   await page.click(".notfound .pbtn"); // Check again
   await expect(page.locator("#content h1")).toHaveText("Finally here");
 });
+
+test("tree chevron folds and unfolds a folder", async ({ page }) => {
+  await login(page);
+  await wikiId(page);
+  await expect(page.locator('#tree .row[data-path="notes"]')).toBeVisible();
+  // Unfold via row click (opens listing + expands), then fold via chevron.
+  await page.click('#tree .row[data-path="notes"]');
+  await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).toBeVisible();
+  await page.click('#tree .row[data-path="notes"] .chev');
+  await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).not.toBeVisible();
+  await page.click('#tree .row[data-path="notes"] .chev');
+  await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).toBeVisible();
+});

@@ -92,8 +92,6 @@ export default function Browser(props: {
       if (dirIndex.has(treePath)) next.add(treePath);
       return next;
     });
-    const row = document.querySelector(`#tree .row[data-path="${CSS.escape(treePath)}"]`);
-    if (row) row.scrollIntoView({ block: "nearest" });
   }, [treePath, loaded, dirIndex]);
   const onToggle = useCallback((p: string) => {
     setExpanded((s) => {
