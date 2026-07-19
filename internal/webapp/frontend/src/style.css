@@ -30,6 +30,12 @@
   --r-ctl: 7px;
   --r-card: 10px;
   --r-over: 14px;
+
+  /* Page columns. Three widths for every route — see .page below. */
+  --page-read: 704px;   /* prose + listings: line length rules */
+  --page-app: 880px;    /* structured views: guide, history, settings, admin */
+  --page-wide: 1200px;  /* data-dense: treemap, coverage matrix, big tables */
+  --hero-top: 10vh;     /* one vertical start for short centered states */
 }
 
 * { box-sizing: border-box; }
@@ -268,12 +274,19 @@ button, input, a.btn { font-family: inherit; }
 .more-item { display: block; width: 100%; text-align: left; min-height: 40px; padding: 0 12px; background: transparent; border: none; cursor: pointer; color: var(--text); font: inherit; font-size: 13.5px; border-radius: var(--r-ctl); }
 .more-item:hover { background: var(--hover); }
 
+/* The scroll container owns scrolling and the page gutter — never a width.
+   Width and centering belong to .page (one per view), so every route shares
+   the same column edges and the gutter never eats into the reading measure. */
 #content { flex: 1; overflow-y: auto; padding: 44px 40px 110px; scroll-behavior: smooth; }
-.empty { color: var(--text-faint); text-align: center; margin-top: 22vh; }
+.page { width: 100%; max-width: var(--page-app); margin-inline: auto; min-width: 0; }
+.page.read { max-width: var(--page-read); }
+.page.wide { max-width: var(--page-wide); }
+.empty { color: var(--text-faint); text-align: center; margin-top: var(--hero-top); }
 .empty-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--text-faint); }
 
 /* ---- onboarding ---- */
-.onboard { max-width: 560px; margin: 8vh auto 0; }
+/* A hero card inside .page.read, not a page column of its own. */
+.onboard { max-width: 560px; margin: var(--hero-top) auto 0; }
 .onboard h1 { font-size: 25px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 8px; color: #f4f6f9; }
 .onboard > p { color: var(--text-dim); margin: 0 0 28px; font-size: 14px; }
 .ob-card { background: var(--bg-side); border: 1px solid var(--border); border-radius: var(--r-card); padding: 20px 22px; margin-bottom: 14px; }
@@ -291,7 +304,7 @@ button, input, a.btn { font-family: inherit; }
 .danger-btn:hover { background: #c94336; }
 
 /* ---- admin panels ---- */
-.admin { max-width: 760px; }
+/* width comes from .page (app) — see #content */
 .admin h1 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 6px; color: #f4f6f9; }
 .admin h3 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); font-weight: 600; margin: 30px 0 10px; }
 .admin-sub { color: var(--text-dim); font-size: 13.5px; margin: 0 0 6px; line-height: 1.55; }
@@ -321,7 +334,7 @@ button, input, a.btn { font-family: inherit; }
 .admin-item.toggle input { width: 16px; height: 16px; margin-top: 2px; accent-color: var(--accent); flex: none; }
 
 /* ---- folder listing ---- */
-.dirlist { max-width: 704px; margin: 0 auto; }
+/* .dirlist width comes from .page (read) */
 .dl-title { display: flex; align-items: center; gap: 10px; font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
 .dl-title-icon { display: flex; color: var(--accent); }
 .dl-title-icon .ico { width: 20px; height: 20px; }
@@ -352,7 +365,7 @@ button, input, a.btn { font-family: inherit; }
 /* ---- project home: the connect-an-agent guide ---- */
 #vault-name.vault-link { cursor: pointer; }
 #vault-name.vault-link:hover { color: var(--accent-bright); }
-.guide { max-width: 760px; margin: 0 auto; }
+/* .guide width comes from .page (app) */
 .gd-tabs { display: flex; gap: 2px; margin: 20px 0 16px; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .gd-tab { font: inherit; font-size: 13px; font-weight: 600; padding: 7px 12px 9px; background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--text-faint); cursor: pointer; white-space: nowrap; }
 .gd-tab:hover { color: var(--text); }
@@ -376,7 +389,7 @@ button, input, a.btn { font-family: inherit; }
 .home-insights { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--border); }
 
 /* ---- insights (read×write matrix) ---- */
-.insights { max-width: 760px; margin: 0 auto; }
+/* .insights width comes from .page (wide on its own route, app when embedded on home) */
 .in-title { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
 .in-title .in-scope { color: var(--text-ghost); font-weight: 500; font-size: 15px; }
 .in-lens { display: flex; gap: 6px; margin: 0 0 14px; }
@@ -421,7 +434,7 @@ button, input, a.btn { font-family: inherit; }
 .in-matrix rect:hover { opacity: .85; }
 
 /* ---- history ---- */
-.history { max-width: 860px; }
+/* .history width comes from .page (app) */
 .hentry { padding: 11px 12px; border-bottom: 1px solid var(--border); }
 .hentry:hover { background: rgba(255,255,255,.015); }
 .hline { display: flex; gap: 10px; align-items: center; }
@@ -520,7 +533,8 @@ button, input, a.btn { font-family: inherit; }
   #account-btn { min-height: 44px; }
   #project-select { min-height: 44px; }
   .nav-add { min-width: 44px; min-height: 44px; }
-  .markdown, .admin, .onboard, .history, .dirlist { max-width: 100%; }
+  /* Columns already collapse on their own (.page is width: 100%); only
+     content that can't shrink needs its own escape hatch. */
   .markdown table, pre.plain { display: block; overflow-x: auto; max-width: 100%; }
   .ob-row { flex-direction: column; }
   .ob-row input { flex: none; min-height: 44px; }
@@ -566,7 +580,7 @@ button, input, a.btn { font-family: inherit; }
 }
 
 /* ---- markdown reading view ---- */
-.markdown { max-width: 704px; width: 100%; margin: 0 auto; }
+/* .markdown is typography only; the column is .page.read around it */
 .markdown h1, .markdown h2, .markdown h3, .markdown h4 { color: #f4f6f9; line-height: 1.25; letter-spacing: -.018em; margin: 1.5em 0 .5em; text-wrap: balance; }
 .markdown h1:first-child { margin-top: 0; }
 .markdown h1 { font-size: 1.85em; font-weight: 660; letter-spacing: -.024em; }
@@ -603,14 +617,14 @@ button, input, a.btn { font-family: inherit; }
 .htmlview { display: block; width: 100%; height: calc(100vh - 150px); border: 1px solid var(--border); border-radius: var(--r-card); background: #fff; }
 
 /* missing path: friendly not-found with the uploading hint */
-.notfound { margin-top: 12vh; text-align: center; color: var(--text-dim); }
+.notfound { margin-top: var(--hero-top); text-align: center; color: var(--text-dim); }
 .notfound h1 { color: var(--text); font-size: 1.4em; margin-bottom: .5em; }
 .notfound code { background: var(--hover); border: 1px solid var(--border); padding: .15em .5em; border-radius: 6px; }
 .notfound .nf-sub { max-width: 440px; margin: 12px auto 20px; font-size: 13px; color: var(--text-faint); line-height: 1.6; }
 
 /* plain file / binary views */
-pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 900px; }
-#content.markdown { min-width: 0; } /* let long unbreakable lines wrap, not blow out the column */
-.filecard { margin-top: 15vh; text-align: center; color: var(--text-dim); }
+pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* long unbreakable lines wrap instead of blowing out the column: .page has min-width: 0 */
+.filecard { margin-top: var(--hero-top); text-align: center; color: var(--text-dim); }
 .filecard .name { font-size: 1.2em; color: var(--text); margin-bottom: .3em; }
 .filecard .btn { margin-top: 14px; }

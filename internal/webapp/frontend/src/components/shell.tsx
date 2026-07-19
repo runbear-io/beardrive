@@ -81,13 +81,29 @@ export function Icon({ name }: { name: string }) {
   return C ? <C className="ico" aria-hidden="true" /> : null;
 }
 
+/* The column system, in one place. `#content` owns scrolling and the page
+   gutter; `<Page>` owns width and centering — nothing else may set either.
+   Three widths cover every view: `read` for prose and listings (line length
+   rules), `app` for structured views, `wide` for data-dense ones. Views used
+   to declare their own max-width (560px to unbounded, half of them
+   uncentered), so no two routes shared a column. */
+export type PageWidth = "read" | "app" | "wide";
+
+export function Page(props: {
+  width?: PageWidth;
+  className?: string; // a view's own styling hook (e.g. markdown typography)
+  children: ReactNode;
+}) {
+  const cls = ["page", props.width ?? "app", props.className].filter(Boolean).join(" ");
+  return <div className={cls}>{props.children}</div>;
+}
+
 export function AppShell(props: {
   vault: ReactNode;
   projectsNav?: ReactNode;
   tree?: ReactNode;
   orgBar?: ReactNode;
   topbar: ReactNode;
-  contentClass?: string;
   contentRef?: React.Ref<HTMLElement>;
   onContentScroll?: () => void;
   children: ReactNode;
@@ -105,7 +121,6 @@ export function AppShell(props: {
         {props.topbar}
         <article
           id="content"
-          className={props.contentClass ?? "markdown"}
           ref={props.contentRef}
           onScroll={props.onContentScroll}
         >
