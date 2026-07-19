@@ -1,0 +1,56 @@
+/* Tailwind v4 entry — theme + utilities ONLY (no preflight): the legacy
+   style.css keeps owning base styling during the migration, so nothing
+   shifts visually until a surface is deliberately moved over. */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "tw-animate-css";
+
+@theme {
+  /* BearDrive tokens (source of truth: style.css :root) */
+  --color-bg: #0a0b0d;
+  --color-side: #0c0e10;
+  --color-raise: #15171b;
+  --color-surface: rgba(255, 255, 255, 0.03);
+  --color-hovered: rgba(255, 255, 255, 0.06);
+  --color-line: rgba(255, 255, 255, 0.07);
+  --color-line-2: rgba(255, 255, 255, 0.11);
+  --color-text: #eef0f3;
+  --color-dim: #9aa0a9;
+  --color-faint: #868b93;
+  --color-ghost: #666b74;
+  --color-honey: #f5a623;
+  --color-honey-bright: #ffcf85;
+  --color-honey-dim: #d3861a;
+  --color-glow: rgba(245, 166, 35, 0.13);
+  --color-add: #4cc38a;
+  --color-del: #f26d6d;
+
+  /* shadcn semantic slots, aliased to the BearDrive palette so copied
+     components render in the house style with zero per-component edits. */
+  --color-background: #0a0b0d;
+  --color-foreground: #eef0f3;
+  --color-card: #15171b;
+  --color-card-foreground: #eef0f3;
+  --color-popover: #15171b;
+  --color-popover-foreground: #eef0f3;
+  --color-primary: #f5a623;
+  --color-primary-foreground: #1a1204;
+  --color-secondary: rgba(255, 255, 255, 0.03);
+  --color-secondary-foreground: #eef0f3;
+  --color-muted: rgba(255, 255, 255, 0.06);
+  --color-muted-foreground: #9aa0a9;
+  --color-accent: rgba(255, 255, 255, 0.06);
+  --color-accent-foreground: #eef0f3;
+  --color-destructive: #f26d6d;
+  --color-border: rgba(255, 255, 255, 0.07);
+  --color-input: rgba(255, 255, 255, 0.11);
+  --color-ring: #d3861a;
+
+  --radius-ctl: 7px;
+  --radius-card: 10px;
+  --radius-over: 14px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
