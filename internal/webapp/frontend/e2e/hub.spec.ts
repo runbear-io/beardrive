@@ -91,3 +91,15 @@ test("new project via the sidebar + modal", async ({ page }) => {
   await expect(page.locator("#project-select option")).toContainText(["scratch", "wiki"]);
   await expectToast(page, "Created");
 });
+
+test("account menu closes on Escape and outside click", async ({ page }) => {
+  await login(page);
+  await page.click("#account-btn");
+  await expect(page.locator("#account-menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#account-menu")).toHaveCount(0);
+  await page.click("#account-btn");
+  await expect(page.locator("#account-menu")).toBeVisible();
+  await page.click("#content", { position: { x: 10, y: 10 } });
+  await expect(page.locator("#account-menu")).toHaveCount(0);
+});
