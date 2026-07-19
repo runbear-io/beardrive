@@ -1,4 +1,5 @@
 import { useRef, useSyncExternalStore } from "react";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -108,12 +109,12 @@ function PromptBody({ m }: { m: Prompt }) {
         onKeyDown={(e) => e.key === "Enter" && ok()}
       />
       <div className="modal-actions">
-        <button className="ai-btn" onClick={() => done(null)}>
+        <Button variant="subtle" onClick={() => done(null)}>
           Cancel
-        </button>
-        <button className="pbtn" onClick={ok}>
+        </Button>
+        <Button variant="primary" onClick={ok}>
           {m.okLabel}
-        </button>
+        </Button>
       </div>
     </>
   );
@@ -131,12 +132,12 @@ function ConfirmBody({ m }: { m: Confirm }) {
       </DialogTitle>
       <p className="modal-msg">{m.message}</p>
       <div className="modal-actions">
-        <button className="ai-btn" onClick={() => done(false)}>
+        <Button variant="subtle" onClick={() => done(false)}>
           Cancel
-        </button>
-        <button className={m.danger ? "danger-btn" : "pbtn"} onClick={() => done(true)} autoFocus>
+        </Button>
+        <Button variant={m.danger ? "danger" : "primary"} onClick={() => done(true)} autoFocus>
           {m.confirmLabel}
-        </button>
+        </Button>
       </div>
     </>
   );

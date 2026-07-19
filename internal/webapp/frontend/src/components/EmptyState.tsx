@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { Button } from "@/components/ui/button";
 import { toast } from "../toast";
 
 // Onboarding: a signed-in account with no projects shouldn't hit a blank
@@ -34,9 +35,9 @@ export function EmptyState({
           <p>A teammate can send you a join link. Paste it here:</p>
           <div className="ob-row">
             <input id="ob-invite" type="text" placeholder="https://…/join/…" autoComplete="off" ref={invite} />
-            <button id="ob-join" className="pbtn" onClick={join}>
+            <Button id="ob-join" variant="primary" onClick={join}>
               Join
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -45,9 +46,9 @@ export function EmptyState({
         <p>Create a shared space for your team's files.</p>
         <div className="ob-row">
           <input id="ob-name" type="text" placeholder="Project name, e.g. wiki" autoComplete="off" ref={name} />
-          <button id="ob-create" className="pbtn" onClick={() => onCreate(name.current!.value.trim())}>
+          <Button id="ob-create" variant="primary" onClick={() => onCreate(name.current!.value.trim())}>
             Create
-          </button>
+          </Button>
         </div>
       </div>
     </div>
