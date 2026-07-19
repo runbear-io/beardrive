@@ -10,7 +10,6 @@ import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { uploadFile } from "../upload";
 import { copyText } from "../util";
 import { toast } from "../toast";
 import { AppShell, Icon, Topbar, closeSidebarOnMobile } from "../components/shell";
@@ -138,17 +137,16 @@ export default function Browser(props: {
 
   /* ---- topbar state + actions ---- */
   const [meta, setMeta] = useState("");
-  const [uploadStatus, setUploadStatus] = useState("");
   const [share, setShare] = useState<{ url: string; copied: boolean } | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const uploadInput = useRef<HTMLInputElement>(null);
   const downloadRef = useRef<HTMLAnchorElement>(null);
 
   const panel = props.panel ?? null;
   const canShare = !panel && hub && !!project && isFile;
   const canHistory = !panel && hub && !!project;
-  const canUpload = !!config.upload?.enabled && (!hub || !!project);
+  // Browser upload is deliberately absent (for now): content enters through
+  // local sync only; the web app is a read/share/history surface.
   const canDownload = !panel && isFile;
   const canMore = !panel && (isFile || (hub && !!project && isDir));
   const downloadURL = apiBase + "download?path=" + encodeURIComponent(path);
@@ -175,32 +173,6 @@ export default function Browser(props: {
     openHistory(isDir ? path + "/" : path);
   }, [path, isDir, openHistory]);
 
-  const uploadNow = useCallback(() => uploadInput.current?.click(), []);
-  const onUploadPick = async () => {
-    const input = uploadInput.current!;
-    const file = input.files?.[0];
-    input.value = "";
-    if (!file) return;
-    // A selected folder receives the upload; a selected file means "next
-    // to it".
-    const dir = !path ? "" : isDir ? path : path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    const dest = dir ? dir + "/" + file.name : file.name;
-    try {
-      setUploadStatus(`Uploading ${dest}…`);
-      await uploadFile(apiBase, dest, file);
-      setUploadStatus(`Uploaded ${dest}`);
-      await qc.invalidateQueries({ queryKey: ["tree", apiBase] });
-      openPath(dest);
-    } catch (err) {
-      setUploadStatus("Upload failed: " + (err as Error).message);
-    }
-  };
-
-  useEffect(() => {
-    // Any navigation clears a stale upload status from the meta slot.
-    setUploadStatus("");
-  }, [routeKey]);
-
   /* ---- ⌘K palette ---- */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -223,7 +195,6 @@ export default function Browser(props: {
       if (isFile) add("download", "Download: " + path, "action", () => downloadRef.current?.click());
     }
     if (hub && project) add("hist", "History: whole project", "action", () => openHistory(""));
-    if (canUpload) add("upload", "Upload a file…", "action", uploadNow);
     if (hub) {
       for (const p of props.projects || []) {
         if (!project || p.id !== project.id) {
@@ -237,7 +208,7 @@ export default function Browser(props: {
     for (const d of dirIndex.keys()) add("folder", d, "folder", () => openPath(d));
     for (const f of flatFiles) add("doc", f.path, "file", () => openPath(f.path));
     return items;
-  }, [hub, project, path, isFile, canUpload, config.auth?.enabled, dirIndex, flatFiles, props.projects, shareNow, historyNow, uploadNow, openHistory, openPath]);
+  }, [hub, project, path, isFile, config.auth?.enabled, dirIndex, flatFiles, props.projects, shareNow, historyNow, openHistory, openPath]);
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
   useEffect(() => {
@@ -372,7 +343,7 @@ export default function Browser(props: {
   const topbar = (
     <Topbar
       crumb={crumb}
-      meta={uploadStatus || meta}
+      meta={meta}
       actions={
         <>
           <button id="search-btn" className="btn ghost" title="Search (⌘K)" onClick={() => setPaletteOpen(true)}>
@@ -388,12 +359,6 @@ export default function Browser(props: {
               <Icon name="hist" /> <span className="lbl">History</span>
             </button>
           )}
-          {canUpload && (
-            <button id="upload-btn" className="btn" onClick={uploadNow}>
-              <Icon name="upload" /> <span className="lbl">Upload</span>
-            </button>
-          )}
-          <input type="file" hidden ref={uploadInput} onChange={onUploadPick} />
           {canDownload && (
             <a id="download" className="btn" download href={downloadURL} ref={downloadRef}>
               <Icon name="download" /> <span className="lbl">Download</span>
@@ -418,11 +383,6 @@ export default function Browser(props: {
               {canHistory && (
                 <button className="more-item" onClick={historyNow}>
                   History
-                </button>
-              )}
-              {canUpload && (
-                <button className="more-item" onClick={uploadNow}>
-                  Upload
                 </button>
               )}
               {canDownload && (

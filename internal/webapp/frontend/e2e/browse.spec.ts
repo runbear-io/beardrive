@@ -113,17 +113,20 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   expect(gone.status()).toBe(404);
 });
 
-test("upload into the selected folder, then the file opens", async ({ page }) => {
+test("no browser upload: content arrives via sync; the tree picks it up", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/notes`);
-  await page.locator("#upload-btn").waitFor();
-  await page.setInputFiles('input[type="file"]', {
-    name: "dropped.md",
-    mimeType: "text/markdown",
-    buffer: Buffer.from("# Dropped\n\nUploaded through the browser.\n"),
-  });
-  await page.waitForURL(`/${pid}/notes/dropped.md`);
+  // The upload affordance is gone everywhere — content enters via local sync.
+  await expect(page.locator("#upload-btn")).toHaveCount(0);
+  await expect(page.locator('input[type="file"]')).toHaveCount(0);
+  // A file lands through the device/store path (simulated via the API)…
+  await page.request.put(
+    `/api/p/${pid}/upload/content?path=${encodeURIComponent("notes/dropped.md")}`,
+    { data: "# Dropped\n\nArrived through sync.\n" },
+  );
+  // …and the polling tree shows it; opening renders it.
+  await page.goto(`/${pid}/notes/dropped.md`);
   await expect(page.locator("#content h1")).toHaveText("Dropped");
   await expect(page.locator('#tree .row[data-path="notes/dropped.md"]')).toBeVisible();
 });
