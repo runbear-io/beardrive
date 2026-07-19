@@ -221,7 +221,9 @@ button, input, a.btn { font-family: inherit; }
    chip in a floating card below the button, arrow pointing up. */
 .has-tip { position: relative; }
 .has-tip .tip {
-  position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  /* Right-aligned (not centered): the sidebar clips at its right edge
+     (overflow hidden), so the card must grow leftward from the button. */
+  position: absolute; top: calc(100% + 8px); right: -6px;
   display: flex; align-items: center; gap: 7px; white-space: nowrap;
   padding: 6px 9px; border-radius: 8px; border: 1px solid var(--border-2);
   background: var(--surface); color: var(--text); font-size: 12.5px; font-weight: 500;
@@ -229,8 +231,8 @@ button, input, a.btn { font-family: inherit; }
   opacity: 0; visibility: hidden; transition: opacity .12s ease .15s; z-index: 40;
 }
 .has-tip .tip::before {
-  content: ""; position: absolute; top: -4.5px; left: 50%;
-  width: 8px; height: 8px; transform: translateX(-50%) rotate(45deg);
+  content: ""; position: absolute; top: -4.5px; right: 16px;
+  width: 8px; height: 8px; transform: rotate(45deg);
   background: var(--surface); border-left: 1px solid var(--border-2); border-top: 1px solid var(--border-2);
 }
 .has-tip:hover .tip, .has-tip:focus-visible .tip { opacity: 1; visibility: visible; }
