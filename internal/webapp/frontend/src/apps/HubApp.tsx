@@ -8,7 +8,7 @@ import { AppShell, Topbar, VaultHeader, closeSidebarOnMobile } from "../componen
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { ProjectNav } from "../components/ProjectNav";
-import { OrgBar } from "../components/OrgBar";
+import { AccountBar } from "../components/AccountBar";
 import { ProjectSettings } from "../components/ProjectSettings";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "../toast";
@@ -72,11 +72,14 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // hub admins and owners of the project's org.
   const canInsights = isAdmin || (org ? org.role === "owner" : false);
 
-  const vault = (
-    <VaultHeader
-      name={projects ? (current ? current.name : brand) : "…"}
-      onHome={current ? () => navigate("/" + current.id) : undefined}
-      showSignout={config.auth.enabled && !current}
+  // Top of the sidebar is the brand; project and account actions live in
+  // their own sections below (PropelAuth-style layout).
+  const vault = <VaultHeader name={brand} onHome={() => navigate("/")} />;
+
+  const accountBar = config.me ? (
+    <AccountBar
+      me={config.me}
+      org={org}
       admin={
         isAdmin
           ? {
@@ -88,18 +91,12 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             }
           : undefined
       }
-      projectSettings={
-        current
-          ? {
-              onClick: () => {
-                setPanel({ kind: "project" });
-                closeSidebarOnMobile();
-              },
-            }
-          : undefined
-      }
+      onOrgSettings={(o) => {
+        setPanel({ kind: "org", orgId: o.id });
+        closeSidebarOnMobile();
+      }}
     />
-  );
+  ) : undefined;
 
   if (!projects || !orgs) {
     return (
@@ -114,6 +111,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       <AppShell
         vault={vault}
         projectsNav={<ProjectNav projects={projects} />}
+        orgBar={accountBar}
         topbar={<Topbar />}
         contentClass="view"
       >
@@ -176,17 +174,17 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       canInsights={canInsights}
       sidebar={{
         vault,
-        projectsNav: <ProjectNav projects={projects} currentId={current.id} />,
-        orgBar: (
-          <OrgBar
-            org={org}
-            showSignout={config.auth.enabled}
-            onManage={(o) => {
-              setPanel({ kind: "org", orgId: o.id });
+        projectsNav: (
+          <ProjectNav
+            projects={projects}
+            currentId={current.id}
+            onOpenSettings={() => {
+              setPanel({ kind: "project" });
               closeSidebarOnMobile();
             }}
           />
         ),
+        orgBar: accountBar,
       }}
       panel={activePanel}
     />
@@ -217,7 +215,7 @@ function JoinInvite({ token, onDone }: { token: string; onDone: (orgId: string |
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
   return (
-    <AppShell vault={<VaultHeader name="…" showSignout />} topbar={<Topbar />}>
+    <AppShell vault={<VaultHeader name="BearDrive" />} topbar={<Topbar />}>
       <div className="empty">Joining…</div>
     </AppShell>
   );

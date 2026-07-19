@@ -1,4 +1,5 @@
 import { navigate } from "../nav";
+import { Icon } from "./shell";
 import { postJSON } from "../api/http";
 import type { Project, ProjectCreated } from "../api/types";
 import { modalPrompt } from "../modal";
@@ -15,7 +16,15 @@ export function projColor(s: string): string {
   return PROJ_COLORS[h % PROJ_COLORS.length];
 }
 
-export function ProjectNav({ projects, currentId }: { projects: Project[]; currentId?: string }) {
+export function ProjectNav({
+  projects,
+  currentId,
+  onOpenSettings,
+}: {
+  projects: Project[];
+  currentId?: string;
+  onOpenSettings?: () => void;
+}) {
   const refresh = useHubRefresh();
 
   const create = async () => {
@@ -39,33 +48,47 @@ export function ProjectNav({ projects, currentId }: { projects: Project[]; curre
           +
         </button>
       </div>
-      <ul>
-        {projects.map((p) => (
-          <li key={p.id}>
-            <div
-              className={"row" + (currentId === p.id ? " active" : "")}
-              title={p.name}
-              tabIndex={0}
-              role="button"
-              onClick={() => {
-                navigate("/" + p.id);
+      <div className="proj-row">
+        <span className="proj-select-wrap">
+          {currentId && (
+            <span
+              className="proj-mark"
+              aria-hidden="true"
+              style={{ background: projColor(projects.find((p) => p.id === currentId)?.name || "") }}
+            />
+          )}
+          <select
+            id="project-select"
+            aria-label="Switch project"
+            value={currentId || ""}
+            onChange={(e) => {
+              if (e.target.value) {
+                navigate("/" + e.target.value);
                 closeSidebarOnMobile();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  (e.currentTarget as HTMLElement).click();
-                }
-              }}
-            >
-              <span className="proj-mark" style={{ background: projColor(p.name) }}>
-                {p.name.trim()[0] || "?"}
-              </span>
-              <span className="label">{p.name}</span>
-            </div>
-          </li>
-        ))}
-      </ul>
+              }
+            }}
+          >
+            {!currentId && <option value="" disabled />}
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <Icon name="chevd" />
+        </span>
+        {onOpenSettings && (
+          <button
+            id="project-settings-btn"
+            className="icon-btn2"
+            title="Project settings"
+            aria-label="Project settings"
+            onClick={onOpenSettings}
+          >
+            <Icon name="gear" />
+          </button>
+        )}
+      </div>
     </nav>
   );
 }

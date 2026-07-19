@@ -78,20 +78,13 @@ button, input, a.btn { font-family: inherit; }
 }
 #vault-name { font-weight: 600; font-size: 13px; letter-spacing: -.01em; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vault-actions { display: flex; align-items: center; gap: 4px; }
-#signout, .icon-btn2 {
+#vault #signout, .icon-btn2 {
   width: 28px; height: 28px; border-radius: 6px;
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--text-ghost); background: transparent; border: none; cursor: pointer; text-decoration: none;
 }
-#signout:hover, .icon-btn2:hover { color: var(--text); background: var(--hover); }
-#signout .ico, .icon-btn2 .ico { width: 16px; height: 16px; }
-.adminbar {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 26px; padding: 0 9px; border-radius: var(--r-ctl);
-  border: 1px solid var(--border); background: var(--surface);
-  color: var(--accent-bright); font-size: 11.5px; font-weight: 600; cursor: pointer;
-}
-.adminbar:hover { background: var(--glow); border-color: transparent; }
+#vault #signout:hover, .icon-btn2:hover { color: var(--text); background: var(--hover); }
+#vault #signout .ico, .icon-btn2 .ico { width: 16px; height: 16px; }
 
 /* projects */
 #projects { flex: none; max-height: 32%; overflow-y: auto; padding: 10px 8px 8px; border-bottom: 1px solid var(--border); }
@@ -143,19 +136,58 @@ button, input, a.btn { font-family: inherit; }
 #tree li.collapsed > .row .chev { transform: rotate(-90deg); }
 
 /* org bar */
-#orgbar { display: flex; align-items: center; gap: 9px; padding: 9px 12px 9px 14px; border-top: 1px solid var(--border); }
-#org-name {
-  flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 8px;
-  color: var(--text-dim); font-size: 12.5px; font-weight: 500; cursor: pointer;
+/* ---- project switcher ---- */
+.proj-row { display: flex; align-items: center; gap: 4px; padding: 0 10px 4px 12px; }
+.proj-select-wrap { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
+.proj-select-wrap .proj-mark { position: absolute; left: 9px; pointer-events: none; }
+.proj-select-wrap > .ico { position: absolute; right: 8px; width: 14px; height: 14px; color: var(--text-ghost); pointer-events: none; }
+#project-select {
+  flex: 1; min-width: 0; height: 30px; padding: 0 26px 0 30px;
+  appearance: none; -webkit-appearance: none;
+  border: 1px solid var(--border); border-radius: var(--r-ctl);
+  background: var(--surface); color: var(--text);
+  font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-#org-name::before {
-  content: ""; width: 15px; height: 15px; flex: none; border-radius: 4px;
-  background: linear-gradient(160deg, #ffcf85, #d3861a); opacity: .85;
+#project-select:hover { background: var(--hover); border-color: var(--border-2); }
+
+/* ---- account bar ---- */
+#accountbar { position: relative; border-top: 1px solid var(--border); padding: 7px 10px; }
+#account-btn {
+  width: 100%; display: flex; align-items: center; gap: 9px; text-align: left;
+  padding: 6px 8px; border: none; border-radius: 7px;
+  background: transparent; color: var(--text-dim); cursor: pointer; font: inherit;
 }
-#org-name:hover { color: var(--text); }
-#orgbar { gap: 4px; }
-#orgbar #org-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#account-btn:hover { background: var(--hover); color: var(--text); }
+#account-btn .avatar {
+  width: 26px; height: 26px; flex: none; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 12px; font-weight: 700;
+}
+#account-btn .acct { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+#account-btn .acct b { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#account-btn .acct small { font-size: 11px; color: var(--text-ghost); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#account-btn > .ico { width: 14px; height: 14px; color: var(--text-ghost); }
+#account-menu {
+  position: absolute; left: 10px; right: 10px; bottom: calc(100% + 4px);
+  padding: 5px; border: 1px solid var(--border-2); border-radius: 9px;
+  background: var(--surface); box-shadow: 0 10px 32px rgba(0, 0, 0, .35);
+  display: flex; flex-direction: column; z-index: 30;
+}
+#account-menu .menu-sec {
+  padding: 7px 9px 3px; font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--text-ghost);
+}
+#account-menu [role="menuitem"] {
+  display: flex; align-items: center; gap: 8px; padding: 7px 9px;
+  border: none; border-radius: 6px; background: transparent; text-align: left;
+  color: var(--text-dim); font: inherit; font-size: 12.5px; cursor: pointer; text-decoration: none;
+}
+#account-menu [role="menuitem"]:hover { background: var(--hover); color: var(--text); }
+#account-menu [role="menuitem"] b { font-weight: 600; }
+#account-menu [role="menuitem"] .ico { width: 15px; height: 15px; }
+#account-menu #signout { color: var(--danger, #e5534b); }
+#account-menu #signout:hover { color: var(--danger, #e5534b); background: var(--hover); }
 
 /* ---- main pane ---- */
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -429,9 +461,9 @@ button, input, a.btn { font-family: inherit; }
   #meta { display: none; }
   #crumb { flex: 1; }
   #vault { padding: 0 8px 0 12px; }
-  .icon-btn2, #signout, .adminbar { min-width: 44px; min-height: 44px; }
-  #tree li > .row, #projects .row { height: 44px; }
-  #org-name { min-height: 44px; }
+  .icon-btn2, #signout,   #tree li > .row, #projects .row { height: 44px; }
+  #account-btn { min-height: 44px; }
+  #project-select { min-height: 44px; }
   .nav-add { min-width: 44px; min-height: 44px; }
   .markdown, .admin, .onboard, .history, .dirlist { max-width: 100%; }
   .markdown table, pre.plain { display: block; overflow-x: auto; max-width: 100%; }

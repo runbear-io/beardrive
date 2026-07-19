@@ -113,11 +113,9 @@ export function AppShell(props: {
 export function VaultHeader(props: {
   name: string;
   onHome?: () => void; // hub: the project name doubles as a home link
-  showSignout?: boolean; // volume mode: sign-out stays in the header (no org bar)
-  admin?: { pending: number; onClick: () => void }; // hub admins only
-  projectSettings?: { onClick: () => void }; // hub: settings for the open project
+  showSignout?: boolean; // volume mode: sign-out stays in the header (no account bar)
 }) {
-  const { name, onHome, showSignout, admin, projectSettings } = props;
+  const { name, onHome, showSignout } = props;
   return (
     <header id="vault">
       <span id="vault-badge" aria-hidden="true">
@@ -139,31 +137,6 @@ export function VaultHeader(props: {
         {name}
       </span>
       <div className="vault-actions">
-        {admin && (
-          <button
-            id="adminbar"
-            className="adminbar"
-            title={
-              "Hub administration — signup policy" +
-              (admin.pending ? " and pending approvals" : "")
-            }
-            onClick={admin.onClick}
-          >
-            <Icon name="shield" />
-            <span>Admin{admin.pending ? " · " + admin.pending : ""}</span>
-          </button>
-        )}
-        {projectSettings && (
-          <button
-            id="project-settings-btn"
-            className="icon-btn2"
-            title="Project settings"
-            aria-label="Project settings"
-            onClick={projectSettings.onClick}
-          >
-            <Icon name="gear" />
-          </button>
-        )}
         {showSignout && (
           <a id="signout" href="/auth/logout" title="Sign out" aria-label="Sign out">
             <Icon name="power" />

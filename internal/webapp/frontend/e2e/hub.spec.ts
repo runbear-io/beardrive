@@ -9,16 +9,16 @@ test("landing selects the first project and rewrites the URL", async ({ page }) 
   await login(page);
   const pid = await wikiId(page);
   await page.waitForURL("/" + pid);
-  await expect(page.locator("#vault-name")).toHaveText("wiki");
+  await expect(page.locator("#project-select option:checked")).toHaveText("wiki");
   await expect(page).toHaveTitle("wiki — BearDrive");
-  await expect(page.locator("#projects .row.active .label")).toHaveText("wiki");
+  await expect(page.locator("#vault-name")).toHaveText("BearDrive");
 });
 
 test("deep link to a project resolves after reload", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto("/" + pid);
-  await expect(page.locator("#vault-name")).toHaveText("wiki");
+  await expect(page.locator("#project-select option:checked")).toHaveText("wiki");
   await expect(page).toHaveURL("/" + pid);
 });
 
@@ -26,22 +26,23 @@ test("unknown project id falls back to a real project", async ({ page }) => {
   await login(page);
   await page.goto("/p-00000000");
   await page.waitForURL(/\/p-[0-9a-f]{8}$/);
-  await expect(page.locator("#vault-name")).not.toHaveText("…");
+  await expect(page.locator("#project-select option:checked")).toHaveText(/.+/);
 });
 
-test("admin sees admin bar and org Manage; member does not", async ({ page, browser }) => {
+test("account menu: admin gets hub admin entry; member does not", async ({ page, browser }) => {
   await login(page); // admin, owner of "default"
-  await expect(page.locator("#adminbar")).toBeVisible();
-  await expect(page.locator("#orgbar #org-name")).toHaveText("default");
-  await expect(page.locator("#org-settings-btn")).toBeVisible();
+  await page.click("#account-btn");
+  await expect(page.locator("#menu-org-settings")).toContainText("default");
+  await expect(page.locator("#menu-hub-admin")).toBeVisible();
   await expect(page.locator("#signout")).toBeVisible();
+  await page.keyboard.press("Escape");
 
   const ctx = await browser.newContext();
   const p2 = await ctx.newPage();
   await login(p2, MEMBER);
-  await expect(p2.locator("#orgbar #org-name")).toHaveText("default");
-  await expect(p2.locator("#adminbar")).toHaveCount(0);
-  await expect(p2.locator("#org-settings-btn")).toHaveCount(0);
+  await p2.click("#account-btn");
+  await expect(p2.locator("#menu-org-settings")).toContainText("default");
+  await expect(p2.locator("#menu-hub-admin")).toHaveCount(0);
   await ctx.close();
 });
 
@@ -77,8 +78,8 @@ test("no-org account gets the onboarding empty state and can create a project", 
   await page.fill("#ob-name", "solo-notes");
   await page.click("#ob-create");
   await page.waitForURL(/\/p-[0-9a-f]{8}$/);
-  await expect(page.locator("#vault-name")).toHaveText("solo-notes");
-  await expect(page.locator("#orgbar")).toBeVisible(); // fresh org, owner
+  await expect(page.locator("#project-select option:checked")).toHaveText("solo-notes");
+  await expect(page.locator("#accountbar")).toBeVisible(); // fresh org, owner
 });
 
 test("new project via the sidebar + modal", async ({ page }) => {
@@ -87,7 +88,7 @@ test("new project via the sidebar + modal", async ({ page }) => {
   await page.fill(".modal-input", "scratch");
   await page.click(".modal .pbtn");
   await page.waitForURL(/\/p-[0-9a-f]{8}$/);
-  await expect(page.locator("#vault-name")).toHaveText("scratch");
-  await expect(page.locator("#projects .row .label")).toContainText(["scratch", "wiki"]);
+  await expect(page.locator("#project-select option:checked")).toHaveText("scratch");
+  await expect(page.locator("#project-select option")).toContainText(["scratch", "wiki"]);
   await expect(page.locator("#toast")).toContainText("Created");
 });
