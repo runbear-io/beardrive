@@ -68,10 +68,11 @@ func TestManualServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.Devices, _ = OpenDeviceRegistry(filepath.Join(state, "devices.json"))
-	srv.Devices.Observe(DeviceInfo{ID: "dev-ci", Name: "claude-ci", OS: "linux/amd64"})
-	srv.Devices.Observe(DeviceInfo{ID: "dev-snow", Name: "claude-snow", OS: "darwin/arm64"})
-	srv.Devices.Observe(DeviceInfo{ID: "codex-mia", Name: "codex-mia", OS: "darwin/arm64"})
-	srv.Devices.Observe(DeviceInfo{ID: "gemini-doc", Name: "gemini-doc", OS: "linux/amd64"})
+	// One agent per teammate, plus shared CI — which is what a real team's
+	// coverage matrix looks like once everyone is running their own.
+	for _, d := range demoDevices {
+		srv.Devices.Observe(d)
+	}
 
 	srv.Shares, _ = OpenShareDB(filepath.Join(state, "shares.json"))
 
@@ -86,6 +87,33 @@ func TestManualServe(t *testing.T) {
 	t.Logf("serving on http://0.0.0.0:8993 (state: %s) — snow@runbear.io / password1", state)
 	go http.ListenAndServe("0.0.0.0:8993", srv.Handler())
 	time.Sleep(8 * time.Hour)
+}
+
+// demoDevices is the agent fleet: one per teammate plus shared CI. Each has a
+// bias in seedDemo so the coverage matrix shows agents specialising rather than
+// eight identical rows.
+var demoDevices = []DeviceInfo{
+	{ID: "claude-snow", Name: "claude-snow", OS: "darwin/arm64"},
+	{ID: "claude-priya", Name: "claude-priya", OS: "darwin/arm64"},
+	{ID: "claude-marco", Name: "claude-marco", OS: "darwin/arm64"},
+	{ID: "claude-ana", Name: "claude-ana", OS: "linux/amd64"},
+	{ID: "codex-mia", Name: "codex-mia", OS: "darwin/arm64"},
+	{ID: "codex-sam", Name: "codex-sam", OS: "linux/amd64"},
+	{ID: "gemini-doc", Name: "gemini-doc", OS: "linux/amd64"},
+	{ID: "claude-ci", Name: "claude-ci", OS: "linux/amd64"},
+}
+
+// agentBias is how much each agent over- or under-reads a given top-level
+// area. Anything unlisted reads it at 1.0.
+var agentBias = map[string]map[string]float64{
+	"claude-snow":  {"wiki": 2.4, "docs": 1.6, "notes": 0.4},
+	"claude-priya": {"wiki": 1.8, "shared": 2.2, "notes": 0.5},
+	"claude-marco": {"docs": 2.6, "shared": 1.4, "wiki": 0.6},
+	"claude-ana":   {"notes": 2.8, "wiki": 0.7, "docs": 0.5},
+	"codex-mia":    {"wiki": 3.0, "notes": 0.3, "shared": 0.4},
+	"codex-sam":    {"wiki": 1.5, "docs": 0.4, "shared": 1.9},
+	"gemini-doc":   {"docs": 3.2, "notes": 1.2, "wiki": 0.5},
+	"claude-ci":    {"wiki": 2.0, "shared": 0.3, "docs": 0.8},
 }
 
 // doc is one seeded file: a path and the markdown body behind it.
@@ -109,7 +137,10 @@ func seedDemo(t *testing.T, state, prefix, projectID string) {
 
 	docs := demoDocs()
 	humans := []string{"alice@x.io", "bob@x.io", "carol@x.io"}
-	agents := []string{"dev-ci", "dev-snow", "codex-mia", "gemini-doc"}
+	agents := make([]string, 0, len(demoDevices))
+	for _, d := range demoDevices {
+		agents = append(agents, d.ID)
+	}
 
 	now := time.Now().UTC()
 	var ops []journal.Op
@@ -120,7 +151,23 @@ func seedDemo(t *testing.T, state, prefix, projectID string) {
 		sum := sha256.Sum256([]byte(d.body))
 		blob := hex.EncodeToString(sum[:])
 		os.WriteFile(filepath.Join(prefix, "blobs", blob), []byte(d.body), 0o644)
-		stale := int(400 * rnd() * rnd())
+		// Most of a live wiki is current — roughly a sixth is genuinely stale.
+		// A warning triangle on every second file just reads as noise.
+		//
+		// Staleness is correlated with reads on purpose: a heavily-read file is
+		// far likelier to have rotted, because it's the one everybody trusts
+		// and nobody owns. That puts the red where the story is — big cells in
+		// the treemap, top-right in the scatter — instead of scattering it
+		// across a hundred files nobody opens.
+		hot := rnd() < 0.15
+		staleChance := 0.09
+		if hot {
+			staleChance = 0.5
+		}
+		stale := int(24 * rnd())
+		if rnd() < staleChance {
+			stale = 34 + int(260*rnd()*rnd())
+		}
 		lam++
 		seq++
 		ops = append(ops, journal.Op{
@@ -132,7 +179,6 @@ func seedDemo(t *testing.T, state, prefix, projectID string) {
 		})
 
 		dir := filepath.Dir(d.path)
-		hot := rnd() < 0.15
 		day := now.AddDate(0, 0, -int(rnd()*20)).Format("2006-01-02")
 		for _, a := range humans {
 			n := int64(math.Floor((map[bool]float64{true: 30, false: 3}[hot]) * rnd() * rnd()))
@@ -141,15 +187,20 @@ func seedDemo(t *testing.T, state, prefix, projectID string) {
 					Kind: ReadKindHuman, Actor: a, Count: n, Last: now})
 			}
 		}
-		for ai, a := range agents {
-			// Runbooks are what the on-call agents live in; research notes are
-			// written for humans and barely read by anything.
+		top, _, _ := strings.Cut(d.path, "/")
+		for _, a := range agents {
+			// Each agent has its own areas (agentBias); on top of that,
+			// runbooks are what everyone's agent lives in and research notes
+			// are written for humans and barely read by anything.
 			boost := 1.0
-			if dir == "wiki/runbooks" && ai < 2 {
-				boost = 4
+			if b, ok := agentBias[a][top]; ok {
+				boost = b
+			}
+			if dir == "wiki/runbooks" {
+				boost *= 2.2
 			}
 			if dir == "notes/research" {
-				boost = 0.05
+				boost *= 0.05
 			}
 			n := int64(math.Floor((map[bool]float64{true: 60, false: 5}[hot]) * rnd() * rnd() * boost))
 			if n > 0 {
