@@ -422,13 +422,17 @@ button, input, a.btn { font-family: inherit; }
 .hnote a:hover { text-decoration: underline; }
 
 /* ---- command palette ---- */
-#palette-overlay { position: fixed; inset: 0; background: rgba(6,7,9,.62); backdrop-filter: blur(3px); display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; z-index: 100; }
-#palette { width: min(560px, 92vw); background: var(--bg-raise); border: 1px solid var(--border-2); border-radius: var(--r-over); box-shadow: 0 24px 70px -18px rgba(0,0,0,.8); overflow: hidden; }
+#palette { position: fixed; top: 12vh; left: 50%; transform: translateX(-50%); z-index: 151; display: block; width: min(560px, 92vw); background: var(--bg-raise); border: 1px solid var(--border-2); border-radius: var(--r-over); box-shadow: 0 24px 70px -18px rgba(0,0,0,.8); overflow: hidden; outline: none; padding: 0; }
 #palette-inputwrap { display: flex; align-items: center; gap: 11px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 #palette-inputwrap .ico { width: 17px; height: 17px; color: var(--text-faint); }
 #palette-input { flex: 1; width: 100%; border: none; background: transparent; color: var(--text); font: inherit; font-size: 15px; letter-spacing: -.01em; outline: none; padding: 0; }
 #palette-input::placeholder { color: var(--text-ghost); }
 #palette-results { list-style: none; margin: 0; padding: 8px; max-height: 46vh; overflow-y: auto; }
+#palette-results [cmdk-item] { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--text-dim); font-size: 13.5px; }
+#palette-results [cmdk-item][data-selected="true"] { background: var(--glow); }
+#palette-results [cmdk-item][data-selected="true"] .picon { color: var(--accent); }
+#palette-results [cmdk-item][data-selected="true"] .plabel { color: var(--accent-bright); }
+#palette-results [cmdk-item][data-selected="true"] .plabel b { color: var(--accent-bright); }
 #palette-results li { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--text-dim); font-size: 13.5px; }
 #palette-results li.selected { background: var(--glow); }
 #palette-results li.selected .picon { color: var(--accent); }

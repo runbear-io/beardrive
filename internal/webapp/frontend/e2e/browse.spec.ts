@@ -101,7 +101,7 @@ test("palette (⌘K) fuzzy-jumps to a file", async ({ page }) => {
   const pid = await wikiId(page);
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.locator("#palette")).toBeVisible();
-  await page.fill("#palette-input", "topic");
+  await page.fill("#palette input", "topic");
   await page.keyboard.press("Enter");
   await page.waitForURL(`/${pid}/notes/deep/topic.md`);
   await expect(page.locator("#content h1")).toHaveText("Topic");
