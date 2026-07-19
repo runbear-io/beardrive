@@ -1,4 +1,5 @@
 import { navigate } from "../nav";
+import { Icon } from "./shell";
 import { postJSON } from "../api/http";
 import type { Project, ProjectCreated } from "../api/types";
 import { modalPrompt } from "../modal";
@@ -15,7 +16,23 @@ export function projColor(s: string): string {
   return PROJ_COLORS[h % PROJ_COLORS.length];
 }
 
-export function ProjectNav({ projects, currentId }: { projects: Project[]; currentId?: string }) {
+export interface ProjectMenu {
+  active: "dashboard" | "install" | "history" | "settings" | null;
+  onDashboard: () => void;
+  onInstall: () => void;
+  onHistory: () => void;
+  onSettings: () => void;
+}
+
+export function ProjectNav({
+  projects,
+  currentId,
+  menu,
+}: {
+  projects: Project[];
+  currentId?: string;
+  menu?: ProjectMenu;
+}) {
   const refresh = useHubRefresh();
 
   const create = async () => {
@@ -39,33 +56,67 @@ export function ProjectNav({ projects, currentId }: { projects: Project[]; curre
           +
         </button>
       </div>
-      <ul>
-        {projects.map((p) => (
-          <li key={p.id}>
-            <div
-              className={"row" + (currentId === p.id ? " active" : "")}
-              title={p.name}
-              tabIndex={0}
-              role="button"
-              onClick={() => {
-                navigate("/" + p.id);
+      <div className="proj-row">
+        <span className="proj-select-wrap">
+          {currentId && (
+            <span
+              className="proj-mark"
+              aria-hidden="true"
+              style={{ background: projColor(projects.find((p) => p.id === currentId)?.name || "") }}
+            />
+          )}
+          <select
+            id="project-select"
+            aria-label="Switch project"
+            value={currentId || ""}
+            onChange={(e) => {
+              if (e.target.value) {
+                navigate("/" + e.target.value);
                 closeSidebarOnMobile();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  (e.currentTarget as HTMLElement).click();
-                }
-              }}
-            >
-              <span className="proj-mark" style={{ background: projColor(p.name) }}>
-                {p.name.trim()[0] || "?"}
-              </span>
-              <span className="label">{p.name}</span>
-            </div>
-          </li>
-        ))}
-      </ul>
+              }
+            }}
+          >
+            {!currentId && <option value="" disabled />}
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <Icon name="chevd" />
+        </span>
+      </div>
+      {menu && (
+        <ul className="nav-menu" aria-label="Project pages">
+          {(
+            [
+              ["dashboard", "Dashboard", "dashboard", menu.onDashboard],
+              ["install", "Installation", "terminal", menu.onInstall],
+              ["history", "History", "hist", menu.onHistory],
+              ["settings", "Settings", "gear", menu.onSettings],
+            ] as const
+          ).map(([key, label, icon, onClick]) => (
+            <li key={key}>
+              <div
+                id={"nav-" + key}
+                className={"row" + (menu.active === key ? " active" : "")}
+                role="button"
+                tabIndex={0}
+                onClick={onClick}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onClick();
+                  }
+                }}
+              >
+                <Icon name={icon} />
+                <span className="label">{label}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </nav>
   );
 }

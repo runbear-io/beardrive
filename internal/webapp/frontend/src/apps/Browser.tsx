@@ -10,9 +10,9 @@ import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { uploadFile } from "../upload";
 import { copyText } from "../util";
 import { toast } from "../toast";
+import { onSearchRequest } from "../search";
 import { AppShell, Icon, Topbar, closeSidebarOnMobile } from "../components/shell";
 import { FileTree, ancestorsOf } from "../components/FileTree";
 import { Breadcrumbs } from "../components/Breadcrumbs";
@@ -41,6 +41,7 @@ export default function Browser(props: {
   // touching the URL — matching the classic app, where they were never
   // routes. Any navigation closes them (the caller owns that state).
   panel?: { crumb: string; body: ReactNode } | null;
+  onClosePanel?: () => void; // panels are not routes: same-path navigation needs an explicit close
 }) {
   const { config, apiBase, route, hub, project } = props;
   const routeKey = useLocationPath(); // scroll memo key, one slot per URL
@@ -58,6 +59,9 @@ export default function Browser(props: {
   }, [insightsOpen, apiBase, qc]);
 
   const path = route.path;
+  // On scoped view routes (/insights/<p>, /history/<p>) the subject of the
+  // page is the target — the tree highlights it, not a menu item.
+  const treePath = path || (route.view === "insights" || route.view === "history" ? route.viewTarget || "" : "");
   const isDir = !!path && dirIndex.has(path);
   // A file only counts as one when the tree actually contains it — a
   // missing path gets the not-found view, not a broken file view.
@@ -77,18 +81,19 @@ export default function Browser(props: {
     if (rootDirs.length === 1) setExpanded((s) => new Set(s).add(rootDirs[0].path));
   }, [tree]);
   useEffect(() => {
-    // Opening any path (tree click, palette, wikilink, deep link) unfolds
-    // the way to it; a selected folder itself opens too.
-    if (!path || !loaded) return;
+    // Opening any path (tree click, palette, wikilink, deep link — or a
+    // scoped insights/history view of it) unfolds the way to it; a selected
+    // folder itself opens too.
+    if (!treePath || !loaded) return;
     setExpanded((s) => {
       const next = new Set(s);
-      for (const a of ancestorsOf(path)) next.add(a);
-      if (dirIndex.has(path)) next.add(path);
+      for (const a of ancestorsOf(treePath)) next.add(a);
+      if (dirIndex.has(treePath)) next.add(treePath);
       return next;
     });
-    const row = document.querySelector(`#tree .row[data-path="${CSS.escape(path)}"]`);
+    const row = document.querySelector(`#tree .row[data-path="${CSS.escape(treePath)}"]`);
     if (row) row.scrollIntoView({ block: "nearest" });
-  }, [path, loaded, dirIndex]);
+  }, [treePath, loaded, dirIndex]);
   const onToggle = useCallback((p: string) => {
     setExpanded((s) => {
       const next = new Set(s);
@@ -138,17 +143,17 @@ export default function Browser(props: {
 
   /* ---- topbar state + actions ---- */
   const [meta, setMeta] = useState("");
-  const [uploadStatus, setUploadStatus] = useState("");
   const [share, setShare] = useState<{ url: string; copied: boolean } | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const uploadInput = useRef<HTMLInputElement>(null);
+  useEffect(() => onSearchRequest(() => setPaletteOpen(true)), []);
   const downloadRef = useRef<HTMLAnchorElement>(null);
 
   const panel = props.panel ?? null;
   const canShare = !panel && hub && !!project && isFile;
   const canHistory = !panel && hub && !!project;
-  const canUpload = !!config.upload?.enabled && (!hub || !!project);
+  // Browser upload is deliberately absent (for now): content enters through
+  // local sync only; the web app is a read/share/history surface.
   const canDownload = !panel && isFile;
   const canMore = !panel && (isFile || (hub && !!project && isDir));
   const downloadURL = apiBase + "download?path=" + encodeURIComponent(path);
@@ -175,32 +180,6 @@ export default function Browser(props: {
     openHistory(isDir ? path + "/" : path);
   }, [path, isDir, openHistory]);
 
-  const uploadNow = useCallback(() => uploadInput.current?.click(), []);
-  const onUploadPick = async () => {
-    const input = uploadInput.current!;
-    const file = input.files?.[0];
-    input.value = "";
-    if (!file) return;
-    // A selected folder receives the upload; a selected file means "next
-    // to it".
-    const dir = !path ? "" : isDir ? path : path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    const dest = dir ? dir + "/" + file.name : file.name;
-    try {
-      setUploadStatus(`Uploading ${dest}…`);
-      await uploadFile(apiBase, dest, file);
-      setUploadStatus(`Uploaded ${dest}`);
-      await qc.invalidateQueries({ queryKey: ["tree", apiBase] });
-      openPath(dest);
-    } catch (err) {
-      setUploadStatus("Upload failed: " + (err as Error).message);
-    }
-  };
-
-  useEffect(() => {
-    // Any navigation clears a stale upload status from the meta slot.
-    setUploadStatus("");
-  }, [routeKey]);
-
   /* ---- ⌘K palette ---- */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -223,7 +202,6 @@ export default function Browser(props: {
       if (isFile) add("download", "Download: " + path, "action", () => downloadRef.current?.click());
     }
     if (hub && project) add("hist", "History: whole project", "action", () => openHistory(""));
-    if (canUpload) add("upload", "Upload a file…", "action", uploadNow);
     if (hub) {
       for (const p of props.projects || []) {
         if (!project || p.id !== project.id) {
@@ -237,7 +215,7 @@ export default function Browser(props: {
     for (const d of dirIndex.keys()) add("folder", d, "folder", () => openPath(d));
     for (const f of flatFiles) add("doc", f.path, "file", () => openPath(f.path));
     return items;
-  }, [hub, project, path, isFile, canUpload, config.auth?.enabled, dirIndex, flatFiles, props.projects, shareNow, historyNow, uploadNow, openHistory, openPath]);
+  }, [hub, project, path, isFile, config.auth?.enabled, dirIndex, flatFiles, props.projects, shareNow, historyNow, openHistory, openPath]);
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
   useEffect(() => {
@@ -261,6 +239,7 @@ export default function Browser(props: {
         flatFiles={flatFiles}
         heatMap={heatMap}
         devices={devices}
+        scope={route.viewTarget || ""}
         onOpenFile={openPath}
         onOpenFolder={openPath}
         isFolder={isFolderFn}
@@ -362,7 +341,7 @@ export default function Browser(props: {
   ) : path ? (
     <Breadcrumbs path={path} onOpenFolder={openPath} />
   ) : route.view === "insights" ? (
-    "Insights — " + (project?.name ?? "")
+    "Insights — " + (route.viewTarget || project?.name || "")
   ) : route.view === "history" ? (
     "History — " + historyTitle(route.viewTarget || "", isFolderFn)
   ) : isHome ? (
@@ -372,31 +351,22 @@ export default function Browser(props: {
   const topbar = (
     <Topbar
       crumb={crumb}
-      meta={uploadStatus || meta}
+      meta={meta}
       actions={
         <>
-          <button id="search-btn" className="btn ghost" title="Search (⌘K)" onClick={() => setPaletteOpen(true)}>
-            <Icon name="search" /> <span className="lbl">Search</span> <kbd>⌘K</kbd>
-          </button>
           {canShare && (
-            <button id="share-btn" className="btn" onClick={shareNow}>
-              <Icon name="share" /> <span className="lbl">Share</span>
+            <button id="share-btn" className="btn icon-only" title="Share" aria-label="Share" onClick={shareNow}>
+              <Icon name="share" />
             </button>
           )}
-          {canHistory && (
+          {canHistory && !path && !route.view && (
             <button id="history-btn" className="btn" onClick={historyNow}>
               <Icon name="hist" /> <span className="lbl">History</span>
             </button>
           )}
-          {canUpload && (
-            <button id="upload-btn" className="btn" onClick={uploadNow}>
-              <Icon name="upload" /> <span className="lbl">Upload</span>
-            </button>
-          )}
-          <input type="file" hidden ref={uploadInput} onChange={onUploadPick} />
           {canDownload && (
-            <a id="download" className="btn" download href={downloadURL} ref={downloadRef}>
-              <Icon name="download" /> <span className="lbl">Download</span>
+            <a id="download" hidden download href={downloadURL} ref={downloadRef}>
+              Download
             </a>
           )}
           {canMore && (
@@ -420,11 +390,6 @@ export default function Browser(props: {
                   History
                 </button>
               )}
-              {canUpload && (
-                <button className="more-item" onClick={uploadNow}>
-                  Upload
-                </button>
-              )}
               {canDownload && (
                 <button className="more-item" onClick={() => downloadRef.current?.click()}>
                   Download
@@ -433,7 +398,10 @@ export default function Browser(props: {
               {props.canInsights && (
                 <button
                   className="more-item"
-                  onClick={() => navigate(urlForView("insights", project?.id))}
+                  onClick={() => {
+                    props.onClosePanel?.();
+                    navigate(urlForView("insights", project?.id, path));
+                  }}
                 >
                   Insights
                 </button>
@@ -456,7 +424,7 @@ export default function Browser(props: {
             root={tree}
             expanded={expanded}
             onToggle={onToggle}
-            currentPath={path}
+            currentPath={treePath}
             listingShowing={listingShowing}
             onOpen={openPath}
           />

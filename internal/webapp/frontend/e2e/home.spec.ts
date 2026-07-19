@@ -151,3 +151,42 @@ test("folder listing's Full history goes to the subtree feed", async ({ page }) 
   const paths = await page.$$eval(".history .hpath", (els) => els.map((e) => e.textContent));
   for (const p of paths) expect(p).toContain("notes/");
 });
+
+test("insights scopes to the selected folder via the ⋯ menu", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/notes`);
+  await page.click("#more-btn");
+  await page.click("#more-menu .more-item:has-text('Insights')");
+  await page.waitForURL(`/${pid}/insights/notes`);
+  await expect(page.locator(".in-title .in-scope")).toContainText("notes");
+  // Scope note in the subtitle is the stable assertion.
+  await expect(page.locator(".insights .dl-sub")).toContainText("notes and everything in it");
+});
+
+test("project menu pages each own a URL: Dashboard, Installation, Settings", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.click("#nav-dashboard");
+  await page.waitForURL(`/${pid}/insights`);
+  await expect(page.locator(".insights .in-title")).toContainText("Knowledge insights");
+  await expect(page.locator("#nav-dashboard")).toHaveClass(/active/);
+  await page.click("#nav-install");
+  await page.waitForURL(`/${pid}/install`);
+  await expect(page.locator("#crumb")).toHaveText("Installation");
+  await expect(page.locator("#nav-install")).toHaveClass(/active/);
+  await page.click("#nav-history");
+  await page.waitForURL(`/${pid}/history`);
+  await expect(page.locator("#nav-history")).toHaveClass(/active/);
+  await page.click("#nav-settings");
+  await page.waitForURL(`/${pid}/settings`);
+  await expect(page.locator("#crumb")).toHaveText("Project settings");
+  await expect(page.locator(".project-settings h2")).toHaveText("wiki");
+  await page.click("#nav-dashboard");
+  await page.waitForURL(`/${pid}/insights`);
+  await expect(page.locator("#nav-dashboard")).toHaveClass(/active/);
+  // Deep link + reload land on the page, like any URL.
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator(".project-settings h2")).toHaveText("wiki");
+  await expect(page.locator("#nav-settings")).toHaveClass(/active/);
+});

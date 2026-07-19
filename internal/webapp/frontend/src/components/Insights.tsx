@@ -48,15 +48,29 @@ export function Insights(props: {
   flatFiles: Node[];
   heatMap: HeatMap | null;
   devices: DeviceHeat[] | null;
+  scope?: string; // "" = whole project; a folder scopes to its subtree, a file to itself
   onOpenFile: (path: string) => void;
   onOpenFolder: (path: string) => void;
   isFolder: (path: string) => boolean;
 }) {
   const [lens, setLens] = useState<Lens>("all");
-  const { flatFiles, heatMap, devices } = props;
+  const { flatFiles, heatMap, devices, scope } = props;
+
+  const inScope = (p: string) => !scope || p === scope || p.startsWith(scope + "/");
+  const scoped = scope ? flatFiles.filter((f) => inScope(f.path)) : flatFiles;
+  const scopedDevices =
+    devices && scope
+      ? devices
+          .map((d) => {
+            const folders: Record<string, number> = {};
+            for (const [f, n] of Object.entries(d.folders || {})) if (inScope(f)) folders[f] = n;
+            return { ...d, folders };
+          })
+          .filter((d) => Object.keys(d.folders).length > 0)
+      : devices;
 
   const now = Date.now();
-  const pts: Pt[] = flatFiles.map((f) => {
+  const pts: Pt[] = scoped.map((f) => {
     const e = (heatMap && heatMap[f.path]) || {};
     const days = f.time ? Math.max(0, (now - new Date(f.time).getTime()) / 86400000) : 0;
     const reads = lens === "all" ? heatTotal(e) : e[lens] || 0;
@@ -72,10 +86,11 @@ export function Insights(props: {
 
   return (
     <div className="insights">
-      <h1 className="in-title">Knowledge insights</h1>
+      <h1 className="in-title">Knowledge insights{scope ? <span className="in-scope"> · {scope}</span> : null}</h1>
       <p className="dl-sub">
-        Reads over the last 30 days × how long since each file changed. Hot but stale knowledge —
-        read a lot, maintained by nobody — is the danger zone.
+        {scope
+          ? `Reads over the last 30 days × freshness, for ${scope} and everything in it.`
+          : "Reads over the last 30 days × how long since each file changed. Hot but stale knowledge — read a lot, maintained by nobody — is the danger zone."}
       </p>
       <div className="in-lens">
         {(["all", "human", "agent"] as const).map((l) => (
@@ -98,10 +113,10 @@ export function Insights(props: {
       <h3 className="dl-h3">Hot path — top files by reads</h3>
       <HotPath pts={pts} lens={lens} onOpenFile={props.onOpenFile} />
 
-      {devices && devices.length > 0 && (
+      {scopedDevices && scopedDevices.length > 0 && (
         <>
           <h3 className="dl-h3">Agent coverage — which agents read which areas</h3>
-          <CoverageMatrix devices={devices} />
+          <CoverageMatrix devices={scopedDevices} />
         </>
       )}
     </div>

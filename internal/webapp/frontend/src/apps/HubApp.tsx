@@ -2,13 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
-import { parseRoute } from "../router";
+import { parseRoute, urlForView } from "../router";
 import { navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { ProjectNav } from "../components/ProjectNav";
-import { OrgBar } from "../components/OrgBar";
+import { AccountBar } from "../components/AccountBar";
+import { ProjectSettings } from "../components/ProjectSettings";
+import { ConnectGuide } from "../components/ConnectGuide";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "../toast";
 import Browser from "./Browser";
@@ -67,20 +69,18 @@ export default function HubApp({ config }: { config: ServerConfig }) {
 
   const brand = config.brand || config.volume || "BearDrive";
   const org = (current && orgs?.find((o) => o.id === current.org)) || null;
-  const ownedOrg = orgs?.find((o) => o.role === "owner") || null;
-  // The top-of-sidebar gear is the always-visible admin entry point: any
-  // account that owns an org (or is a hub admin) gets it, whatever project
-  // is open. The panels it opens arrive in Phase 4.
-  const gearTarget = org && org.role === "owner" ? org : ownedOrg;
   // Insights (embedded on the project home and behind the ⋯ menu) is for
   // hub admins and owners of the project's org.
   const canInsights = isAdmin || (org ? org.role === "owner" : false);
 
-  const vault = (
-    <VaultHeader
-      name={projects ? (current ? current.name : brand) : "…"}
-      onHome={current ? () => navigate("/" + current.id) : undefined}
-      showSignout={config.auth.enabled}
+  // Top of the sidebar is the brand; project and account actions live in
+  // their own sections below (PropelAuth-style layout).
+  const vault = <VaultHeader name={brand} onHome={() => navigate("/")} search={!!current} />;
+
+  const accountBar = config.me ? (
+    <AccountBar
+      me={config.me}
+      org={org}
       admin={
         isAdmin
           ? {
@@ -92,18 +92,12 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             }
           : undefined
       }
-      gear={
-        gearTarget
-          ? {
-              onClick: () => {
-                setPanel({ kind: "org", orgId: gearTarget.id });
-                closeSidebarOnMobile();
-              },
-            }
-          : undefined
-      }
+      onOrgSettings={(o) => {
+        setPanel({ kind: "org", orgId: o.id });
+        closeSidebarOnMobile();
+      }}
     />
-  );
+  ) : undefined;
 
   if (!projects || !orgs) {
     return (
@@ -118,6 +112,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       <AppShell
         vault={vault}
         projectsNav={<ProjectNav projects={projects} />}
+        orgBar={accountBar}
         topbar={<Topbar />}
         contentClass="view"
       >
@@ -160,6 +155,20 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           }
         : null;
 
+  const routePage =
+    route.view === "settings"
+      ? { crumb: "Project settings", body: <ProjectSettings project={current} org={org} /> }
+      : route.view === "install"
+        ? {
+            crumb: "Installation",
+            body: (
+              <div className="onboard">
+                <ConnectGuide project={current} />
+              </div>
+            ),
+          }
+        : null;
+
   // Landing ("/") and unknown project ids both resolve to a real project
   // URL; replace so back/forward never bounces through the redirect.
   if (route.project !== current.id) {
@@ -178,18 +187,54 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       canInsights={canInsights}
       sidebar={{
         vault,
-        projectsNav: <ProjectNav projects={projects} currentId={current.id} />,
-        orgBar: (
-          <OrgBar
-            org={org}
-            onManage={(o) => {
-              setPanel({ kind: "org", orgId: o.id });
-              closeSidebarOnMobile();
+        projectsNav: (
+          <ProjectNav
+            projects={projects}
+            currentId={current.id}
+            menu={{
+              // Scoped views (/insights/<path>, /history/<path>) belong to
+              // the file/folder — the tree carries the selection, no menu
+              // item lights up.
+              active: panel
+                ? null
+                : route.view === "insights" && !route.viewTarget
+                  ? "dashboard"
+                  : route.view === "install"
+                    ? "install"
+                    : route.view === "history" && !route.viewTarget
+                      ? "history"
+                      : route.view === "settings"
+                        ? "settings"
+                        : null,
+              // Each page is a URL; explicitly close overlay panels because
+              // same-path navigation doesn't change pathname.
+              onDashboard: () => {
+                setPanel(null);
+                navigate(urlForView("insights", current.id));
+                closeSidebarOnMobile();
+              },
+              onInstall: () => {
+                setPanel(null);
+                navigate(urlForView("install", current.id));
+                closeSidebarOnMobile();
+              },
+              onHistory: () => {
+                setPanel(null);
+                navigate(urlForView("history", current.id));
+                closeSidebarOnMobile();
+              },
+              onSettings: () => {
+                setPanel(null);
+                navigate(urlForView("settings", current.id));
+                closeSidebarOnMobile();
+              },
             }}
           />
         ),
+        orgBar: accountBar,
       }}
-      panel={activePanel}
+      panel={activePanel || routePage}
+      onClosePanel={() => setPanel(null)}
     />
   );
 }
@@ -218,7 +263,7 @@ function JoinInvite({ token, onDone }: { token: string; onDone: (orgId: string |
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
   return (
-    <AppShell vault={<VaultHeader name="…" showSignout />} topbar={<Topbar />}>
+    <AppShell vault={<VaultHeader name="BearDrive" />} topbar={<Topbar />}>
       <div className="empty">Joining…</div>
     </AppShell>
   );

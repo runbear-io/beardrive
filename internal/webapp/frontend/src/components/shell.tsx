@@ -1,4 +1,35 @@
 import type { ReactNode } from "react";
+import { requestSearch } from "../search";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  Copy,
+  Download,
+  Ellipsis,
+  FileText,
+  Folder,
+  LayoutDashboard,
+  Globe,
+  History,
+  Link,
+  Lock,
+  LogOut,
+  Menu,
+  Plus,
+  Search,
+  Settings,
+  Share2,
+  Shield,
+  SquareTerminal,
+  Trash2,
+  TriangleAlert,
+  Upload,
+  Users,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 
 // The app's fixed layout: off-canvas sidebar (mobile: body.sb-open toggles
 // it), topbar, and the content pane. Ids and classes match the classic app
@@ -11,12 +42,42 @@ export function closeSidebarOnMobile() {
   document.body.classList.remove("sb-open");
 }
 
+// Icons are lucide (lucide.dev) components behind the historical sprite
+// names, so call sites keep the tiny `<Icon name>` API and style.css's
+// `.ico` sizing/stroke rules apply unchanged.
+const ICONS: Record<string, LucideIcon> = {
+  alert: TriangleAlert,
+  check: Check,
+  chev: ChevronRight,
+  chevd: ChevronDown,
+  clock: Clock,
+  copy: Copy,
+  doc: FileText,
+  dots: Ellipsis,
+  download: Download,
+  folder: Folder,
+  dashboard: LayoutDashboard,
+  gear: Settings,
+  globe: Globe,
+  hist: History,
+  link: Link,
+  lock: Lock,
+  menu: Menu,
+  plus: Plus,
+  power: LogOut,
+  search: Search,
+  share: Share2,
+  shield: Shield,
+  terminal: SquareTerminal,
+  trash: Trash2,
+  upload: Upload,
+  users: Users,
+  x: X,
+};
+
 export function Icon({ name }: { name: string }) {
-  return (
-    <svg className="ico" aria-hidden="true">
-      <use href={`#i-${name}`} />
-    </svg>
-  );
+  const C = ICONS[name];
+  return C ? <C className="ico" aria-hidden="true" /> : null;
 }
 
 export function AppShell(props: {
@@ -57,11 +118,10 @@ export function AppShell(props: {
 export function VaultHeader(props: {
   name: string;
   onHome?: () => void; // hub: the project name doubles as a home link
-  showSignout: boolean;
-  admin?: { pending: number; onClick: () => void }; // hub admins only
-  gear?: { onClick: () => void }; // org owners: manage organization
+  showSignout?: boolean; // volume mode: sign-out stays in the header (no account bar)
+  search?: boolean; // icon-only ⌘K search trigger beside the brand
 }) {
-  const { name, onHome, showSignout, admin, gear } = props;
+  const { name, onHome, showSignout, search } = props;
   return (
     <header id="vault">
       <span id="vault-badge" aria-hidden="true">
@@ -83,29 +143,20 @@ export function VaultHeader(props: {
         {name}
       </span>
       <div className="vault-actions">
-        {admin && (
+        {search && (
           <button
-            id="adminbar"
-            className="adminbar"
-            title={
-              "Hub administration — signup policy" +
-              (admin.pending ? " and pending approvals" : "")
-            }
-            onClick={admin.onClick}
+            id="search-btn"
+            className="icon-btn2 has-tip"
+            aria-label="Search"
+            onClick={() => {
+              requestSearch();
+              closeSidebarOnMobile();
+            }}
           >
-            <Icon name="shield" />
-            <span>Admin{admin.pending ? " · " + admin.pending : ""}</span>
-          </button>
-        )}
-        {gear && (
-          <button
-            id="settings-btn"
-            className="icon-btn2"
-            title="Manage organization"
-            aria-label="Manage organization"
-            onClick={gear.onClick}
-          >
-            <Icon name="users" />
+            <Icon name="search" />
+            <span className="tip" role="tooltip">
+              Search <kbd>⌘K</kbd>
+            </span>
           </button>
         )}
         {showSignout && (

@@ -69,6 +69,9 @@ button, input, a.btn { font-family: inherit; }
   display: flex; align-items: center; gap: 9px;
   height: 52px; padding: 0 12px 0 14px;
   border-bottom: 1px solid var(--border);
+  /* Own stacking context above the sections below, so the search tooltip
+     paints over their borders instead of sliding behind them. */
+  position: relative; z-index: 45;
 }
 #vault-badge {
   width: 22px; height: 22px; border-radius: 6px; flex: none;
@@ -78,20 +81,13 @@ button, input, a.btn { font-family: inherit; }
 }
 #vault-name { font-weight: 600; font-size: 13px; letter-spacing: -.01em; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vault-actions { display: flex; align-items: center; gap: 4px; }
-#signout, .icon-btn2 {
+#vault #signout, .icon-btn2 {
   width: 28px; height: 28px; border-radius: 6px;
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--text-ghost); background: transparent; border: none; cursor: pointer; text-decoration: none;
 }
-#signout:hover, .icon-btn2:hover { color: var(--text); background: var(--hover); }
-#signout .ico, .icon-btn2 .ico { width: 16px; height: 16px; }
-.adminbar {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 26px; padding: 0 9px; border-radius: var(--r-ctl);
-  border: 1px solid var(--border); background: var(--surface);
-  color: var(--accent-bright); font-size: 11.5px; font-weight: 600; cursor: pointer;
-}
-.adminbar:hover { background: var(--glow); border-color: transparent; }
+#vault #signout:hover, .icon-btn2:hover { color: var(--text); background: var(--hover); }
+#vault #signout .ico, .icon-btn2 .ico { width: 16px; height: 16px; }
 
 /* projects */
 #projects { flex: none; max-height: 32%; overflow-y: auto; padding: 10px 8px 8px; border-bottom: 1px solid var(--border); }
@@ -143,23 +139,63 @@ button, input, a.btn { font-family: inherit; }
 #tree li.collapsed > .row .chev { transform: rotate(-90deg); }
 
 /* org bar */
-#orgbar { display: flex; align-items: center; gap: 9px; padding: 9px 12px 9px 14px; border-top: 1px solid var(--border); }
-#org-name {
-  flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 8px;
-  color: var(--text-dim); font-size: 12.5px; font-weight: 500; cursor: pointer;
+/* ---- project menu ---- */
+.nav-menu { list-style: none; margin: 6px 0 0; padding: 0; }
+.nav-menu .row .ico { width: 15px; height: 15px; flex: none; color: var(--text-ghost); }
+.nav-menu .row.active .ico { color: var(--accent-bright); }
+
+/* ---- project switcher ---- */
+.proj-row { display: flex; align-items: center; gap: 4px; padding: 0 10px 4px 12px; }
+.proj-select-wrap { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
+.proj-select-wrap .proj-mark { position: absolute; left: 9px; pointer-events: none; }
+.proj-select-wrap > .ico { position: absolute; right: 8px; width: 14px; height: 14px; color: var(--text-ghost); pointer-events: none; }
+#project-select {
+  flex: 1; min-width: 0; height: 30px; padding: 0 26px 0 30px;
+  appearance: none; -webkit-appearance: none;
+  border: 1px solid var(--border); border-radius: var(--r-ctl);
+  background: var(--surface); color: var(--text);
+  font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-#org-name::before {
-  content: ""; width: 15px; height: 15px; flex: none; border-radius: 4px;
-  background: linear-gradient(160deg, #ffcf85, #d3861a); opacity: .85;
+#project-select:hover { background: var(--hover); border-color: var(--border-2); }
+
+/* ---- account bar ---- */
+#accountbar { position: relative; border-top: 1px solid var(--border); padding: 7px 10px; }
+#account-btn {
+  width: 100%; display: flex; align-items: center; gap: 9px; text-align: left;
+  padding: 6px 8px; border: none; border-radius: 7px;
+  background: transparent; color: var(--text-dim); cursor: pointer; font: inherit;
 }
-#org-name:hover { color: var(--text); }
-#invite-btn {
-  flex: none; height: 27px; padding: 0 11px; border-radius: var(--r-ctl);
-  border: 1px solid var(--border); background: var(--surface);
-  color: var(--text-dim); font-size: 12px; font-weight: 500; cursor: pointer;
+#account-btn:hover { background: var(--hover); color: var(--text); }
+#account-btn .avatar {
+  width: 26px; height: 26px; flex: none; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 12px; font-weight: 700;
 }
-#invite-btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-2); }
+#account-btn .acct { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+#account-btn .acct b { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#account-btn .acct small { font-size: 11px; color: var(--text-ghost); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#account-btn > .ico { width: 14px; height: 14px; color: var(--text-ghost); }
+#account-menu {
+  position: absolute; left: 10px; right: 10px; bottom: calc(100% + 4px);
+  padding: 5px; border: 1px solid var(--border-2); border-radius: 9px;
+  background: var(--surface); box-shadow: 0 10px 32px rgba(0, 0, 0, .35);
+  display: flex; flex-direction: column; z-index: 30;
+}
+#account-menu .menu-sec {
+  padding: 7px 9px 3px; font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--text-ghost);
+}
+#account-menu [role="menuitem"] {
+  display: flex; align-items: center; gap: 8px; padding: 7px 9px;
+  border: none; border-radius: 6px; background: transparent; text-align: left;
+  color: var(--text-dim); font: inherit; font-size: 12.5px; cursor: pointer; text-decoration: none;
+}
+#account-menu [role="menuitem"]:hover { background: var(--hover); color: var(--text); }
+#account-menu [role="menuitem"] b { font-weight: 600; }
+#account-menu [role="menuitem"] .ico { width: 15px; height: 15px; }
+#account-menu #signout { color: var(--danger, #e5534b); }
+#account-menu #signout:hover { color: var(--danger, #e5534b); background: var(--hover); }
 
 /* ---- main pane ---- */
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -184,10 +220,29 @@ button, input, a.btn { font-family: inherit; }
 .btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-2); }
 .btn .ico { width: 15px; height: 15px; }
 .btn.ghost { color: var(--text-dim); }
-#search-btn kbd {
+/* Hover tooltip for icon-only controls (the header search): label + kbd
+   chip in a floating card below the button, arrow pointing up. */
+.has-tip { position: relative; }
+.has-tip .tip {
+  /* Right-aligned (not centered): the sidebar clips at its right edge
+     (overflow hidden), so the card must grow leftward from the button. */
+  position: absolute; top: calc(100% + 8px); right: -6px;
+  display: flex; align-items: center; gap: 7px; white-space: nowrap;
+  padding: 6px 9px; border-radius: 8px; border: 1px solid var(--border-2);
+  background: var(--surface); color: var(--text); font-size: 12.5px; font-weight: 500;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+  opacity: 0; visibility: hidden; transition: opacity .12s ease .15s; z-index: 40;
+}
+.has-tip .tip::before {
+  content: ""; position: absolute; top: -4.5px; right: 16px;
+  width: 8px; height: 8px; transform: rotate(45deg);
+  background: var(--surface); border-left: 1px solid var(--border-2); border-top: 1px solid var(--border-2);
+}
+.has-tip:hover .tip, .has-tip:focus-visible .tip { opacity: 1; visibility: visible; }
+.has-tip .tip kbd {
   font: 11px var(--ui); color: var(--text-faint);
   background: var(--hover); border: 1px solid var(--border-2); border-radius: 5px;
-  padding: 1px 5px; margin-left: 2px;
+  padding: 1px 5px;
 }
 #more-menu {
   position: absolute; right: 12px; top: calc(100% - 4px); z-index: 80;
@@ -302,6 +357,7 @@ button, input, a.btn { font-family: inherit; }
 /* ---- insights (read×write matrix) ---- */
 .insights { max-width: 760px; margin: 0 auto; }
 .in-title { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
+.in-title .in-scope { color: var(--text-ghost); font-weight: 500; font-size: 15px; }
 .in-lens { display: flex; gap: 6px; margin: 0 0 14px; }
 .in-lens-btn { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--text-faint); cursor: pointer; }
 .in-lens-btn:hover { color: var(--text); }
@@ -422,7 +478,7 @@ button, input, a.btn { font-family: inherit; }
   .icon-btn { display: inline-flex; width: 44px; height: 44px; }
   #content { padding: 24px 18px 70px; }
   #topbar { padding: 0 8px; gap: 4px; }
-  #search-btn kbd, .btn .lbl { display: none; }
+  .btn .lbl { display: none; }
   #topbar .btn { min-width: 44px; min-height: 44px; padding: 0; justify-content: center; gap: 0; }
   #topbar .btn .ico { width: 18px; height: 18px; }
   #more-btn:not([hidden]) { display: inline-flex; }
@@ -433,10 +489,9 @@ button, input, a.btn { font-family: inherit; }
   #meta { display: none; }
   #crumb { flex: 1; }
   #vault { padding: 0 8px 0 12px; }
-  .icon-btn2, #signout, .adminbar { min-width: 44px; min-height: 44px; }
-  #tree li > .row, #projects .row { height: 44px; }
-  #invite-btn { min-height: 44px; padding: 0 14px; }
-  #org-name { min-height: 44px; }
+  .icon-btn2, #signout,   #tree li > .row, #projects .row { height: 44px; }
+  #account-btn { min-height: 44px; }
+  #project-select { min-height: 44px; }
   .nav-add { min-width: 44px; min-height: 44px; }
   .markdown, .admin, .onboard, .history, .dirlist { max-width: 100%; }
   .markdown table, pre.plain { display: block; overflow-x: auto; max-width: 100%; }
