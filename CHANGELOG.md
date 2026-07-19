@@ -4,6 +4,19 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## Unreleased
+
+- **`bdrive skill install`** — the binary now carries the `beardrive`
+  skill and installs it into any agent that reads `SKILL.md`
+  (`~/.claude|.codex|.gemini|.hermes/skills/beardrive/`), idempotently;
+  bare `bdrive skill` prints the detection table.
+- **Hub install guide, Codex and Hermes tabs: one paste, no terminal** —
+  the same shape as the Claude tab. The pasted prompt has the agent install
+  the CLI, keep the skill, sign in (`login --device`, so it can relay the
+  code instead of hoping a browser opened), `bdrive init`, and
+  `bdrive hooks install` — the step hand-copied setups routinely skipped.
+  The plain commands moved into an "or run it yourself" fallback.
+
 ## v0.8.0 — 2026-07-16
 
 - **Gated links on every mentioned file path**: Claude Code's turn-start

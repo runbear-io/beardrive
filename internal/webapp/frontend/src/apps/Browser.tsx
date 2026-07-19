@@ -11,10 +11,10 @@ import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { copyText } from "../util";
+import { HTML_EXT, copyText } from "../util";
 import { toast } from "../toast";
 import { onSearchRequest } from "../search";
-import { AppShell, Icon, Topbar, closeSidebarOnMobile } from "../components/shell";
+import { AppShell, Icon, Page, Topbar, closeSidebarOnMobile, type PageWidth } from "../components/shell";
 import { FileTree, ancestorsOf } from "../components/FileTree";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
@@ -226,13 +226,16 @@ export default function Browser(props: {
 
   /* ---- content view ---- */
   const isFolderFn = useCallback((p: string) => dirIndex.has(p), [dirIndex]);
-  let contentClass = "markdown";
+  // One column decision per route (see <Page> in shell.tsx). File views also
+  // carry the markdown typography class, which used to sit on #content itself
+  // — putting the width there made the gutter eat into the reading column, so
+  // .md pages ran 80px narrower than every other page.
+  let pageWidth: PageWidth = "app";
+  let pageClass: string | undefined;
   let view: ReactNode;
   if (panel) {
-    contentClass = "view";
     view = panel.body;
   } else if (route.view === "insights") {
-    contentClass = "view";
     view = props.canInsights ? (
       <Insights
         flatFiles={flatFiles}
@@ -247,7 +250,7 @@ export default function Browser(props: {
       <div className="empty">Insights is for hub admins and org owners.</div>
     );
   } else if (route.view === "history") {
-    contentClass = "view";
+    // structured view — default app column, like the folder listing it shares rows with
     view = (
       <HistoryView
         apiBase={apiBase}
@@ -264,7 +267,6 @@ export default function Browser(props: {
     } else if (isMissing) {
       // The tree polls every few seconds, so a file that's mid-upload (or
       // mid-sync from a teammate's device) appears here on its own.
-      contentClass = "view";
       view = (
         <div className="notfound">
           <h1>Couldn't find that</h1>
@@ -285,8 +287,7 @@ export default function Browser(props: {
         </div>
       );
     } else if (isDir) {
-      contentClass = "view";
-      view = (
+      view = ( // structured view — default app column; read is for rendered files only
         <FolderListing
           node={dirIndex.get(path)!}
           heatMap={heatMap}
@@ -298,6 +299,8 @@ export default function Browser(props: {
         />
       );
     } else {
+      pageWidth = HTML_EXT.test(path) ? "wide" : "read";
+      pageClass = "markdown";
       view = (
         <FileView
           apiBase={apiBase}
@@ -313,7 +316,6 @@ export default function Browser(props: {
   } else if (isHome) {
     // The project's index page: the connect-an-agent guide, with Insights
     // below for admins/owners.
-    contentClass = "view";
     view = (
       <>
         <ConnectGuide project={project!} />
@@ -430,11 +432,12 @@ export default function Browser(props: {
           />
         }
         topbar={topbar}
-        contentClass={contentClass}
         contentRef={contentRef}
         onContentScroll={onScroll}
       >
-        {view}
+        <Page width={pageWidth} className={pageClass}>
+          {view}
+        </Page>
       </AppShell>
       {share && <ShareDialog url={share.url} copied={share.copied} onClose={() => setShare(null)} />}
       <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} candidates={paletteCandidates} />

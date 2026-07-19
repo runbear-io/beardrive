@@ -18,6 +18,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Stop syncing | `bdrive stop [<folder>]` (`--forget` also unregisters) |
 | One sync cycle now | `bdrive sync [<folder>]` — `--note <text>` stamps session context; `--hook <label>` is the Claude turn-start hook's plumbing (event JSON in, sync + note, gated-link formula out) |
 | Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install [<folder>]` — auto-detects the platforms in use and merges pull/push/session-note/read-tracking hooks into each one's own hook config, idempotently; bare `bdrive hooks` shows the status table |
+| Install this skill on another agent (Codex, Gemini CLI, Hermes, Claude Code) | `bdrive skill install [<folder>]` — writes the binary's own copy of this skill to each detected platform's user-level skills dir (`~/.codex/skills/beardrive/SKILL.md` and friends), idempotently; bare `bdrive skill` shows the status table. Then the user asks that agent to set the folder up and it runs `init` + `hooks install` itself |
 | Record agent file reads (hook plumbing) | `bdrive read-log [<folder>]` — parses a hook event JSON from stdin and queues in-project reads locally (native reads, grep matches, and files named in shell commands); drained to the hub on the next sync as agent traffic in the read heatmap. Registered automatically by `bdrive hooks install`; rarely run by hand |
 | Mounts + daemon + pending state | `bdrive status [<folder>]` |
 | Change history | `bdrive log [<folder>] [-p path] [-n N]` |
@@ -156,6 +157,40 @@ in place when coverage grows (re-run `bdrive hooks install` after upgrading
 the binary); `--agent claude,codex,gemini,hermes` overrides
 detection; bare `bdrive hooks` prints the detection/registration table.
 Project-level configs ride the repo, so hooks reach the whole team.
+
+**When a teammate is setting up on a non-Claude agent**, point them at
+`bdrive skill install` (see below) rather than a list of commands: the
+agent then runs `init` + `hooks install` itself, which is exactly the step
+hand-copied setups miss.
+
+### Installing this skill on other agents
+
+`SKILL.md` is a cross-agent format, and the bdrive binary carries this very
+file: `bdrive skill install [<folder>]` writes it to the user-level skills
+directory of every platform it detects — `~/.claude/skills/beardrive/`,
+`~/.codex/skills/beardrive/`, `~/.gemini/skills/beardrive/`,
+`~/.hermes/skills/beardrive/`. `--agent claude,codex,gemini,hermes`
+overrides detection; bare `bdrive skill` prints the table; re-running after
+a CLI upgrade refreshes an outdated copy (idempotent otherwise). Installs
+are user-level on purpose — the skill is about the CLI, not one folder, and
+a synced project folder should never carry it.
+
+The intended flow for a new machine is one paste into that agent — the
+commands ride inside the prompt because it has no BearDrive knowledge yet:
+
+```
+Set up BearDrive in this folder.
+1. If `bdrive` is missing, install it: brew install runbear-io/tap/beardrive
+2. bdrive skill install   # so you know the CLI next time
+3. bdrive login --device <hub-url>   # show me the code and the URL
+4. bdrive init --project <project-id>
+5. bdrive hooks install   # don't skip this - it's what syncs every turn
+```
+
+Use `login --device` when an agent is driving: a browser-callback sign-in is
+invisible to it mid-turn, while the device flow yields a code and URL it can
+hand back in chat. The hub's project home page renders this with the URL and
+id filled in.
 
 ### Read heat (who actually reads what)
 

@@ -4,7 +4,7 @@ import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../a
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
 import { parseRoute, urlForView } from "../router";
 import { navigate, Redirect, useLocationPath } from "../nav";
-import { AppShell, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
+import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { ProjectNav } from "../components/ProjectNav";
@@ -102,7 +102,9 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   if (!projects || !orgs) {
     return (
       <AppShell vault={vault} topbar={<Topbar />}>
-        <div className="empty">Loading…</div>
+        <Page>
+          <div className="empty">Loading…</div>
+        </Page>
       </AppShell>
     );
   }
@@ -114,9 +116,9 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         projectsNav={<ProjectNav projects={projects} />}
         orgBar={accountBar}
         topbar={<Topbar />}
-        contentClass="view"
       >
-        <EmptyState
+        <Page>
+          <EmptyState
           authEnabled={config.auth.enabled}
           onCreate={async (name) => {
             if (!name) {
@@ -131,8 +133,9 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             } catch (e) {
               toast("Could not create the project: " + (e as Error).message, true);
             }
-          }}
-        />
+            }}
+          />
+        </Page>
       </AppShell>
     );
   }
@@ -160,12 +163,11 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       ? { crumb: "Project settings", body: <ProjectSettings project={current} org={org} /> }
       : route.view === "install"
         ? {
+            // The same guide the project home shows, in the same column —
+            // it used to sit in the .onboard card, 320px narrower and 90px
+            // lower than home, two sidebar items apart.
             crumb: "Installation",
-            body: (
-              <div className="onboard">
-                <ConnectGuide project={current} />
-              </div>
-            ),
+            body: <ConnectGuide project={current} />,
           }
         : null;
 
@@ -264,7 +266,9 @@ function JoinInvite({ token, onDone }: { token: string; onDone: (orgId: string |
   }, [token]);
   return (
     <AppShell vault={<VaultHeader name="BearDrive" />} topbar={<Topbar />}>
-      <div className="empty">Joining…</div>
+      <Page>
+        <div className="empty">Joining…</div>
+      </Page>
     </AppShell>
   );
 }

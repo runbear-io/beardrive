@@ -143,6 +143,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
 | `bdrive hooks [install]` | Register turn-boundary sync hooks with detected agent platforms (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking; idempotent (`--agent` overrides detection) |
+| `bdrive skill [install]` | Install the `beardrive` skill into detected agent platforms (`~/.codex/skills/beardrive/SKILL.md` and friends) so the agent can do the setup itself — sign in, `bdrive init`, and register the sync hooks; idempotent (`--agent` overrides detection) |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
@@ -430,6 +431,38 @@ The plugin sets up everything at once:
   covering init/stop/sync, sharing by URL, backends and credentials,
   selective sync, and troubleshooting. Working in a clone of this repo
   picks the same skill up automatically via `.claude/skills/`.
+
+## Other agents: Codex, Gemini CLI, Hermes
+
+No terminal needed here either — the setup is one paste. Start the agent in
+the folder you want the files and give it:
+
+```
+Set up BearDrive in this folder.
+1. If `bdrive` is missing, install it: brew install runbear-io/tap/beardrive
+   (no Homebrew? grab the release binary for this OS/arch from
+   https://github.com/runbear-io/beardrive/releases)
+2. bdrive skill install   # so you know the CLI next time
+3. bdrive login --device https://your-hub   # show me the code and the URL
+4. bdrive init --project <project-id>
+5. bdrive hooks install   # don't skip this - it's what syncs every turn
+Then tell me what got set up.
+```
+
+The commands ride inside the prompt because these agents ship no BearDrive
+knowledge — but the user copies one thing, and the agent handles every
+deviation (already installed, no Homebrew, sign-in, wrong folder). Step 2 is
+the durable part: `SKILL.md` is a cross-agent format, and `bdrive skill
+install` writes the very skill the Claude plugin ships to each detected
+platform's user-level skills directory (`~/.codex/skills/beardrive/SKILL.md`,
+`~/.gemini/…`, `~/.hermes/…`, `~/.claude/…`), so from then on "share this
+file" or "what changed?" just works. Step 5 is the one people skip when they
+copy commands by hand, which is exactly why the agent runs it.
+
+A project's home page in the web UI shows this with the hub URL and project
+id already filled in (plus the plain-terminal version). `bdrive skill` and
+`bdrive hooks` print what's set up on this machine; re-run either after a CLI
+upgrade to refresh.
 
 ## How it works
 

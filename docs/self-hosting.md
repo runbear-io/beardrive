@@ -66,9 +66,11 @@ as bearer tokens. For containers, the repo ships a `Dockerfile`
    sync only that subfolder.
 3. Invite a teammate: sidebar footer → **Manage** → **New invite** —
    the join link both creates their account and adds them to your org.
-4. Connect agents: the project's home page in the web UI shows
-   copy-paste setup for Claude Code/Cowork, Hermes, and Codex; or run
-   `bdrive hooks install` in the folder.
+4. Connect agents: the project's home page in the web UI shows one-paste
+   setup for Claude Code/Cowork, Hermes, and Codex — hub URL and project
+   id already filled in. Teammates paste it into their own agent, which
+   installs the CLI, keeps the beardrive skill (`bdrive skill install`),
+   signs in, mounts the project, and registers the sync hooks.
 
 ## Authentication reference
 
@@ -147,7 +149,8 @@ drivers are pure Go, so the binary stays a CGO-free static build.
 `brew upgrade beardrive` (clients and hub are the same binary — keep
 them roughly in step; the sync protocol is append-only journals + blobs,
 which old clients read forward). After upgrading a client, re-run
-`bdrive hooks install` once per project to pick up any hook improvements.
+`bdrive hooks install` once per project to pick up any hook improvements,
+and `bdrive skill install` once per machine to refresh the agent skill.
 
 ## Backup
 

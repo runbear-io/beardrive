@@ -81,13 +81,41 @@ export function Icon({ name }: { name: string }) {
   return C ? <C className="ico" aria-hidden="true" /> : null;
 }
 
+/* The column system, in one place. `#content` owns scrolling and the page
+   gutter; `<Page>` owns width and centering — nothing else may set either.
+   Three widths cover every view: `read` for rendered files only (markdown
+   prose), `app` for every structured view (guide, listings, history,
+   insights, settings, admin), `wide` for content that is itself a
+   page (a rendered HTML file in its frame). `read` and `app` both resolve
+   to Tailwind's md (768px); they stay separate classes because the file
+   view carries markdown typography and the widths may diverge again.
+   Views used to declare their own
+   max-width (560px to unbounded, half of them uncentered), so no two routes
+   shared a column.
+
+   The line: <Page> sets the COLUMN, a view may still cap its own MEASURE
+   (`.nf-sub`, a chart's design width). What a view must never do is declare
+   a page-level width — that is how the tiers drifted apart the first time.
+   Widening a column also never means scaling content up: Insights sits at
+   `app` and its charts cap themselves, because at `wide` the viewBox SVGs
+   just zoomed (a 10.5px label painted at 21px). */
+export type PageWidth = "read" | "app" | "wide";
+
+export function Page(props: {
+  width?: PageWidth;
+  className?: string; // a view's own styling hook (e.g. markdown typography)
+  children: ReactNode;
+}) {
+  const cls = ["page", props.width ?? "app", props.className].filter(Boolean).join(" ");
+  return <div className={cls}>{props.children}</div>;
+}
+
 export function AppShell(props: {
   vault: ReactNode;
   projectsNav?: ReactNode;
   tree?: ReactNode;
   orgBar?: ReactNode;
   topbar: ReactNode;
-  contentClass?: string;
   contentRef?: React.Ref<HTMLElement>;
   onContentScroll?: () => void;
   children: ReactNode;
@@ -105,7 +133,6 @@ export function AppShell(props: {
         {props.topbar}
         <article
           id="content"
-          className={props.contentClass ?? "markdown"}
           ref={props.contentRef}
           onScroll={props.onContentScroll}
         >
