@@ -33,7 +33,7 @@ test("admin sees admin bar and org Manage; member does not", async ({ page, brow
   await login(page); // admin, owner of "default"
   await expect(page.locator("#adminbar")).toBeVisible();
   await expect(page.locator("#orgbar #org-name")).toHaveText("default");
-  await expect(page.locator("#invite-btn")).toBeVisible();
+  await expect(page.locator("#org-settings-btn")).toBeVisible();
   await expect(page.locator("#signout")).toBeVisible();
 
   const ctx = await browser.newContext();
@@ -41,7 +41,7 @@ test("admin sees admin bar and org Manage; member does not", async ({ page, brow
   await login(p2, MEMBER);
   await expect(p2.locator("#orgbar #org-name")).toHaveText("default");
   await expect(p2.locator("#adminbar")).toHaveCount(0);
-  await expect(p2.locator("#invite-btn")).toHaveCount(0);
+  await expect(p2.locator("#org-settings-btn")).toHaveCount(0);
   await ctx.close();
 });
 

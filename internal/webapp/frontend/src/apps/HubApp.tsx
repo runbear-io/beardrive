@@ -9,6 +9,7 @@ import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { ProjectNav } from "../components/ProjectNav";
 import { OrgBar } from "../components/OrgBar";
+import { ProjectSettings } from "../components/ProjectSettings";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "../toast";
 import Browser from "./Browser";
@@ -21,7 +22,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   const [joinedOrgId, setJoinedOrgId] = useState<string | null>(null);
   // Admin panels replace the content pane without touching the URL (they
   // were never routes in the classic app); any navigation closes them.
-  const [panel, setPanel] = useState<null | { kind: "hub" } | { kind: "org"; orgId: string }>(null);
+  const [panel, setPanel] = useState<null | { kind: "hub" } | { kind: "org"; orgId: string } | { kind: "project" }>(null);
   useEffect(() => setPanel(null), [pathname]);
 
   const joinToken = useMemo(() => {
@@ -67,11 +68,6 @@ export default function HubApp({ config }: { config: ServerConfig }) {
 
   const brand = config.brand || config.volume || "BearDrive";
   const org = (current && orgs?.find((o) => o.id === current.org)) || null;
-  const ownedOrg = orgs?.find((o) => o.role === "owner") || null;
-  // The top-of-sidebar gear is the always-visible admin entry point: any
-  // account that owns an org (or is a hub admin) gets it, whatever project
-  // is open. The panels it opens arrive in Phase 4.
-  const gearTarget = org && org.role === "owner" ? org : ownedOrg;
   // Insights (embedded on the project home and behind the ⋯ menu) is for
   // hub admins and owners of the project's org.
   const canInsights = isAdmin || (org ? org.role === "owner" : false);
@@ -80,7 +76,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     <VaultHeader
       name={projects ? (current ? current.name : brand) : "…"}
       onHome={current ? () => navigate("/" + current.id) : undefined}
-      showSignout={config.auth.enabled}
+      showSignout={config.auth.enabled && !current}
       admin={
         isAdmin
           ? {
@@ -92,11 +88,11 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             }
           : undefined
       }
-      gear={
-        gearTarget
+      projectSettings={
+        current
           ? {
               onClick: () => {
-                setPanel({ kind: "org", orgId: gearTarget.id });
+                setPanel({ kind: "project" });
                 closeSidebarOnMobile();
               },
             }
@@ -146,7 +142,9 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   const activePanel =
     panel?.kind === "hub"
       ? { crumb: "Signup & access", body: <HubSettings /> }
-      : panelOrg
+      : panel?.kind === "project"
+        ? { crumb: "Project settings", body: <ProjectSettings project={current} org={org} /> }
+        : panelOrg
         ? {
             crumb: panelOrg.name,
             body: (
@@ -182,6 +180,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         orgBar: (
           <OrgBar
             org={org}
+            showSignout={config.auth.enabled}
             onManage={(o) => {
               setPanel({ kind: "org", orgId: o.id });
               closeSidebarOnMobile();

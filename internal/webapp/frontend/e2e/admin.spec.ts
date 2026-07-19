@@ -8,7 +8,7 @@ import { login, wikiId, ADMIN, MEMBER } from "./helpers";
 
 test("org admin: members with roles, self marked, rename round-trip", async ({ page }) => {
   await login(page);
-  await page.click("#invite-btn"); // owner's Manage button
+  await page.click("#org-settings-btn"); // owner's Manage button
   await expect(page.locator("#org-title")).toHaveText("default");
   await expect(page.locator("#crumb")).toHaveText("default");
   await expect(page.locator(".admin-item", { hasText: ADMIN })).toContainText("(you)");
@@ -27,7 +27,7 @@ test("org admin: members with roles, self marked, rename round-trip", async ({ p
 
 test("org admin: member role change round-trip", async ({ page }) => {
   await login(page);
-  await page.click("#invite-btn");
+  await page.click("#org-settings-btn");
   const sel = page.locator(".admin-item", { hasText: MEMBER }).locator("select");
   await sel.selectOption("owner");
   await expect(page.locator("#toast")).toContainText("Role updated");
@@ -38,7 +38,7 @@ test("org admin: member role change round-trip", async ({ page }) => {
 
 test("org admin: invite create shows in list, revoke removes it", async ({ page }) => {
   await login(page);
-  await page.click("#invite-btn");
+  await page.click("#org-settings-btn");
   await page.click(".admin-h .pbtn"); // New invite
   await expect(page.locator("#toast")).toContainText("Invite");
   const row = page.locator(".admin-item", { hasText: "/join/" }).first();
@@ -54,7 +54,7 @@ test("org admin: public share audit lists and revokes", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.request.post(`/api/p/${pid}/shares`, { data: { path: "index.md" } });
-  await page.click("#invite-btn");
+  await page.click("#org-settings-btn");
   const row = page.locator(".admin-item", { hasText: "index.md" });
   await expect(row).toBeVisible();
   await expect(row.locator(".ai-tag")).toContainText("wiki");
@@ -68,7 +68,7 @@ test("org admin: project rename and delete", async ({ page }) => {
   await login(page);
   await page.request.post("/api/projects", { data: { name: "doomed" } });
   await page.reload(); // pick up the new project
-  await page.click("#invite-btn");
+  await page.click("#org-settings-btn");
   const row = page.locator(".admin-item", { hasText: "doomed" });
   await row.locator(".ai-btn", { hasText: "Rename" }).click();
   await page.fill(".modal-input", "doomed-2");

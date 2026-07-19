@@ -1,31 +1,53 @@
 import type { Org } from "../api/types";
+import { Icon } from "./shell";
 
-// The sidebar footer names the project's org; clicking it opens the org
-// admin panel, and owners get a Manage button that does the same. The
-// panel itself arrives with the admin surfaces (Phase 4).
-export function OrgBar({ org, onManage }: { org: Org | null; onManage: (org: Org) => void }) {
-  if (!org) return null;
+// The sidebar footer is the workspace (org) row: the org name, a gear that
+// opens the org admin panel (owners), and sign-out. Project-scoped actions
+// live in the header; workspace-scoped ones end here.
+export function OrgBar({
+  org,
+  onManage,
+  showSignout,
+}: {
+  org: Org | null;
+  onManage: (org: Org) => void;
+  showSignout?: boolean;
+}) {
+  if (!org && !showSignout) return null;
   return (
     <footer id="orgbar">
-      <span
-        id="org-name"
-        title="Manage organization"
-        role="button"
-        tabIndex={0}
-        onClick={() => onManage(org)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onManage(org);
-          }
-        }}
-      >
-        {org.name}
-      </span>
-      {org.role === "owner" && (
-        <button id="invite-btn" title="Manage this organization" onClick={() => onManage(org)}>
-          Manage
+      {org && (
+        <span
+          id="org-name"
+          title="Manage organization"
+          role="button"
+          tabIndex={0}
+          onClick={() => onManage(org)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onManage(org);
+            }
+          }}
+        >
+          {org.name}
+        </span>
+      )}
+      {org && org.role === "owner" && (
+        <button
+          id="org-settings-btn"
+          className="icon-btn2"
+          title="Manage this organization"
+          aria-label="Manage this organization"
+          onClick={() => onManage(org)}
+        >
+          <Icon name="gear" />
         </button>
+      )}
+      {showSignout && (
+        <a id="signout" href="/auth/logout" title="Sign out" aria-label="Sign out">
+          <Icon name="power" />
+        </a>
       )}
     </footer>
   );
