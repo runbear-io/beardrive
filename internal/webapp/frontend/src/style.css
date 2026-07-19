@@ -517,6 +517,15 @@ button, input, a.btn { font-family: inherit; }
 .markdown table.frontmatter code { white-space: pre-wrap; font-size: 11px; }
 .markdown input[type="checkbox"] { accent-color: var(--accent); }
 
+/* rendered HTML files: a sandboxed page in a framed viewport */
+.htmlview { display: block; width: 100%; height: calc(100vh - 150px); border: 1px solid var(--border); border-radius: var(--r-card); background: #fff; }
+
+/* missing path: friendly not-found with the uploading hint */
+.notfound { margin-top: 12vh; text-align: center; color: var(--text-dim); }
+.notfound h1 { color: var(--text); font-size: 1.4em; margin-bottom: .5em; }
+.notfound code { background: var(--hover); border: 1px solid var(--border); padding: .15em .5em; border-radius: 6px; }
+.notfound .nf-sub { max-width: 440px; margin: 12px auto 20px; font-size: 13px; color: var(--text-faint); line-height: 1.6; }
+
 /* plain file / binary views */
 pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 900px; }
 #content.markdown { min-width: 0; } /* let long unbreakable lines wrap, not blow out the column */

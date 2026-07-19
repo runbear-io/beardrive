@@ -127,3 +127,39 @@ test("upload into the selected folder, then the file opens", async ({ page }) =>
   await expect(page.locator("#content h1")).toHaveText("Dropped");
   await expect(page.locator('#tree .row[data-path="notes/dropped.md"]')).toBeVisible();
 });
+
+test("html file renders as a page in a sandboxed iframe", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const html = "<h1 id='t'>Hello from HTML</h1><script>document.title='js-ran'</scr" + "ipt>";
+  await page.request.put(
+    `/api/p/${pid}/upload/content?path=${encodeURIComponent("pages/hello.html")}`,
+    { data: html },
+  );
+  await page.goto(`/${pid}/pages/hello.html`);
+  const frame = page.locator("#content iframe.htmlview");
+  await expect(frame).toBeVisible();
+  await expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+  await expect(page.frameLocator("#content iframe.htmlview").locator("#t")).toHaveText(
+    "Hello from HTML",
+  );
+  // Server-side wall: inline HTML carries the sandbox CSP (same as /s/*).
+  const res = await page.request.get(`/api/p/${pid}/file?path=${encodeURIComponent("pages/hello.html")}`);
+  expect(res.headers()["content-security-policy"]).toBe("sandbox allow-scripts");
+});
+
+test("missing path gets the not-found view; Check again finds a late upload", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/later.md`);
+  await expect(page.locator(".notfound h1")).toHaveText("Couldn't find that");
+  await expect(page.locator(".notfound code")).toHaveText("later.md");
+  await expect(page.locator(".notfound")).toContainText("still be uploading");
+  // The file arrives (a teammate/agent finished syncing it)…
+  await page.request.put(
+    `/api/p/${pid}/upload/content?path=${encodeURIComponent("later.md")}`,
+    { data: "# Finally here\n" },
+  );
+  await page.click(".notfound .pbtn"); // Check again
+  await expect(page.locator("#content h1")).toHaveText("Finally here");
+});
