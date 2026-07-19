@@ -59,6 +59,9 @@ export default function Browser(props: {
   }, [insightsOpen, apiBase, qc]);
 
   const path = route.path;
+  // On scoped view routes (/insights/<p>, /history/<p>) the subject of the
+  // page is the target — the tree highlights it, not a menu item.
+  const treePath = path || (route.view === "insights" || route.view === "history" ? route.viewTarget || "" : "");
   const isDir = !!path && dirIndex.has(path);
   // A file only counts as one when the tree actually contains it — a
   // missing path gets the not-found view, not a broken file view.
@@ -78,18 +81,19 @@ export default function Browser(props: {
     if (rootDirs.length === 1) setExpanded((s) => new Set(s).add(rootDirs[0].path));
   }, [tree]);
   useEffect(() => {
-    // Opening any path (tree click, palette, wikilink, deep link) unfolds
-    // the way to it; a selected folder itself opens too.
-    if (!path || !loaded) return;
+    // Opening any path (tree click, palette, wikilink, deep link — or a
+    // scoped insights/history view of it) unfolds the way to it; a selected
+    // folder itself opens too.
+    if (!treePath || !loaded) return;
     setExpanded((s) => {
       const next = new Set(s);
-      for (const a of ancestorsOf(path)) next.add(a);
-      if (dirIndex.has(path)) next.add(path);
+      for (const a of ancestorsOf(treePath)) next.add(a);
+      if (dirIndex.has(treePath)) next.add(treePath);
       return next;
     });
-    const row = document.querySelector(`#tree .row[data-path="${CSS.escape(path)}"]`);
+    const row = document.querySelector(`#tree .row[data-path="${CSS.escape(treePath)}"]`);
     if (row) row.scrollIntoView({ block: "nearest" });
-  }, [path, loaded, dirIndex]);
+  }, [treePath, loaded, dirIndex]);
   const onToggle = useCallback((p: string) => {
     setExpanded((s) => {
       const next = new Set(s);
@@ -420,7 +424,7 @@ export default function Browser(props: {
             root={tree}
             expanded={expanded}
             onToggle={onToggle}
-            currentPath={path}
+            currentPath={treePath}
             listingShowing={listingShowing}
             onOpen={openPath}
           />

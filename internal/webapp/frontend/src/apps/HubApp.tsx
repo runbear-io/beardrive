@@ -192,13 +192,16 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             projects={projects}
             currentId={current.id}
             menu={{
+              // Scoped views (/insights/<path>, /history/<path>) belong to
+              // the file/folder — the tree carries the selection, no menu
+              // item lights up.
               active: panel
                 ? null
-                : route.view === "insights"
+                : route.view === "insights" && !route.viewTarget
                   ? "dashboard"
                   : route.view === "install"
                     ? "install"
-                    : route.view === "history"
+                    : route.view === "history" && !route.viewTarget
                       ? "history"
                       : route.view === "settings"
                         ? "settings"
