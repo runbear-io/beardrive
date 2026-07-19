@@ -108,3 +108,12 @@ test("account menu closes on Escape and outside click", async ({ page }) => {
   await page.click("#content", { position: { x: 10, y: 10 } });
   await expect(page.locator("#account-menu")).toHaveCount(0);
 });
+
+test("new-project modal cancels on Escape", async ({ page }) => {
+  await login(page);
+  await wikiId(page);
+  await page.click("#projects .nav-add");
+  await expect(page.locator(".modal-input")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".modal-input")).toHaveCount(0);
+});

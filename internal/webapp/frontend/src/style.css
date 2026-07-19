@@ -443,8 +443,8 @@ button, input, a.btn { font-family: inherit; }
 #palette-hint { padding: 9px 16px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-ghost); }
 
 /* ---- modal ---- */
-.modal-back { position: fixed; inset: 0; background: rgba(6,7,9,.6); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; z-index: 150; padding: 20px; }
-.modal { background: var(--bg-raise); border: 1px solid var(--border-2); border-radius: var(--r-over); padding: 22px 24px; width: min(460px, 100%); box-shadow: 0 24px 70px -18px rgba(0,0,0,.8); }
+[data-slot="dialog-overlay"] { position: fixed; inset: 0; background: rgba(6,7,9,.6); backdrop-filter: blur(3px); z-index: 150; }
+.modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 151; display: block; background: var(--bg-raise); border: 1px solid var(--border-2); border-radius: var(--r-over); padding: 22px 24px; width: min(460px, calc(100vw - 40px)); box-shadow: 0 24px 70px -18px rgba(0,0,0,.8); outline: none; }
 .modal h3 { margin: 0 0 10px; font-size: 16px; font-weight: 620; letter-spacing: -.01em; }
 .modal p { margin: 0 0 16px; font-size: 13.5px; color: var(--text-dim); line-height: 1.55; }
 .modal p b { color: var(--text); }

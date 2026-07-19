@@ -1,7 +1,7 @@
-import { useEffect } from "react";
 import { api } from "../api/http";
 import { copyText } from "../util";
 import { toast } from "../toast";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 
 /* A clear, explicitly-public share confirmation: warns that anyone with the
    link can view, and offers copy / open / revoke. */
@@ -15,17 +15,12 @@ export function ShareDialog({
   onClose: () => void;
 }) {
   const token = url.split("/s/")[1];
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
   return (
-    <div className="modal-back" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal">
-        <h3>Public link created</h3>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="modal" showCloseButton={false}>
+        <DialogTitle asChild>
+          <h3>Public link created</h3>
+        </DialogTitle>
         <p>
           <b>Anyone with this link can view this file</b> — no account needed. It always shows the
           latest version until you revoke it.
@@ -61,7 +56,7 @@ export function ShareDialog({
             Done
           </button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,8 +1,14 @@
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useRef, useSyncExternalStore } from "react";
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 // In-app modal prompt/confirm replacing native prompt()/confirm().
 // Imperative promise-based API (awaitable from event handlers, like the
-// classic app); <ModalHost/> (mounted once in App) renders the active one.
+// classic app); <ModalHost/> (mounted once in App) renders the active one
+// inside a Radix Dialog, which owns Escape/overlay dismissal and focus.
 
 type Prompt = {
   kind: "prompt";
@@ -62,80 +68,76 @@ export function ModalHost() {
     () => current,
   );
   if (!m) return null;
-  return m.kind === "prompt" ? <PromptModal m={m} /> : <ConfirmModal m={m} />;
-}
 
-function close() {
-  emit(null);
-}
-
-function PromptModal({ m }: { m: Prompt }) {
-  const input = useRef<HTMLInputElement>(null);
-  const done = (v: string | null) => {
-    close();
-    m.resolve(v);
+  const cancel = () => {
+    emit(null);
+    if (m.kind === "prompt") m.resolve(null);
+    else m.resolve(false);
   };
-  const ok = () => done(input.current!.value.trim() || null);
-  useEffect(() => {
-    input.current!.focus();
-    input.current!.select();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") done(null);
-      if (e.key === "Enter") ok();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+
   return (
-    <div className="modal-back" onClick={(e) => e.target === e.currentTarget && done(null)}>
-      <div className="modal">
-        <h3>{m.title}</h3>
-        <label className="modal-label">{m.label}</label>
-        <input className="modal-input" type="text" autoComplete="off" defaultValue={m.value} ref={input} />
-        <div className="modal-actions">
-          <button className="ai-btn" onClick={() => done(null)}>
-            Cancel
-          </button>
-          <button className="pbtn" onClick={ok}>
-            {m.okLabel}
-          </button>
-        </div>
-      </div>
-    </div>
+    <Dialog open onOpenChange={(open) => !open && cancel()}>
+      <DialogContent className="modal" showCloseButton={false}>
+        {m.kind === "prompt" ? <PromptBody m={m} /> : <ConfirmBody m={m} />}
+      </DialogContent>
+    </Dialog>
   );
 }
 
-function ConfirmModal({ m }: { m: Confirm }) {
-  const okBtn = useRef<HTMLButtonElement>(null);
-  const done = (v: boolean) => {
-    close();
+function PromptBody({ m }: { m: Prompt }) {
+  const input = useRef<HTMLInputElement>(null);
+  const done = (v: string | null) => {
+    emit(null);
     m.resolve(v);
   };
-  useEffect(() => {
-    okBtn.current!.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") done(false);
-      if (e.key === "Enter") done(true);
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const ok = () => done(input.current!.value.trim() || null);
   return (
-    <div className="modal-back" onClick={(e) => e.target === e.currentTarget && done(false)}>
-      <div className="modal">
+    <>
+      <DialogTitle asChild>
         <h3>{m.title}</h3>
-        <p className="modal-msg">{m.message}</p>
-        <div className="modal-actions">
-          <button className="ai-btn" onClick={() => done(false)}>
-            Cancel
-          </button>
-          <button className={m.danger ? "danger-btn" : "pbtn"} onClick={() => done(true)} ref={okBtn}>
-            {m.confirmLabel}
-          </button>
-        </div>
+      </DialogTitle>
+      <label className="modal-label">{m.label}</label>
+      <input
+        className="modal-input"
+        type="text"
+        autoComplete="off"
+        defaultValue={m.value}
+        ref={input}
+        autoFocus
+        onFocus={(e) => e.currentTarget.select()}
+        onKeyDown={(e) => e.key === "Enter" && ok()}
+      />
+      <div className="modal-actions">
+        <button className="ai-btn" onClick={() => done(null)}>
+          Cancel
+        </button>
+        <button className="pbtn" onClick={ok}>
+          {m.okLabel}
+        </button>
       </div>
-    </div>
+    </>
+  );
+}
+
+function ConfirmBody({ m }: { m: Confirm }) {
+  const done = (v: boolean) => {
+    emit(null);
+    m.resolve(v);
+  };
+  return (
+    <>
+      <DialogTitle asChild>
+        <h3>{m.title}</h3>
+      </DialogTitle>
+      <p className="modal-msg">{m.message}</p>
+      <div className="modal-actions">
+        <button className="ai-btn" onClick={() => done(false)}>
+          Cancel
+        </button>
+        <button className={m.danger ? "danger-btn" : "pbtn"} onClick={() => done(true)} autoFocus>
+          {m.confirmLabel}
+        </button>
+      </div>
+    </>
   );
 }
