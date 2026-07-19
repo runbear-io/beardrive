@@ -198,9 +198,11 @@ export default function HubApp({ config }: { config: ServerConfig }) {
                   ? "dashboard"
                   : route.view === "install"
                     ? "install"
-                    : route.view === "settings"
-                      ? "settings"
-                      : null,
+                    : route.view === "history"
+                      ? "history"
+                      : route.view === "settings"
+                        ? "settings"
+                        : null,
               // Each page is a URL; explicitly close overlay panels because
               // same-path navigation doesn't change pathname.
               onDashboard: () => {
@@ -211,6 +213,11 @@ export default function HubApp({ config }: { config: ServerConfig }) {
               onInstall: () => {
                 setPanel(null);
                 navigate(urlForView("install", current.id));
+                closeSidebarOnMobile();
+              },
+              onHistory: () => {
+                setPanel(null);
+                navigate(urlForView("history", current.id));
                 closeSidebarOnMobile();
               },
               onSettings: () => {

@@ -17,9 +17,10 @@ export function projColor(s: string): string {
 }
 
 export interface ProjectMenu {
-  active: "dashboard" | "install" | "settings" | null;
+  active: "dashboard" | "install" | "history" | "settings" | null;
   onDashboard: () => void;
   onInstall: () => void;
+  onHistory: () => void;
   onSettings: () => void;
 }
 
@@ -91,6 +92,7 @@ export function ProjectNav({
             [
               ["dashboard", "Dashboard", "dashboard", menu.onDashboard],
               ["install", "Installation", "terminal", menu.onInstall],
+              ["history", "History", "hist", menu.onHistory],
               ["settings", "Settings", "gear", menu.onSettings],
             ] as const
           ).map(([key, label, icon, onClick]) => (

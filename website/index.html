@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BearDrive — Google Drive for AI agents</title>
-<meta name="description" content="Google Drive for AI agents: one synced folder for your whole team. Share any file with people as a public URL; share context across agents, so your agent knows what their agent knows. Open source and self-hostable.">
+<meta name="description" content="Google Drive for AI agents: one synced folder for your whole team. Share any file as a public URL; give every agent the same memory, so your agent knows what their agent knows. Managed cloud, or self-host the open-source hub in one binary.">
 <meta property="og:title" content="BearDrive — Google Drive for AI agents">
 <meta property="og:description" content="One synced folder for humans and agents: files become public URLs for people, and shared memory for every teammate's agent. Open source, self-host in one binary.">
 <meta property="og:type" content="website">
@@ -235,14 +235,6 @@ h2 { font-size: clamp(26px, 3.2vw, 34px); margin: 0 0 12px; letter-spacing: -.02
 .oss-card ul { list-style: none; padding: 0; margin: 0 0 26px; }
 .oss-card li { padding: 6px 0 6px 24px; font-size: 14px; color: var(--text-dim); position: relative; }
 .oss-card li::before { content: "✓"; position: absolute; left: 0; color: var(--brand); font-weight: 600; }
-.waitlist { display: flex; gap: 10px; flex-wrap: wrap; }
-.waitlist input {
-  flex: 1 1 190px; padding: 8px 13px; border-radius: 6px;
-  border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
-  font: 14px/1.4 inherit; outline: none;
-}
-.waitlist input:focus { border-color: var(--brand-dark); }
-
 /* closing CTA */
 .closer { text-align: center; padding: 96px 0; }
 .closer h2 { font-size: clamp(28px, 4vw, 44px); margin-bottom: 10px; }
@@ -280,7 +272,8 @@ footer a:hover { color: var(--text); }
       <a href="#claude">Claude Code</a>
       <a href="#get">Open source</a>
       <a href="https://github.com/runbear-io/beardrive" title="GitHub">GitHub</a>
-      <a class="btn" href="https://github.com/runbear-io/beardrive">Star on GitHub</a>
+      <a href="https://app.beardrive.ai/auth/login">Log in</a>
+      <a class="btn" href="https://app.beardrive.ai/auth/signup">Sign up free</a>
     </div>
   </div>
 </nav>
@@ -291,9 +284,10 @@ footer a:hover { color: var(--text); }
     <h1>Google Drive for AI agents.<span class="green">Your agent knows what their agent knows.</span></h1>
     <p class="sub">One synced folder for your whole team — humans and agents.
     <b>Share any file with people</b> as a public URL; <b>give every agent the same
-    memory</b>, synced across machines in seconds. Real files. Self-host the whole thing in one Go binary.</p>
+    memory</b>, synced across machines in seconds. Real files. <b>Use the managed cloud</b>, or self-host the whole thing in one Go binary.</p>
     <div class="cta-row">
-      <a class="btn" href="#get">Start syncing</a>
+      <a class="btn" href="https://app.beardrive.ai/auth/signup">Start free →</a>
+      <a class="btn ghost" href="#get">Self-host it</a>
       <button class="install" id="install" title="Copy">
         <span class="dollar">$</span>
         <span id="install-cmd">brew install runbear-io/tap/beardrive</span>
@@ -399,10 +393,16 @@ every tool works          content-addressed blobs    append-only, no locks, offl
         which device — every past version viewable and downloadable. An agent
         overwriting your doc is an annoyance, not a loss.</p>
       </div>
+      <div class="card"><div class="ico">🔒</div>
+        <p><b>Gated links your agents hand you.</b> When Claude writes or updates a
+        file, it drops a link right beside the path — a hub link that only opens for
+        signed-in teammates on the project. Safe to paste in any internal channel;
+        the turn-start hook teaches every agent to do it automatically.</p>
+      </div>
       <div class="card"><div class="ico">🔗</div>
-        <p><b>Public share links.</b> Any synced file becomes a rendered page at an
-        unguessable URL: HTML as a page, markdown Obsidian-style, PDFs inline.
-        Sandboxed, rate-limited, living until you revoke it.</p>
+        <p><b>Public share links.</b> Need it truly public? Any synced file becomes a
+        rendered page at an unguessable URL: HTML as a page, markdown Obsidian-style,
+        PDFs inline. Sandboxed, rate-limited, living until you revoke it.</p>
       </div>
       <div class="card"><div class="ico">👥</div>
         <p><b>Teams &amp; organizations.</b> Projects belong to your org; only
@@ -427,17 +427,19 @@ every tool works          content-addressed blobs    append-only, no locks, offl
 <section id="claude">
   <div class="wrap claude">
     <div class="copy">
-      <p class="kicker">CLAUDE CODE</p>
+      <p class="kicker">CLAUDE CODE &amp; COWORK</p>
       <h2>Your agents become fluent in it.</h2>
       <ul>
         <li><b>/beardrive:install</b> sets a whole team project up
-        conversationally: CLI, sign-in, project, and sync hooks.</li>
+        conversationally: CLI, sign-in, project, and sync hooks — one plugin that
+        works the same in Claude Code and Claude Cowork.</li>
         <li><b>Hooks keep everything fresh</b> — a pull when you submit a prompt
         (Claude reads the team's latest files) and an async push after every edit
         (artifacts hit the server seconds after Claude writes them). Works for
         every teammate, plugin or not.</li>
-        <li><b>The skill teaches Claude the CLI</b>, so "share this report with
-        the team" just works.</li>
+        <li><b>Every file it writes comes with a link</b> — the turn-start hook
+        teaches Claude to drop a gated hub link beside any synced path it mentions,
+        so "share this report with the team" just works.</li>
       </ul>
       <a class="btn ghost" href="https://github.com/runbear-io/beardrive/tree/main/plugin">Explore the plugin →</a>
     </div>
@@ -468,8 +470,8 @@ every tool works          content-addressed blobs    append-only, no locks, offl
     <p class="kicker">GET BEARDRIVE</p>
     <h2>Self-host everything. Or let us run it.</h2>
     <p class="lede">The entire product is open source under AGPL-3.0 — server, teams,
-    history, share links, <b>nothing held back</b>. The cloud exists for teams who'd
-    rather never think about buckets.</p>
+    history, share links, <b>nothing held back</b>. Or skip the buckets entirely —
+    BearDrive Cloud is live at app.beardrive.ai.</p>
     <div class="oss">
       <div class="oss-card">
         <h3>Open source</h3>
@@ -487,16 +489,16 @@ every tool works          content-addressed blobs    append-only, no locks, offl
       </div>
       <div class="oss-card cloud">
         <h3>BearDrive Cloud</h3>
-        <div class="tag">beardrive.ai · managed hosting · coming soon</div>
+        <div class="tag">app.beardrive.ai · managed hosting · live now</div>
         <ul>
-          <li>Zero setup — <code>bdrive login</code> and go</li>
-          <li>SSO, backups, and support handled for you</li>
+          <li>Zero setup — sign up, <code>bdrive login</code>, and go</li>
+          <li>Managed storage, backups, and support handled for you</li>
           <li>Funds the open source project</li>
         </ul>
-        <form class="waitlist" id="waitlist">
-          <input type="email" id="waitlist-email" placeholder="you@company.com" aria-label="Email" required>
-          <button class="btn" type="submit">Join the waitlist</button>
-        </form>
+        <div class="cta-row" style="justify-content:flex-start">
+          <a class="btn" href="https://app.beardrive.ai/auth/signup">Start free →</a>
+          <a class="btn ghost" href="https://app.beardrive.ai/auth/login">Log in</a>
+        </div>
       </div>
     </div>
   </div>
@@ -504,10 +506,11 @@ every tool works          content-addressed blobs    append-only, no locks, offl
 
 <section class="closer">
   <div class="wrap">
-    <h2>Share files. Share context.<br><span class="green">Self-host in one binary.</span></h2>
-    <p>brew install, run one hub, bdrive init. Files travel to people as URLs; context travels to every agent on the team. Cloud — zero-setup — is on the waitlist.</p>
+    <h2>Share files. Share context.<br><span class="green">Cloud or self-hosted.</span></h2>
+    <p>Sign up for the managed cloud and go, or brew install and self-host in one binary. Files travel to people as URLs; context travels to every agent on the team.</p>
     <div class="cta-row">
-      <a class="btn" href="https://github.com/runbear-io/beardrive">Start on GitHub</a>
+      <a class="btn" href="https://app.beardrive.ai/auth/signup">Start free →</a>
+      <a class="btn ghost" href="https://github.com/runbear-io/beardrive">Self-host on GitHub</a>
       <button class="install" id="install2" title="Copy">
         <span class="dollar">$</span>
         <span id="install-cmd2">brew install runbear-io/tap/beardrive</span>
@@ -528,15 +531,6 @@ every tool works          content-addressed blobs    append-only, no locks, offl
 </footer>
 
 <script>
-/* waitlist: no backend yet, so hand off to email */
-document.getElementById("waitlist").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const email = document.getElementById("waitlist-email").value;
-  location.href = "mailto:hello@runbear.io" +
-    "?subject=" + encodeURIComponent("BearDrive Cloud waitlist") +
-    "&body=" + encodeURIComponent("Please add " + email + " to the BearDrive Cloud waitlist.");
-});
-
 /* copy-to-clipboard on both install commands */
 for (const [btn, cmd] of [["install", "install-cmd"], ["install2", "install-cmd2"]]) {
   document.getElementById(btn).addEventListener("click", async () => {

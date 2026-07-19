@@ -175,6 +175,9 @@ test("project menu pages each own a URL: Dashboard, Installation, Settings", asy
   await page.waitForURL(`/${pid}/install`);
   await expect(page.locator("#crumb")).toHaveText("Installation");
   await expect(page.locator("#nav-install")).toHaveClass(/active/);
+  await page.click("#nav-history");
+  await page.waitForURL(`/${pid}/history`);
+  await expect(page.locator("#nav-history")).toHaveClass(/active/);
   await page.click("#nav-settings");
   await page.waitForURL(`/${pid}/settings`);
   await expect(page.locator("#crumb")).toHaveText("Project settings");
