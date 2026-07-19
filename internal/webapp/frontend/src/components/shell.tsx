@@ -83,9 +83,13 @@ export function Icon({ name }: { name: string }) {
 
 /* The column system, in one place. `#content` owns scrolling and the page
    gutter; `<Page>` owns width and centering — nothing else may set either.
-   Three widths cover every view: `read` for prose and listings (line length
-   rules), `app` for structured views, `wide` for content that is itself a
-   page (a rendered HTML file in its frame). Views used to declare their own
+   Three widths cover every view: `read` for rendered files only (markdown
+   prose), `app` for every structured view (guide, listings, history,
+   insights, settings, admin), `wide` for content that is itself a
+   page (a rendered HTML file in its frame). `read` and `app` both resolve
+   to Tailwind's md (768px); they stay separate classes because the file
+   view carries markdown typography and the widths may diverge again.
+   Views used to declare their own
    max-width (560px to unbounded, half of them uncentered), so no two routes
    shared a column.
 

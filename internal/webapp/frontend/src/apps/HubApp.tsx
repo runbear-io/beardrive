@@ -117,7 +117,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         orgBar={accountBar}
         topbar={<Topbar />}
       >
-        <Page width="read">
+        <Page>
           <EmptyState
           authEnabled={config.auth.enabled}
           onCreate={async (name) => {

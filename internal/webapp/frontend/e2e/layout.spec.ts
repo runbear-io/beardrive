@@ -7,7 +7,7 @@ import { login, wikiId } from "./helpers";
    no two routes lined up. Widths live in CSS tokens; this asserts the routes
    actually resolve to them. */
 
-const WIDTHS = { read: 704, app: 880 }; // wide is viewport-capped at 1280
+const WIDTHS = { read: 768, app: 768 }; // both = Tailwind md; wide is viewport-capped at 1280
 
 async function column(page: Page) {
   return page.evaluate(() => {
@@ -46,9 +46,9 @@ test("every view shares one column system", async ({ page }) => {
   await visit("/install", "app"); // the same guide, so the same column
   await visit("/settings", "app");
   await visit("/insights", "app"); // charts cap their own measure; the column is normal
-  await visit("/history", "read"); // a listing, like the folder view it shares rows with
-  await visit("/index.md", "read"); // rendered markdown
-  await visit("/notes", "read"); // folder listing
+  await visit("/history", "app"); // structured view, not a file render
+  await visit("/index.md", "read"); // rendered markdown — the only read surface
+  await visit("/notes", "app"); // folder listing is a structured view too
 });
 
 test("the install route and the project home render the guide identically", async ({ page }) => {

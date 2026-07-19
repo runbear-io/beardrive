@@ -32,8 +32,8 @@
   --r-over: 14px;
 
   /* Page columns. Three widths for every route — see .page below. */
-  --page-read: 704px;   /* prose + listings: line length rules */
-  --page-app: 880px;    /* structured views: guide, history, settings, admin */
+  --page-read: 768px;   /* rendered files only (markdown prose) — Tailwind md */
+  --page-app: 768px;    /* structured views: guide, listings, history, insights, settings, admin — Tailwind md */
   --page-wide: 1200px;  /* data-dense: treemap, coverage matrix, big tables */
   --hero-top: clamp(32px, 8vh, 88px); /* one vertical start for short centered states */
 }
@@ -334,7 +334,7 @@ button, input, a.btn { font-family: inherit; }
 .admin-item.toggle input { width: 16px; height: 16px; margin-top: 2px; accent-color: var(--accent); flex: none; }
 
 /* ---- folder listing ---- */
-/* .dirlist width comes from .page (read) */
+/* .dirlist width comes from .page (app) */
 .dl-title { display: flex; align-items: center; gap: 10px; font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
 .dl-title-icon { display: flex; color: var(--accent); }
 .dl-title-icon .ico { width: 20px; height: 20px; }
@@ -390,7 +390,7 @@ button, input, a.btn { font-family: inherit; }
 .home-insights { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--border); }
 
 /* ---- insights (read×write matrix) ---- */
-/* .insights width comes from .page (wide on its own route, app when embedded on home) */
+/* .insights width comes from .page (app) */
 .in-title { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
 .in-title .in-scope { color: var(--text-ghost); font-weight: 500; font-size: 15px; }
 .in-lens { display: flex; gap: 6px; margin: 0 0 14px; }

@@ -250,7 +250,7 @@ export default function Browser(props: {
       <div className="empty">Insights is for hub admins and org owners.</div>
     );
   } else if (route.view === "history") {
-    pageWidth = "read"; // a scannable list, like the folder listing it shares rows with
+    // structured view — default app column, like the folder listing it shares rows with
     view = (
       <HistoryView
         apiBase={apiBase}
@@ -287,8 +287,7 @@ export default function Browser(props: {
         </div>
       );
     } else if (isDir) {
-      pageWidth = "read";
-      view = (
+      view = ( // structured view — default app column; read is for rendered files only
         <FolderListing
           node={dirIndex.get(path)!}
           heatMap={heatMap}
