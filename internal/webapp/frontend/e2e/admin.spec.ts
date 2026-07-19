@@ -116,10 +116,10 @@ test("hub settings: policy view, save round-trip, pending queue empty", async ({
   // Toggle approval on, save, revert
   const app = page.locator(".admin-item.toggle").nth(1).locator("input");
   await app.check();
-  await page.click(".admin > .pbtn");
+  await page.click('.admin button:has-text("Save policy")');
   await expectToast(page, "policy saved");
   await app.uncheck();
-  await page.click(".admin > .pbtn");
+  await page.click('.admin button:has-text("Save policy")');
   await expectToast(page, "policy saved");
   await expect(page.locator(".admin-empty", { hasText: "No one is waiting" })).toBeVisible();
 });
@@ -132,4 +132,15 @@ test("navigating away closes an open admin panel", async ({ page }) => {
   await page.click('#tree .row[data-path="index.md"]');
   await expect(page.locator("#content h1")).toHaveText("Wiki");
   await expect(page.locator(".admin")).toHaveCount(0);
+});
+
+test("members table sorts by email", async ({ page }) => {
+  await login(page);
+  await openOrgSettings(page);
+  const emails = page.locator(".admin-table .admin-item .ai-main");
+  await expect(emails.first()).toBeVisible();
+  const before = await emails.allTextContents();
+  await page.click('.admin-table th:has-text("Member")');
+  const after = await emails.allTextContents();
+  expect([...before].reverse()).toEqual(after);
 });

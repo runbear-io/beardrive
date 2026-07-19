@@ -136,6 +136,21 @@ button, input, a.btn { font-family: inherit; }
 #tree .row.collapsed .chev { transform: rotate(-90deg); }
 
 /* org bar */
+.field-err { color: var(--del); font-size: 12px; margin: 6px 2px 0; }
+
+/* react-table admin tables ride the .admin-item/.ai-* vocabulary */
+.admin-table { width: 100%; border-collapse: collapse; }
+.admin-table th {
+  text-align: left; font-size: 11px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--text-ghost); padding: 6px 10px;
+  border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
+}
+.admin-table th:hover { color: var(--text-dim); }
+.admin-table td { padding: 0; border-bottom: 1px solid var(--border); }
+.admin-table tr.admin-item { display: table-row; }
+.admin-table tr.admin-item td { padding: 8px 10px; }
+.admin-table tr.admin-item td:first-child { width: 100%; }
+
 /* ---- project menu ---- */
 .nav-menu { list-style: none; margin: 6px 0 0; padding: 0; }
 .nav-menu .row .ico { width: 15px; height: 15px; flex: none; color: var(--text-ghost); }

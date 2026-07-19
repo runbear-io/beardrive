@@ -1,9 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
 import { getJSON, postJSON } from "../api/http";
 import type { AdminPolicy } from "../api/types";
 import { usePending } from "../hooks/useHub";
 import { toast } from "../toast";
+import { Button } from "@/components/ui/button";
+
+const policySchema = z.object({
+  require_verification: z.boolean(),
+  require_approval: z.boolean(),
+});
+type PolicyForm = z.infer<typeof policySchema>;
 
 /* Hub-admin settings: signup/access policy. Verification & approval are
    live toggles; the domain allowlist and admin list are shown read-only
@@ -16,14 +26,12 @@ export function HubSettings() {
     queryFn: () => getJSON<AdminPolicy>("/api/admin/policy"),
   });
   const { data: pending } = usePending(true);
-  const [ver, setVer] = useState(false);
-  const [app, setApp] = useState(false);
-  useEffect(() => {
-    if (pol) {
-      setVer(pol.require_verification && pol.mailer);
-      setApp(pol.require_approval);
-    }
-  }, [pol]);
+  const form = useForm<PolicyForm>({
+    resolver: zodResolver(policySchema),
+    values: pol
+      ? { require_verification: pol.require_verification && pol.mailer, require_approval: pol.require_approval }
+      : { require_verification: false, require_approval: false },
+  });
   useEffect(() => {
     if (error) toast((error as Error).message, true);
   }, [error]);
@@ -47,40 +55,38 @@ export function HubSettings() {
       </p>
 
       <h3>New-account vetting</h3>
-      <div className="admin-list">
-        <PolicyToggle
-          label="Require email verification"
-          desc={
-            pol.mailer
-              ? "New accounts must click an emailed link before they can sign in — proves they control the address."
-              : "Configure SMTP on the server (auth.smtp) to enable email verification."
-          }
-          checked={ver}
-          disabled={!pol.mailer}
-          onChange={setVer}
-        />
-        <PolicyToggle
-          label="Require admin approval"
-          desc="New accounts wait for a hub admin to approve them before they gain access."
-          checked={app}
-          onChange={setApp}
-        />
-      </div>
-      <button
-        className="pbtn"
-        style={{ marginTop: 14 }}
-        onClick={async () => {
+      <form
+        onSubmit={form.handleSubmit(async (v) => {
           try {
-            await postJSON("/api/admin/policy", { require_verification: ver, require_approval: app });
+            await postJSON("/api/admin/policy", v);
             toast("Signup policy saved.");
             qc.invalidateQueries({ queryKey: ["admin", "policy"] });
           } catch (e) {
             toast((e as Error).message, true);
           }
-        }}
+        })}
       >
-        Save policy
-      </button>
+        <div className="admin-list">
+          <PolicyToggle
+            label="Require email verification"
+            desc={
+              pol.mailer
+                ? "New accounts must click an emailed link before they can sign in — proves they control the address."
+                : "Configure SMTP on the server (auth.smtp) to enable email verification."
+            }
+            disabled={!pol.mailer}
+            inputProps={form.register("require_verification")}
+          />
+          <PolicyToggle
+            label="Require admin approval"
+            desc="New accounts wait for a hub admin to approve them before they gain access."
+            inputProps={form.register("require_approval")}
+          />
+        </div>
+        <Button variant="primary" type="submit" style={{ marginTop: 14 }}>
+          Save policy
+        </Button>
+      </form>
 
       <h3>Who can sign up</h3>
       <div className="admin-list">
@@ -116,9 +122,9 @@ export function HubSettings() {
         {(pending || []).map((u) => (
           <div className="admin-item" key={u.id}>
             <span className="ai-main">{(u.name ? u.name + "  ·  " : "") + u.email}</span>
-            <button className="pbtn" onClick={() => act(u.id, "approve", u.email)}>
+            <Button variant="primary" onClick={() => act(u.id, "approve", u.email)}>
               Approve
-            </button>
+            </Button>
             <button className="ai-del" onClick={() => act(u.id, "deny", u.email)}>
               Deny
             </button>
@@ -132,15 +138,13 @@ export function HubSettings() {
 function PolicyToggle({
   label,
   desc,
-  checked,
   disabled,
-  onChange,
+  inputProps,
 }: {
   label: string;
   desc: string;
-  checked: boolean;
   disabled?: boolean;
-  onChange: (v: boolean) => void;
+  inputProps: ReturnType<ReturnType<typeof useForm<PolicyForm>>["register"]>;
 }) {
   return (
     <label className="admin-item toggle" style={disabled ? { opacity: 0.55 } : undefined}>
@@ -148,12 +152,7 @@ function PolicyToggle({
         <div className="tg-label">{label}</div>
         <div className="tg-desc">{desc}</div>
       </span>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.checked)}
-      />
+      <input type="checkbox" disabled={disabled} {...inputProps} />
     </label>
   );
 }
