@@ -74,7 +74,7 @@ export function FileTree(props: {
           return (
             <div
               key={vi.key}
-              className={"row" + (currentPath === n.path ? " active" : "") + (n.dir && !open ? " collapsed" : "")}
+              className={"row " + (n.dir ? "dir" : "file") + (currentPath === n.path ? " active" : "") + (n.dir && !open ? " collapsed" : "")}
               data-path={n.path}
               tabIndex={0}
               role="button"

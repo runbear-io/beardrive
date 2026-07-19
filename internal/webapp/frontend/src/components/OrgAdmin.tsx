@@ -313,6 +313,7 @@ function MembersTable({
   });
 
   return (
+    <div className="admin-list admin-card-table">
     <Table className="admin-table">
       <TableHeader>
         {table.getHeaderGroups().map((hg) => (
@@ -340,6 +341,7 @@ function MembersTable({
         ))}
       </TableBody>
     </Table>
+    </div>
   );
 }
 
@@ -431,6 +433,7 @@ function SharesTable({
     );
 
   return (
+    <div className="admin-list admin-card-table">
     <Table className="admin-table">
       <TableHeader>
         {table.getHeaderGroups().map((hg) => (
@@ -453,5 +456,6 @@ function SharesTable({
         ))}
       </TableBody>
     </Table>
+    </div>
   );
 }

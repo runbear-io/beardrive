@@ -83,7 +83,7 @@ export function ProjectNav({
             )}
             <SelectValue placeholder="Select a project" />
           </SelectTrigger>
-          <SelectContent className="proj-menu">
+          <SelectContent className="proj-menu" position="popper" sideOffset={4}>
             {projects.map((p) => (
               <SelectItem key={p.id} value={p.id}>
                 {p.name}

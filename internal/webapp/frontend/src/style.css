@@ -91,7 +91,7 @@ button, input, a.btn { font-family: inherit; }
 
 /* projects */
 #projects { flex: none; max-height: 32%; overflow-y: auto; padding: 10px 8px 8px; border-bottom: 1px solid var(--border); }
-.nav-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-ghost); }
+.nav-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); }
 .nav-add { display: grid; place-items: center; width: 18px; height: 18px; border: none; background: transparent; color: var(--text-ghost); cursor: pointer; border-radius: 5px; }
 .nav-add .ico { width: 14px; height: 14px; }
 .nav-add:hover { color: var(--text); background: var(--hover); }
@@ -138,11 +138,18 @@ button, input, a.btn { font-family: inherit; }
 /* org bar */
 .field-err { color: var(--del); font-size: 12px; margin: 6px 2px 0; }
 
+/* Radix/shadcn content utilities set the CSS `translate` property; house
+   overlays center with `transform`. Both compose — neutralize the utility
+   so house positioning owns these surfaces. */
+.modal, #palette { translate: none; }
+
 /* react-table admin tables ride the .admin-item/.ai-* vocabulary */
+.admin-card-table { padding: 0; overflow: hidden; }
 .admin-table { width: 100%; border-collapse: collapse; }
+.admin-table tr:last-child td { border-bottom: none; }
 .admin-table th {
   text-align: left; font-size: 11px; font-weight: 600; letter-spacing: .05em;
-  text-transform: uppercase; color: var(--text-ghost); padding: 6px 10px;
+  text-transform: uppercase; color: var(--text-faint); padding: 6px 10px;
   border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
 }
 .admin-table th:hover { color: var(--text-dim); }
@@ -204,7 +211,7 @@ button, input, a.btn { font-family: inherit; }
 #account-menu [role="menuitem"][data-highlighted] { background: var(--hover); color: var(--text); }
 #account-menu .menu-sec {
   padding: 7px 9px 3px; font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
-  text-transform: uppercase; color: var(--text-ghost);
+  text-transform: uppercase; color: var(--text-faint);
 }
 #account-menu [role="menuitem"] {
   display: flex; align-items: center; gap: 8px; padding: 7px 9px;
@@ -286,7 +293,7 @@ button, input, a.btn { font-family: inherit; }
 /* ---- admin panels ---- */
 .admin { max-width: 760px; }
 .admin h1 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 6px; color: #f4f6f9; }
-.admin h3 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-ghost); font-weight: 600; margin: 30px 0 10px; }
+.admin h3 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); font-weight: 600; margin: 30px 0 10px; }
 .admin-sub { color: var(--text-dim); font-size: 13.5px; margin: 0 0 6px; line-height: 1.55; }
 .admin-h { display: flex; align-items: center; justify-content: space-between; margin: 30px 0 10px; }
 .admin-h h3 { margin: 0; }
@@ -335,7 +342,7 @@ button, input, a.btn { font-family: inherit; }
 .heatdot.lvl3 { opacity: .8; }
 .heatdot.lvl4 { opacity: 1; box-shadow: 0 0 6px rgba(245, 166, 35, .55); }
 .dl-empty { padding: 24px 14px; color: var(--text-faint); font-size: 13px; border: 1px dashed var(--border); border-radius: var(--r-card); text-align: center; }
-.dl-h3 { margin: 28px 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-ghost); font-weight: 600; }
+.dl-h3 { margin: 28px 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); font-weight: 600; }
 .dl-hlist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); overflow: hidden; max-width: none; }
 .dl-hlist .hentry:last-child { border-bottom: none; }
 .hentry.clickable { cursor: pointer; }
@@ -436,6 +443,9 @@ button, input, a.btn { font-family: inherit; }
 /* ---- command palette ---- */
 #palette { position: fixed; top: 12vh; left: 50%; transform: translateX(-50%); z-index: 151; display: block; width: min(560px, 92vw); background: var(--bg-raise); border: 1px solid var(--border-2); border-radius: var(--r-over); box-shadow: 0 24px 70px -18px rgba(0,0,0,.8); overflow: hidden; outline: none; padding: 0; }
 #palette-inputwrap { display: flex; align-items: center; gap: 11px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+#palette-inputwrap [data-slot="command-input-wrapper"] { flex: 1; display: flex; border-bottom: 0; padding: 0; height: auto; }
+#palette-inputwrap [data-slot="command-input-wrapper"] > svg:not(.ico) { display: none; }
+#palette input, #palette input:focus { border: none; background: transparent; box-shadow: none; outline: none; padding: 0; }
 #palette-inputwrap .ico { width: 17px; height: 17px; color: var(--text-faint); }
 #palette-input { flex: 1; width: 100%; border: none; background: transparent; color: var(--text); font: inherit; font-size: 15px; letter-spacing: -.01em; outline: none; padding: 0; }
 #palette-input::placeholder { color: var(--text-ghost); }
