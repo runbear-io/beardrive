@@ -60,7 +60,8 @@ writers whose activity is attributed and measured.
 1. `README.md` — the repo front door: first-90-seconds test (what is it,
    who is it for, why now, time-to-first-wow), positioning line, badges,
    quickstart friction, screenshot/demo presence.
-2. `website/` — the landing page: headline/subhead, category claim, CTA
+2. `cloud/web/landing/` — the landing page (cloud-only; served by the hub at
+   its root for signed-out visitors): headline/subhead, category claim, CTA
    hierarchy (self-host vs cloud), social proof, pricing posture.
 3. `plugin/` — the Claude Code plugin + skill: as a distribution channel
    (marketplace install → team onboarding loop → does a teammate's first
