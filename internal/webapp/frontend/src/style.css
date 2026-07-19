@@ -69,6 +69,9 @@ button, input, a.btn { font-family: inherit; }
   display: flex; align-items: center; gap: 9px;
   height: 52px; padding: 0 12px 0 14px;
   border-bottom: 1px solid var(--border);
+  /* Own stacking context above the sections below, so the search tooltip
+     paints over their borders instead of sliding behind them. */
+  position: relative; z-index: 45;
 }
 #vault-badge {
   width: 22px; height: 22px; border-radius: 6px; flex: none;
