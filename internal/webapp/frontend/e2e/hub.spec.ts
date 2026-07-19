@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId, MEMBER, PASSWORD } from "./helpers";
+import { login, wikiId, MEMBER, PASSWORD, expectToast } from "./helpers";
 
 // Phase 1: shell, session flags, project list/selection, routing, empty
 // state, invite accept. Mutating specs (project creation) run last —
@@ -64,8 +64,7 @@ test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await p2.fill('input[name="email"]', MEMBER);
   await p2.fill('input[name="password"]', PASSWORD);
   await p2.click("form button");
-  await p2.waitForSelector("#toast.show");
-  await expect(p2.locator("#toast")).toContainText("you joined");
+  await expectToast(p2, "you joined");
   await p2.waitForURL(/\/p-[0-9a-f]{8}$/); // lands on the org's project
   await ctx.close();
 });
@@ -90,5 +89,5 @@ test("new project via the sidebar + modal", async ({ page }) => {
   await page.waitForURL(/\/p-[0-9a-f]{8}$/);
   await expect(page.locator("#project-select option:checked")).toHaveText("scratch");
   await expect(page.locator("#project-select option")).toContainText(["scratch", "wiki"]);
-  await expect(page.locator("#toast")).toContainText("Created");
+  await expectToast(page, "Created");
 });

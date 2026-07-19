@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId } from "./helpers";
+import { login, wikiId, expectToast } from "./helpers";
 
 // Phase 2: tree, folder listings (heat dots + change feed), file views
 // (markdown/wikilinks/images), breadcrumbs, upload, share, palette.
@@ -118,7 +118,7 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   expect(publicRes.status()).toBe(200);
   expect(await publicRes.text()).toContain("Second version");
   await page.click(".modal .ai-del"); // revoke
-  await expect(page.locator("#toast")).toContainText("revoked");
+  await expectToast(page, "revoked");
   const gone = await page.request.get(url!);
   expect(gone.status()).toBe(404);
 });

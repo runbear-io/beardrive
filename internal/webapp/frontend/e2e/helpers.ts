@@ -33,3 +33,10 @@ export async function wikiId(page: Page): Promise<string> {
   const out = await (await page.request.get("/api/projects")).json();
   return out.projects.find((p: { name: string }) => p.name === "wiki").id;
 }
+
+// Implementation-agnostic toast assertion: matches the legacy #toast div or
+// a sonner toast, so specs pin BEHAVIOR (text shown) not markup.
+export async function expectToast(page: Page, text: string | RegExp) {
+  const { expect } = await import("@playwright/test");
+  await expect(page.locator("#toast.show, [data-sonner-toast]").filter({ hasText: text }).first()).toBeVisible();
+}

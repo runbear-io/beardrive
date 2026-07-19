@@ -460,9 +460,8 @@ button, input, a.btn { font-family: inherit; }
 .modal-input:focus { border-color: var(--accent); background: var(--hover); }
 
 /* ---- toast ---- */
-#toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--bg-raise); color: var(--text); border: 1px solid var(--border-2); border-radius: 10px; padding: 11px 18px; font-size: 13.5px; box-shadow: 0 18px 44px -12px rgba(0,0,0,.7); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 200; }
-#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-#toast.err { border-color: rgba(242,109,109,.5); color: #ffb0aa; }
+[data-sonner-toast] { background: var(--bg-raise) !important; color: var(--text) !important; border: 1px solid var(--border-2) !important; border-radius: 10px !important; font-size: 13.5px !important; box-shadow: 0 18px 44px -12px rgba(0,0,0,.7) !important; }
+[data-sonner-toast][data-type="error"] { border-color: rgba(242,109,109,.5) !important; color: #ffb0aa !important; }
 
 #sb-backdrop { display: none; }
 
