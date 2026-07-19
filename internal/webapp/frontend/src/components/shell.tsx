@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { requestSearch } from "../search";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Check,
   ChevronDown,
@@ -144,20 +145,24 @@ export function VaultHeader(props: {
       </span>
       <div className="vault-actions">
         {search && (
-          <button
-            id="search-btn"
-            className="icon-btn2 has-tip"
-            aria-label="Search"
-            onClick={() => {
-              requestSearch();
-              closeSidebarOnMobile();
-            }}
-          >
-            <Icon name="search" />
-            <span className="tip" role="tooltip">
+          <Tooltip delayDuration={150}>
+            <TooltipTrigger asChild>
+              <button
+                id="search-btn"
+                className="icon-btn2"
+                aria-label="Search"
+                onClick={() => {
+                  requestSearch();
+                  closeSidebarOnMobile();
+                }}
+              >
+                <Icon name="search" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent className="tipcard" sideOffset={6}>
               Search <kbd>⌘K</kbd>
-            </span>
-          </button>
+            </TooltipContent>
+          </Tooltip>
         )}
         {showSignout && (
           <a id="signout" href="/auth/logout" title="Sign out" aria-label="Sign out">

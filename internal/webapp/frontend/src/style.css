@@ -220,26 +220,14 @@ button, input, a.btn { font-family: inherit; }
 .btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-2); }
 .btn .ico { width: 15px; height: 15px; }
 .btn.ghost { color: var(--text-dim); }
-/* Hover tooltip for icon-only controls (the header search): label + kbd
-   chip in a floating card below the button, arrow pointing up. */
-.has-tip { position: relative; }
-.has-tip .tip {
-  /* Right-aligned (not centered): the sidebar clips at its right edge
-     (overflow hidden), so the card must grow leftward from the button. */
-  position: absolute; top: calc(100% + 8px); right: -6px;
+/* Radix tooltip card (house style) */
+.tipcard {
   display: flex; align-items: center; gap: 7px; white-space: nowrap;
   padding: 6px 9px; border-radius: 8px; border: 1px solid var(--border-2);
-  background: var(--surface); color: var(--text); font-size: 12.5px; font-weight: 500;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
-  opacity: 0; visibility: hidden; transition: opacity .12s ease .15s; z-index: 40;
+  background: var(--surface-solid, var(--bg-raise)); color: var(--text); font-size: 12.5px; font-weight: 500;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35); z-index: 80;
 }
-.has-tip .tip::before {
-  content: ""; position: absolute; top: -4.5px; right: 16px;
-  width: 8px; height: 8px; transform: rotate(45deg);
-  background: var(--surface); border-left: 1px solid var(--border-2); border-top: 1px solid var(--border-2);
-}
-.has-tip:hover .tip, .has-tip:focus-visible .tip { opacity: 1; visibility: visible; }
-.has-tip .tip kbd {
+.tipcard kbd {
   font: 11px var(--ui); color: var(--text-faint);
   background: var(--hover); border: 1px solid var(--border-2); border-radius: 5px;
   padding: 1px 5px;
