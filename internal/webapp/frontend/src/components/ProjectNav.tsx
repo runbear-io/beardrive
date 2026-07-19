@@ -1,5 +1,12 @@
 import { navigate } from "../nav";
 import { Icon } from "./shell";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { postJSON } from "../api/http";
 import type { Project, ProjectCreated } from "../api/types";
 import { modalPrompt } from "../modal";
@@ -57,34 +64,33 @@ export function ProjectNav({
         </button>
       </div>
       <div className="proj-row">
-        <span className="proj-select-wrap">
-          {currentId && (
-            <span
-              className="proj-mark"
-              aria-hidden="true"
-              style={{ background: projColor(projects.find((p) => p.id === currentId)?.name || "") }}
-            />
-          )}
-          <select
-            id="project-select"
-            aria-label="Switch project"
-            value={currentId || ""}
-            onChange={(e) => {
-              if (e.target.value) {
-                navigate("/" + e.target.value);
-                closeSidebarOnMobile();
-              }
-            }}
-          >
-            {!currentId && <option value="" disabled />}
+        <Select
+          value={currentId || ""}
+          onValueChange={(v) => {
+            if (v && v !== currentId) {
+              navigate("/" + v);
+              closeSidebarOnMobile();
+            }
+          }}
+        >
+          <SelectTrigger id="project-select" aria-label="Switch project" className="proj-trigger">
+            {currentId && (
+              <span
+                className="proj-mark"
+                aria-hidden="true"
+                style={{ background: projColor(projects.find((p) => p.id === currentId)?.name || "") }}
+              />
+            )}
+            <SelectValue placeholder="Select a project" />
+          </SelectTrigger>
+          <SelectContent className="proj-menu">
             {projects.map((p) => (
-              <option key={p.id} value={p.id}>
+              <SelectItem key={p.id} value={p.id}>
                 {p.name}
-              </option>
+              </SelectItem>
             ))}
-          </select>
-          <Icon name="chevd" />
-        </span>
+          </SelectContent>
+        </Select>
       </div>
       {menu && (
         <ul className="nav-menu" aria-label="Project pages">

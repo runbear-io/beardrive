@@ -146,18 +146,24 @@ button, input, a.btn { font-family: inherit; }
 
 /* ---- project switcher ---- */
 .proj-row { display: flex; align-items: center; gap: 4px; padding: 0 10px 4px 12px; }
-.proj-select-wrap { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
-.proj-select-wrap .proj-mark { position: absolute; left: 9px; pointer-events: none; }
-.proj-select-wrap > .ico { position: absolute; right: 8px; width: 14px; height: 14px; color: var(--text-ghost); pointer-events: none; }
 #project-select {
-  flex: 1; min-width: 0; height: 30px; padding: 0 26px 0 30px;
-  appearance: none; -webkit-appearance: none;
+  flex: 1; min-width: 0; height: 30px; padding: 0 9px;
+  display: inline-flex; align-items: center; gap: 8px;
   border: 1px solid var(--border); border-radius: var(--r-ctl);
   background: var(--surface); color: var(--text);
   font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; outline: none;
 }
+#project-select > span:last-of-type { overflow: hidden; text-overflow: ellipsis; }
 #project-select:hover { background: var(--hover); border-color: var(--border-2); }
+#project-select svg { color: var(--text-ghost); }
+.proj-menu {
+  z-index: 80; min-width: var(--radix-select-trigger-width, 200px);
+  border: 1px solid var(--border-2); border-radius: 9px; padding: 4px;
+  background: var(--bg-raise); box-shadow: 0 10px 32px rgba(0, 0, 0, .35);
+}
+.proj-menu [role="option"] { font-size: 12.5px; color: var(--text-dim); border-radius: 6px; outline: none; }
+.proj-menu [role="option"][data-highlighted] { background: var(--hover); color: var(--text); }
 
 /* ---- account bar ---- */
 #accountbar { position: relative; border-top: 1px solid var(--border); padding: 7px 10px; }
