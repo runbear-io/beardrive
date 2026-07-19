@@ -176,4 +176,9 @@ test("project menu: Dashboard, Installation, Settings", async ({ page }) => {
   await page.click("#nav-settings");
   await expect(page.locator("#crumb")).toHaveText("Project settings");
   await expect(page.locator(".project-settings h2")).toHaveText("wiki");
+  // Regression: from a panel, Dashboard must work even when the URL is
+  // already /insights (same-path navigation can't rely on route change).
+  await page.click("#nav-dashboard");
+  await expect(page.locator(".insights .in-title")).toContainText("Knowledge insights");
+  await expect(page.locator("#nav-dashboard")).toHaveClass(/active/);
 });

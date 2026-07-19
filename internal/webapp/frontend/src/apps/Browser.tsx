@@ -40,6 +40,7 @@ export default function Browser(props: {
   // touching the URL — matching the classic app, where they were never
   // routes. Any navigation closes them (the caller owns that state).
   panel?: { crumb: string; body: ReactNode } | null;
+  onClosePanel?: () => void; // panels are not routes: same-path navigation needs an explicit close
 }) {
   const { config, apiBase, route, hub, project } = props;
   const routeKey = useLocationPath(); // scroll memo key, one slot per URL
@@ -394,7 +395,10 @@ export default function Browser(props: {
               {props.canInsights && (
                 <button
                   className="more-item"
-                  onClick={() => navigate(urlForView("insights", project?.id, path))}
+                  onClick={() => {
+                    props.onClosePanel?.();
+                    navigate(urlForView("insights", project?.id, path));
+                  }}
                 >
                   Insights
                 </button>

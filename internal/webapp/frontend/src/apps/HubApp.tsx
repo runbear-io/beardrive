@@ -191,6 +191,10 @@ export default function HubApp({ config }: { config: ServerConfig }) {
                       ? "dashboard"
                       : null,
               onDashboard: () => {
+                // Explicitly close any panel: navigating to the SAME url
+                // (already on /insights) doesn't change pathname, so the
+                // route-change effect can't do it.
+                setPanel(null);
                 navigate(urlForView("insights", current.id));
                 closeSidebarOnMobile();
               },
@@ -208,6 +212,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         orgBar: accountBar,
       }}
       panel={activePanel}
+      onClosePanel={() => setPanel(null)}
     />
   );
 }
