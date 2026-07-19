@@ -29,9 +29,9 @@ browser window is coming, then sign in:
 
 If `$ARGUMENTS` gives a project name and/or `--shared <dir>`, use them.
 Otherwise ask the user two questions (or infer from their request):
-- **Create a new project or connect an existing one?** (`bdrive share --list`
-  isn't needed here — `bdrive init --name <name>` creates-or-joins by name;
-  `bdrive init --project <p-id>` connects by id.)
+- **Create a new project or connect an existing one?** (`bdrive init
+  --name <name>` creates-or-joins by name; `bdrive init --project <p-id>`
+  connects by id.)
 - **Sync the whole folder, or only a shared subfolder?** Hard rule:
   **never sync a repo root** — inside a repo, knowledge always syncs as a
   scoped subfolder via `--shared`. Whole-folder is only for a dedicated
@@ -41,6 +41,12 @@ Otherwise ask the user two questions (or infer from their request):
   markdown-heavy, not source code) and propose the best candidate for
   confirmation, e.g. "I found `./wiki` — sync that?".
 
+**One transport per folder.** If the chosen folder is currently git-tracked,
+BearDrive and git would both write it — the silent-revert hazard. Get consent,
+then hand it off: `git rm -r --cached <dir>` and add `<dir>/` to `.gitignore`;
+stage the change but let the user commit. (Full detection ladder — git,
+Obsidian, symlinks — in the beardrive skill's "Connecting knowledge tooling".)
+
 Then run it non-interactively, e.g.:
 ```sh
 bdrive init --name <project-name> --yes            # dedicated knowledge folder
@@ -48,6 +54,11 @@ bdrive init --name <project-name> --shared wiki    # in a repo: only ./wiki sync
 ```
 Re-running `bdrive init --yes` later is always safe: it resumes syncing
 (including after the folder was renamed or moved).
+
+After init, tell git what's what: add `.bdrive/` to `.gitignore` (per-machine
+state, never committed) and COMMIT `.bdriveignore` (on a `--shared` mount the
+root `.bdriveignore` is local-only to each clone, so git is how the team
+shares it).
 
 ## 4. Teach agents about the shared folder (ask first — never do this silently)
 
@@ -118,6 +129,9 @@ Tell the user which platforms got hooks (`bdrive hooks` shows the status
 table). If Codex is among them, mention they must run `/hooks` inside
 Codex once to trust the project's `.codex` layer. To register a platform
 that wasn't detected: `bdrive hooks install --agent claude,codex,gemini,hermes`.
+Heads-up before installing: Hermes hooks are PER-USER (`~/.hermes/config.yaml`,
+outside the repo) — mention that when it's among the targets, and skip it
+unless the user actually uses Hermes.
 
 ## 6. Verify and summarize
 

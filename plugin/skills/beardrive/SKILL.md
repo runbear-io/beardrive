@@ -37,7 +37,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 Two files at the mount root control a folder's sync behavior:
 
 - **`.bdrive/`** — the folder's settings **directory**; `config.json` inside holds the **stable mount id** (`m-xxxxxxxx`) plus `volume`, `remote`, optional `include`. Written by `bdrive init`; safe to hand-edit (a running daemon picks changes up on its next tick). It is **never synced**, holds **no credentials** (the token lives in `~/.bdrive/settings.json`), and because all state is keyed by the mount id — not the path — the folder can be **renamed or moved freely**; the daemon exits on a move and the next bdrive command at the new location resumes.
-- **`.bdriveignore`** — opt-out list, gitignore-style. **Syncs like a normal file**, so all devices share the same rules. Syntax subset: `#` comments, `*` within a segment, `**` across segments, `?`, trailing `/` for directories-only, a `/` elsewhere anchors to the mount root, `!` re-includes.
+- **`.bdriveignore`** — opt-out list, gitignore-style. On a whole-folder mount it **syncs like a normal file**, so all devices share the same rules; on a `--shared <dir>` mount the seeded root `.bdriveignore` sits OUTSIDE the include list and is **local-only** — commit it to git (or place ignore rules inside the shared dir) if the team should share it. Syntax subset: `#` comments, `*` within a segment, `**` across segments, `?`, trailing `/` for directories-only, a `/` elsewhere anchors to the mount root, `!` re-includes.
 
 ```jsonc
 // .bdrive/config.json
