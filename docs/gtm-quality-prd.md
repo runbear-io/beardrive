@@ -10,7 +10,8 @@ agent never scores its own work.
 Everything GTM-relevant that lives in this repo:
 
 - `README.md` (positioning, quickstart, time-to-wow, demo assets plan)
-- `website/` (headline, category claim, CTAs, pricing posture copy)
+- `cloud/web/landing/` (headline, category claim, CTAs, pricing posture copy —
+  cloud-only, served by the hub at its root for signed-out visitors)
 - `docs/` (self-host guide, quickstart, a launch plan, a metrics plan)
 - Community surface: `CONTRIBUTING.md`, `.github/` issue/PR templates,
   `CHANGELOG.md` or release-notes convention, a public `ROADMAP.md`

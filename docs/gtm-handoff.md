@@ -51,9 +51,9 @@ Draft copy is ready to paste; adjust voice as you like.
    - T1: `bdrive share wiki/findings.md` → open the public URL.
    Tools: `vhs` (charmbracelet) or QuickTime + gifski. Put the result at
    `docs/assets/demo.gif` and add it above the fold in README.
-9. **Verify beardrive.ai serves the updated landing page** (the repo's
-   `website/` — including the new `assets/insights.png`) after the next
-   deploy.
+9. **Verify beardrive.ai serves the updated landing page** (now
+   `cloud/web/landing/`, served by the hub itself at `/` for signed-out
+   visitors) after the next deploy.
 
 ## P2 — when you're ready to be seen (launch window)
 
