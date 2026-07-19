@@ -352,18 +352,18 @@ export default function Browser(props: {
             <Icon name="search" /> <span className="lbl">Search</span> <kbd>⌘K</kbd>
           </button>
           {canShare && (
-            <button id="share-btn" className="btn" onClick={shareNow}>
-              <Icon name="share" /> <span className="lbl">Share</span>
+            <button id="share-btn" className="btn icon-only" title="Share" aria-label="Share" onClick={shareNow}>
+              <Icon name="share" />
             </button>
           )}
-          {canHistory && (
+          {canHistory && !path && !route.view && (
             <button id="history-btn" className="btn" onClick={historyNow}>
               <Icon name="hist" /> <span className="lbl">History</span>
             </button>
           )}
           {canDownload && (
-            <a id="download" className="btn" download href={downloadURL} ref={downloadRef}>
-              <Icon name="download" /> <span className="lbl">Download</span>
+            <a id="download" hidden download href={downloadURL} ref={downloadRef}>
+              Download
             </a>
           )}
           {canMore && (

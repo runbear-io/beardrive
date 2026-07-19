@@ -19,7 +19,9 @@ test("markdown file: rendered content, crumb, meta, download + share buttons", a
   await expect(page.locator("#content h1")).toHaveText("Wiki");
   await expect(page.locator("#crumb")).toContainText("index.md");
   await expect(page.locator("#meta")).toContainText("alice@x.io");
-  await expect(page.locator("#download")).toBeVisible();
+  // Download lives in the ⋯ menu now; the hidden anchor powers it.
+  await expect(page.locator("#download")).toHaveCount(1);
+  await expect(page.locator("#more-btn")).toBeVisible();
   await expect(page.locator("#share-btn")).toBeVisible();
 });
 

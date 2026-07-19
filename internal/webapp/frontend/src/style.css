@@ -217,6 +217,13 @@ button, input, a.btn { font-family: inherit; }
 .btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-2); }
 .btn .ico { width: 15px; height: 15px; }
 .btn.ghost { color: var(--text-dim); }
+/* The search control sits dead-center in the topbar, twice its natural
+   width, reading as an input field. */
+#search-btn {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  width: 260px; justify-content: flex-start;
+}
+#search-btn kbd { margin-left: auto; }
 #search-btn kbd {
   font: 11px var(--ui); color: var(--text-faint);
   background: var(--hover); border: 1px solid var(--border-2); border-radius: 5px;
@@ -456,6 +463,7 @@ button, input, a.btn { font-family: inherit; }
   .icon-btn { display: inline-flex; width: 44px; height: 44px; }
   #content { padding: 24px 18px 70px; }
   #topbar { padding: 0 8px; gap: 4px; }
+  #search-btn { position: static; transform: none; width: auto; justify-content: center; }
   #search-btn kbd, .btn .lbl { display: none; }
   #topbar .btn { min-width: 44px; min-height: 44px; padding: 0; justify-content: center; gap: 0; }
   #topbar .btn .ico { width: 18px; height: 18px; }
