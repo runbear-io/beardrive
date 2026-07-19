@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
 import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { urlForPath, urlForView, type Route } from "../router";
@@ -91,8 +92,6 @@ export default function Browser(props: {
       if (dirIndex.has(treePath)) next.add(treePath);
       return next;
     });
-    const row = document.querySelector(`#tree .row[data-path="${CSS.escape(treePath)}"]`);
-    if (row) row.scrollIntoView({ block: "nearest" });
   }, [treePath, loaded, dirIndex]);
   const onToggle = useCallback((p: string) => {
     setExpanded((s) => {
@@ -355,14 +354,14 @@ export default function Browser(props: {
       actions={
         <>
           {canShare && (
-            <button id="share-btn" className="btn icon-only" title="Share" aria-label="Share" onClick={shareNow}>
+            <Button id="share-btn" variant="toolbar" className="icon-only" title="Share" aria-label="Share" onClick={shareNow}>
               <Icon name="share" />
-            </button>
+            </Button>
           )}
           {canHistory && !path && !route.view && (
-            <button id="history-btn" className="btn" onClick={historyNow}>
+            <Button id="history-btn" variant="toolbar" onClick={historyNow}>
               <Icon name="hist" /> <span className="lbl">History</span>
-            </button>
+            </Button>
           )}
           {canDownload && (
             <a id="download" hidden download href={downloadURL} ref={downloadRef}>
@@ -370,9 +369,10 @@ export default function Browser(props: {
             </a>
           )}
           {canMore && (
-            <button
+            <Button
               id="more-btn"
-              className="btn icon-only"
+              variant="toolbar"
+              className="icon-only"
               title="More actions"
               aria-label="More actions"
               onClick={(e) => {
@@ -381,7 +381,7 @@ export default function Browser(props: {
               }}
             >
               <Icon name="dots" />
-            </button>
+            </Button>
           )}
           {moreOpen && (
             <div id="more-menu" role="menu">

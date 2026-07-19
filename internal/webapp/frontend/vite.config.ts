@@ -1,5 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import path from "node:path";
 
 // Build output feeds the Go binary: ../static is the go:embed target in
 // server.go, and the compiled assets are committed so plain `go build`
@@ -9,7 +11,8 @@ import react from "@vitejs/plugin-react";
 const target = process.env.BDRIVE_DEV_PROXY || "http://localhost:8080";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  resolve: { alias: { "@": path.resolve(__dirname, "src") } },
   build: { outDir: "../static", emptyOutDir: true },
   server: {
     proxy: {

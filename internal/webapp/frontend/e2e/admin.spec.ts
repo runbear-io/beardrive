@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId, ADMIN, MEMBER } from "./helpers";
+import { login, wikiId, ADMIN, MEMBER, expectToast } from "./helpers";
 
 // Phase 4: org admin (rename, members, projects, invites, share audit) and
 // hub settings (policy toggles, pending queue). Panels are not routes —
@@ -24,7 +24,7 @@ test("org admin: members with roles, self marked, rename round-trip", async ({ p
   // Rename and revert
   await page.fill("#org-rename", "renamed-org");
   await page.click("#org-rename-btn");
-  await expect(page.locator("#toast")).toContainText("Renamed");
+  await expectToast(page, "Renamed");
   await page.click("#account-btn");
   await expect(page.locator("#menu-org-settings")).toContainText("renamed-org");
   await page.keyboard.press("Escape");
@@ -40,7 +40,7 @@ test("org admin: member role change round-trip", async ({ page }) => {
   await openOrgSettings(page);
   const sel = page.locator(".admin-item", { hasText: MEMBER }).locator("select");
   await sel.selectOption("owner");
-  await expect(page.locator("#toast")).toContainText("Role updated");
+  await expectToast(page, "Role updated");
   await expect(sel).toHaveValue("owner");
   await sel.selectOption("member");
   await expect(sel).toHaveValue("member");
@@ -50,13 +50,13 @@ test("org admin: invite create shows in list, revoke removes it", async ({ page 
   await login(page);
   await openOrgSettings(page);
   await page.click(".admin-h .pbtn"); // New invite
-  await expect(page.locator("#toast")).toContainText("Invite");
+  await expectToast(page, "Invite");
   const row = page.locator(".admin-item", { hasText: "/join/" }).first();
   await expect(row).toBeVisible();
   await expect(row.locator(".ai-tag")).toContainText("unused");
   await row.locator(".ai-del").click();
   await page.click(".modal .danger-btn"); // confirm revoke
-  await expect(page.locator("#toast")).toContainText("Revoked");
+  await expectToast(page, "Revoked");
   await expect(page.locator(".admin-item", { hasText: "/join/" })).toHaveCount(0);
 });
 
@@ -70,7 +70,7 @@ test("org admin: public share audit lists and revokes", async ({ page }) => {
   await expect(row.locator(".ai-tag")).toContainText("wiki");
   await row.locator(".ai-del").click();
   await page.click(".modal .danger-btn");
-  await expect(page.locator("#toast")).toContainText("Share revoked");
+  await expectToast(page, "Share revoked");
   await expect(page.locator(".admin-item", { hasText: "index.md" })).toHaveCount(0);
 });
 
@@ -83,12 +83,12 @@ test("org admin: project rename and delete", async ({ page }) => {
   await row.locator(".ai-btn", { hasText: "Rename" }).click();
   await page.fill(".modal-input", "doomed-2");
   await page.click(".modal .pbtn");
-  await expect(page.locator("#toast")).toContainText("Renamed");
+  await expectToast(page, "Renamed");
   const row2 = page.locator(".admin-item", { hasText: "doomed-2" });
   await expect(row2).toBeVisible();
   await row2.locator(".ai-del").click();
   await page.click(".modal .danger-btn");
-  await expect(page.locator("#toast")).toContainText("Deleted");
+  await expectToast(page, "Deleted");
   await expect(page.locator(".admin-item", { hasText: "doomed-2" })).toHaveCount(0);
   await expect(page.locator("#projects .row .label", { hasText: "doomed-2" })).toHaveCount(0);
 });
@@ -116,11 +116,11 @@ test("hub settings: policy view, save round-trip, pending queue empty", async ({
   // Toggle approval on, save, revert
   const app = page.locator(".admin-item.toggle").nth(1).locator("input");
   await app.check();
-  await page.click(".admin > .pbtn");
-  await expect(page.locator("#toast")).toContainText("policy saved");
+  await page.click('.admin button:has-text("Save policy")');
+  await expectToast(page, "policy saved");
   await app.uncheck();
-  await page.click(".admin > .pbtn");
-  await expect(page.locator("#toast")).toContainText("policy saved");
+  await page.click('.admin button:has-text("Save policy")');
+  await expectToast(page, "policy saved");
   await expect(page.locator(".admin-empty", { hasText: "No one is waiting" })).toBeVisible();
 });
 
@@ -132,4 +132,15 @@ test("navigating away closes an open admin panel", async ({ page }) => {
   await page.click('#tree .row[data-path="index.md"]');
   await expect(page.locator("#content h1")).toHaveText("Wiki");
   await expect(page.locator(".admin")).toHaveCount(0);
+});
+
+test("members table sorts by email", async ({ page }) => {
+  await login(page);
+  await openOrgSettings(page);
+  const emails = page.locator(".admin-table .admin-item .ai-main");
+  await expect(emails.first()).toBeVisible();
+  const before = await emails.allTextContents();
+  await page.click('.admin-table th:has-text("Member")');
+  const after = await emails.allTextContents();
+  expect([...before].reverse()).toEqual(after);
 });

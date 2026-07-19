@@ -494,9 +494,9 @@ conflicts. Set `BDRIVE_HOME` to relocate all beardrive state (used heavily in te
 ### Web frontend
 
 The hub's web UI is a React + TypeScript app in `internal/webapp/frontend`
-(Vite; runtime dependencies are just react, react-dom,
-@tanstack/react-query, and lucide-react for icons — routing is a small
-in-repo history router). Its
+(Vite + Tailwind v4 + shadcn/ui components owned in-repo; TanStack
+query/table/virtual, react-hook-form + zod, cmdk, sonner, lucide-react —
+routing stays a small in-repo history router). Its
 **built output is committed** at `internal/webapp/static`, the `go:embed`
 target, so building or `go install`-ing the binary never needs Node.
 

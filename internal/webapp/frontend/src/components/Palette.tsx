@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Icon } from "./shell";
+import { Command, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 
 /* ---- command palette (⌘K / Ctrl+K) ----
    One box for everything: fuzzy-jump to any file, switch projects, and run
@@ -71,9 +73,6 @@ export function Palette({
   candidates: () => PaletteItem[];
 }) {
   const [query, setQuery] = useState("");
-  const [sel, setSel] = useState(0);
-  const input = useRef<HTMLInputElement>(null);
-  const listRef = useRef<HTMLUListElement>(null);
 
   const items = useMemo(() => {
     if (!open) return [];
@@ -87,81 +86,54 @@ export function Palette({
   }, [open, query, candidates]);
 
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      setSel(0);
-      input.current?.focus();
-    }
+    if (open) setQuery("");
   }, [open]);
-  useEffect(() => setSel(0), [query]);
-  useEffect(() => {
-    listRef.current?.children[sel]?.scrollIntoView({ block: "nearest" });
-  }, [sel, items]);
 
   const run = (item: PaletteItem) => {
     onClose();
     item.run();
   };
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        e.preventDefault();
-        const n = items.length;
-        if (n) setSel((s) => (s + (e.key === "ArrowDown" ? 1 : n - 1)) % n);
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        if (items[sel]) run(items[sel]);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, items, sel]);
-
-  if (!open) return null;
+  // cmdk owns keyboard nav/selection/aria; our fuzzy scorer owns matching
+  // and order (shouldFilter=false), so search behavior is unchanged.
   return (
-    <div id="palette-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div id="palette" role="dialog" aria-label="Search and quick actions">
-        <div id="palette-inputwrap">
-          <Icon name="search" />
-          <input
-            id="palette-input"
-            type="text"
-            placeholder="Search file names, projects, actions…"
-            autoComplete="off"
-            spellCheck={false}
-            ref={input}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </div>
-        <ul id="palette-results" ref={listRef}>
-          {items.length === 0 ? (
-            <li className="pempty">No matches — search covers file names, projects, and actions</li>
-          ) : (
-            items.map((item, i) => (
-              <li
-                key={item.kind + ":" + item.label}
-                className={i === sel ? "selected" : undefined}
-                onClick={() => run(item)}
-                onMouseMove={() => sel !== i && setSel(i)}
-              >
-                <span className="picon">
-                  <Icon name={item.icon} />
-                </span>
-                <Highlight text={item.label} hits={item.hits} />
-                <span className="pkind">{item.kind}</span>
-              </li>
-            ))
-          )}
-        </ul>
-        <footer id="palette-hint">↑↓ navigate · ⏎ select · esc close</footer>
-      </div>
-    </div>
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent id="palette" className="palette" showCloseButton={false} aria-describedby={undefined}>
+        <DialogTitle className="sr-only">Search and quick actions</DialogTitle>
+        <Command shouldFilter={false} loop>
+          <div id="palette-inputwrap">
+            <Icon name="search" />
+            <CommandInput
+              id="palette-input"
+              placeholder="Search file names, projects, actions…"
+              autoComplete="off"
+              spellCheck={false}
+              value={query}
+              onValueChange={setQuery}
+            />
+          </div>
+          <CommandList id="palette-results">
+            {items.length === 0 ? (
+              <div className="pempty">No matches — search covers file names, projects, and actions</div>
+            ) : (
+              items.map((item) => (
+                <CommandItem
+                  key={item.kind + ":" + item.label}
+                  value={item.kind + ":" + item.label}
+                  onSelect={() => run(item)}
+                >
+                  <span className="picon">
+                    <Icon name={item.icon} />
+                  </span>
+                  <Highlight text={item.label} hits={item.hits} />
+                  <span className="pkind">{item.kind}</span>
+                </CommandItem>
+              ))
+            )}
+          </CommandList>
+          <footer id="palette-hint">↑↓ navigate · ⏎ select · esc close</footer>
+        </Command>
+      </DialogContent>
+    </Dialog>
   );
 }

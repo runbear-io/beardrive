@@ -1,11 +1,18 @@
-import { useEffect, useRef, useState } from "react";
 import type { Org } from "../api/types";
 import { Icon } from "./shell";
 import { projColor } from "./ProjectNav";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 // The sidebar footer is the account row: avatar, name, email. Clicking it
-// opens a popover with the workspace (org) and account actions — settings,
-// hub administration for admins, and sign-out.
+// opens a menu with the workspace (org) and account actions — settings,
+// hub administration for admins, and sign-out. Radix owns open/dismiss
+// behavior (Escape, outside click, focus).
 export function AccountBar({
   me,
   org,
@@ -17,86 +24,52 @@ export function AccountBar({
   admin?: { pending: number; onClick: () => void }; // hub admins only
   onOrgSettings: (org: Org) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
   const display = me.name || me.email;
   return (
-    <footer id="accountbar" ref={ref}>
-      {open && (
-        <div id="account-menu" role="menu" aria-label="Account menu">
+    <footer id="accountbar">
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <button id="account-btn" aria-label="Account menu">
+            <span className="avatar" style={{ background: projColor(me.email) }} aria-hidden="true">
+              {(display.trim()[0] || "?").toUpperCase()}
+            </span>
+            <span className="acct">
+              <b>{display}</b>
+              {me.name && <small>{me.email}</small>}
+            </span>
+            <Icon name="chev" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent id="account-menu" side="top" align="start" sideOffset={6} className="acct-menu">
           {org && (
             <>
-              <div className="menu-sec">Organization</div>
-              <button
-                id="menu-org-settings"
-                role="menuitem"
-                onClick={() => {
-                  setOpen(false);
-                  onOrgSettings(org);
-                }}
-              >
+              <DropdownMenuLabel className="menu-sec">Organization</DropdownMenuLabel>
+              <DropdownMenuItem id="menu-org-settings" onSelect={() => onOrgSettings(org)}>
                 <Icon name="gear" />
                 <span>
                   <b>{org.name}</b> Settings
                 </span>
-              </button>
+              </DropdownMenuItem>
             </>
           )}
           {admin && (
             <>
-              <div className="menu-sec">Hub</div>
-              <button
-                id="menu-hub-admin"
-                role="menuitem"
-                onClick={() => {
-                  setOpen(false);
-                  admin.onClick();
-                }}
-              >
+              <DropdownMenuLabel className="menu-sec">Hub</DropdownMenuLabel>
+              <DropdownMenuItem id="menu-hub-admin" onSelect={admin.onClick}>
                 <Icon name="shield" />
                 <span>Signup &amp; access{admin.pending ? ` · ${admin.pending}` : ""}</span>
-              </button>
+              </DropdownMenuItem>
             </>
           )}
-          <div className="menu-sec">Account</div>
-          <a id="signout" role="menuitem" href="/auth/logout">
-            <Icon name="power" />
-            <span>Log out</span>
-          </a>
-        </div>
-      )}
-      <button
-        id="account-btn"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="avatar" style={{ background: projColor(me.email) }} aria-hidden="true">
-          {(display.trim()[0] || "?").toUpperCase()}
-        </span>
-        <span className="acct">
-          <b>{display}</b>
-          {me.name && <small>{me.email}</small>}
-        </span>
-        <Icon name="chev" />
-      </button>
+          <DropdownMenuLabel className="menu-sec">Account</DropdownMenuLabel>
+          <DropdownMenuItem asChild>
+            <a id="signout" href="/auth/logout">
+              <Icon name="power" />
+              <span>Log out</span>
+            </a>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </footer>
   );
 }

@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId, MEMBER, PASSWORD } from "./helpers";
+import { login, wikiId, MEMBER, PASSWORD, expectToast } from "./helpers";
 
 // Phase 1: shell, session flags, project list/selection, routing, empty
 // state, invite accept. Mutating specs (project creation) run last —
@@ -9,7 +9,7 @@ test("landing selects the first project and rewrites the URL", async ({ page }) 
   await login(page);
   const pid = await wikiId(page);
   await page.waitForURL("/" + pid);
-  await expect(page.locator("#project-select option:checked")).toHaveText("wiki");
+  await expect(page.locator("#project-select")).toContainText("wiki");
   await expect(page).toHaveTitle("wiki — BearDrive");
   await expect(page.locator("#vault-name")).toHaveText("BearDrive");
 });
@@ -18,7 +18,7 @@ test("deep link to a project resolves after reload", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto("/" + pid);
-  await expect(page.locator("#project-select option:checked")).toHaveText("wiki");
+  await expect(page.locator("#project-select")).toContainText("wiki");
   await expect(page).toHaveURL("/" + pid);
 });
 
@@ -26,7 +26,7 @@ test("unknown project id falls back to a real project", async ({ page }) => {
   await login(page);
   await page.goto("/p-00000000");
   await page.waitForURL(/\/p-[0-9a-f]{8}$/);
-  await expect(page.locator("#project-select option:checked")).toHaveText(/.+/);
+  await expect(page.locator("#project-select")).toContainText(/.+/);
 });
 
 test("account menu: admin gets hub admin entry; member does not", async ({ page, browser }) => {
@@ -64,8 +64,7 @@ test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await p2.fill('input[name="email"]', MEMBER);
   await p2.fill('input[name="password"]', PASSWORD);
   await p2.click("form button");
-  await p2.waitForSelector("#toast.show");
-  await expect(p2.locator("#toast")).toContainText("you joined");
+  await expectToast(p2, "you joined");
   await p2.waitForURL(/\/p-[0-9a-f]{8}$/); // lands on the org's project
   await ctx.close();
 });
@@ -78,7 +77,7 @@ test("no-org account gets the onboarding empty state and can create a project", 
   await page.fill("#ob-name", "solo-notes");
   await page.click("#ob-create");
   await page.waitForURL(/\/p-[0-9a-f]{8}$/);
-  await expect(page.locator("#project-select option:checked")).toHaveText("solo-notes");
+  await expect(page.locator("#project-select")).toContainText("solo-notes");
   await expect(page.locator("#accountbar")).toBeVisible(); // fresh org, owner
 });
 
@@ -88,7 +87,33 @@ test("new project via the sidebar + modal", async ({ page }) => {
   await page.fill(".modal-input", "scratch");
   await page.click(".modal .pbtn");
   await page.waitForURL(/\/p-[0-9a-f]{8}$/);
-  await expect(page.locator("#project-select option:checked")).toHaveText("scratch");
-  await expect(page.locator("#project-select option")).toContainText(["scratch", "wiki"]);
-  await expect(page.locator("#toast")).toContainText("Created");
+  await expect(page.locator("#project-select")).toContainText("scratch");
+  // Open the switcher: both projects listed; picking one navigates.
+  await page.click("#project-select");
+  await expect(page.getByRole("option", { name: "wiki" })).toBeVisible();
+  await page.getByRole("option", { name: "wiki" }).click();
+  await page.waitForURL(/\/p-[0-9a-f]{8}$/);
+  await expect(page.locator("#project-select")).toContainText("wiki");
+  await expectToast(page, "Created");
+});
+
+test("account menu closes on Escape and outside click", async ({ page }) => {
+  await login(page);
+  await page.click("#account-btn");
+  await expect(page.locator("#account-menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#account-menu")).toHaveCount(0);
+  await page.click("#account-btn");
+  await expect(page.locator("#account-menu")).toBeVisible();
+  await page.click("#content", { position: { x: 10, y: 10 } });
+  await expect(page.locator("#account-menu")).toHaveCount(0);
+});
+
+test("new-project modal cancels on Escape", async ({ page }) => {
+  await login(page);
+  await wikiId(page);
+  await page.click("#projects .nav-add");
+  await expect(page.locator(".modal-input")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".modal-input")).toHaveCount(0);
 });

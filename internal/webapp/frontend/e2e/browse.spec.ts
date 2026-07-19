@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId } from "./helpers";
+import { login, wikiId, expectToast } from "./helpers";
 
 // Phase 2: tree, folder listings (heat dots + change feed), file views
 // (markdown/wikilinks/images), breadcrumbs, upload, share, palette.
@@ -101,7 +101,7 @@ test("palette (⌘K) fuzzy-jumps to a file", async ({ page }) => {
   const pid = await wikiId(page);
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.locator("#palette")).toBeVisible();
-  await page.fill("#palette-input", "topic");
+  await page.fill("#palette input", "topic");
   await page.keyboard.press("Enter");
   await page.waitForURL(`/${pid}/notes/deep/topic.md`);
   await expect(page.locator("#content h1")).toHaveText("Topic");
@@ -118,7 +118,7 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   expect(publicRes.status()).toBe(200);
   expect(await publicRes.text()).toContain("Second version");
   await page.click(".modal .ai-del"); // revoke
-  await expect(page.locator("#toast")).toContainText("revoked");
+  await expectToast(page, "revoked");
   const gone = await page.request.get(url!);
   expect(gone.status()).toBe(404);
 });
@@ -175,4 +175,17 @@ test("missing path gets the not-found view; Check again finds a late upload", as
   );
   await page.click(".notfound .pbtn"); // Check again
   await expect(page.locator("#content h1")).toHaveText("Finally here");
+});
+
+test("tree chevron folds and unfolds a folder", async ({ page }) => {
+  await login(page);
+  await wikiId(page);
+  await expect(page.locator('#tree .row[data-path="notes"]')).toBeVisible();
+  // Unfold via row click (opens listing + expands), then fold via chevron.
+  await page.click('#tree .row[data-path="notes"]');
+  await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).toBeVisible();
+  await page.click('#tree .row[data-path="notes"] .chev');
+  await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).not.toBeVisible();
+  await page.click('#tree .row[data-path="notes"] .chev');
+  await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).toBeVisible();
 });

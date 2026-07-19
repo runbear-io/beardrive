@@ -1,7 +1,8 @@
-import { useEffect } from "react";
 import { api } from "../api/http";
+import { Button } from "@/components/ui/button";
 import { copyText } from "../util";
 import { toast } from "../toast";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 
 /* A clear, explicitly-public share confirmation: warns that anyone with the
    link can view, and offers copy / open / revoke. */
@@ -15,36 +16,31 @@ export function ShareDialog({
   onClose: () => void;
 }) {
   const token = url.split("/s/")[1];
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
   return (
-    <div className="modal-back" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal">
-        <h3>Public link created</h3>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="modal" showCloseButton={false}>
+        <DialogTitle asChild>
+          <h3>Public link created</h3>
+        </DialogTitle>
         <p>
           <b>Anyone with this link can view this file</b> — no account needed. It always shows the
           latest version until you revoke it.
         </p>
         <div className="modal-url">{url}</div>
         <div className="modal-actions">
-          <button
-            className="pbtn"
+          <Button
+            variant="primary"
             onClick={() =>
               copyText(url).then((ok) => toast(ok ? "Copied." : "Select and copy the link above."))
             }
           >
             {copied ? "Copied ✓" : "Copy link"}
-          </button>
-          <button className="ai-btn" onClick={() => window.open(url, "_blank")}>
+          </Button>
+          <Button variant="subtle" onClick={() => window.open(url, "_blank")}>
             Open
-          </button>
-          <button
-            className="ai-del"
+          </Button>
+          <Button
+            variant="subtle" className="ai-del"
             onClick={async () => {
               try {
                 await api("DELETE", "/api/shares/" + token);
@@ -56,12 +52,12 @@ export function ShareDialog({
             }}
           >
             Revoke
-          </button>
-          <button className="ai-btn" onClick={onClose}>
+          </Button>
+          <Button variant="subtle" onClick={onClose}>
             Done
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

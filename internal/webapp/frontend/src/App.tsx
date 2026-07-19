@@ -1,4 +1,5 @@
 import { useConfig } from "./hooks/useConfig";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell, Topbar, VaultHeader } from "./components/shell";
 import { Toaster } from "./toast";
 import { ModalHost } from "./modal";
@@ -9,7 +10,7 @@ export default function App() {
   const { data: config } = useConfig();
 
   return (
-    <>
+    <TooltipProvider delayDuration={150}>
       {!config ? (
         <AppShell vault={<VaultHeader name="…" showSignout={false} />} topbar={<Topbar />}>
           <div className="empty">Loading…</div>
@@ -21,6 +22,6 @@ export default function App() {
       )}
       <Toaster />
       <ModalHost />
-    </>
+    </TooltipProvider>
   );
 }

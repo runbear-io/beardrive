@@ -29,3 +29,12 @@ test("mistyped API path is a real 404, not the shell", async ({ page }) => {
   const res = await page.request.get("/api/nope");
   expect(res.status()).toBe(404);
 });
+
+test("search button shows the shortcut tooltip on hover", async ({ page }) => {
+  const { login } = await import("./helpers");
+  await login(page);
+  await page.hover("#search-btn");
+  const tip = page.locator('[role="tooltip"], .tip').filter({ hasText: "Search" }).first();
+  await expect(tip).toBeVisible();
+  await expect(tip).toContainText("⌘");
+});
