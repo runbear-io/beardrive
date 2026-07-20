@@ -1,9 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" role="img" aria-label="BearDrive">
-  <circle cx="8" cy="8.5" r="4.5" fill="currentColor" opacity=".55"/>
-  <circle cx="24" cy="8.5" r="4.5" fill="currentColor" opacity=".55"/>
-  <circle cx="16" cy="18" r="11" fill="currentColor"/>
-  <circle cx="11.5" cy="15.5" r="1.6" fill="#0a0b0d"/>
-  <circle cx="20.5" cy="15.5" r="1.6" fill="#0a0b0d"/>
-  <ellipse cx="16" cy="21.5" rx="3.6" ry="2.8" fill="#0a0b0d" opacity=".22"/>
-  <ellipse cx="16" cy="20.4" rx="1.7" ry="1.25" fill="#0a0b0d"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="#f5a623" role="img" aria-label="BearDrive">
+  <rect x="4" y="4" width="5.6" height="24"/>
+  <rect x="11.2" y="4" width="14.4" height="11.2"/>
+  <rect x="11.2" y="16.8" width="16.8" height="11.2"/>
 </svg>

@@ -59,3 +59,41 @@
 .sl-markdown-content .language-console .line > span:first-child {
   color: var(--sl-color-gray-3);
 }
+
+/* ---- brand lockup ----
+   Jersey 10 is the logo face across all three surfaces (app sidebar, cloud
+   landing nav, here), and it is the ONLY thing it sets — a pixel face is a
+   logo, not a UI font. Self-hosted so the docs make no third-party font
+   request; SIL OFL, licence beside the file in public/fonts/. */
+@font-face {
+  font-family: "Jersey 10";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/jersey-10.woff2") format("woff2");
+}
+/* Same optical size for whichever face wins the load race: Jersey 10 is
+   condensed, so 22px of it measures like ~16px of the UI face. */
+@font-face {
+  font-family: "Logo Fallback";
+  src: local("Helvetica Neue"), local("Arial"), local("Segoe UI"), local("Roboto");
+  size-adjust: 73%;
+}
+
+.site-title {
+  font-family: "Jersey 10", "Logo Fallback", var(--sl-font);
+  font-size: 22px;
+  font-weight: 400;
+  font-synthesis: none;
+  letter-spacing: 0.01em;
+  /* The mark carries the honey; the name stays text colour, matching the app
+     sidebar and the landing nav. Starlight's default would tint the title
+     with the accent, which also fails contrast as honey-on-white. */
+  color: var(--sl-color-white);
+}
+/* The mark ships as an <img>, so it can't inherit currentColor — it carries
+   the honey fill itself. Size it to sit with the wordmark's cap height. */
+.site-title img {
+  width: 22px;
+  height: 22px;
+}

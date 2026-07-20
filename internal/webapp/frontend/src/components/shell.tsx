@@ -81,6 +81,28 @@ export function Icon({ name }: { name: string }) {
   return C ? <C className="ico" aria-hidden="true" /> : null;
 }
 
+/* The BearDrive mark: a rail and two blocks — the letter B built from
+   rectangles only, and the same shape as the product (a spine with volumes
+   hanging off it). One fill, so `currentColor` themes it everywhere: the
+   sidebar, the favicon, flat ink. Kept identical to the landing page's
+   Mark.astro; if one changes, change both. */
+export function Mark({ size = 22 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="currentColor"
+      role="img"
+      aria-label="BearDrive"
+    >
+      <rect x="4" y="4" width="5.6" height="24" />
+      <rect x="11.2" y="4" width="14.4" height="11.2" />
+      <rect x="11.2" y="16.8" width="16.8" height="11.2" />
+    </svg>
+  );
+}
+
 /* The column system, in one place. `#content` owns scrolling and the page
    gutter; `<Page>` owns width and centering — nothing else may set either.
    Three widths cover every view: `read` for rendered files only (markdown
@@ -152,8 +174,8 @@ export function VaultHeader(props: {
   const { name, onHome, showSignout, search } = props;
   return (
     <header id="vault">
-      <span id="vault-badge" aria-hidden="true">
-        🐻
+      <span id="vault-badge">
+        <Mark size={22} />
       </span>
       <span
         id="vault-name"

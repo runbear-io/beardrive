@@ -580,9 +580,8 @@ background:#0a0b0d;color:#eef0f3;display:flex;justify-content:center;padding-top
 letter-spacing:-.006em;-webkit-font-smoothing:antialiased}
 .card{background:#0c0e10;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:28px 30px;width:344px;
 box-shadow:0 24px 70px -24px rgba(0,0,0,.7)}
-.logo{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-size:19px;line-height:1;
-background:linear-gradient(160deg,#ffcf85,#f5a623 55%%,#d3861a);
-box-shadow:0 1px 0 rgba(255,255,255,.35) inset,0 3px 10px -2px rgba(245,166,35,.45);margin-bottom:16px}
+.logo{width:30px;height:30px;display:grid;place-items:center;color:#f5a623;margin-bottom:16px}
+.logo svg{width:30px;height:30px;fill:currentColor}
 h1{font-size:18px;font-weight:640;letter-spacing:-.02em;margin:0 0 18px}
 label{display:block;font-size:12px;color:#9aa0a9;margin:14px 0 5px;font-weight:500}
 input{width:100%%;box-sizing:border-box;height:38px;padding:0 12px;border-radius:8px;
@@ -600,7 +599,9 @@ button:focus-visible{outline:2px solid #ffcf85;outline-offset:2px}
 @media (max-width:900px){input{height:44px}button{height:44px}}
 code{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);padding:2px 6px;border-radius:5px;
 font-family:ui-monospace,Menlo,monospace}
-</style></head><body><div class="card"><div class="logo">🐻</div><h1>%s</h1>%s</div></body></html>`,
+</style></head><body><div class="card"><div class="logo"><svg viewBox="0 0 32 32" role="img" aria-label="BearDrive">` +
+		`<rect x="4" y="4" width="5.6" height="24"/><rect x="11.2" y="4" width="14.4" height="11.2"/>` +
+		`<rect x="11.2" y="16.8" width="16.8" height="11.2"/></svg></div><h1>%s</h1>%s</div></body></html>`,
 		html.EscapeString(title), html.EscapeString(title), body)
 }
 

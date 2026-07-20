@@ -38,6 +38,26 @@
   --hero-top: clamp(32px, 8vh, 88px); /* one vertical start for short centered states */
 }
 
+/* Jersey 10 — the logo face, and only the logo (a pixel face is a logo, not a
+   UI font). Self-hosted: Vite fingerprints it into static/assets/ alongside
+   the bundle, so the binary stays self-contained and no request leaves the
+   hub. SIL OFL; licence sits beside the file in src/assets/.
+   Deliberately NOT a token: tw.css's @theme is mirrored by the cloud landing's
+   tokens.css and a drift check fails the build if they diverge. */
+@font-face {
+  font-family: "Jersey 10";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/jersey-10.woff2") format("woff2");
+}
+/* Same optical size for whichever face wins the load race. */
+@font-face {
+  font-family: "Logo Fallback";
+  src: local("Helvetica Neue"), local("Arial"), local("Segoe UI"), local("Roboto");
+  size-adjust: 73%;
+}
+
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; }
@@ -79,13 +99,19 @@ button, input, a.btn { font-family: inherit; }
      paints over their borders instead of sliding behind them. */
   position: relative; z-index: 45;
 }
-#vault-badge {
-  width: 22px; height: 22px; border-radius: 6px; flex: none;
-  display: grid; place-items: center; font-size: 13px; line-height: 1;
-  background: linear-gradient(160deg, #ffcf85, #f5a623 55%, #d3861a);
-  box-shadow: 0 1px 0 rgba(255,255,255,.35) inset, 0 2px 6px -1px rgba(245,166,35,.4);
+/* Brand lockup: the mark in honey, the name in text colour, so the accent
+   lands once. Same mark and same face as the landing page and the docs — the
+   three surfaces are one identity. */
+#vault-badge { flex: none; display: grid; place-items: center; color: var(--accent); }
+#vault-name {
+  font-family: "Jersey 10", "Logo Fallback", var(--ui);
+  /* Jersey 10 is a condensed pixel face with a single weight: 18px here sets
+     to the same optical size as 13px of the UI face, and synthetic bold would
+     fill the gaps between pixels. */
+  font-size: 18px; font-weight: 400; font-synthesis: none;
+  letter-spacing: .01em; line-height: 1;
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-#vault-name { font-weight: 600; font-size: 13px; letter-spacing: -.01em; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vault-actions { display: flex; align-items: center; gap: 4px; }
 #vault #signout, .icon-btn2 {
   width: 28px; height: 28px; border-radius: 6px;
