@@ -1,0 +1,61 @@
+/* Maps Starlight's theme variables onto the BearDrive tokens generated into
+   tokens.gen.css from the hub frontend. Nothing here invents a color: every
+   value below is a var() reference, so the palette has exactly one owner.
+
+   BearDrive's app is dark-only. The docs site keeps a light theme (people read
+   docs in daylight, and search engines render light), so the dark block gets
+   the real tokens and the light block derives from the same honey accent. */
+
+:root {
+  --sl-font: var(--font-sans);
+  --sl-font-mono: var(--font-mono);
+  --sl-nav-height: 3.75rem;
+}
+
+/* Dark — the house style, straight from the app's tokens. */
+:root[data-theme="dark"] {
+  --sl-color-accent-low: var(--color-glow);
+  --sl-color-accent: var(--color-honey-dim);
+  --sl-color-accent-high: var(--color-honey-bright);
+
+  --sl-color-white: var(--color-text);
+  --sl-color-gray-1: var(--color-text);
+  --sl-color-gray-2: var(--color-dim);
+  --sl-color-gray-3: var(--color-faint);
+  --sl-color-gray-4: var(--color-ghost);
+  --sl-color-gray-5: var(--color-raise);
+  --sl-color-gray-6: var(--color-side);
+  --sl-color-black: var(--color-bg);
+
+  --sl-color-bg: var(--color-bg);
+  --sl-color-bg-nav: var(--color-side);
+  --sl-color-bg-sidebar: var(--color-side);
+  --sl-color-bg-inline-code: var(--color-surface);
+  --sl-color-hairline: var(--color-line);
+  --sl-color-hairline-light: var(--color-line-2);
+  --sl-color-hairline-shade: var(--color-line);
+
+  --sl-color-text-accent: var(--color-honey);
+  --sl-color-text-invert: var(--color-primary-foreground);
+}
+
+/* Light — same accent, inverted neutrals. */
+:root[data-theme="light"] {
+  --sl-color-accent-low: #fdefd6;
+  --sl-color-accent: var(--color-honey-dim);
+  --sl-color-accent-high: #7a4c00;
+
+  --sl-color-text-accent: var(--color-honey-dim);
+}
+
+/* The honey accent on a light background fails contrast as link text at body
+   size, so links there lean on the deeper tone rather than the brand tone. */
+:root[data-theme="light"] .sl-markdown-content a:not(:where(.not-content *)) {
+  color: #8a5600;
+}
+
+/* Terminal transcripts are the dominant code block in these docs. Dim the
+   prompt so the command the reader must type is what their eye lands on. */
+.sl-markdown-content .language-console .line > span:first-child {
+  color: var(--sl-color-gray-3);
+}

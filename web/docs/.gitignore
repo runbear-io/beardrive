@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.astro/
+# Generated from internal/webapp/frontend/src/tw.css by scripts/tokens.mjs.
+src/styles/tokens.gen.css
