@@ -6,7 +6,9 @@ import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 // are markup-agnostic.
 
 export function toast(msg: string, isErr = false) {
-  if (isErr) sonner.error(msg);
+  // Errors stay until dismissed: a failed action the user has to react to
+  // should not vanish while they are reading it.
+  if (isErr) sonner.error(msg, { duration: Infinity, closeButton: true });
   else sonner(msg);
 }
 

@@ -29,6 +29,30 @@ const renameSchema = z.object({
 });
 type RenameForm = z.infer<typeof renameSchema>;
 
+// SortableHead is both tables' header cell: a real button inside the th so
+// sorting is reachable by keyboard, with the direction announced rather than
+// carried by a glyph alone. Two tables ten centimetres apart had opposite
+// accessibility contracts before this existed.
+function SortableHead({ header }: { header: any }) {
+  const sorted = header.column.getIsSorted();
+  if (!header.column.getCanSort()) {
+    // The actions column has no header text and nothing to sort; a button
+    // here is a dead tab stop with an empty accessible name.
+    return <TableHead>{flexRender(header.column.columnDef.header, header.getContext())}</TableHead>;
+  }
+  return (
+    <TableHead
+      data-sort={sorted || undefined}
+      aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : "none"}
+    >
+      <button type="button" className="th-sort" onClick={header.column.getToggleSortingHandler()}>
+        {flexRender(header.column.columnDef.header, header.getContext())}
+        {sorted === "asc" ? " ↑" : sorted === "desc" ? " ↓" : ""}
+      </button>
+    </TableHead>
+  );
+}
+
 type Member = Org["members"][number];
 
 export function OrgAdmin({
@@ -71,7 +95,13 @@ export function OrgAdmin({
 
   return (
     <div className="admin">
-      <h1 id="org-title">{org.name + (owner ? "" : "  ·  member")}</h1>
+      <h1 id="org-title">{org.name}</h1>
+      {!owner && <p className="role-chip-row"><span className="ai-tag role-chip">Member</span></p>}
+      {!owner && (
+        <p className="admin-sub">
+          Only owners can rename this organization, manage members, or issue invite links.
+        </p>
+      )}
 
       {owner && (
         <form
@@ -86,18 +116,48 @@ export function OrgAdmin({
             }
           })}
         >
-          <input id="org-rename" type="text" {...renameForm.register("name")} />
-          <Button variant="primary" id="org-rename-btn" type="submit">
+          <label className="admin-lbl" htmlFor="org-rename">
+            Organization name
+          </label>
+          <input
+            id="org-rename"
+            type="text"
+            aria-invalid={!!renameForm.formState.errors.name}
+            aria-describedby={renameForm.formState.errors.name ? "org-rename-err" : undefined}
+            {...renameForm.register("name")}
+          />
+          <Button
+            variant="subtle"
+            id="org-rename-btn"
+            type="submit"
+            disabled={!renameForm.formState.isDirty}
+          >
             Rename org
           </Button>
           {renameForm.formState.errors.name && (
-            <span className="field-err">{renameForm.formState.errors.name.message}</span>
+            <span id="org-rename-err" role="alert" className="field-err">
+              {renameForm.formState.errors.name.message}
+            </span>
           )}
         </form>
       )}
 
       <h3>Members</h3>
       <MembersTable org={org} owner={owner} myEmail={myEmail} onChanged={refreshOrgs} />
+
+      {!owner && (
+        <>
+          <h3>Projects</h3>
+          <div className="admin-list">
+            {orgProjects.length === 0 && <div className="admin-empty">No projects yet.</div>}
+            {orgProjects.map((p) => (
+              <div className="admin-item" key={p.id}>
+                <span className="ai-main" title={p.name}>{p.name}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       {owner && (
         <>
@@ -106,12 +166,13 @@ export function OrgAdmin({
             {orgProjects.length === 0 && <div className="admin-empty">No projects yet.</div>}
             {orgProjects.map((p) => (
               <div className="admin-item" key={p.id}>
-                <span className="ai-main">{p.name}</span>
+                <span className="ai-main" title={p.name}>{p.name}</span>
                 <Button
                   variant="subtle"
+                  aria-label={`Rename ${p.name}`}
                   onClick={async () => {
                     const name = await modalPrompt("Rename project", "New name", p.name, "Rename");
-                    if (!name || name === p.name) return;
+                    if (name === null || name.trim() === p.name) return;
                     try {
                       await api("PATCH", "/api/projects/" + p.id, { name });
                       toast("Renamed.");
@@ -125,6 +186,7 @@ export function OrgAdmin({
                 </Button>
                 <button
                   className="ai-del"
+                  aria-label={`Delete ${p.name}`}
                   onClick={async () => {
                     if (
                       !(await modalConfirm(
@@ -174,16 +236,17 @@ export function OrgAdmin({
             )}
             {(invites || []).map((inv) => (
               <div className="admin-item" key={inv.token}>
-                <span
-                  className="ai-main mono"
-                  style={{ cursor: "pointer" }}
-                  title="Copy"
+                <button
+                  type="button"
+                  className="ai-main mono ai-copy"
+                  aria-label={`Copy invite link ${inv.url}`}
+                  title={inv.url}
                   onClick={() =>
                     copyText(inv.url).then((ok) => toast(ok ? "Copied." : "Select and copy the link."))
                   }
                 >
                   {inv.url}
-                </span>
+                </button>
                 <span className="ai-tag">
                   {(inv.creator ? "by " + inv.creator + " · " : "") +
                     (inv.uses ? inv.uses + " joined · " : "unused · ") +
@@ -192,11 +255,12 @@ export function OrgAdmin({
                 </span>
                 <button
                   className="ai-del"
+                  aria-label={`Revoke invite ${inv.token.slice(0, 8)}`}
                   onClick={async () => {
                     if (
                       !(await modalConfirm(
                         "Revoke invite",
-                        "Revoke this invite link? Anyone still holding it won't be able to join.",
+                        `Revoke the link starting ${inv.token.slice(0, 8)}…? Anyone still holding it won't be able to join.`,
                         "Revoke",
                         true,
                       ))
@@ -248,7 +312,11 @@ function MembersTable({
         header: "Member",
         cell: (c) => {
           const isSelf = !!myEmail && c.getValue().toLowerCase() === myEmail.toLowerCase();
-          return <span className="ai-main">{c.getValue() + (isSelf ? "  (you)" : "")}</span>;
+          return (
+            <span className="ai-main" title={c.getValue()}>
+              {c.getValue() + (isSelf ? "  (you)" : "")}
+            </span>
+          );
         },
       }),
       col.accessor("role", {
@@ -257,10 +325,11 @@ function MembersTable({
         cell: (c) => {
           const m = c.row.original;
           const isSelf = !!myEmail && m.email.toLowerCase() === myEmail.toLowerCase();
-          if (!owner || isSelf) return <span className="ai-tag">{m.role}</span>;
+          if (!owner || isSelf) return <span className="ai-tag role-static">{m.role}</span>;
           return (
-            <>
+            <span className="role-cell">
               <select
+                aria-label={`Role for ${m.email}`}
                 value={m.role}
                 onChange={async (e) => {
                   try {
@@ -279,6 +348,7 @@ function MembersTable({
               </select>
               <button
                 className="ai-del"
+                aria-label={`Remove ${m.email}`}
                 onClick={async () => {
                   if (
                     !(await modalConfirm("Remove member", `Remove ${m.email} from ${org.name}?`, "Remove", true))
@@ -295,7 +365,7 @@ function MembersTable({
               >
                 Remove
               </button>
-            </>
+            </span>
           );
         },
       }),
@@ -319,14 +389,7 @@ function MembersTable({
         {table.getHeaderGroups().map((hg) => (
           <TableRow key={hg.id}>
             {hg.headers.map((h) => (
-              <TableHead
-                key={h.id}
-                onClick={h.column.getToggleSortingHandler()}
-                data-sort={h.column.getIsSorted() || undefined}
-              >
-                {flexRender(h.column.columnDef.header, h.getContext())}
-                {h.column.getIsSorted() === "asc" ? " ↑" : h.column.getIsSorted() === "desc" ? " ↓" : ""}
-              </TableHead>
+              <SortableHead key={h.id} header={h} />
             ))}
           </TableRow>
         ))}
@@ -361,14 +424,15 @@ function SharesTable({
       col.accessor("path", {
         header: "Path",
         cell: (c) => (
-          <span
+          <a
             className="ai-main mono"
-            style={{ cursor: "pointer" }}
-            title={c.row.original.url}
-            onClick={() => window.open(c.row.original.url, "_blank")}
+            href={c.row.original.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={c.getValue()}
           >
             {c.getValue()}
-          </span>
+          </a>
         ),
       }),
       col.accessor((s) => s.project_name || "", {
@@ -388,6 +452,7 @@ function SharesTable({
         cell: (c) => (
           <button
             className="ai-del"
+            aria-label={`Revoke the share of ${c.row.original.path}`}
             onClick={async () => {
               const sh = c.row.original;
               if (
@@ -439,9 +504,7 @@ function SharesTable({
         {table.getHeaderGroups().map((hg) => (
           <TableRow key={hg.id}>
             {hg.headers.map((h) => (
-              <TableHead key={h.id} onClick={h.column.getToggleSortingHandler()}>
-                {flexRender(h.column.columnDef.header, h.getContext())}
-              </TableHead>
+              <SortableHead key={h.id} header={h} />
             ))}
           </TableRow>
         ))}

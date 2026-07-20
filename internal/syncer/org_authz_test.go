@@ -38,7 +38,7 @@ func orgHub(t *testing.T, storage remote.Backend) (ts *httptest.Server, aliceTok
 	srv := &webapp.Server{
 		Root: storage, Projects: db, Refresh: 0,
 		Upload: webapp.UploadConfig{Enabled: true},
-		Auth:   auth, Orgs: orgs,
+		Auth:   auth, Dir: webapp.LocalDirectory{OrgDB: orgs},
 	}
 	ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

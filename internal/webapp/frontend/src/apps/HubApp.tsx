@@ -3,7 +3,7 @@ import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
 import { parseRoute, urlForView } from "../router";
-import { navigate, Redirect, useLocationPath } from "../nav";
+import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
@@ -21,9 +21,10 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // Org just joined via an invite this page-load: prefer its projects over
   // whatever happens to be first in the list.
   const [joinedOrgId, setJoinedOrgId] = useState<string | null>(null);
-  // Admin panels replace the content pane without touching the URL (they
-  // were never routes in the classic app); any navigation closes them.
-  const [panel, setPanel] = useState<null | { kind: "hub" } | { kind: "org"; orgId: string }>(null);
+  // The hub-admin panel still replaces the content pane without touching the
+  // URL (the last of the classic app's URL-less surfaces); any navigation
+  // closes it. Org administration is a real route — see /orgs/<id> below.
+  const [panel, setPanel] = useState<null | { kind: "hub" }>(null);
   useEffect(() => setPanel(null), [pathname]);
 
   const joinToken = useMemo(() => {
@@ -81,6 +82,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     <AccountBar
       me={config.me}
       org={org}
+      orgActive={!!route.org}
       admin={
         isAdmin
           ? {
@@ -92,10 +94,6 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             }
           : undefined
       }
-      onOrgSettings={(o) => {
-        setPanel({ kind: "org", orgId: o.id });
-        closeSidebarOnMobile();
-      }}
     />
   ) : undefined;
 
@@ -140,23 +138,38 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     );
   }
 
-  const panelOrg = panel?.kind === "org" ? orgs.find((o) => o.id === panel.orgId) : null;
-  const activePanel =
-    panel?.kind === "hub"
-      ? { crumb: "Signup & access", body: <HubSettings /> }
-      : panelOrg
-        ? {
-            crumb: panelOrg.name,
-            body: (
-              <OrgAdmin
-                org={panelOrg}
-                projects={projects}
-                myEmail={config.me?.email || ""}
-                onProjectsChanged={refresh}
-              />
-            ),
-          }
-        : null;
+  const activePanel = panel?.kind === "hub" ? { crumb: "Signup & access", body: <HubSettings /> } : null;
+
+  const routeOrg = route.org ? orgs.find((o) => o.id === route.org) : null;
+  // A stale link, a revoked membership, or a typo: say so. Rendering the
+  // project view at /orgs/<id> told the user nothing and survived a reload.
+  const orgMissing = route.org && !routeOrg;
+  const orgPage = orgMissing
+    ? {
+        crumb: "Organization",
+        body: (
+          <div className="empty">
+            <h3>Organization not found</h3>
+            <p>This organization doesn't exist, or you're no longer a member.</p>
+            <p>
+              <a {...linkProps("/" + current.id)}>Back to {current.name}</a>
+            </p>
+          </div>
+        ),
+      }
+    : routeOrg
+    ? {
+        crumb: "Organization",
+        body: (
+          <OrgAdmin
+            org={routeOrg}
+            projects={projects}
+            myEmail={config.me?.email || ""}
+            onProjectsChanged={refresh}
+          />
+        ),
+      }
+    : null;
 
   const routePage =
     route.view === "settings"
@@ -172,8 +185,10 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         : null;
 
   // Landing ("/") and unknown project ids both resolve to a real project
-  // URL; replace so back/forward never bounces through the redirect.
-  if (route.project !== current.id) {
+  // URL; replace so back/forward never bounces through the redirect. The
+  // org route is not project-scoped, so it is exempt — it borrows whichever
+  // project the sidebar is showing.
+  if (!route.org && route.project !== current.id) {
     return <Redirect to={"/" + current.id} />;
   }
 
@@ -235,7 +250,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         ),
         orgBar: accountBar,
       }}
-      panel={activePanel || routePage}
+      panel={activePanel || orgPage || routePage}
       onClosePanel={() => setPanel(null)}
     />
   );

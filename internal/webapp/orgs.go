@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -320,7 +321,16 @@ func (db *OrgDB) ValidInvite(token string) bool {
 // predates organizations keeps working with zero manual steps. All existing
 // accounts join it — they could all see every project before, so anything
 // narrower would lock someone out — with the oldest account as owner.
-func MigrateOrgs(projects *ProjectDB, orgs *OrgDB, accounts []User) error {
+// orgWriter is the slice of Directory that MigrateOrgs needs: it creates one
+// org and fills it. Taking the narrow type keeps the sweep usable with a bare
+// OrgDB (which is what the CLI has at that point) instead of forcing a
+// LocalDirectory wrapper on a function that has no use for ManageURL.
+type orgWriter interface {
+	Create(name, ownerEmail string) (Org, error)
+	AddMember(orgID, email, role string) error
+}
+
+func MigrateOrgs(projects *ProjectDB, orgs orgWriter, accounts []User) error {
 	var orphans []Project
 	for _, p := range projects.List() {
 		if p.Org == "" {
@@ -366,26 +376,26 @@ func (s *Server) orgOf(projectID string) string {
 // Without an org registry (single-volume mode, tests, pre-org hubs) every
 // authenticated request passes, preserving the old behavior.
 func (s *Server) projectAllowed(r *http.Request, projectID string) bool {
-	if s.Orgs == nil || s.Auth == nil {
+	if s.Dir == nil || s.Auth == nil {
 		return true
 	}
 	org := s.orgOf(projectID)
 	if org == "" {
 		return true // org-less project (migration happens at startup)
 	}
-	return s.Orgs.Role(org, s.requestUser(r).Email) != ""
+	return s.Dir.Role(org, s.requestUser(r).Email) != ""
 }
 
 // handleOrgList returns the caller's orgs with members (visible to any
 // member) and the caller's role.
 func (s *Server) handleOrgList(w http.ResponseWriter, r *http.Request) {
-	if s.Orgs == nil {
+	if s.Dir == nil {
 		writeJSON(w, map[string]any{"orgs": []any{}})
 		return
 	}
 	me := s.requestUser(r)
 	out := []map[string]any{}
-	for _, o := range s.Orgs.OrgsFor(me.Email) {
+	for _, o := range s.Dir.OrgsFor(me.Email) {
 		members := make([]map[string]string, 0, len(o.Members))
 		for email, role := range o.Members {
 			members = append(members, map[string]string{"email": email, "role": role})
@@ -394,20 +404,34 @@ func (s *Server) handleOrgList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"id": o.ID, "name": o.Name, "role": o.Members[normEmail(me.Email)],
 			"members": members, "created": o.Created,
+			"manage_url": s.Dir.ManageURL(o.ID),
 		})
 	}
 	writeJSON(w, map[string]any{"orgs": out})
 }
 
+// writeDirErr answers a failed directory write. A directory that does not own
+// its organizations says so with ErrManagedElsewhere, and the answer is 409
+// plus the page that does own them — the request was well-formed, it is the
+// state of the world that makes it wrong. The hub never learns WHY the write
+// was refused, only where to send the user.
+func (s *Server) writeDirErr(w http.ResponseWriter, orgID string, err error) {
+	if errors.Is(err, ErrManagedElsewhere) {
+		http.Error(w, err.Error()+": "+s.Dir.ManageURL(orgID), http.StatusConflict)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadRequest)
+}
+
 // requireOwner returns true and the caller's email when they own the org;
 // otherwise it writes the error response and returns false.
 func (s *Server) requireOwner(w http.ResponseWriter, r *http.Request, orgID string) (string, bool) {
-	if s.Orgs == nil {
+	if s.Dir == nil {
 		http.Error(w, "organizations are not enabled on this server", http.StatusNotFound)
 		return "", false
 	}
 	me := s.requestUser(r)
-	if s.Orgs.Role(orgID, me.Email) != RoleOwner {
+	if s.Dir.Role(orgID, me.Email) != RoleOwner {
 		http.Error(w, "only an organization owner can do that", http.StatusForbidden)
 		return "", false
 	}
@@ -427,8 +451,8 @@ func (s *Server) handleOrgRename(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.Orgs.Rename(orgID, req.Name); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := s.Dir.Rename(orgID, req.Name); err != nil {
+		s.writeDirErr(w, orgID, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -447,8 +471,8 @@ func (s *Server) handleMemberUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.Orgs.SetRole(orgID, r.PathValue("email"), req.Role); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := s.Dir.SetRole(orgID, r.PathValue("email"), req.Role); err != nil {
+		s.writeDirErr(w, orgID, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -460,8 +484,8 @@ func (s *Server) handleMemberRemove(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireOwner(w, r, orgID); !ok {
 		return
 	}
-	if err := s.Orgs.RemoveMember(orgID, r.PathValue("email")); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := s.Dir.RemoveMember(orgID, r.PathValue("email")); err != nil {
+		s.writeDirErr(w, orgID, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -473,7 +497,7 @@ func (s *Server) handleInviteList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireOwner(w, r, orgID); !ok {
 		return
 	}
-	invs := s.Orgs.ListInvites(orgID)
+	invs := s.Dir.ListInvites(orgID)
 	out := make([]map[string]any, 0, len(invs))
 	for _, inv := range invs {
 		out = append(out, map[string]any{
@@ -491,23 +515,23 @@ func (s *Server) handleInviteRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Confirm the invite belongs to this org before revoking.
-	inv, ok := s.Orgs.Redeem(r.PathValue("token"))
+	inv, ok := s.Dir.Redeem(r.PathValue("token"))
 	if !ok || inv.Org != orgID {
 		http.Error(w, "no such invite", http.StatusNotFound)
 		return
 	}
-	s.Orgs.RevokeInvite(r.PathValue("token"))
+	s.Dir.RevokeInvite(r.PathValue("token"))
 	writeJSON(w, map[string]any{"ok": true})
 }
 
 // handleInviteCreate mints an invite link. Owners only.
 func (s *Server) handleInviteCreate(w http.ResponseWriter, r *http.Request) {
-	if s.Orgs == nil {
+	if s.Dir == nil {
 		http.Error(w, "organizations are not enabled on this server", http.StatusNotFound)
 		return
 	}
 	orgID := r.PathValue("org")
-	if s.Orgs.Role(orgID, s.requestUser(r).Email) != RoleOwner {
+	if s.Dir.Role(orgID, s.requestUser(r).Email) != RoleOwner {
 		http.Error(w, "only an organization owner can invite", http.StatusForbidden)
 		return
 	}
@@ -524,9 +548,9 @@ func (s *Server) handleInviteCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		ttl = d
 	}
-	inv, err := s.Orgs.CreateInvite(orgID, s.requestUser(r).Email, ttl)
+	inv, err := s.Dir.CreateInvite(orgID, s.requestUser(r).Email, ttl)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeDirErr(w, orgID, err)
 		return
 	}
 	writeJSON(w, map[string]any{
@@ -538,7 +562,7 @@ func (s *Server) handleInviteCreate(w http.ResponseWriter, r *http.Request) {
 
 // handleInviteAccept joins the signed-in account to the invite's org.
 func (s *Server) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
-	if s.Orgs == nil {
+	if s.Dir == nil {
 		http.Error(w, "organizations are not enabled on this server", http.StatusNotFound)
 		return
 	}
@@ -547,12 +571,12 @@ func (s *Server) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sign in to accept an invite", http.StatusUnauthorized)
 		return
 	}
-	inv, ok := s.Orgs.Redeem(r.PathValue("token"))
+	inv, ok := s.Dir.Redeem(r.PathValue("token"))
 	if !ok {
 		http.Error(w, "this invite is invalid or expired", http.StatusNotFound)
 		return
 	}
-	org, _ := s.Orgs.Get(inv.Org)
+	org, _ := s.Dir.Get(inv.Org)
 	if org.Members[normEmail(me.Email)] == "" {
 		if err := s.quota().CheckSeat(inv.Org, len(org.Members)); err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)
@@ -560,12 +584,12 @@ func (s *Server) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	newMember := org.Members[normEmail(me.Email)] == ""
-	if err := s.Orgs.AddMember(inv.Org, me.Email, RoleMember); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err := s.Dir.AddMember(inv.Org, me.Email, RoleMember); err != nil {
+		s.writeDirErr(w, inv.Org, err)
 		return
 	}
 	if newMember {
-		s.Orgs.RecordInviteUse(r.PathValue("token"))
+		s.Dir.RecordInviteUse(r.PathValue("token"))
 	}
 	writeJSON(w, map[string]any{"ok": true, "org": map[string]string{"id": org.ID, "name": org.Name}})
 }

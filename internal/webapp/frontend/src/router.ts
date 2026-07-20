@@ -2,6 +2,7 @@
 //   volume mode:  /<path>
 //   hub mode:     /<project-id>/<path>
 //   invite:       /join/<token>
+//   org admin:    /orgs/<org-id>
 // Each path segment is percent-encoded for odd characters, but the "/"
 // separators stay literal so the URL reads like a real file path. This is
 // why routes are parsed by hand instead of with a route-matching library:
@@ -28,6 +29,10 @@ export const VIEW_ROUTES = new Set(["insights", "history", "install", "settings"
 export type ViewName = "insights" | "history" | "install" | "settings";
 
 export interface Route {
+  // Org administration is not project-scoped, so it is a top-level route
+  // rather than a view under a project. The server hands out this URL (see
+  // manage_url on /api/orgs), which is why it is reserved here.
+  org?: string;
   project?: string;
   path: string;
   view?: ViewName;
@@ -37,6 +42,9 @@ export interface Route {
 export function parseRoute(pathname: string, mode: "volume" | "hub"): Route {
   const raw = pathname.replace(/^\/+/, "");
   if (mode !== "hub") return { path: raw ? decodePath(raw) : "" };
+  if (raw === "orgs" || raw.startsWith("orgs/")) {
+    return { org: raw.slice(5).replace(/\/+$/, ""), path: "" };
+  }
   const slash = raw.indexOf("/");
   if (slash === -1) return { project: raw, path: "" };
   const r: Route = { project: raw.slice(0, slash), path: decodePath(raw.slice(slash + 1)) };

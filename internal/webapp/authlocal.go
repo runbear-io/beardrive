@@ -400,6 +400,29 @@ func (a *BuiltinAuth) grantDevice(id, userID string) bool {
 	return true
 }
 
+// Branding is the hub name this provider renders on its own pages.
+func (a *BuiltinAuth) Branding() string { return a.Brand }
+
+// Policy reports this provider's signup gates (webapp.AccountApprover). The
+// provider assembles it so the hub never reaches into these fields itself.
+func (a *BuiltinAuth) Policy() SignupPolicy {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	admins := make([]string, 0, len(a.Admins))
+	for e := range a.Admins {
+		admins = append(admins, e)
+	}
+	sort.Strings(admins)
+	return SignupPolicy{
+		RequireVerification: a.RequireVerification,
+		RequireApproval:     a.RequireApproval,
+		AllowSignup:         a.AllowSignup,
+		AllowedDomains:      a.AllowedDomains,
+		Admins:              admins,
+		Mailer:              a.Mail != nil,
+	}
+}
+
 // PendingUsers lists accounts awaiting admin approval, oldest first.
 func (a *BuiltinAuth) PendingUsers() []User {
 	a.mu.Lock()
@@ -606,8 +629,34 @@ font-family:ui-monospace,Menlo,monospace}
 }
 
 func field(label, name, typ, value string) string {
-	return fmt.Sprintf(`<label>%s</label><input name=%q type=%q value=%q required>`,
-		html.EscapeString(label), name, typ, html.EscapeString(value))
+	return fmt.Sprintf(`<label for="f-%s">%s</label><input id="f-%s" name=%q type=%q value=%q autocomplete=%q required>`,
+		name, html.EscapeString(label), name, name, typ, html.EscapeString(value), autocompleteFor(name, typ))
+}
+
+// autocompleteFor names a field's purpose so browsers and password managers
+// fill it (WCAG 1.3.5). A password field's purpose depends on the page, not
+// its name: offering a saved credential on a signup form is worse than
+// offering nothing, so those callers use newPasswordField.
+func autocompleteFor(name, typ string) string {
+	switch name {
+	case "email":
+		return "email"
+	case "name":
+		return "name"
+	case "code":
+		return "one-time-code"
+	}
+	if typ == "password" {
+		return "current-password"
+	}
+	return "on"
+}
+
+// newPasswordField is field() for a password being CREATED (signup, reset),
+// so a manager generates one instead of filling an existing login.
+func newPasswordField(label, name string) string {
+	return fmt.Sprintf(`<label for="f-%s">%s</label><input id="f-%s" name=%q type="password" autocomplete="new-password" required>`,
+		name, html.EscapeString(label), name, name)
 }
 
 func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
@@ -715,7 +764,7 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 		field("Name", "name", "text", r.FormValue("name")),
 		field("Email", "email", "email", r.FormValue("email")),
 		domainNote,
-		field("Password (min 8 chars)", "password", "password", ""),
+		newPasswordField("Password (min 8 chars)", "password"),
 		errMsg, url.QueryEscape(next)))
 }
 
@@ -863,7 +912,7 @@ func (a *BuiltinAuth) pageResetConfirm(w http.ResponseWriter, r *http.Request) {
 
 func resetForm(token, msg string) string {
 	return fmt.Sprintf(`<form method="post"><input type="hidden" name="token" value=%q>%s%s<button>Set password</button></form>`,
-		html.EscapeString(token), field("New password (min 8 chars)", "password", "password", ""), msg)
+		html.EscapeString(token), newPasswordField("New password (min 8 chars)", "password"), msg)
 }
 
 func requestBaseURL(r *http.Request) string {

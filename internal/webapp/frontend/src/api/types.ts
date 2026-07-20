@@ -49,6 +49,10 @@ export interface Org {
   role: string; // the signed-in account's role in this org
   members: OrgMember[];
   created?: string;
+  // Where this org is administered: the hub's own page on a self-hosted
+  // install, an external directory's page on a managed one. Follow it; do
+  // not branch on it.
+  manage_url: string;
 }
 
 export interface OrgList {

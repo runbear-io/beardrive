@@ -37,10 +37,65 @@ import {
 // so style.css applies unchanged.
 
 export function toggleSidebar() {
+  const opening = !document.body.classList.contains("sb-open");
   document.body.classList.toggle("sb-open");
+  syncSidebarInert();
+  // The drawer is modal for the mouse (scrim, click-to-dismiss); make it modal
+  // for the keyboard too. Without this, Tab walks from the drawer into the
+  // content BEHIND the scrim, where clicks do nothing — and because the menu
+  // button follows the sidebar in DOM order, the nav was only reachable by
+  // tabbing backwards.
+  if (opening) {
+    document.getElementById("sidebar")?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+  } else {
+    document.getElementById("menu-btn")?.focus();
+  }
 }
+
+const FOCUSABLE = 'a[href], button:not(:disabled), select, input, [tabindex]:not([tabindex="-1"])';
 export function closeSidebarOnMobile() {
+  const wasOpen = document.body.classList.contains("sb-open");
   document.body.classList.remove("sb-open");
+  syncSidebarInert();
+  // Closing returns focus to the control that opened it — otherwise focus
+  // falls to <body> and the next Tab restarts from the top of the document.
+  if (wasOpen && window.innerWidth <= SIDEBAR_BREAKPOINT) {
+    document.getElementById("menu-btn")?.focus();
+  }
+}
+
+// The sidebar is off-canvas below the breakpoint — translated out of view, but
+// still in the DOM, so its nine controls stayed in the tab order with no
+// visible focus indicator: nine dead stops before the first thing on screen
+// (WCAG 2.4.7). `inert` removes focusability and AT exposure together, which
+// is exactly the "it isn't there right now" the transform already implies.
+const SIDEBAR_BREAKPOINT = 900; // must match the off-canvas media query in style.css
+
+export function syncSidebarInert() {
+  const el = document.getElementById("sidebar");
+  if (!el) return;
+  const open = document.body.classList.contains("sb-open");
+  const hidden = window.innerWidth <= SIDEBAR_BREAKPOINT && !open;
+  if (hidden) el.setAttribute("inert", "");
+  else el.removeAttribute("inert");
+  // The mirror: while the drawer is over the page, the page is not reachable.
+  const main = document.getElementById("main");
+  if (main) {
+    if (open && window.innerWidth <= SIDEBAR_BREAKPOINT) main.setAttribute("inert", "");
+    else main.removeAttribute("inert");
+  }
+  el.setAttribute("aria-modal", String(open && window.innerWidth <= SIDEBAR_BREAKPOINT));
+  // The trigger's state lives in a body class rather than React state, so it
+  // is declared from here — the one place that always runs when it changes.
+  document.getElementById("menu-btn")?.setAttribute("aria-expanded", String(open));
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("resize", syncSidebarInert);
+  // Escape closes the drawer, the way every other overlay in the app does.
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("sb-open")) closeSidebarOnMobile();
+  });
 }
 
 // Icons are lucide (lucide.dev) components behind the historical sprite
@@ -132,6 +187,12 @@ export function Page(props: {
   return <div className={cls}>{props.children}</div>;
 }
 
+// Applies the initial inert state as soon as the element exists, so the first
+// paint at a small width is already correct.
+function sidebarInert(el: HTMLElement | null) {
+  if (el) syncSidebarInert();
+}
+
 export function AppShell(props: {
   vault: ReactNode;
   projectsNav?: ReactNode;
@@ -145,7 +206,7 @@ export function AppShell(props: {
   return (
     <>
       <div id="sb-backdrop" onClick={closeSidebarOnMobile} />
-      <aside id="sidebar">
+      <aside id="sidebar" ref={sidebarInert}>
         {props.vault}
         {props.projectsNav}
         {props.tree ?? <nav id="tree" aria-label="Files" />}
@@ -226,7 +287,15 @@ export function VaultHeader(props: {
 export function Topbar(props: { crumb?: ReactNode; meta?: ReactNode; actions?: ReactNode }) {
   return (
     <header id="topbar">
-      <button id="menu-btn" className="icon-btn" title="Menu" aria-label="Menu" onClick={toggleSidebar}>
+      <button
+        id="menu-btn"
+        className="icon-btn"
+        title="Menu"
+        aria-label="Menu"
+        aria-controls="sidebar"
+        aria-expanded="false"
+        onClick={toggleSidebar}
+      >
         <Icon name="menu" />
       </button>
       <span id="crumb">{props.crumb}</span>

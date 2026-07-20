@@ -1,4 +1,4 @@
-import { useRef, useSyncExternalStore } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -91,23 +91,46 @@ function PromptBody({ m }: { m: Prompt }) {
     emit(null);
     m.resolve(v);
   };
-  const ok = () => done(input.current!.value.trim() || null);
+  // Return the raw string: null means cancelled, "" means the user submitted
+// nothing. Collapsing the two here made every caller's blank-input branch
+// unreachable.
+  const [err, setErr] = useState("");
+  const ok = () => {
+    const v = input.current!.value;
+    if (!v.trim()) {
+      // Keep the dialog open and say so where the user is looking, the way
+      // the org-rename form does — closing and toasting loses their context.
+      setErr("Give it a name.");
+      input.current!.focus();
+      return;
+    }
+    done(v);
+  };
   return (
     <>
       <DialogTitle asChild>
         <h3>{m.title}</h3>
       </DialogTitle>
-      <label className="modal-label">{m.label}</label>
+      <label className="modal-label" htmlFor="modal-input">{m.label}</label>
       <input
         className="modal-input"
         type="text"
         autoComplete="off"
         defaultValue={m.value}
         ref={input}
+        id="modal-input"
         autoFocus
         onFocus={(e) => e.currentTarget.select()}
+        aria-invalid={!!err}
+        aria-describedby={err ? "modal-input-err" : undefined}
+        onChange={() => err && setErr("")}
         onKeyDown={(e) => e.key === "Enter" && ok()}
       />
+      {err && (
+        <span id="modal-input-err" role="alert" className="field-err">
+          {err}
+        </span>
+      )}
       <div className="modal-actions">
         <Button variant="subtle" onClick={() => done(null)}>
           Cancel
@@ -132,10 +155,10 @@ function ConfirmBody({ m }: { m: Confirm }) {
       </DialogTitle>
       <p className="modal-msg">{m.message}</p>
       <div className="modal-actions">
-        <Button variant="subtle" onClick={() => done(false)}>
+        <Button variant="subtle" onClick={() => done(false)} autoFocus={m.danger}>
           Cancel
         </Button>
-        <Button variant={m.danger ? "danger" : "primary"} onClick={() => done(true)} autoFocus>
+        <Button variant={m.danger ? "danger" : "primary"} onClick={() => done(true)} autoFocus={!m.danger}>
           {m.confirmLabel}
         </Button>
       </div>

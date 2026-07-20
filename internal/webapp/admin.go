@@ -14,14 +14,14 @@ import (
 
 // projectOwner returns true when the request's account owns the project's org.
 func (s *Server) projectOwner(r *http.Request, projectID string) bool {
-	if s.Orgs == nil || s.Auth == nil {
+	if s.Dir == nil || s.Auth == nil {
 		return true
 	}
 	org := s.orgOf(projectID)
 	if org == "" {
 		return true
 	}
-	return s.Orgs.Role(org, s.requestUser(r).Email) == RoleOwner
+	return s.Dir.Role(org, s.requestUser(r).Email) == RoleOwner
 }
 
 // handleProjectRename renames a project. Owner of its org only.
@@ -80,12 +80,12 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 // so an owner can audit "what have we made public?" in one place. Any org
 // member may view; only owners revoke (via the existing per-share endpoint).
 func (s *Server) handleOrgShares(w http.ResponseWriter, r *http.Request) {
-	if s.Shares == nil || s.Orgs == nil {
+	if s.Shares == nil || s.Dir == nil {
 		http.Error(w, "sharing is not enabled on this server", http.StatusNotFound)
 		return
 	}
 	orgID := r.PathValue("org")
-	if s.Orgs.Role(orgID, s.requestUser(r).Email) == "" {
+	if s.Dir.Role(orgID, s.requestUser(r).Email) == "" {
 		http.Error(w, "you are not a member of this organization", http.StatusForbidden)
 		return
 	}
@@ -103,11 +103,19 @@ func (s *Server) handleOrgShares(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"shares": out})
 }
 
-// builtinAuth returns the concrete OSS auth provider, or nil for a swapped
-// provider that doesn't support approval.
-func (s *Server) builtinAuth() *BuiltinAuth {
-	a, _ := s.Auth.(*BuiltinAuth)
-	return a
+// approver returns the auth provider's account-administration half, if it has
+// one. A provider whose accounts live in an external identity system does not:
+// there is no local approval queue to show and no local policy to flip.
+func (s *Server) approver(w http.ResponseWriter) (AccountApprover, bool) {
+	a, ok := s.Auth.(AccountApprover)
+	if !ok {
+		// 503, not an empty list: "no queue here" and "queue is empty" are
+		// different answers, and only one of them is true.
+		http.Error(w, "accounts on this hub are administered in its identity provider",
+			http.StatusServiceUnavailable)
+		return nil, false
+	}
+	return a, true
 }
 
 // handleAdminPending lists accounts awaiting approval. Hub admins only.
@@ -116,9 +124,8 @@ func (s *Server) handleAdminPending(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "hub admins only", http.StatusForbidden)
 		return
 	}
-	a := s.builtinAuth()
-	if a == nil {
-		writeJSON(w, map[string]any{"pending": []any{}})
+	a, ok := s.approver(w)
+	if !ok {
 		return
 	}
 	writeJSON(w, map[string]any{"pending": a.PendingUsers()})
@@ -133,9 +140,8 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "hub admins only", http.StatusForbidden)
 		return
 	}
-	a := s.builtinAuth()
-	if a == nil {
-		http.Error(w, "policy is not supported by this auth provider", http.StatusNotFound)
+	a, ok := s.approver(w)
+	if !ok {
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -149,7 +155,7 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		// Email verification is only a real gate with a mailer; refuse to turn
 		// it on without SMTP rather than silently logging links.
-		if req.RequireVerification && a.Mail == nil {
+		if req.RequireVerification && !a.Policy().Mailer {
 			http.Error(w, "email verification needs SMTP configured on the server", http.StatusBadRequest)
 			return
 		}
@@ -158,18 +164,7 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	admins := make([]string, 0, len(a.Admins))
-	for e := range a.Admins {
-		admins = append(admins, e)
-	}
-	writeJSON(w, map[string]any{
-		"require_verification": a.RequireVerification,
-		"require_approval":     a.RequireApproval,
-		"allow_signup":         a.AllowSignup,
-		"allowed_domains":      a.AllowedDomains, // read-only (server config)
-		"admins":               admins,           // read-only (server config)
-		"mailer":               a.Mail != nil,
-	})
+	writeJSON(w, a.Policy())
 }
 
 // handleAdminApprove activates a pending account. Hub admins only.
@@ -178,9 +173,8 @@ func (s *Server) handleAdminApprove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "hub admins only", http.StatusForbidden)
 		return
 	}
-	a := s.builtinAuth()
-	if a == nil {
-		http.Error(w, "approval is not supported by this auth provider", http.StatusNotFound)
+	a, ok := s.approver(w)
+	if !ok {
 		return
 	}
 	if err := a.Approve(r.PathValue("id")); err != nil {
@@ -196,9 +190,8 @@ func (s *Server) handleAdminDeny(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "hub admins only", http.StatusForbidden)
 		return
 	}
-	a := s.builtinAuth()
-	if a == nil {
-		http.Error(w, "approval is not supported by this auth provider", http.StatusNotFound)
+	a, ok := s.approver(w)
+	if !ok {
 		return
 	}
 	if err := a.Deny(r.PathValue("id")); err != nil {

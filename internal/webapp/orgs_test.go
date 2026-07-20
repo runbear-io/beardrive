@@ -144,7 +144,7 @@ func orgHubSrv(t *testing.T) (h http.Handler, srv *Server, alice, bob *http.Cook
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.Orgs = orgs
+	srv.Dir = LocalDirectory{OrgDB: orgs}
 	shares, err := OpenShareDB(filepath.Join(t.TempDir(), "shares.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -279,4 +279,118 @@ func TestProjectNamesScopedToOrg(t *testing.T) {
 		t.Fatalf("alice must re-join %s, got %+v", pa.ID, out)
 	}
 	_ = alice
+}
+
+// The account menu follows manage_url without deciding anything, so the
+// server has to hand out a usable destination in both deployments: its own
+// org page by default, whatever the deployment says when orgs live in an
+// external directory.
+func TestOrgManageURL(t *testing.T) {
+	h, srv, alice, _, pa := orgHubSrv(t)
+
+	orgOf := func(t *testing.T) map[string]any {
+		t.Helper()
+		rec := doAs(t, h, "GET", "/api/orgs", nil, alice)
+		if rec.Code != 200 {
+			t.Fatalf("GET /api/orgs: %d", rec.Code)
+		}
+		var out struct {
+			Orgs []map[string]any `json:"orgs"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Orgs) != 1 {
+			t.Fatalf("orgs = %d, want 1", len(out.Orgs))
+		}
+		return out.Orgs[0]
+	}
+
+	// Self-hosted: the hub's own org page, which the SPA serves.
+	if got, want := orgOf(t)["manage_url"], "/orgs/"+pa.Org; got != want {
+		t.Errorf("manage_url = %v, want %v", got, want)
+	}
+	rec := doAs(t, h, "GET", "/orgs/"+pa.Org, nil, alice)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<div id=\"root\">") {
+		t.Errorf("GET /orgs/<id> = %d, want the SPA shell", rec.Code)
+	}
+
+	// Managed: an external directory owns the org, so the link leaves.
+	srv.Dir = externalDir{Directory: srv.Dir}
+	if got, want := orgOf(t)["manage_url"], "https://auth.example.com/org/members/pa-"+pa.Org; got != want {
+		t.Errorf("managed manage_url = %v, want %v", got, want)
+	}
+}
+
+// externalDir stands in for a directory whose orgs live somewhere else: it
+// reads like the local one but administration happens off-hub.
+type externalDir struct{ Directory }
+
+func (externalDir) ManageURL(orgID string) string {
+	return "https://auth.example.com/org/members/pa-" + orgID
+}
+
+// A directory that does not own its organizations turns every org write into
+// 409 plus the page that does own them. This is what replaces per-deployment
+// route blocking: the hub answers generically and never learns why.
+func TestReadOnlyDirectoryRefusesWrites(t *testing.T) {
+	h, srv, alice, bob, pa := orgHubSrv(t)
+	srv.Dir = readOnlyDir{Directory: srv.Dir}
+
+	writes := []struct {
+		method, url string
+		body        any
+	}{
+		{"PATCH", "/api/orgs/" + pa.Org, map[string]string{"name": "nope"}},
+		{"PATCH", "/api/orgs/" + pa.Org + "/members/bob@x.io", map[string]string{"role": "owner"}},
+		{"DELETE", "/api/orgs/" + pa.Org + "/members/bob@x.io", nil},
+		{"POST", "/api/orgs/" + pa.Org + "/invites", nil},
+	}
+	for _, tc := range writes {
+		rec := doAs(t, h, tc.method, tc.url, tc.body, alice)
+		if rec.Code != 409 {
+			t.Errorf("%s %s = %d, want 409", tc.method, tc.url, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "https://elsewhere.example/") {
+			t.Errorf("%s %s body = %q, want the manage URL", tc.method, tc.url, rec.Body)
+		}
+	}
+
+	// Creating a project when you have no org is a write too: the hub cannot
+	// invent one, and the answer has to point somewhere useful rather than
+	// 403ing about an organization that does not exist.
+	bobRec := doAs(t, h, "POST", "/api/projects", map[string]string{"name": "fresh"}, bob)
+	if bobRec.Code != 409 {
+		t.Errorf("project create with no org = %d, want 409", bobRec.Code)
+	}
+	if !strings.Contains(bobRec.Body.String(), "https://elsewhere.example/") {
+		t.Errorf("project create body = %q, want the manage URL", bobRec.Body)
+	}
+
+	// Reads are unaffected: the org still lists, with the external link.
+	rec := doAs(t, h, "GET", "/api/orgs", nil, alice)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "https://elsewhere.example/") {
+		t.Errorf("GET /api/orgs = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// On a hub whose orgs live elsewhere, the org page must not be reachable at
+// all — a bookmark or a typed URL would otherwise paint a live owner console
+// whose every control 409s.
+func TestOrgPageRedirectsWhenManagedElsewhere(t *testing.T) {
+	h, srv, alice, _, pa := orgHubSrv(t)
+
+	// Hub-owned: the SPA shell, as before.
+	if rec := doAs(t, h, "GET", "/orgs/"+pa.Org, nil, alice); rec.Code != 200 {
+		t.Fatalf("self-hosted /orgs/<id> = %d, want 200", rec.Code)
+	}
+
+	srv.Dir = readOnlyDir{Directory: srv.Dir}
+	rec := doAs(t, h, "GET", "/orgs/"+pa.Org, nil, alice)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("managed /orgs/<id> = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "https://elsewhere.example/"+pa.Org {
+		t.Errorf("Location = %q, want the provider's page", loc)
+	}
 }

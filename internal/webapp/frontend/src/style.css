@@ -76,6 +76,17 @@ body {
 }
 ::selection { background: var(--glow); color: var(--accent-bright); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 5px; }
+:focus-visible { outline-color: var(--accent); }
+.admin input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.admin input[aria-invalid="true"]:focus-visible { outline-color: var(--del); }
+[role="dialog"] input[aria-invalid="true"] { border-color: var(--del); }
+[role="dialog"] input[aria-invalid="true"]:focus-visible { outline-color: var(--del); }
+button:disabled, .btn:disabled { cursor: default; }
+input[type="checkbox"] { accent-color: var(--accent); width: 20px; height: 20px; color-scheme: dark; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
 .sprite { position: absolute; }
 .ico {
   width: 16px; height: 16px; flex: none;
@@ -176,19 +187,31 @@ button, input, a.btn { font-family: inherit; }
 .modal, #palette { translate: none; }
 
 /* react-table admin tables ride the .admin-item/.ai-* vocabulary */
-.admin-card-table { padding: 0; overflow: hidden; }
-.admin-table { width: 100%; border-collapse: collapse; }
+.admin-card-table { padding: 0; }
+.admin-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.admin-table td .ai-main, .admin-table td a.ai-main, .admin-table td .ai-copy,
+.admin-table td .ai-tag {
+  display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* table-layout: fixed takes its tracks from the first row, so the actions
+   column needs a real width — otherwise `width: 100%` on the first cell
+   starves it to nothing and the content of column two spills across it. */
+/* table-layout: fixed takes its tracks from the FIRST ROW, which is the
+   header — sizing td alone did nothing. The last column holds the row's
+   controls (a role select plus a destructive button), so it gets a real
+   track and the text column takes the rest. */
+.admin-table th:last-child, .admin-table td:last-child { width: 186px; text-align: right; }
+
 .admin-table tr:last-child td { border-bottom: none; }
 .admin-table th {
   text-align: left; font-size: 11px; font-weight: 600; letter-spacing: .05em;
-  text-transform: uppercase; color: var(--text-faint); padding: 6px 10px;
-  border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
+  text-transform: uppercase; color: var(--text-faint); padding: 0;
+  border-bottom: 1px solid var(--border); user-select: none;
 }
-.admin-table th:hover { color: var(--text-dim); }
-.admin-table td { padding: 0; border-bottom: 1px solid var(--border); }
+.admin-table td { padding: 0; border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; }
 .admin-table tr.admin-item { display: table-row; }
 .admin-table tr.admin-item td { padding: 8px 10px; }
-.admin-table tr.admin-item td:first-child { width: 100%; }
+
 
 /* ---- project menu ---- */
 .nav-menu { list-style: none; margin: 6px 0 0; padding: 0; }
@@ -253,8 +276,8 @@ button, input, a.btn { font-family: inherit; }
 #account-menu [role="menuitem"]:hover { background: var(--hover); color: var(--text); }
 #account-menu [role="menuitem"] b { font-weight: 600; }
 #account-menu [role="menuitem"] .ico { width: 15px; height: 15px; }
-#account-menu #signout { color: var(--danger, #e5534b); }
-#account-menu #signout:hover { color: var(--danger, #e5534b); background: var(--hover); }
+#account-menu #signout { color: var(--del); }
+#account-menu #signout:hover { color: var(--del); background: var(--hover); }
 
 /* ---- main pane ---- */
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -333,31 +356,71 @@ button, input, a.btn { font-family: inherit; }
 /* width comes from .page (app) — see #content */
 .admin h1 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 6px; color: #f4f6f9; }
 .admin h3 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); font-weight: 600; margin: 30px 0 10px; }
-.admin-sub { color: var(--text-dim); font-size: 13.5px; margin: 0 0 6px; line-height: 1.55; }
+.admin-lbl { flex: 1 1 100%; margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--text-dim); }
+.admin-sub { color: var(--text-dim); font-size: 13.5px; margin: -2px 0 16px; line-height: 1.55; }
 .admin-h { display: flex; align-items: center; justify-content: space-between; margin: 30px 0 10px; }
 .admin-h h3 { margin: 0; }
 .admin-row { display: flex; gap: 9px; margin-bottom: 8px; }
 .admin-row input { flex: 1; height: 34px; padding: 0 12px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; outline: none; }
 .admin-row input:focus { border-color: var(--accent); background: var(--hover); }
 .admin-list { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; background: var(--bg-side); }
+/* Belt and braces, and it must come after .admin-list: if a column still
+   overflows, scroll it rather than clipping a destructive control out of
+   reach. */
+.admin-list.admin-card-table { overflow-x: auto; overflow-y: hidden; }
 .admin-item { display: flex; align-items: center; gap: 11px; padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+.modal-actions .ai-btn { height: 32px; }
+.empty a { color: var(--accent); text-decoration: none; display: inline-block; padding: 6px 10px; }
+.empty a:hover { text-decoration: underline; }
+.empty h3 { margin: 0 0 8px; font-size: 16px; color: var(--text); }
+.ai-copy { text-align: left; background: none; border: 0; padding: 6px 0; cursor: pointer; }
+.ai-copy:hover { color: var(--text); }
+a.ai-main { color: var(--text-dim); text-decoration: none; padding: 6px 0; }
+a.ai-main:hover { color: var(--accent); }
+.th-sort { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 6px 10px; font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+.th-sort:hover { color: var(--text-dim); }
+/* Role controls share one track so the value sits at the same x on every
+   row, whether it is a select or the static tag on your own row. */
+.proj-trigger > [data-slot="select-value"] {
+  display: block; flex: 1 1 auto; min-width: 0; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.role-cell { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; justify-items: start; }
+.admin-table td .role-static { text-align: left; }
+.role-chip-row { margin: -6px 0 12px; }
+.role-chip { margin-left: 0; padding: 2px 8px; border: 1px solid var(--border-2); border-radius: 99px; vertical-align: middle; }
+.ext { margin-left: 4px; color: var(--text-faint); font-size: 11px; }
 .admin-item:last-child { border-bottom: none; }
-.admin-item:hover { background: rgba(255,255,255,.015); }
+.admin-item:hover { background: var(--hover); }
+.field-err { flex: 1 1 100%; margin: 6px 0 0; }
+.admin-row { flex-wrap: wrap; }
+.admin-row input[aria-invalid="true"] { border-color: var(--del); }
 .ai-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.admin-item > .ai-main { flex: 1 1 55%; min-width: 22ch; }
+.admin-item > .ai-tag { flex: 0 0 auto; min-width: 0; max-width: 45%; }
+@media (max-width: 1000px) {
+  /* Between the drawer breakpoint and 1000px the meta still clipped; let it
+     drop to its own line rather than lose the expiry year. */
+  .admin-item { flex-wrap: wrap; }
+  .admin-item > .ai-tag { flex: 1 1 100%; max-width: 100%; }
+}
+.admin-table td .ai-main { min-width: 0; }
 .ai-main.mono { font: 12px var(--mono); color: var(--text-dim); cursor: pointer; }
-.ai-tag { font-size: 11.5px; color: var(--text-faint); flex: none; }
+.ai-tag { font-size: 11.5px; color: var(--text-faint); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .admin-item select { height: 28px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; font: inherit; font-size: 12.5px; cursor: pointer; }
 .admin-item select:hover { border-color: var(--border-2); }
 .ai-btn, .ai-del { flex: none; height: 27px; padding: 0 11px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; }
+/* One destructive treatment: Delete removes a whole project and was rendering
+   as bare text beside a bordered Rename. */
+.ai-del { color: var(--del); border-color: rgba(242, 109, 109, .28); }
+.ai-del:hover { background: rgba(242, 109, 109, .12); border-color: var(--del); color: #ff8b8b; }
 .ai-btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-2); }
-.ai-del { color: var(--del); border-color: transparent; background: transparent; }
-.ai-del:hover { background: rgba(242,109,109,.12); color: #ff8b8b; }
 .admin-empty { padding: 14px; color: var(--text-faint); font-size: 13px; }
 .admin-item.toggle { cursor: pointer; align-items: flex-start; }
 .admin-item.toggle .ai-main { white-space: normal; }
 .tg-label { font-size: 13.5px; font-weight: 550; color: var(--text); }
 .tg-desc { font-size: 12px; color: var(--text-faint); margin-top: 3px; line-height: 1.5; }
-.admin-item.toggle input { width: 16px; height: 16px; margin-top: 2px; accent-color: var(--accent); flex: none; }
+.admin-item.toggle input { margin-top: 2px; flex: none; }
 
 /* ---- folder listing ---- */
 /* .dirlist width comes from .page (app) */
@@ -395,6 +458,8 @@ button, input, a.btn { font-family: inherit; }
 .gd-tabs { display: flex; gap: 2px; margin: 20px 0 16px; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .gd-tab { font: inherit; font-size: 13px; font-weight: 600; padding: 7px 12px 9px; background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--text-faint); cursor: pointer; white-space: nowrap; }
 .gd-tab:hover { color: var(--text); }
+#account-btn.active { background: var(--glow); }
+#account-btn.active .acct b { color: var(--accent-bright); }
 .gd-tab.active { color: var(--accent-bright); border-bottom-color: var(--accent); }
 .gd-step { margin: 0 0 18px; }
 .gd-step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 3px; }
@@ -542,7 +607,7 @@ button, input, a.btn { font-family: inherit; }
   #sidebar { position: fixed; z-index: 60; top: 0; left: 0; height: 100%; transform: translateX(-100%); transition: transform .2s ease; box-shadow: 0 0 40px rgba(0,0,0,.6); }
   body.sb-open #sidebar { transform: translateX(0); }
   body.sb-open #sb-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 50; }
-  .icon-btn { display: inline-flex; width: 44px; height: 44px; }
+  .icon-btn, #search-btn { display: inline-flex; width: 44px; height: 44px; }
   #content { padding: 24px 18px 70px; }
   #topbar { padding: 0 8px; gap: 4px; }
   .btn .lbl { display: none; }
@@ -570,12 +635,47 @@ button, input, a.btn { font-family: inherit; }
   .admin-item { flex-wrap: wrap; row-gap: 8px; padding: 12px 14px; }
   .admin-item select { height: 44px; }
   .ai-btn, .ai-del { height: auto; min-height: 44px; padding: 0 12px; }
+  /* react-table renders rows as `display: table-row`, which makes every
+     flex rule above inert and lets the last column (Remove) fall outside
+     the card, where `.admin-card-table { overflow: hidden }` clips it —
+     one long email made member removal impossible on every row. Stack the
+     table into rows instead; a nested horizontal scroller on touch would
+     be undiscoverable. */
+  .admin-table thead { display: none; }
+  .admin-table, .admin-table tbody, .admin-table td { display: block; width: auto; }
+  .admin-table tr.admin-item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .admin-table tr.admin-item td { padding: 0; border-bottom: none; }
+  .admin-table tr.admin-item td:first-child { flex: 1 1 100%; width: auto; }
+  /* Beats `.admin-table th:last-child, td:last-child` (0,0,2,1): stacked rows
+     are flex children, so the desktop track and right-alignment are wrong. */
+  .admin-table tr.admin-item td:last-child { width: auto; text-align: left; }
+  /* Radix menu items miss the 44px floor the rest of the app meets. */
+  [data-slot="dropdown-menu-item"] { min-height: 44px; }
+  /* The rename row put a 34px input beside a 44px button and truncated the
+     value; stack them at full height instead. */
+  /* The projects list was capped at 32% of the drawer and sliced "Settings"
+     in half on every phone; let the tree below absorb the pressure instead. */
+  #projects { flex: 0 1 auto; max-height: none; }
+  .admin-row { flex-wrap: wrap; }
+  .admin-row input { flex: 1 1 100%; min-height: 44px; }
+  .admin-row button { flex: 0 0 auto; align-self: flex-start; min-height: 44px; }
   /* No hover on touch: a truncated email/URL would be unreadable — wrap
      it. The name/URL takes the whole row (tag + buttons drop below):
      without full-row basis, a long flex:none .ai-tag starves the URL down
      to one character per line. break-word prefers natural break points
      (@, .) and still splits long unbroken URLs when it must. */
-  .admin-item .ai-main { flex: 1 1 100%; white-space: normal; overflow-wrap: break-word; }
+  .admin-item .ai-main { flex: 1 1 100%; white-space: normal; overflow-wrap: anywhere; }
+  /* Beats the desktop truncation rule (0,2,1) inside the stacked table. */
+  .admin-table td { white-space: normal; }
+  .admin-table td .ai-main, .admin-table td a.ai-main, .admin-table td .ai-copy, .admin-table td .ai-tag {
+    white-space: normal; overflow-wrap: anywhere;
+  }
+  /* Invite meta (uses, expiry) is the only triage signal an owner has; it was
+     truncating to "· unus…" on every phone-width row. */
+  .admin-item .ai-tag { flex: 1 1 100%; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  /* The invite row's primary action was a 28px target. */
+  .ai-copy { min-height: 44px; display: block; padding: 12px 0; white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
+  a.ai-main { min-height: 44px; display: flex; align-items: center; }
   /* The code-block Copy button needs a real touch target; give one-line
      blocks the height to hold it. */
   .gd-code { min-height: 62px; padding-top: 12px; padding-bottom: 12px; }
@@ -638,7 +738,12 @@ button, input, a.btn { font-family: inherit; }
 .markdown table.frontmatter td { color: var(--text-dim); padding: 6px 12px 6px 0; border-bottom: 1px solid var(--border); }
 .markdown table.frontmatter tr:last-child th, .markdown table.frontmatter tr:last-child td { border-bottom: none; }
 .markdown table.frontmatter code { white-space: pre-wrap; font-size: 11px; }
-.markdown input[type="checkbox"] { accent-color: var(--accent); }
+.markdown .admin input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.admin input[aria-invalid="true"]:focus-visible { outline-color: var(--del); }
+[role="dialog"] input[aria-invalid="true"] { border-color: var(--del); }
+[role="dialog"] input[aria-invalid="true"]:focus-visible { outline-color: var(--del); }
+button:disabled, .btn:disabled { cursor: default; }
+input[type="checkbox"] { accent-color: var(--accent); }
 
 /* rendered HTML files: a sandboxed page in a framed viewport */
 .htmlview { display: block; width: 100%; height: calc(100vh - 150px); border: 1px solid var(--border); border-radius: var(--r-card); background: #fff; }

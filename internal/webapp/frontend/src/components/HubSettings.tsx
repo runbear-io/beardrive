@@ -83,7 +83,12 @@ export function HubSettings() {
             inputProps={form.register("require_approval")}
           />
         </div>
-        <Button variant="primary" type="submit" style={{ marginTop: 14 }}>
+        <Button
+          variant="primary"
+          type="submit"
+          style={{ marginTop: 14 }}
+          disabled={!form.formState.isDirty}
+        >
           Save policy
         </Button>
       </form>

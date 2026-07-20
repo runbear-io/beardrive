@@ -31,6 +31,40 @@ type AuthProvider interface {
 	// Register mounts the provider's own pages and endpoints (/auth/*,
 	// /api/auth/*) on the server mux.
 	Register(mux *http.ServeMux)
+	// Accounts lists every account the provider knows, oldest first. Startup
+	// tasks (the org migration) need it, and both implementations already had
+	// it — declaring it here stops callers reaching for a concrete type.
+	Accounts() []User
+}
+
+// AccountApprover is the optional half of account administration: signup
+// policy and the approval queue behind /api/admin/*. A provider whose accounts
+// live in an external identity system does not implement it, and those routes
+// say so (503) rather than pretending the queue is empty.
+type AccountApprover interface {
+	PendingUsers() []User
+	Approve(id string) error
+	Deny(id string) error
+	SetPolicy(requireVerification, requireApproval bool) error
+	// Policy reports the signup gates as configured. The provider assembles
+	// it, so the hub never reaches into provider fields to render the page.
+	Policy() SignupPolicy
+}
+
+// Brander is the optional hub-name half: a provider that renders its own
+// sign-in pages knows what to call this hub.
+type Brander interface{ Branding() string }
+
+// SignupPolicy is what /api/admin/policy reports: which gates are on, and
+// which of them are server-config owned (read-only to a browser session, so
+// that no one can widen access by clicking).
+type SignupPolicy struct {
+	RequireVerification bool     `json:"require_verification"`
+	RequireApproval     bool     `json:"require_approval"`
+	AllowSignup         bool     `json:"allow_signup"`
+	AllowedDomains      []string `json:"allowed_domains"` // read-only
+	Admins              []string `json:"admins"`          // read-only
+	Mailer              bool     `json:"mailer"`          // SMTP configured?
 }
 
 // authGate wraps the API with authentication when a provider is configured.

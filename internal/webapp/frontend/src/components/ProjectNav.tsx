@@ -44,7 +44,7 @@ export function ProjectNav({
 
   const create = async () => {
     const name = await modalPrompt("New project", "Project name", "", "Create");
-    if (!name) return;
+    if (name === null) return;
     try {
       const out = await postJSON<ProjectCreated>("/api/projects", { name });
       await refresh();
@@ -59,7 +59,7 @@ export function ProjectNav({
     <nav id="projects" aria-label="Projects">
       <div className="nav-head">
         <span>Projects</span>
-        <button className="nav-add" title="New project" onClick={create}>
+        <button className="nav-add" title="New project" aria-label="New project" onClick={create}>
           +
         </button>
       </div>
@@ -73,7 +73,12 @@ export function ProjectNav({
             }
           }}
         >
-          <SelectTrigger id="project-select" aria-label="Switch project" className="proj-trigger">
+          <SelectTrigger
+            id="project-select"
+            aria-label={`Switch project — current: ${projects.find((p) => p.id === currentId)?.name ?? "none"}`}
+            title={projects.find((p) => p.id === currentId)?.name}
+            className="proj-trigger"
+          >
             {currentId && (
               <span
                 className="proj-mark"

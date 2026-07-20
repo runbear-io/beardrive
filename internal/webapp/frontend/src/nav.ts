@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore, type MouseEvent } from "react";
 
 // Minimal synchronous history router. React Router v7 wraps navigation in
 // React.startTransition, which can leave the old view on screen for
@@ -44,6 +44,30 @@ export function useLocationPath(): string {
 // what scroll restoration keys off.
 export function currentNavType(): NavType {
   return navType;
+}
+
+// The single place that decides whether an href is ours to route or the
+// browser's to follow. Everything else just renders a link and lets the
+// server say where it points — no component needs to know which kind of
+// destination it got.
+export function linkProps(href: string) {
+  const internal = href.startsWith("/") && !href.startsWith("//");
+  // An external destination leaves the app, so it opens in its own tab and
+  // says so (callers render an ↗ off the same datum).
+  if (!internal) return { href, target: "_blank", rel: "noopener noreferrer" };
+  return {
+    href,
+    onClick: (e: MouseEvent) => {
+      // Leave modified clicks (new tab/window, download) to the browser.
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+      e.preventDefault();
+      navigate(href);
+      // Navigating away closes the off-canvas sidebar. This lives here, not
+      // in each link, because every in-app link needs it and the ones that
+      // forget leave the drawer sitting on top of the page it just opened.
+      document.body.classList.remove("sb-open");
+    },
+  };
 }
 
 // Render-time redirect (the declarative <Navigate replace> equivalent).

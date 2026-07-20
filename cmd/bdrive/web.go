@@ -319,7 +319,7 @@ credentials); otherwise it is relayed through this server.`,
 				if err != nil {
 					return fmt.Errorf("open org registry: %w", err)
 				}
-				srv.Orgs = orgs
+				srv.Dir = webapp.LocalDirectory{OrgDB: orgs}
 				// Invite links can bootstrap an account on an invite-only hub.
 				auth.InviteValid = orgs.ValidInvite
 				// A hub that predates organizations: sweep its projects into

@@ -99,7 +99,7 @@ func TestE2EServe(t *testing.T) {
 	if err := db.SetOrg(p.ID, org.ID); err != nil {
 		t.Fatal(err)
 	}
-	srv.Orgs = orgs
+	srv.Dir = LocalDirectory{OrgDB: orgs}
 	auth.InviteValid = orgs.ValidInvite
 
 	shares, err := OpenShareDB(filepath.Join(state, "shares.json"))

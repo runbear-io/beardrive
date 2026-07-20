@@ -19,6 +19,7 @@ package webapp
 
 import (
 	"context"
+	"errors"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -74,8 +75,12 @@ type Server struct {
 	// Reads, when set, aggregates read telemetry (viewer, share, and agent
 	// reads) for the heat API. Nil means read tracking is off.
 	Reads *ReadLedger
-	// Orgs, when set, walls projects off by organization membership.
-	Orgs *OrgDB
+	// Dir, when set, walls projects off by organization membership and owns
+	// every org read and write the hub performs. LocalDirectory is the
+	// built-in implementation; a managed deployment supplies its own so that
+	// orgs come from the same place identities do. Nil means single-volume
+	// mode: no orgs, every authenticated request passes.
+	Dir Directory
 	// Quota, when set, enforces plan limits (managed deployments). Nil
 	// means UnlimitedQuota: the open-source server never says no.
 	Quota QuotaProvider
@@ -399,6 +404,17 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
+		// A hub whose organizations live elsewhere has no org page to show:
+		// send the browser where they are actually administered rather than
+		// painting a console whose every control would 409. The account menu
+		// already links to the same place; this covers bookmarks, history, and
+		// hand-typed URLs, which are the paths a link cannot reach.
+		if id, ok := strings.CutPrefix(upath, "orgs/"); ok && s.Dir != nil {
+			if u := s.Dir.ManageURL(id); !strings.HasPrefix(u, "/") {
+				http.Redirect(w, r, u, http.StatusFound)
+				return
+			}
+		}
 		if upath != "" && upath != "index.html" {
 			if f, err := static.Open(upath); err == nil {
 				fi, statErr := f.Stat()
@@ -430,10 +446,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// show the admin surfaces. Never leak more than these booleans.
 	me := s.requestUser(r)
 	brand := ""
-	if a := s.builtinAuth(); a != nil {
-		auth["allow_signup"] = a.AllowSignup
+	if a, ok := s.Auth.(AccountApprover); ok {
+		// Only a hub that owns its accounts can offer self-signup or an admin
+		// queue; one whose identities come from elsewhere offers neither.
+		auth["allow_signup"] = a.Policy().AllowSignup
 		auth["admin"] = me.Admin
-		brand = a.Brand
+	}
+	if b, ok := s.Auth.(Brander); ok {
+		brand = b.Branding()
 	}
 	if brand == "" {
 		brand = s.Volume
@@ -504,6 +524,13 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	org, err := s.orgForCreate(r, req.Org)
 	if err != nil {
+		if errors.Is(err, ErrManagedElsewhere) {
+			// A user with no organization on a hub that cannot create one:
+			// send them where organizations actually come from, rather than a
+			// 403 naming an org that does not exist.
+			s.writeDirErr(w, "", err)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -520,17 +547,17 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 // for an account in no org yet — a fresh org named after the account, so
 // nobody is ever blocked from starting to sync. Orgs disabled → "".
 func (s *Server) orgForCreate(r *http.Request, requested string) (string, error) {
-	if s.Orgs == nil || s.Auth == nil {
+	if s.Dir == nil || s.Auth == nil {
 		return "", nil
 	}
 	me := s.requestUser(r)
 	if requested != "" {
-		if s.Orgs.Role(requested, me.Email) == "" {
+		if s.Dir.Role(requested, me.Email) == "" {
 			return "", fmt.Errorf("you are not a member of organization %q", requested)
 		}
 		return requested, nil
 	}
-	mine := s.Orgs.OrgsFor(me.Email)
+	mine := s.Dir.OrgsFor(me.Email)
 	if len(mine) > 0 {
 		return mine[0].ID, nil
 	}
@@ -538,7 +565,7 @@ func (s *Server) orgForCreate(r *http.Request, requested string) (string, error)
 	if name == "" {
 		name = strings.SplitN(me.Email, "@", 2)[0]
 	}
-	o, err := s.Orgs.Create(name, me.Email)
+	o, err := s.Dir.Create(name, me.Email)
 	if err != nil {
 		return "", err
 	}

@@ -16,7 +16,9 @@ test("org admin: members with roles, self marked, rename round-trip", async ({ p
   await login(page);
   await openOrgSettings(page);
   await expect(page.locator("#org-title")).toHaveText("default");
-  await expect(page.locator("#crumb")).toHaveText("default");
+  // The crumb names the surface; repeating the org name under the <h1> that
+  // already says it told the reader nothing.
+  await expect(page.locator("#crumb")).toHaveText("Organization");
   await expect(page.locator(".admin-item", { hasText: ADMIN })).toContainText("(you)");
   const memberRow = page.locator(".admin-item", { hasText: MEMBER });
   await expect(memberRow.locator("select")).toHaveValue("member");
@@ -33,6 +35,22 @@ test("org admin: members with roles, self marked, rename round-trip", async ({ p
   await page.click("#account-btn");
   await expect(page.locator("#menu-org-settings")).toContainText("default");
   await page.keyboard.press("Escape");
+});
+
+// The org page owns a URL like every other page: the account menu is a plain
+// link to it, so a deep link and a reload both land on the same view.
+test("org admin: is a real route, not panel state", async ({ page }) => {
+  await login(page);
+  await openOrgSettings(page);
+  await expect(page).toHaveURL(/\/orgs\/[^/]+$/);
+  const url = page.url();
+
+  await page.reload();
+  await expect(page.locator("#org-title")).toHaveText("default");
+
+  await page.goto("/");
+  await page.goto(url);
+  await expect(page.locator("#org-title")).toHaveText("default");
 });
 
 test("org admin: member role change round-trip", async ({ page }) => {
@@ -96,7 +114,12 @@ test("org admin: project rename and delete", async ({ page }) => {
 test("member sees the org panel read-only", async ({ page }) => {
   await login(page, MEMBER);
   await openOrgSettings(page);
-  await expect(page.locator("#org-title")).toContainText("member");
+  // The role reads as a chip beside the name, not as part of it, and the
+  // short page explains itself rather than looking truncated.
+  // The chip is a sibling of the <h1>, not a child: inside it, the
+  // accessible name of the heading came out as "defaultMember".
+  await expect(page.locator(".role-chip")).toHaveText("Member");
+  await expect(page.locator(".admin-sub")).toContainText("Only owners");
   await expect(page.locator("#org-rename")).toHaveCount(0);
   await expect(page.locator(".admin-item select")).toHaveCount(0);
   await expect(page.locator(".admin-item .ai-tag").first()).toBeVisible(); // role tags
@@ -140,7 +163,10 @@ test("members table sorts by email", async ({ page }) => {
   const emails = page.locator(".admin-table .admin-item .ai-main");
   await expect(emails.first()).toBeVisible();
   const before = await emails.allTextContents();
-  await page.click('.admin-table th:has-text("Member")');
+  // Sorting is a button inside the header cell so it is reachable by
+  // keyboard; the header also announces the direction via aria-sort.
+  await page.click('.admin-table th:has-text("Member") .th-sort');
+  await expect(page.locator('.admin-table th:has-text("Member")')).toHaveAttribute("aria-sort", /ascending|descending/);
   const after = await emails.allTextContents();
   expect([...before].reverse()).toEqual(after);
 });
