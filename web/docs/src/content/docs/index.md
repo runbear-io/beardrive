@@ -40,6 +40,9 @@ page.
   Code, one paste anywhere else, and the folder syncs from then on.
 - **[Your first hour](/start/first-hour/)** — what a connected folder feels like:
   ask for a doc, get a link back, teammates' agents pick it up.
+- **[Use cases](/use-cases/team-artifacts/)** — how this fits a real situation:
+  a team sharing what its agents produce, a wiki that maintains itself, an
+  existing knowledge base that needs teammates, one context across devices.
 - **[Run a hub](/self-hosting/run-a-hub/)** — self-host in about ten minutes.
 - **[Manual setup](/manual/install/)** — the same result command by command, if
   you'd rather see the moving parts.

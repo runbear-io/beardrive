@@ -64,6 +64,20 @@ export default defineConfig({
           ],
         },
         {
+          // Job-shaped titles, persona named in the description (which is also
+          // the search snippet and the llms.txt line). These pages ROUTE — the
+          // moment one starts teaching a feature, it links to the guide that
+          // owns it instead.
+          label: "Use cases",
+          items: [
+            { label: "Share work across your team's agents", slug: "use-cases/team-artifacts" },
+            { label: "Keep a wiki your agents maintain", slug: "use-cases/team-wiki" },
+            { label: "Turn a personal brain into a company brain", slug: "use-cases/company-brain" },
+            { label: "Run a personal wiki, publish part of it", slug: "use-cases/personal-wiki" },
+            { label: "Carry one context across agents and devices", slug: "use-cases/multi-device" },
+          ],
+        },
+        {
           // Guides are about working with agents — that's what the product is
           // for. Command-by-command CLI detail belongs in Reference.
           label: "Working with agents",
