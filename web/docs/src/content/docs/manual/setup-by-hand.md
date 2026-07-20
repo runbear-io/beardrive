@@ -1,9 +1,15 @@
 ---
-title: Quickstart
-description: Sign a device in, start syncing a folder, and connect a second machine — the whole loop in a few minutes.
+title: Set up by hand
+description: The same setup an agent performs, run yourself — sign a device in, start syncing a folder, and connect a second machine.
 ---
 
-Three steps: sign the device in, start syncing a folder, work normally.
+This is [what your agent does for you](/start/setup/), one command at a time.
+Useful on a machine with no agent, when scripting a fleet, or when you simply
+want to see the moving parts.
+
+Three steps: sign the device in, start syncing a folder, work normally. Then
+[register the hooks](/manual/skills-and-hooks/) — that last step is what keeps
+an agent's files fresh, and it is the one hand-setups forget.
 
 ## 1. Sign this device in
 
@@ -87,8 +93,8 @@ changes.
 
 ## Next
 
-- [Connect an agent](/guides/connect-an-agent/) — wire Claude Code, Codex,
-  Gemini CLI, or Hermes into this folder. This is what BearDrive is for.
+- [Skills and hooks in detail](/manual/skills-and-hooks/) — the two commands
+  that make an agent read fresh files every turn. Don't stop before this one.
 - [Shared agent memory](/guides/shared-agent-memory/) — orient agents in the
   folder so they know where to read and write.
 - [Artifacts and links](/guides/agent-artifacts/) — internal links for

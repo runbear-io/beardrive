@@ -54,10 +54,72 @@ Convention puts `llms.txt` at the **root** domain, not a docs subdomain — so
 That redirect lives in the cloud landing page and is the one cross-repo
 coordination point this split introduces.
 
+## Structure
+
+The sidebar order in `astro.config.mjs` **is** the recommended path, and the
+recommended path is agent-first:
+
+- **Start here** — what it is, set up with your agent, first hour. No `brew
+  install` appears in this group.
+- **Working with agents** — the workflows the product exists for.
+- **Manual setup (optional)** — the CLI route: install, set up by hand, skills
+  and hooks in detail. Same destination, more steps; one click away, never on
+  the critical path.
+- **Self-hosting**, **Reference**, **Concepts** — unchanged in intent.
+
+Keep new onboarding content out of Manual. If a page teaches someone how to get
+started, it belongs in Start here and should say what to ask an agent, not what
+to type.
+
 ## Deploying
 
 Static output in `dist/`. Any static host works; build command `npm run build`,
 output directory `dist`, project root `web/docs`.
+
+### Redirects
+
+The docs were reorganized around the agent-first path, so three old URLs moved:
+
+| Old | New |
+|---|---|
+| `/start/install` | `/manual/install/` |
+| `/start/quickstart` | `/manual/setup-by-hand/` |
+| `/guides/connect-an-agent` | `/start/setup/` |
+
+`astro.config.mjs` declares these, which in a static build emits **meta-refresh
+pages** — fine for humans, weak for search engines. Real 301s belong in the host.
+
+**Firebase Hosting** (simplest static option on GCP — CDN, TLS, and custom
+domains included):
+
+```json
+{
+  "hosting": {
+    "public": "dist",
+    "ignore": ["firebase.json", "**/.*"],
+    "redirects": [
+      { "source": "/start/install", "destination": "/manual/install/", "type": 301 },
+      { "source": "/start/quickstart", "destination": "/manual/setup-by-hand/", "type": 301 },
+      { "source": "/guides/connect-an-agent", "destination": "/start/setup/", "type": 301 }
+    ]
+  }
+}
+```
+
+**Cloud Storage behind an external Application Load Balancer:** put the rules in
+the URL map, which redirects before the bucket is ever reached.
+
+```sh
+gcloud compute url-maps edit docs-url-map   # pathMatchers[].pathRules[]:
+#   - paths: ["/start/install"]
+#     urlRedirect:
+#       pathRedirect: "/manual/install/"
+#       redirectResponseCode: MOVED_PERMANENTLY_DEFAULT
+#       stripQuery: false
+```
+
+Whichever host wins, keep the Astro `redirects` block as well: it is the
+portable fallback, and it keeps local `npm run preview` honest.
 
 Note that the build reads a file **outside** `web/docs` (the token source), so
 the host must check out the whole repository rather than just this

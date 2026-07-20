@@ -16,6 +16,14 @@ import llmsTxt from "starlight-llms-txt";
 // contributor can actually open a PR against.
 export default defineConfig({
   site: "https://docs.beardrive.ai",
+  // The docs were reorganized around the agent-first path; these URLs were
+  // public and indexed. Astro emits meta-refresh pages for static output —
+  // real 301s belong in the host config (see README, "Deploying").
+  redirects: {
+    "/start/install": "/manual/install/",
+    "/start/quickstart": "/manual/setup-by-hand/",
+    "/guides/connect-an-agent": "/start/setup/",
+  },
   integrations: [
     starlight({
       title: "BearDrive",
@@ -44,11 +52,15 @@ export default defineConfig({
       plugins: [llmsTxt()],
       sidebar: [
         {
+          // The reading order IS the recommended path, and the recommended path
+          // is agent-first: nobody should meet `brew install` before they meet
+          // /beardrive:install. Everything CLI lives under "Manual setup",
+          // one click away and never on the critical path.
           label: "Start here",
           items: [
             { label: "What is BearDrive?", slug: "" },
-            { label: "Install", slug: "start/install" },
-            { label: "Quickstart", slug: "start/quickstart" },
+            { label: "Set up with your agent", slug: "start/setup" },
+            { label: "Your first hour", slug: "start/first-hour" },
           ],
         },
         {
@@ -56,11 +68,20 @@ export default defineConfig({
           // for. Command-by-command CLI detail belongs in Reference.
           label: "Working with agents",
           items: [
-            { label: "Connect an agent", slug: "guides/connect-an-agent" },
             { label: "Shared agent memory", slug: "guides/shared-agent-memory" },
             { label: "Artifacts and links", slug: "guides/agent-artifacts" },
             { label: "What agents read", slug: "guides/what-agents-read" },
             { label: "Scoping the folder", slug: "guides/scoping" },
+          ],
+        },
+        {
+          // For people who would rather type it, and for machines with no agent
+          // on them. Same destination, more steps.
+          label: "Manual setup (optional)",
+          items: [
+            { label: "Install the CLI", slug: "manual/install" },
+            { label: "Set up by hand", slug: "manual/setup-by-hand" },
+            { label: "Skills and hooks in detail", slug: "manual/skills-and-hooks" },
           ],
         },
         {

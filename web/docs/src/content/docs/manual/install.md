@@ -1,7 +1,13 @@
 ---
-title: Install
-description: Install the bdrive CLI with Homebrew, go install, or a release binary.
+title: Install the CLI
+description: Install the bdrive binary with Homebrew, go install, or a release tarball — for setting a folder up by hand, or for running a hub.
 ---
+
+Most people never run this. [Setting up through your agent](/start/setup/)
+installs the binary as its first step.
+
+Install it yourself when you would rather drive the setup by hand, when you are
+[running a hub](/self-hosting/run-a-hub/), or when a machine has no agent on it.
 
 BearDrive ships one binary, `bdrive`. It is the CLI, the sync daemon, and the
 web server. macOS and Linux.
@@ -49,4 +55,5 @@ agent skill.
 
 ## Next
 
-[Quickstart](/start/quickstart/) — sign in and start syncing a folder.
+[Set up by hand](/manual/setup-by-hand/) — sign in and start syncing a folder,
+command by command.

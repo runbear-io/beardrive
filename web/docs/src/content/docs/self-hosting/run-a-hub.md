@@ -81,7 +81,7 @@ container platform works the same way.
    link both creates their account and adds them to your org.
 4. Connect agents: the project's home page shows one-paste setup for Claude
    Code, Hermes, and Codex, with the hub URL and project id already filled in.
-   See [Connect an agent](/guides/connect-an-agent/).
+   See [Set up with your agent](/start/setup/).
 
 ## How the hub is organized
 

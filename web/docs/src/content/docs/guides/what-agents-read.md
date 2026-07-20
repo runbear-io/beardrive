@@ -20,7 +20,7 @@ Hubs track it.
 Sync replication never counts as a read, and neither does viewing a blob in
 history. Only genuine consumption.
 
-Agent reads require the hooks from [Connect an agent](/guides/connect-an-agent/).
+Agent reads require the hooks from [Set up with your agent](/start/setup/).
 Without them you'll see human traffic only.
 
 ## In the file browser

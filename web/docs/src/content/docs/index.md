@@ -7,8 +7,15 @@ BearDrive mounts any folder as a synced volume. Its contents stay synchronized
 across all your devices and teammates through a BearDrive **hub**, every change
 is tracked (who, when, on which device), and everything keeps working offline.
 
-The CLI is `bdrive`. A hub is a `bdrive web` server you (or we) run on an object
-store — clients sync through it over HTTPS and never touch the storage directly.
+**You don't install it — you ask your agent to.** One command in Claude Code, or
+one paste in Codex, Gemini CLI, or Hermes, and the folder is connected: your
+agent reads the team's current files before it answers and pushes whatever it
+writes when the turn ends.
+
+Underneath there is a CLI called `bdrive` and a **hub** — a `bdrive web` server
+you (or we) run on an object store, which clients sync through over HTTPS and
+never touch the storage directly. You can drive all of it by hand, and most
+people never do.
 
 ## What it's for
 
@@ -29,12 +36,13 @@ page.
 
 ## Where to start
 
-- **[Connect an agent](/guides/connect-an-agent/)** — the point of the product.
-  Claude Code, Codex, Gemini CLI, or Hermes, reading and writing the shared
-  folder every turn.
-- **[Quickstart](/start/quickstart/)** — sign in and start syncing a folder, if
-  you'd rather see the mechanics first.
+- **[Set up with your agent](/start/setup/)** — the way in. One command in Claude
+  Code, one paste anywhere else, and the folder syncs from then on.
+- **[Your first hour](/start/first-hour/)** — what a connected folder feels like:
+  ask for a doc, get a link back, teammates' agents pick it up.
 - **[Run a hub](/self-hosting/run-a-hub/)** — self-host in about ten minutes.
+- **[Manual setup](/manual/install/)** — the same result command by command, if
+  you'd rather see the moving parts.
 
 ## What you get
 

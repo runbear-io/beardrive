@@ -32,7 +32,7 @@ With no argument, `bdrive url` gives the project home.
 The sync hook installed by `bdrive hooks install` injects the project's
 gated-link formula into the agent's context, so a connected agent appends
 `path` [🔗](link) to every synced path it mentions — without being asked. See
-[Connect an agent](/guides/connect-an-agent/).
+[Set up with your agent](/start/setup/).
 :::
 
 ## Public links, for everyone else
