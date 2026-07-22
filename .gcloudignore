@@ -1,0 +1,6 @@
+.git
+node_modules/
+/bdrive
+/dist/
+/web/docs/dist/
+/private

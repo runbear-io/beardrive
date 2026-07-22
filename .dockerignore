@@ -6,5 +6,4 @@ website
 *.md
 .goreleaser.yaml
 .claude
-plugin
 /private
