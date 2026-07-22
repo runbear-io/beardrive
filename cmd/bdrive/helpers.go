@@ -6,11 +6,19 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/mattn/go-isatty"
+
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
+
+// stdinIsTTY is the one answer to "is this an interactive shell?" — used both
+// to decide whether init may prompt and whether login can drive a browser.
+func stdinIsTTY() bool {
+	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
+}
 
 func absFolder(args []string) (string, error) {
 	arg := "."

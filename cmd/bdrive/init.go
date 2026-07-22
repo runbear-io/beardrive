@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -97,7 +96,7 @@ the folder was renamed or moved.`,
 			}
 			server := settings.Server
 
-			interactive := isatty.IsTerminal(os.Stdin.Fd()) && !yes
+			interactive := stdinIsTTY() && !yes
 
 			// Which project?
 			var p serverProject
@@ -158,6 +157,9 @@ the folder was renamed or moved.`,
 			}
 			if err := startSync(cmd.Context(), folder, proj, foreground, 3*time.Second, 10*time.Second); err != nil {
 				return err
+			}
+			if foreground {
+				return nil // daemon already ran and exited; "syncing automatically" would be false now
 			}
 			fmt.Printf(`
 done — the daemon now keeps this folder in sync automatically.
