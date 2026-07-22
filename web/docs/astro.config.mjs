@@ -93,6 +93,7 @@ export default defineConfig({
           items: [
             { label: "Share work across your team's agents", slug: "use-cases/team-artifacts" },
             { label: "Keep a wiki your agents maintain", slug: "use-cases/team-wiki" },
+            { label: "Give your coding agents the business context", slug: "use-cases/business-context" },
             { label: "Turn a personal brain into a company brain", slug: "use-cases/company-brain" },
             { label: "Run a personal wiki, publish part of it", slug: "use-cases/personal-wiki" },
             { label: "Carry one context across agents and devices", slug: "use-cases/multi-device" },

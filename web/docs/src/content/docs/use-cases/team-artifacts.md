@@ -12,7 +12,9 @@ person's agent re-does work that already exists.
 - One folder every agent on the team writes into and reads from.
 - Whatever your agent produces is on a teammate's machine seconds later —
   nobody attaches, uploads, or pastes anything.
-- A link for anyone outside the team, when you want one.
+- A link you can send a person. Markdown and HTML render as pages, so anything
+  an agent wrote is already readable at a URL — one link that opens only for
+  members, one public link for anyone outside.
 
 ## Set it up
 
@@ -35,6 +37,13 @@ disk, say so — "sync only `client-work/`" — and the agent scopes it.
 The turn ends and the brief is on the hub. Your colleague, an hour later, asks
 their own agent about Q3 — and it has already read the brief, because it pulls
 the team's current files before it answers. Nobody sent anything.
+
+Agents aren't the only readers. When a person needs to see it, send the hub
+link rather than the file — the hub renders markdown and HTML as pages, so
+paste it into Slack, an email or a ticket and teammates get the current version
+as a document. Anyone outside the org gets a wall, so the link is safe to
+forward internally. (Your agent appends one of these to every synced path it
+mentions, so there's usually nothing to go and copy.)
 
 When it needs to leave the company:
 
