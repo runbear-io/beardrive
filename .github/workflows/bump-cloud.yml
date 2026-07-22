@@ -1,0 +1,49 @@
+# Every OSS merge to main bumps OSS_COMMIT in runbear-io/beardrive-cloud.
+# That push triggers cloud CI: full test suite against the new pin, then the
+# prod deploy — a bad combo fails cloud CI and never deploys.
+# Needs the CLOUD_BUMP_TOKEN secret: fine-grained PAT, beardrive-cloud repo
+# only, Contents read+write.
+name: bump-cloud
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: bump-cloud
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout beardrive-cloud
+        uses: actions/checkout@v4
+        with:
+          repository: runbear-io/beardrive-cloud
+          token: ${{ secrets.CLOUD_BUMP_TOKEN }}
+
+      - name: Bump OSS_COMMIT and push
+        env:
+          OSS_SHA: ${{ github.sha }}
+          # Via env, not inline interpolation: commit messages are attacker-
+          # controlled text and must never be spliced into the script itself.
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          if [ "$(cat OSS_COMMIT)" = "$OSS_SHA" ]; then
+            echo "already pinned at $OSS_SHA"
+            exit 0
+          fi
+          printf '%s\n' "$OSS_SHA" > OSS_COMMIT
+          git config user.name "beardrive-bot"
+          git config user.email "bot@beardrive.ai"
+          git add OSS_COMMIT
+          subject="$(printf '%s' "${HEAD_MSG:-manual bump}" | head -n1)"
+          git commit -m "bump OSS to ${OSS_SHA::7}: ${subject}"
+          # Two quick OSS merges can race; rebase keeps both bumps (last wins
+          # on the pin, which is correct — it's the newer OSS commit).
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          exit 1
