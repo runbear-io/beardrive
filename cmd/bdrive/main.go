@@ -28,7 +28,9 @@ Cloud). Every change is journaled — you can always see which device and
 author changed which file, and when. Files are real files on disk, so
 everything keeps working offline; changes sync when the remote is reachable.`,
 		SilenceUsage: true,
+		Version:      version,
 	}
+	root.SetVersionTemplate("beardrive {{.Version}}\n")
 	root.AddCommand(
 		loginCmd(),
 		logoutCmd(),
@@ -77,7 +79,17 @@ func whoamiCmd() *cobra.Command {
 			}
 			fmt.Printf("device id:   %s\n", dev.ID)
 			fmt.Printf("device name: %s\n", dev.Name)
-			fmt.Printf("author:      %s\n", dev.Author)
+			if settings, _ := config.LoadSettings(); settings.Email != "" {
+				who := settings.Email
+				if settings.Name != "" {
+					who = settings.Name + " <" + settings.Email + ">"
+				}
+				fmt.Printf("account:     %s (from `bdrive login`; changes are attributed to this)\n", who)
+				fmt.Printf("author:      %s (git/OS fallback, used only when signed out)\n", dev.Author)
+			} else {
+				fmt.Printf("account:     not signed in — changes are attributed to the author below (run `bdrive login`)\n")
+				fmt.Printf("author:      %s (detected from git config / OS user)\n", dev.Author)
+			}
 			fmt.Printf("beardrive home:    %s\n", home)
 			return nil
 		},

@@ -156,7 +156,18 @@ the folder was renamed or moved.`,
 			if shared != "" {
 				fmt.Printf("  syncing: ./%s only\n", shared)
 			}
-			return startSync(cmd.Context(), folder, proj, foreground, 3*time.Second, 10*time.Second)
+			if err := startSync(cmd.Context(), folder, proj, foreground, 3*time.Second, 10*time.Second); err != nil {
+				return err
+			}
+			fmt.Printf(`
+done — the daemon now keeps this folder in sync automatically.
+
+next steps:
+  connect another device or teammate:  bdrive init --project %s
+  see who changed what:                bdrive log
+  share a file by public URL:          bdrive share <file>
+`, p.ID)
+			return nil
 		},
 	}
 	c.Flags().StringVar(&projectID, "project", "", "connect an existing project by id (p-xxxxxxxx)")

@@ -9,7 +9,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in. Browser flow; `--device` for headless. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
+| `bdrive login [server-url]` | Sign this device in. Browser flow; `--device` forces the code flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
 | `bdrive logout` | Sign this device out — clear the saved token and account. `--forget` also drops the remembered server |
 | `bdrive init [folder]` | Create or connect a project and start syncing. Interactive on a TTY; flags (`--name`, `--project`, `--shared`, `--yes`) for scripts. Re-run to resume |
 | `bdrive stop [folder]` | Stop syncing. Files stay on disk; `bdrive init` resumes |
@@ -22,8 +22,8 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
 | `bdrive web [folder \| storage-root-url]` | Web server: viewer, uploads, multi-project sync hub |
-| `bdrive whoami` | Device identity used in change tracking |
-| `bdrive version` | Version |
+| `bdrive whoami` | Signed-in account and device identity used in change tracking |
+| `bdrive version` | Version (also `bdrive --version`) |
 
 ## Notes on a few
 
