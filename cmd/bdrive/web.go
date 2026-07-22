@@ -239,7 +239,11 @@ credentials); otherwise it is relayed through this server.`,
 				srv.Projects = db
 				srv.Device = webapp.Identity{ID: dev.ID, Name: dev.Name, Author: dev.Author}
 				srv.Volume = volumeName(remoteURL)
-				display = remoteURL + " (projects: " + projectsDB + ")"
+				if meta != nil {
+					display = remoteURL
+				} else {
+					display = remoteURL + " (projects: " + projectsDB + ")"
+				}
 			}
 			if volume != "" {
 				srv.Volume = volume

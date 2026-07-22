@@ -1,6 +1,6 @@
 // bdrive is the BearDrive CLI: mount a folder, and its
-// contents stay synchronized across devices through cloud object storage,
-// with full per-file change history and offline support.
+// contents stay synchronized across devices and teammates through a
+// BearDrive hub, with full per-file change history and offline support.
 package main
 
 import (
@@ -22,9 +22,9 @@ func main() {
 		Long: `bdrive — the BearDrive CLI. A mountable, offline-first, synced file
 system for AI agents.
 
-Mount any folder and BearDrive keeps it synchronized across your devices through
-cloud object storage (Amazon S3, Google Cloud Storage, or a plain shared
-directory). Every change is journaled — you can always see which device and
+Mount any folder and BearDrive keeps it synchronized across your devices and
+teammates through a BearDrive hub (bdrive web — self-hosted or BearDrive
+Cloud). Every change is journaled — you can always see which device and
 author changed which file, and when. Files are real files on disk, so
 everything keeps working offline; changes sync when the remote is reachable.`,
 		SilenceUsage: true,
