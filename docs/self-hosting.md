@@ -31,8 +31,9 @@ hub over HTTPS.
   "upload": true,
   "auth": {
     // Signup is invite-only by default — the safe posture for a public
-    // URL. Your first account: start once with signup gated (or use an
-    // org invite), then invite teammates from the web UI.
+    // URL. Bootstrap: while the hub has zero accounts, the emails listed
+    // in "admins" can sign up directly; then invite teammates from the
+    // web UI.
     "admins": ["you@example.com"],
     "users_db": "/var/lib/bdrive/auth.json"
   },
@@ -58,8 +59,11 @@ as bearer tokens. For containers, the repo ships a `Dockerfile`
 
 ## 5. First sign-in and first project
 
-1. Open `https://your-hub/` → create your account (first run: use the
-   signup posture you configured; hub admins are the `admins` emails).
+1. Open `https://your-hub/` → sign up with one of the `admins` emails
+   from your config. On a brand-new hub these can always create the
+   first account (whatever the signup posture); it activates
+   immediately, and admin-listed emails skip the approval/verification
+   gates on any posture.
 2. On any machine: `bdrive login https://your-hub` (browser flow), then
    in the folder you want synced:
    `bdrive init --name wiki --yes` — or `--shared docs` inside a repo to
@@ -85,7 +89,8 @@ no plaintext credentials ever touch disk).
 **Signup is invite-only by default** — the safe posture for a hub on a
 public URL. New people get in only through an expiring invite link an owner
 mints; the link lets them create an account (bypassing the gates below) and
-join, in one step. To allow self-service signup instead, set
+join, in one step. (One exception so a fresh hub isn't a locked room: while
+zero accounts exist, the config's `admins` emails may sign up directly.) To allow self-service signup instead, set
 `"allow_signup": true` **with a gate** — the server refuses to start an open
 hub that has none, so a fake email can never just walk in. Three postures:
 

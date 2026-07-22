@@ -194,7 +194,11 @@ func (a *BuiltinAuth) createAccount(email, name, password string, viaInvite bool
 		return nil, err
 	}
 	status := a.initialStatus()
-	if viaInvite {
+	// An invite is an owner's explicit grant; an email on the config's admin
+	// list is the operator's own. Both are stronger vetting than the signup
+	// gates, so these accounts activate immediately — otherwise a fresh
+	// approval-gated hub would strand its first admin as pending forever.
+	if viaInvite || a.isAdmin(email) {
 		status = statusActive
 	}
 	a.mu.Lock()
@@ -285,6 +289,12 @@ func (a *BuiltinAuth) domainList() string {
 
 func (a *BuiltinAuth) isAdmin(email string) bool {
 	return a.Admins != nil && a.Admins[normEmail(email)]
+}
+
+func (a *BuiltinAuth) accountCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.users)
 }
 
 func (a *BuiltinAuth) verifyPassword(email, password string) *authUser {
@@ -712,9 +722,13 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 	next := safeNext(r.FormValue("next"))
 	// An invite link authorizes account creation even when public self-signup
-	// is closed — it's the only way into an invite-only hub.
+	// is closed — it's the only way into an invite-only hub. Except once: a
+	// brand-new hub has no accounts to mint an invite with, so until the
+	// first account exists, the emails on the config's admin list may sign
+	// up directly (the operator wrote them there — that's the vetting).
 	inviteTok := a.invitedVia(next)
-	if !a.AllowSignup && inviteTok == "" {
+	bootstrap := !a.AllowSignup && inviteTok == "" && len(a.Admins) > 0 && a.accountCount() == 0
+	if !a.AllowSignup && inviteTok == "" && !bootstrap {
 		authPage(w, "Sign up disabled", `<p>This server is invite-only. Ask a team owner for an invite link, or sign in if you already have an account.</p>
 <p class="alt"><a href="/auth/login">Back to sign in</a></p>`)
 		return
@@ -724,6 +738,11 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 		signup := a.signup
 		if inviteTok != "" {
 			signup = a.signupInvited // invite is the vetting: skip gates, activate
+		}
+		if bootstrap && !a.isAdmin(r.FormValue("email")) {
+			signup = func(string, string, string) (*authUser, error) {
+				return nil, fmt.Errorf("this server is invite-only; only a hub admin can create the first account")
+			}
 		}
 		u, err := signup(r.FormValue("email"), r.FormValue("name"), r.FormValue("password"))
 		if err == nil {

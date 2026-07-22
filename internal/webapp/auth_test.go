@@ -142,6 +142,63 @@ func TestSignupDisabled(t *testing.T) {
 	}
 }
 
+// A fresh approval-gated hub must not strand its first admin: an email on the
+// config's admin list activates on signup instead of waiting for an approver
+// who doesn't exist yet.
+func TestSignupAdminBypassesApproval(t *testing.T) {
+	srv, auth, _ := authHub(t, true)
+	auth.RequireApproval = true
+	auth.Admins = map[string]bool{"admin@x.io": true}
+	h := srv.Handler()
+
+	cookie := signupAndSession(t, h, "admin@x.io", "Admin", "password1")
+	if cookie == nil {
+		t.Fatal("admin signup did not start a session")
+	}
+
+	// A non-admin under the same posture still lands pending.
+	form := url.Values{"email": {"b@x.io"}, "name": {"B"}, "password": {"password1"}}
+	req := httptest.NewRequest("POST", "/auth/signup", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "waiting for an administrator") {
+		t.Fatalf("non-admin signup should be pending: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A brand-new invite-only hub has nobody to mint an invite: until the first
+// account exists, config-listed admin emails may sign up directly; everyone
+// else stays out, and the door closes again after the first account.
+func TestSignupInviteOnlyBootstrap(t *testing.T) {
+	srv, auth, _ := authHub(t, false)
+	auth.Admins = map[string]bool{"admin@x.io": true}
+	h := srv.Handler()
+
+	// a stranger can't take the bootstrap slot
+	form := url.Values{"email": {"b@x.io"}, "name": {"B"}, "password": {"password1"}}
+	req := httptest.NewRequest("POST", "/auth/signup", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "only a hub admin") {
+		t.Fatalf("stranger during bootstrap: %d %s", rec.Code, rec.Body)
+	}
+
+	// the configured admin signs up and is active immediately
+	if signupAndSession(t, h, "admin@x.io", "Admin", "password1") == nil {
+		t.Fatal("admin bootstrap signup did not start a session")
+	}
+
+	// with the first account in place the hub is invite-only again
+	req = httptest.NewRequest("GET", "/auth/signup", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "invite-only") {
+		t.Fatalf("signup page after bootstrap should be disabled: %s", rec.Body)
+	}
+}
+
 // The browser flow bdrive login drives: session → /auth/cli redirect with a
 // one-time code → exchange for a device token.
 func TestCLICallbackFlow(t *testing.T) {
