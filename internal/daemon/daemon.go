@@ -134,8 +134,6 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	}
 	defer os.Remove(PidPath(volDir))
 
-	settings, _ := config.LoadSettings()
-
 	log.Printf("daemon started: folder=%s mount=%s volume=%s remote=%q device=%s(%s) scan=%s sync=%s",
 		folder, proj.ID, proj.Volume, proj.Remote, dev.Name, dev.ID, scanInterval, remoteInterval)
 
@@ -191,6 +189,10 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 		}
 
+		// Re-read settings each tick too, so a login/logout/account switch
+		// after the daemon started is reflected in op authorship — otherwise
+		// a long-lived daemon stamps every change with a stale identity.
+		settings, _ := config.LoadSettings()
 		sess := &syncer.Session{Folder: folder, MountID: proj.ID, Store: st, Device: dev, Account: settings}
 		if doRemote {
 			sess.Backend = be

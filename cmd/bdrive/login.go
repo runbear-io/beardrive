@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -163,6 +164,13 @@ func runLogin(server string, cfg serverConfig, useDevice bool) error {
 	if loginPath == "" {
 		loginPath = "/auth/cli"
 	}
+	// Headless shells (agents, CI, SSH) can't complete the loopback-callback
+	// flow — the browser would open nowhere and the CLI would hang. Fall back
+	// to the device-code flow automatically instead of waiting.
+	if !useDevice && !isatty.IsTerminal(os.Stdin.Fd()) && !isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+		fmt.Println("no interactive terminal detected — using the device-code sign-in flow")
+		useDevice = true
+	}
 	var token string
 	var user serverUser
 	var err error
@@ -170,6 +178,10 @@ func runLogin(server string, cfg serverConfig, useDevice bool) error {
 		token, user, err = deviceCodeLogin(server)
 	} else {
 		token, user, err = browserLogin(server, loginPath)
+		if errors.Is(err, errNoBrowser) {
+			fmt.Println("could not open a browser — switching to the device-code sign-in flow")
+			token, user, err = deviceCodeLogin(server)
+		}
 	}
 	if err != nil {
 		return err
@@ -238,6 +250,10 @@ func deviceName() string {
 	return "cli"
 }
 
+// errNoBrowser signals that the loopback flow can't proceed because no local
+// browser could be opened; the caller falls back to the device-code flow.
+var errNoBrowser = errors.New("no local browser")
+
 // browserLogin runs the loopback-callback flow.
 func browserLogin(server, loginPath string) (string, serverUser, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -272,8 +288,11 @@ func browserLogin(server, loginPath string) (string, serverUser, error) {
 	fmt.Println("opening your browser to sign in (sign up there if you don't have an account):")
 	fmt.Println("  " + loginURL)
 	if err := openBrowser(loginURL); err != nil {
-		fmt.Println("could not open a browser — open the URL above manually, or rerun with --device")
+		// The loopback callback only works from a browser on this machine, so
+		// a URL the user pastes elsewhere would dead-end — use the code flow.
+		return "", serverUser{}, errNoBrowser
 	}
+	fmt.Println("waiting for the browser sign-in… (no browser here? Ctrl-C and run `bdrive login --device`)")
 
 	select {
 	case code := <-codeCh:

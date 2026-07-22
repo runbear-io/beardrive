@@ -23,7 +23,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Mounts + daemon + pending state | `bdrive status [<folder>]` |
 | Change history | `bdrive log [<folder>] [-p path] [-n N]` |
 | This device's identity | `bdrive whoami` |
-| Sign this device in (once per device) | `bdrive login [url]` — bare form targets BearDrive Cloud (beardrive.ai): signing up there auto-creates a free personal workspace, no questions asked. Self-hosting teams pass their hub URL instead. Opens the sign-in page in a browser (sign-up available there); the terminal completes on its own and stores a per-device token. `--device` prints a code to approve from any browser (SSH/headless); `--status` shows server + account. Password reset: "Forgot password?" on the sign-in page (emailed via the server's SMTP config, or the link appears in the server log). **Switch hubs** with `bdrive login <new-url>`, then re-run `bdrive init` in each folder. |
+| Sign this device in (once per device) | `bdrive login [url]` — bare form targets BearDrive Cloud (beardrive.ai): signing up there auto-creates a free personal workspace, no questions asked. Self-hosting teams pass their hub URL instead. Opens the sign-in page in a browser (sign-up available there); the terminal completes on its own and stores a per-device token. `--device` prints a code to approve from any browser (SSH/headless), and login falls back to that code flow automatically when there is no TTY (agent shells, CI) or no browser opens; `--status` shows server + account. Password reset: "Forgot password?" on the sign-in page (emailed via the server's SMTP config, or the link appears in the server log). **Switch hubs** with `bdrive login <new-url>`, then re-run `bdrive init` in each folder. |
 | Sign this device out | `bdrive logout` — clears the saved token + account (folders untouched); `--forget` also drops the remembered server. The device token stays valid server-side until it expires — revoke it from the hub's device list to be sure. |
 | Link a synced file for teammates | `bdrive url <file>` — prints the file's hub viewer URL (sign-in + project membership required; always the latest content). Computed locally, no network; `--sync` pushes first so a just-created file's link resolves immediately; no arg = the project home page. **After creating a shareable artifact (.md/.html/.csv/report/plan) in the shared folder, include this link in your reply** so teammates can open it. |
 | Share a synced file publicly by URL | `bdrive share <file>` — prints a link anyone can open (HTML renders as a page, markdown rendered, PDFs inline; sandboxed; always the latest content; no account needed). `--expires 24h` for self-destructing links; `--list` / `--revoke <token-or-url>` to manage. Put generated reports in the shared folder, sync, then share. |
@@ -484,12 +484,14 @@ History is content-addressed — overwritten and deleted files are still in the 
 ```
 device id:   d380dea58598
 device name: macbook
-author:      snow@runbear.io
+account:     Snow <snow@runbear.io> (from `bdrive login`; changes are attributed to this)
+author:      snow@runbear.io (git/OS fallback, used only when signed out)
 beardrive home:    /Users/snow/.bdrive
 ```
 
 - **device id** — random 12-hex, generated on first run, persisted to `~/.bdrive/device.json`.
 - **device name** — hostname (without `.local`).
+- **account** — the signed-in hub account; changes are attributed to it in `bdrive log` and hub history. When signed out, the author fallback is used instead.
 - **author** — `git config user.email` if present, else `$USER@<hostname>`.
 
 To change name/author, edit `~/.bdrive/device.json` and restart the daemon (`bdrive stop`/`bdrive init`).
