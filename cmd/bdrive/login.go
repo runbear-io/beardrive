@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -167,7 +166,7 @@ func runLogin(server string, cfg serverConfig, useDevice bool) error {
 	// Headless shells (agents, CI, SSH) can't complete the loopback-callback
 	// flow — the browser would open nowhere and the CLI would hang. Fall back
 	// to the device-code flow automatically instead of waiting.
-	if !useDevice && !isatty.IsTerminal(os.Stdin.Fd()) && !isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+	if !useDevice && !stdinIsTTY() {
 		fmt.Println("no interactive terminal detected — using the device-code sign-in flow")
 		useDevice = true
 	}

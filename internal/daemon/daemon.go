@@ -144,6 +144,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		}
 	}()
 	var lastRemote time.Time
+	var lastToken string
 
 	for {
 		// Re-read the project config each tick: picks up `bdrive remote set`
@@ -177,6 +178,21 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		}
 		proj = cur
 
+		// Re-read settings each tick too, so a login/logout/account switch
+		// after the daemon started is reflected in op authorship — otherwise
+		// a long-lived daemon stamps every change with a stale identity. The
+		// http backend captures its credential at open, so drop it when the
+		// token changes and reconnect with the new one.
+		settings, _ := config.LoadSettings()
+		if settings.Token != lastToken {
+			if be != nil {
+				be.Close()
+				be = nil
+			}
+			lastToken = settings.Token
+			lastRemote = time.Time{}
+		}
+
 		doRemote := proj.Remote != "" && time.Since(lastRemote) >= remoteInterval
 		if doRemote && be == nil {
 			b, err := remote.Open(ctx, proj.Remote)
@@ -189,10 +205,6 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 		}
 
-		// Re-read settings each tick too, so a login/logout/account switch
-		// after the daemon started is reflected in op authorship — otherwise
-		// a long-lived daemon stamps every change with a stale identity.
-		settings, _ := config.LoadSettings()
 		sess := &syncer.Session{Folder: folder, MountID: proj.ID, Store: st, Device: dev, Account: settings}
 		if doRemote {
 			sess.Backend = be

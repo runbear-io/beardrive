@@ -79,7 +79,10 @@ func whoamiCmd() *cobra.Command {
 			}
 			fmt.Printf("device id:   %s\n", dev.ID)
 			fmt.Printf("device name: %s\n", dev.Name)
-			if settings, _ := config.LoadSettings(); settings.Email != "" {
+			settings, serr := config.LoadSettings()
+			if serr != nil {
+				fmt.Printf("account:     unknown — cannot read settings: %v\n", serr)
+			} else if settings.Email != "" {
 				who := settings.Email
 				if settings.Name != "" {
 					who = settings.Name + " <" + settings.Email + ">"
