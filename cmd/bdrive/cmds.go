@@ -25,10 +25,29 @@ func syncCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Gate before openSession: hooks fire in every folder on every
+			// turn, and must never enroll this device or resume a paused
+			// project — that is `bdrive init`'s job alone.
+			proj, ok, err := config.LoadProject(folder)
 			if hookLabel != "" {
 				// Agent-hook mode: event JSON on stdin, silent best-effort
 				// sync, link-formula context on stdout. Never fails.
+				if err != nil || !ok || syncBlocked(proj) != "" {
+					return nil
+				}
 				return runHookSync(cmd, folder, hookLabel)
+			}
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", folder)
+			}
+			switch syncBlocked(proj) {
+			case "init":
+				return fmt.Errorf("%s is not synced on this device yet (run `bdrive init` there to connect it)", folder)
+			case "paused":
+				return fmt.Errorf("syncing is paused for %s (run `bdrive init` there to resume)", folder)
 			}
 			sess, proj, err := openSession(cmd.Context(), folder, true)
 			if err != nil {

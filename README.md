@@ -108,7 +108,8 @@ bdrive log
 # Check sync state and the daemon
 bdrive status
 
-# Stop syncing (files stay on disk; bdrive init resumes any time)
+# Stop syncing — pauses everything, including agent turn hooks
+# (files stay on disk; bdrive init resumes any time)
 bdrive stop
 ```
 
@@ -138,7 +139,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive login [server-url]` | Sign this device in (browser flow; `--device` forces the code flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
-| `bdrive stop [folder]` | Stop syncing (files stay; `bdrive init` resumes) |
+| `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
 | `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |

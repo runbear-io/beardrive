@@ -40,9 +40,12 @@ to run it by hand.`,
 			if err != nil {
 				return nil
 			}
-			proj, found, err := config.ResolveMount(folder)
-			if err != nil || !found {
-				return nil // not a beardrive project: fast no-op
+			// LoadProject, not ResolveMount: a hook must never enroll this
+			// device (registry self-heal) — and syncBlocked keeps a paused
+			// or never-inited project's spool from even being created.
+			proj, found, err := config.LoadProject(folder)
+			if err != nil || !found || syncBlocked(proj) != "" {
+				return nil // not an actively synced project: fast no-op
 			}
 			data, _ := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 1<<20))
 			paths := extractEventPaths(data, folder)

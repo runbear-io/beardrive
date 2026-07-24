@@ -15,7 +15,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 |---|---|
 | Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dir>` / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
 | Run the daemon in the foreground | `bdrive init -f` |
-| Stop syncing | `bdrive stop [<folder>]` (`--forget` also unregisters) |
+| Stop syncing | `bdrive stop [<folder>]` — pauses daemon *and* agent hooks; `bdrive init` resumes (`--forget` also unregisters) |
 | One sync cycle now | `bdrive sync [<folder>]` — `--note <text>` stamps session context; `--hook <label>` is the Claude turn-start hook's plumbing (event JSON in, sync + note, gated-link formula out) |
 | Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install [<folder>]` — auto-detects the platforms in use and merges pull/push/session-note/read-tracking hooks into each one's own hook config, idempotently; bare `bdrive hooks` shows the status table |
 | Install this skill on another agent (Codex, Gemini CLI, Hermes, Claude Code) | `bdrive skill install [<folder>]` — writes the binary's own copy of this skill to each detected platform's user-level skills dir (`~/.codex/skills/beardrive/SKILL.md` and friends), idempotently; bare `bdrive skill` shows the status table. Then the user asks that agent to set the folder up and it runs `init` + `hooks install` itself |
@@ -110,8 +110,10 @@ Renaming/moving a project folder is safe: the daemon notices its folder vanished
 
 ### Stop
 
-- `bdrive stop <folder>` — stop the daemon. Files stay on disk; the local volume store under `~/.bdrive/volumes/<mount-id>/` is kept. `bdrive init` resumes any time.
+- `bdrive stop <folder>` — stop the daemon and pause all syncing for the folder, **including the agent turn hooks** (`bdrive sync` refuses while paused, and the turn-start hook stops injecting the link formula). Files stay on disk; the local volume store under `~/.bdrive/volumes/<mount-id>/` is kept. Only `bdrive init` resumes.
 - `bdrive stop <folder> --forget` — also drop from the mount registry. Local volume data is still preserved; `rm -rf ~/.bdrive/volumes/<mount-id>/` reclaims disk.
+
+Syncing only ever runs where this device opted in: a `.bdrive/config.json` that merely arrived with the folder (git clone, copied dir) is inert — hooks and `bdrive sync` no-op until someone runs `bdrive init` there.
 
 ### On-demand sync
 

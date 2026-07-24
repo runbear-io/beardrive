@@ -44,6 +44,26 @@ func mustProject(folder string) (config.Project, error) {
 	return proj, nil
 }
 
+// syncBlocked reports why syncing must not run for a project on this device:
+// "init" when the mount was never enrolled here (.bdrive/config.json travels
+// with the folder — e.g. arrives in a git clone — so its presence alone is
+// not consent to sync; only `bdrive init` enrolls a device), "paused" after
+// `bdrive stop`, "" to proceed. Deliberately reads the registry without
+// ResolveMount's self-heal, which would enroll as a side effect.
+func syncBlocked(proj config.Project) string {
+	mounts, err := config.LoadMounts()
+	if err != nil {
+		return "init"
+	}
+	if _, enrolled := mounts[proj.ID]; !enrolled {
+		return "init"
+	}
+	if vdir, err := config.VolumeDir(proj.ID); err == nil && store.Paused(vdir) {
+		return "paused"
+	}
+	return ""
+}
+
 // openSession builds a syncer session for a project folder. When withRemote
 // is set and the remote is unreachable, it degrades to offline with a warning
 // rather than failing.
