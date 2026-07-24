@@ -26,6 +26,11 @@ func startSync(ctx context.Context, folder string, proj config.Project, foregrou
 	if _, err := store.Open(vdir); err != nil {
 		return err
 	}
+	// init is the one gesture that (re)consents to syncing: clear any pause
+	// left by `bdrive stop` so the daemon and the agent hooks run again.
+	if err := store.SetPaused(vdir, false); err != nil {
+		return err
+	}
 
 	// Initial cycle: import existing files, pull remote state.
 	sess, _, err := openSession(ctx, folder, true)
@@ -82,10 +87,16 @@ folder's .bdrive settings and the local volume data are kept).`,
 			if err != nil {
 				return err
 			}
+			// The pause must outlive the daemon: agent turn hooks run
+			// `bdrive sync` in this folder on every turn and would silently
+			// resume without it. Cleared by `bdrive init`.
+			if err := store.SetPaused(vdir, true); err != nil {
+				return err
+			}
 			if stopped {
-				fmt.Printf("stopped syncing %s\n", folder)
+				fmt.Printf("stopped syncing %s (run `bdrive init` to resume)\n", folder)
 			} else {
-				fmt.Printf("no sync daemon running for %s\n", folder)
+				fmt.Printf("no sync daemon running for %s; syncing paused (run `bdrive init` to resume)\n", folder)
 			}
 			if forget {
 				mounts, err := config.LoadMounts()

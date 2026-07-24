@@ -107,6 +107,9 @@ func TestReadLogCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := config.ResolveMount(folder); err != nil { // enroll, as `bdrive init` would
+		t.Fatal(err)
+	}
 
 	c := readLogCmd()
 	c.SetIn(bytes.NewReader([]byte(`{"session_id":"abc","tool_name":"Read",
@@ -131,5 +134,65 @@ func TestReadLogCommand(t *testing.T) {
 	}
 	if len(evs) != 1 || evs[0].Path != "wiki/a.md" {
 		t.Fatalf("spool = %+v, want just the in-project read, mount-relative", evs)
+	}
+}
+
+// read-log fires on every agent tool call in every folder, so it must be
+// inert where this device never opted in: an unenrolled config.json (one
+// that arrived with a git clone / copied folder) spools nothing, enrolls
+// nothing, and creates no volume store; a paused project spools nothing.
+func TestReadLogGated(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	folder := t.TempDir()
+	folder, _ = filepath.EvalSymlinks(folder)
+	proj, err := config.SaveProject(folder, config.Project{Volume: "wiki"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := `{"tool_name":"Read","tool_input":{"file_path":"` + folder + `/wiki/a.md"}}`
+	run := func() {
+		c := readLogCmd()
+		c.SetIn(bytes.NewReader([]byte(event)))
+		c.SetArgs([]string{folder})
+		if err := c.Execute(); err != nil {
+			t.Fatalf("read-log must never fail: %v", err)
+		}
+	}
+
+	// Unenrolled: no spool, no store, no registry entry.
+	run()
+	if _, err := os.Stat(vdir); !os.IsNotExist(err) {
+		t.Fatal("unenrolled read-log created the volume store")
+	}
+	mounts, err := config.LoadMounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, enrolled := mounts[proj.ID]; enrolled {
+		t.Fatal("read-log enrolled the mount; only `bdrive init` may do that")
+	}
+
+	// Enrolled but paused by `bdrive stop`: still nothing spooled.
+	if _, _, err := config.ResolveMount(folder); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPaused(vdir, true); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs, err := st.PendingReads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 0 {
+		t.Fatalf("paused read-log spooled %+v, want nothing", evs)
 	}
 }

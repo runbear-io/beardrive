@@ -6,6 +6,16 @@ minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#s
 
 ## Unreleased
 
+- **Fix: agent hooks no longer sync (or inject hub links into) folders this
+  device never opted into.** `bdrive sync`/`sync --hook`/`read-log` now
+  require the mount to be enrolled here — a `.bdrive/config.json` that
+  merely arrived with a folder (git clone, copied dir) is inert until
+  `bdrive init`; previously one hook firing silently minted a device
+  identity, registered the mount, and journaled the whole folder. And
+  `bdrive stop` now truly pauses: it sets a per-device paused marker that
+  gates the hooks and `bdrive sync` (which previously resumed a stopped
+  project every agent turn and re-registered even after `stop --forget`);
+  only `bdrive init` resumes.
 - **`bdrive skill install`** — the binary now carries the `beardrive`
   skill and installs it into any agent that reads `SKILL.md`
   (`~/.claude|.codex|.gemini|.hermes/skills/beardrive/`), idempotently;

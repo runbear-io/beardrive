@@ -12,17 +12,23 @@ case "$cmd" in
 *skip-diagram-check*) exit 0 ;;
 esac
 base=$(git merge-base origin/main HEAD 2>/dev/null || git merge-base main HEAD 2>/dev/null) || exit 0
-code=$(git diff --name-only "$base" HEAD -- 'internal/webapp/*.go' 'internal/remote/*.go')
+# Every application package is drawn in architecture/ (see its README);
+# frontend static/ is generated output, excluded via the src-only pathspec.
+code=$(git diff --name-only "$base" HEAD -- 'cmd/' 'internal/*.go' \
+	'internal/webapp/frontend/src/')
 diag=$(git diff --name-only "$base" HEAD -- architecture/)
 if [ -n "$code" ] && [ -z "$diag" ]; then
 	cat >&2 <<EOF
-This branch changes server code but architecture/ is untouched:
+This branch changes code covered by architecture/ diagrams but architecture/ is untouched:
 $code
 
 Before creating the PR: if any of these change types or relationships drawn
-in architecture/, update the affected diagram, commit it, and embed the
-changed diagram(s) in the PR body. If nothing structural changed, re-run the
-same command with '# skip-diagram-check' appended.
+in architecture/, update the affected diagram, commit it, and add an
+"Architecture changes" section to the PR body: say what changed, then show
+Before and After mermaid excerpts of ONLY the affected classes and their
+immediate relationships (Before = diagram at the merge base), never the full
+diagram. If nothing structural changed, re-run the same command with
+'# skip-diagram-check' appended.
 EOF
 	exit 2
 fi

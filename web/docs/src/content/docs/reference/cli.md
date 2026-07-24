@@ -12,10 +12,10 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive login [server-url]` | Sign this device in. Browser flow; `--device` forces the code flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
 | `bdrive logout` | Sign this device out — clear the saved token and account. `--forget` also drops the remembered server |
 | `bdrive init [folder]` | Create or connect a project and start syncing. Interactive on a TTY; flags (`--name`, `--project`, `--shared`, `--yes`) for scripts. Re-run to resume |
-| `bdrive stop [folder]` | Stop syncing. Files stay on disk; `bdrive init` resumes |
+| `bdrive stop [folder]` | Stop syncing — daemon and agent sync hooks both pause. Files stay on disk; `bdrive init` resumes |
 | `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file. `--list`, `--revoke`, `--expires` |
-| `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it. `--hook <label>` is agent-hook plumbing |
+| `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it. `--hook <label>` is agent-hook plumbing |
 | `bdrive hooks [install]` | Register turn-boundary sync hooks with detected agent platforms. Idempotent; `--agent` overrides detection |
 | `bdrive skill [install]` | Install the `beardrive` skill into detected agent platforms so the agent can do setup itself. Idempotent; `--agent` overrides detection |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
