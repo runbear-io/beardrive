@@ -20,9 +20,12 @@ This branch changes server code but architecture/ is untouched:
 $code
 
 Before creating the PR: if any of these change types or relationships drawn
-in architecture/, update the affected diagram, commit it, and embed the
-changed diagram(s) in the PR body. If nothing structural changed, re-run the
-same command with '# skip-diagram-check' appended.
+in architecture/, update the affected diagram, commit it, and add an
+"Architecture changes" section to the PR body: say what changed, then show
+Before and After mermaid excerpts of ONLY the affected classes and their
+immediate relationships (Before = diagram at the merge base), never the full
+diagram. If nothing structural changed, re-run the same command with
+'# skip-diagram-check' appended.
 EOF
 	exit 2
 fi

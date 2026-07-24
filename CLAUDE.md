@@ -75,7 +75,7 @@ The real coverage is the integration tests in `internal/syncer/syncer_test.go`: 
 
 ## Architecture diagrams in PRs
 
-`architecture/` holds mermaid class diagrams of the server (`webapp-server.md`). Before `gh pr create`: if the branch changes types or relationships drawn there (new/removed types, new seams, changed fields/implements/ownership in `internal/webapp` or `internal/remote`), update the affected diagram and commit it on the branch, then include ONLY the changed diagrams' mermaid blocks in the PR description under an "Architecture changes" section (GitHub renders them). No structural change → no section, and append `# skip-diagram-check` to the `gh pr create` command to satisfy the pre-PR hook.
+`architecture/` holds mermaid class diagrams of the server (`webapp-server.md`). Before `gh pr create`: if the branch changes types or relationships drawn there (new/removed types, new seams, changed fields/implements/ownership in `internal/webapp` or `internal/remote`), update the affected diagram and commit it on the branch, then add an "Architecture changes" section to the PR description with, per changed diagram: (1) a sentence naming exactly which types/relationships changed and how, (2) a **Before** mermaid block and an **After** mermaid block (GitHub renders them), each an *excerpt* containing only the affected classes and their immediate relationships — never paste the full diagram. The committed diagram file stays the full current state; the before/after excerpts live only in the PR description (take Before from the diagram at the merge base). No structural change → no section, and append `# skip-diagram-check` to the `gh pr create` command to satisfy the pre-PR hook.
 
 ## Docs to keep in sync
 
