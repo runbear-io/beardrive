@@ -21,6 +21,8 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
+| `bdrive export [folder]` | Export the whole project — all devices' history and content — to a portable `.tar.gz` (`-o` names the file) |
+| `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides the archive's name) |
 | `bdrive web [folder \| storage-root-url]` | Web server: viewer, uploads, multi-project sync hub |
 | `bdrive whoami` | Signed-in account and device identity used in change tracking |
 | `bdrive version` | Version (also `bdrive --version`) |
@@ -55,6 +57,30 @@ move to a different hub, run `bdrive login <new-url>` and then re-run
 
 There is no client command to point a folder at a raw bucket. `init` always
 writes a hub remote.
+
+### `bdrive export` / `bdrive import` — moving a project between hubs
+
+Re-running `init` against a new hub carries only your files' current state.
+`export` + `import` carry the whole project: every device's journal and every
+retained blob, so per-file history and authorship arrive intact — and devices
+that later connect to the imported project resume exactly where they left off.
+
+```sh
+# on any machine that syncs the project (run bdrive sync first)
+bdrive export ~/team-wiki -o team-wiki.tar.gz
+
+# point the device at the destination hub and import
+bdrive login https://your-hub.example
+bdrive import team-wiki.tar.gz
+bdrive init --project p-xxxxxxxx   # connect folders to the new project
+```
+
+This works in both directions — cloud to self-hosted or self-hosted to
+cloud. The archive is the project's store layout in a tar.gz; the target
+project must be empty, and the destination hub needs uploads enabled. Shares,
+invite links, and read-heat stay behind (they belong to the hub, not the
+project store). Step-by-step walkthrough:
+[Migrate between hubs](/reference/migration/).
 
 ## Environment
 
