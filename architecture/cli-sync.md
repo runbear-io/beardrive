@@ -1,7 +1,7 @@
 # `bdrive` CLI & sync engine — class diagram
 
 Source of truth: `cmd/bdrive` (commands, gates) and `internal/{syncer,store,
-journal,config,daemon,agenthooks}`; the `internal/remote` seam is drawn in
+journal,config,daemon,agenthooks,agentskills}`; the `internal/remote` seam is drawn in
 [webapp-server.md](webapp-server.md). Reflects the code as of this commit;
 update this file in any PR that changes these types or their relationships.
 
@@ -141,6 +141,13 @@ classDiagram
     }
     note for PausedMarker "set by bdrive stop, cleared only by bdrive init (startSync)"
 
+    class AgentSkills {
+        Detect / Install
+        embedded SKILL.md
+    }
+    note for AgentSkills "internal/agentskills — installs the beardrive skill user-level (per-platform skills dir) from the binary's embedded copy; idempotent, refreshed on upgrade"
+
+    Commands --> AgentSkills : skill install
     AgentHooks --> Commands : runs sync and read-log
     Commands --> syncBlocked : sync and read-log gate first
     syncBlocked --> MountRegistry : reads only, never enrolls
