@@ -12,11 +12,14 @@ case "$cmd" in
 *skip-diagram-check*) exit 0 ;;
 esac
 base=$(git merge-base origin/main HEAD 2>/dev/null || git merge-base main HEAD 2>/dev/null) || exit 0
-code=$(git diff --name-only "$base" HEAD -- 'internal/webapp/*.go' 'internal/remote/*.go')
+code=$(git diff --name-only "$base" HEAD -- 'internal/webapp/*.go' 'internal/remote/*.go' \
+	'cmd/bdrive/*.go' 'internal/syncer/*.go' 'internal/store/*.go' \
+	'internal/journal/*.go' 'internal/config/*.go' 'internal/daemon/*.go' \
+	'internal/agenthooks/*.go')
 diag=$(git diff --name-only "$base" HEAD -- architecture/)
 if [ -n "$code" ] && [ -z "$diag" ]; then
 	cat >&2 <<EOF
-This branch changes server code but architecture/ is untouched:
+This branch changes code covered by architecture/ diagrams but architecture/ is untouched:
 $code
 
 Before creating the PR: if any of these change types or relationships drawn

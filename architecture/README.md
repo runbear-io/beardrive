@@ -19,3 +19,4 @@ delta at a glance. A pre-PR hook (`.claude/hooks/check-arch-diagrams.sh`)
 reminds Claude Code sessions when server code changed but no diagram did.
 
 - [webapp-server.md](webapp-server.md) — class diagram of the `bdrive web` server (`internal/webapp` + its `internal/remote` seam)
+- [cli-sync.md](cli-sync.md) — class diagram of the CLI and sync engine (`cmd/bdrive` + `internal/{syncer,store,journal,config,daemon,agenthooks}`)
