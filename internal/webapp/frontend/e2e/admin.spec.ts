@@ -92,9 +92,9 @@ test("org admin: public share audit lists and revokes", async ({ page }) => {
   await expect(page.locator(".admin-item", { hasText: "index.md" })).toHaveCount(0);
 });
 
-test("org admin: project rename and delete", async ({ page }) => {
+test("org admin: project rename (delete lives on project settings)", async ({ page }) => {
   await login(page);
-  await page.request.post("/api/projects", { data: { name: "doomed" } });
+  const made = await (await page.request.post("/api/projects", { data: { name: "doomed" } })).json();
   await page.reload(); // pick up the new project
   await openOrgSettings(page);
   const row = page.locator(".admin-item", { hasText: "doomed" });
@@ -104,11 +104,9 @@ test("org admin: project rename and delete", async ({ page }) => {
   await expectToast(page, "Renamed");
   const row2 = page.locator(".admin-item", { hasText: "doomed-2" });
   await expect(row2).toBeVisible();
-  await row2.locator(".ai-del").click();
-  await page.click(".modal .danger-btn");
-  await expectToast(page, "Deleted");
-  await expect(page.locator(".admin-item", { hasText: "doomed-2" })).toHaveCount(0);
-  await expect(page.locator("#projects .row .label", { hasText: "doomed-2" })).toHaveCount(0);
+  // The one-click delete is gone: Settings' type-the-name flow is the only way.
+  await expect(row2.locator(".ai-del")).toHaveCount(0);
+  await page.request.delete("/api/projects/" + made.project.id); // clean up
 });
 
 test("member sees the org panel read-only", async ({ page }) => {
