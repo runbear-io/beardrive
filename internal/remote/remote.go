@@ -15,12 +15,19 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"strings"
 	"time"
 )
+
+// ErrForbidden marks a refusal by the hub's authorization — the device asked
+// correctly and was told no, which is a different thing from being offline.
+// The syncer keys its degraded states off it: a refused push means read-only
+// (keep pulling), a refused pull means access is gone (pause, touch nothing).
+var ErrForbidden = errors.New("forbidden")
 
 type Object struct {
 	Key  string

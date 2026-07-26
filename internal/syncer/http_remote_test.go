@@ -80,7 +80,9 @@ func TestSyncThroughWebServer(t *testing.T) {
 }
 
 // With uploads disabled on the server, a client can still pull (read-only
-// follower) — its pushes degrade to offline instead of failing the cycle.
+// follower) — its pushes report ReadOnly instead of failing the cycle. Not
+// Offline: the server answered, it just said no, and retrying forever as if
+// the network were down would hide that from the user.
 func TestReadOnlyServerClientStillPulls(t *testing.T) {
 	storage := sharedRemote(t)
 	ts, p := newHub(t, storage, false) // read-only hub
@@ -101,8 +103,8 @@ func TestReadOnlyServerClientStillPulls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Offline {
-		t.Fatalf("push against read-only server should degrade to offline: %+v", res)
+	if !res.ReadOnly || res.Offline {
+		t.Fatalf("push against a read-only server should report ReadOnly, not Offline: %+v", res)
 	}
 	if read(t, a.Folder, "shared.md") != "server-side truth" {
 		t.Fatal("client should still pull from a read-only server")

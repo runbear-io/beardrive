@@ -118,7 +118,10 @@ export default defineConfig({
         },
         {
           label: "Concepts",
-          items: [{ label: "How sync works", slug: "concepts/how-it-works" }],
+          items: [
+            { label: "How sync works", slug: "concepts/how-it-works" },
+            { label: "Project permissions", slug: "concepts/permissions" },
+          ],
         },
       ],
     }),

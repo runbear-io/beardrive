@@ -3,10 +3,14 @@ package syncer
 import (
 	"context"
 	"fmt"
+	"io"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -381,4 +385,194 @@ func TestNestedMountExcluded(t *testing.T) {
 	if got := read(t, b.Folder, "readme.md"); got != "root v2" {
 		t.Fatalf("b readme.md = %q, want root v2", got)
 	}
+}
+
+// gated wraps a backend and refuses the operations the hub would refuse for a
+// given permission level, with the same sentinel the http backend produces.
+// The flags are read on every call so a test can revoke (or restore) access
+// mid-run, which is exactly the case that used to look like a network fault.
+type gated struct {
+	remote.Backend
+	read  *atomic.Bool // pulls allowed (List/Get)
+	write *atomic.Bool // pushes allowed (Put)
+}
+
+func newGated(be remote.Backend) *gated {
+	g := &gated{Backend: be, read: &atomic.Bool{}, write: &atomic.Bool{}}
+	g.read.Store(true)
+	g.write.Store(true)
+	return g
+}
+
+func (g *gated) List(ctx context.Context, prefix string) ([]remote.Object, error) {
+	if !g.read.Load() {
+		return nil, fmt.Errorf("%w: server: 403 Forbidden", remote.ErrForbidden)
+	}
+	return g.Backend.List(ctx, prefix)
+}
+
+func (g *gated) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if !g.read.Load() {
+		return nil, fmt.Errorf("%w: server: 403 Forbidden", remote.ErrForbidden)
+	}
+	return g.Backend.Get(ctx, key)
+}
+
+func (g *gated) Put(ctx context.Context, key string, r io.Reader, size int64) error {
+	if !g.write.Load() {
+		return fmt.Errorf("%w: server: 403 Forbidden", remote.ErrForbidden)
+	}
+	return g.Backend.Put(ctx, key, r, size)
+}
+
+// A read-only device keeps pulling its teammates' changes and journals its own
+// edits locally, but nothing of its own ever reaches the remote — and the
+// cycle says ReadOnly, never Offline, so the user is told rather than left
+// watching a silent retry loop.
+func TestReadOnlyDevicePullsOnly(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	gate := newGated(be)
+	b := newDevice(t, "devb", gate)
+
+	write(t, a.Folder, "shared.md", "from A")
+	cycle(t, a)
+
+	gate.write.Store(false) // B is downgraded to read
+	write(t, b.Folder, "mine.md", "local only")
+	res, err := b.Cycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.ReadOnly || res.Offline {
+		t.Fatalf("read-only push: %+v, want ReadOnly and not Offline", res)
+	}
+	if got := read(t, b.Folder, "shared.md"); got != "from A" {
+		t.Fatalf("b shared.md = %q — a read-only device must still pull", got)
+	}
+	// B's own edit is journaled locally...
+	ops, err := b.Store.DeviceOps(b.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || ops[0].Path != "mine.md" {
+		t.Fatalf("b's local journal = %+v, want one op for mine.md", ops)
+	}
+	// ...and never lands in the shared remote, however many cycles run.
+	for i := 0; i < 3; i++ {
+		if _, err := b.Cycle(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := newDevice(t, "devc", be)
+	cycle(t, c)
+	if _, err := os.Stat(filepath.Join(c.Folder, "mine.md")); !os.IsNotExist(err) {
+		t.Fatal("a read-only device's edit reached the remote")
+	}
+	// The state is persisted so `bdrive status` can report it without a cycle.
+	if st, err := b.Store.LoadSync(); err != nil || st.Access != store.AccessReadOnly {
+		t.Fatalf("persisted access = %q (%v), want read-only", st.Access, err)
+	}
+
+	// Restoring write self-heals: the held-back op finally goes out.
+	gate.write.Store(true)
+	if res := cycle(t, b); !res.Pushed {
+		t.Fatalf("re-granted device did not push: %+v", res)
+	}
+	cycle(t, c)
+	if got := read(t, c.Folder, "mine.md"); got != "local only" {
+		t.Fatalf("c mine.md = %q after the re-grant", got)
+	}
+	if st, _ := b.Store.LoadSync(); st.Access != store.AccessOK {
+		t.Fatalf("persisted access = %q after re-grant, want cleared", st.Access)
+	}
+}
+
+// A device whose access is revoked entirely pauses: the cycle reports
+// NoAccess (not Offline), the working folder is left byte-for-byte alone —
+// revoking access must never look like the hub deleting someone's files — and
+// re-granting resumes normal sync with no manual step.
+func TestNoAccessPausesSync(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	gate := newGated(be)
+	c := newDevice(t, "devc", gate)
+
+	write(t, a.Folder, "doc.md", "v1")
+	cycle(t, a)
+	cycle(t, c)
+	if got := read(t, c.Folder, "doc.md"); got != "v1" {
+		t.Fatalf("c doc.md = %q, want v1", got)
+	}
+
+	// A moves on while C's access is cut.
+	write(t, a.Folder, "doc.md", "v2")
+	write(t, a.Folder, "new.md", "after the cut")
+	cycle(t, a)
+
+	gate.read.Store(false)
+	gate.write.Store(false)
+	before := snapshotDir(t, c.Folder)
+	write(t, c.Folder, "cs-own.md", "written while cut off")
+	before["cs-own.md"] = "written while cut off"
+
+	for i := 0; i < 3; i++ {
+		res, err := c.Cycle(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.NoAccess || res.Offline {
+			t.Fatalf("cycle %d: %+v, want NoAccess and not Offline", i, res)
+		}
+		if res.Materialized != 0 || res.Pushed {
+			t.Fatalf("cycle %d touched the folder or pushed: %+v", i, res)
+		}
+	}
+	if got := snapshotDir(t, c.Folder); !maps.Equal(got, before) {
+		t.Fatalf("working folder changed while access was revoked:\n got %v\nwant %v", got, before)
+	}
+	if st, _ := c.Store.LoadSync(); st.Access != store.AccessNone {
+		t.Fatalf("persisted access = %q, want no-access", st.Access)
+	}
+
+	// Re-granting needs no intervention: the next cycle converges both ways.
+	gate.read.Store(true)
+	gate.write.Store(true)
+	cycle(t, c)
+	if got := read(t, c.Folder, "doc.md"); got != "v2" {
+		t.Fatalf("c doc.md = %q after the re-grant, want v2", got)
+	}
+	if got := read(t, c.Folder, "new.md"); got != "after the cut" {
+		t.Fatalf("c new.md = %q after the re-grant", got)
+	}
+	cycle(t, a)
+	if got := read(t, a.Folder, "cs-own.md"); got != "written while cut off" {
+		t.Fatalf("a cs-own.md = %q — C's held-back edit should arrive", got)
+	}
+}
+
+// snapshotDir reads every file under folder (excluding .bdrive) as path→content.
+func snapshotDir(t *testing.T, folder string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.WalkDir(folder, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(folder, p)
+		rel = filepath.ToSlash(rel)
+		if strings.HasPrefix(rel, config.ProjectDir+"/") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out[rel] = string(b)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }

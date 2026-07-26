@@ -455,7 +455,12 @@ Interpretation:
 - **`remote`** — `(none — local only)` means changes are journaled locally but never leave the device.
 - **`daemon`** — `running (pid N)` or `stopped`. If stopped, run `bdrive init <folder>` to start a daemon, or `bdrive sync <folder>` for a one-shot.
 - **`files`** — tracked file count and total bytes.
-- **`pending`** — local journal ops not yet pushed. Should be 0 shortly after a successful sync. Stuck > 0 usually means broken remote/creds, stopped daemon, or a custom `--remote-interval`.
+- **`pending`** — local journal ops not yet pushed. Should be 0 shortly after a successful sync. Stuck > 0 usually means broken remote/creds, stopped daemon, or a custom `--remote-interval` — or an `access:` line below.
+- **`access`** — only printed when the hub is refusing this device. Two forms, and they are not the same as being offline:
+  - `read-only (pull only) — N local change(s) stay on this device` — you have `read` on this project. The daemon keeps pulling teammates' changes and materializing them; your own edits are journaled locally and never pushed (never lost either — they go out if you're granted `write` again).
+  - `no access to this project — sync paused` — your access was revoked. Nothing is pulled, pushed, or written; your files are left exactly as they are. Re-granting access resumes on the next tick with nothing to do by hand.
+
+  Same two lines appear in the `bdrive sync` output as `remote: read-only (pull only)` / `remote: no access — sync paused`, and once (not per tick) in `daemon.log`. Ask a project admin or workspace owner for access.
 
 ### `bdrive log [<folder>]`
 
@@ -513,11 +518,12 @@ Useful when `pending` is stuck > 0, the daemon flips to `stopped` after a restar
 
 ### Diagnostic flow ("beardrive doesn't seem to be working")
 
-1. `bdrive status` — folder listed? daemon `running`? `pending` stuck > 0?
+1. `bdrive status` — folder listed? daemon `running`? `pending` stuck > 0? any `access:` line?
 2. `daemon: stopped` → `bdrive init <folder>` to restart it.
-3. `pending` stuck → `bdrive sync <folder>` and read the cycle output. Errors here point at the remote — see the cloud-storage troubleshooting table above.
-4. Sync succeeds but the other device doesn't see changes → `bdrive sync` on the other device + `bdrive log` to confirm the op crossed over.
-5. Daemon keeps dying → tail `~/.bdrive/volumes/<mount-id>/daemon.log` for the cause.
+3. `access: read-only` or `access: no access` → this is a **permissions** answer, not a broken remote. Nothing to fix on the device; the project's admin (or a workspace owner) has to raise the level in the hub's Project settings → People. Local files and journal are intact either way, and the daemon resumes on its own once the grant changes.
+4. `pending` stuck (with no `access:` line) → `bdrive sync <folder>` and read the cycle output. Errors here point at the remote — see the cloud-storage troubleshooting table above.
+5. Sync succeeds but the other device doesn't see changes → `bdrive sync` on the other device + `bdrive log` to confirm the op crossed over.
+6. Daemon keeps dying → tail `~/.bdrive/volumes/<mount-id>/daemon.log` for the cause.
 
 ---
 

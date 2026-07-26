@@ -49,6 +49,30 @@ Stamps session context — an agent session id, say — onto changes. It shows u
 `bdrive log` and hub history, and keeps applying to daemon-committed changes
 until `--note-ttl` expires.
 
+### `bdrive status` — and the two degraded access states
+
+Alongside `pending`, `status` prints an `access:` line whenever the hub is
+refusing this device. Neither is the same as being offline, and neither ever
+touches your files:
+
+```
+  pending:  3 local change(s) not yet pushed
+  access:   read-only (pull only) — 3 local change(s) stay on this device
+```
+
+- **`read-only (pull only)`** — you have `read` on the project. The daemon keeps
+  pulling teammates' changes; your own edits stay journaled locally, never
+  pushed and never dropped. They go out if you are granted `write` again.
+- **`no access to this project — sync paused`** — your access was revoked.
+  Nothing is pulled, pushed, or written; the working folder is left exactly as
+  it is. Re-granting resumes on the next tick with no manual step.
+
+`bdrive sync` shows the same two as `remote: read-only (pull only)` /
+`remote: no access — sync paused`, and the daemon logs each once on
+transition rather than on every tick. Both are permission answers: they are
+fixed in the hub's Project settings → People, not on the device. See
+[Project permissions](/concepts/permissions/).
+
 ### `bdrive login` and switching hubs
 
 `bdrive login` remembers the server in `settings.json` under the bdrive home. To

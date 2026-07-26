@@ -2,6 +2,8 @@ import { Page } from "@playwright/test";
 
 export const ADMIN = "e2e@example.com";
 export const MEMBER = "member@example.com";
+// Org member cut back to read-only on "wiki" by the seeded harness.
+export const READER = "reader@example.com";
 export const PASSWORD = "e2e-pass-1";
 
 // One real form login per identity per run, then the session cookie is

@@ -372,20 +372,6 @@ func (s *Server) orgOf(projectID string) string {
 	return p.Org
 }
 
-// projectAllowed says whether the request's account may touch the project.
-// Without an org registry (single-volume mode, tests, pre-org hubs) every
-// authenticated request passes, preserving the old behavior.
-func (s *Server) projectAllowed(r *http.Request, projectID string) bool {
-	if s.Dir == nil || s.Auth == nil {
-		return true
-	}
-	org := s.orgOf(projectID)
-	if org == "" {
-		return true // org-less project (migration happens at startup)
-	}
-	return s.Dir.Role(org, s.requestUser(r).Email) != ""
-}
-
 // handleOrgList returns the caller's orgs with members (visible to any
 // member) and the caller's role.
 func (s *Server) handleOrgList(w http.ResponseWriter, r *http.Request) {

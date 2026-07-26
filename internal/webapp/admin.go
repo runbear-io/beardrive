@@ -12,34 +12,14 @@ import (
 // operable — an admin can offboard, clean up, and audit — without editing
 // JSON files on the server by hand.
 
-// projectOwner returns true when the request's account owns the project's org.
-func (s *Server) projectOwner(r *http.Request, projectID string) bool {
-	if s.Dir == nil || s.Auth == nil {
-		return true
-	}
-	org := s.orgOf(projectID)
-	if org == "" {
-		return true
-	}
-	return s.Dir.Role(org, s.requestUser(r).Email) == RoleOwner
-}
-
-// handleProjectUpdate edits a project's name, description and icon. Owner of
-// its org only. It's a partial update: every field is a pointer, so only the
-// keys actually present in the body change — {"description":""} clears the
-// description, omitting the key leaves it alone.
+// handleProjectUpdate edits a project's name, description and icon. Project
+// admins (and, implicitly, the owners of its org) only. It's a partial update:
+// every field is a pointer, so only the keys actually present in the body
+// change — {"description":""} clears the description, omitting the key leaves
+// it alone.
 func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("project")
-	if s.Projects == nil {
-		http.Error(w, "this server does not host projects", http.StatusNotFound)
-		return
-	}
-	if _, ok := s.Projects.Get(id); !ok || !s.projectAllowed(r, id) {
-		http.Error(w, "no such project", http.StatusNotFound)
-		return
-	}
-	if !s.projectOwner(r, id) {
-		http.Error(w, "only an organization owner can rename a project", http.StatusForbidden)
+	if _, ok := s.project(w, r, id, PermAdmin); !ok {
 		return
 	}
 	var req struct {
@@ -58,20 +38,11 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// handleProjectDelete removes a project from the registry. Owner only.
-// Storage (blobs, journals) is intentionally left in place.
+// handleProjectDelete removes a project from the registry. Project admins
+// only. Storage (blobs, journals) is intentionally left in place.
 func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("project")
-	if s.Projects == nil {
-		http.Error(w, "this server does not host projects", http.StatusNotFound)
-		return
-	}
-	if _, ok := s.Projects.Get(id); !ok || !s.projectAllowed(r, id) {
-		http.Error(w, "no such project", http.StatusNotFound)
-		return
-	}
-	if !s.projectOwner(r, id) {
-		http.Error(w, "only an organization owner can delete a project", http.StatusForbidden)
+	if _, ok := s.project(w, r, id, PermAdmin); !ok {
 		return
 	}
 	if err := s.Projects.Delete(id); err != nil {

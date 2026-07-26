@@ -89,10 +89,16 @@ func (b *httpBackend) endpoint(name string, q url.Values) string {
 }
 
 // httpError turns a non-2xx response into an error carrying the server's
-// message.
+// message. A 403 additionally wraps ErrForbidden: only the hub's own
+// endpoints go through here, so that status is always an authorization
+// answer, never a storage hiccup.
 func httpError(resp *http.Response) error {
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return fmt.Errorf("server: %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+	err := fmt.Errorf("server: %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+	if resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: %w", ErrForbidden, err)
+	}
+	return err
 }
 
 func (b *httpBackend) List(ctx context.Context, prefix string) ([]Object, error) {
@@ -225,7 +231,12 @@ func (b *httpBackend) putDirect(ctx context.Context, plan putPlan, r io.Reader, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("direct upload: %w", httpError(resp))
+		// Deliberately not httpError: this response comes from the object
+		// store, not the hub, and its 403 means an expired presigned URL —
+		// mapping it to ErrForbidden would park the device in permanent
+		// read-only over a transient signing problem.
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("direct upload: %s: %s", resp.Status, strings.TrimSpace(string(msg)))
 	}
 	return nil
 }

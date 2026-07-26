@@ -19,9 +19,9 @@ package webapp
 
 import (
 	"context"
-	"errors"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -292,7 +292,9 @@ func (s *Server) Handler() http.Handler {
 
 	// Volume resolution per route family: fixed single volume, or by
 	// project id in hub mode. One handler implementation serves both.
-	single := func(h func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+	// Single-volume mode has no per-project permissions, so it ignores the
+	// declared level; hub mode enforces it.
+	single := func(_ string, h func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if s.Source == nil {
 				http.Error(w, "this server hosts projects; use /api/p/<project-id>/...", http.StatusNotFound)
@@ -301,7 +303,7 @@ func (s *Server) Handler() http.Handler {
 			h(s.single(), w, r)
 		}
 	}
-	proj := func(h func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+	proj := func(level string, h func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("project")
 			v, err := s.projectVolume(id)
@@ -309,12 +311,11 @@ func (s *Server) Handler() http.Handler {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			if !s.projectAllowed(r, id) {
-				http.Error(w, "you are not a member of this project's organization", http.StatusForbidden)
+			if !s.requirePerm(w, r, id, level) {
 				return
 			}
 			// Read recording (and anything else downstream) finds the project
-			// id in the context; membership has already passed at this point.
+			// id in the context; permission has already passed at this point.
 			h(v, w, withProjectID(r, id))
 		}
 	}
@@ -324,17 +325,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/projects", s.handleProjectCreate)
 	mux.HandleFunc("GET /api/projects/{project}", s.handleProjectGet)
 
-	for prefix, resolve := range map[string]func(func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc{
+	for prefix, resolve := range map[string]func(string, func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc{
 		"/api/":             single,
 		"/api/p/{project}/": proj,
 	} {
-		mux.HandleFunc("GET "+prefix+"tree", resolve(s.handleTree))
-		mux.HandleFunc("GET "+prefix+"file", resolve(s.handleFile))
-		mux.HandleFunc("GET "+prefix+"download", resolve(s.handleDownload))
-		mux.HandleFunc("GET "+prefix+"render", resolve(s.handleRender))
-		mux.HandleFunc("POST "+prefix+"upload/init", resolve(s.handleUploadInit))
-		mux.HandleFunc("PUT "+prefix+"upload/content", resolve(s.handleUploadContent))
-		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(s.handleUploadCommit))
+		mux.HandleFunc("GET "+prefix+"tree", resolve(PermRead, s.handleTree))
+		mux.HandleFunc("GET "+prefix+"file", resolve(PermRead, s.handleFile))
+		mux.HandleFunc("GET "+prefix+"download", resolve(PermRead, s.handleDownload))
+		mux.HandleFunc("GET "+prefix+"render", resolve(PermRead, s.handleRender))
+		mux.HandleFunc("POST "+prefix+"upload/init", resolve(PermWrite, s.handleUploadInit))
+		mux.HandleFunc("PUT "+prefix+"upload/content", resolve(PermWrite, s.handleUploadContent))
+		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(PermWrite, s.handleUploadCommit))
 	}
 
 	mux.HandleFunc("GET /api/orgs", s.handleOrgList)
@@ -356,22 +357,28 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/pending/{id}/approve", s.handleAdminApprove)
 	mux.HandleFunc("POST /api/admin/pending/{id}/deny", s.handleAdminDeny)
 
-	mux.HandleFunc("GET /api/p/{project}/history", proj(s.handleHistory))
-	mux.HandleFunc("GET /api/p/{project}/blob", proj(s.handleBlob))
-	mux.HandleFunc("GET /api/p/{project}/heat", proj(s.handleHeat))
-	mux.HandleFunc("POST /api/p/{project}/reads", proj(s.handleReadReport))
-	mux.HandleFunc("POST /api/p/{project}/shares", proj(s.handleShareCreate))
-	mux.HandleFunc("GET /api/p/{project}/shares", proj(s.handleShareList))
+	mux.HandleFunc("GET /api/p/{project}/history", proj(PermRead, s.handleHistory))
+	mux.HandleFunc("GET /api/p/{project}/blob", proj(PermRead, s.handleBlob))
+	mux.HandleFunc("GET /api/p/{project}/heat", proj(PermRead, s.handleHeat))
+	mux.HandleFunc("POST /api/p/{project}/reads", proj(PermRead, s.handleReadReport))
+	mux.HandleFunc("POST /api/p/{project}/shares", proj(PermWrite, s.handleShareCreate))
+	mux.HandleFunc("GET /api/p/{project}/shares", proj(PermRead, s.handleShareList))
 	mux.HandleFunc("DELETE /api/shares/{token}", s.handleShareRevoke)
 	mux.HandleFunc("GET /s/{token}", s.handleShared)
 
+	mux.HandleFunc("GET /api/p/{project}/permissions", s.handleProjectPerms)
+	mux.HandleFunc("PUT /api/p/{project}/permissions", s.handleProjectPermDefault)
+	mux.HandleFunc("PUT /api/p/{project}/permissions/{email}", s.handleProjectPermSet)
+	mux.HandleFunc("DELETE /api/p/{project}/permissions/{email}", s.handleProjectPermClear)
+
 	// The sync (store) API only exists per project: hub mode is what
-	// storage-blind devices sync through.
-	mux.HandleFunc("GET /api/p/{project}/store/list", proj(s.handleStoreList))
-	mux.HandleFunc("GET /api/p/{project}/store/object", proj(s.handleStoreGet))
-	mux.HandleFunc("GET /api/p/{project}/store/exists", proj(s.handleStoreExists))
-	mux.HandleFunc("POST /api/p/{project}/store/sign", proj(s.handleStoreSign))
-	mux.HandleFunc("PUT /api/p/{project}/store/object", proj(s.handleStorePut))
+	// storage-blind devices sync through. Reading the store is how a
+	// pull-only (read) device stays current; writing needs write.
+	mux.HandleFunc("GET /api/p/{project}/store/list", proj(PermRead, s.handleStoreList))
+	mux.HandleFunc("GET /api/p/{project}/store/object", proj(PermRead, s.handleStoreGet))
+	mux.HandleFunc("GET /api/p/{project}/store/exists", proj(PermRead, s.handleStoreExists))
+	mux.HandleFunc("POST /api/p/{project}/store/sign", proj(PermWrite, s.handleStoreSign))
+	mux.HandleFunc("PUT /api/p/{project}/store/object", proj(PermWrite, s.handleStorePut))
 
 	mux.Handle("GET /", s.frontend(static))
 	if s.Auth != nil {
@@ -479,14 +486,34 @@ func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this server does not host projects", http.StatusNotFound)
 		return
 	}
-	list := s.Projects.List()
-	visible := make([]Project, 0, len(list))
-	for _, p := range list {
-		if s.projectAllowed(r, p.ID) {
-			visible = append(visible, p)
+	// Each row carries the caller's own level, so the frontend can hide write
+	// affordances without a second fetch per project on every render.
+	visible := []projectView{}
+	for _, p := range s.Projects.List() {
+		perm := s.projectPerm(r, p.ID)
+		if !atLeast(perm, PermRead) {
+			continue
 		}
+		visible = append(visible, projectJSON(p, perm))
 	}
 	writeJSON(w, map[string]any{"projects": visible})
+}
+
+// projectJSON renders a project for the API with the caller's effective level.
+// projectView is a Project plus the caller's own effective level on it.
+// It embeds rather than re-listing fields on purpose: hand-listing them means
+// every new Project field silently fails to reach the client until someone
+// remembers to add it here.
+type projectView struct {
+	Project
+	Perm string `json:"perm"`
+}
+
+func projectJSON(p Project, perm string) projectView {
+	// The grant list and the default belong to /api/p/{id}/permissions, which
+	// has its own gate; they'd be noise on every row of every project list.
+	p.Perms, p.Default = nil, ""
+	return projectView{p, perm}
 }
 
 func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
@@ -495,11 +522,12 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, ok := s.Projects.Get(r.PathValue("project"))
-	if !ok || !s.projectAllowed(r, p.ID) {
+	perm := s.projectPerm(r, p.ID)
+	if !ok || !atLeast(perm, PermRead) {
 		http.Error(w, "no such project", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, p)
+	writeJSON(w, projectJSON(p, perm))
 }
 
 // handleProjectCreate creates a project by name, or returns the existing one
@@ -539,7 +567,33 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"project": p, "created": created})
+	if created {
+		// The creator is the project's first admin. Both writes are
+		// best-effort in the sense that a failure leaves a usable project
+		// governed by org owners — but report it rather than lie.
+		me := normEmail(s.requestUser(r).Email)
+		if me != "" {
+			if err := s.Projects.SetCreator(p.ID, me); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// An org owner is already implicitly admin; an explicit grant on
+			// one is refused elsewhere, so don't write one here either.
+			if s.Dir == nil || org == "" || s.Dir.Role(org, me) != RoleOwner {
+				if err := s.Projects.SetPerm(p.ID, me, PermAdmin); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			p, _ = s.Projects.Get(p.ID)
+		}
+	} else if !atLeast(s.projectPerm(r, p.ID), PermRead) {
+		// GetOrCreate is create-or-join by name: without this, POSTing the
+		// name of a project you've been cut off from would hand back its id.
+		http.Error(w, permDenied(PermRead), http.StatusForbidden)
+		return
+	}
+	writeJSON(w, map[string]any{"project": projectJSON(p, s.projectPerm(r, p.ID)), "created": created})
 }
 
 // orgForCreate resolves which org a new project lands in: the explicitly

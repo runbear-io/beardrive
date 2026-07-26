@@ -124,6 +124,10 @@ func printCycle(res *syncer.Result) {
 	}
 	fmt.Printf("  files updated:  %d\n", res.Materialized)
 	switch {
+	case res.NoAccess:
+		fmt.Printf("  remote:         no access — sync paused (ask a project admin for access)\n")
+	case res.ReadOnly:
+		fmt.Printf("  remote:         read-only (pull only) — local changes stay on this device\n")
 	case res.Offline:
 		fmt.Printf("  remote:         offline (%v)\n", res.OfflineErr)
 	case res.Pushed:

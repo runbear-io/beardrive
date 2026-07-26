@@ -255,6 +255,38 @@ sweeps its existing projects into a `default` org that all existing
 accounts join, so nothing breaks. Public share links stay outside the
 wall on purpose.
 
+Inside an org, each project carries its own **permissions** — four ordered
+levels, edited under Project settings → People:
+
+| Level | Can |
+|---|---|
+| `none` | nothing: the project is hidden — absent from the project list, every route denied |
+| `read` | browse, view, download, history, read heat — and **pull**, so a device stays current |
+| `write` | + upload, sync push, and minting/revoking share links |
+| `admin` | + rename, delete, and edit this project's permissions |
+
+The default is `write` for every org member, which is exactly the old
+behavior — an upgraded hub changes nothing until someone edits
+permissions. Setting the **default** to `No access` makes a project
+invite-only: only explicit grants get in. Whoever creates a project becomes
+its first admin, and **org owners are implicitly admin on every project in
+their org**, so nobody can lock them out. Grants are org members only, and
+a project always keeps at least one admin.
+
+Two things follow on the **device** side, because a refusal is not the same
+as being offline (see `bdrive status`):
+
+- **read-only** — pushes are refused, so the daemon goes **pull-only**. Your
+  local edits stay journaled on the device, never pushed and never lost;
+  they go out if you're granted `write` again.
+- **no access** — pulls are refused too, so sync **pauses**. Nothing is
+  pulled, pushed, or written: revoking access never deletes or reverts a
+  file on someone's disk. Re-granting resumes on the next tick.
+
+Public `/s/<token>` share links are **unaffected** by any of this: they are
+anonymous by design and keep serving until revoked, so cutting someone's
+access does not kill links they already minted.
+
 ```sh
 # On the server device (knows the storage)
 bdrive web -c config.json
@@ -289,7 +321,8 @@ blob uploads go direct to the object store via the same short-lived
 presigned URLs browser uploads use (falling back to relaying when the
 backend can't presign). Client pushes and project creation require the
 server to run with `--upload`; against a read-only hub, clients still pull
-and their pushes wait (offline semantics) until allowed.
+and `bdrive status` reports `access: read-only (pull only)` rather than
+pretending to be offline.
 
 ### Sharing files by URL
 

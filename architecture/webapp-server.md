@@ -121,11 +121,26 @@ classDiagram
         -repo ProjectRepo
         -byID
         +Get +Create +Update +Rename +List
+        +SetCreator +SetDefault
+        +SetPerm +ClearPerm
     }
     class Project {
         +ID +Name +Org +Created
         +Description +Icon
+        +Creator string
+        +Default string
+        +Perms map email→level
     }
+    note for Project "Default == \"\" means write — the historical behavior, so an upgraded hub needs no migration. SetPerm/ClearPerm refuse to drop the last explicit admin."
+
+    class projectPerm {
+        <<resolver>>
+        org owner → admin
+        explicit grant → that level
+        org member → project Default
+        otherwise → none
+    }
+    note for projectPerm "perms.go — the single authorization ladder. proj(level, h) in server.go is the one choke point: every per-project route declares its level at registration."
 
     class ShareDB {
         -repo ShareRepo
@@ -198,6 +213,9 @@ classDiagram
     BuiltinAuth ..> OrgDB : InviteValid wiring
 
     ProjectDB ..> Project
+    Server *-- projectPerm : gates every per-project route
+    projectPerm ..> Project : Perms + Default
+    projectPerm ..> Directory : org role
     ShareDB ..> Share
     DeviceRegistry ..> DeviceInfo
     ReadLedger ..> ReadStat
@@ -257,7 +275,9 @@ classDiagram
     class sqlMetaStore {
         one database/sql impl
         sqlite (modernc) or postgres (pgx)
+        +addColumns() idempotent ALTER
     }
+    note for sqlMetaStore "ProjectRepo.Put is transactional over projects + project_perms (same shape as orgs + org_members); addColumns probes the live column set so a running hub gains projects.creator / default_level on restart."
 
     MetaStore <|.. fileMetaStore
     MetaStore <|.. sqlMetaStore

@@ -115,7 +115,7 @@ func signupDeviceToken(t *testing.T, ts *httptest.Server, email, name string) st
 }
 
 // A device signed in to the wrong org can neither push into nor pull from a
-// project: sync degrades to offline (never partial access) and no data
+// project: sync pauses with NoAccess (never partial access) and no data
 // crosses the wall in either direction.
 func TestOrgWallsDeviceSync(t *testing.T) {
 	storage := sharedRemote(t)
@@ -147,8 +147,8 @@ func TestOrgWallsDeviceSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Offline {
-		t.Fatal("cross-org sync must degrade to offline, not succeed")
+	if !res.NoAccess || res.Offline {
+		t.Fatalf("cross-org sync must pause with NoAccess, not succeed or look offline: %+v", res)
 	}
 	if _, err := os.Stat(filepath.Join(b.Folder, "secret.md")); err == nil {
 		t.Fatal("org A's file leaked to a device in org B")

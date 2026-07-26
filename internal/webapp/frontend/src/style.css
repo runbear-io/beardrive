@@ -373,7 +373,7 @@ button, input, a.btn { font-family: inherit; }
 [data-slot="dropdown-menu-content"] { border-color: var(--border); }
 
 /* ---- project settings ---- */
-/* Sectioned cards: General (editable), About (facts), Danger zone. */
+/* Sectioned cards: General (editable), About (facts), People, Danger zone. */
 .project-settings { display: flex; flex-direction: column; gap: 14px; }
 .project-settings > h2 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
 .ps-form { display: flex; flex-direction: column; gap: 18px; }
@@ -395,6 +395,17 @@ button, input, a.btn { font-family: inherit; }
 .ps-icon-cell.active { border-color: var(--accent); color: var(--accent-bright); }
 /* Irreversible actions keep their own, clearly-marked card. */
 .ps-danger [data-slot="card-title"] { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: #d2695e; font-weight: 600; }
+/* Who can do what — one more card in the same stack. The read-only view is
+   the same markup with its controls disabled, so nothing shifts when the
+   caller's level changes. Native selects here rather than the shadcn Select:
+   the org admin's role picker already uses them, and this table matches it. */
+.ps-chip { margin-left: 10px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-faint); font-size: 11px; font-weight: 600; letter-spacing: .02em; vertical-align: middle; }
+.ps-people h4 { font-size: 12.5px; font-weight: 600; color: var(--text-dim); margin: 0; }
+.ps-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--text-dim); margin: 0 0 10px; }
+.ps-people select { height: 28px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; }
+.ps-people select:disabled { opacity: .6; cursor: default; }
+.ps-note { color: var(--text-faint); font-size: 12.5px; margin: 0 0 12px; max-width: 56ch; line-height: 1.55; }
+.ps-people-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 20px 0 8px; }
 .ps-danger p { color: var(--text-dim); font-size: 13px; margin: 0 0 14px; max-width: 52ch; line-height: 1.55; }
 .ps-facts { display: grid; grid-template-columns: auto 1fr; gap: 8px 20px; margin: 0; font-size: 13px; }
 .ps-facts dt { color: var(--text-faint); }

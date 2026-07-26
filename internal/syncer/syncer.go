@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -79,6 +80,13 @@ func (s *Session) mountID() string {
 }
 
 // Result summarizes one sync cycle.
+//
+// Offline, ReadOnly, and NoAccess are three different answers and must not be
+// conflated: offline means the hub could not be reached and everything should
+// be retried; ReadOnly means it refused our push (we keep pulling, local ops
+// stay journaled and unpushed); NoAccess means it refused our pull too, so the
+// cycle does nothing at all and leaves the working folder alone. Regaining
+// access self-heals on a later cycle with no manual step.
 type Result struct {
 	LocalOps     int  // local changes committed to the journal
 	PulledOps    int  // ops received from other devices
@@ -87,6 +95,9 @@ type Result struct {
 	Pushed       bool // own journal/blobs uploaded
 	Offline      bool // remote configured but unreachable this cycle
 	OfflineErr   error
+	ReadOnly     bool // the hub refused our push: pull-only from here
+	NoAccess     bool // the hub refused our pull: sync paused, nothing touched
+	AccessErr    error
 }
 
 func (r *Result) Activity() bool {
@@ -150,7 +161,17 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	var pulled []journal.Op
 	if s.Backend != nil {
 		pulled, err = s.pull(ctx)
-		if err != nil {
+		switch {
+		case err == nil:
+		case errors.Is(err, remote.ErrForbidden):
+			// Access to this project was revoked. Stop here: materializing a
+			// replay we can no longer refresh would look like the hub
+			// reverting the user's files. Nothing is pushed, nothing is
+			// deleted, and the next cycle re-checks.
+			res.NoAccess, res.AccessErr = true, err
+			st.Access = store.AccessNone
+			return res, s.finish(cache, st)
+		default:
 			res.Offline = true
 			res.OfflineErr = err
 		}
@@ -191,11 +212,19 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 
 	// 5. Push our blobs and journal.
 	if s.Backend != nil && !res.Offline && int64(len(myOps)) > st.PushedOps {
-		if err := s.push(ctx, myOps, &st); err != nil {
+		switch err := s.push(ctx, myOps, &st); {
+		case err == nil:
+			res.Pushed = true
+		case errors.Is(err, remote.ErrForbidden):
+			// Read-only on this project: pull and materialize already ran, so
+			// pull-only is the steady state. Our own ops stay in the local
+			// journal — never pushed, never dropped. The push is still
+			// attempted once per remote interval (no hot loop, and a re-grant
+			// self-heals).
+			res.ReadOnly, res.AccessErr = true, err
+		default:
 			res.Offline = true
 			res.OfflineErr = err
-		} else {
-			res.Pushed = true
 		}
 	}
 
@@ -214,13 +243,24 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		}
 	}
 
-	if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
-		return nil, err
+	st.Access = store.AccessOK
+	if res.ReadOnly {
+		st.Access = store.AccessReadOnly
 	}
-	if err := s.Store.SaveSync(st); err != nil {
+	if err := s.finish(cache, st); err != nil {
 		return nil, err
 	}
 	return res, nil
+}
+
+// finish persists the two pieces of state a cycle mutates. Saving the cache
+// matters even on a cut-short cycle: the scan already journaled local edits,
+// and dropping the cache would make the next scan journal them all again.
+func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState) error {
+	if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
+		return err
+	}
+	return s.Store.SaveSync(st)
 }
 
 // scan diffs the working folder against the state cache and returns ops for

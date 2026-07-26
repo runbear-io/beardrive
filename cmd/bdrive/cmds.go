@@ -9,6 +9,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/daemon"
 	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
@@ -167,6 +168,12 @@ func statusCmd() *cobra.Command {
 						pending = 0
 					}
 					fmt.Printf("  pending:  %d local change(s) not yet pushed\n", pending)
+					switch st.Access {
+					case store.AccessReadOnly:
+						fmt.Printf("  access:   read-only (pull only) — %d local change(s) stay on this device\n", pending)
+					case store.AccessNone:
+						fmt.Printf("  access:   no access to this project — sync paused\n")
+					}
 				}
 			}
 			return nil
