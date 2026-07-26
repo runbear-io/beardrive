@@ -17,6 +17,10 @@ type Prompt = {
   label: string;
   value: string;
   okLabel: string;
+  // Irreversible actions: `match` holds OK disabled until the user types the
+  // thing's name back exactly, `danger` paints the button red.
+  match?: string;
+  danger?: boolean;
   resolve: (v: string | null) => void;
 };
 type Confirm = {
@@ -41,9 +45,10 @@ export function modalPrompt(
   label: string,
   value = "",
   okLabel = "OK",
+  opts: { match?: string; danger?: boolean } = {},
 ): Promise<string | null> {
   return new Promise((resolve) =>
-    emit({ kind: "prompt", title, label, value, okLabel, resolve }),
+    emit({ kind: "prompt", title, label, value, okLabel, ...opts, resolve }),
   );
 }
 
@@ -95,8 +100,13 @@ function PromptBody({ m }: { m: Prompt }) {
 // nothing. Collapsing the two here made every caller's blank-input branch
 // unreachable.
   const [err, setErr] = useState("");
+  // Controlled so the OK button can react to typing (the `match` gate). The
+  // no-match path behaves exactly as the uncontrolled version did.
+  const [val, setVal] = useState(m.value);
+  const armed = m.match === undefined || val.trim() === m.match;
   const ok = () => {
-    const v = input.current!.value;
+    const v = val;
+    if (!armed) return;
     if (!v.trim()) {
       // Keep the dialog open and say so where the user is looking, the way
       // the org-rename form does — closing and toasting loses their context.
@@ -116,14 +126,17 @@ function PromptBody({ m }: { m: Prompt }) {
         className="modal-input"
         type="text"
         autoComplete="off"
-        defaultValue={m.value}
+        value={val}
         ref={input}
         id="modal-input"
         autoFocus
         onFocus={(e) => e.currentTarget.select()}
         aria-invalid={!!err}
         aria-describedby={err ? "modal-input-err" : undefined}
-        onChange={() => err && setErr("")}
+        onChange={(e) => {
+          setVal(e.currentTarget.value);
+          if (err) setErr("");
+        }}
         onKeyDown={(e) => e.key === "Enter" && ok()}
       />
       {err && (
@@ -135,7 +148,11 @@ function PromptBody({ m }: { m: Prompt }) {
         <Button variant="subtle" onClick={() => done(null)}>
           Cancel
         </Button>
-        <Button variant="primary" onClick={ok}>
+        <Button
+          variant={m.danger ? "danger" : "primary"}
+          onClick={ok}
+          disabled={!armed}
+        >
           {m.okLabel}
         </Button>
       </div>

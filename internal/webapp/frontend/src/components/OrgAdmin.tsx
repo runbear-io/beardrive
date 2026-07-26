@@ -184,30 +184,8 @@ export function OrgAdmin({
                 >
                   Rename
                 </Button>
-                <button
-                  className="ai-del"
-                  aria-label={`Delete ${p.name}`}
-                  onClick={async () => {
-                    if (
-                      !(await modalConfirm(
-                        "Delete project",
-                        `Delete “${p.name}”? Its files stay in storage, but it's removed from the hub.`,
-                        "Delete",
-                        true,
-                      ))
-                    )
-                      return;
-                    try {
-                      await api("DELETE", "/api/projects/" + p.id);
-                      toast(`Deleted “${p.name}”.`);
-                      await onProjectsChanged();
-                    } catch (e) {
-                      toast((e as Error).message, true);
-                    }
-                  }}
-                >
-                  Delete
-                </button>
+                {/* Delete lives on the project's own Settings page, behind
+                    type-the-name — one way to delete, and it's the hard one. */}
               </div>
             ))}
           </div>

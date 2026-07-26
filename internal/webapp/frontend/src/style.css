@@ -352,6 +352,12 @@ button, input, a.btn { font-family: inherit; }
 .danger-btn { display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: #b3382e; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
 .danger-btn:hover { background: #c94336; }
 
+/* ---- project settings ---- */
+/* Irreversible actions get their own ruled-off section, well below the facts. */
+.ps-danger { margin-top: 36px; padding-top: 20px; border-top: 1px solid var(--border); }
+.ps-danger h3 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: #d2695e; font-weight: 600; margin: 0 0 8px; }
+.ps-danger p { color: var(--text-dim); font-size: 13px; margin: 0 0 14px; max-width: 52ch; line-height: 1.55; }
+
 /* ---- admin panels ---- */
 /* width comes from .page (app) — see #content */
 .admin h1 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 6px; color: #f4f6f9; }

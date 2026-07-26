@@ -173,7 +173,23 @@ export default function HubApp({ config }: { config: ServerConfig }) {
 
   const routePage =
     route.view === "settings"
-      ? { crumb: "Project settings", body: <ProjectSettings project={current} org={org} /> }
+      ? {
+          crumb: "Project settings",
+          body: (
+            <ProjectSettings
+              project={current}
+              org={org}
+              onDeleted={async () => {
+                // The id is dead now: refresh drops it from the list, and
+                // navigating home lands on whatever project is left (or the
+                // empty state) in one hop instead of via the stale-route
+                // redirect below.
+                await refresh();
+                navigate("/");
+              }}
+            />
+          ),
+        }
       : route.view === "install"
         ? {
             // The same guide the project home shows, in the same column —

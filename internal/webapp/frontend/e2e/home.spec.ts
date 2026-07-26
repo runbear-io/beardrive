@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId, MEMBER } from "./helpers";
+import { login, wikiId, MEMBER, expectToast } from "./helpers";
 
 // Phase 3: project home (connect guide + embedded insights), the dedicated
 // insights route, and the history views. Ports the original parity checks
@@ -199,4 +199,42 @@ test("project menu pages each own a URL: Dashboard, Installation, Settings", asy
   await page.goto(`/${pid}/settings`);
   await expect(page.locator(".project-settings h2")).toHaveText("wiki");
   await expect(page.locator("#nav-settings")).toHaveClass(/active/);
+});
+
+test("project settings: danger zone is owner-only", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator(".ps-danger")).toBeVisible();
+  await expect(page.locator(".ps-danger .danger-btn")).toHaveText("Delete project");
+});
+
+test("project settings: a member sees no danger zone", async ({ page }) => {
+  await login(page, MEMBER);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator(".project-settings h2")).toHaveText("wiki"); // page rendered
+  await expect(page.locator(".ps-danger")).toHaveCount(0);
+});
+
+test("project settings: delete needs the exact name typed, then navigates away", async ({ page }) => {
+  await login(page);
+  await page.request.post("/api/projects", { data: { name: "condemned" } });
+  await page.reload();
+  const out = await (await page.request.get("/api/projects")).json();
+  const pid = out.projects.find((p: { name: string }) => p.name === "condemned").id;
+
+  await page.goto(`/${pid}/settings`);
+  await page.click(".ps-danger .danger-btn");
+  // Confirm stays disabled until the typed text matches exactly.
+  await expect(page.locator(".modal .danger-btn")).toBeDisabled();
+  await page.fill(".modal-input", "condemne");
+  await expect(page.locator(".modal .danger-btn")).toBeDisabled();
+  await page.fill(".modal-input", "condemned");
+  await expect(page.locator(".modal .danger-btn")).toBeEnabled();
+  await page.click(".modal .danger-btn");
+
+  await expectToast(page, "Deleted");
+  await expect(page).not.toHaveURL(new RegExp(pid));
+  await expect(page.locator("#projects .row .label", { hasText: "condemned" })).toHaveCount(0);
 });
