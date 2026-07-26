@@ -6,6 +6,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -13,7 +15,19 @@ import (
 )
 
 // version is set at release time via -ldflags "-X main.version=...".
+// `go install …@vX.Y.Z` builds skip ldflags, so fall back to the module
+// version Go stamps into the binary.
 var version = "0.1.0-dev"
+
+func resolvedVersion() string {
+	if version != "0.1.0-dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return strings.TrimPrefix(bi.Main.Version, "v")
+	}
+	return version
+}
 
 func main() {
 	root := &cobra.Command{
@@ -28,7 +42,7 @@ Cloud). Every change is journaled — you can always see which device and
 author changed which file, and when. Files are real files on disk, so
 everything keeps working offline; changes sync when the remote is reachable.`,
 		SilenceUsage: true,
-		Version:      version,
+		Version:      resolvedVersion(),
 	}
 	root.SetVersionTemplate("beardrive {{.Version}}\n")
 	root.AddCommand(
@@ -61,7 +75,7 @@ func versionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print the bdrive version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("beardrive", version)
+			fmt.Println("beardrive", resolvedVersion())
 		},
 	}
 }
