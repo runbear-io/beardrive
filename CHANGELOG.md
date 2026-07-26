@@ -4,8 +4,22 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
-## Unreleased
+## v0.10.0 — 2026-07-26
 
+(v0.9.0 was tagged 2026-07-25 without a changelog section; its items are
+folded in here.)
+
+- **`bdrive export` / `bdrive import`** — move projects between hubs with
+  full change history.
+- **Onboarding fixes**: headless login falls back to the device-code flow
+  instead of hanging on a browser that never opens; `bdrive --version`
+  works; `bdrive init` prints next steps; changes are attributed to the
+  signed-in account with labeled authorship. Follow-ups: init next-steps
+  gated on background mode, daemon reconnects on token change, `whoami`
+  surfaces settings errors.
+- `bdrive version` now reports the real version for
+  `go install …@vX.Y.Z` builds (previously always `0.1.0-dev`).
+- Web: delete a project from its Settings page, behind type-the-name.
 - **Fix: agent hooks no longer sync (or inject hub links into) folders this
   device never opted into.** `bdrive sync`/`sync --hook`/`read-log` now
   require the mount to be enrolled here — a `.bdrive/config.json` that
