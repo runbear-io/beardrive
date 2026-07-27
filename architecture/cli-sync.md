@@ -88,7 +88,7 @@ classDiagram
 
     class Commands {
         init login logout
-        sync stop status log
+        sync stop scope status log
         url share export import
         web daemon hooks read-log skill
     }

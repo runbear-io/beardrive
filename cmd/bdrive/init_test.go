@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+func TestScopeRemove(t *testing.T) {
+	include := []string{"wiki/", "docs/", "*.md"}
+	for _, tc := range []struct {
+		args []string
+		want []string
+		err  bool
+	}{
+		{args: []string{"docs"}, want: []string{"wiki/", "*.md"}},
+		{args: []string{"docs/"}, want: []string{"wiki/", "*.md"}},   // normalized match
+		{args: []string{"*.md"}, want: []string{"wiki/", "docs/"}},   // literal pattern match
+		{args: []string{"wiki", "docs"}, want: []string{"*.md"}},
+		{args: []string{"notes"}, err: true}, // not in scope
+	} {
+		got, err := scopeRemove(include, tc.args)
+		if tc.err != (err != nil) {
+			t.Errorf("scopeRemove(%q) err = %v, want err %v", tc.args, err, tc.err)
+			continue
+		}
+		if !tc.err && !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("scopeRemove(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
 func TestCleanShared(t *testing.T) {
 	for _, tc := range []struct {
 		in   []string

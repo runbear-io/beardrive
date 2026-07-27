@@ -57,7 +57,9 @@ bdrive init --name <project-name> --shared wiki       # in a repo: only ./wiki s
 bdrive init --name <project-name> --shared wiki,docs  # several shared subfolders, one project
 ```
 Re-running `bdrive init --yes` later is always safe: it resumes syncing
-(including after the folder was renamed or moved).
+(including after the folder was renamed or moved). To add or remove shared
+subfolders later, use `bdrive scope add <dir>` / `bdrive scope rm <dir>`
+from the mount root — never hand-edit `.bdrive/config.json`.
 
 After init, tell git what's what: add `.bdrive/` to `.gitignore` (per-machine
 state, never committed) and COMMIT `.bdriveignore` (on a `--shared` mount the

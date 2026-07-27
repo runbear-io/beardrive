@@ -16,6 +16,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dirs>` (comma-separated or repeated) / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
 | Run the daemon in the foreground | `bdrive init -f` |
 | Stop syncing | `bdrive stop [<folder>]` — pauses daemon *and* agent hooks; `bdrive init` resumes (`--forget` also unregisters) |
+| Show/change which subfolders sync | `bdrive scope` / `bdrive scope add <dirs...>` / `bdrive scope rm <dirs...>` — edits the include list set by `init --shared` (run from the mount root; NEVER hand-edit config.json for this). The daemon applies it within seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub; removing the last entry is refused (that would flip to whole-folder sync — use `bdrive stop` instead) |
 | One sync cycle now | `bdrive sync [<folder>]` — `--note <text>` stamps session context; `--hook <label>` is the Claude turn-start hook's plumbing (event JSON in, sync + note, gated-link formula out) |
 | Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install [<folder>]` — auto-detects the platforms in use and merges pull/push/session-note/read-tracking hooks into each one's own hook config, idempotently; bare `bdrive hooks` shows the status table |
 | Install this skill on another agent (Codex, Gemini CLI, Hermes, Claude Code) | `bdrive skill install [<folder>]` — writes the binary's own copy of this skill to each detected platform's user-level skills dir (`~/.codex/skills/beardrive/SKILL.md` and friends), idempotently; bare `bdrive skill` shows the status table. Then the user asks that agent to set the folder up and it runs `init` + `hooks install` itself |
@@ -47,7 +48,7 @@ Two files at the mount root control a folder's sync behavior:
   "id": "m-5a10b713",
   "volume": "agent-workspace",
   "remote": "https://drive.example.com/p/p-7f3a2c91",
-  "include": ["shared/"]   // optional: sync ONLY these (set by init --shared)
+  "include": ["shared/"]   // optional: sync ONLY these (init --shared; edit with bdrive scope add/rm)
 }
 ```
 
