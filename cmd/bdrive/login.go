@@ -106,6 +106,12 @@ With no argument the remembered server is used, or ` + config.DefaultServer + `.
 	return c
 }
 
+// logoutNote is printed after every logout. It must stay honest: there is no
+// device-list page and no revoke route on the hub, and device tokens carry no
+// expiry (see internal/webapp/authlocal.go authToken) — logout only rewrites
+// the local settings file. login_test.go guards the wording.
+const logoutNote = "note: the token is only cleared locally — the server still accepts it, and there is no way to revoke it yet"
+
 func logoutCmd() *cobra.Command {
 	var forget bool
 	c := &cobra.Command{
@@ -148,7 +154,7 @@ Your synced folders are untouched; this only affects this device's session.`,
 			if forget {
 				fmt.Println("forgot the remembered server (run `bdrive login <url>` to set a new one)")
 			}
-			fmt.Println("note: the device token stays valid on the server until it expires — revoke it from the hub's device list if needed")
+			fmt.Println(logoutNote)
 			return nil
 		},
 	}
