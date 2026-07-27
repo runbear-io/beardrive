@@ -27,7 +27,8 @@ classDiagram
     }
 
     class router {
-        +VIEW_ROUTES insights history install settings
+        +VIEW_ROUTES dashboard history install settings
+        +LEGACY_VIEWS insights to dashboard
         +top-level routes orgs billing
         +parseRoute(pathname, mode) Route
         +urlForPath / urlForView
