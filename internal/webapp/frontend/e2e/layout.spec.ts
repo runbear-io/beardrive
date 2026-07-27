@@ -110,3 +110,51 @@ test("the gutter belongs to the scroll container, not the column", async ({ page
     expect(r.childMax, `${path}: view sets its own max-width`).toBe("none");
   }
 });
+
+/* Mobile folder rows used to drop .dl-meta entirely below 430px, leaving an
+   unlabelled coloured dot as the only signal — and the dot's meaning lived in
+   a title= that touch never shows and screen readers never read. The meta now
+   wraps to a second line and the dot carries its own accessible name. */
+test("folder rows keep their metadata, and the heat dot a name, on a phone", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const file = page.locator('.dl-row[title="notes/readme.md"]');
+  const dir = page.locator('.dl-row[title="notes/deep"]');
+
+  await page.setViewportSize({ width: 431, height: 800 });
+  await page.goto(`/${pid}/notes`);
+  await page.waitForSelector(".dl-row");
+  const desktopMeta = await file.locator(".dl-meta").textContent();
+
+  for (const width of [360, 390, 430]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto(`/${pid}/notes`);
+    await page.waitForSelector(".dl-row");
+
+    // Same information as desktop: read count, size and date all present.
+    await expect(file.locator(".dl-meta"), `${width}px: file meta`).toBeVisible();
+    expect(await file.locator(".dl-meta").textContent(), `${width}px: file meta`).toBe(desktopMeta);
+    await expect(file.locator(".dl-meta")).toContainText(/read/);
+    await expect(dir.locator(".dl-meta"), `${width}px: folder meta`).toContainText("1 item");
+
+    const m = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll<HTMLElement>(".dl-row")];
+      const name = rows.map((r) => r.querySelector(".dl-name") as HTMLElement);
+      return {
+        truncated: name.some((n) => n.scrollWidth > n.clientWidth + 1),
+        minHeight: Math.min(...rows.map((r) => r.getBoundingClientRect().height)),
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      };
+    });
+    expect(m.truncated, `${width}px: filename truncated`).toBe(false);
+    expect(m.minHeight, `${width}px: row tap target`).toBeGreaterThanOrEqual(44);
+    expect(m.overflow, `${width}px: horizontal page scroll`).toBe(false);
+
+    // Accessibility tree, not pixels: every dot announces itself. (Read
+    // counts accumulate across the shared hub, so match the shape not a
+    // number — what matters is that no dot is nameless.)
+    const dots = await page.locator(".heatdot").count();
+    await expect(page.getByRole("img", { name: /read/ }), `${width}px: named dots`).toHaveCount(dots);
+    await expect(file.locator(".heatdot")).toHaveAttribute("aria-label", /\d+ reads? .*in 30 days/);
+  }
+});
