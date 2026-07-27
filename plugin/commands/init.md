@@ -1,6 +1,6 @@
 ---
-description: Start syncing a project in this folder — create a new BearDrive project or connect an existing one, whole folder or a shared subfolder, and start the sync daemon
-argument-hint: "[folder] [--name <project> | --project <p-id>] [--shared <dir>]"
+description: Start syncing a project in this folder — create a new BearDrive project or connect an existing one, whole folder or shared subfolders, and start the sync daemon
+argument-hint: "[folder] [--name <project> | --project <p-id>] [--shared <dirs>]"
 ---
 
 Start syncing a project with BearDrive. Arguments: `$ARGUMENTS` (optional
@@ -43,17 +43,21 @@ Follow these steps:
 
 4. **Initialize** — two hard rules:
 
-   - **Never sync a repo root**: inside a repo, knowledge syncs as a
-     scoped subfolder via `--shared`. A dedicated knowledge folder
-     (empty dir, standalone vault) may be the mount itself.
+   - **Never sync a repo root**: inside a repo, knowledge syncs as
+     scoped subfolders via `--shared` (one or more — several folders can
+     share one project when the same people should see all of them;
+     folders needing different access go in separate projects). A
+     dedicated knowledge folder (empty dir, standalone vault) may be the
+     mount itself.
    - **One transport per folder**: a git-tracked dir must leave git
      tracking before it syncs (`git rm -r --cached <dir>` + gitignore;
      stage it, let the user commit). Offer one-way git snapshots if they
      want a git record; `bdrive log -p <path>` covers history for most.
 
    ```sh
-   bdrive init --name <project> --yes            # dedicated knowledge folder
-   bdrive init --name <project> --shared wiki    # in a repo: only ./wiki syncs
+   bdrive init --name <project> --yes                 # dedicated knowledge folder
+   bdrive init --name <project> --shared wiki         # in a repo: only ./wiki syncs
+   bdrive init --name <project> --shared wiki,docs    # several shared subfolders, one project
    ```
 
 5. **Register agent sync hooks**: run `bdrive hooks install <folder>`. It
