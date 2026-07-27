@@ -47,7 +47,8 @@ venv/
 // folder just resumes syncing (which is also how a moved/renamed folder
 // picks up where it left off).
 func initCmd() *cobra.Command {
-	var projectID, projectName, shared string
+	var projectID, projectName string
+	var shared []string
 	var yes, foreground bool
 	c := &cobra.Command{
 		Use:   "init [folder]",
@@ -56,8 +57,8 @@ func initCmd() *cobra.Command {
 syncing it through your bdrive server.
 
 On a terminal, init asks what you want: create a new project or connect an
-existing one, and whether to sync the whole folder or only a shared
-subfolder (e.g. ./shared). Flags answer those questions non-interactively;
+existing one, and whether to sync the whole folder or only shared
+subfolders (e.g. ./shared). Flags answer those questions non-interactively;
 without a TTY init never prompts (it creates-or-joins a project named after
 the folder and syncs the whole folder).
 
@@ -70,6 +71,7 @@ the folder was renamed or moved.`,
   bdrive init ./notes --name shared-notes
   bdrive init --project p-7f3a2c91   # connect an existing project
   bdrive init --shared shared        # only ./shared syncs
+  bdrive init --shared wiki,docs     # only ./wiki and ./docs sync
   bdrive init --yes                  # accept all defaults (no prompts)`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -115,20 +117,18 @@ the folder was renamed or moved.`,
 			}
 
 			// What syncs?
-			if shared == "" && interactive && !cmd.Flags().Changed("shared") {
+			if len(shared) == 0 && interactive && !cmd.Flags().Changed("shared") {
 				shared, err = chooseScope()
 				if err != nil {
 					return err
 				}
 			}
-			var include []string
-			if shared != "" {
-				shared = strings.Trim(path.Clean(filepath.ToSlash(shared)), "/")
-				if shared == "" || shared == "." || strings.HasPrefix(shared, "..") {
-					return fmt.Errorf("invalid shared folder %q", shared)
-				}
-				include = []string{shared + "/"}
-				if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(shared)), 0o755); err != nil {
+			include, err := cleanShared(shared)
+			if err != nil {
+				return err
+			}
+			for _, inc := range include {
+				if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(strings.TrimSuffix(inc, "/"))), 0o755); err != nil {
 					return err
 				}
 			}
@@ -152,8 +152,12 @@ the folder was renamed or moved.`,
 				}
 			}
 			fmt.Printf("initialized %s\n  server:  %s\n  project: %s (%s)\n", folder, server, p.Name, p.ID)
-			if shared != "" {
-				fmt.Printf("  syncing: ./%s only\n", shared)
+			if len(include) > 0 {
+				dirs := make([]string, len(include))
+				for i, inc := range include {
+					dirs[i] = "./" + strings.TrimSuffix(inc, "/")
+				}
+				fmt.Printf("  syncing: %s only\n", strings.Join(dirs, ", "))
 			}
 			if err := startSync(cmd.Context(), folder, proj, foreground, 3*time.Second, 10*time.Second); err != nil {
 				return err
@@ -174,7 +178,7 @@ next steps:
 	}
 	c.Flags().StringVar(&projectID, "project", "", "connect an existing project by id (p-xxxxxxxx)")
 	c.Flags().StringVar(&projectName, "name", "", "project name to create or join (default: folder name)")
-	c.Flags().StringVar(&shared, "shared", "", "sync only this subfolder (e.g. shared)")
+	c.Flags().StringSliceVar(&shared, "shared", nil, "sync only these subfolders (repeatable or comma-separated, e.g. wiki,docs)")
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "accept defaults, never prompt")
 	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run the sync daemon in the foreground")
 	return c
@@ -248,23 +252,43 @@ func chooseProject(server, token, defaultName string) (serverProject, error) {
 	return projects[idx], nil
 }
 
-// chooseScope returns "" for whole-folder sync, or the shared subfolder.
-func chooseScope() (string, error) {
+// chooseScope returns nil for whole-folder sync, or the shared subfolders.
+func chooseScope() ([]string, error) {
 	var mode string
 	if err := survey.AskOne(&survey.Select{
 		Message: "What should sync?",
-		Options: []string{"The whole folder", "Only a shared subfolder"},
+		Options: []string{"The whole folder", "Only shared subfolders"},
 	}, &mode); err != nil {
-		return "", err
+		return nil, err
 	}
 	if mode == "The whole folder" {
-		return "", nil
+		return nil, nil
 	}
-	dir := "shared"
-	if err := survey.AskOne(&survey.Input{Message: "Shared subfolder:", Default: "shared"}, &dir); err != nil {
-		return "", err
+	dirs := "shared"
+	if err := survey.AskOne(&survey.Input{Message: "Shared subfolder(s), space- or comma-separated:", Default: "shared"}, &dirs); err != nil {
+		return nil, err
 	}
-	return dir, nil
+	return strings.Fields(strings.ReplaceAll(dirs, ",", " ")), nil
+}
+
+// cleanShared normalizes --shared entries into include patterns ("wiki/"):
+// slashes cleaned, duplicates dropped. Any entry that resolves to the mount
+// root or escapes it is an error — a silently-dropped "." would widen the
+// scope to the whole folder.
+func cleanShared(shared []string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range shared {
+		s = strings.Trim(path.Clean(filepath.ToSlash(strings.TrimSpace(s))), "/")
+		if s == "" || s == "." || strings.HasPrefix(s, "..") {
+			return nil, fmt.Errorf("invalid shared folder %q", s)
+		}
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s+"/")
+		}
+	}
+	return out, nil
 }
 
 type serverProject struct {

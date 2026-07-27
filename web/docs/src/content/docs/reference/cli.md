@@ -33,7 +33,8 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 
 The front door. Interactive on a TTY, with survey menus for create-new versus
 connect-existing (showing a project list) and whole-folder versus
-`--shared <dir>` (which becomes the include list). Full flag bypass with
+`--shared <dirs>` (one or more subfolders, repeatable or comma-separated —
+`--shared wiki,docs` — which become the include list). Full flag bypass with
 `--name`, `--project`, `--shared`, `--yes`, and it never prompts without a TTY.
 
 It runs the login flow first when there is no session, writes

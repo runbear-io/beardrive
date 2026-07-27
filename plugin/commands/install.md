@@ -1,6 +1,6 @@
 ---
 description: Set up BearDrive for this project — install the CLI, sign in, create/connect a project, optionally document the shared folder in CLAUDE.md, and register project-level sync hooks so every teammate's files stay fresh during Claude sessions
-argument-hint: "[project-name] [--shared <dir>]"
+argument-hint: "[project-name] [--shared <dirs>]"
 ---
 
 Set up BearDrive for the current project, end to end. Work through these
@@ -27,7 +27,8 @@ browser window is coming, then sign in:
 
 ## 3. Initialize the project
 
-If `$ARGUMENTS` gives a project name and/or `--shared <dir>`, use them.
+If `$ARGUMENTS` gives a project name and/or `--shared <dirs>` (one or more,
+comma-separated or repeated), use them.
 Otherwise ask the user two questions (or infer from their request):
 - **Create a new project or connect an existing one?** (`bdrive init
   --name <name>` creates-or-joins by name; `bdrive init --project <p-id>`

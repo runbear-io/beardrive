@@ -67,8 +67,8 @@ $ bdrive login https://your-hub && cd ~/workspace && bdrive init
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file. Nothing is silently dropped.
 - **Selective sync** — a gitignore-style `.bdriveignore` opts files out, and
-  `bdrive init --shared <dir>` (or the interactive prompt) narrows sync to
-  one shared subfolder.
+  `bdrive init --shared <dirs>` (or the interactive prompt) narrows sync to
+  one or more shared subfolders (`--shared wiki,docs`, or repeat the flag).
 - **macOS & Linux.**
 
 ## Install

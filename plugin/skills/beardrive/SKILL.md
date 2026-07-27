@@ -13,7 +13,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 
 | Action | Command |
 |---|---|
-| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dir>` / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
+| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dirs>` (comma-separated or repeated) / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
 | Run the daemon in the foreground | `bdrive init -f` |
 | Stop syncing | `bdrive stop [<folder>]` — pauses daemon *and* agent hooks; `bdrive init` resumes (`--forget` also unregisters) |
 | One sync cycle now | `bdrive sync [<folder>]` — `--note <text>` stamps session context; `--hook <label>` is the Claude turn-start hook's plumbing (event JSON in, sync + note, gated-link formula out) |
@@ -84,7 +84,7 @@ Selective-sync semantics — important when advising users:
 
 - `--name <x>` — project name to create-or-join (default: folder basename).
 - `--project <id>` — connect an existing project by id (`p-xxxxxxxx`).
-- `--shared <dir>` — sync only this subfolder (becomes the include list; remote paths keep the prefix so all devices see the same layout).
+- `--shared <dirs>` — sync only these subfolders (repeatable or comma-separated: `--shared wiki,docs`; becomes the include list; remote paths keep the prefix so all devices see the same layout).
 - `--yes, -y` — accept defaults, never prompt.
 - `--foreground, -f` — run the daemon in the foreground (systemd/launchd/containers).
 
