@@ -525,29 +525,20 @@ a.ai-main:hover { color: var(--accent); }
 #vault-name.vault-link { cursor: pointer; }
 #vault-name.vault-link:hover { color: var(--accent-bright); }
 /* .guide width comes from .page (app) */
-.gd-tabs { display: flex; gap: 2px; margin: 20px 0 16px; border-bottom: 1px solid var(--border); overflow-x: auto; }
-.gd-tab { font: inherit; font-size: 13px; font-weight: 600; padding: 7px 12px 9px; background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--text-faint); cursor: pointer; white-space: nowrap; }
-.gd-tab:hover { color: var(--text); }
 #account-btn.active { background: var(--glow); }
 #account-btn.active .acct b { color: var(--accent-bright); }
-.gd-tab.active { color: var(--accent-bright); border-bottom-color: var(--accent); }
-.gd-step { margin: 0 0 18px; }
-.gd-step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 3px; }
-.gd-num { flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--glow); color: var(--accent-bright); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
-.gd-step-title { font-weight: 600; font-size: 14px; color: var(--text); }
-.gd-desc { margin: 2px 0 8px 32px; color: var(--text-faint); font-size: 13px; line-height: 1.5; }
-.gd-extra { font-size: 12.5px; margin-top: 6px; }
-.gd-code { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 10px; margin: 6px 0 6px 32px; padding: 10px 12px; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6; color: var(--text); }
+.gd-body { margin-top: 18px; }
+.gd-desc { margin: 2px 0 8px; color: var(--text-faint); font-size: 13px; line-height: 1.5; }
+.gd-list { margin: 4px 0 8px; padding-left: 18px; display: grid; gap: 6px; }
+.gd-code { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 10px; margin: 6px 0 10px; padding: 10px 12px; background: var(--bg-raise); border: 1px solid var(--border); border-radius: var(--r-card); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6; color: var(--text); }
 .gd-code > code { display: block; min-width: 0; overflow-x: auto; white-space: pre; }
 .gd-copy { align-self: start; font: inherit; font-family: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-2); background: var(--bg-raise); color: var(--text-faint); cursor: pointer; }
 .gd-copy:hover { color: var(--accent-bright); border-color: var(--accent-dim); }
-/* A single unnumbered step has no badge to indent under. */
-.gd-solo .gd-desc, .gd-solo .gd-code { margin-left: 0; }
 .gd-manual { margin: 10px 0 0; }
 .gd-manual > summary { display: inline-block; font-size: 12.5px; font-weight: 600; color: var(--text-faint); cursor: pointer; padding: 4px 0; }
+.gd-manual > summary::before { content: "▸ "; color: var(--text-ghost); }
+.gd-manual[open] > summary::before { content: "▾ "; }
 .gd-manual > summary:hover { color: var(--text); }
-.gd-manual .gd-desc, .gd-manual .gd-code { margin-left: 0; }
-.gd-done { margin: 22px 0 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); color: var(--text-faint); font-size: 13px; line-height: 1.5; }
 .home-insights { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--border); }
 
 /* ---- insights (read×write matrix) ---- */

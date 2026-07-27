@@ -13,38 +13,13 @@ test("landing is the project home (guide), not an insights redirect", async ({ p
   await expect(page.locator("#crumb")).toHaveText("wiki");
 });
 
-test("guide: three agent tabs, one active, choice persisted", async ({ page }) => {
+test("guide: one paste for every agent, one line of prose, details collapsed", async ({ page }) => {
   await login(page);
+  const pid = await wikiId(page);
   await page.waitForSelector(".guide");
-  await expect(page.locator(".gd-tab")).toHaveText(["Claude Code & Cowork", "Hermes", "Codex"]);
-  await expect(page.locator(".gd-tab.active")).toHaveCount(1);
-  await page.click('.gd-tab[data-key="codex"]');
-  expect(await page.evaluate(() => localStorage.getItem("bdrive-guide-agent"))).toBe("codex");
-  await page.click('.gd-tab[data-key="claude"]');
-});
-
-test("claude tab: same two-line paste, manual fallback links the docs", async ({ page }) => {
-  await login(page);
-  const pid = await wikiId(page);
-  await page.click('.gd-tab[data-key="claude"]');
-  const prompt = await page.$$eval(".gd-step .gd-code code", (els) =>
-    els.map((e) => e.textContent).join("\n"),
-  );
-  expect(prompt).toContain(
-    "Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md",
-  );
-  expect(prompt).toContain(`project ${pid} on http://localhost:8993`);
-  expect(prompt).not.toContain("/plugin marketplace");
-  await expect(page.locator(".gd-body")).toContainText("Cowork");
-  await expect(page.locator('.gd-manual a[href="https://docs.beardrive.ai/manual/install/"]')).toHaveCount(1);
-});
-
-test("codex tab is one paste that hands the whole setup to the agent", async ({ page }) => {
-  await login(page);
-  const pid = await wikiId(page);
-  await page.click('.gd-tab[data-key="codex"]');
-  await expect(page.locator(".gd-step")).toHaveCount(1);
-  const prompt = await page.$$eval(".gd-step .gd-code code", (els) =>
+  // No agent tabs anymore — the prompt is identical for every agent.
+  await expect(page.locator(".gd-tab")).toHaveCount(0);
+  const prompt = await page.$$eval(".gd-body > .gd-code code", (els) =>
     els.map((e) => e.textContent).join("\n"),
   );
   // The prompt points at the canonical instructions with the project id and
@@ -54,22 +29,26 @@ test("codex tab is one paste that hands the whole setup to the agent", async ({ 
   );
   expect(prompt).toContain(`project ${pid} on http://localhost:8993`);
   expect(prompt).not.toContain("brew install");
+  // Detail lives behind the two collapsed sections.
+  await expect(page.locator(".gd-manual > summary")).toHaveText([
+    "What exactly happens",
+    "Or run it yourself",
+  ]);
+  await expect(page.locator(".gd-manual[open]")).toHaveCount(0);
+});
+
+test("guide: manual fallback has the full command list and the docs link", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.waitForSelector(".guide");
   const manual = await page.$$eval(".gd-manual .gd-code code", (els) =>
     els.map((e) => e.textContent).join("\n"),
   );
+  expect(manual).toContain("brew install runbear-io/tap/beardrive");
   expect(manual).toContain("bdrive login http://localhost:8993");
-  expect(manual).toContain("bdrive hooks install --agent codex");
-  await page.click('.gd-tab[data-key="claude"]');
-});
-
-test("a stale saved tab choice falls back to the first tab", async ({ page }) => {
-  await login(page);
-  await page.waitForSelector(".guide");
-  await page.evaluate(() => localStorage.setItem("bdrive-guide-agent", "cowork"));
-  await page.reload();
-  await page.waitForSelector(".guide");
-  await expect(page.locator(".gd-tab.active")).toHaveText("Claude Code & Cowork");
-  await page.evaluate(() => localStorage.setItem("bdrive-guide-agent", "claude"));
+  expect(manual).toContain(`bdrive init --project ${pid}`);
+  expect(manual).toContain("bdrive hooks install");
+  await expect(page.locator('.gd-manual a[href="https://docs.beardrive.ai/manual/install/"]')).toHaveCount(1);
 });
 
 test("admin home embeds insights below the guide; member home does not", async ({ page, browser }) => {
