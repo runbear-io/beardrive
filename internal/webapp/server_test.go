@@ -210,6 +210,48 @@ func TestFrontendServed(t *testing.T) {
 	}
 }
 
+// The brand is the product/self-hoster name, never the storage basename:
+// a hub whose bucket is "beardrive" must not report that as its brand.
+func TestConfigBrandNeverLeaksVolume(t *testing.T) {
+	srv, _, _ := newHub(t, true, nil)
+	srv.Volume = "beardrive"
+
+	var cfg struct {
+		Volume string `json:"volume"`
+		Brand  string `json:"brand"`
+	}
+	read := func() {
+		t.Helper()
+		rec := do(t, srv.Handler(), "GET", "/api/config", nil)
+		if rec.Code != 200 {
+			t.Fatalf("config: %d %s", rec.Code, rec.Body)
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	read()
+	if cfg.Brand != "" {
+		t.Errorf("unconfigured brand = %q, want empty (the frontend defaults it)", cfg.Brand)
+	}
+	if cfg.Volume != "beardrive" {
+		t.Errorf("volume = %q, want beardrive (VolumeApp reads this key)", cfg.Volume)
+	}
+
+	auth, err := OpenBuiltinAuth(filepath.Join(t.TempDir(), "auth.json"), false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth.Brand = "Acme Docs"
+	srv.Auth = auth
+
+	read()
+	if cfg.Brand != "Acme Docs" {
+		t.Errorf("configured brand = %q, want Acme Docs", cfg.Brand)
+	}
+}
+
 func TestExpandWikilinks(t *testing.T) {
 	got := string(expandWikilinks([]byte("a [[x y]] b [[u|v]] c [[no")))
 	want := "a [x y](wiki:x%20y) b [v](wiki:u) c [[no"

@@ -52,7 +52,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   useEffect(() => {
     document.title = current
       ? current.name + " — BearDrive"
-      : config.brand || config.volume || "BearDrive";
+      : config.brand || "BearDrive";
   }, [current, config]);
 
   if (joinToken) {
@@ -68,7 +68,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     );
   }
 
-  const brand = config.brand || config.volume || "BearDrive";
+  const brand = config.brand || "BearDrive";
   const org = (current && orgs?.find((o) => o.id === current.org)) || null;
   // Insights (embedded on the project home and behind the ⋯ menu) is for
   // hub admins and owners of the project's org.
