@@ -2,11 +2,13 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
+import { GuideCode, INSTALL_DOC } from "./ConnectGuide";
 
 // Onboarding: a signed-in account with no projects shouldn't hit a blank
-// sidebar. Explain that access comes from an invite, let them paste one,
-// and — since any member can — offer to start a new project. Both inputs
-// are RHF+zod forms with inline errors (no toast-on-typo).
+// sidebar. Lead with the real way in — init a folder from the terminal so
+// files actually sync — then the fallbacks: paste an invite link, or create
+// an empty project from here. The inputs are RHF+zod forms with inline
+// errors (no toast-on-typo).
 
 const joinSchema = z.object({
   invite: z
@@ -40,6 +42,34 @@ export function EmptyState({
     <div className="onboard">
       <h1>Welcome to BearDrive</h1>
       <p>You're signed in, but you're not part of any project yet.</p>
+      <div className="ob-card">
+        <h3>Start syncing a folder</h3>
+        <p>
+          Paste into your coding agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the
+          folder where you want the files. It creates the project and starts syncing:
+        </p>
+        <GuideCode
+          code={
+            "Follow " +
+            INSTALL_DOC +
+            "\nto connect this folder to a new BearDrive project on " +
+            window.location.origin +
+            "."
+          }
+        />
+        <details className="gd-manual">
+          <summary>Or run it yourself</summary>
+          <GuideCode
+            code={
+              "brew install runbear-io/tap/beardrive\n" +
+              "bdrive skill install\n" +
+              "bdrive login " +
+              window.location.origin +
+              "\nbdrive init\nbdrive hooks install"
+            }
+          />
+        </details>
+      </div>
       {authEnabled && (
         <div className="ob-card">
           <h3>Have an invite link?</h3>

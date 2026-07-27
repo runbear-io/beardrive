@@ -11,7 +11,7 @@ import { projColor } from "./ProjectNav";
    installed, no Homebrew, sign-in, wrong folder — so the page itself
    stays to one line of prose; detail lives in the collapsed sections. */
 
-const INSTALL_DOC = "https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md";
+export const INSTALL_DOC = "https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md";
 
 export function ConnectGuide({ project }: { project: Project }) {
   const origin = window.location.origin;
@@ -86,7 +86,7 @@ export function ConnectGuide({ project }: { project: Project }) {
   );
 }
 
-function GuideCode({ code }: { code: string }) {
+export function GuideCode({ code }: { code: string }) {
   const [label, setLabel] = useState("Copy");
   return (
     <pre className="gd-code">

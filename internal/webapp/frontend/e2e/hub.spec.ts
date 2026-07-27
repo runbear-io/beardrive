@@ -74,6 +74,10 @@ test("no-org account gets the onboarding empty state and can create a project", 
 }) => {
   await login(page, "solo@example.com");
   await expect(page.locator(".onboard h1")).toHaveText("Welcome to BearDrive");
+  // The agent paste-prompt leads, with this hub's real origin filled in.
+  await expect(page.locator(".onboard .gd-code code").first()).toContainText(
+    "to connect this folder to a new BearDrive project on http://localhost:8993.",
+  );
   await page.fill("#ob-name", "solo-notes");
   await page.click("#ob-create");
   await page.waitForURL(/\/p-[0-9a-f]{8}$/);
