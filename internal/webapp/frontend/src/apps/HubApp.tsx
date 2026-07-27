@@ -165,7 +165,6 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             org={routeOrg}
             projects={projects}
             myEmail={config.me?.email || ""}
-            onProjectsChanged={refresh}
           />
         ),
       }

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { Project } from "../api/types";
 import { copyText } from "../util";
+import { ProjectIcon } from "./shell";
+import { projColor } from "./ProjectNav";
 
 /* ---- project home guide ----
    How to mount the project as a local folder and connect a coding agent,
@@ -149,7 +151,17 @@ export function ConnectGuide({ project }: { project: Project }) {
 
   return (
     <div className="guide">
-      <h1 className="in-title">{project.name}</h1>
+      <h1 className="in-title gd-head">
+        <span
+          className="proj-mark"
+          aria-hidden="true"
+          style={{ background: projColor(project.name) }}
+        >
+          <ProjectIcon name={project.icon} />
+        </span>
+        {project.name}
+      </h1>
+      {project.description && <p className="in-desc">{project.description}</p>}
       <p className="dl-sub">
         Mount this project as a folder on any machine and connect your coding agent: files sync both
         ways in the background, every change is journaled with who made it, and agent reads feed

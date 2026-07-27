@@ -92,20 +92,27 @@ test("org admin: public share audit lists and revokes", async ({ page }) => {
   await expect(page.locator(".admin-item", { hasText: "index.md" })).toHaveCount(0);
 });
 
-test("org admin: project rename (delete lives on project settings)", async ({ page }) => {
+test("org admin: the project list is read-only; rename lives on project settings", async ({
+  page,
+}) => {
   await login(page);
   const made = await (await page.request.post("/api/projects", { data: { name: "doomed" } })).json();
   await page.reload(); // pick up the new project
   await openOrgSettings(page);
   const row = page.locator(".admin-item", { hasText: "doomed" });
-  await row.locator(".ai-btn", { hasText: "Rename" }).click();
-  await page.fill(".modal-input", "doomed-2");
-  await page.click(".modal .pbtn");
-  await expectToast(page, "Renamed");
-  const row2 = page.locator(".admin-item", { hasText: "doomed-2" });
-  await expect(row2).toBeVisible();
-  // The one-click delete is gone: Settings' type-the-name flow is the only way.
-  await expect(row2.locator(".ai-del")).toHaveCount(0);
+  await expect(row).toBeVisible();
+  // Neither affordance lives here any more: renaming and deleting a project
+  // both happen on the project's own Settings page.
+  await expect(row.locator(".ai-btn", { hasText: "Rename" })).toHaveCount(0);
+  await expect(row.locator(".ai-del")).toHaveCount(0);
+
+  // …and renaming there works, showing up in the nav.
+  await page.goto(`/${made.project.id}/settings`);
+  await page.fill("#ps-name", "doomed-2");
+  await page.click("#ps-save");
+  await expectToast(page, "Saved");
+  await expect(page.locator("#projects .proj-trigger")).toContainText("doomed-2");
+
   await page.request.delete("/api/projects/" + made.project.id); // clean up
 });
 

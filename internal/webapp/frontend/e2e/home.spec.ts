@@ -209,12 +209,68 @@ test("project settings: danger zone is owner-only", async ({ page }) => {
   await expect(page.locator(".ps-danger .danger-btn")).toHaveText("Delete project");
 });
 
-test("project settings: a member sees no danger zone", async ({ page }) => {
+test("project settings: a member sees no danger zone and cannot edit", async ({ page }) => {
   await login(page, MEMBER);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/settings`);
   await expect(page.locator(".project-settings h2")).toHaveText("wiki"); // page rendered
   await expect(page.locator(".ps-danger")).toHaveCount(0);
+  // The General card is shown, disabled — not hidden, and with no way to submit.
+  await expect(page.locator("#ps-name")).toBeDisabled();
+  await expect(page.locator("#ps-desc")).toBeDisabled();
+  await expect(page.locator("#ps-icon-btn")).toBeDisabled();
+  await expect(page.locator("#ps-save")).toHaveCount(0);
+});
+
+test("project settings: icon + description save, and show in nav and dashboard", async ({
+  page,
+}) => {
+  await login(page);
+  const made = await (await page.request.post("/api/projects", { data: { name: "dressed" } })).json();
+  const pid = made.project.id;
+  await page.goto(`/${pid}/settings`);
+
+  // Nothing dirty yet → nothing to save.
+  await expect(page.locator("#ps-save")).toBeDisabled();
+  // Placeholder until an icon is picked.
+  await expect(page.locator(".ps-icon-row .proj-mark svg")).toHaveCount(1);
+
+  await page.click("#ps-icon-btn");
+  await page.click('.ps-icon-grid [aria-label="book-open"]');
+  await page.fill("#ps-desc", "everything support needs");
+  await expect(page.locator(".ps-count")).toHaveText("24 / 280");
+  await expect(page.locator("#ps-save")).toBeEnabled();
+  await page.click("#ps-save");
+  await expectToast(page, "Saved");
+  await expect(page.locator("#ps-save")).toBeDisabled(); // clean again
+
+  // Both surfaces pick it up without a reload: the nav mark right here, and
+  // the project header on the next SPA navigation (same header component the
+  // project home renders).
+  await expect(page.locator("#projects .proj-trigger .proj-mark svg")).toHaveCount(1);
+  await page.click("#nav-install");
+  await expect(page.locator(".in-desc")).toHaveText("everything support needs");
+  await expect(page.locator(".gd-head .proj-mark svg")).toHaveCount(1);
+
+  // …and it survives a reload, i.e. it really was persisted — on the project
+  // home header, and back in the form.
+  await page.goto(`/${pid}`);
+  await expect(page.locator(".in-desc")).toHaveText("everything support needs");
+  await expect(page.locator(".gd-head .proj-mark svg")).toHaveCount(1);
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator("#ps-desc")).toHaveValue("everything support needs");
+
+  await page.request.delete("/api/projects/" + pid); // clean up
+});
+
+test("project settings: an over-long description is refused inline", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/settings`);
+  await page.fill("#ps-desc", "x".repeat(281));
+  await page.click("#ps-save");
+  await expect(page.locator("#ps-desc-err")).toBeVisible();
+  await expect(page.locator("#ps-desc")).toHaveValue("x".repeat(281)); // form not cleared
 });
 
 test("project settings: delete needs the exact name typed, then navigates away", async ({ page }) => {

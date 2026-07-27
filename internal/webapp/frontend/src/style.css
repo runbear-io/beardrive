@@ -150,6 +150,11 @@ button, input, a.btn { font-family: inherit; }
   display: grid; place-items: center; font-size: 10px; font-weight: 700;
   color: #0a0b0d; letter-spacing: -.02em; text-transform: uppercase;
 }
+/* The project's lucide glyph sits inside the colored square. */
+.proj-mark svg { width: 11px; height: 11px; }
+/* Menu rows carry their own mark, so they need the same row layout the
+   trigger has. */
+.proj-menu [data-slot="select-item"] { display: flex; align-items: center; gap: 8px; }
 #projects .row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 #projects .row:hover { background: var(--hover); color: var(--text); }
 #projects .row.active { background: var(--glow); color: var(--accent-bright); }
@@ -352,11 +357,48 @@ button, input, a.btn { font-family: inherit; }
 .danger-btn { display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: #b3382e; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
 .danger-btn:hover { background: #c94336; }
 
+/* Tailwind preflight is deliberately off (see tw.css), so copied shadcn
+   components miss two of its defaults: form controls inheriting the page font
+   and color (a bare <textarea> otherwise renders monospace, an <input> black),
+   and the `border` utility resolving to a themed color rather than
+   currentColor (a near-white hairline on every card). Supply both here, by
+   slot, so the primitives stay unedited. */
+[data-slot="input"],
+[data-slot="textarea"] { font: inherit; color: var(--text); }
+/* An invalid field keeps a red ring while focused, the way .admin's do —
+   the accent ring otherwise contradicts the red message below it. */
+[data-slot="input"][aria-invalid="true"]:focus-visible,
+[data-slot="textarea"][aria-invalid="true"]:focus-visible { border-color: var(--del); }
+[data-slot="card"],
+[data-slot="dropdown-menu-content"] { border-color: var(--border); }
+
 /* ---- project settings ---- */
-/* Irreversible actions get their own ruled-off section, well below the facts. */
-.ps-danger { margin-top: 36px; padding-top: 20px; border-top: 1px solid var(--border); }
-.ps-danger h3 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: #d2695e; font-weight: 600; margin: 0 0 8px; }
+/* Sectioned cards: General (editable), About (facts), Danger zone. */
+.project-settings { display: flex; flex-direction: column; gap: 14px; }
+.project-settings > h2 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
+.ps-form { display: flex; flex-direction: column; gap: 18px; }
+.ps-field { display: flex; flex-direction: column; gap: 7px; }
+.ps-field label { font-size: 12.5px; color: var(--text-dim); }
+.ps-opt { color: var(--text-ghost); font-weight: 400; }
+.ps-icon-row { display: flex; align-items: center; gap: 10px; }
+.ps-icon-row .proj-mark { width: 26px; height: 26px; border-radius: 7px; }
+.ps-icon-row .proj-mark svg { width: 15px; height: 15px; }
+.ps-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.ps-meta .field-err { flex: 0 1 auto; margin: 0; }
+.ps-count { font-size: 11.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.ps-actions { display: flex; justify-content: flex-end; }
+/* Icon picker: a grid inside the existing dropdown-menu, no new primitive. */
+.ps-icon-grid { display: grid; grid-template-columns: repeat(6, 30px); gap: 4px; padding: 8px; }
+.ps-icon-cell { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; border: 1px solid transparent; background: none; color: var(--text-dim); cursor: pointer; }
+.ps-icon-cell svg { width: 16px; height: 16px; }
+.ps-icon-cell:hover { background: var(--hover); color: var(--text); }
+.ps-icon-cell.active { border-color: var(--accent); color: var(--accent-bright); }
+/* Irreversible actions keep their own, clearly-marked card. */
+.ps-danger [data-slot="card-title"] { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: #d2695e; font-weight: 600; }
 .ps-danger p { color: var(--text-dim); font-size: 13px; margin: 0 0 14px; max-width: 52ch; line-height: 1.55; }
+.ps-facts { display: grid; grid-template-columns: auto 1fr; gap: 8px 20px; margin: 0; font-size: 13px; }
+.ps-facts dt { color: var(--text-faint); }
+.ps-facts dd { margin: 0; color: var(--text-dim); }
 
 /* ---- admin panels ---- */
 /* width comes from .page (app) — see #content */
@@ -490,6 +532,12 @@ a.ai-main:hover { color: var(--accent); }
 /* .insights width comes from .page (app) */
 .in-title { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
 .in-title .in-scope { color: var(--text-ghost); font-weight: 500; font-size: 15px; }
+/* The project dashboard title carries the project's mark; its description
+   (when it has one) sits directly under the name. */
+.gd-head { display: flex; align-items: center; gap: 9px; }
+.gd-head .proj-mark { width: 22px; height: 22px; border-radius: 6px; }
+.gd-head .proj-mark svg { width: 13px; height: 13px; }
+.in-desc { color: var(--text-dim); font-size: 13.5px; line-height: 1.55; margin: 0 0 10px; max-width: 62ch; }
 .in-lens { display: flex; gap: 6px; margin: 0 0 14px; }
 .in-lens-btn { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--text-faint); cursor: pointer; }
 .in-lens-btn:hover { color: var(--text); }

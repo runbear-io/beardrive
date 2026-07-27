@@ -13,7 +13,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { api, getJSON, postJSON } from "../api/http";
 import type { Org, OrgInviteInfo, OrgShareInfo, Project } from "../api/types";
-import { modalConfirm, modalPrompt } from "../modal";
+import { modalConfirm } from "../modal";
 import { toast } from "../toast";
 import { copyText } from "../util";
 import { Button } from "@/components/ui/button";
@@ -59,12 +59,10 @@ export function OrgAdmin({
   org,
   projects,
   myEmail,
-  onProjectsChanged,
 }: {
   org: Org;
   projects: Project[];
   myEmail: string;
-  onProjectsChanged: () => Promise<void>;
 }) {
   const qc = useQueryClient();
   const owner = org.role === "owner";
@@ -145,51 +143,20 @@ export function OrgAdmin({
       <h3>Members</h3>
       <MembersTable org={org} owner={owner} myEmail={myEmail} onChanged={refreshOrgs} />
 
-      {!owner && (
-        <>
-          <h3>Projects</h3>
-          <div className="admin-list">
-            {orgProjects.length === 0 && <div className="admin-empty">No projects yet.</div>}
-            {orgProjects.map((p) => (
-              <div className="admin-item" key={p.id}>
-                <span className="ai-main" title={p.name}>{p.name}</span>
-              </div>
-            ))}
+      {/* Read-only for everybody: a project is renamed (and deleted) from its
+          own Settings page, so this list is the same whatever your role. */}
+      <h3>Projects</h3>
+      <div className="admin-list">
+        {orgProjects.length === 0 && <div className="admin-empty">No projects yet.</div>}
+        {orgProjects.map((p) => (
+          <div className="admin-item" key={p.id}>
+            <span className="ai-main" title={p.name}>{p.name}</span>
           </div>
-        </>
-      )}
+        ))}
+      </div>
 
       {owner && (
         <>
-          <h3>Projects</h3>
-          <div className="admin-list">
-            {orgProjects.length === 0 && <div className="admin-empty">No projects yet.</div>}
-            {orgProjects.map((p) => (
-              <div className="admin-item" key={p.id}>
-                <span className="ai-main" title={p.name}>{p.name}</span>
-                <Button
-                  variant="subtle"
-                  aria-label={`Rename ${p.name}`}
-                  onClick={async () => {
-                    const name = await modalPrompt("Rename project", "New name", p.name, "Rename");
-                    if (name === null || name.trim() === p.name) return;
-                    try {
-                      await api("PATCH", "/api/projects/" + p.id, { name });
-                      toast("Renamed.");
-                      await onProjectsChanged();
-                    } catch (e) {
-                      toast((e as Error).message, true);
-                    }
-                  }}
-                >
-                  Rename
-                </Button>
-                {/* Delete lives on the project's own Settings page, behind
-                    type-the-name — one way to delete, and it's the hard one. */}
-              </div>
-            ))}
-          </div>
-
           <div className="admin-h">
             <h3>Invite links</h3>
             <Button

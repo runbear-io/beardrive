@@ -120,10 +120,11 @@ classDiagram
     class ProjectDB {
         -repo ProjectRepo
         -byID
-        +Get +Create +Rename +List
+        +Get +Create +Update +Rename +List
     }
     class Project {
         +ID +Name +Org +Created
+        +Description +Icon
     }
 
     class ShareDB {

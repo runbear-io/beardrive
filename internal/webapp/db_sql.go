@@ -167,6 +167,40 @@ func (s *sqlMetaStore) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	// Columns added after the tables shipped. CREATE TABLE IF NOT EXISTS does
+	// nothing for an existing table, so these need a real (idempotent) ALTER.
+	return s.addColumns("projects", map[string]string{
+		"description": `TEXT NOT NULL DEFAULT ''`,
+		"icon":        `TEXT NOT NULL DEFAULT ''`,
+	})
+}
+
+// addColumns adds any of cols that the table doesn't already have. The live
+// column set comes from an empty result set's metadata, which both drivers
+// (modernc/sqlite and pgx) report the same way — no engine-specific catalog
+// query, and safe to run on every start.
+func (s *sqlMetaStore) addColumns(table string, cols map[string]string) error {
+	rows, err := s.db.Query(`SELECT * FROM ` + table + ` LIMIT 0`)
+	if err != nil {
+		return fmt.Errorf("migrate %s: %w", table, err)
+	}
+	names, err := rows.Columns()
+	rows.Close()
+	if err != nil {
+		return fmt.Errorf("migrate %s: %w", table, err)
+	}
+	have := make(map[string]bool, len(names))
+	for _, n := range names {
+		have[strings.ToLower(n)] = true
+	}
+	for col, spec := range cols {
+		if have[col] {
+			continue
+		}
+		if _, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + spec); err != nil {
+			return fmt.Errorf("migrate %s.%s: %w", table, col, err)
+		}
+	}
 	return nil
 }
 
@@ -259,7 +293,7 @@ func (r *sqlAccountRepo) PutPolicy(p authPolicy) error {
 type sqlProjectRepo struct{ s *sqlMetaStore }
 
 func (r *sqlProjectRepo) Load() ([]Project, error) {
-	rows, err := r.s.db.Query(`SELECT id, name, org, created FROM projects`)
+	rows, err := r.s.db.Query(`SELECT id, name, org, created, description, icon FROM projects`)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +302,7 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 	for rows.Next() {
 		var p Project
 		var created string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Org, &created); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Org, &created, &p.Description, &p.Icon); err != nil {
 			return nil, err
 		}
 		p.Created = tdec(created)
@@ -278,9 +312,10 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 }
 
 func (r *sqlProjectRepo) Put(p Project) error {
-	return r.s.exec(`INSERT INTO projects (id,name,org,created) VALUES (?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created`,
-		p.ID, p.Name, p.Org, tenc(p.Created))
+	return r.s.exec(`INSERT INTO projects (id,name,org,created,description,icon) VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
+		description=excluded.description, icon=excluded.icon`,
+		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon)
 }
 
 func (r *sqlProjectRepo) Delete(id string) error {

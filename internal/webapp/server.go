@@ -347,7 +347,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/orgs/{org}/shares", s.handleOrgShares)
 	mux.HandleFunc("POST /api/invites/{token}", s.handleInviteAccept)
 
-	mux.HandleFunc("PATCH /api/projects/{project}", s.handleProjectRename)
+	mux.HandleFunc("PATCH /api/projects/{project}", s.handleProjectUpdate)
 	mux.HandleFunc("DELETE /api/projects/{project}", s.handleProjectDelete)
 
 	mux.HandleFunc("GET /api/admin/policy", s.handleAdminPolicy)

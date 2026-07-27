@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -64,6 +65,52 @@ func TestProjectLifecycle(t *testing.T) {
 	if err := db.Rename(p.ID, "docs"); err == nil {
 		t.Fatal("rename to an existing org-name must be refused")
 	}
+
+	// Partial update: only the fields you pass move.
+	ptr := func(s string) *string { return &s }
+	if err := db.Update(p.ID, nil, ptr("the team handbook"), ptr("book-open")); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.Get(p.ID)
+	if got.Name != "handbook" || got.Description != "the team handbook" || got.Icon != "book-open" {
+		t.Fatalf("update: %+v", got)
+	}
+	// icon-only update leaves name and description alone
+	if err := db.Update(p.ID, nil, nil, ptr("users")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = db.Get(p.ID); got.Name != "handbook" || got.Description != "the team handbook" || got.Icon != "users" {
+		t.Fatalf("icon-only update: %+v", got)
+	}
+	// present-and-empty clears; absent does not
+	if err := db.Update(p.ID, nil, ptr(""), ptr("")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = db.Get(p.ID); got.Description != "" || got.Icon != "" || got.Name != "handbook" {
+		t.Fatalf("clear: %+v", got)
+	}
+
+	for _, tc := range []struct {
+		what             string
+		name, desc, icon *string
+	}{
+		{"empty name", ptr("  "), nil, nil},
+		{"name over 120", ptr(strings.Repeat("x", 121)), nil, nil},
+		{"sibling collision", ptr("docs"), nil, nil},
+		{"description over 280", nil, ptr(strings.Repeat("d", 281)), nil},
+		{"icon uppercase", nil, nil, ptr("Folder")},
+		{"icon with space", nil, nil, ptr("a b")},
+		{"icon over 32", nil, nil, ptr(strings.Repeat("a", 33))},
+	} {
+		if err := db.Update(p.ID, tc.name, tc.desc, tc.icon); err == nil {
+			t.Fatalf("%s: expected an error", tc.what)
+		}
+	}
+	// a rejected update leaves the record untouched
+	if got, _ = db.Get(p.ID); got.Name != "handbook" || got.Description != "" || got.Icon != "" {
+		t.Fatalf("rejected updates mutated the project: %+v", got)
+	}
+
 	if err := db.Delete(p.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +143,76 @@ func TestAdminEndpointsOwnerOnly(t *testing.T) {
 	// alice can delete it
 	if rec := doAs(t, h, "DELETE", "/api/projects/"+pa.ID, nil, alice); rec.Code != 200 {
 		t.Fatalf("owner project delete: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// PATCH /api/projects/{id} is a partial update: only the keys in the body
+// move, present-and-empty clears, and every validation failure is a 400. The
+// permission gate is unchanged — a non-member still gets what it got before.
+func TestProjectUpdatePartial(t *testing.T) {
+	h, srv, alice, bob, pa := orgHubSrv(t)
+
+	patch := func(body string, c *http.Cookie) int {
+		return doAs(t, h, "PATCH", "/api/projects/"+pa.ID, []byte(body), c).Code
+	}
+	get := func() Project {
+		t.Helper()
+		p, ok := srv.Projects.Get(pa.ID)
+		if !ok {
+			t.Fatal("project vanished")
+		}
+		return p
+	}
+
+	if code := patch(`{"name":"notes"}`, alice); code != 200 {
+		t.Fatalf("rename: %d", code)
+	}
+	if p := get(); p.Name != "notes" || p.Description != "" || p.Icon != "" {
+		t.Fatalf("name-only patch touched other fields: %+v", p)
+	}
+	if code := patch(`{"icon":"book-open"}`, alice); code != 200 {
+		t.Fatalf("icon: %d", code)
+	}
+	if p := get(); p.Name != "notes" || p.Icon != "book-open" {
+		t.Fatalf("icon-only patch: %+v", p)
+	}
+	if code := patch(`{"description":"what support reads"}`, alice); code != 200 {
+		t.Fatalf("description: %d", code)
+	}
+	if p := get(); p.Description != "what support reads" || p.Icon != "book-open" {
+		t.Fatalf("description-only patch: %+v", p)
+	}
+	if code := patch(`{"description":""}`, alice); code != 200 {
+		t.Fatalf("clear description: %d", code)
+	}
+	if p := get(); p.Description != "" || p.Icon != "book-open" || p.Name != "notes" {
+		t.Fatalf("clearing description touched other fields: %+v", p)
+	}
+
+	// alice's org gets a sibling so the collision rule has something to hit
+	if rec := doAs(t, h, "POST", "/api/projects", map[string]string{"name": "docs"}, alice); rec.Code != 200 {
+		t.Fatalf("create sibling: %d %s", rec.Code, rec.Body)
+	}
+
+	for _, tc := range []struct{ what, body string }{
+		{"empty name", `{"name":""}`},
+		{"long name", `{"name":"` + strings.Repeat("x", 121) + `"}`},
+		{"sibling collision", `{"name":"docs"}`},
+		{"long description", `{"description":"` + strings.Repeat("d", 281) + `"}`},
+		{"bad icon", `{"icon":"BookOpen"}`},
+	} {
+		if code := patch(tc.body, alice); code != http.StatusBadRequest {
+			t.Fatalf("%s: got %d, want 400", tc.what, code)
+		}
+	}
+	// and none of those touched the record
+	if p := get(); p.Name != "notes" || p.Description != "" || p.Icon != "book-open" {
+		t.Fatalf("rejected patches mutated the project: %+v", p)
+	}
+
+	// gate unchanged: a non-member gets 404 (the project doesn't exist for him)
+	if code := patch(`{"icon":"users"}`, bob); code == 200 {
+		t.Fatal("non-member updated a project")
 	}
 }
 

@@ -24,8 +24,11 @@ func (s *Server) projectOwner(r *http.Request, projectID string) bool {
 	return s.Dir.Role(org, s.requestUser(r).Email) == RoleOwner
 }
 
-// handleProjectRename renames a project. Owner of its org only.
-func (s *Server) handleProjectRename(w http.ResponseWriter, r *http.Request) {
+// handleProjectUpdate edits a project's name, description and icon. Owner of
+// its org only. It's a partial update: every field is a pointer, so only the
+// keys actually present in the body change — {"description":""} clears the
+// description, omitting the key leaves it alone.
+func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("project")
 	if s.Projects == nil {
 		http.Error(w, "this server does not host projects", http.StatusNotFound)
@@ -40,13 +43,15 @@ func (s *Server) handleProjectRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name string `json:"name"`
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+		Icon        *string `json:"icon"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.Projects.Rename(id, req.Name); err != nil {
+	if err := s.Projects.Update(id, req.Name, req.Description, req.Icon); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
