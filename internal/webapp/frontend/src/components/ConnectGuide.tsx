@@ -98,22 +98,14 @@ function guideSteps(agent: GuideAgent, project: Project): Step[] {
   ];
 }
 
-// The prompt the user pastes. Numbered, exact commands: an agent with no
-// BearDrive knowledge follows this reliably, and knows what to do when a step
-// is already done. `login --device` on purpose — a browser-callback sign-in is
-// invisible to an agent mid-turn, while the device flow gives it a code and a
-// URL it can hand back in chat.
-function setupPrompt(agent: GuideAgent, project: Project): string {
+// The prompt the user pastes. It points at the canonical agent instructions
+// (repo-root INSTALL_FOR_AGENTS.md) instead of inlining commands, so the
+// steps never go stale in someone's copy — the agent fetches the doc and
+// works through install, skill install, device-code login, init, and hooks.
+function setupPrompt(_agent: GuideAgent, project: Project): string {
   return [
-    "Set up BearDrive in this folder.",
-    "1. If `bdrive` is missing, install it: brew install runbear-io/tap/beardrive",
-    "   (no Homebrew? grab the release binary for this OS/arch from",
-    "   https://github.com/runbear-io/beardrive/releases)",
-    "2. bdrive skill install --agent " + agent.agent + "   # so you know the CLI next time",
-    "3. bdrive login --device " + window.location.origin + "   # show me the code and the URL",
-    "4. bdrive init --project " + project.id,
-    "5. bdrive hooks install   # don't skip this - it's what syncs every turn",
-    "Then tell me what got set up.",
+    "Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md",
+    "to connect this folder to BearDrive project " + project.id + " on " + window.location.origin + ".",
   ].join("\n");
 }
 

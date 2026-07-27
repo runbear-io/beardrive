@@ -44,12 +44,13 @@ test("codex tab is one paste that hands the whole setup to the agent", async ({ 
   const prompt = await page.$$eval(".gd-step .gd-code code", (els) =>
     els.map((e) => e.textContent).join("\n"),
   );
-  // Everything the agent needs rides inside the pasted prompt.
-  expect(prompt).toContain("brew install runbear-io/tap/beardrive");
-  expect(prompt).toContain("bdrive skill install --agent codex");
-  expect(prompt).toContain("bdrive login --device http://localhost:8993");
-  expect(prompt).toContain(`bdrive init --project ${pid}`);
-  expect(prompt).toContain("bdrive hooks install");
+  // The prompt points at the canonical instructions with the project id and
+  // hub URL filled in; the agent fetches the doc for the actual steps.
+  expect(prompt).toContain(
+    "Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md",
+  );
+  expect(prompt).toContain(`project ${pid} on http://localhost:8993`);
+  expect(prompt).not.toContain("brew install");
   const manual = await page.$$eval(".gd-manual .gd-code code", (els) =>
     els.map((e) => e.textContent).join("\n"),
   );
