@@ -160,6 +160,9 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	png := "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" +
 		"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
 	put("assets/logo.png", png, 24*time.Hour)
+	// A second version of the same binary, so the history diff has a
+	// predecessor to refuse to diff (the "binary — no diff" path).
+	put("assets/logo.png", png+"\x00trailing", 3*time.Hour)
 	// One removed file, so the history feed has a delete row: deletes have no
 	// content, so their rows stay unclickable while every other row is now an
 	// address for its own version.

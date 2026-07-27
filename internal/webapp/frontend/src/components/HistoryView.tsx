@@ -42,11 +42,26 @@ export function HistoryView(props: {
 
   if (!data) return null;
   const entries = data.entries || [];
+  // Diffs are a per-file affair: the subtree feed mixes paths, and each row
+  // there would need its own predecessor lookup for no review benefit.
+  const perFile = !!target && !isFolder(target);
+  // Entries arrive newest-first, so a row's predecessor is the next entry
+  // below it on the same path that still has content.
+  const prevBlob = (i: number) => {
+    for (let j = i + 1; j < entries.length; j++) {
+      if (entries[j].path === entries[i].path && entries[j].kind !== "delete") return entries[j].blob;
+    }
+  };
   return (
     <div className="history">
       {entries.length === 0 && <div className="empty">No history yet.</div>}
       {entries.map((e, i) => (
-        <HistoryRow key={i} entry={e} onOpen={props.onOpen} />
+        <HistoryRow
+          key={i}
+          entry={e}
+          onOpen={props.onOpen}
+          diff={perFile ? { apiBase, prev: prevBlob(i) } : undefined}
+        />
       ))}
     </div>
   );

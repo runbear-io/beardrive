@@ -44,6 +44,7 @@ classDiagram
 
     class api {
         +getJSON / postJSON / api
+        +getResponse (raw bytes)
         types.ts server contracts
     }
     note for api "api/http.ts — all URLs root-absolute so deep paths never break relative resolution"
@@ -52,17 +53,24 @@ classDiagram
         +useConfig
         +useHub
         +useBrowse
+        +useBlobText (sha-keyed, immutable)
     }
     note for hooks "TanStack Query wrappers over the viewer APIs"
 
     class components {
         FileView FolderListing FileTree
-        HistoryView HistoryRow VersionBanner
-        Insights ShareDialog OrgAdmin
-        HubSettings ProjectSettings
+        HistoryView HistoryRow DiffView VersionBanner
+        Insights ShareDialog
+        OrgAdmin HubSettings ProjectSettings
         Palette shell AccountBar ...
     }
     note for components "components/ui — shadcn/ui primitives (Radix, copied in), themed from BearDrive tokens in tw.css; rendered markdown is transformed as a string before mounting, link clicks delegated on the container — never patch the dangerouslySetInnerHTML subtree"
+
+    class lib {
+        +diff.ts splitLines lcsDiff diffText
+        +utils.ts
+    }
+    note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package"
 
     App --> HubApp
     App --> VolumeApp
@@ -73,6 +81,7 @@ classDiagram
     Browser --> components
     HubApp --> components
     components --> nav : linkProps navigate
+    components --> lib : diffText
     hooks --> api
     Browser --> hooks
     HubApp --> hooks

@@ -618,6 +618,30 @@ a.ai-main:hover { color: var(--accent); }
 .hnote a { color: var(--accent-bright); text-decoration: none; }
 .hnote a:hover { text-decoration: underline; }
 
+/* ---- per-version diff (per-file history) ---- */
+.hdiff-btn { display: inline-flex; align-items: center; gap: 4px; margin: 6px 0 0 23px; padding: 2px 7px 2px 4px; border: 1px solid var(--border); border-radius: 5px; background: none; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; }
+.hdiff-btn:hover { color: var(--text); border-color: var(--border-2); background: var(--hover); }
+.hdiff-btn .ico { width: 12px; height: 12px; }
+.hdiff-none { margin: 6px 0 0 23px; font-size: 12px; color: var(--text-ghost); }
+.dv { margin: 8px 0 2px 23px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.dv-msg { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 9px 11px; font-size: 12px; color: var(--text-faint); }
+.dv-dl { display: flex; gap: 12px; }
+.dv-msg a { color: var(--accent-bright); text-decoration: none; }
+.dv-msg a:hover { text-decoration: underline; }
+.dv-head { display: flex; align-items: center; gap: 10px; padding: 5px 11px; border-bottom: 1px solid var(--border); font-size: 11px; font-variant-numeric: tabular-nums; }
+.dv-add { color: var(--add); font-weight: 600; }
+.dv-del { color: var(--del); font-weight: 600; }
+.dv-same { color: var(--text-ghost); }
+/* The diff scrolls inside its own box; the page body never scrolls sideways. */
+.dv-body { overflow-x: auto; padding: 4px 0; }
+.dv-line { display: flex; font-family: var(--mono); font-size: 12px; line-height: 1.55; white-space: pre; }
+.dv-n { flex: none; width: 34px; padding-right: 8px; text-align: right; color: var(--text-ghost); user-select: none; font-variant-numeric: tabular-nums; }
+.dv-mark { flex: none; width: 16px; text-align: center; user-select: none; }
+.dv-text { padding-right: 12px; }
+.dv-ins { background: rgba(76,195,138,.10); color: var(--add); }
+.dv-rm { background: rgba(242,109,109,.10); color: #ff8b8b; }
+.dv-ctx { color: var(--text-dim); }
+
 /* ---- command palette ---- */
 #palette { position: fixed; top: 12vh; left: 50%; transform: translateX(-50%); z-index: 151; display: block; width: min(560px, 92vw); background: var(--bg-raise); border: 1px solid var(--border-2); border-radius: var(--r-over); box-shadow: 0 24px 70px -18px rgba(0,0,0,.8); overflow: hidden; outline: none; padding: 0; }
 #palette-inputwrap { display: flex; align-items: center; gap: 11px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
