@@ -455,9 +455,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if b, ok := s.Auth.(Brander); ok {
 		brand = b.Branding()
 	}
-	if brand == "" {
-		brand = s.Volume
-	}
+	// No fallback: the volume is a storage basename, not a brand. An
+	// unconfigured brand stays empty and each app picks its own default
+	// (hub: "BearDrive", volume mode: the folder name).
 	out := map[string]any{
 		"mode":   mode,
 		"volume": s.Volume,

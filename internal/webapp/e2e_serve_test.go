@@ -56,7 +56,10 @@ func TestE2EServe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &Server{Root: be, Projects: db, Device: webDevice, Refresh: 0, Upload: UploadConfig{Enabled: true}}
+	// Volume is deliberately the lowercase storage basename, so hub.spec.ts's
+	// "#vault-name reads BearDrive" assertion actually catches a brand that
+	// falls back to storage instead of the product name.
+	srv := &Server{Root: be, Projects: db, Device: webDevice, Refresh: 0, Volume: "beardrive", Upload: UploadConfig{Enabled: true}}
 
 	seedE2E(t, state, filepath.Join(state, "storage", p.ID), p.ID)
 
