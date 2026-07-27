@@ -24,11 +24,13 @@ export function AccountBar({
   org,
   admin,
   orgActive,
+  billing,
 }: {
   me: { email: string; name: string };
   org: Org | null;
   admin?: { pending: number; onClick: () => void }; // hub admins only
   orgActive?: boolean; // the org page is the open surface
+  billing?: { plan: string; url: string }; // managed deployments only
 }) {
   const display = me.name || me.email;
   // The menu's open state is ours because the org entry is a link: linkProps
@@ -80,6 +82,17 @@ export function AccountBar({
                   )}
                 </a>
               </DropdownMenuItem>
+              {billing && (
+                <DropdownMenuItem asChild>
+                  {/* Server-rendered page outside the SPA: a plain full-load
+                      link, no router. The chip shows the org's current plan. */}
+                  <a id="menu-billing" href={billing.url}>
+                    <Icon name="card" />
+                    <span>Billing</span>
+                    <span className="ps-chip plan-chip">{billing.plan}</span>
+                  </a>
+                </DropdownMenuItem>
+              )}
             </>
           )}
           {admin && (

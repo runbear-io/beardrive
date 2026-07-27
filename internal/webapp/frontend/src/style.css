@@ -281,6 +281,7 @@ button, input, a.btn { font-family: inherit; }
 #account-menu [role="menuitem"]:hover { background: var(--hover); color: var(--text); }
 #account-menu [role="menuitem"] b { font-weight: 600; }
 #account-menu [role="menuitem"] .ico { width: 15px; height: 15px; }
+#account-menu .plan-chip { margin-left: auto; color: var(--accent); border-color: var(--border-2); }
 #account-menu #signout { color: var(--del); }
 #account-menu #signout:hover { color: var(--del); background: var(--hover); }
 

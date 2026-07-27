@@ -14,6 +14,7 @@ import {
   Code,
   Compass,
   Copy,
+  CreditCard,
   Database,
   Download,
   Ellipsis,
@@ -125,6 +126,7 @@ if (typeof window !== "undefined") {
 // `.ico` sizing/stroke rules apply unchanged.
 const ICONS: Record<string, LucideIcon> = {
   alert: TriangleAlert,
+  card: CreditCard,
   check: Check,
   chev: ChevronRight,
   chevd: ChevronDown,

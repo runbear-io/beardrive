@@ -84,6 +84,13 @@ type Server struct {
 	// Quota, when set, enforces plan limits (managed deployments). Nil
 	// means UnlimitedQuota: the open-source server never says no.
 	Quota QuotaProvider
+	// Billing, when set, surfaces a billing entry in the frontend's account
+	// menu: the billing page URL plus the signed-in user's current plan name
+	// (/api/config `billing`). The OSS hub has no billing; managed
+	// deployments plug this in. Nil — or ok=false for a user with no org —
+	// hides the entry. The mirror of the Quota seam: Quota enforces the
+	// plan, Billing displays it.
+	Billing func(email string) (plan, url string, ok bool)
 	// ShareRPM is the per-IP request rate on public share links (/s/*);
 	// 0 means DefaultShareRPM.
 	ShareRPM int
@@ -477,6 +484,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if me.Email != "" {
 		out["me"] = map[string]string{"email": me.Email, "name": me.Name}
+		if s.Billing != nil {
+			if plan, url, ok := s.Billing(me.Email); ok {
+				out["billing"] = map[string]string{"plan": plan, "url": url}
+			}
+		}
 	}
 	writeJSON(w, out)
 }

@@ -17,6 +17,8 @@ export interface ServerConfig {
   };
   reads: { enabled: boolean };
   me?: { email: string; name: string };
+  // Managed deployments only: where billing lives + the user's current plan.
+  billing?: { plan: string; url: string };
 }
 
 // Per-project permission levels (perms.go). Ordered: each includes the ones

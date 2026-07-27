@@ -464,3 +464,49 @@ func readFileString(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	return string(data), err
 }
+
+// TestConfigBillingSeam: the billing block appears in /api/config only when
+// the hook is set, the caller is signed in, and the hook says ok.
+func TestConfigBillingSeam(t *testing.T) {
+	srv, _, _ := authHub(t, true)
+	srv.Billing = func(email string) (string, string, bool) {
+		if email == "a@x.io" {
+			return "Team", "/billing", true
+		}
+		return "", "", false
+	}
+	h := srv.Handler()
+
+	get := func(cookie *http.Cookie) map[string]json.RawMessage {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/config", nil)
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("config: %d %s", rec.Code, rec.Body)
+		}
+		var out map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// Signed out: no billing key, even with the hook set.
+	if _, ok := get(nil)["billing"]; ok {
+		t.Fatal("billing leaked to a signed-out config")
+	}
+	// Signed in and the hook says ok: plan + url.
+	cookie := signupAndSession(t, h, "a@x.io", "Alice", "password1")
+	if got := string(get(cookie)["billing"]); got != `{"plan":"Team","url":"/billing"}` {
+		t.Fatalf("billing block = %s", got)
+	}
+	// A user the hook declines (no org yet): key absent.
+	other := signupAndSession(t, h, "b@x.io", "Bob", "password1")
+	if _, ok := get(other)["billing"]; ok {
+		t.Fatal("billing shown to a user the hook declined")
+	}
+}

@@ -83,6 +83,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       me={config.me}
       org={org}
       orgActive={!!route.org}
+      billing={config.billing}
       admin={
         isAdmin
           ? {
