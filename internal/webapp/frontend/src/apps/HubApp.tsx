@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { postJSON } from "../api/http";
-import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
+import type { InviteAccepted, Project, ServerConfig } from "../api/types";
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
 import { parseRoute, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
@@ -118,23 +118,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         topbar={<Topbar />}
       >
         <Page>
-          <EmptyState
-          authEnabled={config.auth.enabled}
-          onCreate={async (name) => {
-            if (!name) {
-              toast("Give the project a name.", true);
-              return;
-            }
-            try {
-              const out = await postJSON<ProjectCreated>("/api/projects", { name });
-              await refresh();
-              navigate("/" + out.project.id);
-              toast(`Created “${out.project.name}”.`);
-            } catch (e) {
-              toast("Could not create the project: " + (e as Error).message, true);
-            }
-            }}
-          />
+          <EmptyState />
         </Page>
       </AppShell>
     );
