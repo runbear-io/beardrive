@@ -57,7 +57,7 @@ Three hooks, three jobs:
 - **Push**, after an edit, so teammates see the change within seconds rather
   than whenever a daemon tick lands.
 - **Read tracking**, on the agent's read-shaped tools, queued locally and sent
-  on the next sync. This is what fills [Insights](/guides/what-agents-read/).
+  on the next sync. This is what fills the [Dashboard](/guides/what-agents-read/).
   Listing tools are deliberately excluded: seeing a filename is not reading it.
 
 Every platform pipes hook JSON with a session id, so one hook command serves all

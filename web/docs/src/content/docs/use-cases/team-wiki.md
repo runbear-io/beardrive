@@ -1,6 +1,6 @@
 ---
 title: Keep a wiki your agents maintain
-description: For a team whose knowledge lives in documents nobody updates. The wiki gets written as a side effect of work, every change is attributed, and Insights shows which pages are load-bearing and stale.
+description: For a team whose knowledge lives in documents nobody updates. The wiki gets written as a side effect of work, every change is attributed, and the project Dashboard shows which pages are load-bearing and stale.
 ---
 
 Every team has the same wiki problem: the pages that matter most are the ones
@@ -43,7 +43,7 @@ model that has ever survived contact with a busy team.
 
 ## Reading the health of it
 
-The hub's **Insights** (hub admins and org owners) plots reads against
+The hub's project **Dashboard** (every member) plots reads against
 staleness. The quadrant to watch is **hot and stale**: pages your agents read
 constantly that nobody has updated. That is your maintenance queue, and it is
 usually three pages, not thirty.
@@ -53,7 +53,7 @@ behind an admin screen.
 
 ## What matters for this case
 
-- **[What agents read](/guides/what-agents-read/)** — read heat, Insights, and
+- **[What agents read](/guides/what-agents-read/)** — read heat, the Dashboard, and
   what the hub deliberately does not record.
 - **[Shared agent memory](/guides/shared-agent-memory/)** — an `AGENTS.md` map
   at the wiki root so agents file things consistently instead of inventing a
