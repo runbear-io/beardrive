@@ -18,7 +18,9 @@ plus project, remote, and include settings.
 ```
 
 Written by `bdrive init` and safe to hand-edit — a running daemon picks changes
-up automatically.
+up automatically. The `include` list (which subfolders sync, set by
+`init --shared`) has a friendlier editor: `bdrive scope add`/`rm` from the
+mount root.
 
 It is **never synced** and holds **no credentials**; the session token stays in
 `~/.bdrive`.

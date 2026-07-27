@@ -13,9 +13,10 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 
 | Action | Command |
 |---|---|
-| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dir>` / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
+| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dirs>` (comma-separated or repeated) / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
 | Run the daemon in the foreground | `bdrive init -f` |
 | Stop syncing | `bdrive stop [<folder>]` — pauses daemon *and* agent hooks; `bdrive init` resumes (`--forget` also unregisters) |
+| Show/change which subfolders sync | `bdrive scope` / `bdrive scope add <dirs...>` / `bdrive scope rm <dirs...>` — edits the include list set by `init --shared` (run from the mount root; NEVER hand-edit config.json for this). The daemon applies it within seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub; removing the last entry is refused (that would flip to whole-folder sync — use `bdrive stop` instead) |
 | One sync cycle now | `bdrive sync [<folder>]` — `--note <text>` stamps session context; `--hook <label>` is the Claude turn-start hook's plumbing (event JSON in, sync + note, gated-link formula out) |
 | Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install [<folder>]` — auto-detects the platforms in use and merges pull/push/session-note/read-tracking hooks into each one's own hook config, idempotently; bare `bdrive hooks` shows the status table |
 | Install this skill on another agent (Codex, Gemini CLI, Hermes, Claude Code) | `bdrive skill install [<folder>]` — writes the binary's own copy of this skill to each detected platform's user-level skills dir (`~/.codex/skills/beardrive/SKILL.md` and friends), idempotently; bare `bdrive skill` shows the status table. Then the user asks that agent to set the folder up and it runs `init` + `hooks install` itself |
@@ -47,7 +48,7 @@ Two files at the mount root control a folder's sync behavior:
   "id": "m-5a10b713",
   "volume": "agent-workspace",
   "remote": "https://drive.example.com/p/p-7f3a2c91",
-  "include": ["shared/"]   // optional: sync ONLY these (set by init --shared)
+  "include": ["shared/"]   // optional: sync ONLY these (init --shared; edit with bdrive scope add/rm)
 }
 ```
 
@@ -72,7 +73,7 @@ Selective-sync semantics — important when advising users:
 ### Init flow
 
 1. Sign-in happens lazily: `bdrive init` runs the login flow itself when the device has no session, so don't ask users to sign up ahead of time. Bare `bdrive login` targets BearDrive Cloud (beardrive.ai) — signing up in the browser auto-creates a free personal workspace; a pending team invite routes them into that team instead. Self-hosting teams: `bdrive login https://your-hub`.
-2. Pick what to sync BEFORE running init. In a repo, look for an existing knowledge folder (`wiki/`, `docs/`, `notes/`, `handbook/`, an Obsidian vault) and propose it as `--shared <dir>` — confirm, don't interrogate. Never sync a repo root. Then run `bdrive init` in the folder. Interactive on a TTY (create new / connect existing project; whole folder / shared subfolder); with flags or without a TTY it creates-or-joins a project named after the folder and syncs everything. It:
+2. Pick what to sync BEFORE running init. In a repo, look for existing knowledge folders (`wiki/`, `docs/`, `notes/`, `handbook/`, an Obsidian vault) and propose them as `--shared <dirs>` — several folders can share one project (`--shared wiki,docs`) when the same people should see all of them; folders needing different access belong in separate projects. Confirm, don't interrogate. Never sync a repo root. Then run `bdrive init` in the folder. Interactive on a TTY (create new / connect existing project; whole folder / shared subfolder); with flags or without a TTY it creates-or-joins a project named after the folder and syncs everything. It:
    - writes `<folder>/.bdrive/config.json` (mount id + project + remote) and registers the mount id in `~/.bdrive/mounts.json`,
    - seeds a starter `.bdriveignore` (node_modules, build dirs, caches, `.env*`) when none exists,
    - opens the volume store under `~/.bdrive/volumes/<mount-id>/`,
@@ -84,7 +85,7 @@ Selective-sync semantics — important when advising users:
 
 - `--name <x>` — project name to create-or-join (default: folder basename).
 - `--project <id>` — connect an existing project by id (`p-xxxxxxxx`).
-- `--shared <dir>` — sync only this subfolder (becomes the include list; remote paths keep the prefix so all devices see the same layout).
+- `--shared <dirs>` — sync only these subfolders (repeatable or comma-separated: `--shared wiki,docs`; becomes the include list; remote paths keep the prefix so all devices see the same layout).
 - `--yes, -y` — accept defaults, never prompt.
 - `--foreground, -f` — run the daemon in the foreground (systemd/launchd/containers).
 
@@ -235,7 +236,7 @@ bdrive stop ./notes --forget
 When guiding `bdrive init`, detect existing knowledge tooling and connect it instead of blind-syncing the folder. Two rules govern every case:
 
 - **One transport per folder.** Never sync a folder that has another writer. Git-tracked paths: a teammate's `git pull` or branch switch rewrites files with older content, and sync broadcasts that as a fresh edit — silently reverting the team's latest pages. A gbrain brain root: every private capture and overnight enrichment would become team-visible, and each member's cron rewriting the same pages fills the project with conflict copies. Moving a folder from git to beardrive is a **handoff**: `git rm -r --cached <dir>` + add `<dir>/` to `.gitignore`, stage the change but let the user commit it (teammates then pull and re-init; identical content converges with no conflicts). If they want a git record anyway, offer **one-way snapshots** (a scheduled job commits the synced folder's state to an archive branch — git only ever reads the folder) and note that hub history (`bdrive log -p <path>`) usually covers the need.
-- **Knowledge syncs as a scoped folder.** Inside a repo, always `--shared <dir>` — never the repo root. A dedicated knowledge folder (an empty dir, a standalone vault) may be the mount itself. The sync scope is per-device (`.bdrive/` never syncs), so recommend the same `--shared <dir>` when each teammate connects.
+- **Knowledge syncs as a scoped folder.** Inside a repo, always `--shared <dirs>` (one or more subfolders) — never the repo root. A dedicated knowledge folder (an empty dir, a standalone vault) may be the mount itself. The sync scope is per-device (`.bdrive/` never syncs), so recommend the same `--shared <dirs>` when each teammate connects.
 
 Detection ladder — first match wins; if two rungs match, ask which to connect:
 

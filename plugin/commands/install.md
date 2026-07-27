@@ -1,6 +1,6 @@
 ---
 description: Set up BearDrive for this project — install the CLI, sign in, create/connect a project, optionally document the shared folder in CLAUDE.md, and register project-level sync hooks so every teammate's files stay fresh during Claude sessions
-argument-hint: "[project-name] [--shared <dir>]"
+argument-hint: "[project-name] [--shared <dirs>]"
 ---
 
 Set up BearDrive for the current project, end to end. Work through these
@@ -27,19 +27,22 @@ browser window is coming, then sign in:
 
 ## 3. Initialize the project
 
-If `$ARGUMENTS` gives a project name and/or `--shared <dir>`, use them.
+If `$ARGUMENTS` gives a project name and/or `--shared <dirs>` (one or more,
+comma-separated or repeated), use them.
 Otherwise ask the user two questions (or infer from their request):
 - **Create a new project or connect an existing one?** (`bdrive init
   --name <name>` creates-or-joins by name; `bdrive init --project <p-id>`
   connects by id.)
-- **Sync the whole folder, or only a shared subfolder?** Hard rule:
-  **never sync a repo root** — inside a repo, knowledge always syncs as a
-  scoped subfolder via `--shared`. Whole-folder is only for a dedicated
+- **Sync the whole folder, or only shared subfolders?** Hard rule:
+  **never sync a repo root** — inside a repo, knowledge always syncs as
+  scoped subfolders via `--shared`. Whole-folder is only for a dedicated
   knowledge folder (an empty dir, a standalone vault) that is the mount
-  itself. Don't ask open-endedly: scan the repo for an existing knowledge
-  folder (`wiki/`, `docs/`, `notes/`, `handbook/`, an Obsidian vault —
-  markdown-heavy, not source code) and propose the best candidate for
-  confirmation, e.g. "I found `./wiki` — sync that?".
+  itself. Don't ask open-endedly: scan the repo for existing knowledge
+  folders (`wiki/`, `docs/`, `notes/`, `handbook/`, an Obsidian vault —
+  markdown-heavy, not source code) and propose the candidates for
+  confirmation, e.g. "I found `./wiki` and `./docs` — sync both?"
+  (`--shared wiki,docs` puts them in one project — one membership, one
+  permission set; folders needing different access go in separate projects).
 
 **One transport per folder.** If the chosen folder is currently git-tracked,
 BearDrive and git would both write it — the silent-revert hazard. Get consent,
@@ -50,10 +53,13 @@ Obsidian, symlinks — in the beardrive skill's "Connecting knowledge tooling".)
 Then run it non-interactively, e.g.:
 ```sh
 bdrive init --name <project-name> --yes            # dedicated knowledge folder
-bdrive init --name <project-name> --shared wiki    # in a repo: only ./wiki syncs
+bdrive init --name <project-name> --shared wiki       # in a repo: only ./wiki syncs
+bdrive init --name <project-name> --shared wiki,docs  # several shared subfolders, one project
 ```
 Re-running `bdrive init --yes` later is always safe: it resumes syncing
-(including after the folder was renamed or moved).
+(including after the folder was renamed or moved). To add or remove shared
+subfolders later, use `bdrive scope add <dir>` / `bdrive scope rm <dir>`
+from the mount root — never hand-edit `.bdrive/config.json`.
 
 After init, tell git what's what: add `.bdrive/` to `.gitignore` (per-machine
 state, never committed) and COMMIT `.bdriveignore` (on a `--shared` mount the

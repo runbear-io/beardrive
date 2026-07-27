@@ -1,6 +1,6 @@
 ---
 title: Scoping the folder
-description: Decide what agents can see — narrow a project to one subfolder, and opt files out with a gitignore-style .bdriveignore.
+description: Decide what agents can see — narrow a project to chosen subfolders, change the scope later with bdrive scope, and opt files out with a gitignore-style .bdriveignore.
 ---
 
 Shared agent memory works better when it's curated. A folder holding
@@ -12,15 +12,18 @@ subfolder, and **`.bdriveignore`** that opts individual paths out. Both are
 applied symmetrically — the same filter governs what's read from disk and what's
 written back to it.
 
-## Sync only a subfolder
+## Sync only subfolders
 
 ```sh
 bdrive init --shared wiki
+bdrive init --shared wiki,docs   # several subfolders, one project
 ```
 
 This is the right shape inside a code repository: sync `wiki/` or `docs/` and
 leave the source tree alone. The agent gets a knowledge folder; the code stays
-in git where it belongs. The interactive `bdrive init` asks the same question.
+in git where it belongs. `--shared` takes one folder or several — comma-separated
+or repeated — and they all join the same project, with one membership and one
+permission set. The interactive `bdrive init` asks the same question.
 
 The result lands in `.bdrive/config.json` as an include list:
 
@@ -28,6 +31,23 @@ The result lands in `.bdrive/config.json` as an include list:
 { "id": "m-5a10b713", "volume": "notes",
   "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["wiki/"] }
 ```
+
+## Change the scope later
+
+`bdrive scope` shows the include list; `scope add` / `scope rm` edit it — no
+JSON editing, and the running daemon applies the change within seconds:
+
+```sh
+bdrive scope             # what syncs now
+bdrive scope add notes   # also sync ./notes
+bdrive scope rm docs     # stop syncing ./docs
+```
+
+Removing a folder stops syncing it but deletes nothing — local files stay, and
+the hub keeps everything already synced (the same
+[non-destructive rule](#opting-out-is-non-destructive) as `.bdriveignore`).
+Removing the *last* entry is refused, because an empty include list means the
+whole folder syncs; if you want to stop syncing entirely, that's `bdrive stop`.
 
 :::tip
 A `--shared` mount is also where the two-file

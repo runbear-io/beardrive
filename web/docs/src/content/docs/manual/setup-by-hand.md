@@ -58,9 +58,11 @@ Init writes `.bdrive/config.json`, seeds a starter `.bdriveignore`
 in yet? It runs the login flow first.
 
 :::tip[Working inside a repository]
-Sync a subfolder rather than the repo root: `bdrive init --shared docs`. Git
-directories are never synced (per-file last-writer-wins would corrupt a
-repository), but a narrower scope keeps the sync surface honest.
+Sync subfolders rather than the repo root: `bdrive init --shared docs` (or
+several at once: `--shared wiki,docs`). Git directories are never synced
+(per-file last-writer-wins would corrupt a repository), but a narrower scope
+keeps the sync surface honest. Adjust it later with `bdrive scope add`/`rm` —
+see [Scoping the folder](/guides/scoping/).
 :::
 
 ## 3. Work normally

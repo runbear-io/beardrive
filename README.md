@@ -67,8 +67,8 @@ $ bdrive login https://your-hub && cd ~/workspace && bdrive init
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file. Nothing is silently dropped.
 - **Selective sync** — a gitignore-style `.bdriveignore` opts files out, and
-  `bdrive init --shared <dir>` (or the interactive prompt) narrows sync to
-  one shared subfolder.
+  `bdrive init --shared <dirs>` (or the interactive prompt) narrows sync to
+  one or more shared subfolders (`--shared wiki,docs`, or repeat the flag).
 - **macOS & Linux.**
 
 ## Install
@@ -140,6 +140,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
+| `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync (the include list set by `init --shared`) — no JSON editing; the daemon picks changes up in seconds. `rm` deletes nothing, locally or on the hub |
 | `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |

@@ -13,6 +13,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive logout` | Sign this device out — clear the saved token and account. `--forget` also drops the remembered server |
 | `bdrive init [folder]` | Create or connect a project and start syncing. Interactive on a TTY; flags (`--name`, `--project`, `--shared`, `--yes`) for scripts. Re-run to resume |
 | `bdrive stop [folder]` | Stop syncing — daemon and agent sync hooks both pause. Files stay on disk; `bdrive init` resumes |
+| `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — the include list set by `init --shared`. Run from the mount root; the daemon picks changes up in seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub |
 | `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file. `--list`, `--revoke`, `--expires` |
 | `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it. `--hook <label>` is agent-hook plumbing |
@@ -33,7 +34,8 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 
 The front door. Interactive on a TTY, with survey menus for create-new versus
 connect-existing (showing a project list) and whole-folder versus
-`--shared <dir>` (which becomes the include list). Full flag bypass with
+`--shared <dirs>` (one or more subfolders, repeatable or comma-separated —
+`--shared wiki,docs` — which become the include list). Full flag bypass with
 `--name`, `--project`, `--shared`, `--yes`, and it never prompts without a TTY.
 
 It runs the login flow first when there is no session, writes
