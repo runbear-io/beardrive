@@ -71,8 +71,9 @@ build/
 Supported: `#` comments, `*`, `**`, `?`, a trailing `/` for directories, a
 leading (or any) `/` for root-anchoring, and `!` to re-include.
 
-It syncs like a normal file, so every device shares the same rules — one person
-excluding `*.tmp` fixes it for the whole team.
+It always syncs — even on an include-list mount where it sits outside the
+scope, and even if a pattern matches it — so every device shares the same
+rules: one person excluding `*.tmp` fixes it for the whole team.
 
 `bdrive init` seeds a starter one covering `node_modules`, build directories,
 caches, and `.env*`.

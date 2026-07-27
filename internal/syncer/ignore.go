@@ -147,6 +147,9 @@ func compile(line string) (pattern, bool) {
 
 // Skip reports whether a file path should not sync.
 func (f *Filter) Skip(rel string) bool {
+	if rel == IgnoreFile {
+		return false // the ignore file itself always syncs so devices share rules
+	}
 	if f.underNestedMount(rel) || f.ignoredFile(rel) {
 		return true
 	}

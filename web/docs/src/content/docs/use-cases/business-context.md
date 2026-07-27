@@ -123,9 +123,8 @@ and it is also the thing to be deliberate about.
   [Turn a personal brain into a company brain](/use-cases/company-brain/) for
   how that model works.
 - **Opt things out** with `.bdriveignore` — see
-  [Scoping the folder](/guides/scoping/). On a `--shared` mount the seeded root
-  `.bdriveignore` sits outside the include list and stays local, so put shared
-  rules inside `context/` instead.
+  [Scoping the folder](/guides/scoping/). It always syncs, even on a
+  `--shared` mount, so one person's rules apply for the whole team.
 - **Watch what actually gets read.** [Read heat](/guides/what-agents-read/)
   shows which context pages agents consume. Pages nothing has read in a month
   are candidates for deletion, and deleting them makes the rest work better.
