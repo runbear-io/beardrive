@@ -4,6 +4,39 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## v0.11.0 — 2026-07-27
+
+- **`bdrive forget` + `bdrive sync --prune`** — take an already-synced path
+  off the hub after ignoring it, without deleting anyone's local files
+  (BEA-20).
+- **Per-project permissions** — none/read/write/admin per member,
+  invite-only projects, and honest degraded sync when a device's access
+  shrinks (#46).
+- **File version history grew up**: a history row opens the exact version
+  it describes (`?v=<sha>` deep links, BEA-7), the hub shows what changed
+  between versions (BEA-10), the feed sorts by wall-clock time instead of
+  Lamport clock (BEA-9), and the kind marker is a text badge instead of a
+  fake disclosure toggle (BEA-17).
+- **Hub UX**: the project Dashboard opens to every member and `/insights`
+  is now `/dashboard` (old URLs redirect, BEA-12); a file's public share
+  links are managed from the file itself and from project settings, not
+  the org panel (BEA-16); read counts say what they're made of and the
+  visit debounce is pinned (BEA-15); folder rows keep their metadata on
+  phones and the heat dot has a name (BEA-14).
+- **Sync scope**: multi-folder `--shared` at init plus `bdrive scope` to
+  edit the sync scope later (#53); `.bdriveignore` itself always syncs
+  (#54); `--shared` include entries anchor to the mount root instead of
+  matching same-named nested dirs (BEA-5).
+- **Agent-first onboarding**: `INSTALL_FOR_AGENTS.md` is one paste-able
+  URL that onboards any agent (#57), and a hub with no projects shows the
+  same two-line agent prompt (#60).
+- Project rename, description and icon from its Settings page (#51); the
+  sidebar always brands as BearDrive, never the storage name (#52);
+  Billing entry in the account menu for managed hubs (#55).
+- CLI copy no longer points at a hub device list that doesn't exist
+  (BEA-13).
+- Claude Code plugin **0.4.0**.
+
 ## v0.10.0 — 2026-07-26
 
 (v0.9.0 was tagged 2026-07-25 without a changelog section; its items are
