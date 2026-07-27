@@ -98,5 +98,11 @@ falling back to relaying when the backend can't presign. Journals are never
 presigned — only immutable blobs.
 
 Client pushes and project creation require the server to run with `--upload`.
-Against a read-only hub, clients still pull and their pushes wait (offline
-semantics) until allowed.
+Against a read-only hub, clients still pull, and `bdrive status` says
+`access: read-only (pull only)` rather than reporting a phantom outage.
+
+Per-project permissions gate the same API: `read` admits `store/list`,
+`store/object`, and `store/exists` — everything a pull needs — while
+`PUT store/object` and `store/sign` need `write`. That is what makes a
+read-only teammate's device pull-only instead of stuck. See
+[Project permissions](/concepts/permissions/).

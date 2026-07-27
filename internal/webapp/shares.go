@@ -190,9 +190,11 @@ func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sharing is not enabled on this server", http.StatusNotFound)
 		return
 	}
+	// This route is /api/shares/{token} — outside the proj() wrapper — so the
+	// level check lives here: minting and killing public links are the same
+	// authority.
 	sh, ok := s.Shares.Get(r.PathValue("token"))
-	if ok && !s.projectAllowed(r, sh.Project) {
-		http.Error(w, "you are not a member of this project's organization", http.StatusForbidden)
+	if ok && !s.requirePerm(w, r, sh.Project, PermWrite) {
 		return
 	}
 	if s.Shares.Revoke(r.PathValue("token")) {

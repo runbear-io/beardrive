@@ -161,6 +161,9 @@ func (s *sqlMetaStore) migrate() error {
 			kind TEXT NOT NULL, actor TEXT NOT NULL,
 			count INTEGER NOT NULL DEFAULT 0, last TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (project, path, day, kind, actor))`,
+		`CREATE TABLE IF NOT EXISTS project_perms (
+			project TEXT NOT NULL, email TEXT NOT NULL, level TEXT NOT NULL,
+			PRIMARY KEY (project, email))`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
@@ -170,8 +173,10 @@ func (s *sqlMetaStore) migrate() error {
 	// Columns added after the tables shipped. CREATE TABLE IF NOT EXISTS does
 	// nothing for an existing table, so these need a real (idempotent) ALTER.
 	return s.addColumns("projects", map[string]string{
-		"description": `TEXT NOT NULL DEFAULT ''`,
-		"icon":        `TEXT NOT NULL DEFAULT ''`,
+		"description":   `TEXT NOT NULL DEFAULT ''`,
+		"icon":          `TEXT NOT NULL DEFAULT ''`,
+		"creator":       `TEXT NOT NULL DEFAULT ''`,
+		"default_level": `TEXT NOT NULL DEFAULT ''`,
 	})
 }
 
@@ -293,33 +298,101 @@ func (r *sqlAccountRepo) PutPolicy(p authPolicy) error {
 type sqlProjectRepo struct{ s *sqlMetaStore }
 
 func (r *sqlProjectRepo) Load() ([]Project, error) {
-	rows, err := r.s.db.Query(`SELECT id, name, org, created, description, icon FROM projects`)
+	rows, err := r.s.db.Query(
+		`SELECT id, name, org, created, description, icon, creator, default_level FROM projects`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Project
+	byID := map[string]*Project{}
+	var order []string
 	for rows.Next() {
 		var p Project
 		var created string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Org, &created, &p.Description, &p.Icon); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Org, &created,
+			&p.Description, &p.Icon, &p.Creator, &p.Default); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		p.Created = tdec(created)
-		out = append(out, p)
+		byID[p.ID] = &p
+		order = append(order, p.ID)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = r.s.db.Query(`SELECT project, email, level FROM project_perms`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var project, email, level string
+		if err := rows.Scan(&project, &email, &level); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if p := byID[project]; p != nil {
+			if p.Perms == nil {
+				p.Perms = map[string]string{}
+			}
+			p.Perms[email] = level
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]Project, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out, nil
 }
 
+// Put writes the project and replaces its grants in one transaction — same
+// shape as PutOrg over orgs/org_members.
 func (r *sqlProjectRepo) Put(p Project) error {
-	return r.s.exec(`INSERT INTO projects (id,name,org,created,description,icon) VALUES (?,?,?,?,?,?)
+	tx, err := r.s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(r.s.q(
+		`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level)
+		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
-		description=excluded.description, icon=excluded.icon`,
-		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon)
+		description=excluded.description, icon=excluded.icon,
+		creator=excluded.creator, default_level=excluded.default_level`),
+		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), p.ID); err != nil {
+		return err
+	}
+	for email, level := range p.Perms {
+		if _, err := tx.Exec(r.s.q(`INSERT INTO project_perms (project,email,level) VALUES (?,?,?)`),
+			p.ID, email, level); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *sqlProjectRepo) Delete(id string) error {
-	return r.s.exec(`DELETE FROM projects WHERE id = ?`, id)
+	tx, err := r.s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(r.s.q(`DELETE FROM projects WHERE id = ?`), id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---- orgs (+ members, + invites) ----

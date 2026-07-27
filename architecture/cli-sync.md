@@ -28,7 +28,9 @@ classDiagram
         +LocalOps +PulledOps
         +Conflicts +Materialized
         +Pushed +Offline +OfflineErr
+        +ReadOnly +NoAccess +AccessErr
     }
+    note for Result "Offline / ReadOnly / NoAccess are three different answers: unreachable (retry all), push refused (pull-only), pull refused (pause, touch nothing)"
 
     class Filter {
         +Skip(rel) bool
@@ -59,8 +61,9 @@ classDiagram
     class Backend {
         <<interface>>
         +Put +Get +List +Exists +Close
+        +ErrForbidden sentinel
     }
-    note for Backend "internal/remote — client devices use the https:// hub backend (token from BDRIVE_TOKEN / settings.json)"
+    note for Backend "internal/remote — client devices use the https:// hub backend (token from BDRIVE_TOKEN / settings.json); a hub 403 wraps ErrForbidden, which is what Result turns into ReadOnly/NoAccess instead of Offline"
 
     class daemon {
         +Run(folder, scan, remote)

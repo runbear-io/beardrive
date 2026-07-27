@@ -134,8 +134,25 @@ func TestMetaStoreConformance(t *testing.T) {
 				t.Fatal(err)
 			}
 			p2, _, _ := projects.GetOrCreate("scratch", "o-1")
+			if err := projects.SetPerm(p2.ID, "doomed@x.io", PermAdmin); err != nil {
+				t.Fatal(err)
+			}
 			if err := projects.Delete(p2.ID); err != nil {
 				t.Fatal(err)
+			}
+			// per-project permissions ride along with the project record
+			if err := projects.SetCreator(p1.ID, "Boss@X.io"); err != nil {
+				t.Fatal(err)
+			}
+			if err := projects.SetDefault(p1.ID, PermNone); err != nil {
+				t.Fatal(err)
+			}
+			for email, level := range map[string]string{
+				"boss@x.io": PermAdmin, "reader@x.io": PermRead, "cutoff@x.io": PermNone,
+			} {
+				if err := projects.SetPerm(p1.ID, email, level); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			orgs, err := NewOrgDB(st.Orgs())
@@ -225,11 +242,22 @@ func TestMetaStoreConformance(t *testing.T) {
 			if !ok || hb.Name != "handbook" {
 				t.Fatalf("rename lost across reload: %+v", hb)
 			}
-			// Description/icon are the columns migrate() has to ADD to an
-			// already-created projects table; the reopen above already ran
-			// migrate() a second time, so surviving here proves it's a no-op.
+			// Description/icon and creator/default_level are all columns
+			// migrate() has to ADD to an already-created projects table; the
+			// reopen above already ran migrate() a second time, so surviving
+			// here proves it's a no-op.
 			if hb.Description != "everything support needs" || hb.Icon != "book-open" {
 				t.Fatalf("description/icon lost across reload: %+v", hb)
+			}
+			if hb.Creator != "boss@x.io" || hb.Default != PermNone {
+				t.Fatalf("creator/default lost across reload: %+v", hb)
+			}
+			if hb.Perms["boss@x.io"] != PermAdmin || hb.Perms["reader@x.io"] != PermRead ||
+				hb.Perms["cutoff@x.io"] != PermNone || len(hb.Perms) != 3 {
+				t.Fatalf("grants lost across reload: %+v", hb.Perms)
+			}
+			if _, ok := projects2.Get(p2.ID); ok {
+				t.Fatal("deleted project (and its grants) came back after reload")
 			}
 
 			orgs2, _ := NewOrgDB(st2.Orgs())
@@ -273,5 +301,55 @@ func TestMetaStoreConformance(t *testing.T) {
 				t.Fatalf("prefix heat = %+v, want only wiki/deep.md", sub)
 			}
 		})
+	}
+}
+
+// migrate() only ever created tables, so the columns permissions added need a
+// real ALTER on a hub that is already running. Prove both halves: an old
+// projects table gains them (with its rows intact), and migrating again is a
+// no-op rather than an error.
+func TestSQLMigrateAddsPermissionColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the pre-permissions schema, verbatim
+	if _, err := old.Exec(`CREATE TABLE projects (
+		id TEXT PRIMARY KEY, name TEXT NOT NULL, org TEXT NOT NULL DEFAULT '',
+		created TEXT NOT NULL DEFAULT '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO projects (id,name,org,created) VALUES ('p-0000abcd','wiki','o-1','')`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	for i := 0; i < 2; i++ { // opening twice re-runs migrate()
+		st, err := OpenSQLStore("sqlite", path)
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		projects, err := NewProjectDB(st.Projects())
+		if err != nil {
+			t.Fatalf("load %d: %v", i, err)
+		}
+		p, ok := projects.Get("p-0000abcd")
+		if !ok || p.Name != "wiki" {
+			t.Fatalf("pre-existing row lost on upgrade: %+v", p)
+		}
+		// An upgraded row has no creator and an empty default, which reads as
+		// write — the whole "no behavior change on upgrade" promise.
+		if p.Creator != "" || p.Default != "" || p.level() != PermWrite {
+			t.Fatalf("upgraded row = %+v, want empty creator/default reading as write", p)
+		}
+		if i == 0 {
+			if err := projects.SetPerm(p.ID, "a@x.io", PermRead); err != nil {
+				t.Fatal(err)
+			}
+		} else if p.Perms["a@x.io"] != PermRead {
+			t.Fatalf("grant lost across reopen: %+v", p.Perms)
+		}
+		st.Close()
 	}
 }

@@ -19,7 +19,17 @@ export interface ServerConfig {
   me?: { email: string; name: string };
 }
 
-// GET /api/projects (handleProjectList → Project, projects.go)
+// Per-project permission levels (perms.go). Ordered: each includes the ones
+// before it.
+export type PermLevel = "none" | "read" | "write" | "admin";
+const PERM_RANK: Record<string, number> = { read: 1, write: 2, admin: 3 };
+// Mirrors atLeast() on the server. The UI uses it to hide affordances; the
+// server still enforces every one of them.
+export function atLeast(have: string | undefined, want: PermLevel): boolean {
+  return (PERM_RANK[have || ""] || 0) >= (PERM_RANK[want] || 0);
+}
+
+// GET /api/projects (handleProjectList, server.go)
 export interface Project {
   id: string;
   name: string;
@@ -28,6 +38,19 @@ export interface Project {
   description?: string;
   /** lucide icon name (kebab-case); unknown or absent → the folder placeholder */
   icon?: string;
+  creator?: string;
+  // The signed-in account's effective level on this project, resolved
+  // server-side. A project you cannot read never appears in the list at all,
+  // so this is always read or better here.
+  perm?: PermLevel;
+}
+
+// GET /api/p/{id}/permissions (handleProjectPerms, perms.go)
+export interface ProjectPerms {
+  default: PermLevel; // what org members get without a grant
+  me: PermLevel; // the caller's own effective level
+  creator?: string;
+  grants: Array<{ email: string; level: PermLevel }>;
 }
 
 export interface ProjectList {

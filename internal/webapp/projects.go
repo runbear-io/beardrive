@@ -22,6 +22,23 @@ type Project struct {
 	Created     time.Time `json:"created"`
 	Description string    `json:"description,omitempty"` // optional one-line subtitle
 	Icon        string    `json:"icon,omitempty"`        // optional lucide icon name
+	// Creator is the account that first created the project; it gets an
+	// explicit admin grant at creation. Empty on projects that predate
+	// per-project permissions — those are governed by org owners.
+	Creator string `json:"creator,omitempty"`
+	// Default is the level every org member gets without an explicit grant.
+	// Empty means write: the historical behavior, so no row needs migrating.
+	Default string `json:"default,omitempty"`
+	// Perms are the explicit grants, lowercase email → level.
+	Perms map[string]string `json:"perms,omitempty"`
+}
+
+// level is the project's effective default level for org members.
+func (p Project) level() string {
+	if p.Default == "" {
+		return PermWrite
+	}
+	return p.Default
 }
 
 var projectIDRe = regexp.MustCompile(`^p-[0-9a-f]{8}$`)
@@ -186,6 +203,103 @@ func (db *ProjectDB) Delete(id string) error {
 	}
 	delete(db.byID, id)
 	return db.repo.Delete(id)
+}
+
+// SetCreator records who created a project (and is its first admin).
+func (db *ProjectDB) SetCreator(id, email string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	p.Creator = normEmail(email)
+	db.byID[id] = p
+	return db.repo.Put(p)
+}
+
+// SetDefault sets the level org members get without an explicit grant.
+func (db *ProjectDB) SetDefault(id, level string) error {
+	if !validLevel(level) || level == PermAdmin {
+		return fmt.Errorf("invalid default level %q", level)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	p.Default = level
+	db.byID[id] = p
+	return db.repo.Put(p)
+}
+
+// SetPerm grants one account an explicit level on the project. Demoting the
+// last explicit admin is refused, the same shape as OrgDB's last-owner rule:
+// a project must keep someone who can administer it (org owners aside, who
+// are implicitly admin and never appear in this list).
+func (db *ProjectDB) SetPerm(id, email, level string) error {
+	if !validLevel(level) {
+		return fmt.Errorf("invalid level %q", level)
+	}
+	e := normEmail(email)
+	if e == "" {
+		return fmt.Errorf("email must not be empty")
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	if level != PermAdmin && p.Perms[e] == PermAdmin && adminCount(p) <= 1 {
+		return fmt.Errorf("cannot demote the last project admin")
+	}
+	perms := make(map[string]string, len(p.Perms)+1)
+	for k, v := range p.Perms {
+		perms[k] = v
+	}
+	perms[e] = level
+	p.Perms = perms
+	db.byID[id] = p
+	return db.repo.Put(p)
+}
+
+// ClearPerm drops an explicit grant, reverting the account to the default.
+func (db *ProjectDB) ClearPerm(id, email string) error {
+	e := normEmail(email)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	if _, has := p.Perms[e]; !has {
+		return fmt.Errorf("%s has no permission set on this project", email)
+	}
+	if p.Perms[e] == PermAdmin && adminCount(p) <= 1 {
+		return fmt.Errorf("cannot remove the last project admin")
+	}
+	perms := make(map[string]string, len(p.Perms))
+	for k, v := range p.Perms {
+		if k != e {
+			perms[k] = v
+		}
+	}
+	p.Perms = perms
+	db.byID[id] = p
+	return db.repo.Put(p)
+}
+
+// adminCount counts explicit admin grants on a project.
+func adminCount(p Project) int {
+	n := 0
+	for _, l := range p.Perms {
+		if l == PermAdmin {
+			n++
+		}
+	}
+	return n
 }
 
 // SetOrg moves a project into an org (used by the startup migration).

@@ -29,6 +29,7 @@ const (
 	e2eAdmin    = "e2e@example.com"
 	e2eMember   = "member@example.com"
 	e2eSolo     = "solo@example.com"
+	e2eReader   = "reader@example.com" // org member with a read-only grant on "wiki"
 	e2ePassword = "e2e-pass-1"
 )
 
@@ -85,6 +86,9 @@ func TestE2EServe(t *testing.T) {
 	if _, err := auth.signup(e2eSolo, "E2E Solo", e2ePassword); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := auth.signup(e2eReader, "E2E Reader", e2ePassword); err != nil {
+		t.Fatal(err)
+	}
 	auth.Admins = map[string]bool{e2eAdmin: true}
 	srv.Auth = auth
 
@@ -96,10 +100,17 @@ func TestE2EServe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := orgs.AddMember(org.ID, e2eMember, RoleMember); err != nil {
-		t.Fatal(err)
+	for _, m := range []string{e2eMember, e2eReader} {
+		if err := orgs.AddMember(org.ID, m, RoleMember); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := db.SetOrg(p.ID, org.ID); err != nil {
+		t.Fatal(err)
+	}
+	// One member cut back to read: the suite checks that write affordances
+	// are absent for them, not merely that the server would 403.
+	if err := db.SetPerm(p.ID, e2eReader, PermRead); err != nil {
 		t.Fatal(err)
 	}
 	srv.Dir = LocalDirectory{OrgDB: orgs}

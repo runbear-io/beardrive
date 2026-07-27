@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId, MEMBER, expectToast } from "./helpers";
+import { login, wikiId, MEMBER, READER, expectToast } from "./helpers";
 
 // Phase 3: project home (connect guide + embedded insights), the dedicated
 // insights route, and the history views. Ports the original parity checks
@@ -293,4 +293,41 @@ test("project settings: delete needs the exact name typed, then navigates away",
   await expectToast(page, "Deleted");
   await expect(page).not.toHaveURL(new RegExp(pid));
   await expect(page.locator("#projects .row .label", { hasText: "condemned" })).toHaveCount(0);
+});
+
+test("project settings: People shows the default level and the grants", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/settings`);
+  const people = page.locator(".ps-people");
+  await expect(people).toBeVisible();
+  // An admin gets live controls...
+  await expect(people.locator('select[aria-label="Default access for workspace members"]')).toBeEnabled();
+  await expect(people.locator("button", { hasText: "+ Add" })).toBeVisible();
+  // ...the seeded read-only member is listed as an exception...
+  await expect(people.locator(`select[aria-label="Access for ${READER}"]`)).toHaveValue("read");
+  // ...and the workspace owner is shown as permanently admin, not editable.
+  await expect(people.locator(".admin-item", { hasText: "Workspace owner" })).toBeVisible();
+});
+
+test("a read-only member: no Share, no danger zone, People is read-only", async ({ page }) => {
+  await login(page, READER);
+  const pid = await wikiId(page);
+
+  // The project is fully visible and browsable.
+  await page.goto(`/${pid}/index.md`);
+  await expect(page.locator("#content h1")).toHaveText("Wiki");
+  // ...but nothing that writes is offered.
+  await expect(page.locator("#share-btn")).toHaveCount(0);
+
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator(".project-settings h2")).toContainText("wiki");
+  await expect(page.locator(".ps-chip")).toHaveText("Read-only");
+  await expect(page.locator(".ps-danger")).toHaveCount(0);
+  // The People table is shown, disabled — same layout, no controls.
+  await expect(page.locator(".ps-people")).toBeVisible();
+  await expect(
+    page.locator('.ps-people select[aria-label="Default access for workspace members"]'),
+  ).toBeDisabled();
+  await expect(page.locator(".ps-people button", { hasText: "+ Add" })).toHaveCount(0);
 });

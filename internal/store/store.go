@@ -181,9 +181,20 @@ func (s *Store) SaveCache(mountID string, c map[string]CachedFile) error {
 
 // ---- sync state (sync.json) ----
 
+// Access records how the hub answered this device on the last cycle that
+// reached it. It is persisted so `bdrive status` — which never runs a cycle —
+// can report a degraded state, and so the daemon can log a transition once
+// instead of on every tick.
+const (
+	AccessOK       = ""          // normal read+write sync
+	AccessReadOnly = "read-only" // pushes refused: pull-only
+	AccessNone     = "no-access" // pulls refused too: sync paused
+)
+
 type SyncState struct {
-	Lamport   int64 `json:"lamport"`
-	PushedOps int64 `json:"pushed_ops"` // how many of our own ops the remote has
+	Lamport   int64  `json:"lamport"`
+	PushedOps int64  `json:"pushed_ops"`       // how many of our own ops the remote has
+	Access    string `json:"access,omitempty"` // "", "read-only", or "no-access"
 }
 
 func (s *Store) LoadSync() (SyncState, error) {

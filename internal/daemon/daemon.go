@@ -145,6 +145,9 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	}()
 	var lastRemote time.Time
 	var lastToken string
+	// Which access state we last logged, so a degraded daemon says it once
+	// instead of on every tick.
+	lastAccess := store.AccessOK
 
 	for {
 		// Re-read the project config each tick: picks up `bdrive remote set`
@@ -216,6 +219,21 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			return nil
 		case err != nil:
 			log.Printf("cycle error: %v", err)
+		case res.NoAccess:
+			// The connection is fine, the answer isn't: keep the backend and
+			// keep ticking cheaply so a re-grant self-heals. Log the
+			// transition only — a paused daemon must stay quiet.
+			if lastAccess != store.AccessNone {
+				log.Printf("access revoked for this project; sync paused (%v)", res.AccessErr)
+				lastAccess = store.AccessNone
+			}
+			lastRemote = time.Now()
+		case res.ReadOnly:
+			if lastAccess != store.AccessReadOnly {
+				log.Printf("read-only on this project, pulling only; local changes stay on this device")
+				lastAccess = store.AccessReadOnly
+			}
+			lastRemote = time.Now()
 		case res.Offline:
 			log.Printf("offline, will retry: %v", res.OfflineErr)
 			if be != nil {
@@ -224,6 +242,10 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 			lastRemote = time.Now()
 		default:
+			if lastAccess != store.AccessOK {
+				log.Printf("access restored; syncing normally")
+				lastAccess = store.AccessOK
+			}
 			if res.Activity() {
 				log.Printf("local+%d pulled+%d conflicts=%d files~%d pushed=%v",
 					res.LocalOps, res.PulledOps, res.Conflicts, res.Materialized, res.Pushed)

@@ -7,6 +7,7 @@ import {
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { atLeast } from "../api/types";
 import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { urlForPath, urlForView, type Route } from "../router";
@@ -149,7 +150,9 @@ export default function Browser(props: {
   const downloadRef = useRef<HTMLAnchorElement>(null);
 
   const panel = props.panel ?? null;
-  const canShare = !panel && hub && !!project && isFile;
+  // Minting a public link is a write. A read-only member sees no Share
+  // button rather than a button that 403s.
+  const canShare = !panel && hub && !!project && isFile && atLeast(project.perm, "write");
   const canHistory = !panel && hub && !!project;
   // Browser upload is deliberately absent (for now): content enters through
   // local sync only; the web app is a read/share/history surface.
