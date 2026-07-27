@@ -64,6 +64,9 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
       getJSON<RenderDoc>(
         apiBase + "render?path=" + encodeURIComponent(path) + (version ? "&sha=" + version : ""),
       ),
+    // A blob that isn't there will not appear on a retry, and the retry's
+    // delay is a blank pane the reader has no explanation for.
+    retry: version ? false : undefined,
   });
 
   // Rewrite the HTML BEFORE rendering (relative image sources, external
@@ -81,11 +84,14 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
     const parts: string[] = [];
     if (doc.author) parts.push(doc.author + (doc.device ? " on " + doc.device : ""));
     if (doc.time) parts.push(new Date(doc.time).toLocaleString());
-    const he = heatMap && heatMap[doc.path];
+    // Read counts belong to the path, not to one version — showing them
+    // beside content the banner just called historical reads as if they
+    // counted views of these bytes.
+    const he = version ? null : heatMap && heatMap[doc.path];
     if (he && heatTotal(he)) parts.push(heatText(he) + " / 30d");
     onMeta(parts.join(" · "));
     onRendered?.();
-  }, [doc, heatMap, onMeta, onRendered]);
+  }, [doc, version, heatMap, onMeta, onRendered]);
 
   if (error) return <LoadError version={version} err={error as Error} />;
   if (!doc) return null;
@@ -169,6 +175,7 @@ function TextView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
       if (!r.ok) throw new Error(await r.text());
       return r.text();
     },
+    retry: version ? false : undefined,
   });
   useEffect(() => {
     if (data != null) onRendered?.();
