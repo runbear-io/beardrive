@@ -357,9 +357,9 @@ button, input, a.btn { font-family: inherit; }
 .ob-card { background: var(--bg-side); border: 1px solid var(--border); border-radius: var(--r-card); padding: 20px 22px; margin-bottom: 14px; }
 .ob-card h3 { margin: 0 0 6px; font-size: 14.5px; font-weight: 600; }
 .ob-card p { margin: 0 0 14px; font-size: 13px; color: var(--text-dim); }
-.ob-row { display: flex; gap: 9px; }
-.ob-row input { flex: 1; height: 34px; padding: 0 12px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; outline: none; }
-.ob-row input:focus { border-color: var(--accent); background: var(--hover); }
+.ob-alt { margin: 12px 0 0; }
+.ob-alt a { color: var(--text-faint); font-size: 12.5px; font-weight: 600; text-decoration: none; }
+.ob-alt a:hover { color: var(--text); }
 
 /* primary + secondary buttons */
 .pbtn { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: var(--accent); color: #241704; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
@@ -695,8 +695,6 @@ a.ai-main:hover { color: var(--accent); }
   /* Columns already collapse on their own (.page is width: 100%); only
      content that can't shrink needs its own escape hatch. */
   .markdown table, pre.plain { display: block; overflow-x: auto; max-width: 100%; }
-  .ob-row { flex-direction: column; }
-  .ob-row input { flex: none; min-height: 44px; }
   /* Admin rows: 27-28px selects/buttons are too small to tap; let rows
      wrap so the controls keep room next to long names/URLs. */
   .admin-item { flex-wrap: wrap; row-gap: 8px; padding: 12px 14px; }

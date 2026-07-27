@@ -69,16 +69,21 @@ test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await ctx.close();
 });
 
-test("no-org account gets the onboarding empty state and can create a project", async ({
+test("no-org account gets the onboarding empty state with the agent prompt", async ({
   page,
 }) => {
   await login(page, "solo@example.com");
   await expect(page.locator(".onboard h1")).toHaveText("Welcome to BearDrive");
-  await page.fill("#ob-name", "solo-notes");
-  await page.click("#ob-create");
-  await page.waitForURL(/\/p-[0-9a-f]{8}$/);
-  await expect(page.locator("#project-select")).toContainText("solo-notes");
-  await expect(page.locator("#accountbar")).toBeVisible(); // fresh org, owner
+  await expect(page.locator(".ob-card h3")).toHaveText("Connect a new drive to your project");
+  // The agent paste-prompt is the one path, with this hub's real origin
+  // filled in; the by-hand route is a docs link.
+  await expect(page.locator(".onboard .gd-code code")).toContainText(
+    "to connect this folder to a new BearDrive project on http://localhost:8993.",
+  );
+  await expect(page.locator(".ob-alt a")).toHaveAttribute(
+    "href",
+    "https://docs.beardrive.ai/manual/setup-by-hand/",
+  );
 });
 
 test("new project via the sidebar + modal", async ({ page }) => {
