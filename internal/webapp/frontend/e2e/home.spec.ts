@@ -129,9 +129,9 @@ test("history: whole project, newest first, and per-file versions", async ({ pag
   await expect(page.locator("#crumb")).toContainText("History — guide.md");
   await expect(page.locator(".history .hentry")).toHaveCount(2);
   await expect(page.locator(".history .hentry").first()).toContainText("edited");
-  // clicking an entry opens the file
+  // clicking an entry opens THAT version of the file (BEA-7)
   await page.click(".history .hentry.clickable >> nth=0");
-  await page.waitForURL(`/${pid}/guide.md`);
+  await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
 });
 
 test("folder listing's Full history goes to the subtree feed", async ({ page }) => {

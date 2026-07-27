@@ -189,3 +189,67 @@ test("tree chevron folds and unfolds a folder", async ({ page }) => {
   await page.click('#tree .row[data-path="notes"] .chev');
   await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).toBeVisible();
 });
+
+// BEA-7: a history row is an address for the version it describes.
+
+test("history row opens THAT version, banner says so, View current returns", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  // Oldest row = the first version; click it rather than the latest.
+  const added = page.locator(".hentry.add");
+  await expect(added).toBeVisible();
+  await added.click();
+  await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
+  await expect(page.locator("#content")).toContainText("First version");
+  await expect(page.locator("#content")).not.toContainText("Second version");
+  // Rendered markdown, not raw source.
+  await expect(page.locator("#content h1")).toHaveText("Guide");
+  // The banner is what stops the page misleading.
+  const banner = page.locator(".vbanner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("This is not the current file");
+  await expect(banner).toContainText("alice@x.io");
+  await expect(banner.locator("a[download]")).toHaveAttribute("href", /blob\?sha=[0-9a-f]{64}.*download=1/);
+  // Downloading while pinned gives that version, not the current bytes.
+  await expect(page.locator("#download")).toHaveAttribute("href", /blob\?sha=[0-9a-f]{64}/);
+  await banner.getByText("View current").click();
+  await page.waitForURL(`/${pid}/guide.md`);
+  await expect(page.locator("#content")).toContainText("Second version");
+  await expect(page.locator(".vbanner")).toHaveCount(0);
+});
+
+test("a version URL survives a hard reload, and Back returns to history", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  await page.locator(".hentry.add").click();
+  const url = page.url();
+  await page.reload();
+  await expect(page.locator("#content")).toContainText("First version");
+  await expect(page.locator(".vbanner")).toBeVisible();
+  await page.goto(url); // fresh navigation to the deep link
+  await expect(page.locator("#content")).toContainText("First version");
+  await page.goBack();
+  await expect(page.locator(".history .hentry").first()).toBeVisible();
+});
+
+test("an unknown version says so instead of showing current content", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/guide.md?v=${"a".repeat(64)}`);
+  await expect(page.locator("#content")).toContainText("That version isn't available");
+  await expect(page.locator("#content")).not.toContainText("Second version");
+  await expect(page.locator(".vbanner")).toBeVisible(); // still offers a way back
+});
+
+test("delete rows have no version to open, so they stay unclickable", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/scratch.md`);
+  const del = page.locator(".hentry.delete");
+  await expect(del).toBeVisible();
+  await expect(del).not.toHaveClass(/clickable/);
+  await del.click();
+  await expect(page).toHaveURL(`/${pid}/history/scratch.md`);
+});

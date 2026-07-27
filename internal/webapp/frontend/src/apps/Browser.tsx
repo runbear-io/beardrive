@@ -25,6 +25,7 @@ import { Palette, type PaletteItem } from "../components/Palette";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
+import { VersionBanner } from "../components/VersionBanner";
 
 // The browsing surface shared by hub projects and single-volume mode: the
 // file tree, folder listings, file views, and every topbar action. Sidebar
@@ -61,6 +62,8 @@ export default function Browser(props: {
   }, [insightsOpen, apiBase, qc]);
 
   const path = route.path;
+  // ?v= belongs to the file page; a view route or folder ignores it.
+  const version = !route.view ? route.version : undefined;
   // On scoped view routes (/insights/<p>, /history/<p>) the subject of the
   // page is the target — the tree highlights it, not a menu item.
   const treePath = path || (route.view === "insights" || route.view === "history" ? route.viewTarget || "" : "");
@@ -130,8 +133,10 @@ export default function Browser(props: {
 
   /* ---- navigation ---- */
   const openPath = useCallback(
-    (p: string) => {
-      navigate(urlForPath(p, project?.id));
+    // A version (a history row's content hash) pins the file page to those
+    // exact bytes; without one the page is the current file.
+    (p: string, v?: string) => {
+      navigate(urlForPath(p, project?.id, v));
       closeSidebarOnMobile();
     },
     [project?.id],
@@ -158,7 +163,12 @@ export default function Browser(props: {
   // local sync only; the web app is a read/share/history surface.
   const canDownload = !panel && isFile;
   const canMore = !panel && (isFile || (hub && !!project && isDir));
-  const downloadURL = apiBase + "download?path=" + encodeURIComponent(path);
+  // Downloading while a version is open gives you THAT version — the ⋯ menu
+  // offering the current bytes under a page framed as historical was half of
+  // what made old versions unreachable.
+  const downloadURL = version
+    ? apiBase + "blob?sha=" + version + "&name=" + encodeURIComponent(path) + "&download=1"
+    : apiBase + "download?path=" + encodeURIComponent(path);
 
   const shareNow = useCallback(async () => {
     // Shares are per-file; a selected folder has nothing to mint.
@@ -305,15 +315,26 @@ export default function Browser(props: {
       pageWidth = HTML_EXT.test(path) ? "wide" : "read";
       pageClass = "markdown";
       view = (
-        <FileView
-          apiBase={apiBase}
-          path={path}
-          heatMap={heatMap}
-          flatFiles={flatFiles}
-          onOpenFile={openPath}
-          onMeta={setMeta}
-          onRendered={onRendered}
-        />
+        <>
+          {version && (
+            <VersionBanner
+              apiBase={apiBase}
+              path={path}
+              version={version}
+              onViewCurrent={() => openPath(path)}
+            />
+          )}
+          <FileView
+            apiBase={apiBase}
+            path={path}
+            version={version}
+            heatMap={heatMap}
+            flatFiles={flatFiles}
+            onOpenFile={openPath}
+            onMeta={setMeta}
+            onRendered={onRendered}
+          />
+        </>
       );
     }
   } else if (isHome) {

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { HistoryEntry } from "../api/types";
-import { humanSize } from "../util";
+import { humanSize, whoChanged } from "../util";
 import { Icon } from "./shell";
 
 /* One change as a row: what happened (added / edited / deleted), to which
@@ -13,16 +13,18 @@ export function HistoryRow({
   onOpen,
 }: {
   entry: HistoryEntry;
-  onOpen: (path: string) => void;
+  // The row's own version (e.blob) rides along: a row is an address for the
+  // bytes it describes, not a shortcut to whatever the file says now.
+  onOpen: (path: string, version?: string) => void;
 }) {
   const [noteOpen, setNoteOpen] = useState(false);
   const kind = e.kind === "put" ? "edit" : e.kind; // older servers report raw "put" ops
-  const who = e.user_name ? `${e.user_name} <${e.user}>` : e.user || e.author || "unknown";
+  const who = whoChanged(e);
   const dev = [e.device.name || e.device.id, e.device.os, e.device.ip].filter(Boolean).join(" · ");
   const clickable = kind !== "delete";
   const open = (ev: React.MouseEvent | React.KeyboardEvent) => {
     if ((ev.target as HTMLElement).tagName === "A") return;
-    if (clickable) onOpen(e.path);
+    if (clickable) onOpen(e.path, e.blob);
   };
   return (
     <div
@@ -33,7 +35,7 @@ export function HistoryRow({
       onKeyDown={(ev) => {
         if (clickable && (ev.key === "Enter" || ev.key === " ")) {
           ev.preventDefault();
-          onOpen(e.path);
+          onOpen(e.path, e.blob);
         }
       }}
     >
