@@ -594,27 +594,27 @@ a.ai-main:hover { color: var(--accent); }
 
 /* ---- history ---- */
 /* .history width comes from .page (app) */
-.hentry { padding: 11px 12px; border-bottom: 1px solid var(--border); }
+.hentry { padding: 11px 12px; border-bottom: 1px solid var(--border); --hindent: 78px; }
 .hentry:hover { background: rgba(255,255,255,.015); }
 .hline { display: flex; gap: 10px; align-items: center; }
-.hkind { display: inline-flex; color: var(--add); }
-.hkind .ico { width: 13px; height: 13px; }
-.hentry.edit .hkind { color: var(--accent); }
-.hentry.delete .hkind { color: var(--del); }
-.htag { flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: 1px 6px; border-radius: 4px; }
-.hentry.add .htag { color: var(--add); background: rgba(76,195,138,.12); }
-.hentry.edit .htag { color: var(--accent-bright); background: var(--glow); }
-.hentry.delete .htag { color: #ff8b8b; background: rgba(242,109,109,.12); }
+/* The kind is a status badge, not a control: a fixed-width pill of text,
+   so nothing in the row's leftmost slot has the size or shape of a
+   disclosure toggle. --hindent keeps meta and note aligned under the path. */
+.hkind { flex: none; width: 56px; text-align: center; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: 2px 6px; border-radius: 4px; color: var(--add); background: rgba(76,195,138,.12); }
+.hentry.edit .hkind { color: var(--accent-bright); background: var(--glow); }
+.hentry.delete .hkind { color: #ff8b8b; background: rgba(242,109,109,.12); }
 .hpath { font-weight: 500; cursor: pointer; color: var(--text); font-size: 13px; }
 .hpath:hover { color: var(--accent-bright); }
 .htime { margin-left: auto; color: var(--text-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
-.hmeta { display: flex; align-items: center; gap: 14px; margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-dim); }
+.hmeta { display: flex; align-items: center; gap: 14px; margin-top: 4px; padding-left: var(--hindent); font-size: 12px; color: var(--text-dim); }
 .hdev, .hsize { color: var(--text-faint); }
 .hsize { font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
-.hnote { margin-top: 4px; padding-left: 23px; font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.hnote { margin-top: 4px; padding-left: var(--hindent); font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .hnote:hover { color: var(--text); }
 .hnote.open { white-space: normal; overflow-wrap: anywhere; }
-.hnote::before { content: "› "; color: var(--text-ghost); }
+/* The one real disclosure in a row — so it gets the chevron, and turns. */
+.hnote::before { content: "›"; display: inline-block; margin-right: 5px; color: var(--text-ghost); transition: transform .12s; }
+.hnote.open::before { transform: rotate(90deg); }
 .hnote a { color: var(--accent-bright); text-decoration: none; }
 .hnote a:hover { text-decoration: underline; }
 
@@ -766,6 +766,9 @@ a.ai-main:hover { color: var(--accent); }
   .ai-tag { font-size: 11px; }
   .htime { white-space: nowrap; font-size: 12px; }
   .hline { flex-wrap: wrap; }
+  /* 78px of indent is a fifth of a 360px row, and the wrapped .hline has
+     nothing left to align under anyway. */
+  .hentry { --hindent: 0px; }
   /* Four share-dialog buttons don't fit one row at 360 — the destructive
      Revoke takes its own line rather than sitting 9px from Done. */
   .modal-actions .ai-del { flex: 0 0 100%; justify-content: center; text-align: center; }

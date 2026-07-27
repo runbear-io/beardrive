@@ -48,6 +48,32 @@ test("folder listing: counts, change feed, heat dot on a read file", async ({ pa
   await expect(page.locator('.dl-row[title="notes/readme.md"] .heatdot')).toBeVisible();
 });
 
+// BEA-17: the kind glyph read as a disclosure toggle. It is now a text
+// badge, the row's only real expander is the note, and clicking the badge
+// navigates like the rest of the row — no dead zone, no second behavior.
+test("history row: kind is a badge, not a disclosure control", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  const row = page.locator(".history .hentry").first();
+  await expect(row).toBeVisible();
+  // kind is conveyed as text, not by an icon shape
+  await expect(row.locator(".hkind")).toHaveText("edited");
+  await expect(row.locator(".hkind .ico")).toHaveCount(0);
+  // a row announces kind, path and author without the icon
+  await expect(page.getByRole("button", { name: /edited\s+guide\.md.*alice@x\.io/s })).toHaveCount(1);
+  // the note is the only thing in the view claiming to expand
+  await expect(page.locator(".history [aria-expanded]")).toHaveCount(1);
+  await expect(page.locator(".history .hnote[aria-expanded]")).toHaveCount(1);
+  // ...and it still expands in place, without navigating
+  await row.locator(".hnote").click({ position: { x: 6, y: 6 } }); // off the note's link
+  await expect(row.locator(".hnote")).toHaveClass(/open/);
+  await expect(page).toHaveURL(`/${pid}/history/guide.md`);
+  // clicking the badge does exactly what clicking the row does
+  await row.locator(".hkind").click();
+  await page.waitForURL(`/${pid}/guide.md`);
+});
+
 test("image file renders an <img>", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
