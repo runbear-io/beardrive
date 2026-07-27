@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "node --test 'src/**/*.test.ts'",
     "e2e": "playwright test -c e2e"
   },
   "dependencies": {

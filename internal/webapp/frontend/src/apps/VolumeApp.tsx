@@ -8,12 +8,12 @@ import Browser from "./Browser";
 // Single-volume mode: one folder, no projects or orgs — but the full
 // browsing surface (tree, listings, files, upload when enabled).
 export default function VolumeApp({ config }: { config: ServerConfig }) {
-  const pathname = useLocationPath();
+  const loc = useLocationPath(); // pathname + search
   const name = config.volume || "BearDrive";
   useEffect(() => {
     document.title = config.brand || name;
   }, [config, name]);
-  const route = useMemo(() => parseRoute(pathname, "volume"), [pathname]);
+  const route = useMemo(() => parseRoute(loc, "volume"), [loc]);
 
   return (
     <Browser

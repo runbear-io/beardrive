@@ -4,11 +4,12 @@ import { getJSON } from "../api/http";
 import type { HeatMap, Node } from "../api/types";
 import { heatTotal } from "../hooks/useBrowse";
 
-/* ---- insights: the read×write matrix ----
+/* ---- the project Dashboard: the read×write matrix ----
    Every file plotted by how much it is read (30 days, from the heat API)
    against how long since it last changed (from the tree). The hot-but-stale
    quadrant is the danger zone: knowledge people still rely on that nobody
-   maintains. Admin/org-owner only — members get the ambient heat dots. */
+   maintains. Every project member sees this — /heat is gated on membership
+   and returns counts only, never actor identities (reads.go). */
 
 const HOT_READS = 3; // ≥ this many reads/30d = hot
 const STALE_DAYS = 30; // ≥ this many days since last write = stale

@@ -1,6 +1,6 @@
 ---
 title: What agents read
-description: The hub's read heat and Insights dashboard — which documents your agents actually consume, and which ones everyone relies on and nobody maintains.
+description: The hub's read heat and project Dashboard — which documents your agents actually consume, and which ones everyone relies on and nobody maintains.
 ---
 
 Writing to shared memory is easy to observe. *Reading* is the part that's
@@ -29,9 +29,9 @@ Folder listings show heat dots and 30-day read counts to every member. It's the
 fastest way to tell which parts of a knowledge folder are load-bearing and which
 are decoration.
 
-## Insights
+## The project Dashboard
 
-Admins and org owners get an **Insights** dashboard with an all/human/agent
+Every project member gets a **Dashboard** with an all/human/agent
 lens — four views:
 
 - **Treemap** — every file, cell size by reads, color by staleness, with ⚠ on
