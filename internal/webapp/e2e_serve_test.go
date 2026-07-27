@@ -163,6 +163,18 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	// A second version of the same binary, so the history diff has a
 	// predecessor to refuse to diff (the "binary — no diff" path).
 	put("assets/logo.png", png+"\x00trailing", 3*time.Hour)
+	// One removed file, so the history feed has a delete row: deletes have no
+	// content, so their rows stay unclickable while every other row is now an
+	// address for its own version.
+	put("scratch.md", "# Scratch\n\nTemporary.\n", 12*time.Hour)
+	lam++
+	seq++
+	ops = append(ops, journal.Op{
+		Seq: seq, Lamport: lam, Time: now.Add(-6 * time.Hour),
+		Device: "seed", DeviceName: "seed-agent", Author: "alice@x.io",
+		User: "alice@x.io", UserName: "Alice",
+		Kind: journal.KindDelete, Path: "scratch.md",
+	})
 	if err := journal.Append(filepath.Join(prefix, "journal", "seed.jsonl"), ops); err != nil {
 		t.Fatal(err)
 	}

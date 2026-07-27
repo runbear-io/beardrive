@@ -763,6 +763,10 @@ func (s *Server) handleDownload(v *volume, w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request) {
+	if sha := r.URL.Query().Get("sha"); sha != "" {
+		s.renderVersion(v, w, r, sha)
+		return
+	}
 	p, fi, code, err := lookup(v, r)
 	if err != nil {
 		http.Error(w, err.Error(), code)
@@ -788,6 +792,41 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{
 		"path": p, "html": html,
 		"size": fi.Size, "time": fi.Time, "author": fi.Author, "device": fi.Device,
+	})
+}
+
+// renderVersion renders one exact past version by content hash — the
+// markdown counterpart of /blob?sha=, so opening an old .md from history
+// shows a rendered page instead of raw source. Provenance is not returned:
+// the caller already has the history entry it clicked. Viewing history is
+// never a read (see the read-heat invariant), so nothing is recorded.
+func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request, sha string) {
+	if !blobRe.MatchString(sha) {
+		http.Error(w, "invalid sha", http.StatusBadRequest)
+		return
+	}
+	rs := storeSource(v, w)
+	if rs == nil {
+		return
+	}
+	rc, err := rs.Backend.Get(r.Context(), "blobs/"+sha)
+	if err != nil {
+		http.Error(w, "no such version", http.StatusNotFound)
+		return
+	}
+	src, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	html, err := RenderMarkdown(src)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("render: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"path": r.URL.Query().Get("path"), "html": html, "size": len(src),
 	})
 }
 

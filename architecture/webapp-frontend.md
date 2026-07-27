@@ -29,17 +29,18 @@ classDiagram
     class router {
         +VIEW_ROUTES insights history install settings
         +top-level routes orgs billing
-        +parseRoute(pathname, mode) Route
-        +urlForPath / urlForView
-        +encodePath / decodePath
+        +parseRoute(url, mode) Route
+        +Route.version ?v= sha, one past version
+        +urlForPath(path, projectId, version)
+        +urlForView / encodePath / decodePath
     }
     class nav {
         +navigate(url)
-        +useLocationPath()
+        +useLocationPath() pathname + search
         +linkProps(href)
         +Redirect
     }
-    note for nav "nav.ts + router.ts — deliberately NOT a router library (react-router v7 startTransition left stale views); History-API path routing, slashes literal, every user-facing page owns a URL path"
+    note for nav "nav.ts + router.ts — deliberately NOT a router library (react-router v7 startTransition left stale views); History-API path routing, slashes literal, every user-facing page owns a URL path. A version is not a view route (the first segment after the project id is reserved for view names) — it rides as ?v=, so useLocationPath must snapshot the search too or the URL changes and nothing re-renders"
 
     class api {
         +getJSON / postJSON / api
@@ -58,7 +59,7 @@ classDiagram
 
     class components {
         FileView FolderListing FileTree
-        HistoryView HistoryRow DiffView
+        HistoryView HistoryRow DiffView VersionBanner
         Insights ShareDialog
         OrgAdmin HubSettings ProjectSettings
         Palette shell AccountBar ...

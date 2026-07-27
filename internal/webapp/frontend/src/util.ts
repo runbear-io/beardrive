@@ -40,3 +40,10 @@ export async function copyText(text: string): Promise<boolean> {
   }
   return false;
 }
+
+/* Who made a change, as history renders it everywhere: the account, with
+   the display name in front when the server knows one, falling back to the
+   git/OS identity of an offline device. */
+export function whoChanged(e: { user?: string; user_name?: string; author?: string }): string {
+  return e.user_name ? `${e.user_name} <${e.user}>` : e.user || e.author || "unknown";
+}

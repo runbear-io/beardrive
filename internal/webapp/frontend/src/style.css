@@ -843,6 +843,16 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .notfound code { background: var(--hover); border: 1px solid var(--border); padding: .15em .5em; border-radius: 6px; }
 .notfound .nf-sub { max-width: 440px; margin: 12px auto 20px; font-size: 13px; color: var(--text-faint); line-height: 1.6; }
 
+/* viewing a past version: the banner that keeps the page from lying about
+   which bytes are on screen — it stays put for as long as ?v= is set */
+.vbanner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; padding: 11px 14px; border: 1px solid var(--accent-dim); border-radius: var(--r-card); background: var(--glow); }
+.vbanner .vb-icon { flex: none; display: flex; color: var(--accent-bright); }
+.vbanner .vb-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; line-height: 1.45; }
+.vbanner .vb-text b { color: var(--accent-bright); font-weight: 600; }
+.vbanner .vb-text span { color: var(--text-dim); }
+.vbanner .vb-actions { flex: none; display: flex; gap: 8px; }
+.vbanner .vb-actions .ai-btn { display: inline-flex; align-items: center; text-decoration: none; }
+
 /* plain file / binary views */
 pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* long unbreakable lines wrap instead of blowing out the column: .page has min-width: 0 */

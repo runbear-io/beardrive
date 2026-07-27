@@ -41,9 +41,23 @@ export interface Route {
   path: string;
   view?: ViewName;
   viewTarget?: string;
+  // A past version of `path`, by content hash (?v=<sha>). Not a view route:
+  // the first segment after the project id is reserved for view names, and a
+  // version is the same page pinned to older bytes, so it rides as a query
+  // param on the file route.
+  version?: string;
 }
 
-export function parseRoute(pathname: string, mode: "volume" | "hub"): Route {
+// `url` is pathname + search (what useLocationPath hands back).
+export function parseRoute(url: string, mode: "volume" | "hub"): Route {
+  const qi = url.indexOf("?");
+  const version = qi === -1 ? "" : new URLSearchParams(url.slice(qi)).get("v") || "";
+  const r = parsePath(qi === -1 ? url : url.slice(0, qi), mode);
+  if (version) r.version = version;
+  return r;
+}
+
+function parsePath(pathname: string, mode: "volume" | "hub"): Route {
   const raw = pathname.replace(/^\/+/, "");
   if (mode !== "hub") return { path: raw ? decodePath(raw) : "" };
   if (raw === "orgs" || raw.startsWith("orgs/")) {
@@ -65,11 +79,13 @@ export function parseRoute(pathname: string, mode: "volume" | "hub"): Route {
   return r;
 }
 
-// The URL for a file within a project (hub) or the volume (no project id).
-export function urlForPath(path: string, projectId?: string): string {
+// The URL for a file within a project (hub) or the volume (no project id),
+// optionally pinned to one past version by content hash.
+export function urlForPath(path: string, projectId?: string, version?: string): string {
   const enc = encodePath(path);
-  if (projectId) return "/" + projectId + (enc ? "/" + enc : "");
-  return "/" + enc;
+  const q = version ? "?v=" + version : "";
+  if (projectId) return "/" + projectId + (enc ? "/" + enc : "") + q;
+  return "/" + enc + q;
 }
 
 // The URL for a special view of a project.
