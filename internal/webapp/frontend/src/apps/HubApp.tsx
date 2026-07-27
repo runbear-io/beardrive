@@ -71,9 +71,6 @@ export default function HubApp({ config }: { config: ServerConfig }) {
 
   const brand = config.brand || "BearDrive";
   const org = (current && orgs?.find((o) => o.id === current.org)) || null;
-  // Insights (embedded on the project home and behind the ⋯ menu) is for
-  // hub admins and owners of the project's org.
-  const canInsights = isAdmin || (org ? org.role === "owner" : false);
 
   // Top of the sidebar is the brand; project and account actions live in
   // their own sections below (PropelAuth-style layout).
@@ -211,6 +208,12 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     return <Redirect to={"/" + current.id} />;
   }
 
+  // A renamed view URL (/insights) still resolves; swap it for the current
+  // one so there is one live URL per page.
+  if (route.legacyView && route.view) {
+    return <Redirect to={urlForView(route.view, current.id, route.viewTarget)} />;
+  }
+
   return (
     <Browser
       key={current.id} // fresh tree/fold state per project
@@ -220,7 +223,6 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       hub
       project={current}
       projects={projects}
-      canInsights={canInsights}
       sidebar={{
         vault,
         projectsNav: (
@@ -228,12 +230,12 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             projects={projects}
             currentId={current.id}
             menu={{
-              // Scoped views (/insights/<path>, /history/<path>) belong to
+              // Scoped views (/dashboard/<path>, /history/<path>) belong to
               // the file/folder — the tree carries the selection, no menu
               // item lights up.
               active: panel
                 ? null
-                : route.view === "insights" && !route.viewTarget
+                : route.view === "dashboard" && !route.viewTarget
                   ? "dashboard"
                   : route.view === "install"
                     ? "install"
@@ -246,7 +248,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
               // same-path navigation doesn't change pathname.
               onDashboard: () => {
                 setPanel(null);
-                navigate(urlForView("insights", current.id));
+                navigate(urlForView("dashboard", current.id));
                 closeSidebarOnMobile();
               },
               onInstall: () => {

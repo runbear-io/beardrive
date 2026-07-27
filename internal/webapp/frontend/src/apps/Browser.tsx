@@ -37,7 +37,6 @@ export default function Browser(props: {
   hub: boolean;
   project?: Project;
   projects?: Project[];
-  canInsights?: boolean;
   sidebar: { vault: ReactNode; projectsNav?: ReactNode; orgBar?: ReactNode };
   // Admin panels (org admin, hub settings) replace the content pane without
   // touching the URL — matching the classic app, where they were never
@@ -51,19 +50,19 @@ export default function Browser(props: {
 
   const { tree, flatFiles, dirIndex, loaded } = useTree(apiBase, !hub || !!project);
   const heatMap = useHeat(apiBase, hub && !!project && !!config.reads?.enabled);
-  // Insights data: the per-device breakdown, plus a fresh heat fetch when
-  // an insights surface opens (the ambient heat cache may be a minute old).
+  // Dashboard data: the per-device breakdown, plus a fresh heat fetch when
+  // a dashboard surface opens (the ambient heat cache may be a minute old).
   const isHome = hub && !!project && !route.path && !route.view;
-  const insightsOpen = !!props.canInsights && (route.view === "insights" || isHome);
+  const insightsOpen = route.view === "dashboard" || isHome;
   const devices = useInsightsDevices(apiBase, insightsOpen);
   useEffect(() => {
     if (insightsOpen) qc.invalidateQueries({ queryKey: ["heat", apiBase] });
   }, [insightsOpen, apiBase, qc]);
 
   const path = route.path;
-  // On scoped view routes (/insights/<p>, /history/<p>) the subject of the
+  // On scoped view routes (/dashboard/<p>, /history/<p>) the subject of the
   // page is the target — the tree highlights it, not a menu item.
-  const treePath = path || (route.view === "insights" || route.view === "history" ? route.viewTarget || "" : "");
+  const treePath = path || (route.view === "dashboard" || route.view === "history" ? route.viewTarget || "" : "");
   const isDir = !!path && dirIndex.has(path);
   // A file only counts as one when the tree actually contains it — a
   // missing path gets the not-found view, not a broken file view.
@@ -84,7 +83,7 @@ export default function Browser(props: {
   }, [tree]);
   useEffect(() => {
     // Opening any path (tree click, palette, wikilink, deep link — or a
-    // scoped insights/history view of it) unfolds the way to it; a selected
+    // scoped dashboard/history view of it) unfolds the way to it; a selected
     // folder itself opens too.
     if (!treePath || !loaded) return;
     setExpanded((s) => {
@@ -238,8 +237,8 @@ export default function Browser(props: {
   let view: ReactNode;
   if (panel) {
     view = panel.body;
-  } else if (route.view === "insights") {
-    view = props.canInsights ? (
+  } else if (route.view === "dashboard") {
+    view = (
       <Insights
         flatFiles={flatFiles}
         heatMap={heatMap}
@@ -249,8 +248,6 @@ export default function Browser(props: {
         onOpenFolder={openPath}
         isFolder={isFolderFn}
       />
-    ) : (
-      <div className="empty">Insights is for hub admins and org owners.</div>
     );
   } else if (route.view === "history") {
     // structured view — default app column, like the folder listing it shares rows with
@@ -317,23 +314,21 @@ export default function Browser(props: {
       );
     }
   } else if (isHome) {
-    // The project's index page: the connect-an-agent guide, with Insights
-    // below for admins/owners.
+    // The project's index page: the connect-an-agent guide, with the
+    // dashboard below it.
     view = (
       <>
         <ConnectGuide project={project!} />
-        {props.canInsights && (
-          <div className="home-insights">
-            <Insights
-              flatFiles={flatFiles}
-              heatMap={heatMap}
-              devices={devices}
-              onOpenFile={openPath}
-              onOpenFolder={openPath}
-              isFolder={isFolderFn}
-            />
-          </div>
-        )}
+        <div className="home-insights">
+          <Insights
+            flatFiles={flatFiles}
+            heatMap={heatMap}
+            devices={devices}
+            onOpenFile={openPath}
+            onOpenFolder={openPath}
+            isFolder={isFolderFn}
+          />
+        </div>
       </>
     );
   } else {
@@ -344,8 +339,8 @@ export default function Browser(props: {
     panel.crumb
   ) : path ? (
     <Breadcrumbs path={path} onOpenFolder={openPath} />
-  ) : route.view === "insights" ? (
-    "Insights — " + (route.viewTarget || project?.name || "")
+  ) : route.view === "dashboard" ? (
+    "Dashboard — " + (route.viewTarget || project?.name || "")
   ) : route.view === "history" ? (
     "History — " + historyTitle(route.viewTarget || "", isFolderFn)
   ) : isHome ? (
@@ -400,15 +395,15 @@ export default function Browser(props: {
                   Download
                 </button>
               )}
-              {props.canInsights && (
+              {hub && !!project && (
                 <button
                   className="more-item"
                   onClick={() => {
                     props.onClosePanel?.();
-                    navigate(urlForView("insights", project?.id, path));
+                    navigate(urlForView("dashboard", project?.id, path));
                   }}
                 >
-                  Insights
+                  Dashboard
                 </button>
               )}
             </div>
