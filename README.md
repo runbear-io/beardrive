@@ -175,7 +175,7 @@ the project:
 ```jsonc
 // .bdrive/config.json
 { "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["shared/"] }
+  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["/shared/"] }
 ```
 
 Opting out is non-destructive: when a pattern starts matching an

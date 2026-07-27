@@ -48,7 +48,7 @@ Two files at the mount root control a folder's sync behavior:
   "id": "m-5a10b713",
   "volume": "agent-workspace",
   "remote": "https://drive.example.com/p/p-7f3a2c91",
-  "include": ["shared/"]   // optional: sync ONLY these (init --shared; edit with bdrive scope add/rm)
+  "include": ["/shared/"]  // optional: sync ONLY these (init --shared; edit with bdrive scope add/rm)
 }
 ```
 

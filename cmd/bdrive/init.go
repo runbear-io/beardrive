@@ -274,10 +274,12 @@ func chooseScope() ([]string, error) {
 	return strings.Fields(strings.ReplaceAll(dirs, ",", " ")), nil
 }
 
-// cleanShared normalizes --shared entries into include patterns ("wiki/"):
-// slashes cleaned, duplicates dropped. Any entry that resolves to the mount
-// root or escapes it is an error — a silently-dropped "." would widen the
-// scope to the whole folder.
+// cleanShared normalizes --shared entries into include patterns ("/wiki/"):
+// slashes cleaned, duplicates dropped. The leading slash anchors the pattern
+// to the mount root — without it a nested directory of the same name (say
+// .claude/skills/x/wiki/) would match and sync too. Any entry that resolves
+// to the mount root or escapes it is an error — a silently-dropped "." would
+// widen the scope to the whole folder.
 func cleanShared(shared []string) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
@@ -288,7 +290,7 @@ func cleanShared(shared []string) ([]string, error) {
 		}
 		if !seen[s] {
 			seen[s] = true
-			out = append(out, s+"/")
+			out = append(out, "/"+s+"/")
 		}
 	}
 	return out, nil
