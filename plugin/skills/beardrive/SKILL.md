@@ -179,22 +179,21 @@ a CLI upgrade refreshes an outdated copy (idempotent otherwise). Installs
 are user-level on purpose — the skill is about the CLI, not one folder, and
 a synced project folder should never carry it.
 
-The intended flow for a new machine is one paste into that agent — the
-commands ride inside the prompt because it has no BearDrive knowledge yet:
+The intended flow for a new machine is one paste into that agent — it points
+at the canonical instructions (repo-root `INSTALL_FOR_AGENTS.md`) since the
+agent has no BearDrive knowledge yet:
 
 ```
-Set up BearDrive in this folder.
-1. If `bdrive` is missing, install it: brew install runbear-io/tap/beardrive
-2. bdrive skill install   # so you know the CLI next time
-3. bdrive login --device <hub-url>   # show me the code and the URL
-4. bdrive init --project <project-id>
-5. bdrive hooks install   # don't skip this - it's what syncs every turn
+Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
+to connect this folder to BearDrive project <project-id> on <hub-url>.
 ```
 
-Use `login --device` when an agent is driving: a browser-callback sign-in is
+The fetched instructions cover install, `bdrive skill install`, sign-in,
+`bdrive init --project`, and `bdrive hooks install`. They use `login
+--device` because an agent is driving: a browser-callback sign-in is
 invisible to it mid-turn, while the device flow yields a code and URL it can
-hand back in chat. The hub's project home page renders this with the URL and
-id filled in.
+hand back in chat. The hub's project home page renders this prompt with the
+URL and id filled in.
 
 ### Read heat (who actually reads what)
 
