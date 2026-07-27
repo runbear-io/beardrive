@@ -15,5 +15,8 @@
     "isolatedModules": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // The unit tests run on node (`npm test`), not in the browser: they
+  // import node: builtins that this DOM-only lib set does not know about.
+  "exclude": ["src/**/*.test.ts"]
 }

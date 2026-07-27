@@ -1,11 +1,11 @@
 import { test, expect } from "@playwright/test";
 import { login, wikiId, MEMBER, READER, expectToast } from "./helpers";
 
-// Phase 3: project home (connect guide + embedded insights), the dedicated
-// insights route, and the history views. Ports the original parity checks
+// Phase 3: project home (connect guide + embedded dashboard), the dedicated
+// dashboard route, and the history views. Ports the original parity checks
 // from the pre-migration smoke suite.
 
-test("landing is the project home (guide), not an insights redirect", async ({ page }) => {
+test("landing is the project home (guide), not a dashboard redirect", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.waitForURL("/" + pid);
@@ -51,11 +51,11 @@ test("guide: manual fallback has the full command list and the docs link", async
   await expect(page.locator('.gd-manual a[href="https://docs.beardrive.ai/manual/install/"]')).toHaveCount(1);
 });
 
-test("admin home embeds insights below the guide; member home does not", async ({ page, browser }) => {
+test("home embeds the dashboard below the guide, for members too", async ({ page, browser }) => {
   await login(page);
   await page.waitForSelector(".guide");
   await expect(page.locator(".home-insights .insights")).toBeVisible();
-  // Guide renders above the embedded insights
+  // Guide renders above the embedded dashboard
   const order = await page.evaluate(() => {
     const g = document.querySelector(".guide");
     const i = document.querySelector(".home-insights");
@@ -69,24 +69,51 @@ test("admin home embeds insights below the guide; member home does not", async (
   const p2 = await ctx.newPage();
   await login(p2, MEMBER);
   await p2.waitForSelector(".guide");
-  await expect(p2.locator(".home-insights")).toHaveCount(0);
+  await expect(p2.locator(".home-insights .insights")).toBeVisible();
   await ctx.close();
 });
 
-test("dedicated insights route still works and survives reload", async ({ page }) => {
+test("dedicated dashboard route still works and survives reload", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/insights`);
-  await expect(page.locator("#crumb")).toHaveText("Insights — wiki");
+  await page.goto(`/${pid}/dashboard`);
+  await expect(page.locator("#crumb")).toHaveText("Dashboard — wiki");
   await expect(page.locator(".in-treemap")).toBeVisible();
   await page.reload();
   await expect(page.locator(".in-treemap")).toBeVisible();
 });
 
+test("a plain member gets the Dashboard, not a refusal", async ({ page }) => {
+  await login(page, MEMBER);
+  const pid = await wikiId(page);
+  await page.click("#nav-dashboard");
+  await page.waitForURL(`/${pid}/dashboard`);
+  await expect(page.locator("#nav-dashboard")).toHaveClass(/active/);
+  await expect(page.locator("#crumb")).toHaveText("Dashboard — wiki");
+  await expect(page.locator(".in-treemap")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("hub admins and org owners");
+  // …and a scoped deep link resolves on a cold page, back/forward included.
+  await page.goto(`/${pid}/dashboard/notes`);
+  await expect(page.locator(".in-title .in-scope")).toContainText("notes");
+  await page.goBack();
+  await page.waitForURL(`/${pid}/dashboard`);
+});
+
+test("the retired /insights URL still lands on the Dashboard", async ({ page }) => {
+  await login(page, MEMBER);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/insights`);
+  await page.waitForURL(`/${pid}/dashboard`); // normalized, one live URL per page
+  await expect(page.locator(".in-treemap")).toBeVisible();
+  await page.goto(`/${pid}/insights/notes`);
+  await page.waitForURL(`/${pid}/dashboard/notes`);
+  await expect(page.locator(".in-title .in-scope")).toContainText("notes");
+});
+
 test("hot path row opens the file", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/insights`);
+  await page.goto(`/${pid}/dashboard`);
   await page.click(".in-hp-row:first-child");
   await page.waitForURL(/\/(index|guide)\.md$/);
   await expect(page.locator("#content h1")).toBeVisible();
@@ -101,13 +128,13 @@ test("vault name returns to the project home", async ({ page }) => {
   await expect(page.locator(".guide")).toBeVisible();
 });
 
-test("back/forward walks home → file → insights", async ({ page }) => {
+test("back/forward walks home → file → dashboard", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.waitForURL("/" + pid);
   await page.click('#tree .row[data-path="index.md"]');
   await page.waitForURL(`/${pid}/index.md`);
-  await page.goto(`/${pid}/insights`);
+  await page.goto(`/${pid}/dashboard`);
   await page.goBack();
   await expect(page.locator("#content h1")).toHaveText("Wiki");
   await page.goBack();
@@ -129,9 +156,70 @@ test("history: whole project, newest first, and per-file versions", async ({ pag
   await expect(page.locator("#crumb")).toContainText("History — guide.md");
   await expect(page.locator(".history .hentry")).toHaveCount(2);
   await expect(page.locator(".history .hentry").first()).toContainText("edited");
-  // clicking an entry opens the file
+  // clicking an entry opens THAT version of the file (BEA-7)
   await page.click(".history .hentry.clickable >> nth=0");
-  await page.waitForURL(`/${pid}/guide.md`);
+  await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
+});
+
+test("per-file history: a version expands to show what changed", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  const rows = page.locator(".history .hentry");
+  await expect(rows).toHaveCount(2);
+  // Nothing is fetched until a row is expanded.
+  const blobReqs: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().includes("/blob?sha=")) blobReqs.push(r.url());
+  });
+  await expect(page.locator(".dv")).toHaveCount(0);
+
+  // Newest version diffs against the one before it.
+  await rows.nth(0).locator(".hdiff-btn").click();
+  const dv = page.locator(".dv");
+  await expect(dv).toBeVisible();
+  await expect(dv.locator(".dv-rm")).toContainText("First version of the guide.");
+  await expect(dv.locator(".dv-ins")).toContainText("Second version of the guide, with more detail.");
+  await expect(dv.locator(".dv-add")).toHaveText("+1");
+  await expect(dv.locator(".dv-del")).toHaveText("−1");
+  expect(blobReqs.length).toBe(2); // exactly the two versions, once each
+
+  // Collapsing and re-expanding is free: the blobs are cached by sha.
+  await rows.nth(0).locator(".hdiff-btn").click();
+  await expect(page.locator(".dv")).toHaveCount(0);
+  await rows.nth(0).locator(".hdiff-btn").click();
+  await expect(page.locator(".dv")).toBeVisible();
+  expect(blobReqs.length).toBe(2);
+
+  // The first version has nothing behind it, and says so.
+  await expect(rows.nth(1).locator(".hdiff-btn")).toHaveCount(0);
+  await expect(rows.nth(1).locator(".hdiff-none")).toContainText("nothing to compare against");
+
+  // Expanding never navigates away.
+  await expect(page).toHaveURL(`/${pid}/history/guide.md`);
+});
+
+test("per-file history: a binary version says so instead of diffing", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/assets/logo.png`);
+  await page.locator(".history .hentry").nth(0).locator(".hdiff-btn").click();
+  const dv = page.locator(".dv");
+  await expect(dv).toContainText("Binary file — no diff available");
+  // Both versions stay reachable by download.
+  await expect(dv.locator("a", { hasText: "download previous" })).toHaveAttribute(
+    "href",
+    /blob\?sha=[0-9a-f]{64}&name=logo\.png&download=1/,
+  );
+  await expect(dv.locator("a", { hasText: "download this version" })).toBeVisible();
+});
+
+test("the whole-project feed carries no diff controls", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history`);
+  await expect(page.locator(".history .hentry").first()).toBeVisible();
+  await expect(page.locator(".history .hdiff-btn")).toHaveCount(0);
 });
 
 test("folder listing's Full history goes to the subtree feed", async ({ page }) => {
@@ -145,13 +233,13 @@ test("folder listing's Full history goes to the subtree feed", async ({ page }) 
   for (const p of paths) expect(p).toContain("notes/");
 });
 
-test("insights scopes to the selected folder via the ⋯ menu", async ({ page }) => {
-  await login(page);
+test("the dashboard scopes to the selected folder via the ⋯ menu", async ({ page }) => {
+  await login(page, MEMBER); // members get the scoped entry too
   const pid = await wikiId(page);
   await page.goto(`/${pid}/notes`);
   await page.click("#more-btn");
-  await page.click("#more-menu .more-item:has-text('Insights')");
-  await page.waitForURL(`/${pid}/insights/notes`);
+  await page.click("#more-menu .more-item:has-text('Dashboard')");
+  await page.waitForURL(`/${pid}/dashboard/notes`);
   await expect(page.locator(".in-title .in-scope")).toContainText("notes");
   // Scope note in the subtitle is the stable assertion.
   await expect(page.locator(".insights .dl-sub")).toContainText("notes and everything in it");
@@ -161,7 +249,7 @@ test("project menu pages each own a URL: Dashboard, Installation, Settings", asy
   await login(page);
   const pid = await wikiId(page);
   await page.click("#nav-dashboard");
-  await page.waitForURL(`/${pid}/insights`);
+  await page.waitForURL(`/${pid}/dashboard`);
   await expect(page.locator(".insights .in-title")).toContainText("Knowledge insights");
   await expect(page.locator("#nav-dashboard")).toHaveClass(/active/);
   await page.click("#nav-install");
@@ -176,7 +264,7 @@ test("project menu pages each own a URL: Dashboard, Installation, Settings", asy
   await expect(page.locator("#crumb")).toHaveText("Project settings");
   await expect(page.locator(".project-settings h2")).toHaveText("wiki");
   await page.click("#nav-dashboard");
-  await page.waitForURL(`/${pid}/insights`);
+  await page.waitForURL(`/${pid}/dashboard`);
   await expect(page.locator("#nav-dashboard")).toHaveClass(/active/);
   // Deep link + reload land on the page, like any URL.
   await page.goto(`/${pid}/settings`);

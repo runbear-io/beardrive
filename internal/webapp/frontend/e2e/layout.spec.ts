@@ -45,7 +45,7 @@ test("every view shares one column system", async ({ page }) => {
   await visit("", "app"); // project home
   await visit("/install", "app"); // the same guide, so the same column
   await visit("/settings", "app");
-  await visit("/insights", "app"); // charts cap their own measure; the column is normal
+  await visit("/dashboard", "app"); // charts cap their own measure; the column is normal
   await visit("/history", "app"); // structured view, not a file render
   await visit("/index.md", "read"); // rendered markdown — the only read surface
   await visit("/notes", "app"); // folder listing is a structured view too
@@ -73,7 +73,7 @@ test("charts never scale past the size they were drawn at", async ({ page }) => 
   await page.setViewportSize({ width: 1600, height: 900 });
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`http://localhost:8993/${pid}/insights`);
+  await page.goto(`http://localhost:8993/${pid}/dashboard`);
   await page.waitForSelector(".in-chart");
   const worst = await page.evaluate(() => {
     let max = 0;

@@ -10,7 +10,7 @@ export function FolderListing(props: {
   heatMap: HeatMap | null;
   hub: boolean; // hub feeds exist; a plain-folder viewer has no journals
   apiBase: string;
-  onOpen: (path: string) => void;
+  onOpen: (path: string, version?: string) => void;
   onFullHistory: (prefix: string) => void;
   onRendered?: () => void; // scroll restoration: content height just grew
 }) {
@@ -104,7 +104,7 @@ export function FolderListing(props: {
 function FolderHistory(props: {
   apiBase: string;
   prefix: string;
-  onOpen: (path: string) => void;
+  onOpen: (path: string, version?: string) => void;
   onFullHistory: () => void;
   onRendered?: () => void;
 }) {

@@ -24,7 +24,7 @@ as memory, and your agent knows what their agent knows. Notes, plans, findings,
 and artifacts follow the team everywhere.
 
 Unlike a memory API, they stay **real files with provenance**: every change is
-attributed to the human, agent, and device that made it, and the hub's Insights
+attributed to the human, agent, and device that made it, and the hub's Dashboard
 show what your agents actually read — including the hot-but-stale documents
 everyone relies on and nobody maintains.
 
