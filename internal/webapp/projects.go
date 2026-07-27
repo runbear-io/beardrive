@@ -6,21 +6,37 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Project is one synced project hosted by this server. Its storage lives
 // under <root>/<id>/ in the object store; the id is permanent, the name is a
 // renameable label.
 type Project struct {
-	ID      string    `json:"id"`
-	Name    string    `json:"name"`
-	Org     string    `json:"org,omitempty"` // owning organization
-	Created time.Time `json:"created"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Org         string    `json:"org,omitempty"` // owning organization
+	Created     time.Time `json:"created"`
+	Description string    `json:"description,omitempty"` // optional one-line subtitle
+	Icon        string    `json:"icon,omitempty"`        // optional lucide icon name
 }
 
 var projectIDRe = regexp.MustCompile(`^p-[0-9a-f]{8}$`)
+
+// iconRe validates the *shape* of an icon name only. The list of icons a
+// project may pick from lives in the frontend (shell.tsx's PROJECT_ICONS) —
+// the server stores whatever kebab-case name it's given and the UI falls back
+// to a placeholder for anything it doesn't know, so adding an icon never
+// needs a server change.
+var iconRe = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+const (
+	maxNameLen = 120
+	maxDescLen = 280
+)
 
 // ProjectDB is the server's project registry: an in-memory index over a
 // MetaStore ProjectRepo. Reads are served from memory; every change is
@@ -102,26 +118,61 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 	return p, true, nil
 }
 
-// Rename changes a project's display name (its id and storage are permanent).
-func (db *ProjectDB) Rename(id, name string) error {
-	name = trimName(name)
-	if name == "" {
-		return fmt.Errorf("project name must not be empty")
+// Update changes a project's editable metadata. Each field is a pointer so
+// that "absent" (nil, leave alone) is distinguishable from "present and
+// empty" (clear it) — the whole point of a partial update. One lock, one
+// repo write, whatever the caller changed.
+func (db *ProjectDB) Update(id string, name, description, icon *string) error {
+	var newName, newDesc, newIcon string
+	if name != nil {
+		newName = trimText(*name, maxNameLen+1)
+		if newName == "" {
+			return fmt.Errorf("project name must not be empty")
+		}
+		if utf8.RuneCountInString(newName) > maxNameLen {
+			return fmt.Errorf("project name must be at most %d characters", maxNameLen)
+		}
 	}
+	if description != nil {
+		newDesc = trimText(*description, maxDescLen+1)
+		if utf8.RuneCountInString(newDesc) > maxDescLen {
+			return fmt.Errorf("project description must be at most %d characters", maxDescLen)
+		}
+	}
+	if icon != nil {
+		newIcon = strings.TrimSpace(*icon)
+		if newIcon != "" && !iconRe.MatchString(newIcon) {
+			return fmt.Errorf("invalid icon name %q", newIcon)
+		}
+	}
+
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	p, ok := db.byID[id]
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
 	}
-	for _, other := range db.byID {
-		if other.ID != id && other.Name == name && other.Org == p.Org {
-			return fmt.Errorf("a project named %q already exists in this organization", name)
+	if name != nil {
+		for _, other := range db.byID {
+			if other.ID != id && other.Name == newName && other.Org == p.Org {
+				return fmt.Errorf("a project named %q already exists in this organization", newName)
+			}
 		}
+		p.Name = newName
 	}
-	p.Name = name
+	if description != nil {
+		p.Description = newDesc
+	}
+	if icon != nil {
+		p.Icon = newIcon
+	}
 	db.byID[id] = p
 	return db.repo.Put(p)
+}
+
+// Rename changes a project's display name (its id and storage are permanent).
+func (db *ProjectDB) Rename(id, name string) error {
+	return db.Update(id, &name, nil, nil)
 }
 
 // Delete removes a project from the registry. Its storage prefix (blobs,
@@ -150,7 +201,13 @@ func (db *ProjectDB) SetOrg(id, org string) error {
 	return db.repo.Put(p)
 }
 
-func trimName(s string) string {
+// trimName normalizes a name on the *creation* path, where an over-long name
+// is silently truncated rather than rejected (bdrive init must not fail on a
+// long folder name). Update is stricter — see maxNameLen.
+func trimName(s string) string { return trimText(s, 128) }
+
+// trimText strips line breaks and outer spaces, then truncates to max runes.
+func trimText(s string, max int) string {
 	out := make([]rune, 0, len(s))
 	for _, r := range s {
 		if r == '\n' || r == '\r' || r == '\t' {
@@ -164,8 +221,8 @@ func trimName(s string) string {
 	for len(out) > 0 && out[len(out)-1] == ' ' {
 		out = out[:len(out)-1]
 	}
-	if len(out) > 128 {
-		out = out[:128]
+	if len(out) > max {
+		out = out[:max]
 	}
 	return string(out)
 }

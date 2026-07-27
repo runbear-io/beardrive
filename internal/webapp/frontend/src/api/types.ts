@@ -25,6 +25,9 @@ export interface Project {
   name: string;
   org?: string;
   created?: string;
+  description?: string;
+  /** lucide icon name (kebab-case); unknown or absent → the folder placeholder */
+  icon?: string;
 }
 
 export interface ProjectList {

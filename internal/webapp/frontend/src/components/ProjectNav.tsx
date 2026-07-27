@@ -1,5 +1,5 @@
 import { navigate } from "../nav";
-import { Icon } from "./shell";
+import { Icon, ProjectIcon } from "./shell";
 import {
   Select,
   SelectContent,
@@ -41,6 +41,7 @@ export function ProjectNav({
   menu?: ProjectMenu;
 }) {
   const refresh = useHubRefresh();
+  const current = projects.find((p) => p.id === currentId);
 
   const create = async () => {
     const name = await modalPrompt("New project", "Project name", "", "Create");
@@ -75,22 +76,39 @@ export function ProjectNav({
         >
           <SelectTrigger
             id="project-select"
-            aria-label={`Switch project — current: ${projects.find((p) => p.id === currentId)?.name ?? "none"}`}
-            title={projects.find((p) => p.id === currentId)?.name}
+            aria-label={`Switch project — current: ${current?.name ?? "none"}`}
+            title={current?.name}
             className="proj-trigger"
           >
-            {currentId && (
+            {current && (
               <span
                 className="proj-mark"
                 aria-hidden="true"
-                style={{ background: projColor(projects.find((p) => p.id === currentId)?.name || "") }}
-              />
+                style={{ background: projColor(current.name) }}
+              >
+                <ProjectIcon name={current.icon} />
+              </span>
             )}
-            <SelectValue placeholder="Select a project" />
+            {/* SelectValue mirrors the selected item's text into the trigger —
+                which, now that every item carries its own mark, would draw a
+                second one here. Render the name ourselves when we have it,
+                keeping the [data-slot="select-value"] styling hook. */}
+            {current ? (
+              <span data-slot="select-value">{current.name}</span>
+            ) : (
+              <SelectValue placeholder="Select a project" />
+            )}
           </SelectTrigger>
           <SelectContent className="proj-menu" position="popper" sideOffset={4}>
             {projects.map((p) => (
               <SelectItem key={p.id} value={p.id}>
+                <span
+                  className="proj-mark"
+                  aria-hidden="true"
+                  style={{ background: projColor(p.name) }}
+                >
+                  <ProjectIcon name={p.icon} />
+                </span>
                 {p.name}
               </SelectItem>
             ))}

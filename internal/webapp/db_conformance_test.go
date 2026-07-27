@@ -129,6 +129,10 @@ func TestMetaStoreConformance(t *testing.T) {
 			if err := projects.Rename(p1.ID, "handbook"); err != nil {
 				t.Fatal(err)
 			}
+			desc, icon := "everything support needs", "book-open"
+			if err := projects.Update(p1.ID, nil, &desc, &icon); err != nil {
+				t.Fatal(err)
+			}
 			p2, _, _ := projects.GetOrCreate("scratch", "o-1")
 			if err := projects.Delete(p2.ID); err != nil {
 				t.Fatal(err)
@@ -220,6 +224,12 @@ func TestMetaStoreConformance(t *testing.T) {
 			hb, ok := projects2.Get(p1.ID)
 			if !ok || hb.Name != "handbook" {
 				t.Fatalf("rename lost across reload: %+v", hb)
+			}
+			// Description/icon are the columns migrate() has to ADD to an
+			// already-created projects table; the reopen above already ran
+			// migrate() a second time, so surviving here proves it's a no-op.
+			if hb.Description != "everything support needs" || hb.Icon != "book-open" {
+				t.Fatalf("description/icon lost across reload: %+v", hb)
 			}
 
 			orgs2, _ := NewOrgDB(st2.Orgs())

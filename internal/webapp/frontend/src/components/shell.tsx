@@ -2,32 +2,54 @@ import type { ReactNode } from "react";
 import { requestSearch } from "../search";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
+  Beaker,
+  BookOpen,
+  Briefcase,
+  Bug,
+  Calendar,
   Check,
   ChevronDown,
   ChevronRight,
   Clock,
+  Code,
+  Compass,
   Copy,
+  Database,
   Download,
   Ellipsis,
   FileText,
+  Flag,
   Folder,
+  Gauge,
+  Heart,
+  Image,
   LayoutDashboard,
+  Lightbulb,
+  Gavel,
   Globe,
+  GraduationCap,
   History,
   Link,
   Lock,
   LogOut,
+  Megaphone,
   Menu,
+  Music,
+  Package,
+  PenLine,
   Plus,
+  Rocket,
   Search,
   Settings,
   Share2,
   Shield,
   SquareTerminal,
+  Star,
   Trash2,
   TriangleAlert,
   Upload,
   Users,
+  Wrench,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -134,6 +156,53 @@ const ICONS: Record<string, LucideIcon> = {
 export function Icon({ name }: { name: string }) {
   const C = ICONS[name];
   return C ? <C className="ico" aria-hidden="true" /> : null;
+}
+
+// The icons a project may choose from, keyed by their real lucide name (so
+// what lands in the database is a public, portable identifier — not one of
+// ICONS' historical sprite aliases). Deliberately a curated shortlist: these
+// are named imports, which is what lets Vite tree-shake the other ~1500
+// lucide icons out of the bundle. Adding one here is the whole change; the
+// server only ever validates the shape of the string.
+export const PROJECT_ICONS: Record<string, LucideIcon> = {
+  folder: Folder,
+  "book-open": BookOpen,
+  "file-text": FileText,
+  "pen-line": PenLine,
+  users: Users,
+  briefcase: Briefcase,
+  megaphone: Megaphone,
+  rocket: Rocket,
+  lightbulb: Lightbulb,
+  flag: Flag,
+  star: Star,
+  heart: Heart,
+  code: Code,
+  "square-terminal": SquareTerminal,
+  bug: Bug,
+  wrench: Wrench,
+  database: Database,
+  package: Package,
+  beaker: Beaker,
+  gauge: Gauge,
+  shield: Shield,
+  lock: Lock,
+  gavel: Gavel,
+  globe: Globe,
+  compass: Compass,
+  calendar: Calendar,
+  clock: Clock,
+  "graduation-cap": GraduationCap,
+  image: Image,
+  music: Music,
+};
+
+// ProjectIcon renders a project's chosen glyph. One fallback, one place:
+// no icon set, or a name this build doesn't know (hand-written into storage,
+// or dropped from the list later) → the folder placeholder.
+export function ProjectIcon({ name, className }: { name?: string; className?: string }) {
+  const C = PROJECT_ICONS[name ?? ""] ?? Folder;
+  return <C className={className} aria-hidden="true" />;
 }
 
 /* The BearDrive mark: a rail and two blocks — the letter B built from
