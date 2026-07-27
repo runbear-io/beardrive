@@ -141,9 +141,10 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync (the include list set by `init --shared`) — no JSON editing; the daemon picks changes up in seconds. `rm` deletes nothing, locally or on the hub |
+| `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
-| `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
+| `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
 | `bdrive hooks [install]` | Register turn-boundary sync hooks with detected agent platforms (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking; idempotent (`--agent` overrides detection) |
 | `bdrive skill [install]` | Install the `beardrive` skill into detected agent platforms (`~/.codex/skills/beardrive/SKILL.md` and friends) so the agent can do the setup itself — sign in, `bdrive init`, and register the sync hooks; idempotent (`--agent` overrides detection) |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
@@ -179,7 +180,11 @@ the project:
 ```
 
 Opting out is non-destructive: when a pattern starts matching an
-already-synced file, the file stops syncing but is deleted nowhere.
+already-synced file, the file stops syncing but is deleted nowhere — which
+also means the hub keeps the copy it already has. `bdrive forget <path>` (or
+`bdrive sync --prune` for rules you added by hand) takes it off the hub, and
+still deletes nothing on disk: every device receives the rule alongside the
+removal and simply stops tracking the path.
 
 ## Web server
 
