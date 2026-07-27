@@ -28,6 +28,10 @@ export function navigate(url: string, opts?: { replace?: boolean }) {
   emit();
 }
 
+// The whole location, search included — routes carry state in the query
+// (?v=<sha> pins a file to one past version), and a snapshot of pathname
+// alone would leave useSyncExternalStore blind to those navigations: the URL
+// would change and nothing would re-render.
 export function useLocationPath(): string {
   return useSyncExternalStore(
     (l) => {
@@ -36,7 +40,7 @@ export function useLocationPath(): string {
         listeners.delete(l);
       };
     },
-    () => location.pathname,
+    () => location.pathname + location.search,
   );
 }
 
