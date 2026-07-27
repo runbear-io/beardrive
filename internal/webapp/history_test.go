@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -24,6 +25,25 @@ func (f *fakeRemote) putAs(dev, user, userName, path, content string) {
 		f.t.Fatal(err)
 	}
 	ops[len(ops)-1].User, ops[len(ops)-1].UserName = user, userName
+	data, err := journal.Marshal(ops)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	writeFileT(f.t, p, data)
+}
+
+// putAt writes a put whose wall-clock time is `at`. The Lamport clock still
+// advances in call order, so a test can make causal and chronological order
+// disagree — exactly what an offline device produces.
+func (f *fakeRemote) putAt(dev, path, content string, at time.Time) {
+	f.t.Helper()
+	f.put(dev, path, content)
+	p := filepath.Join(f.dir, "journal", dev+".jsonl")
+	ops, err := journal.ReadFile(p)
+	if err != nil || len(ops) == 0 {
+		f.t.Fatal(err)
+	}
+	ops[len(ops)-1].Time = at
 	data, err := journal.Marshal(ops)
 	if err != nil {
 		f.t.Fatal(err)
@@ -127,6 +147,70 @@ func TestHistoryAPI(t *testing.T) {
 	}
 	if rec := do(t, h, "GET", base+"blob?sha=nothex", nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad sha: %d, want 400", rec.Code)
+	}
+}
+
+// History is newest-first by wall-clock time, not by Lamport clock: a device
+// that was offline writes later in real time but carries a lower clock, so
+// reverse-journal order would bury the most recent change.
+func TestHistoryOrderedByTimeNotLamport(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	early := time.Date(2026, 7, 26, 0, 9, 17, 0, time.UTC)
+	late := time.Date(2026, 7, 26, 22, 9, 17, 0, time.UTC)
+	// lamport 1 but newest by the clock — the offline device
+	f.putAt("offline", "notes/late.md", "written offline", late)
+	// lamport 2..4, all at the same earlier timestamp
+	f.putAt("online", "notes/a.md", "a", early)
+	f.putAt("online", "notes/b.md", "b", early)
+	f.putAt("online", "notes/c.md", "c", early)
+
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/"
+	paths := func(url string) []string {
+		t.Helper()
+		rec := do(t, h, "GET", url, nil)
+		if rec.Code != 200 {
+			t.Fatalf("history: %d %s", rec.Code, rec.Body)
+		}
+		var out struct {
+			Entries []HistoryEntry `json:"entries"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, e := range out.Entries {
+			if e.Kind != "add" { // first version of each path, whatever the display order
+				t.Fatalf("kind = %q for %s, want add", e.Kind, e.Path)
+			}
+			got = append(got, e.Path+"@"+e.Time)
+		}
+		return got
+	}
+
+	// newest by time first, then the equal-timestamp rows in descending Lamport
+	want := []string{
+		"notes/late.md@2026-07-26T22:09:17Z",
+		"notes/c.md@2026-07-26T00:09:17Z",
+		"notes/b.md@2026-07-26T00:09:17Z",
+		"notes/a.md@2026-07-26T00:09:17Z",
+	}
+	got := paths(base + "history")
+	if !slices.Equal(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+	// ?n= selects the n most recent BY TIME, not the n highest-Lamport
+	if got := paths(base + "history?n=1"); !slices.Equal(got, want[:1]) {
+		t.Fatalf("n=1 = %v, want %v", got, want[:1])
+	}
+	// equal timestamps come back in a stable order across requests
+	if again := paths(base + "history"); !slices.Equal(again, want) {
+		t.Fatalf("repeat = %v, want %v", again, want)
+	}
+	// a filtered view sorts the same way
+	if got := paths(base + "history?prefix=notes/"); !slices.Equal(got, want) {
+		t.Fatalf("prefix order = %v, want %v", got, want)
 	}
 }
 

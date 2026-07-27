@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 )
@@ -33,7 +35,7 @@ type HistoryEntry struct {
 
 // handleHistory serves ?path=<file> (one file's versions) or
 // ?prefix=<folder/> (everything underneath, "" = the whole project),
-// newest first, at most ?n= entries (default 100).
+// newest first by wall-clock time, at most ?n= entries (default 100).
 func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request) {
 	rs := storeSource(v, w)
 	if rs == nil {
@@ -77,8 +79,12 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			exists[op.Path] = true
 		}
 	}
-	entries := make([]HistoryEntry, 0, n)
-	for i := len(all) - 1; i >= 0 && len(entries) < n; i-- { // newest first
+	type timed struct {
+		entry HistoryEntry
+		at    time.Time
+	}
+	matched := make([]timed, 0, len(all))
+	for i := len(all) - 1; i >= 0; i-- { // descending journal (Lamport) order
 		op := all[i]
 		switch {
 		case path != "" && op.Path != path:
@@ -90,12 +96,26 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		if dev.ID == "" {
 			dev = DeviceInfo{ID: op.Device, Name: op.DeviceName}
 		}
-		entries = append(entries, HistoryEntry{
+		matched = append(matched, timed{HistoryEntry{
 			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: kinds[i],
 			Path: op.Path, Size: op.Size, Blob: op.Blob,
 			User: op.User, UserName: op.UserName, Author: op.Author,
 			Device: dev, Note: op.Note,
-		})
+		}, op.Time})
+	}
+	// Journal order is causal, not chronological: a device that was offline can
+	// write at a later wall-clock time yet carry a lower Lamport clock, so
+	// reverse-journal order is not "newest first". Sort the response by time,
+	// and truncate to ?n= AFTER that — truncating during the walk above would
+	// pick the n highest-Lamport entries and merely display them in time order.
+	// Stable + strict After keeps equal timestamps in descending-Lamport order.
+	sort.SliceStable(matched, func(a, b int) bool { return matched[a].at.After(matched[b].at) })
+	if len(matched) > n {
+		matched = matched[:n]
+	}
+	entries := make([]HistoryEntry, len(matched))
+	for i, m := range matched {
+		entries[i] = m.entry
 	}
 	writeJSON(w, map[string]any{"entries": entries})
 }
