@@ -57,6 +57,7 @@ classDiagram
     class components {
         FileView FolderListing FileTree
         HistoryView Insights ShareDialog
+        ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
         Palette shell AccountBar ...
     }

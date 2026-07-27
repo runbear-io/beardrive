@@ -182,14 +182,19 @@ export interface OrgInviteInfo {
   uses: number;
 }
 
-// GET /api/orgs/{org}/shares (handleOrgShares, admin.go)
-export interface OrgShareInfo {
+// One live public link. Both listings return the same shape (shareJSON,
+// shares.go): GET /api/p/{project}/shares for one project, and
+// GET /api/orgs/{org}/shares for the org-wide audit, which alone adds
+// project_name.
+export interface ShareInfo {
   token: string;
   url: string;
   path: string;
+  project: string;
   project_name?: string;
   creator?: string;
   created?: string;
+  expires?: string;
 }
 
 // GET/POST /api/admin/policy (handleAdminPolicy, admin.go)

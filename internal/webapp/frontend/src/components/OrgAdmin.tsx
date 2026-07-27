@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createColumnHelper,
-  flexRender,
   getCoreRowModel,
   getSortedRowModel,
   useReactTable,
@@ -12,12 +11,13 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { api, getJSON, postJSON } from "../api/http";
-import type { Org, OrgInviteInfo, OrgShareInfo, Project } from "../api/types";
+import type { Org, OrgInviteInfo, ShareInfo, Project } from "../api/types";
 import { modalConfirm } from "../modal";
 import { toast } from "../toast";
 import { copyText } from "../util";
 import { Button } from "@/components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { AdminTable } from "./AdminTable";
+import { SharesTable } from "./SharesTable";
 
 /* The org admin panel: members (owners can change roles / remove), rename,
    projects (rename / delete), invite links (create / revoke), and an
@@ -28,30 +28,6 @@ const renameSchema = z.object({
   name: z.string().trim().min(1, "Give the organization a name.").max(60, "Keep it under 60 characters."),
 });
 type RenameForm = z.infer<typeof renameSchema>;
-
-// SortableHead is both tables' header cell: a real button inside the th so
-// sorting is reachable by keyboard, with the direction announced rather than
-// carried by a glyph alone. Two tables ten centimetres apart had opposite
-// accessibility contracts before this existed.
-function SortableHead({ header }: { header: any }) {
-  const sorted = header.column.getIsSorted();
-  if (!header.column.getCanSort()) {
-    // The actions column has no header text and nothing to sort; a button
-    // here is a dead tab stop with an empty accessible name.
-    return <TableHead>{flexRender(header.column.columnDef.header, header.getContext())}</TableHead>;
-  }
-  return (
-    <TableHead
-      data-sort={sorted || undefined}
-      aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : "none"}
-    >
-      <button type="button" className="th-sort" onClick={header.column.getToggleSortingHandler()}>
-        {flexRender(header.column.columnDef.header, header.getContext())}
-        {sorted === "asc" ? " ↑" : sorted === "desc" ? " ↓" : ""}
-      </button>
-    </TableHead>
-  );
-}
 
 type Member = Org["members"][number];
 
@@ -84,7 +60,7 @@ export function OrgAdmin({
   });
   const { data: shares } = useQuery({
     queryKey: ["orgShares", org.id],
-    queryFn: () => getJSON<{ shares: OrgShareInfo[] }>(`/api/orgs/${org.id}/shares`),
+    queryFn: () => getJSON<{ shares: ShareInfo[] }>(`/api/orgs/${org.id}/shares`),
     enabled: owner,
     select: (d) => d.shares || [],
   });
@@ -227,7 +203,11 @@ export function OrgAdmin({
           </div>
 
           <h3>Public share links</h3>
-          <SharesTable shares={shares || []} onChanged={refreshShares} />
+          <p className="admin-sub">
+            Every live link across this organization's projects. A project's own links are on its
+            Settings page, and on the file itself.
+          </p>
+          <SharesTable shares={shares || []} onChanged={refreshShares} showProject />
         </>
       )}
     </div>
@@ -327,143 +307,5 @@ function MembersTable({
     getSortedRowModel: getSortedRowModel(),
   });
 
-  return (
-    <div className="admin-list admin-card-table">
-    <Table className="admin-table">
-      <TableHeader>
-        {table.getHeaderGroups().map((hg) => (
-          <TableRow key={hg.id}>
-            {hg.headers.map((h) => (
-              <SortableHead key={h.id} header={h} />
-            ))}
-          </TableRow>
-        ))}
-      </TableHeader>
-      <TableBody>
-        {table.getRowModel().rows.map((r) => (
-          <TableRow key={r.id} className="admin-item">
-            {r.getVisibleCells().map((c) => (
-              <TableCell key={c.id}>{flexRender(c.column.columnDef.cell, c.getContext())}</TableCell>
-            ))}
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-    </div>
-  );
-}
-
-/* ---- shares audit (react-table: sortable path/project) ---- */
-
-function SharesTable({
-  shares,
-  onChanged,
-}: {
-  shares: OrgShareInfo[];
-  onChanged: () => void;
-}) {
-  const [sorting, setSorting] = useState<SortingState>([]);
-  const col = useMemo(() => createColumnHelper<OrgShareInfo>(), []);
-  const columns = useMemo(
-    () => [
-      col.accessor("path", {
-        header: "Path",
-        cell: (c) => (
-          <a
-            className="ai-main mono"
-            href={c.row.original.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            title={c.getValue()}
-          >
-            {c.getValue()}
-          </a>
-        ),
-      }),
-      col.accessor((s) => s.project_name || "", {
-        id: "project",
-        header: "Project",
-        cell: (c) => (
-          <span className="ai-tag">
-            {(c.getValue() || "") +
-              (c.row.original.creator ? " · by " + c.row.original.creator : "") +
-              (c.row.original.created ? " · " + new Date(c.row.original.created).toLocaleDateString() : "")}
-          </span>
-        ),
-      }),
-      col.display({
-        id: "actions",
-        header: "",
-        cell: (c) => (
-          <button
-            className="ai-del"
-            aria-label={`Revoke the share of ${c.row.original.path}`}
-            onClick={async () => {
-              const sh = c.row.original;
-              if (
-                !(await modalConfirm(
-                  "Revoke share link",
-                  `Revoke the public link to “${sh.path}”? Anyone with the URL will lose access.`,
-                  "Revoke",
-                  true,
-                ))
-              )
-                return;
-              try {
-                await api("DELETE", "/api/shares/" + sh.token);
-                toast("Share revoked.");
-                onChanged();
-              } catch (e) {
-                toast((e as Error).message, true);
-              }
-            }}
-          >
-            Revoke
-          </button>
-        ),
-      }),
-    ],
-    [col, onChanged],
-  );
-
-  const table = useReactTable({
-    data: shares,
-    columns,
-    state: { sorting },
-    onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-  });
-
-  if (shares.length === 0)
-    return (
-      <div className="admin-list">
-        <div className="admin-empty">No public shares.</div>
-      </div>
-    );
-
-  return (
-    <div className="admin-list admin-card-table">
-    <Table className="admin-table">
-      <TableHeader>
-        {table.getHeaderGroups().map((hg) => (
-          <TableRow key={hg.id}>
-            {hg.headers.map((h) => (
-              <SortableHead key={h.id} header={h} />
-            ))}
-          </TableRow>
-        ))}
-      </TableHeader>
-      <TableBody>
-        {table.getRowModel().rows.map((r) => (
-          <TableRow key={r.id} className="admin-item">
-            {r.getVisibleCells().map((c) => (
-              <TableCell key={c.id}>{flexRender(c.column.columnDef.cell, c.getContext())}</TableCell>
-            ))}
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-    </div>
-  );
+  return <AdminTable table={table} />;
 }
