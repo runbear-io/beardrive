@@ -5,8 +5,13 @@ import { Icon } from "./shell";
 import { DiffView } from "./DiffView";
 
 /* One change as a row: what happened (added / edited / deleted), to which
-   file, by whom, from where — with the note (session link) expandable. */
-const KIND_ICON: Record<string, string> = { add: "plus", edit: "edit", delete: "x" };
+   file, by whom, from where — with the note (session link) expandable.
+
+   The kind is a word in a badge, never a +/✕ glyph in the row's leftmost
+   slot: sitting there, inside a role="button" row, it read as a disclosure
+   toggle it never was. The toggle slot stays free for a real per-row
+   disclosure; the only genuine expansion here is the note, which owns its
+   own control and its own aria-expanded. */
 const KIND_LABEL: Record<string, string> = { add: "added", edit: "edited", delete: "deleted" };
 
 export function HistoryRow({
@@ -50,11 +55,8 @@ export function HistoryRow({
       }}
     >
       <div className="hline">
-        <span className="hkind">
-          <Icon name={KIND_ICON[kind] || "dot"} />
-        </span>
+        <span className="hkind">{KIND_LABEL[kind] || kind}</span>
         <span className="hpath">{e.path}</span>
-        <span className="htag">{KIND_LABEL[kind] || kind}</span>
         <span className="htime">{new Date(e.time).toLocaleString()}</span>
       </div>
       <div className="hmeta">

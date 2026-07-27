@@ -156,8 +156,9 @@ test("history: whole project, newest first, and per-file versions", async ({ pag
   await expect(page.locator("#crumb")).toContainText("History — guide.md");
   await expect(page.locator(".history .hentry")).toHaveCount(2);
   await expect(page.locator(".history .hentry").first()).toContainText("edited");
-  // clicking an entry opens THAT version of the file (BEA-7)
-  await page.click(".history .hentry.clickable >> nth=0");
+  // clicking an entry opens THAT version of the file (BEA-7); aim at the
+  // path cell — the row's center can land on its expandable note
+  await page.click(".history .hentry.clickable >> nth=0 >> .hpath");
   await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
 });
 
