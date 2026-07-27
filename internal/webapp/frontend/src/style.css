@@ -594,13 +594,13 @@ a.ai-main:hover { color: var(--accent); }
 
 /* ---- history ---- */
 /* .history width comes from .page (app) */
-.hentry { padding: 11px 12px; border-bottom: 1px solid var(--border); --hindent: 78px; }
+.hentry { padding: 11px 12px; border-bottom: 1px solid var(--border); --hindent: 72px; }
 .hentry:hover { background: rgba(255,255,255,.015); }
 .hline { display: flex; gap: 10px; align-items: center; }
 /* The kind is a status badge, not a control: a fixed-width pill of text,
    so nothing in the row's leftmost slot has the size or shape of a
    disclosure toggle. --hindent keeps meta and note aligned under the path. */
-.hkind { flex: none; width: 56px; text-align: center; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: 2px 6px; border-radius: 4px; color: var(--add); background: rgba(76,195,138,.12); }
+.hkind { flex: none; width: 62px; white-space: nowrap; text-align: center; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: 2px 6px; border-radius: 4px; color: var(--add); background: rgba(76,195,138,.12); }
 .hentry.edit .hkind { color: var(--accent-bright); background: var(--glow); }
 .hentry.delete .hkind { color: #ff8b8b; background: rgba(242,109,109,.12); }
 .hpath { font-weight: 500; cursor: pointer; color: var(--text); font-size: 13px; }
