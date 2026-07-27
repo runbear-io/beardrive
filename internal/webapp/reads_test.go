@@ -57,6 +57,16 @@ func TestReadLedgerDebounce(t *testing.T) {
 	if heat["a.md"].LastRead.IsZero() {
 		t.Fatal("last_read not set")
 	}
+	// …and once the window has passed, the same actor counts again: the
+	// debounce collapses a visit, it does not stop counting (BEA-15).
+	visit := ReadStatKey{Project: "p-1", Path: "a.md", Kind: ReadKindHuman, Actor: "alice@x.io"}
+	l.mu.Lock()
+	l.seen[visit] = l.seen[visit].Add(-readDebounce - time.Minute)
+	l.mu.Unlock()
+	l.Record("p-1", "a.md", ReadKindHuman, "alice@x.io")
+	if e := l.Heat("p-1", "", time.Time{})["a.md"]; e.Human != 3 || e.Readers != 2 {
+		t.Fatalf("a.md after the window = %+v, want human 3, readers 2", e)
+	}
 }
 
 func TestReadLedgerWindow(t *testing.T) {
@@ -296,5 +306,123 @@ func TestHeatByDevice(t *testing.T) {
 
 	if rec := do(t, h, "GET", base+"heat?by=path", nil); rec.Code != 400 {
 		t.Fatalf("invalid by: %d, want 400", rec.Code)
+	}
+}
+
+// readsHub builds an authenticated hub with one project owned by alice and
+// two seeded files: the markdown the viewer renders, and an HTML file the
+// viewer shows inside a sandboxed iframe.
+func readsHub(t *testing.T) (http.Handler, *Server, Project, map[string]*http.Cookie) {
+	t.Helper()
+	srv, _, root := newHub(t, true, nil)
+	auth, err := OpenBuiltinAuth(filepath.Join(t.TempDir(), "auth.json"), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Auth = auth
+	orgs, err := OpenOrgDB(filepath.Join(t.TempDir(), "orgs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Dir = LocalDirectory{OrgDB: orgs}
+	srv.Reads, err = OpenReadLedger(filepath.Join(t.TempDir(), "reads.json"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+	cookies := map[string]*http.Cookie{
+		"alice": signupAndSession(t, h, "alice@x.io", "Alice", "password1"),
+		"bob":   signupAndSession(t, h, "bob@x.io", "Bob", "password1"),
+	}
+	rec := doAs(t, h, "POST", "/api/projects", map[string]string{"name": "wiki"}, cookies["alice"])
+	if rec.Code != 200 {
+		t.Fatalf("create project: %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Project Project `json:"project"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if err := orgs.AddMember(out.Project.Org, "bob@x.io", RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeRemoteAt(t, filepath.Join(root, out.Project.ID))
+	f.putAs("dev1", "alice@x.io", "Alice", "guide.md", "# guide")
+	f.putAs("dev1", "alice@x.io", "Alice", "page.html", "<p>hi</p>")
+	return h, srv, out.Project, cookies
+}
+
+func humanHeat(t *testing.T, h http.Handler, p Project, c *http.Cookie, path string) HeatEntry {
+	t.Helper()
+	rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/heat?days=30", nil, c)
+	if rec.Code != 200 {
+		t.Fatalf("heat: %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Entries map[string]HeatEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Entries[path]
+}
+
+// TestReadCountsOnePageOpenOnce is the BEA-15 regression: one signed-in
+// person opening one file, however many requests the page open makes and
+// whichever handler serves them, is exactly one read.
+func TestReadCountsOnePageOpenOnce(t *testing.T) {
+	h, _, p, c := readsHub(t)
+	base := "/api/p/" + p.ID + "/"
+
+	// A markdown page open is a /render; reopening it five times in a
+	// session is one visit.
+	for range 5 {
+		if rec := doAs(t, h, "GET", base+"render?path=guide.md", nil, c["alice"]); rec.Code != 200 {
+			t.Fatalf("render: %d %s", rec.Code, rec.Body)
+		}
+	}
+	// The ⋯ menu's Download and a raw view hit the same file by other handlers.
+	doAs(t, h, "GET", base+"file?path=guide.md", nil, c["alice"])
+	doAs(t, h, "GET", base+"download?path=guide.md", nil, c["alice"])
+	if e := humanHeat(t, h, p, c["alice"], "guide.md"); e.Human != 1 || e.Readers != 1 {
+		t.Fatalf("guide.md after one person's session = %+v, want human 1, readers 1", e)
+	}
+
+	// A second person opening it once adds exactly one, and one more reader.
+	doAs(t, h, "GET", base+"render?path=guide.md", nil, c["bob"])
+	if e := humanHeat(t, h, p, c["alice"], "guide.md"); e.Human != 2 || e.Readers != 2 {
+		t.Fatalf("guide.md after bob = %+v, want human 2, readers 2", e)
+	}
+
+	// An HTML file is served into a sandboxed iframe, which fetches it as an
+	// opaque origin — no session cookie. That fetch is a subresource of an
+	// already-counted page open, not a second reader.
+	doAs(t, h, "GET", base+"file?path=page.html", nil, c["alice"])
+	do(t, h, "GET", base+"file?path=page.html", nil) // the sandboxed iframe
+	if e := humanHeat(t, h, p, c["alice"], "page.html"); e.Human != 1 || e.Readers != 1 {
+		t.Fatalf("page.html = %+v, want human 1, readers 1 (sandboxed fetch is not a reader)", e)
+	}
+
+	// Spelunking through history is not consumption: neither the feed nor an
+	// old version fetched from it counts.
+	rec := doAs(t, h, "GET", base+"history?path=guide.md", nil, c["bob"])
+	var hist struct {
+		Entries []struct {
+			Blob string `json:"blob"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &hist); err != nil || len(hist.Entries) == 0 {
+		t.Fatalf("history: %d %s (%v)", rec.Code, rec.Body, err)
+	}
+	doAs(t, h, "GET", base+"blob?sha="+hist.Entries[0].Blob, nil, c["bob"])
+	if e := humanHeat(t, h, p, c["alice"], "guide.md"); e.Human != 2 {
+		t.Fatalf("guide.md after history spelunking = %+v, want human still 2", e)
+	}
+
+	// The privacy line: counts leave the server, identities never do.
+	rec = doAs(t, h, "GET", base+"heat?days=30", nil, c["alice"])
+	for _, leak := range []string{"alice@x.io", "bob@x.io", "dev1", "actor"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Fatalf("heat leaked %q: %s", leak, rec.Body)
+		}
 	}
 }
