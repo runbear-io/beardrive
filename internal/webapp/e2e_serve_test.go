@@ -81,8 +81,7 @@ func TestE2EServe(t *testing.T) {
 	if _, err := auth.signup(e2eMember, "E2E Member", e2ePassword); err != nil {
 		t.Fatal(err)
 	}
-	// In no org: sees the onboarding empty state (and creating a project
-	// from it mints a fresh org via orgForCreate).
+	// In no org: sees the onboarding empty state (agent paste prompt).
 	if _, err := auth.signup(e2eSolo, "E2E Solo", e2ePassword); err != nil {
 		t.Fatal(err)
 	}

@@ -1,49 +1,16 @@
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
-import { Button } from "@/components/ui/button";
 import { GuideCode, INSTALL_DOC } from "./ConnectGuide";
 
 // Onboarding: a signed-in account with no projects shouldn't hit a blank
-// sidebar. Lead with the real way in — init a folder from the terminal so
-// files actually sync — then the fallbacks: paste an invite link, or create
-// an empty project from here. The inputs are RHF+zod forms with inline
-// errors (no toast-on-typo).
+// sidebar. One path in — paste the canonical install prompt into a coding
+// agent — with the by-hand route a docs link away.
 
-const joinSchema = z.object({
-  invite: z
-    .string()
-    .trim()
-    .refine((v) => /join\/([0-9a-f]+)/.test(v) || /^[0-9a-f]{8,}$/.test(v), {
-      message: "That doesn't look like an invite link.",
-    }),
-});
-const createSchema = z.object({
-  name: z.string().trim().min(1, "Give the project a name.").max(60, "Keep it under 60 characters."),
-});
-
-export function EmptyState({
-  authEnabled,
-  onCreate,
-}: {
-  authEnabled: boolean;
-  onCreate: (name: string) => void;
-}) {
-  const joinForm = useForm<z.infer<typeof joinSchema>>({
-    resolver: zodResolver(joinSchema),
-    defaultValues: { invite: "" },
-  });
-  const createForm = useForm<z.infer<typeof createSchema>>({
-    resolver: zodResolver(createSchema),
-    defaultValues: { name: "" },
-  });
-
+export function EmptyState() {
   return (
     <div className="onboard">
       <h1>Welcome to BearDrive</h1>
       <p>You're signed in, but you're not part of any project yet.</p>
       <div className="ob-card">
-        <h3>Start syncing a folder</h3>
+        <h3>Connect a new drive to your project</h3>
         <p>
           Paste into your coding agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the
           folder where you want the files. It creates the project and starts syncing:
@@ -57,64 +24,11 @@ export function EmptyState({
             "."
           }
         />
-        <details className="gd-manual">
-          <summary>Or run it yourself</summary>
-          <GuideCode
-            code={
-              "brew install runbear-io/tap/beardrive\n" +
-              "bdrive skill install\n" +
-              "bdrive login " +
-              window.location.origin +
-              "\nbdrive init\nbdrive hooks install"
-            }
-          />
-        </details>
-      </div>
-      {authEnabled && (
-        <div className="ob-card">
-          <h3>Have an invite link?</h3>
-          <p>A teammate can send you a join link. Paste it here:</p>
-          <form
-            className="ob-row"
-            onSubmit={joinForm.handleSubmit(({ invite }) => {
-              const m = invite.match(/join\/([0-9a-f]+)/) || invite.match(/^([0-9a-f]{8,})$/);
-              location.href = "/join/" + m![1];
-            })}
-          >
-            <input
-              id="ob-invite"
-              type="text"
-              placeholder="https://…/join/…"
-              autoComplete="off"
-              {...joinForm.register("invite")}
-            />
-            <Button id="ob-join" variant="primary" type="submit">
-              Join
-            </Button>
-          </form>
-          {joinForm.formState.errors.invite && (
-            <p className="field-err">{joinForm.formState.errors.invite.message}</p>
-          )}
-        </div>
-      )}
-      <div className="ob-card">
-        <h3>Or start a new project</h3>
-        <p>Create a shared space for your team's files.</p>
-        <form className="ob-row" onSubmit={createForm.handleSubmit(({ name }) => onCreate(name))}>
-          <input
-            id="ob-name"
-            type="text"
-            placeholder="Project name, e.g. wiki"
-            autoComplete="off"
-            {...createForm.register("name")}
-          />
-          <Button id="ob-create" variant="primary" type="submit">
-            Create
-          </Button>
-        </form>
-        {createForm.formState.errors.name && (
-          <p className="field-err">{createForm.formState.errors.name.message}</p>
-        )}
+        <p className="ob-alt">
+          <a href="https://docs.beardrive.ai/manual/setup-by-hand/" target="_blank" rel="noreferrer">
+            Or start a project manually →
+          </a>
+        </p>
       </div>
     </div>
   );
