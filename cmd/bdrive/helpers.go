@@ -122,6 +122,9 @@ func printCycle(res *syncer.Result) {
 	if res.Conflicts > 0 {
 		fmt.Printf("  conflicts:      %d (preserved as *.bdrive-conflict-* files)\n", res.Conflicts)
 	}
+	if res.Pruned > 0 {
+		fmt.Printf("  pruned:         %d path(s) removed from the hub (kept on disk)\n", res.Pruned)
+	}
 	fmt.Printf("  files updated:  %d\n", res.Materialized)
 	switch {
 	case res.NoAccess:

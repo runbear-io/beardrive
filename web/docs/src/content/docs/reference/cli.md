@@ -14,9 +14,10 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive init [folder]` | Create or connect a project and start syncing. Interactive on a TTY; flags (`--name`, `--project`, `--shared`, `--yes`) for scripts. Re-run to resume |
 | `bdrive stop [folder]` | Stop syncing — daemon and agent sync hooks both pause. Files stay on disk; `bdrive init` resumes |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — the include list set by `init --shared`. Run from the mount root; the daemon picks changes up in seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub |
+| `bdrive forget <path>...` | Stop syncing a path and remove it from the hub. Adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file. `--list`, `--revoke`, `--expires` |
-| `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it. `--hook <label>` is agent-hook plumbing |
+| `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing |
 | `bdrive hooks [install]` | Register turn-boundary sync hooks with detected agent platforms. Idempotent; `--agent` overrides detection |
 | `bdrive skill [install]` | Install the `beardrive` skill into detected agent platforms so the agent can do setup itself. Idempotent; `--agent` overrides detection |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
@@ -50,6 +51,42 @@ Daemon intervals are tunable here: `--scan-interval` (default 3s) and
 Stamps session context — an agent session id, say — onto changes. It shows up in
 `bdrive log` and hub history, and keeps applying to daemon-committed changes
 until `--note-ttl` expires.
+
+### `bdrive forget` and `bdrive sync --prune` — cleaning up the hub
+
+Adding a rule to `.bdriveignore` only stops *future* uploads. Anything that
+synced before the rule existed stays on the hub. These two commands are how it
+comes off:
+
+```
+$ bdrive forget .omc
+added `.omc/` to .bdriveignore
+synced /Users/you/notes (project "notes")
+  ...
+  pruned:         72 path(s) removed from the hub (kept on disk)
+
+$ bdrive sync --prune       # same cleanup for rules you added by hand
+```
+
+`forget` writes the rule (a trailing `/` for a directory) and prunes in the
+same run; it is idempotent, so re-running it just prunes. A path outside the
+project is an error and writes nothing.
+
+**No device loses a file.** The removal is journaled as an ordinary delete, and
+because `.bdriveignore` syncs, every device receives the rule alongside the
+delete and simply stops tracking the path — the file itself stays on disk here
+and on every teammate's machine. Nothing is destroyed either: blobs are
+retained forever, so the removal shows in `bdrive log` and every past version
+stays in the hub's history.
+
+Prune reconciles against `.bdriveignore` only, never against this device's own
+sync scope (`bdrive scope` / `init --shared`). Ignore rules are shared; the
+scope is per-device, and a narrow scope means "not on my disk", not "not on the
+hub". To clean up something your scope excludes, `bdrive forget` it — that
+writes the exclusion into the shared rules first, which is what makes it safe.
+
+If a teammate edits the file between your prune and their next sync, their
+version wins and the path comes back. Run `--prune` again once they have synced.
 
 ### `bdrive status` — and the two degraded access states
 

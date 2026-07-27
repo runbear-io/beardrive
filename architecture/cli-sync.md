@@ -19,14 +19,16 @@ classDiagram
         +Account config.Settings
         +Backend remote.Backend
         +Note string
+        +Prune bool
         +OnProgress func
         +Cycle(ctx) Result
     }
-    note for Session "internal/syncer — scan → commit local ops → pull peer journals → preserve conflicts → materialize → push blobs then own journal"
+    note for Session "internal/syncer — scan → commit local ops → pull peer journals → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
+    note for Session "Prune (bdrive forget / sync --prune, never the daemon) journals a delete for every replayed path the SHARED ignore rules exclude — the include scope is per-device and must never prune it"
 
     class Result {
         +LocalOps +PulledOps
-        +Conflicts +Materialized
+        +Conflicts +Pruned +Materialized
         +Pushed +Offline +OfflineErr
         +ReadOnly +NoAccess +AccessErr
     }
@@ -88,7 +90,7 @@ classDiagram
 
     class Commands {
         init login logout
-        sync stop scope status log
+        sync stop scope forget status log
         url share export import
         web daemon hooks read-log skill
     }

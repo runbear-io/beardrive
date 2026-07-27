@@ -17,10 +17,22 @@ func syncCmd() *cobra.Command {
 	var note string
 	var noteTTL time.Duration
 	var hookLabel string
+	var prune bool
 	c := &cobra.Command{
 		Use:   "sync [folder]",
 		Short: "Sync a mounted folder with its remote now",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Run one sync cycle now: journal local changes, pull teammates' changes,
+and push.
+
+--prune additionally reconciles the hub against .bdriveignore: anything the
+hub still holds that the ignore rules now exclude is removed from the hub
+while staying on disk, here and on every teammate's device. That is the
+cleanup path for files that synced before the rule was added. It never
+prunes paths excluded only by this device's own sync scope (bdrive scope) —
+a narrow scope means "not on my disk", not "not on the hub".`,
+		Example: `  bdrive sync
+  bdrive sync --prune    # also drop hub files that .bdriveignore now excludes`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			folder, err := absFolder(args)
 			if err != nil {
@@ -65,6 +77,7 @@ func syncCmd() *cobra.Command {
 				}
 				sess.Note = note
 			}
+			sess.Prune = prune
 			sess.OnProgress = progressReporter()
 			res, err := sess.Cycle(cmd.Context())
 			if err != nil {
@@ -75,6 +88,7 @@ func syncCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&prune, "prune", false, "also remove from the hub what .bdriveignore now excludes (files stay on disk everywhere)")
 	c.Flags().StringVar(&note, "note", "", "session context stamped onto changes (e.g. an agent session id); shown in history; empty clears")
 	c.Flags().DurationVar(&noteTTL, "note-ttl", 30*time.Minute, "how long the note keeps applying to daemon-committed changes")
 	c.Flags().StringVar(&hookLabel, "hook", "", "agent-hook mode: read the platform's hook event JSON from stdin, sync with a session note labeled by this value, and emit the project's link-formula context (Claude Code hook JSON) on stdout")

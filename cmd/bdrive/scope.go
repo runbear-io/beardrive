@@ -25,7 +25,8 @@ folder syncs. Run from the mount root; the daemon picks changes up within
 seconds.
 
 Removing a folder stops syncing it but deletes nothing — local files stay,
-and the hub keeps everything already synced.`,
+and the hub keeps everything already synced. To take something off the hub
+too, use ` + "`bdrive forget <path>`" + `.`,
 		Example: `  bdrive scope             # show what syncs
   bdrive scope add docs    # also sync ./docs
   bdrive scope rm docs     # stop syncing ./docs (files stay everywhere)`,

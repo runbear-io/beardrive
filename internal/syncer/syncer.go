@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -61,7 +62,14 @@ type Session struct {
 	// store's persisted session note (store.LoadNote), which lets a one-shot
 	// `bdrive sync --note` leave context that the daemon's later scans also
 	// stamp. Conflict-copy ops keep their own explanatory note.
-	Note    string
+	Note string
+	// Prune makes this cycle reconcile the hub against the shared ignore
+	// rules: every path the remote still holds that .bdriveignore (or a
+	// builtin never-sync rule) now excludes is journaled as a delete, so it
+	// leaves the hub while staying on disk on every device. Off by default —
+	// plain `bdrive sync` and the daemon never set it, because pruning must
+	// be a deliberate act, never a side effect of editing .bdriveignore.
+	Prune   bool
 	Backend remote.Backend // nil = work offline
 	// OnProgress, when set, is called during push with upload progress. It may
 	// be invoked concurrently from upload workers, so it must be safe to call
@@ -91,6 +99,7 @@ type Result struct {
 	LocalOps     int  // local changes committed to the journal
 	PulledOps    int  // ops received from other devices
 	Conflicts    int  // conflict copies created
+	Pruned       int  // paths removed from the hub by --prune (kept on disk)
 	Materialized int  // files written/removed in the working folder
 	Pushed       bool // own journal/blobs uploaded
 	Offline      bool // remote configured but unreachable this cycle
@@ -101,7 +110,7 @@ type Result struct {
 }
 
 func (r *Result) Activity() bool {
-	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Materialized > 0
+	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Pruned > 0 || r.Materialized > 0
 }
 
 // The .bdrive settings dir (config.ProjectDir) never syncs: it is the
@@ -204,11 +213,49 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("read journals: %w", err)
 	}
 	target := journal.Replay(all)
+
+	// The ignore rules sync like any other file, so a peer can receive the new
+	// .bdriveignore and the delete ops it justifies in the same batch. The
+	// filter was loaded at the top of the cycle, before the pull, so write the
+	// rules first and reload from them — otherwise materialize's delete loop
+	// runs against stale rules, its filter guard never fires, and it unlinks
+	// files that merely left sync scope.
+	if want, ok := target[IgnoreFile]; ok && len(pulled) > 0 {
+		wrote, err := s.materializeFile(IgnoreFile, want, cache)
+		if err != nil {
+			return nil, fmt.Errorf("materialize %s: %w", IgnoreFile, err)
+		}
+		if wrote {
+			res.Materialized++
+			if filter, err = loadFilter(s.Folder, proj.Include); err != nil {
+				return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
+			}
+		}
+		// If the blob isn't fetched yet materializeFile skips it and the old
+		// rules stand: the usual retry-next-cycle posture, and the guard in
+		// materialize still protects the files either way.
+	}
+
+	// 4b. Prune: remove from the hub what the shared rules now exclude.
+	if s.Prune {
+		pruneOps, err := s.pruneOps(target, &st, int64(len(myOps)))
+		if err != nil {
+			return nil, err
+		}
+		if len(pruneOps) > 0 {
+			if err := s.Store.AppendOps(s.Device.ID, pruneOps); err != nil {
+				return nil, fmt.Errorf("append prune ops: %w", err)
+			}
+			myOps = append(myOps, pruneOps...)
+			res.Pruned = len(pruneOps)
+		}
+	}
+
 	n, err := s.materialize(target, cache, filter)
 	if err != nil {
 		return nil, fmt.Errorf("materialize: %w", err)
 	}
-	res.Materialized = n
+	res.Materialized += n
 
 	// 5. Push our blobs and journal.
 	if s.Backend != nil && !res.Offline && int64(len(myOps)) > st.PushedOps {
@@ -516,40 +563,26 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 		if filter.Skip(rel) {
 			continue
 		}
-		c, ok := cache[rel]
-		if ok && c.Blob == want.Blob && c.Mode == want.Mode {
-			continue
-		}
-		abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
-		if fi, err := os.Stat(abs); err == nil {
-			if ok && (fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS) {
-				continue // dirty: changed mid-cycle, next scan commits it
-			}
-			if !ok {
-				// Untracked file already at this path: adopt if identical,
-				// otherwise leave it for the next scan to journal.
-				sum, err := hashFile(abs)
-				if err != nil || sum != want.Blob {
-					continue
-				}
-			}
-		}
-		if !s.Store.HasBlob(want.Blob) {
-			continue // content not fetched yet; retry next cycle
-		}
-		if err := s.writeFile(abs, want); err != nil {
-			return changed, fmt.Errorf("write %s: %w", rel, err)
-		}
-		fi, err := os.Stat(abs)
+		wrote, err := s.materializeFile(rel, want, cache)
 		if err != nil {
 			return changed, err
 		}
-		cache[rel] = store.CachedFile{Blob: want.Blob, Size: fi.Size(), Mode: want.Mode, MTimeNS: fi.ModTime().UnixNano()}
-		changed++
+		if wrote {
+			changed++
+		}
 	}
 
 	for rel, c := range cache {
 		if _, ok := target[rel]; ok {
+			continue
+		}
+		if filter.Skip(rel) {
+			// The path left sync scope rather than being deleted — someone
+			// ignored it, or `--prune` removed it from the hub. Stop tracking
+			// it; the file itself is ours to keep. Without this guard a prune
+			// (or any delete op for a now-filtered path) unlinks every peer's
+			// local copy, which is the data loss the feature exists to avoid.
+			delete(cache, rel)
 			continue
 		}
 		abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
@@ -566,6 +599,99 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 		changed++
 	}
 	return changed, nil
+}
+
+// materializeFile writes one path of the merged state into the working
+// folder, reporting whether it wrote. It never clobbers a file that changed
+// since the scan earlier in this cycle. Split out of materialize so the cycle
+// can land .bdriveignore on its own, before the rules are needed.
+func (s *Session) materializeFile(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
+	c, ok := cache[rel]
+	if ok && c.Blob == want.Blob && c.Mode == want.Mode {
+		return false, nil
+	}
+	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
+	if fi, err := os.Stat(abs); err == nil {
+		if ok && (fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS) {
+			return false, nil // dirty: changed mid-cycle, next scan commits it
+		}
+		if !ok {
+			// Untracked file already at this path: adopt if identical,
+			// otherwise leave it for the next scan to journal.
+			sum, err := hashFile(abs)
+			if err != nil || sum != want.Blob {
+				return false, nil
+			}
+		}
+	}
+	if !s.Store.HasBlob(want.Blob) {
+		return false, nil // content not fetched yet; retry next cycle
+	}
+	if err := s.writeFile(abs, want); err != nil {
+		return false, fmt.Errorf("write %s: %w", rel, err)
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return false, err
+	}
+	cache[rel] = store.CachedFile{Blob: want.Blob, Size: fi.Size(), Mode: want.Mode, MTimeNS: fi.ModTime().UnixNano()}
+	return true, nil
+}
+
+// pruneOps journals a delete for every path the hub still holds that the
+// shared rules now exclude, and drops it from target so this cycle does not
+// write it back. Peers keep their copies: the delete arrives alongside the
+// rules that explain it, and materialize's filter guard turns it into
+// "stop tracking" rather than "unlink".
+//
+// It reconciles against the replayed remote state, not the local cache. A
+// path filtered out in some earlier cycle was dropped from the cache back
+// then and is invisible locally today — which is exactly the leak --prune
+// exists to clean up.
+//
+// The rules are deliberately ignore-only. .bdriveignore syncs, so every
+// device agrees on it; the include list lives in this device's own
+// .bdrive/config.json and does not sync. Never reuse the cycle's main filter
+// here: a device with a narrow --shared scope would delete files a
+// whole-folder teammate legitimately syncs.
+func (s *Session) pruneOps(target map[string]journal.FileState, st *store.SyncState, seqBase int64) ([]journal.Op, error) {
+	shared, err := loadFilter(s.Folder, nil) // nil include: shared rules only
+	if err != nil {
+		return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
+	}
+	var paths []string
+	for rel := range target {
+		if shared.Skip(rel) || neverSync(rel) {
+			paths = append(paths, rel)
+		}
+	}
+	sort.Strings(paths) // map order is random; keep the journal reproducible
+	ops := make([]journal.Op, 0, len(paths))
+	for _, rel := range paths {
+		st.Lamport++
+		seqBase++
+		ops = append(ops, journal.Op{
+			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
+			Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
+			User: s.Account.Email, UserName: s.Account.Name,
+			Kind: journal.KindDelete, Path: rel,
+			Note: "pruned: excluded by " + IgnoreFile,
+		})
+		delete(target, rel)
+	}
+	return ops, nil
+}
+
+// neverSync reports whether a path is one the scan walk never uploads at all
+// — the builtin exclusions, which prune treats exactly like ignore rules.
+func neverSync(rel string) bool {
+	parts := strings.Split(rel, "/")
+	for _, dir := range parts[:len(parts)-1] {
+		if ignoreDirs[dir] {
+			return true
+		}
+	}
+	return ignoredFile(parts[len(parts)-1])
 }
 
 func (s *Session) writeFile(abs string, want journal.FileState) error {
