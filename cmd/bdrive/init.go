@@ -88,6 +88,9 @@ the folder was renamed or moved.`,
 				return err
 			} else if ok && proj.Remote != "" {
 				fmt.Printf("resuming %s (project %s)\n", folder, proj.Volume)
+				if cmd.Flags().Changed("shared") {
+					fmt.Println("note: --shared is ignored on resume — change what syncs with `bdrive scope add`/`rm`")
+				}
 				return startSync(cmd.Context(), folder, proj, foreground, 3*time.Second, 10*time.Second)
 			}
 
