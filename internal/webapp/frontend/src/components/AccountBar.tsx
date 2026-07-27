@@ -41,6 +41,7 @@ export function AccountBar({
   // (middle-click, copy link address).
   const [menuOpen, setMenuOpen] = useState(false);
   const orgLink = org ? linkProps(org.manage_url) : null;
+  const billingLink = billing ? linkProps(billing.url) : null;
   return (
     <footer id="accountbar">
       <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
@@ -84,9 +85,16 @@ export function AccountBar({
               </DropdownMenuItem>
               {billing && (
                 <DropdownMenuItem asChild>
-                  {/* Server-rendered page outside the SPA: a plain full-load
-                      link, no router. The chip shows the org's current plan. */}
-                  <a id="menu-billing" href={billing.url}>
+                  {/* An in-app view route (/billing); the chip shows the
+                      org's current plan. */}
+                  <a
+                    id="menu-billing"
+                    {...billingLink}
+                    onClick={(e) => {
+                      billingLink?.onClick?.(e);
+                      setMenuOpen(false);
+                    }}
+                  >
                     <Icon name="card" />
                     <span>Billing</span>
                     <span className="ps-chip plan-chip">{billing.plan}</span>

@@ -9,6 +9,7 @@ import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { ProjectNav } from "../components/ProjectNav";
 import { AccountBar } from "../components/AccountBar";
+import { BillingView } from "../components/BillingView";
 import { ProjectSettings } from "../components/ProjectSettings";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { EmptyState } from "../components/EmptyState";
@@ -171,6 +172,24 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       }
     : null;
 
+  // Billing is hub-level (the managed deployment's surface), not
+  // project-scoped — like the org route it borrows whichever project the
+  // sidebar is showing. An OSS hub has no billing block; a hand-typed
+  // /billing there says so instead of silently showing files.
+  const billingPage = route.billing
+    ? {
+        crumb: "Billing",
+        body: config.billing ? (
+          <BillingView url={config.billing.url} />
+        ) : (
+          <div className="empty">
+            <h3>No billing on this hub</h3>
+            <p>This BearDrive hub doesn't have a billing surface.</p>
+          </div>
+        ),
+      }
+    : null;
+
   const routePage =
     route.view === "settings"
       ? {
@@ -204,7 +223,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // URL; replace so back/forward never bounces through the redirect. The
   // org route is not project-scoped, so it is exempt — it borrows whichever
   // project the sidebar is showing.
-  if (!route.org && route.project !== current.id) {
+  if (!route.org && !route.billing && route.project !== current.id) {
     return <Redirect to={"/" + current.id} />;
   }
 
@@ -266,7 +285,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         ),
         orgBar: accountBar,
       }}
-      panel={activePanel || orgPage || routePage}
+      panel={activePanel || orgPage || billingPage || routePage}
       onClosePanel={() => setPanel(null)}
     />
   );

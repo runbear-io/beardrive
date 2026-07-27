@@ -21,6 +21,22 @@ export interface ServerConfig {
   billing?: { plan: string; url: string };
 }
 
+// GET <config.billing.url> with Accept: application/json (managed hubs).
+// The SPA's /billing view renders this; the money actions stay server-side
+// (checkout_url/portal_url are plain form-POST targets that leave the SPA).
+export interface BillingInfo {
+  org: string;
+  role: string;
+  owner: boolean;
+  plan: { id: string; name: string; status?: string };
+  usage: { used: string; cap: string; pct: number };
+  seats: { used: number; cap: number };
+  plans: { id: string; name: string; price: string; blurb: string; current: boolean }[];
+  has_customer: boolean;
+  checkout_url: string;
+  portal_url: string;
+}
+
 // Per-project permission levels (perms.go). Ordered: each includes the ones
 // before it.
 export type PermLevel = "none" | "read" | "write" | "admin";
