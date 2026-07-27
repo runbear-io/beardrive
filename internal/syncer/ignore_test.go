@@ -76,6 +76,18 @@ func TestIgnoreBeatsInclude(t *testing.T) {
 	}
 }
 
+func TestIgnoreFileAlwaysSyncs(t *testing.T) {
+	for _, f := range []*Filter{
+		filterFrom(t, ".bdriveignore\n*", nil),          // self-ignored
+		filterFrom(t, "", []string{"docs/"}),            // include list without it
+		filterFrom(t, ".bdriveignore", []string{"src"}), // both
+	} {
+		if f.Skip(IgnoreFile) {
+			t.Error(".bdriveignore must always sync")
+		}
+	}
+}
+
 func TestPruneDir(t *testing.T) {
 	f := filterFrom(t, "node_modules/", nil)
 	if !f.PruneDir("node_modules") || !f.PruneDir("sub/node_modules") {

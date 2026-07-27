@@ -62,9 +62,9 @@ subfolders later, use `bdrive scope add <dir>` / `bdrive scope rm <dir>`
 from the mount root — never hand-edit `.bdrive/config.json`.
 
 After init, tell git what's what: add `.bdrive/` to `.gitignore` (per-machine
-state, never committed) and COMMIT `.bdriveignore` (on a `--shared` mount the
-root `.bdriveignore` is local-only to each clone, so git is how the team
-shares it).
+state, never committed). `.bdriveignore` always syncs through BearDrive —
+including on `--shared` mounts — so the team shares rules automatically;
+committing it to git too is fine but optional.
 
 ## 4. Teach agents about the shared folder (ask first — never do this silently)
 
