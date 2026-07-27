@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
@@ -8,14 +8,21 @@ import { HTML_EXT, IMG_EXT, MD_EXT, TEXT_EXT, joinPath } from "../util";
 export function FileView(props: {
   apiBase: string;
   path: string;
+  // Pinned to one past version by content hash (?v=), otherwise current.
+  version?: string;
   heatMap: HeatMap | null;
   flatFiles: Node[];
   onOpenFile: (path: string) => void;
   onMeta: (meta: string) => void;
   onRendered?: () => void;
 }) {
-  const { apiBase, path, onMeta } = props;
-  const fileURL = apiBase + "file?path=" + encodeURIComponent(path);
+  const { apiBase, path, version, onMeta } = props;
+  // A version is served by content hash; ?name= is what makes the server
+  // set a real Content-Type, so images and text render instead of
+  // downloading as octet-stream.
+  const fileURL = version
+    ? apiBase + "blob?sha=" + version + "&name=" + encodeURIComponent(path)
+    : apiBase + "file?path=" + encodeURIComponent(path);
 
   useEffect(() => () => onMeta(""), [path, onMeta]); // leaving a file clears its meta line
 
@@ -35,14 +42,14 @@ export function FileView(props: {
     );
   }
   if (IMG_EXT.test(path)) {
-    return <ImgView src={fileURL} alt={path} onRendered={props.onRendered} />;
+    return <ImgView src={fileURL} alt={path} version={version} onRendered={props.onRendered} />;
   }
   if (TEXT_EXT.test(path)) return <TextView {...props} fileURL={fileURL} />;
   return (
     <div className="filecard">
       <div className="name">{path.split("/").pop()}</div>
       <p>No preview for this file type.</p>
-      <a className="btn" download href={apiBase + "download?path=" + encodeURIComponent(path)}>
+      <a className="btn" download href={version ? fileURL + "&download=1" : apiBase + "download?path=" + encodeURIComponent(path)}>
         Download
       </a>
     </div>
@@ -50,10 +57,13 @@ export function FileView(props: {
 }
 
 function MarkdownView(props: Parameters<typeof FileView>[0]) {
-  const { apiBase, path, heatMap, flatFiles, onOpenFile, onMeta, onRendered } = props;
+  const { apiBase, path, version, heatMap, flatFiles, onOpenFile, onMeta, onRendered } = props;
   const { data: doc, error } = useQuery({
-    queryKey: ["render", apiBase, path],
-    queryFn: () => getJSON<RenderDoc>(apiBase + "render?path=" + encodeURIComponent(path)),
+    queryKey: ["render", apiBase, path, version || ""],
+    queryFn: () =>
+      getJSON<RenderDoc>(
+        apiBase + "render?path=" + encodeURIComponent(path) + (version ? "&sha=" + version : ""),
+      ),
   });
 
   // Rewrite the HTML BEFORE rendering (relative image sources, external
@@ -77,7 +87,7 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
     onRendered?.();
   }, [doc, heatMap, onMeta, onRendered]);
 
-  if (error) return <div className="empty">Could not load file: {(error as Error).message}</div>;
+  if (error) return <LoadError version={version} err={error as Error} />;
   if (!doc) return null;
   // Server-rendered, server-sanitized markdown — same trust model as the
   // classic app assigning innerHTML.
@@ -131,12 +141,27 @@ function transformHTML(html: string, p: string, apiBase: string): string {
   return parsed.body.innerHTML;
 }
 
-function ImgView({ src, alt, onRendered }: { src: string; alt: string; onRendered?: () => void }) {
-  return <img src={src} alt={alt} onLoad={onRendered} />;
+function ImgView(props: { src: string; alt: string; version?: string; onRendered?: () => void }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <LoadError version={props.version} err={new Error("could not be loaded")} />;
+  return (
+    <img src={props.src} alt={props.alt} onLoad={props.onRendered} onError={() => setFailed(true)} />
+  );
+}
+
+/* A missing current file is a server problem worth quoting; a missing
+   version is almost always a bad ?v= in a hand-edited or stale URL, which
+   the server's "no such version" wording does not explain. */
+function LoadError({ version, err }: { version?: string; err: Error }) {
+  return (
+    <div className="empty">
+      {version ? "That version isn't available." : "Could not load file: " + err.message}
+    </div>
+  );
 }
 
 function TextView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
-  const { path, fileURL, onRendered } = props;
+  const { path, version, fileURL, onRendered } = props;
   const { data, error } = useQuery({
     queryKey: ["text", fileURL],
     queryFn: async () => {
@@ -148,7 +173,7 @@ function TextView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
   useEffect(() => {
     if (data != null) onRendered?.();
   }, [data, onRendered]);
-  if (error) return <div className="empty">Could not load file: {(error as Error).message}</div>;
+  if (error) return <LoadError version={version} err={error as Error} />;
   if (data == null) return null;
   return (
     <pre className="plain" key={path}>

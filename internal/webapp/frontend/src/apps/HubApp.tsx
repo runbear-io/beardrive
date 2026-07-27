@@ -17,7 +17,7 @@ import { toast } from "../toast";
 import Browser from "./Browser";
 
 export default function HubApp({ config }: { config: ServerConfig }) {
-  const pathname = useLocationPath();
+  const loc = useLocationPath(); // pathname + search
   const refresh = useHubRefresh();
   // Org just joined via an invite this page-load: prefer its projects over
   // whatever happens to be first in the list.
@@ -26,19 +26,19 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // URL (the last of the classic app's URL-less surfaces); any navigation
   // closes it. Org administration is a real route — see /orgs/<id> below.
   const [panel, setPanel] = useState<null | { kind: "hub" }>(null);
-  useEffect(() => setPanel(null), [pathname]);
+  useEffect(() => setPanel(null), [loc]);
 
   const joinToken = useMemo(() => {
-    const m = pathname.match(/^\/join\/([0-9a-f]+)\/?$/);
+    const m = loc.split("?")[0].match(/^\/join\/([0-9a-f]+)\/?$/);
     return m ? m[1] : null;
-  }, [pathname]);
+  }, [loc]);
 
   const { data: projects } = useProjects(!joinToken);
   const { data: orgs } = useOrgs(!joinToken);
   const isAdmin = !!config.auth.admin;
   const { data: pending } = usePending(isAdmin);
 
-  const route = useMemo(() => parseRoute(pathname, "hub"), [pathname]);
+  const route = useMemo(() => parseRoute(loc, "hub"), [loc]);
 
   const current: Project | null = useMemo(() => {
     if (!projects) return null;

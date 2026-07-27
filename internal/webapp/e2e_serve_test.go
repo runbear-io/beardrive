@@ -161,6 +161,18 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	png := "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" +
 		"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
 	put("assets/logo.png", png, 24*time.Hour)
+	// One removed file, so the history feed has a delete row: deletes have no
+	// content, so their rows stay unclickable while every other row is now an
+	// address for its own version.
+	put("scratch.md", "# Scratch\n\nTemporary.\n", 12*time.Hour)
+	lam++
+	seq++
+	ops = append(ops, journal.Op{
+		Seq: seq, Lamport: lam, Time: now.Add(-6 * time.Hour),
+		Device: "seed", DeviceName: "seed-agent", Author: "alice@x.io",
+		User: "alice@x.io", UserName: "Alice",
+		Kind: journal.KindDelete, Path: "scratch.md",
+	})
 	if err := journal.Append(filepath.Join(prefix, "journal", "seed.jsonl"), ops); err != nil {
 		t.Fatal(err)
 	}

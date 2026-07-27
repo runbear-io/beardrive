@@ -13,7 +13,7 @@ export function HistoryView(props: {
   apiBase: string;
   target: string; // "" = whole project
   isFolder: (p: string) => boolean;
-  onOpen: (path: string) => void;
+  onOpen: (path: string, version?: string) => void;
   onMeta: (meta: string) => void;
   onRendered?: () => void;
 }) {

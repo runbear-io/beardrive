@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +128,76 @@ func TestHistoryAPI(t *testing.T) {
 	}
 	if rec := do(t, h, "GET", base+"blob?sha=nothex", nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad sha: %d, want 400", rec.Code)
+	}
+}
+
+// An old markdown version renders as markdown, not raw source — and looking
+// at history is never a read.
+func TestRenderVersion(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	f.putAs("dev1", "alice@x.io", "Alice", "guide.md", "# Guide\n\nFirst version.\n")
+	f.putAs("dev1", "alice@x.io", "Alice", "guide.md", "# Guide\n\nSecond version, longer.\n")
+	var err error
+	if srv.Reads, err = OpenReadLedger(filepath.Join(t.TempDir(), "reads.json"), 0); err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/"
+
+	rec := do(t, h, "GET", base+"history?path=guide.md", nil)
+	var hist struct {
+		Entries []HistoryEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &hist); err != nil {
+		t.Fatal(err)
+	}
+	first := hist.Entries[len(hist.Entries)-1] // oldest
+
+	rec = do(t, h, "GET", base+"render?path=guide.md&sha="+first.Blob, nil)
+	if rec.Code != 200 {
+		t.Fatalf("render version: %d %s", rec.Code, rec.Body)
+	}
+	var doc struct {
+		Path string `json:"path"`
+		HTML string `json:"html"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doc.HTML, "First version") || strings.Contains(doc.HTML, "Second version") {
+		t.Fatalf("rendered the wrong version: %q", doc.HTML)
+	}
+	if !strings.Contains(doc.HTML, "<h1") { // rendered, not raw source
+		t.Fatalf("not markdown-rendered: %q", doc.HTML)
+	}
+	if doc.Path != "guide.md" {
+		t.Fatalf("path = %q", doc.Path)
+	}
+	// current content still renders from the snapshot
+	rec = do(t, h, "GET", base+"render?path=guide.md", nil)
+	if !strings.Contains(rec.Body.String(), "Second version") {
+		t.Fatalf("current render = %s", rec.Body)
+	}
+
+	if rec := do(t, h, "GET", base+"render?path=guide.md&sha=nothex", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad sha: %d, want 400", rec.Code)
+	}
+	missing := strings.Repeat("a", 64)
+	if rec := do(t, h, "GET", base+"render?path=guide.md&sha="+missing, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown sha: %d, want 404", rec.Code)
+	}
+
+	// Only the current-content render above counted; the version views did not.
+	rec = do(t, h, "GET", base+"heat", nil)
+	var heat struct {
+		Entries map[string]HeatEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &heat); err != nil {
+		t.Fatal(err)
+	}
+	if e := heat.Entries["guide.md"]; e.Human != 1 {
+		t.Fatalf("heat = %+v; viewing history must not count as a read", heat.Entries)
 	}
 }
 
