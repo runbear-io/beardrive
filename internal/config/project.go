@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ProjectDir is the per-folder settings directory at the mount root. It
@@ -63,7 +64,25 @@ func LoadProject(folder string) (Project, bool, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return p, false, fmt.Errorf("parse %s: %w", projectConfigPath(folder), err)
 	}
+	p.Include = normalizeInclude(p.Include)
 	return p, true, nil
+}
+
+// normalizeInclude anchors bare single-segment include entries to the mount
+// root, so a config written before the fix ("wiki/") stops matching nested
+// directories of the same name without needing a re-init. Only single-segment
+// entries need it: compile() already anchors anything containing a slash.
+// Entries with glob syntax are left alone — a hand-written pattern is a
+// deliberate pattern.
+func normalizeInclude(include []string) []string {
+	for n, i := range include {
+		s := strings.TrimSuffix(i, "/")
+		if s == "" || strings.ContainsAny(s, "/*?[!") {
+			continue
+		}
+		include[n] = "/" + i
+	}
+	return include
 }
 
 // SaveProject writes <folder>/.bdrive/config.json, assigning a mount ID on

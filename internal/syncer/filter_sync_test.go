@@ -76,3 +76,29 @@ func TestIncludeListLimitsSync(t *testing.T) {
 		}
 	}
 }
+
+// The shared-subfolder scope is anchored at the mount root: a nested
+// directory that happens to share the name must never sync, or private
+// material leaks out of a project scoped to one folder.
+func TestIncludeListIsRootAnchored(t *testing.T) {
+	for _, include := range []string{"/shared/", "shared/"} { // new form, and pre-fix configs
+		t.Run(include, func(t *testing.T) {
+			be := sharedRemote(t)
+			a := newDevice(t, "deva", be)
+			b := newDevice(t, "devb", be)
+
+			write(t, a.Folder, ".bdrive/config.json", `{"include": ["`+include+`"]}`)
+			write(t, a.Folder, "shared/a.txt", "included")
+			write(t, a.Folder, ".claude/skills/x/shared/leak.mjs", "private")
+			cycle(t, a)
+			cycle(t, b)
+
+			if got := read(t, b.Folder, "shared/a.txt"); got != "included" {
+				t.Fatalf("shared/a.txt = %q", got)
+			}
+			if _, err := os.Stat(filepath.Join(b.Folder, ".claude/skills/x/shared/leak.mjs")); !os.IsNotExist(err) {
+				t.Fatal("a nested dir named shared/ must not sync")
+			}
+		})
+	}
+}

@@ -14,7 +14,7 @@ plus project, remote, and include settings.
 ```jsonc
 // .bdrive/config.json
 { "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["shared/"] }
+  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["/shared/"] }
 ```
 
 Written by `bdrive init` and safe to hand-edit — a running daemon picks changes

@@ -29,8 +29,12 @@ The result lands in `.bdrive/config.json` as an include list:
 
 ```jsonc
 { "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["wiki/"] }
+  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["/wiki/"] }
 ```
+
+The leading slash anchors each entry to the mount root: `/wiki/` means the
+`wiki` folder at the top of this project and nothing else, so a nested
+directory that happens to share the name never syncs.
 
 ## Change the scope later
 

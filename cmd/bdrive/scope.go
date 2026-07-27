@@ -128,14 +128,17 @@ func scopeRmCmd() *cobra.Command {
 }
 
 // scopeRemove drops the named dirs from the include list, matching each
-// argument both literally and in normalized "dir/" form (hand-edited
-// configs may hold arbitrary patterns). Unknown entries are an error.
+// argument literally, in normalized "/dir/" form, and in the pre-anchoring
+// "dir/" form that configs written before the anchoring fix still hold
+// (hand-edited configs may hold arbitrary patterns). Unknown entries are an
+// error.
 func scopeRemove(include, args []string) ([]string, error) {
 	remove := map[string]bool{}
 	for _, a := range args {
 		keys := map[string]bool{strings.TrimSpace(a): true}
 		if norm, err := cleanShared([]string{a}); err == nil {
 			keys[norm[0]] = true
+			keys[strings.TrimPrefix(norm[0], "/")] = true
 		}
 		found := false
 		for _, i := range include {
@@ -164,6 +167,6 @@ func printScope(proj config.Project) {
 	}
 	fmt.Println("syncing only:")
 	for _, i := range proj.Include {
-		fmt.Println("  ./" + strings.TrimSuffix(i, "/"))
+		fmt.Println("  ./" + strings.Trim(i, "/"))
 	}
 }
