@@ -7,3 +7,4 @@
 .claude/worktrees/
 /docs/
 /.review-shots/
+.env
