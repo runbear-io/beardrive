@@ -48,6 +48,15 @@ export async function getJSON<T>(url: string): Promise<T> {
   return r.json();
 }
 
+// Same auth/error handling as getJSON, but hands back the raw Response —
+// for endpoints that serve bytes rather than JSON (blob?sha=).
+export async function getResponse(url: string): Promise<Response> {
+  const r = await fetch(url);
+  if (r.status === 401) toLogin();
+  if (!r.ok) await fail(r);
+  return r;
+}
+
 /* fetch wrapper for methods without a body-returning helper */
 export async function api<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
   const opt: RequestInit = { method };

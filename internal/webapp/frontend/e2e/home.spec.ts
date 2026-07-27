@@ -134,6 +134,67 @@ test("history: whole project, newest first, and per-file versions", async ({ pag
   await page.waitForURL(`/${pid}/guide.md`);
 });
 
+test("per-file history: a version expands to show what changed", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  const rows = page.locator(".history .hentry");
+  await expect(rows).toHaveCount(2);
+  // Nothing is fetched until a row is expanded.
+  const blobReqs: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().includes("/blob?sha=")) blobReqs.push(r.url());
+  });
+  await expect(page.locator(".dv")).toHaveCount(0);
+
+  // Newest version diffs against the one before it.
+  await rows.nth(0).locator(".hdiff-btn").click();
+  const dv = page.locator(".dv");
+  await expect(dv).toBeVisible();
+  await expect(dv.locator(".dv-rm")).toContainText("First version of the guide.");
+  await expect(dv.locator(".dv-ins")).toContainText("Second version of the guide, with more detail.");
+  await expect(dv.locator(".dv-add")).toHaveText("+1");
+  await expect(dv.locator(".dv-del")).toHaveText("−1");
+  expect(blobReqs.length).toBe(2); // exactly the two versions, once each
+
+  // Collapsing and re-expanding is free: the blobs are cached by sha.
+  await rows.nth(0).locator(".hdiff-btn").click();
+  await expect(page.locator(".dv")).toHaveCount(0);
+  await rows.nth(0).locator(".hdiff-btn").click();
+  await expect(page.locator(".dv")).toBeVisible();
+  expect(blobReqs.length).toBe(2);
+
+  // The first version has nothing behind it, and says so.
+  await expect(rows.nth(1).locator(".hdiff-btn")).toHaveCount(0);
+  await expect(rows.nth(1).locator(".hdiff-none")).toContainText("nothing to compare against");
+
+  // Expanding never navigates away.
+  await expect(page).toHaveURL(`/${pid}/history/guide.md`);
+});
+
+test("per-file history: a binary version says so instead of diffing", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/assets/logo.png`);
+  await page.locator(".history .hentry").nth(0).locator(".hdiff-btn").click();
+  const dv = page.locator(".dv");
+  await expect(dv).toContainText("Binary file — no diff available");
+  // Both versions stay reachable by download.
+  await expect(dv.locator("a", { hasText: "download previous" })).toHaveAttribute(
+    "href",
+    /blob\?sha=[0-9a-f]{64}&name=logo\.png&download=1/,
+  );
+  await expect(dv.locator("a", { hasText: "download this version" })).toBeVisible();
+});
+
+test("the whole-project feed carries no diff controls", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history`);
+  await expect(page.locator(".history .hentry").first()).toBeVisible();
+  await expect(page.locator(".history .hdiff-btn")).toHaveCount(0);
+});
+
 test("folder listing's Full history goes to the subtree feed", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
