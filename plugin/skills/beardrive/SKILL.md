@@ -200,8 +200,8 @@ URL and id filled in.
 Hubs aggregate reads per file — viewer opens and downloads count as human
 reads, share-link hits as share reads, and hook-reported agent reads as
 agent reads; `/store` sync replication never counts. The web UI shows heat
-dots and read counts on folder listings (all members), and admins / org
-owners get an **Insights** dashboard (⋯ menu, all/human/agent lens): a
+dots and read counts on folder listings, and every project member gets
+the **Dashboard** (sidebar or ⋯ menu, all/human/agent lens): a
 treemap of every file (size = 30-day reads, color = staleness, ⚠ =
 hot+stale, click-through), a reads × freshness scatter (hot-but-stale
 quadrant = fix first), the hot path (top files by reads, agent/human

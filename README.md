@@ -13,7 +13,7 @@ knows what their agent knows. (People are covered too: any synced file
 becomes a public URL that renders as a page.) Notes, plans, findings, and
 artifacts follow the team everywhere — and unlike a memory API, they stay
 **real files with provenance**: every change is attributed to the human,
-agent, and device that made it, and the hub's Insights show what your
+agent, and device that made it, and the hub's Dashboard shows what your
 agents actually read (and which hot-but-stale docs nobody maintains).
 
 <p align="center">
@@ -394,8 +394,8 @@ Hubs also track **read heat**: viewer opens and downloads count as human
 reads, share-link hits as share reads, and agent tool reads (reported by
 the sync hooks via `bdrive read-log`) as agent reads — sync replication
 never counts. Folder listings show heat dots and 30-day read counts to
-every member, and admins / org owners get an **Insights** dashboard
-(⋯ menu), four sections with an all/human/agent lens: a **treemap** of
+every member, and every member gets the project **Dashboard**
+(sidebar or ⋯ menu), four sections with an all/human/agent lens: a **treemap** of
 every file (cell size = reads, color = staleness, ⚠ on hot+stale — click
 through to any file), the **reads × freshness** scatter whose hot-but-stale
 quadrant is the knowledge people rely on that nobody maintains, the
