@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
-import type { OrgList, PendingList, ProjectList, ProjectPerms } from "../api/types";
+import type { OrgList, PendingList, ProjectList, ProjectPerms, ShareInfo } from "../api/types";
 
 // Hub-wide server state: the project list (polled — new projects appear
 // without a reload, matching the classic app's 30s refresh) and the orgs
@@ -32,6 +32,19 @@ export function usePermissions(projectId: string | undefined) {
     queryKey: ["permissions", projectId],
     queryFn: () => getJSON<ProjectPerms>(`/api/p/${projectId}/permissions`),
     enabled: !!projectId,
+  });
+}
+
+// One project's live public links. Any member with read may fetch them —
+// knowing the folder you rely on is exposed is not an admin privilege. One
+// cache entry feeds both the file-page banner and the Settings list, so a
+// revoke in either place updates the other.
+export function useShares(projectId: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: ["shares", projectId],
+    queryFn: () => getJSON<{ shares: ShareInfo[] }>(`/api/p/${projectId}/shares`),
+    enabled: !!projectId && enabled,
+    select: (d) => d.shares || [],
   });
 }
 

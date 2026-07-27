@@ -5,7 +5,9 @@ import { toast } from "../toast";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 
 /* A clear, explicitly-public share confirmation: warns that anyone with the
-   link can view, and offers copy / open / revoke. */
+   link can view, and offers copy / open / revoke. The title says "Public
+   link", not "created": ShareDB.Create hands back the file's existing live
+   link when there is one, so a second Share click is not a second link. */
 export function ShareDialog({
   url,
   copied,
@@ -20,7 +22,7 @@ export function ShareDialog({
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="modal" showCloseButton={false}>
         <DialogTitle asChild>
-          <h3>Public link created</h3>
+          <h3>Public link</h3>
         </DialogTitle>
         <p>
           <b>Anyone with this link can view this file</b> — no account needed. It always shows the

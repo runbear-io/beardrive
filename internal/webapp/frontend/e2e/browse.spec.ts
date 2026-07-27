@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId, expectToast } from "./helpers";
+import { login, wikiId, expectToast, READER } from "./helpers";
 
 // Phase 2: tree, folder listings (heat dots + change feed), file views
 // (markdown/wikilinks/images), breadcrumbs, upload, share, palette.
@@ -188,6 +188,105 @@ test("tree chevron folds and unfolds a folder", async ({ page }) => {
   await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).not.toBeVisible();
   await page.click('#tree .row[data-path="notes"] .chev');
   await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).toBeVisible();
+});
+
+// BEA-16: the undo for "I made this public" lives on the file, not three
+// clicks away in the org panel.
+test("public link: the file page says it is shared, and revokes without a reload", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/guide.md`);
+  await expect(page.locator(".share-banner")).toHaveCount(0);
+
+  await page.click("#share-btn");
+  const url = (await page.locator(".modal-url").textContent())!;
+  await page.click(".modal button:has-text('Done')");
+
+  // The indicator is on the file itself, and it is still there after a reload
+  // (the dialog used to be the only place the link — and its Revoke — existed).
+  await page.reload();
+  const banner = page.locator(".share-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("Publicly shared");
+  await expect(banner).toContainText("1 active link");
+  await expect(banner).toContainText("no expiry");
+  expect((await page.request.get(url)).status()).toBe(200);
+
+  // Revoking from the file page kills the link and updates in place.
+  await banner.locator(".ai-del").click();
+  await page.click(".modal .danger-btn");
+  await expectToast(page, "Share revoked");
+  await expect(banner).toHaveCount(0);
+  expect((await page.request.get(url)).status()).toBe(404);
+});
+
+test("project settings lists this project's public links and revokes them", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.post(`/api/p/${pid}/shares`, { data: { path: "notes/readme.md" } });
+
+  await page.goto(`/${pid}/settings`);
+  const row = page.locator(".admin-item", { hasText: "notes/readme.md" });
+  await expect(row).toBeVisible();
+  await expect(row.locator(".ai-tag")).toContainText("by e2e@example.com");
+  await expect(row.locator(".ai-tag")).toContainText("no expiry");
+
+  await row.locator(".ai-del").click();
+  await page.click(".modal .danger-btn");
+  await expectToast(page, "Share revoked");
+  await expect(page.locator(".admin-item", { hasText: "notes/readme.md" })).toHaveCount(0);
+  await expect(page.locator(".admin-empty", { hasText: "No public links." })).toBeVisible();
+});
+
+test("a read-only member sees the public-link banner but cannot revoke", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const made = await (
+    await page.request.post(`/api/p/${pid}/shares`, { data: { path: "index.md" } })
+  ).json();
+
+  // A real second identity in this page: drop the admin session first, or
+  // the helper's first-time form login never sees /auth/login.
+  await page.context().clearCookies();
+  await login(page, READER);
+  await page.goto(`/${pid}/index.md`);
+  const banner = page.locator(".share-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("Publicly shared");
+  await expect(banner.locator("button:has-text('Copy link')")).toBeVisible();
+  await expect(banner.locator(".ai-del")).toHaveCount(0);
+  await expect(page.locator("#share-btn")).toHaveCount(0);
+
+  await page.context().clearCookies();
+  await login(page); // clean up as someone who may
+  await page.request.delete(`/api/shares/${made.token}`);
+});
+
+test("public links: banner and settings table fit a 390px viewport", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const made = await (
+    await page.request.post(`/api/p/${pid}/shares`, { data: { path: "guide.md" } })
+  ).json();
+  await page.setViewportSize({ width: 390, height: 780 });
+
+  const sideways = () =>
+    page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+
+  await page.goto(`/${pid}/guide.md`);
+  await expect(page.locator(".share-banner")).toBeVisible();
+  expect(await sideways()).toBe(false);
+
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator(".admin-item", { hasText: "guide.md" })).toBeVisible();
+  expect(await sideways()).toBe(false);
+  // The table takes its own horizontal scroll rather than widening the page.
+  const box = page.locator(".project-settings .admin-card-table").last();
+  expect(await box.evaluate((el) => getComputedStyle(el).overflowX)).toBe("auto");
+
+  await page.request.delete(`/api/shares/${made.token}`);
 });
 
 // BEA-7: a history row is an address for the version it describes.

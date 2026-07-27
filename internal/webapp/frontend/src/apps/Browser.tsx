@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
 import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
+import { useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
 import { HTML_EXT, copyText } from "../util";
@@ -21,6 +22,7 @@ import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
 import { FileView } from "../components/FileView";
 import { ShareDialog } from "../components/ShareDialog";
+import { ShareBanner } from "../components/ShareBanner";
 import { Palette, type PaletteItem } from "../components/Palette";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { Insights, useInsightsDevices } from "../components/Insights";
@@ -157,6 +159,15 @@ export default function Browser(props: {
   // Minting a public link is a write. A read-only member sees no Share
   // button rather than a button that 403s.
   const canShare = !panel && hub && !!project && isFile && atLeast(project.perm, "write");
+  // The project's live public links, filtered to the open file. One query
+  // for the whole project (Settings reads the same cache entry), so opening
+  // a file costs no extra request.
+  const { data: shares } = useShares(project?.id, hub && !!project);
+  const refreshShares = useCallback(
+    () => void qc.invalidateQueries({ queryKey: ["shares", project?.id] }),
+    [qc, project?.id],
+  );
+  const fileShares = isFile ? (shares || []).filter((s) => s.path === path) : [];
   const canHistory = !panel && hub && !!project;
   // Browser upload is deliberately absent (for now): content enters through
   // local sync only; the web app is a read/share/history surface.
@@ -181,10 +192,11 @@ export default function Browser(props: {
       const s = await r.json();
       const copied = await copyText(s.url);
       setShare({ url: s.url, copied });
+      refreshShares(); // the banner appears (or stays) without a reload
     } catch (err) {
       toast("Share failed: " + (err as Error).message, true);
     }
-  }, [apiBase, path]);
+  }, [apiBase, path, refreshShares]);
 
   const historyNow = useCallback(() => {
     if (!path) return openHistory("");
@@ -455,10 +467,26 @@ export default function Browser(props: {
         onContentScroll={onScroll}
       >
         <Page width={pageWidth} className={pageClass}>
+          {!panel && isFile && (
+            <ShareBanner
+              shares={fileShares}
+              canRevoke={!!project && atLeast(project.perm, "write")}
+              onChanged={refreshShares}
+            />
+          )}
           {view}
         </Page>
       </AppShell>
-      {share && <ShareDialog url={share.url} copied={share.copied} onClose={() => setShare(null)} />}
+      {share && (
+        <ShareDialog
+          url={share.url}
+          copied={share.copied}
+          onClose={() => {
+            setShare(null);
+            refreshShares(); // the dialog can revoke; the banner must agree
+          }}
+        />
+      )}
       <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} candidates={paletteCandidates} />
     </>
   );

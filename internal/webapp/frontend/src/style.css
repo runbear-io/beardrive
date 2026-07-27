@@ -216,6 +216,43 @@ button, input, a.btn { font-family: inherit; }
 .admin-table td { padding: 0; border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; }
 .admin-table tr.admin-item { display: table-row; }
 .admin-table tr.admin-item td { padding: 8px 10px; }
+/* Narrow screens: the table keeps its own horizontal scroll so the page
+   never scrolls sideways under it. */
+.admin-card-table { overflow-x: auto; }
+/* The shares table's actions column holds one button, not a select plus one
+   like the members table. At 186px it stole the room the row's own facts
+   (who, when, whether it expires) needed, and they truncated to "no exp…". */
+.shares-table .admin-table th:last-child, .shares-table .admin-table td:last-child { width: 110px; }
+
+/* ---- file-page "this file is public" banner ---- */
+.share-banner {
+  margin: 0 0 18px; padding: 12px 14px;
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--r-ctl); background: var(--surface);
+}
+.share-banner .sb-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text);
+}
+.share-banner .sb-head .ico, .share-banner .sb-head svg {
+  width: 15px; height: 15px; flex: none; color: var(--accent);
+}
+.share-banner .sb-count { color: var(--text-faint); font-size: 12px; }
+.share-banner .sb-note {
+  margin: 6px 0 10px; font-size: 12.5px; line-height: 1.55;
+  color: var(--text-faint); max-width: 64ch;
+}
+.share-banner .sb-link {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding-top: 8px; border-top: 1px solid var(--border);
+}
+.share-banner .sb-link + .sb-link { margin-top: 8px; }
+.share-banner .sb-url {
+  flex: 1 1 260px; min-width: 0; font-size: 12px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.share-banner .sb-meta { font-size: 11.5px; color: var(--text-faint); }
+.share-banner .sb-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 
 
 /* ---- project menu ---- */

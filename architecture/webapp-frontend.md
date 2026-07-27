@@ -62,6 +62,7 @@ classDiagram
         FileView FolderListing FileTree
         HistoryView HistoryRow DiffView VersionBanner
         Insights ShareDialog
+        ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
         Palette shell AccountBar ...
     }
