@@ -54,7 +54,7 @@ Open the project in a browser. Three things are worth a minute:
   ever deleted.
 - **The file browser** — folders show read counts, so you can see which
   documents your team's agents actually consume.
-- **Insights** (hub admins and org owners) — reads against staleness. The
+- **Dashboard** (every project member) — reads against staleness. The
   hot-but-stale quadrant is the knowledge everyone relies on and nobody
   maintains. See [What agents read](/guides/what-agents-read/).
 

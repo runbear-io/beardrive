@@ -17,16 +17,20 @@ export function decodePath(p: string): string {
 
 // Special views are RESTful routes under the project — the first segment
 // after the project id is reserved when it names a view:
-//   /<project-id>/insights[/<path>]   the Insights dashboard (optionally scoped)
+//   /<project-id>/dashboard[/<path>]  the read×staleness dashboard (optionally scoped)
 //   /<project-id>/history[/<path>]    change feed (project / subtree / file)
 //   /<project-id>/install             connect-a-device guide
 //   /<project-id>/settings            project settings
 // Rule: every page gets its own URL path (see CLAUDE.md) — new surfaces are
 // view routes here, not ephemeral panel state. (Root-level files literally
 // named like a view lose the URL shortcut and remain reachable via the tree.)
-export const VIEW_ROUTES = new Set(["insights", "history", "install", "settings"]);
+export const VIEW_ROUTES = new Set(["dashboard", "history", "install", "settings"]);
 
-export type ViewName = "insights" | "history" | "install" | "settings";
+// Shipped URLs that were renamed. Parsed into the new view and normalized
+// away on arrival, so bookmarks resolve without a second live name.
+const LEGACY_VIEWS: Record<string, ViewName> = { insights: "dashboard" };
+
+export type ViewName = "dashboard" | "history" | "install" | "settings";
 
 export interface Route {
   // Org administration is not project-scoped, so it is a top-level route
@@ -41,9 +45,26 @@ export interface Route {
   path: string;
   view?: ViewName;
   viewTarget?: string;
+  // The URL used a renamed segment (e.g. /insights): the app replaces it
+  // with the canonical one instead of leaving two URLs for one page.
+  legacyView?: boolean;
+  // A past version of `path`, by content hash (?v=<sha>). Not a view route:
+  // the first segment after the project id is reserved for view names, and a
+  // version is the same page pinned to older bytes, so it rides as a query
+  // param on the file route.
+  version?: string;
 }
 
-export function parseRoute(pathname: string, mode: "volume" | "hub"): Route {
+// `url` is pathname + search (what useLocationPath hands back).
+export function parseRoute(url: string, mode: "volume" | "hub"): Route {
+  const qi = url.indexOf("?");
+  const version = qi === -1 ? "" : new URLSearchParams(url.slice(qi)).get("v") || "";
+  const r = parsePath(qi === -1 ? url : url.slice(0, qi), mode);
+  if (version) r.version = version;
+  return r;
+}
+
+function parsePath(pathname: string, mode: "volume" | "hub"): Route {
   const raw = pathname.replace(/^\/+/, "");
   if (mode !== "hub") return { path: raw ? decodePath(raw) : "" };
   if (raw === "orgs" || raw.startsWith("orgs/")) {
@@ -57,19 +78,22 @@ export function parseRoute(pathname: string, mode: "volume" | "hub"): Route {
   const r: Route = { project: raw.slice(0, slash), path: decodePath(raw.slice(slash + 1)) };
   const seg = r.path.indexOf("/");
   const head = seg === -1 ? r.path : r.path.slice(0, seg);
-  if (VIEW_ROUTES.has(head)) {
-    r.view = head as ViewName;
+  if (VIEW_ROUTES.has(head) || LEGACY_VIEWS[head]) {
+    r.view = LEGACY_VIEWS[head] || (head as ViewName);
+    if (LEGACY_VIEWS[head]) r.legacyView = true;
     r.viewTarget = seg === -1 ? "" : r.path.slice(seg + 1).replace(/\/+$/, "");
     r.path = "";
   }
   return r;
 }
 
-// The URL for a file within a project (hub) or the volume (no project id).
-export function urlForPath(path: string, projectId?: string): string {
+// The URL for a file within a project (hub) or the volume (no project id),
+// optionally pinned to one past version by content hash.
+export function urlForPath(path: string, projectId?: string, version?: string): string {
   const enc = encodePath(path);
-  if (projectId) return "/" + projectId + (enc ? "/" + enc : "");
-  return "/" + enc;
+  const q = version ? "?v=" + version : "";
+  if (projectId) return "/" + projectId + (enc ? "/" + enc : "") + q;
+  return "/" + enc + q;
 }
 
 // The URL for a special view of a project.

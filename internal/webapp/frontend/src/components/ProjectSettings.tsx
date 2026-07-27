@@ -6,8 +6,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/http";
 import { modalConfirm, modalPrompt } from "../modal";
 import { toast } from "../toast";
-import { useHubRefresh, usePermissions } from "../hooks/useHub";
+import { useHubRefresh, usePermissions, useShares } from "../hooks/useHub";
 import { PROJECT_ICONS, ProjectIcon } from "./shell";
+import { SharesTable } from "./SharesTable";
 import { projColor } from "./ProjectNav";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -247,6 +248,8 @@ export function ProjectSettings({
 
       <People project={project} org={org} />
 
+      <PublicLinks project={project} />
+
       {/* Admin-only, and only as UX: handleProjectDelete enforces it too. */}
       {mayEdit && (
         <Card className="ps-danger">
@@ -285,6 +288,34 @@ export function ProjectSettings({
         </Card>
       )}
     </div>
+  );
+}
+
+// Public links: this project's live share URLs, where its own settings are.
+// The org panel keeps the cross-project audit; nobody should have to go
+// there to find one project's links.
+function PublicLinks({ project }: { project: Project }) {
+  const qc = useQueryClient();
+  const { data: shares, error } = useShares(project.id);
+  if (error) return null; // sharing is off on this server, or single-volume mode
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Public links</CardTitle>
+        <CardDescription>
+          Files in this project that anyone with the URL can read — no account needed.
+        </CardDescription>
+      </CardHeader>
+      <Separator />
+      <CardContent>
+        <SharesTable
+          shares={shares || []}
+          canRevoke={atLeast(project.perm, "write")}
+          onChanged={() => qc.invalidateQueries({ queryKey: ["shares", project.id] })}
+          empty="No public links."
+        />
+      </CardContent>
+    </Card>
   );
 }
 

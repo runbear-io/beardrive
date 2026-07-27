@@ -10,7 +10,7 @@ export function FolderListing(props: {
   heatMap: HeatMap | null;
   hub: boolean; // hub feeds exist; a plain-folder viewer has no journals
   apiBase: string;
-  onOpen: (path: string) => void;
+  onOpen: (path: string, version?: string) => void;
   onFullHistory: (prefix: string) => void;
   onRendered?: () => void; // scroll restoration: content height just grew
 }) {
@@ -70,7 +70,16 @@ export function FolderListing(props: {
                   <Icon name={c.dir ? "folder" : "doc"} />
                 </span>
                 <span className="dl-name">{c.name}</span>
-                {he && <span className={"heatdot lvl" + heatLevel(he)} title={heatText(he) + " in 30 days"} />}
+                {he && (
+                  /* title= needs hover, which touch never gives and screen
+                     readers never see — the dot carries its own name. */
+                  <span
+                    className={"heatdot lvl" + heatLevel(he)}
+                    role="img"
+                    aria-label={heatText(he) + " in 30 days"}
+                    title={heatText(he) + " in 30 days"}
+                  />
+                )}
                 <span className="dl-meta">{meta}</span>
               </div>
             );
@@ -95,7 +104,7 @@ export function FolderListing(props: {
 function FolderHistory(props: {
   apiBase: string;
   prefix: string;
-  onOpen: (path: string) => void;
+  onOpen: (path: string, version?: string) => void;
   onFullHistory: () => void;
   onRendered?: () => void;
 }) {

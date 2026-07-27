@@ -82,12 +82,21 @@ export function heatTotal(e: HeatEntry): number {
   return (e.human || 0) + (e.agent || 0) + (e.share || 0);
 }
 
+/* The total mixes three kinds of reader with independent debounces: your own
+   revisits fold into one visit, but an agent or a share-link hit on the
+   same file still moves the number. Break it out whenever more than people
+   are reading, so a count that changed while you watched says who it
+   counted — an unexplained total reads as a double-count. */
 export function heatText(e: HeatEntry): string {
   const total = heatTotal(e);
   if (!total) return "";
-  let s = total + (total === 1 ? " read" : " reads");
-  if (e.agent) s += " (" + e.agent + " agent)";
-  return s;
+  const s = total + (total === 1 ? " read" : " reads");
+  if (!e.agent && !e.share) return s;
+  const parts: string[] = [];
+  if (e.human) parts.push(e.human + " human");
+  if (e.agent) parts.push(e.agent + " agent");
+  if (e.share) parts.push(e.share + " shared");
+  return s + " (" + parts.join(", ") + ")";
 }
 
 /* Dot intensity 1–4, log-ish steps: 1–2, 3–9, 10–29, 30+ reads. */

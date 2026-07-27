@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
 import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
+import { useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
 import { HTML_EXT, copyText } from "../util";
@@ -21,10 +22,12 @@ import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
 import { FileView } from "../components/FileView";
 import { ShareDialog } from "../components/ShareDialog";
+import { ShareBanner } from "../components/ShareBanner";
 import { Palette, type PaletteItem } from "../components/Palette";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
+import { VersionBanner } from "../components/VersionBanner";
 
 // The browsing surface shared by hub projects and single-volume mode: the
 // file tree, folder listings, file views, and every topbar action. Sidebar
@@ -37,7 +40,6 @@ export default function Browser(props: {
   hub: boolean;
   project?: Project;
   projects?: Project[];
-  canInsights?: boolean;
   sidebar: { vault: ReactNode; projectsNav?: ReactNode; orgBar?: ReactNode };
   // Admin panels (org admin, hub settings) replace the content pane without
   // touching the URL — matching the classic app, where they were never
@@ -51,19 +53,21 @@ export default function Browser(props: {
 
   const { tree, flatFiles, dirIndex, loaded } = useTree(apiBase, !hub || !!project);
   const heatMap = useHeat(apiBase, hub && !!project && !!config.reads?.enabled);
-  // Insights data: the per-device breakdown, plus a fresh heat fetch when
-  // an insights surface opens (the ambient heat cache may be a minute old).
+  // Dashboard data: the per-device breakdown, plus a fresh heat fetch when
+  // a dashboard surface opens (the ambient heat cache may be a minute old).
   const isHome = hub && !!project && !route.path && !route.view;
-  const insightsOpen = !!props.canInsights && (route.view === "insights" || isHome);
+  const insightsOpen = route.view === "dashboard" || isHome;
   const devices = useInsightsDevices(apiBase, insightsOpen);
   useEffect(() => {
     if (insightsOpen) qc.invalidateQueries({ queryKey: ["heat", apiBase] });
   }, [insightsOpen, apiBase, qc]);
 
   const path = route.path;
-  // On scoped view routes (/insights/<p>, /history/<p>) the subject of the
+  // ?v= belongs to the file page; a view route or folder ignores it.
+  const version = !route.view ? route.version : undefined;
+  // On scoped view routes (/dashboard/<p>, /history/<p>) the subject of the
   // page is the target — the tree highlights it, not a menu item.
-  const treePath = path || (route.view === "insights" || route.view === "history" ? route.viewTarget || "" : "");
+  const treePath = path || (route.view === "dashboard" || route.view === "history" ? route.viewTarget || "" : "");
   const isDir = !!path && dirIndex.has(path);
   // A file only counts as one when the tree actually contains it — a
   // missing path gets the not-found view, not a broken file view.
@@ -84,7 +88,7 @@ export default function Browser(props: {
   }, [tree]);
   useEffect(() => {
     // Opening any path (tree click, palette, wikilink, deep link — or a
-    // scoped insights/history view of it) unfolds the way to it; a selected
+    // scoped dashboard/history view of it) unfolds the way to it; a selected
     // folder itself opens too.
     if (!treePath || !loaded) return;
     setExpanded((s) => {
@@ -130,8 +134,10 @@ export default function Browser(props: {
 
   /* ---- navigation ---- */
   const openPath = useCallback(
-    (p: string) => {
-      navigate(urlForPath(p, project?.id));
+    // A version (a history row's content hash) pins the file page to those
+    // exact bytes; without one the page is the current file.
+    (p: string, v?: string) => {
+      navigate(urlForPath(p, project?.id, v));
       closeSidebarOnMobile();
     },
     [project?.id],
@@ -153,12 +159,26 @@ export default function Browser(props: {
   // Minting a public link is a write. A read-only member sees no Share
   // button rather than a button that 403s.
   const canShare = !panel && hub && !!project && isFile && atLeast(project.perm, "write");
+  // The project's live public links, filtered to the open file. One query
+  // for the whole project (Settings reads the same cache entry), so opening
+  // a file costs no extra request.
+  const { data: shares } = useShares(project?.id, hub && !!project);
+  const refreshShares = useCallback(
+    () => void qc.invalidateQueries({ queryKey: ["shares", project?.id] }),
+    [qc, project?.id],
+  );
+  const fileShares = isFile ? (shares || []).filter((s) => s.path === path) : [];
   const canHistory = !panel && hub && !!project;
   // Browser upload is deliberately absent (for now): content enters through
   // local sync only; the web app is a read/share/history surface.
   const canDownload = !panel && isFile;
   const canMore = !panel && (isFile || (hub && !!project && isDir));
-  const downloadURL = apiBase + "download?path=" + encodeURIComponent(path);
+  // Downloading while a version is open gives you THAT version — the ⋯ menu
+  // offering the current bytes under a page framed as historical was half of
+  // what made old versions unreachable.
+  const downloadURL = version
+    ? apiBase + "blob?sha=" + version + "&name=" + encodeURIComponent(path) + "&download=1"
+    : apiBase + "download?path=" + encodeURIComponent(path);
 
   const shareNow = useCallback(async () => {
     // Shares are per-file; a selected folder has nothing to mint.
@@ -172,10 +192,11 @@ export default function Browser(props: {
       const s = await r.json();
       const copied = await copyText(s.url);
       setShare({ url: s.url, copied });
+      refreshShares(); // the banner appears (or stays) without a reload
     } catch (err) {
       toast("Share failed: " + (err as Error).message, true);
     }
-  }, [apiBase, path]);
+  }, [apiBase, path, refreshShares]);
 
   const historyNow = useCallback(() => {
     if (!path) return openHistory("");
@@ -238,8 +259,8 @@ export default function Browser(props: {
   let view: ReactNode;
   if (panel) {
     view = panel.body;
-  } else if (route.view === "insights") {
-    view = props.canInsights ? (
+  } else if (route.view === "dashboard") {
+    view = (
       <Insights
         flatFiles={flatFiles}
         heatMap={heatMap}
@@ -249,8 +270,6 @@ export default function Browser(props: {
         onOpenFolder={openPath}
         isFolder={isFolderFn}
       />
-    ) : (
-      <div className="empty">Insights is for hub admins and org owners.</div>
     );
   } else if (route.view === "history") {
     // structured view — default app column, like the folder listing it shares rows with
@@ -305,35 +324,44 @@ export default function Browser(props: {
       pageWidth = HTML_EXT.test(path) ? "wide" : "read";
       pageClass = "markdown";
       view = (
-        <FileView
-          apiBase={apiBase}
-          path={path}
-          heatMap={heatMap}
-          flatFiles={flatFiles}
-          onOpenFile={openPath}
-          onMeta={setMeta}
-          onRendered={onRendered}
-        />
+        <>
+          {version && (
+            <VersionBanner
+              apiBase={apiBase}
+              path={path}
+              version={version}
+              onViewCurrent={() => openPath(path)}
+            />
+          )}
+          <FileView
+            apiBase={apiBase}
+            path={path}
+            version={version}
+            heatMap={heatMap}
+            flatFiles={flatFiles}
+            onOpenFile={openPath}
+            onMeta={setMeta}
+            onRendered={onRendered}
+          />
+        </>
       );
     }
   } else if (isHome) {
-    // The project's index page: the connect-an-agent guide, with Insights
-    // below for admins/owners.
+    // The project's index page: the connect-an-agent guide, with the
+    // dashboard below it.
     view = (
       <>
         <ConnectGuide project={project!} />
-        {props.canInsights && (
-          <div className="home-insights">
-            <Insights
-              flatFiles={flatFiles}
-              heatMap={heatMap}
-              devices={devices}
-              onOpenFile={openPath}
-              onOpenFolder={openPath}
-              isFolder={isFolderFn}
-            />
-          </div>
-        )}
+        <div className="home-insights">
+          <Insights
+            flatFiles={flatFiles}
+            heatMap={heatMap}
+            devices={devices}
+            onOpenFile={openPath}
+            onOpenFolder={openPath}
+            isFolder={isFolderFn}
+          />
+        </div>
       </>
     );
   } else {
@@ -344,8 +372,8 @@ export default function Browser(props: {
     panel.crumb
   ) : path ? (
     <Breadcrumbs path={path} onOpenFolder={openPath} />
-  ) : route.view === "insights" ? (
-    "Insights — " + (route.viewTarget || project?.name || "")
+  ) : route.view === "dashboard" ? (
+    "Dashboard — " + (route.viewTarget || project?.name || "")
   ) : route.view === "history" ? (
     "History — " + historyTitle(route.viewTarget || "", isFolderFn)
   ) : isHome ? (
@@ -400,15 +428,15 @@ export default function Browser(props: {
                   Download
                 </button>
               )}
-              {props.canInsights && (
+              {hub && !!project && (
                 <button
                   className="more-item"
                   onClick={() => {
                     props.onClosePanel?.();
-                    navigate(urlForView("insights", project?.id, path));
+                    navigate(urlForView("dashboard", project?.id, path));
                   }}
                 >
-                  Insights
+                  Dashboard
                 </button>
               )}
             </div>
@@ -439,10 +467,26 @@ export default function Browser(props: {
         onContentScroll={onScroll}
       >
         <Page width={pageWidth} className={pageClass}>
+          {!panel && isFile && (
+            <ShareBanner
+              shares={fileShares}
+              canRevoke={!!project && atLeast(project.perm, "write")}
+              onChanged={refreshShares}
+            />
+          )}
           {view}
         </Page>
       </AppShell>
-      {share && <ShareDialog url={share.url} copied={share.copied} onClose={() => setShare(null)} />}
+      {share && (
+        <ShareDialog
+          url={share.url}
+          copied={share.copied}
+          onClose={() => {
+            setShare(null);
+            refreshShares(); // the dialog can revoke; the banner must agree
+          }}
+        />
+      )}
       <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} candidates={paletteCandidates} />
     </>
   );

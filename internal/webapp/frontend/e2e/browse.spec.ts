@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId, expectToast } from "./helpers";
+import { login, wikiId, expectToast, READER } from "./helpers";
 
 // Phase 2: tree, folder listings (heat dots + change feed), file views
 // (markdown/wikilinks/images), breadcrumbs, upload, share, palette.
@@ -62,16 +62,17 @@ test("history row: kind is a badge, not a disclosure control", async ({ page }) 
   await expect(row.locator(".hkind .ico")).toHaveCount(0);
   // a row announces kind, path and author without the icon
   await expect(page.getByRole("button", { name: /edited\s+guide\.md.*alice@x\.io/s })).toHaveCount(1);
-  // the note is the only thing in the view claiming to expand
-  await expect(page.locator(".history [aria-expanded]")).toHaveCount(1);
+  // only genuine expanders claim to expand: the note and the diff disclosure
   await expect(page.locator(".history .hnote[aria-expanded]")).toHaveCount(1);
+  await expect(page.locator(".history [aria-expanded]:not(.hnote):not(.hdiff-btn)")).toHaveCount(0);
   // ...and it still expands in place, without navigating
   await row.locator(".hnote").click({ position: { x: 6, y: 6 } }); // off the note's link
   await expect(row.locator(".hnote")).toHaveClass(/open/);
   await expect(page).toHaveURL(`/${pid}/history/guide.md`);
-  // clicking the badge does exactly what clicking the row does
+  // clicking the badge does exactly what clicking the row does: it opens
+  // the version the row describes (BEA-7), not a dead zone
   await row.locator(".hkind").click();
-  await page.waitForURL(`/${pid}/guide.md`);
+  await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
 });
 
 test("image file renders an <img>", async ({ page }) => {
@@ -214,4 +215,167 @@ test("tree chevron folds and unfolds a folder", async ({ page }) => {
   await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).not.toBeVisible();
   await page.click('#tree .row[data-path="notes"] .chev');
   await expect(page.locator('#tree .row[data-path="notes/readme.md"]')).toBeVisible();
+});
+
+// BEA-16: the undo for "I made this public" lives on the file, not three
+// clicks away in the org panel.
+test("public link: the file page says it is shared, and revokes without a reload", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/guide.md`);
+  await expect(page.locator(".share-banner")).toHaveCount(0);
+
+  await page.click("#share-btn");
+  const url = (await page.locator(".modal-url").textContent())!;
+  await page.click(".modal button:has-text('Done')");
+
+  // The indicator is on the file itself, and it is still there after a reload
+  // (the dialog used to be the only place the link — and its Revoke — existed).
+  await page.reload();
+  const banner = page.locator(".share-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("Publicly shared");
+  await expect(banner).toContainText("1 active link");
+  await expect(banner).toContainText("no expiry");
+  expect((await page.request.get(url)).status()).toBe(200);
+
+  // Revoking from the file page kills the link and updates in place.
+  await banner.locator(".ai-del").click();
+  await page.click(".modal .danger-btn");
+  await expectToast(page, "Share revoked");
+  await expect(banner).toHaveCount(0);
+  expect((await page.request.get(url)).status()).toBe(404);
+});
+
+test("project settings lists this project's public links and revokes them", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.post(`/api/p/${pid}/shares`, { data: { path: "notes/readme.md" } });
+
+  await page.goto(`/${pid}/settings`);
+  const row = page.locator(".admin-item", { hasText: "notes/readme.md" });
+  await expect(row).toBeVisible();
+  await expect(row.locator(".ai-tag")).toContainText("by e2e@example.com");
+  await expect(row.locator(".ai-tag")).toContainText("no expiry");
+
+  await row.locator(".ai-del").click();
+  await page.click(".modal .danger-btn");
+  await expectToast(page, "Share revoked");
+  await expect(page.locator(".admin-item", { hasText: "notes/readme.md" })).toHaveCount(0);
+  await expect(page.locator(".admin-empty", { hasText: "No public links." })).toBeVisible();
+});
+
+test("a read-only member sees the public-link banner but cannot revoke", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const made = await (
+    await page.request.post(`/api/p/${pid}/shares`, { data: { path: "index.md" } })
+  ).json();
+
+  // A real second identity in this page: drop the admin session first, or
+  // the helper's first-time form login never sees /auth/login.
+  await page.context().clearCookies();
+  await login(page, READER);
+  await page.goto(`/${pid}/index.md`);
+  const banner = page.locator(".share-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("Publicly shared");
+  await expect(banner.locator("button:has-text('Copy link')")).toBeVisible();
+  await expect(banner.locator(".ai-del")).toHaveCount(0);
+  await expect(page.locator("#share-btn")).toHaveCount(0);
+
+  await page.context().clearCookies();
+  await login(page); // clean up as someone who may
+  await page.request.delete(`/api/shares/${made.token}`);
+});
+
+test("public links: banner and settings table fit a 390px viewport", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const made = await (
+    await page.request.post(`/api/p/${pid}/shares`, { data: { path: "guide.md" } })
+  ).json();
+  await page.setViewportSize({ width: 390, height: 780 });
+
+  const sideways = () =>
+    page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+
+  await page.goto(`/${pid}/guide.md`);
+  await expect(page.locator(".share-banner")).toBeVisible();
+  expect(await sideways()).toBe(false);
+
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator(".admin-item", { hasText: "guide.md" })).toBeVisible();
+  expect(await sideways()).toBe(false);
+  // The table takes its own horizontal scroll rather than widening the page.
+  const box = page.locator(".project-settings .admin-card-table").last();
+  expect(await box.evaluate((el) => getComputedStyle(el).overflowX)).toBe("auto");
+
+  await page.request.delete(`/api/shares/${made.token}`);
+});
+
+// BEA-7: a history row is an address for the version it describes.
+
+test("history row opens THAT version, banner says so, View current returns", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  // Oldest row = the first version; click it rather than the latest.
+  const added = page.locator(".hentry.add");
+  await expect(added).toBeVisible();
+  await added.click();
+  await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
+  await expect(page.locator("#content")).toContainText("First version");
+  await expect(page.locator("#content")).not.toContainText("Second version");
+  // Rendered markdown, not raw source.
+  await expect(page.locator("#content h1")).toHaveText("Guide");
+  // The banner is what stops the page misleading.
+  const banner = page.locator(".vbanner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("This is not the current file");
+  await expect(banner).toContainText("alice@x.io");
+  await expect(banner.locator("a[download]")).toHaveAttribute("href", /blob\?sha=[0-9a-f]{64}.*download=1/);
+  // Downloading while pinned gives that version, not the current bytes.
+  await expect(page.locator("#download")).toHaveAttribute("href", /blob\?sha=[0-9a-f]{64}/);
+  await banner.getByText("View current").click();
+  await page.waitForURL(`/${pid}/guide.md`);
+  await expect(page.locator("#content")).toContainText("Second version");
+  await expect(page.locator(".vbanner")).toHaveCount(0);
+});
+
+test("a version URL survives a hard reload, and Back returns to history", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  await page.locator(".hentry.add").click();
+  const url = page.url();
+  await page.reload();
+  await expect(page.locator("#content")).toContainText("First version");
+  await expect(page.locator(".vbanner")).toBeVisible();
+  await page.goto(url); // fresh navigation to the deep link
+  await expect(page.locator("#content")).toContainText("First version");
+  await page.goBack();
+  await expect(page.locator(".history .hentry").first()).toBeVisible();
+});
+
+test("an unknown version says so instead of showing current content", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/guide.md?v=${"a".repeat(64)}`);
+  await expect(page.locator("#content")).toContainText("That version isn't available");
+  await expect(page.locator("#content")).not.toContainText("Second version");
+  await expect(page.locator(".vbanner")).toBeVisible(); // still offers a way back
+});
+
+test("delete rows have no version to open, so they stay unclickable", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/scratch.md`);
+  const del = page.locator(".hentry.delete");
+  await expect(del).toBeVisible();
+  await expect(del).not.toHaveClass(/clickable/);
+  await del.click();
+  await expect(page).toHaveURL(`/${pid}/history/scratch.md`);
 });

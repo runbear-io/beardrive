@@ -45,7 +45,7 @@ test("every view shares one column system", async ({ page }) => {
   await visit("", "app"); // project home
   await visit("/install", "app"); // the same guide, so the same column
   await visit("/settings", "app");
-  await visit("/insights", "app"); // charts cap their own measure; the column is normal
+  await visit("/dashboard", "app"); // charts cap their own measure; the column is normal
   await visit("/history", "app"); // structured view, not a file render
   await visit("/index.md", "read"); // rendered markdown — the only read surface
   await visit("/notes", "app"); // folder listing is a structured view too
@@ -73,7 +73,7 @@ test("charts never scale past the size they were drawn at", async ({ page }) => 
   await page.setViewportSize({ width: 1600, height: 900 });
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`http://localhost:8993/${pid}/insights`);
+  await page.goto(`http://localhost:8993/${pid}/dashboard`);
   await page.waitForSelector(".in-chart");
   const worst = await page.evaluate(() => {
     let max = 0;
@@ -108,5 +108,53 @@ test("the gutter belongs to the scroll container, not the column", async ({ page
     expect(r.pad, `${path}: gutter`).toBe("40px");
     // Views may not re-declare a column of their own inside .page.
     expect(r.childMax, `${path}: view sets its own max-width`).toBe("none");
+  }
+});
+
+/* Mobile folder rows used to drop .dl-meta entirely below 430px, leaving an
+   unlabelled coloured dot as the only signal — and the dot's meaning lived in
+   a title= that touch never shows and screen readers never read. The meta now
+   wraps to a second line and the dot carries its own accessible name. */
+test("folder rows keep their metadata, and the heat dot a name, on a phone", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const file = page.locator('.dl-row[title="notes/readme.md"]');
+  const dir = page.locator('.dl-row[title="notes/deep"]');
+
+  await page.setViewportSize({ width: 431, height: 800 });
+  await page.goto(`/${pid}/notes`);
+  await page.waitForSelector(".dl-row");
+  const desktopMeta = await file.locator(".dl-meta").textContent();
+
+  for (const width of [360, 390, 430]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto(`/${pid}/notes`);
+    await page.waitForSelector(".dl-row");
+
+    // Same information as desktop: read count, size and date all present.
+    await expect(file.locator(".dl-meta"), `${width}px: file meta`).toBeVisible();
+    expect(await file.locator(".dl-meta").textContent(), `${width}px: file meta`).toBe(desktopMeta);
+    await expect(file.locator(".dl-meta")).toContainText(/read/);
+    await expect(dir.locator(".dl-meta"), `${width}px: folder meta`).toContainText("1 item");
+
+    const m = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll<HTMLElement>(".dl-row")];
+      const name = rows.map((r) => r.querySelector(".dl-name") as HTMLElement);
+      return {
+        truncated: name.some((n) => n.scrollWidth > n.clientWidth + 1),
+        minHeight: Math.min(...rows.map((r) => r.getBoundingClientRect().height)),
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      };
+    });
+    expect(m.truncated, `${width}px: filename truncated`).toBe(false);
+    expect(m.minHeight, `${width}px: row tap target`).toBeGreaterThanOrEqual(44);
+    expect(m.overflow, `${width}px: horizontal page scroll`).toBe(false);
+
+    // Accessibility tree, not pixels: every dot announces itself. (Read
+    // counts accumulate across the shared hub, so match the shape not a
+    // number — what matters is that no dot is nameless.)
+    const dots = await page.locator(".heatdot").count();
+    await expect(page.getByRole("img", { name: /read/ }), `${width}px: named dots`).toHaveCount(dots);
+    await expect(file.locator(".heatdot")).toHaveAttribute("aria-label", /\d+ reads? .*in 30 days/);
   }
 });

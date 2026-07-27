@@ -47,7 +47,7 @@ Credentials use each provider's standard chain — nothing BearDrive-specific:
     "admins": ["you@example.com"],
     "users_db": "/var/lib/bdrive/auth.json"
   },
-  "reads": { "enabled": true },              // agent read analytics (Insights)
+  "reads": { "enabled": true },              // agent read analytics (Dashboard)
   "database": { "driver": "sqlite", "dsn": "/var/lib/bdrive/hub.db" }
 }
 ```
