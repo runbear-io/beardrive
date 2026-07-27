@@ -40,7 +40,9 @@ async function fail(r: Response): Promise<never> {
 }
 
 export async function getJSON<T>(url: string): Promise<T> {
-  const r = await fetch(url);
+  // Explicit Accept so endpoints that content-negotiate (e.g. /billing:
+  // JSON data vs the app shell) know this is a data fetch.
+  const r = await fetch(url, { headers: { Accept: "application/json" } });
   if (r.status === 401) toLogin();
   if (!r.ok) await fail(r);
   return r.json();

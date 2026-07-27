@@ -24,11 +24,13 @@ export function AccountBar({
   org,
   admin,
   orgActive,
+  billing,
 }: {
   me: { email: string; name: string };
   org: Org | null;
   admin?: { pending: number; onClick: () => void }; // hub admins only
   orgActive?: boolean; // the org page is the open surface
+  billing?: { plan: string; url: string }; // managed deployments only
 }) {
   const display = me.name || me.email;
   // The menu's open state is ours because the org entry is a link: linkProps
@@ -39,6 +41,7 @@ export function AccountBar({
   // (middle-click, copy link address).
   const [menuOpen, setMenuOpen] = useState(false);
   const orgLink = org ? linkProps(org.manage_url) : null;
+  const billingLink = billing ? linkProps(billing.url) : null;
   return (
     <footer id="accountbar">
       <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
@@ -80,6 +83,24 @@ export function AccountBar({
                   )}
                 </a>
               </DropdownMenuItem>
+              {billing && (
+                <DropdownMenuItem asChild>
+                  {/* An in-app view route (/billing); the chip shows the
+                      org's current plan. */}
+                  <a
+                    id="menu-billing"
+                    {...billingLink}
+                    onClick={(e) => {
+                      billingLink?.onClick?.(e);
+                      setMenuOpen(false);
+                    }}
+                  >
+                    <Icon name="card" />
+                    <span>Billing</span>
+                    <span className="ps-chip plan-chip">{billing.plan}</span>
+                  </a>
+                </DropdownMenuItem>
+              )}
             </>
           )}
           {admin && (

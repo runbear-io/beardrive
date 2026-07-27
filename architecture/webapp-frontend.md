@@ -28,6 +28,7 @@ classDiagram
 
     class router {
         +VIEW_ROUTES insights history install settings
+        +top-level routes orgs billing
         +parseRoute(pathname, mode) Route
         +urlForPath / urlForView
         +encodePath / decodePath

@@ -33,6 +33,10 @@ export interface Route {
   // rather than a view under a project. The server hands out this URL (see
   // manage_url on /api/orgs), which is why it is reserved here.
   org?: string;
+  // Billing (managed hubs) is hub-level like the org route; the URL comes
+  // from /api/config's billing block. Reserved only in hub mode — project
+  // ids are p-… so the segment can't collide with a project.
+  billing?: boolean;
   project?: string;
   path: string;
   view?: ViewName;
@@ -44,6 +48,9 @@ export function parseRoute(pathname: string, mode: "volume" | "hub"): Route {
   if (mode !== "hub") return { path: raw ? decodePath(raw) : "" };
   if (raw === "orgs" || raw.startsWith("orgs/")) {
     return { org: raw.slice(5).replace(/\/+$/, ""), path: "" };
+  }
+  if (raw === "billing" || raw.startsWith("billing/")) {
+    return { billing: true, path: "" };
   }
   const slash = raw.indexOf("/");
   if (slash === -1) return { project: raw, path: "" };

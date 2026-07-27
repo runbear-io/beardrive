@@ -24,6 +24,7 @@ classDiagram
         +Reads *ReadLedger
         +Dir Directory
         +Quota QuotaProvider
+        +Billing func(email) (plan, url, ok)
         +ShareRPM int
         -vols per-project volume cache
         +Handler() http.Handler

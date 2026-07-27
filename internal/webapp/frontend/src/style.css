@@ -281,8 +281,19 @@ button, input, a.btn { font-family: inherit; }
 #account-menu [role="menuitem"]:hover { background: var(--hover); color: var(--text); }
 #account-menu [role="menuitem"] b { font-weight: 600; }
 #account-menu [role="menuitem"] .ico { width: 15px; height: 15px; }
+#account-menu .plan-chip { margin-left: auto; color: var(--accent); border-color: var(--border-2); }
 #account-menu #signout { color: var(--del); }
 #account-menu #signout:hover { color: var(--del); background: var(--hover); }
+
+/* ---- billing view (managed hubs) ---- */
+#billing-view .plan-chip { color: var(--accent); }
+.plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 700px) { .plan-grid { grid-template-columns: 1fr; } }
+.usage-bar { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; height: 6px; overflow: hidden; }
+.usage-bar > div { background: var(--accent); height: 100%; }
+.plan-price { font-size: 20px; font-weight: 700; margin: 0 0 10px; }
+.plan-price small { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+.muted-note { color: var(--text-dim); font-size: 13px; }
 
 /* ---- main pane ---- */
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
