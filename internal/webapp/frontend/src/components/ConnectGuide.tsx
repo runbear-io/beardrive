@@ -18,7 +18,15 @@ interface GuideAgent {
 }
 
 const GUIDE_AGENTS: GuideAgent[] = [
-  { key: "claude", label: "Claude Code & Cowork" },
+  {
+    key: "claude",
+    label: "Claude Code & Cowork",
+    agent: "claude",
+    skillDir: "~/.claude/skills/beardrive/",
+    extra:
+      "It also installs the BearDrive plugin, so the /beardrive commands and sync hooks are built " +
+      "into every later session — and Cowork shares Claude Code's plugins, so one setup covers both.",
+  },
   {
     key: "hermes",
     label: "Hermes",
@@ -44,39 +52,11 @@ interface Step {
 }
 
 function guideSteps(agent: GuideAgent, project: Project): Step[] {
-  const origin = window.location.origin;
-  const pid = project.id;
-
-  // Claude Code and Claude Cowork share one plugin: install it once, then
-  // /beardrive:install does the whole setup conversationally.
-  if (agent.key === "claude") {
-    return [
-      {
-        title: "Add the BearDrive plugin",
-        desc:
-          "One time, in any Claude Code session. The plugin ships the beardrive skill, the /beardrive " +
-          "commands, and turn-boundary sync hooks — and Claude Cowork shares the same plugins, so " +
-          "installing it once covers both.",
-        code: "/plugin marketplace add runbear-io/beardrive\n/plugin install beardrive@beardrive",
-      },
-      {
-        title: "Set up this project conversationally",
-        desc: "In a Claude Code or Cowork session in the folder where you want the files, run:",
-        code: "/beardrive:install connect to " + origin + ", project " + pid,
-        extra:
-          "Claude installs the CLI, signs this machine in, mounts the project, and registers the " +
-          "sync hooks — pull the latest before every turn, push after edits (stamped with the session " +
-          "that made them), and report file reads to Insights. It asks before anything it changes.",
-      },
-    ];
-  }
-
-  // Every other agent: one paste, no terminal — the same shape as the Claude
-  // tab. The commands ride INSIDE the prompt because these agents ship no
-  // BearDrive knowledge (Claude's tab can be terse only because the plugin
-  // carries it); the user still copies one thing, and the agent handles every
-  // deviation — already installed, no Homebrew, sign-in, wrong folder. Step 2
-  // of the prompt installs the skill, so every later session is conversational.
+  // Every agent, Claude included: one paste, no terminal. The prompt points
+  // at the canonical INSTALL_FOR_AGENTS.md; the agent fetches it and handles
+  // every deviation — already installed, no Homebrew, sign-in, wrong folder.
+  // The fetched steps install the skill (and, on Claude, the plugin), so
+  // every later session is conversational.
   return [
     {
       title: "Paste this into " + agent.label,
@@ -199,6 +179,11 @@ export function ConnectGuide({ project }: { project: Project }) {
               are what keep every turn starting from the latest state.
             </p>
             <GuideCode code={manualCommands(agent, project)} />
+            <p className="gd-desc">
+              <a href="https://docs.beardrive.ai/manual/install/" target="_blank" rel="noreferrer">
+                Full manual setup guide →
+              </a>
+            </p>
           </details>
         )}
         <p className="gd-done">

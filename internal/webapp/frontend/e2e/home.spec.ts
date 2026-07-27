@@ -23,17 +23,20 @@ test("guide: three agent tabs, one active, choice persisted", async ({ page }) =
   await page.click('.gd-tab[data-key="claude"]');
 });
 
-test("claude tab: plugin flow with real hub origin and project id, no raw CLI", async ({ page }) => {
+test("claude tab: same two-line paste, manual fallback links the docs", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.click('.gd-tab[data-key="claude"]');
-  const codes = await page.$$eval(".gd-code code", (els) => els.map((e) => e.textContent).join("\n"));
-  expect(codes).toContain("/plugin marketplace add runbear-io/beardrive");
-  expect(codes).toContain("/plugin install beardrive@beardrive");
-  expect(codes).toContain(`/beardrive:install connect to http://localhost:8993, project ${pid}`);
-  expect(codes).not.toContain("brew install");
-  expect(codes).not.toContain("hooks install");
+  const prompt = await page.$$eval(".gd-step .gd-code code", (els) =>
+    els.map((e) => e.textContent).join("\n"),
+  );
+  expect(prompt).toContain(
+    "Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md",
+  );
+  expect(prompt).toContain(`project ${pid} on http://localhost:8993`);
+  expect(prompt).not.toContain("/plugin marketplace");
   await expect(page.locator(".gd-body")).toContainText("Cowork");
+  await expect(page.locator('.gd-manual a[href="https://docs.beardrive.ai/manual/install/"]')).toHaveCount(1);
 });
 
 test("codex tab is one paste that hands the whole setup to the agent", async ({ page }) => {
