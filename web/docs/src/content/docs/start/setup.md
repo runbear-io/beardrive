@@ -43,27 +43,24 @@ installed the plugin**.
 
 ## Codex, Gemini CLI, and Hermes
 
-These agents ship no BearDrive knowledge yet, so the instructions travel in the
-message. Start the agent in the folder you want synced and paste:
+These agents ship no BearDrive knowledge yet, so the prompt points them at the
+canonical instructions instead. Start the agent in the folder you want synced
+and paste:
 
 ```
-Set up BearDrive in this folder.
-1. If `bdrive` is missing, install it: brew install runbear-io/tap/beardrive
-   (no Homebrew? grab the release binary for this OS/arch from
-   https://github.com/runbear-io/beardrive/releases)
-2. bdrive skill install   # so you know the CLI next time
-3. bdrive login --device https://your-hub   # show me the code and the URL
-4. bdrive init --project <project-id>
-5. bdrive hooks install   # don't skip this - it's what syncs every turn
-Then tell me what got set up.
+Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
+to connect this folder to BearDrive project <project-id> on <hub-url>.
 ```
 
-You copy one thing; the agent handles every deviation — already installed, no
-Homebrew, browser sign-in, wrong folder.
+The agent fetches that page and works through it — install the CLI, sign in
+with a device code, connect the project, register the sync hooks. You copy one
+thing; the agent handles every deviation — already installed, no Homebrew,
+browser sign-in, wrong folder. On BearDrive Cloud, drop `on <hub-url>` —
+sign-in defaults to beardrive.ai.
 
-Step 2 is the durable part. Once the skill is installed the agent knows the CLI
-from then on, so "share this file" or "what changed?" work without you
-explaining anything again.
+The skill step in those instructions is the durable part. Once the skill is
+installed the agent knows the CLI from then on, so "share this file" or "what
+changed?" work without you explaining anything again.
 
 :::tip[Don't retype this for teammates]
 A project's home page in the hub shows this same paste with your hub URL and

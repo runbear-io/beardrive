@@ -476,26 +476,22 @@ No terminal needed here either — the setup is one paste. Start the agent in
 the folder you want the files and give it:
 
 ```
-Set up BearDrive in this folder.
-1. If `bdrive` is missing, install it: brew install runbear-io/tap/beardrive
-   (no Homebrew? grab the release binary for this OS/arch from
-   https://github.com/runbear-io/beardrive/releases)
-2. bdrive skill install   # so you know the CLI next time
-3. bdrive login --device https://your-hub   # show me the code and the URL
-4. bdrive init --project <project-id>
-5. bdrive hooks install   # don't skip this - it's what syncs every turn
-Then tell me what got set up.
+Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
+to connect this folder to BearDrive project <project-id> on <hub-url>.
 ```
 
-The commands ride inside the prompt because these agents ship no BearDrive
-knowledge — but the user copies one thing, and the agent handles every
-deviation (already installed, no Homebrew, sign-in, wrong folder). Step 2 is
-the durable part: `SKILL.md` is a cross-agent format, and `bdrive skill
-install` writes the very skill the Claude plugin ships to each detected
-platform's user-level skills directory (`~/.codex/skills/beardrive/SKILL.md`,
-`~/.gemini/…`, `~/.hermes/…`, `~/.claude/…`), so from then on "share this
-file" or "what changed?" just works. Step 5 is the one people skip when they
-copy commands by hand, which is exactly why the agent runs it.
+The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
+it: install the CLI, `bdrive skill install`, device-code sign-in, `bdrive
+init`, `bdrive hooks install`. The instructions live at that URL rather than
+inside the prompt so they never go stale in someone's copy — and the agent
+handles every deviation (already installed, no Homebrew, sign-in, wrong
+folder). The skill step is the durable part: `SKILL.md` is a cross-agent
+format, and `bdrive skill install` writes the very skill the Claude plugin
+ships to each detected platform's user-level skills directory
+(`~/.codex/skills/beardrive/SKILL.md`, `~/.gemini/…`, `~/.hermes/…`,
+`~/.claude/…`), so from then on "share this file" or "what changed?" just
+works. The hooks step is the one people skip when they copy commands by
+hand, which is exactly why the agent runs it.
 
 A project's home page in the web UI shows this with the hub URL and project
 id already filled in (plus the plain-terminal version). `bdrive skill` and

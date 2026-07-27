@@ -144,18 +144,15 @@ tell them those teammates need no terminal either — they paste one prompt
 into their own agent (the hub's project home page shows it filled in):
 
 ```
-Set up BearDrive in this folder.
-1. If `bdrive` is missing, install it: brew install runbear-io/tap/beardrive
-2. bdrive skill install   # so you know the CLI next time
-3. bdrive login --device <hub-url>   # show me the code and the URL
-4. bdrive init --project <project-id>
-5. bdrive hooks install   # don't skip this - it's what syncs every turn
+Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
+to connect this folder to BearDrive project <project-id> on <hub-url>.
 ```
 
-Step 2 leaves the beardrive skill in that agent's skills dir
-(`~/.codex/skills/beardrive/` and friends) so their later sessions are
-conversational. Handing teammates loose commands is how the hooks step gets
-skipped.
+The fetched instructions run install, skill install (which leaves the
+beardrive skill in that agent's skills dir — `~/.codex/skills/beardrive/`
+and friends — so later sessions are conversational), device-code login,
+init, and hooks install. Handing teammates loose commands instead is how
+the hooks step gets skipped.
 
 ## 6. Verify and summarize
 

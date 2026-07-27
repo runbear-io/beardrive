@@ -84,4 +84,5 @@ Every PR body starts with a `## TL;DR` section: at most 5 bullet points, one sho
 ## Docs to keep in sync
 
 - `README.md` and `plugin/skills/beardrive/SKILL.md` both document CLI behavior, flags, output formats, and the on-disk layout. When changing CLI commands, flags, output, or layout, update both — the skill is what makes Claude Code beardrive-aware for end users and must match the actual binary.
+- `INSTALL_FOR_AGENTS.md` (repo root) is the URL-addressable agent onboarding runbook — the canonical two-line paste prompt (README, docs, SKILL.md, `plugin/commands/install.md`, and the hub's `ConnectGuide.tsx` all point at its raw URL) tells any agent to fetch and follow it. It condenses `plugin/commands/install.md`; when that flow or the CLI steps it names change, update it too.
 - `web/docs/src/content/docs/` is the third surface: it restates the same CLI reference, hub config, and self-hosting knobs for end users. A CLI or config change lands there too — `reference/cli.md`, `reference/hub-config.md`, `reference/project-files.md`, and the `self-hosting/` pages are the ones that go stale.
