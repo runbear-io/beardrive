@@ -22,6 +22,25 @@ export type RestoreAction = {
   busy?: string; // path+sha currently in flight
 };
 
+// Linkify http(s) URLs (e.g. a Claude session link); everything else stays
+// plain text — notes are user/agent input, never markup. Shared with the run
+// card's header, which shows the same note.
+export function NoteText({ text }: { text: string }) {
+  return (
+    <>
+      {text.split(/(https?:\/\/\S+)/).map((tok, i) =>
+        /^https?:\/\//.test(tok) ? (
+          <a key={i} href={tok} target="_blank" rel="noopener">
+            {tok}
+          </a>
+        ) : (
+          tok
+        ),
+      )}
+    </>
+  );
+}
+
 export function HistoryRow({
   entry: e,
   onOpen,
@@ -116,7 +135,9 @@ export function HistoryRow({
           </span>
         )}
       </div>
-      {e.note && (
+      {/* Inside a run card the note is the card's header — repeating it on
+          every row says the same thing N times. */}
+      {e.note && !inRun && (
         <div
           className={"hnote" + (noteOpen ? " open" : "")}
           tabIndex={0}
@@ -136,18 +157,7 @@ export function HistoryRow({
             }
           }}
         >
-          {/* Linkify http(s) URLs (e.g. a Claude session link); everything
-              else stays plain text — notes are user/agent input, never
-              markup. */}
-          {e.note.split(/(https?:\/\/\S+)/).map((tok, i) =>
-            /^https?:\/\//.test(tok) ? (
-              <a key={i} href={tok} target="_blank" rel="noopener">
-                {tok}
-              </a>
-            ) : (
-              tok
-            ),
-          )}
+          <NoteText text={e.note} />
         </div>
       )}
       {/* Its own control, never the kind glyph: expanding a row must not

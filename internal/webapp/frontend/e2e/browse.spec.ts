@@ -397,8 +397,10 @@ test("history groups one agent run into a single card", async ({ page }) => {
   // ...and note-less changes are still bare rows, exactly as before.
   await expect(page.locator(".history > .hentry").first()).toBeVisible();
   await expect(page.locator(".history > .hentry .hrun-note")).toHaveCount(0);
+  // The note is not repeated on every row inside the card.
+  await expect(run.locator(".hnote")).toHaveCount(0);
   // The card collapses without navigating.
-  await run.locator(".hrun-head").click();
+  await run.locator(".hrun-toggle").click();
   await expect(run.locator(".hentry")).toHaveCount(0);
   await expect(page).toHaveURL(`/${pid}/history`);
 });
