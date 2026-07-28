@@ -53,6 +53,56 @@ the hub keeps everything already synced (the same
 Removing the *last* entry is refused, because an empty include list means the
 whole folder syncs; if you want to stop syncing entirely, that's `bdrive stop`.
 
+## Check what actually leaves your machine
+
+Rules are one thing; their effect is another. `bdrive scope --explain` walks the
+folder and prints every path it found, split into what syncs and what does not:
+
+```sh
+bdrive scope --explain
+```
+
+```
+synced (4)
+  .bdriveignore
+  docs/architecture.md
+  docs/onboarding.md
+  specs/BEA-24.md
+
+not synced (2,486)
+  .DS_Store
+  .bdrive/                       (1 file)
+  .env
+  .git/                          (312 files)
+  node_modules/                  (2,481 files)
+  scratch/notes.md
+  vendor/acme/                   (own project — syncs separately)
+
+4 files sync, 2,486 do not.
+```
+
+A directory that is excluded whole collapses to one counted line, so a folder
+with `node_modules` in it prints a handful of lines, not thousands. A nested
+mount is labelled rather than called "not synced" — it *does* sync, through its
+own project.
+
+The decisions come from the same walk the sync cycle itself uses, so what this
+prints cannot drift from what actually leaves. It is a pure read: safe to run
+while the daemon is running and while you are offline, it takes no lock and
+makes no network call. Output is sorted and stable, which makes it diffable —
+the way to prove a rule change did what you meant:
+
+```sh
+bdrive scope --explain > before.txt
+# edit .bdriveignore
+bdrive scope --explain > after.txt
+diff before.txt after.txt
+```
+
+One thing it does **not** answer: whether a path you exclude *today* is already
+on the hub from before the rule existed. Excluding it stops future syncs but
+leaves the copy up there — `bdrive forget <path>` is what takes it off.
+
 :::tip
 A `--shared` mount is also where the two-file
 [`AGENTS.md` pattern](/guides/shared-agent-memory/) earns its keep — the synced
