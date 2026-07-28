@@ -24,6 +24,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 | Record agent file reads (hook plumbing) | `bdrive read-log [<folder>]` — parses a hook event JSON from stdin and queues in-project reads locally (native reads, grep matches, and files named in shell commands); drained to the hub on the next sync as agent traffic in the read heatmap. Registered automatically by `bdrive hooks install`; rarely run by hand |
 | Mounts + daemon + pending state | `bdrive status [<folder>]` |
 | Change history | `bdrive log [<folder>] [-p path] [-n N]` |
+| Undo a change to a file | `bdrive restore <file> [<version>]` — writes an earlier version back as a NEW change (never rewrites history); no version = the previous one, `--list` shows them. Also in the hub's History view. Cannot un-create a file a run created (see below) |
 | Move a project to a different hub (cloud ↔ self-hosted) | `bdrive export [<folder>]` writes a portable `.tar.gz` of the whole project — every device's journal and every blob, so full history and authorship travel. Then `bdrive login <other-hub>` and `bdrive import <archive>` recreates it there as a new project (`--name` overrides; target must be empty); connect folders with `bdrive init --project <id>`. Sync first so the export is complete. |
 | This device's identity | `bdrive whoami` |
 | Sign this device in (once per device) | `bdrive login [url]` — bare form targets BearDrive Cloud (beardrive.ai): signing up there auto-creates a free personal workspace, no questions asked. Self-hosting teams pass their hub URL instead. Opens the sign-in page in a browser (sign-up available there); the terminal completes on its own and stores a per-device token. `--device` prints a code to approve from any browser (SSH/headless), and login falls back to that code flow automatically when there is no TTY (agent shells, CI) or no browser opens; `--status` shows server + account. Password reset: "Forgot password?" on the sign-in page (emailed via the server's SMTP config, or the link appears in the server log). **Switch hubs** with `bdrive login <new-url>`, then re-run `bdrive init` in each folder. |
@@ -490,6 +491,26 @@ Answers:
 - "Did my edit cross over?" → run `bdrive log` on the other device; the op appears once it has pulled the source device's journal.
 
 History is content-addressed — overwritten and deleted files are still in the log, with blobs retained under `~/.bdrive/volumes/<mount-id>/blobs/`.
+
+### `bdrive restore <file> [version]`
+
+Undo a bad change — an agent (maybe you) rewrote a file and the old content was better.
+
+```sh
+bdrive restore docs/spec.md              # the version before the current content
+bdrive restore docs/spec.md --list       # short hash, time, size, who — pick one
+bdrive restore docs/spec.md a3f9c1e2     # that version (any unique short-hash prefix)
+```
+
+```
+restored docs/spec.md to the version from 2026-07-28 14:01 (a3f9c1e2, 12.0 KB)
+```
+
+Restore writes the old bytes back as a **new change**: nothing is erased, the versions in between stay in the history, the restore itself appears in `bdrive log` (note `restore <path>@<sha8>`), and it syncs to every device and teammate like any ordinary edit — so a restore can itself be restored away from. A file whose latest op is a delete comes back. The hub's History view has the same per-version Restore button.
+
+**Known gap:** restore puts content back; it cannot remove a file yet, so a file that a run *created* cannot be un-created. Delete it normally and let the next sync carry that.
+
+An ignored/out-of-scope path is refused rather than silently dropped by the next scan; a path with no history exits non-zero and writes nothing.
 
 ### `bdrive whoami`
 

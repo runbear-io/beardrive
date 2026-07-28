@@ -23,6 +23,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
+| `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change. No version restores the previous one; `--list` shows the versions with their short hashes |
 | `bdrive export [folder]` | Export the whole project — all devices' history and content — to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides the archive's name) |
 | `bdrive web [folder \| storage-root-url]` | Web server: viewer, uploads, multi-project sync hub |
@@ -51,6 +52,28 @@ Daemon intervals are tunable here: `--scan-interval` (default 3s) and
 Stamps session context — an agent session id, say — onto changes. It shows up in
 `bdrive log` and hub history, and keeps applying to daemon-committed changes
 until `--note-ttl` expires.
+
+### `bdrive restore` — undoing a change
+
+An agent rewrote a file you liked. Put the old bytes back:
+
+```
+$ bdrive restore docs/spec.md
+restored docs/spec.md to the version from 2026-07-28 14:01 (a3f9c1e2, 12.0 KB)
+
+$ bdrive restore docs/spec.md --list      # short hash, time, size, who
+$ bdrive restore docs/spec.md a3f9c1e2    # a specific version (any unique prefix)
+```
+
+Restoring writes those bytes back as a **new change**. Nothing is erased: the
+versions in between stay in the history, the restore itself shows up in
+`bdrive log` and the hub's History view, and it syncs to every device and
+teammate like any other edit — so you can restore away from a restore. The hub
+has the same button on every history row.
+
+**Known gap:** restore puts content back; it cannot yet remove a file, so a
+file that a run *created* cannot be un-created. Delete it yourself and let the
+next sync carry that.
 
 ### `bdrive forget` and `bdrive sync --prune` — cleaning up the hub
 
