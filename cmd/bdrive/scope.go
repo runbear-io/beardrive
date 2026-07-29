@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
 // bdrive scope shows and edits which of the mount's subfolders sync. The
@@ -17,6 +19,7 @@ import (
 // reason to hand-write the negation syntax. The daemon re-reads the rules
 // every tick, so changes apply within seconds.
 func scopeCmd() *cobra.Command {
+	var explain bool
 	c := &cobra.Command{
 		Use:   "scope",
 		Short: "Show or change which subfolders sync",
@@ -26,10 +29,15 @@ The whole mount syncs by default. Narrowing it writes a managed block of
 .bdriveignore rules ("only these folders"), which syncs to the team like any
 other rule — so everyone sees the same scope. Run from the mount root.
 
+--explain walks the folder and prints every path it found, split into what
+syncs and what does not, so you can verify what leaves this machine instead
+of taking it on trust. It is a pure read: no daemon, no lock, no network.
+
 Removing a folder stops syncing it but deletes nothing — local files stay,
 and the hub keeps everything already synced. To take something off the hub
 too, use ` + "`bdrive forget <path>`" + `.`,
 		Example: `  bdrive scope             # show what syncs
+  bdrive scope --explain   # list every path: synced vs not synced
   bdrive scope add docs    # also sync ./docs
   bdrive scope rm docs     # stop syncing ./docs (files stay everywhere)`,
 		Args: cobra.NoArgs,
@@ -42,11 +50,59 @@ too, use ` + "`bdrive forget <path>`" + `.`,
 			if err != nil {
 				return err
 			}
-			return printScope(folder, proj)
+			if err := printScope(folder, proj); err != nil {
+				return err
+			}
+			if !explain {
+				return nil
+			}
+			synced, notSynced, err := syncer.Explain(folder, proj.Include)
+			if err != nil {
+				return err
+			}
+			printExplain(synced, notSynced)
+			return nil
 		},
 	}
+	// Flags, not PersistentFlags: add/rm must not inherit --explain.
+	c.Flags().BoolVar(&explain, "explain", false, "list every path, split into what syncs and what does not")
 	c.AddCommand(scopeAddCmd(), scopeRmCmd())
 	return c
+}
+
+// printExplain renders the two lists. All the filtering rules live in
+// internal/syncer — this only formats what the walk decided.
+func printExplain(synced []string, notSynced []syncer.Entry) {
+	fmt.Printf("\nsynced (%s)\n", comma(len(synced)))
+	for _, p := range synced {
+		fmt.Println("  " + p)
+	}
+	fmt.Printf("\nnot synced (%s)\n", comma(syncer.NotSyncedFiles(notSynced)))
+	for _, e := range notSynced {
+		note := ""
+		switch {
+		case e.Nested:
+			note = "(own project — syncs separately)"
+		case e.IsDir():
+			note = fmt.Sprintf("(%s files)", comma(e.Files))
+			if e.Files == 1 {
+				note = "(1 file)"
+			}
+		}
+		fmt.Println(strings.TrimRight(fmt.Sprintf("  %-30s %s", e.Path, note), " "))
+	}
+	fmt.Printf("\n%s files sync, %s do not.\n\n", comma(len(synced)), comma(syncer.NotSyncedFiles(notSynced)))
+	fmt.Println("Excluded paths never leave this machine. Anything that synced before its rule")
+	fmt.Println("existed may still be on the hub — `bdrive forget <path>` takes it off.")
+}
+
+// comma groups thousands: 2486 -> "2,486".
+func comma(n int) string {
+	s := strconv.Itoa(n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 func scopeAddCmd() *cobra.Command {

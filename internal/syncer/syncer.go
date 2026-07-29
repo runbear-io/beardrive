@@ -333,27 +333,8 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 	}
 
-	err := filepath.WalkDir(s.Folder, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil // skip unreadable entries
-		}
-		rel, err := filepath.Rel(s.Folder, p)
-		if err != nil || rel == "." {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if d.IsDir() {
-			if ignoreDirs[d.Name()] || filter.PruneDir(rel) {
-				return fs.SkipDir
-			}
-			if config.IsMount(p) {
-				// A mount of its own: it syncs through its own project.
-				filter.addNestedMount(rel)
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() || ignoredFile(d.Name()) || filter.Skip(rel) {
+	err := walkFolder(s.Folder, filter, func(p, rel string, d fs.DirEntry, v verdict) error {
+		if v != vSync {
 			return nil
 		}
 		info, err := d.Info()
