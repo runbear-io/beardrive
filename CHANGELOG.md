@@ -4,6 +4,46 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## v0.12.0 — 2026-07-28
+
+- **Sync hooks are registered once per machine**, in each agent platform's
+  own user config (`~/.claude/settings.json`, `~/.codex/hooks.json`,
+  `~/.gemini/settings.json`, `~/.hermes/config.yaml`) instead of inside the
+  project. Platforms read hook config only from the directory a session
+  starts in, so project-level hooks fired only for sessions that happened
+  to start at the mount — and, living inside a synced folder, they
+  replicated one machine's agent config to the whole team. Installing
+  migrates away the old project-level blocks, and `bdrive hooks uninstall`
+  removes ours while leaving any other hooks in those files untouched.
+- **Setup is one command.** `bdrive init` now also installs the agent
+  skill, prints the project's hub link, and takes `--server <hub-url>`
+  (scheme optional), so connecting to a hub this device has never seen no
+  longer needs a separate `bdrive login`. Fewer commands means fewer
+  permission prompts for whoever is driving the agent.
+- **`--shared` is replaced by `--only`.** A mount is now always exactly the
+  folder you name; `bdrive init . --only wiki,docs` narrows it in place by
+  writing a managed block of ordinary `.bdriveignore` rules (`bdrive scope
+  add/rm` edits the same block, and `init --only` re-applies on an existing
+  mount). Because those rules sync, the scope is the team's — so
+  `bdrive sync --prune` now refuses on a scoped project rather than
+  stripping everything outside the scope from the hub for everyone. Legacy
+  `include` lists keep working, but nothing writes them any more.
+- **`bdrive init` refuses a second folder for a project this device already
+  syncs** — one device writes one journal per project, so a second mount
+  silently overwrote the first one's history on the hub.
+- **Sync resolves the mount from any directory**: a session inside a synced
+  subfolder walks up to it, a session above one finds it through the
+  registry (symlinks resolved, so macOS `/tmp` vs `/private/tmp` no longer
+  hides a mount).
+- **The Claude Code plugin auto-approves beardrive's own setup commands**
+  through a `PreToolUse` hook — narrowly: `init`/`login`/`hooks`/`status`/
+  `sync`/`url` as bare invocations only, anything with a shell operator
+  falls through to the normal prompt.
+- Docs across the README, the docs site, the plugin commands and the
+  beardrive skill were audited against the code and corrected — including
+  `--scan-interval`/`--remote-interval`, which were documented as `init`
+  flags but only ever existed on the daemon.
+
 ## v0.11.0 — 2026-07-27
 
 - **`bdrive forget` + `bdrive sync --prune`** — take an already-synced path
