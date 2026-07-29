@@ -143,6 +143,7 @@ func TestReadOnlyMemberRoutes(t *testing.T) {
 		{"PUT", base + "store/object?key=journal/d.jsonl", []byte("{}")},
 		{"POST", base + "store/sign", map[string]any{"key": "blobs/" + strings.Repeat("a", 64), "size": 1}},
 		{"POST", base + "shares", map[string]string{"path": "x.md"}},
+		{"POST", base + "restore", map[string]string{"path": "x.md", "sha": strings.Repeat("a", 64)}},
 		{"PATCH", "/api/projects/" + p.ID, map[string]string{"name": "nope"}},
 		{"DELETE", "/api/projects/" + p.ID, nil},
 		{"PUT", base + "permissions", map[string]string{"default": "read"}},

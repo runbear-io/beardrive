@@ -45,7 +45,9 @@ type DirectUploader interface {
 	Uploader
 	SignBlobPut(ctx context.Context, blob string, size int64, ttl time.Duration) (*remote.SignedPut, error)
 	HasBlob(ctx context.Context, blob string) (bool, error)
-	Commit(ctx context.Context, path, blob string, size int64, who User) error
+	// note rides along on the journaled op — "" for an ordinary upload,
+	// "restore <path>@<sha8>" when the write is a restore.
+	Commit(ctx context.Context, path, blob string, size int64, who User, note string) error
 }
 
 // ---- RemoteSource: writes go to the object store + our own journal ----
@@ -85,7 +87,7 @@ func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ in
 	if err := r.Backend.Put(ctx, "blobs/"+blob, tmp, size); err != nil {
 		return fmt.Errorf("push blob: %w", err)
 	}
-	return r.Commit(ctx, p, blob, size, who)
+	return r.Commit(ctx, p, blob, size, who, "")
 }
 
 // Commit appends a put op for path→blob to this server's own journal. It
@@ -93,7 +95,7 @@ func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ in
 // whose content is missing). Only this server writes this journal key, so
 // the read-modify-write below has a single writer; upmu serializes it across
 // concurrent requests.
-func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, who User) error {
+func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, who User, note string) error {
 	if r.Device.ID == "" {
 		return fmt.Errorf("no device identity configured for uploads")
 	}
@@ -124,6 +126,7 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, w
 		Device: r.Device.ID, DeviceName: r.Device.Name, Author: r.Device.Author,
 		User: who.Email, UserName: who.Name,
 		Kind: journal.KindPut, Path: p, Blob: blob, Size: size, Mode: 0o644,
+		Note: note,
 	}
 
 	// Read-modify-write of our own journal. A transient read error must fail
@@ -330,7 +333,7 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := direct.Commit(r.Context(), req.Path, req.SHA256, req.Size, s.requestUser(r)); err != nil {
+	if err := direct.Commit(r.Context(), req.Path, req.SHA256, req.Size, s.requestUser(r), ""); err != nil {
 		code := http.StatusBadGateway
 		if err == errBlobMissing {
 			code = http.StatusConflict

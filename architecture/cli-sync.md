@@ -22,7 +22,9 @@ classDiagram
         +Prune bool
         +OnProgress func
         +Cycle(ctx) Result
+        +Restore(ctx, path, sha) error
     }
+    note for Session "Restore writes a historical blob back into the working folder as an ordinary edit (fetching it from the hub when this device never held it) — the next Cycle journals it like any other change; it takes no lock and appends to no journal itself"
     note for Session "internal/syncer — scan → commit local ops → pull peer journals → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
     note for Session "Prune (bdrive forget / sync --prune, never the daemon) journals a delete for every replayed path the SHARED ignore rules exclude — the include scope is per-device and must never prune it"
 
@@ -113,7 +115,7 @@ classDiagram
     class Commands {
         init login logout
         sync stop scope forget status log
-        url share export import
+        restore url share export import
         web daemon hooks read-log skill
         hook-approve PreToolUse
     }

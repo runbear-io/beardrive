@@ -108,6 +108,9 @@ echo "remember this" > memory.md
 # See what changed, who changed it, and from which device
 bdrive log
 
+# An agent clobbered a file? Put the old version back (as a new change)
+bdrive restore memory.md
+
 # Check sync state and the daemon
 bdrive status
 
@@ -153,6 +156,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
+| `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change (`--list` shows the versions; no version = the previous one). Nothing is erased and it syncs everywhere like any edit. A file that was *created* can't be un-created yet |
 | `bdrive export [folder]` | Export the whole project — every device's journal, all blobs, full history — from its hub to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides); history and authorship carry over. Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
 | `bdrive web [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub |

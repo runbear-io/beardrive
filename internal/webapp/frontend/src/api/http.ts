@@ -27,6 +27,8 @@ function errorFor(status: number, body: string): string {
       return raw ? raw[0].toUpperCase() + raw.slice(1) : "That is managed outside this hub.";
     case 404:
       return "That is gone — it may have been removed already.";
+    case 413:
+      return "This project is over its plan limit.";
     case 429:
       return "Too many requests. Give it a moment.";
     default:

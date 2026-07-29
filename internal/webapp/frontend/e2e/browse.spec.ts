@@ -422,6 +422,75 @@ test("delete rows have no version to open, so they stay unclickable", async ({ p
   await expect(page).toHaveURL(`/${pid}/history/scratch.md`);
 });
 
+// BEA-6: one agent run is one card, and any version can be put back.
+
+test("history groups one agent run into a single card", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history`);
+  const run = page.locator(".hrun");
+  await expect(run).toHaveCount(1);
+  await expect(run.locator(".hrun-note")).toHaveText("claude-code session 8f21e4");
+  await expect(run.locator(".hrun-meta")).toContainText("2 files");
+  await expect(run.locator(".hrun-meta")).toContainText("seed-agent");
+  // Both of the run's changes live inside the card...
+  await expect(run.locator(".hentry")).toHaveCount(2);
+  await expect(run.locator('.hentry:has-text("runbook.md")')).toBeVisible();
+  // ...and note-less changes are still bare rows, exactly as before.
+  await expect(page.locator(".history > .hentry").first()).toBeVisible();
+  await expect(page.locator(".history > .hentry .hrun-note")).toHaveCount(0);
+  // The note is not repeated on every row inside the card.
+  await expect(run.locator(".hnote")).toHaveCount(0);
+  // The card collapses without navigating.
+  await run.locator(".hrun-toggle").click();
+  await expect(run.locator(".hentry")).toHaveCount(0);
+  await expect(page).toHaveURL(`/${pid}/history`);
+});
+
+test("a file the run created says why it can't be undone", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history`);
+  const created = page.locator('.hrun .hentry.add:has-text("runbook.md")');
+  await expect(created).toBeVisible();
+  await expect(created.locator(".hrestore-btn")).toHaveCount(0);
+  await expect(created.locator(".hrestore-gap")).toContainText("created by this run");
+  // The file it edited does offer one.
+  await expect(
+    page.locator('.hrun .hentry.edit:has-text("notes/readme.md") .hrestore-btn'),
+  ).toBeVisible();
+});
+
+test("restoring an old version brings its content back", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  // Its own file, with its own two versions — restoring is a real write, so
+  // it must not disturb what the rest of the suite reads.
+  const path = "restore-me.md";
+  const url = `/api/p/${pid}/upload/content?path=${path}`;
+  await page.request.put(url, { data: "# Restore me\n\nThe good version.\n" });
+  await page.request.put(url, { data: "# Restore me\n\nClobbered by an agent.\n" });
+
+  await page.goto(`/${pid}/history/${path}`);
+  const older = page.locator(".hentry.add"); // the first version
+  await expect(older).toBeVisible();
+  await older.locator(".hrestore-btn").click();
+  await expectToast(page, /Restored restore-me\.md/);
+  // The restore is itself a change, and the file serves the old bytes again.
+  await expect(page.locator(".history .hentry")).toHaveCount(3);
+  await expect(page.locator(".history .hentry").first()).toContainText("restore restore-me.md@");
+  await page.goto(`/${pid}/${path}`);
+  await expect(page.locator("#content")).toContainText("The good version");
+});
+
+test("a read-only member gets no restore buttons", async ({ page }) => {
+  await login(page, READER);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history`);
+  await expect(page.locator(".history .hentry").first()).toBeVisible();
+  await expect(page.locator(".hrestore-btn")).toHaveCount(0);
+});
+
 // BEA-26: the row was already an address for its version — but a bare
 // role="button" div announces that to nobody, so a persona whose whole fear
 // is "an agent quietly rewrote my doc" concludes recovery is impossible.

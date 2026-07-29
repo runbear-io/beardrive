@@ -58,8 +58,9 @@ classDiagram
         <<interface>>
         +SignBlobPut(ctx, blob, size, ttl)
         +HasBlob(ctx, blob)
-        +Commit(ctx, path, blob, size, who)
+        +Commit(ctx, path, blob, size, who, note)
     }
+    note for DirectUploader "Commit's note is \"\" for an upload and \"restore &lt;path&gt;@&lt;sha8&gt;\" for POST /api/p/{id}/restore — which is the upload commit minus the upload: find the historical op for (path, sha), journal a NEW put at its blob. Never rewrites a journal."
 
     class Backend {
         <<interface>>

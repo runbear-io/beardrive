@@ -655,6 +655,30 @@ a.ai-main:hover { color: var(--accent); }
 .hnote a { color: var(--accent-bright); text-decoration: none; }
 .hnote a:hover { text-decoration: underline; }
 
+/* ---- run groups (one agent session = one card) ---- */
+.hrun { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); margin: 10px 0; overflow: hidden; }
+.hrun-head { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 12px; color: var(--text); font-size: 12.5px; }
+.hrun-toggle { display: flex; flex: none; padding: 2px; border: none; border-radius: 4px; background: none; color: var(--text-faint); cursor: pointer; }
+.hrun-toggle:hover { color: var(--text); background: var(--hover); }
+.hrun-toggle .ico { width: 13px; height: 13px; }
+.hrun-note { font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
+.hrun-note a { color: var(--accent-bright); text-decoration: none; }
+.hrun-note a:hover { text-decoration: underline; }
+.hrun-meta { color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrun-time { margin-left: auto; flex: none; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+/* Rows inside a card don't repeat the card's own border or note. */
+.hrun-body { border-top: 1px solid var(--border); }
+.hrun-body .hentry:last-child { border-bottom: none; }
+
+/* ---- restore ---- */
+.hrestore-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 2px 8px 2px 5px; border: 1px solid var(--border); border-radius: 5px; background: none; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; }
+.hrestore-btn:hover { color: var(--accent-bright); border-color: var(--border-2); background: var(--hover); }
+.hrestore-btn:disabled { opacity: .5; cursor: default; }
+.hrestore-btn .ico { width: 12px; height: 12px; }
+/* The gap has to explain itself: nothing writes a delete op yet, so a file
+   a run created cannot be un-created. */
+.hrestore-gap { margin-left: auto; color: var(--text-ghost); font-size: 11.5px; }
+
 /* ---- a row's controls: diff (per-file only) + this version's handles ---- */
 .hactions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 0 23px; }
 .hdiff-btn, .hver-btn { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px 2px 4px; border: 1px solid var(--border); border-radius: 5px; background: none; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; text-decoration: none; }

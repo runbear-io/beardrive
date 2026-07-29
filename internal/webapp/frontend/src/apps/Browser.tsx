@@ -8,6 +8,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
+import { postJSON } from "../api/http";
 import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { useShares } from "../hooks/useHub";
@@ -198,6 +199,31 @@ export default function Browser(props: {
     }
   }, [apiBase, path, refreshShares]);
 
+  /* ---- restore ----
+     Putting an old version back is a write, so a read-only member sees no
+     Restore button rather than one that 403s. The restore itself is a new
+     change: the tree, the file, and the history feed all move. */
+  const [restoring, setRestoring] = useState("");
+  const canRestore = hub && !!project && atLeast(project?.perm, "write");
+  const onRestore = useCallback(
+    async (p: string, sha: string) => {
+      setRestoring(p + sha);
+      try {
+        await postJSON(apiBase + "restore", { path: p, sha });
+        qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        qc.invalidateQueries({ queryKey: ["render", apiBase, p] });
+        qc.invalidateQueries({ queryKey: ["text"] });
+        toast("Restored " + p + " — it syncs to every device like any other change.");
+      } catch (err) {
+        toast("Restore failed: " + (err as Error).message, true);
+      } finally {
+        setRestoring("");
+      }
+    },
+    [apiBase, qc],
+  );
+
   const historyNow = useCallback(() => {
     if (!path) return openHistory("");
     openHistory(isDir ? path + "/" : path);
@@ -281,6 +307,7 @@ export default function Browser(props: {
         onOpen={openPath}
         onMeta={setMeta}
         onRendered={onRendered}
+        restore={canRestore ? { onRestore, busy: restoring } : undefined}
       />
     );
   } else if (path) {
