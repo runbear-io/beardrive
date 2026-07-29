@@ -370,6 +370,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/p/{project}/reads", proj(PermRead, s.handleReadReport))
 	mux.HandleFunc("POST /api/p/{project}/shares", proj(PermWrite, s.handleShareCreate))
 	mux.HandleFunc("GET /api/p/{project}/shares", proj(PermRead, s.handleShareList))
+	mux.HandleFunc("PATCH /api/shares/{token}", s.handleShareExpiry)
 	mux.HandleFunc("DELETE /api/shares/{token}", s.handleShareRevoke)
 	mux.HandleFunc("GET /s/{token}", s.handleShared)
 

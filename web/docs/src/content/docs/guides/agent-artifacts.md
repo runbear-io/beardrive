@@ -46,7 +46,7 @@ https://drive.example.com/s/eacc1df3ee6a6ebbdacc535c2796dc30
 ```
 
 Links serve the file's **latest** synced content, which is the right behavior
-for living reports and wiki pages, and live until revoked.
+for living reports and wiki pages, and live until they expire or you revoke them.
 
 ```sh
 bdrive share --list                    # every link you've minted
@@ -54,7 +54,10 @@ bdrive share --revoke <token-or-url>   # kill one
 bdrive share --expires 24h <file>      # self-destructing link
 ```
 
-The web UI has a Share button on every file.
+The web UI has a Share button on every file. Its dialog also carries an
+**Expires** selector — Never, 24 hours, 7 days, 30 days — which re-dates the
+link it just minted. The token and URL don't change, so an expiry you add after
+copying the link doesn't invalidate what you pasted.
 
 This is what makes "write a report and share it" a single request: the agent
 generates `wiki/report.html`, the hook pushes it, and the reply comes back with

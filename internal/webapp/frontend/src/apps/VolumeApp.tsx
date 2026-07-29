@@ -1,8 +1,8 @@
 import { useEffect, useMemo } from "react";
 import type { ServerConfig } from "../api/types";
 import { VaultHeader } from "../components/shell";
-import { parseRoute } from "../router";
-import { useLocationPath } from "../nav";
+import { parseRoute, urlForPath } from "../router";
+import { Redirect, useLocationPath } from "../nav";
 import Browser from "./Browser";
 
 // Single-volume mode: one folder, no projects or orgs — but the full
@@ -14,6 +14,11 @@ export default function VolumeApp({ config }: { config: ServerConfig }) {
     document.title = config.brand || name;
   }, [config, name]);
   const route = useMemo(() => parseRoute(loc, "volume"), [loc]);
+
+  // /notes/ is the same page as /notes — see the same guard in HubApp.
+  if (route.trailingSlash && route.path) {
+    return <Redirect to={urlForPath(route.path)} />;
+  }
 
   return (
     <Browser

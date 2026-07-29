@@ -190,6 +190,10 @@ func TestMetaStoreConformance(t *testing.T) {
 			if !shares.Revoke(gone.Token) {
 				t.Fatal("revoke should succeed")
 			}
+			dated, _ := shares.Create(p1.ID, "deck.md", "boss@x.io", 0)
+			if _, ok, err := shares.SetExpiry(dated.Token, time.Hour); err != nil || !ok {
+				t.Fatalf("set expiry: %v %v", ok, err)
+			}
 
 			devices, err := NewDeviceRegistry(st.Devices())
 			if err != nil {
@@ -278,6 +282,9 @@ func TestMetaStoreConformance(t *testing.T) {
 			}
 			if _, ok := shares2.Get(gone.Token); ok {
 				t.Fatal("revoked share came back after reload")
+			}
+			if got, ok := shares2.Get(dated.Token); !ok || got.Expires.IsZero() {
+				t.Fatalf("patched expiry lost across reload: %+v", got)
 			}
 
 			devices2, _ := NewDeviceRegistry(st2.Devices())

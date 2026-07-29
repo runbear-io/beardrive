@@ -20,12 +20,18 @@ import { AdminTable } from "./AdminTable";
    either way — the server does its own PermWrite check, so canRevoke only
    decides whether to offer the control. */
 
+// The one place a share's lifetime gets worded — the audit row and the share
+// dialog must not drift on what "no expiry" looks like.
+export function expiryLabel(expires?: string): string {
+  return expires ? "expires " + new Date(expires).toLocaleDateString() : "no expiry";
+}
+
 export function shareDetail(s: ShareInfo, showProject: boolean): string {
   const bits: string[] = [];
   if (showProject && s.project_name) bits.push(s.project_name);
   if (s.creator) bits.push("by " + s.creator);
   if (s.created) bits.push(new Date(s.created).toLocaleDateString());
-  bits.push(s.expires ? "expires " + new Date(s.expires).toLocaleDateString() : "no expiry");
+  bits.push(expiryLabel(s.expires));
   return bits.join(" · ");
 }
 
