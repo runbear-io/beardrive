@@ -49,9 +49,10 @@ brew upgrade beardrive
 Clients and hub are the same binary — keep them roughly in step. The sync
 protocol is append-only journals plus blobs, which old clients read forward.
 
-After upgrading a client, re-run `bdrive hooks install` once per project to pick
-up hook improvements, and `bdrive skill install` once per machine to refresh the
-agent skill.
+After upgrading a client, re-run `bdrive hooks install` to pick up hook
+improvements and `bdrive skill install` to refresh the agent skill — both once
+per machine, since both write to your user config. (Re-running `bdrive init` in a
+synced folder refreshes the hooks, but not the skill.)
 
 ## Next
 

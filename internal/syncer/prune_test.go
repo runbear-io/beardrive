@@ -120,7 +120,7 @@ func TestPruneFindsHistoricallyDroppedPaths(t *testing.T) {
 	}
 }
 
-// Prune reconciles against the shared rules only. A device's own --shared
+// Prune reconciles against the shared rules only. A device's own legacy
 // scope is a statement about its disk, not about what the team may hold, so
 // pruning must never act on it.
 func TestPruneIgnoresPerDeviceScope(t *testing.T) {

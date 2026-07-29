@@ -19,9 +19,9 @@ export function EmptyState() {
           code={
             "Follow " +
             INSTALL_DOC +
-            "\nto connect this folder to a new BearDrive project on " +
+            "\nto set up a new BearDrive project on " +
             window.location.origin +
-            "."
+            ". Ask me which folder to sync."
           }
         />
         <p className="ob-alt">

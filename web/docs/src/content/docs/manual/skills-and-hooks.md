@@ -1,11 +1,11 @@
 ---
 title: Skills and hooks in detail
-description: What bdrive skill install and bdrive hooks install actually write — per-platform paths, hook events, idempotency, and when to re-run them.
+description: What bdrive skill install and bdrive hooks install actually write — the user-level config paths, hook events, idempotency, and when to re-run them.
 ---
 
-Setting up through your agent runs these two commands for you. This is what
-they do, for when you want to run them yourself, review what changed, or debug a
-folder that isn't syncing.
+`bdrive init` runs both of these for you — that is why setup is one command. This
+is what they do, for when you want to run them yourself, review what changed, or
+debug a folder that isn't syncing.
 
 ## The skill
 
@@ -35,19 +35,21 @@ beardrive@beardrive` covers Claude without this command.
 ## The hooks
 
 ```sh
-bdrive hooks install            # every detected platform, this project
+bdrive hooks install            # every detected platform, this machine
 bdrive hooks install --agent claude,codex,gemini,hermes
 bdrive hooks                    # status table
+bdrive hooks uninstall          # remove them again
 ```
 
-Each platform gets the same three hooks written into its own config format:
+Each platform gets the same three hooks written into its own user-level config,
+in its own format:
 
 | Platform | Config it writes | Pull / push / read events |
 |---|---|---|
-| Claude Code | `<project>/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse` (Write\|Edit) / `PostToolUse` (Read\|Grep\|Bash) |
-| Codex | `<project>/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse` (apply_patch) / `PostToolUse` (read_file\|shell) |
-| Gemini CLI | `<project>/.gemini/settings.json` | `BeforeAgent` / `AfterTool` (write_file\|replace) / `AfterTool` (read tools) |
-| Hermes | `~/.hermes/config.yaml` (per user) | `pre_llm_call` / `post_tool_call` (write_file\|patch) / `post_tool_call` (read_file\|grep\|bash) |
+| Claude Code | `~/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse` (Write\|Edit\|MultiEdit) / `PostToolUse` (Read\|Grep\|Bash) |
+| Codex | `~/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse` (apply_patch) / `PostToolUse` (read_file\|shell) |
+| Gemini CLI | `~/.gemini/settings.json` | `BeforeAgent` / `AfterTool` (write_file\|replace\|edit) / `AfterTool` (read tools) |
+| Hermes | `~/.hermes/config.yaml` | `pre_llm_call` / `post_tool_call` (write_file\|patch) / `post_tool_call` (read_file\|grep\|bash) |
 
 Three hooks, three jobs:
 
@@ -64,8 +66,15 @@ Every platform pipes hook JSON with a session id, so one hook command serves all
 four, and changes are stamped with `<agent> session <id>` — visible in
 `bdrive log` and the hub's history.
 
-Codex asks once to trust the project's `.codex` layer. Answer yes, or run
-`/hooks` inside Codex.
+Codex hooks are experimental and off by default. Turn them on in
+`~/.codex/config.toml`:
+
+```toml
+[features]
+codex_hooks = true
+```
+
+Codex then asks once to trust the hook definition. Answer yes.
 
 ## Both are safe to re-run
 
@@ -73,15 +82,26 @@ Merging is idempotent and preserves hooks you already have. Each hook carries
 its own marker, so a config written before a hook existed gains just the missing
 one, and a registered hook's matcher is upgraded in place when coverage grows.
 
-Re-run after a CLI upgrade: `bdrive hooks install` once per project, `bdrive
-skill install` once per machine.
+Re-run after a CLI upgrade: `bdrive hooks install` and `bdrive skill install`,
+once per machine each.
 
 ## Where they live matters
 
-Claude Code, Codex, and Gemini CLI hooks are **project-level** — they ride the
-repository, so a teammate who clones it syncs whether or not they installed
-anything. Hermes hooks are **per-user** (`~/.hermes/config.yaml`), outside the
-repo, so each person registers their own.
+Hooks are registered **once per machine**, in each platform's own user config —
+never inside a project. Agent platforms read hook config only from the directory
+a session starts in: never a parent, never a subfolder. A file in the project
+would fire only for the sessions that happened to start exactly there, and — if
+the project is synced — would travel to the whole team. A user-level
+registration covers every session in every folder instead.
 
-The hook is a fast no-op in any folder without a `.bdrive/` directory, which is
-what makes registering it globally safe.
+So BearDrive writes no agent-config directory into your project, and teammates
+don't inherit your hooks: each device registers its own the first time it runs
+`bdrive init`. Earlier versions did write project-level hooks; installing strips
+those out as it goes, so nothing ends up running twice.
+
+The hook opens with a shell guard that makes it a fast no-op in any folder
+without a `.bdrive/` directory, which is what makes registering it globally safe.
+
+`bdrive hooks uninstall` takes them back out — it removes only BearDrive's own
+entries and leaves every other hook in those files untouched. Syncing itself is
+unaffected; only turn-boundary sync stops.

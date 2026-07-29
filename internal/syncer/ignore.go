@@ -164,6 +164,12 @@ func (f *Filter) Skip(rel string) bool {
 	return true
 }
 
+// Negated reports whether any `!` rule is in play. Scope narrowing is
+// written as negation rules, so this is how callers tell "these rules
+// exclude a few things" from "these rules exclude everything but a few
+// things" — the difference between a safe prune and a destructive one.
+func (f *Filter) Negated() bool { return f.negated }
+
 // PruneDir reports whether a whole directory can be skipped during the
 // scan walk. Pruning is conservative: never with `!` rules (a child could
 // be re-included) or an include list (a deep child could match).

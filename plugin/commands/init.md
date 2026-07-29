@@ -1,10 +1,10 @@
 ---
-description: Start syncing a project in this folder — create a new BearDrive project or connect an existing one, whole folder or shared subfolders, and start the sync daemon
-argument-hint: "[folder] [--name <project> | --project <p-id>] [--shared <dirs>]"
+description: Start syncing a project in this folder — create a new BearDrive project or connect an existing one, the whole folder or only some subfolders, and start the sync daemon
+argument-hint: "[folder] [--name <project> | --project <p-id>] [--only <dirs>]"
 ---
 
 Start syncing a project with BearDrive. Arguments: `$ARGUMENTS` (optional
-folder, optional `--name`/`--project`/`--shared`).
+folder, optional `--name`/`--project`/`--only`).
 
 Follow these steps:
 
@@ -32,7 +32,7 @@ Follow these steps:
      own project; never a brain root, and one enrichment owner per shared
      folder (everyone else indexes read-only — see the skill).
    - **OKF wiki** (markdown with OKF frontmatter) → offer: connect the
-     wiki dir via `--shared`, or keep it PR-gated and create a new shared
+     wiki dir by mounting it, or keep it PR-gated and create a new shared
      folder.
    - **Wiki-ish folder** (`docs`/`wiki`/`notes` full of markdown) → check
      `git log -- <dir>`; dormant → recommend connecting it, active PR
@@ -43,10 +43,11 @@ Follow these steps:
 
 4. **Initialize** — two hard rules:
 
-   - **Never sync a repo root**: inside a repo, knowledge syncs as
-     scoped subfolders via `--shared` (one or more — several folders can
-     share one project when the same people should see all of them;
-     folders needing different access go in separate projects). A
+   - **Never sync a repo root**: inside a repo, knowledge syncs as a
+     mounted subfolder (`bdrive init wiki`), or as the root narrowed
+     with `--only` when several folders belong to one project and the
+     same people should see all of them (folders needing different
+     access go in separate projects). A
      dedicated knowledge folder (empty dir, standalone vault) may be the
      mount itself.
    - **One transport per folder**: a git-tracked dir must leave git
@@ -56,21 +57,23 @@ Follow these steps:
 
    ```sh
    bdrive init --name <project> --yes                 # dedicated knowledge folder
-   bdrive init --name <project> --shared wiki         # in a repo: only ./wiki syncs
-   bdrive init --name <project> --shared wiki,docs    # several shared subfolders, one project
+   bdrive init wiki --name <project> --yes            # ./wiki is the project
+   bdrive init . --name <project> --only wiki,docs --yes  # narrow this folder to those subfolders
    ```
 
-5. **Register agent sync hooks**: run `bdrive hooks install <folder>`. It
-   detects the agent platforms in use (Claude Code, Codex, Gemini CLI,
-   Hermes — by their config dirs in the project or home) and idempotently
-   merges beardrive's sync hooks into each platform's own hook config, so
-   files pull at every turn start, push after edits, every change is
-   stamped with the agent session that made it, and agent file reads — native
-   reads, grep matches, and files named in shell commands — feed the hub's
-   read heatmap (queued locally by `bdrive read-log`, reported on the next
-   sync). Tell the user which platforms got hooks; if Codex is
-   among them, mention they must run `/hooks` inside Codex once to trust
-   the project's `.codex` layer.
+5. **Confirm the sync hooks**: `bdrive init` registered them for every agent
+   platform it detected, in that platform's **user** config
+   (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/settings.json`,
+   `~/.hermes/config.yaml`) — once per machine, covering every session in
+   every folder, with nothing written inside the project. Files pull at every
+   turn start, push after edits, every change is stamped with the agent
+   session that made it, and agent file reads feed the hub's read heatmap
+   (queued locally by `bdrive read-log`, reported on the next sync). Read
+   init's output and tell the user which platforms are covered. If Codex is
+   among them, pass on that its hooks are experimental and off by default —
+   `[features] codex_hooks = true` in `~/.codex/config.toml`, then trust the
+   hook when Codex asks. `bdrive hooks` shows the status table;
+   `bdrive hooks uninstall` removes them.
 
 6. **Verify**: run `bdrive status <folder>` and confirm the daemon is
    running and pending is 0. Summarize: project name/id, what syncs, and
@@ -79,11 +82,11 @@ Follow these steps:
    the skill's "Teaching agents the folder" section): a synced
    `<shared>/AGENTS.md` mapping the folder — draft it if this user is
    creating the project, read and follow it if joining — and, for
-   `--shared` mounts inside a repo, a short pointer to it in the repo
+   mounts inside a repo, a short pointer to it in the repo
    root's `AGENTS.md`/`CLAUDE.md` (the only file Codex loads, and what
    makes any agent aware the folder matters). Then tell the user how
-   teammates connect (invite link → `bdrive init` → same `--shared`
-   scope, which is per-device).
+   teammates connect (invite link → `bdrive init`; the scope rides
+   `.bdriveignore`, so it matches automatically).
 
 For the full team setup (the AGENTS.md orientation + per-project sync
 hooks in `.claude/settings.json`), suggest `/beardrive:install` instead.

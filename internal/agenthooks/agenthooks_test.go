@@ -61,7 +61,7 @@ func TestInstallJSONPlatforms(t *testing.T) {
 	}
 
 	// Claude: both events present, push is async, command carries the label.
-	cl := readJSON(t, filepath.Join(folder, ".claude", "settings.json"))
+	cl := readJSON(t, ConfigPath("", "claude"))
 	hooks := cl["hooks"].(map[string]any)
 	for _, ev := range []string{"UserPromptSubmit", "PostToolUse"} {
 		if _, ok := hooks[ev]; !ok {
@@ -84,7 +84,7 @@ func TestInstallJSONPlatforms(t *testing.T) {
 	}
 
 	// Codex: same schema, its own label and matcher, no async field.
-	cx, _ := json.Marshal(readJSON(t, filepath.Join(folder, ".codex", "hooks.json")))
+	cx, _ := json.Marshal(readJSON(t, ConfigPath("", "codex")))
 	if !strings.Contains(string(cx), "codex session $s") || !strings.Contains(string(cx), "apply_patch") {
 		t.Fatalf("codex hooks wrong: %s", cx)
 	}
@@ -96,7 +96,7 @@ func TestInstallJSONPlatforms(t *testing.T) {
 	}
 
 	// Gemini: its own event names and ms timeout.
-	gm, _ := json.Marshal(readJSON(t, filepath.Join(folder, ".gemini", "settings.json")))
+	gm, _ := json.Marshal(readJSON(t, ConfigPath("", "gemini")))
 	for _, want := range []string{"BeforeAgent", "AfterTool", "gemini session $s", "30000", "bdrive read-log", "read_file|read_many_files|search_file_content|run_shell_command"} {
 		if !strings.Contains(string(gm), want) {
 			t.Fatalf("gemini hooks missing %q: %s", want, gm)
@@ -110,13 +110,14 @@ func TestInstallIdempotentAndPreserving(t *testing.T) {
 
 	// Pre-existing user hook must survive the merge.
 	pre := `{"permissions":{"allow":["Bash(ls:*)"]},"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo mine"}]}]}}`
-	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)
-	os.WriteFile(filepath.Join(folder, ".claude", "settings.json"), []byte(pre), 0o644)
+	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)       // detection
+	os.MkdirAll(filepath.Dir(ConfigPath("", "claude")), 0o755) // where hooks live now
+	os.WriteFile(ConfigPath("", "claude"), []byte(pre), 0o644)
 
 	if _, err := Install(folder, []string{"claude"}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := readJSON(t, filepath.Join(folder, ".claude", "settings.json"))
+	cfg := readJSON(t, ConfigPath("", "claude"))
 	raw, _ := json.Marshal(cfg)
 	if !strings.Contains(string(raw), "echo mine") {
 		t.Fatal("merge dropped the user's existing hook")
@@ -129,7 +130,7 @@ func TestInstallIdempotentAndPreserving(t *testing.T) {
 	}
 
 	// Second install: no change, byte-identical file.
-	before, _ := os.ReadFile(filepath.Join(folder, ".claude", "settings.json"))
+	before, _ := os.ReadFile(ConfigPath("", "claude"))
 	results, err := Install(folder, []string{"claude"})
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +138,7 @@ func TestInstallIdempotentAndPreserving(t *testing.T) {
 	if results[0].Changed {
 		t.Fatal("re-install reported a change")
 	}
-	after, _ := os.ReadFile(filepath.Join(folder, ".claude", "settings.json"))
+	after, _ := os.ReadFile(ConfigPath("", "claude"))
 	if string(before) != string(after) {
 		t.Fatal("re-install rewrote the file")
 	}
@@ -151,8 +152,9 @@ func TestInstallUpgradesSyncOnlyConfig(t *testing.T) {
 	old := `{"hooks":{
 		"UserPromptSubmit":[{"hooks":[{"type":"command","command":"sh -c 'bdrive sync .'"}]}],
 		"PostToolUse":[{"matcher":"Write|Edit|MultiEdit","hooks":[{"type":"command","command":"sh -c 'bdrive sync .'"}]}]}}`
-	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)
-	os.WriteFile(filepath.Join(folder, ".claude", "settings.json"), []byte(old), 0o644)
+	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)       // detection
+	os.MkdirAll(filepath.Dir(ConfigPath("", "claude")), 0o755) // where hooks live now
+	os.WriteFile(ConfigPath("", "claude"), []byte(old), 0o644)
 
 	results, err := Install(folder, []string{"claude"})
 	if err != nil {
@@ -161,7 +163,7 @@ func TestInstallUpgradesSyncOnlyConfig(t *testing.T) {
 	if !results[0].Changed {
 		t.Fatal("upgrade install reported unchanged")
 	}
-	cfg := readJSON(t, filepath.Join(folder, ".claude", "settings.json"))
+	cfg := readJSON(t, ConfigPath("", "claude"))
 	hooks := cfg["hooks"].(map[string]any)
 	if got := len(hooks["UserPromptSubmit"].([]any)); got != 1 {
 		t.Fatalf("UserPromptSubmit groups = %d, want the old one only", got)
@@ -186,8 +188,9 @@ func TestInstallUpgradesReadMatcher(t *testing.T) {
 		"PostToolUse":[
 			{"matcher":"Write|Edit|MultiEdit","hooks":[{"type":"command","command":"sh -c 'bdrive sync .'"}]},
 			{"matcher":"Read","hooks":[{"type":"command","command":"sh -c 'bdrive read-log .'"}]}]}}`
-	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)
-	os.WriteFile(filepath.Join(folder, ".claude", "settings.json"), []byte(old), 0o644)
+	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)       // detection
+	os.MkdirAll(filepath.Dir(ConfigPath("", "claude")), 0o755) // where hooks live now
+	os.WriteFile(ConfigPath("", "claude"), []byte(old), 0o644)
 
 	results, err := Install(folder, []string{"claude"})
 	if err != nil {
@@ -196,7 +199,7 @@ func TestInstallUpgradesReadMatcher(t *testing.T) {
 	if !results[0].Changed {
 		t.Fatal("matcher upgrade reported unchanged")
 	}
-	cfg := readJSON(t, filepath.Join(folder, ".claude", "settings.json"))
+	cfg := readJSON(t, ConfigPath("", "claude"))
 	hooks := cfg["hooks"].(map[string]any)
 	if got := len(hooks["PostToolUse"].([]any)); got != 2 {
 		t.Fatalf("PostToolUse groups = %d, want push + read (no duplicates)", got)
@@ -227,8 +230,9 @@ func TestInstallUpgradesPullCommand(t *testing.T) {
 		"PostToolUse":[
 			{"matcher":"Write|Edit|MultiEdit","hooks":[{"type":"command","command":"sh -c 'bdrive sync .'","timeout":30,"async":true}]},
 			{"matcher":"Read|Grep|Bash","hooks":[{"type":"command","command":"sh -c 'bdrive read-log .'","timeout":30,"async":true}]}]}}`
-	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)
-	os.WriteFile(filepath.Join(folder, ".claude", "settings.json"), []byte(old), 0o644)
+	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)       // detection
+	os.MkdirAll(filepath.Dir(ConfigPath("", "claude")), 0o755) // where hooks live now
+	os.WriteFile(ConfigPath("", "claude"), []byte(old), 0o644)
 
 	results, err := Install(folder, []string{"claude"})
 	if err != nil {
@@ -237,7 +241,7 @@ func TestInstallUpgradesPullCommand(t *testing.T) {
 	if !results[0].Changed {
 		t.Fatal("pull-command upgrade reported unchanged")
 	}
-	cfg := readJSON(t, filepath.Join(folder, ".claude", "settings.json"))
+	cfg := readJSON(t, ConfigPath("", "claude"))
 	hooks := cfg["hooks"].(map[string]any)
 	if got := len(hooks["UserPromptSubmit"].([]any)); got != 1 {
 		t.Fatalf("UserPromptSubmit groups = %d, want converged single group", got)
@@ -331,7 +335,7 @@ func TestHookCommandExtraction(t *testing.T) {
 		t.Skip("no /bin/sh")
 	}
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, ".bdrive"), 0o755)
+	makeMount(t, dir)
 	bin := filepath.Join(dir, "bin")
 	os.MkdirAll(bin, 0o755)
 	fake := "#!/bin/sh\necho \"$@\" > \"" + dir + "/args.txt\"\n"
@@ -368,7 +372,7 @@ func TestReadHookCommand(t *testing.T) {
 		t.Skip("no /bin/sh")
 	}
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, ".bdrive"), 0o755)
+	makeMount(t, dir)
 	bin := filepath.Join(dir, "bin")
 	os.MkdirAll(bin, 0o755)
 	fake := "#!/bin/sh\necho \"$@\" > \"" + dir + "/args.txt\"\ncat > \"" + dir + "/stdin.txt\"\n"
@@ -402,6 +406,73 @@ func TestReadHookCommand(t *testing.T) {
 	}
 }
 
+// makeMount marks a folder as a mount root the way the hook guard tests for
+// it: the config file, not just the directory — `$BDRIVE_HOME` is a `.bdrive`
+// directory too, and must never read as a project.
+func makeMount(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".bdrive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".bdrive", "config.json"), []byte(`{"id":"m-test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The guard has to fire from wherever the agent session happens to start:
+// inside a synced subfolder (walk up), at a root above the mounts (registry),
+// and nowhere else — including the home directory, whose ~/.bdrive holds
+// device state rather than a project.
+func TestHookGuardFindsMountFromAnyDirectory(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	root := t.TempDir()
+	mount := filepath.Join(root, "wiki")
+	inside := filepath.Join(mount, "notes")
+	unrelated := filepath.Join(root, "src")
+	for _, d := range []string{inside, unrelated} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeMount(t, mount)
+
+	bin := filepath.Join(root, "bin")
+	os.MkdirAll(bin, 0o755)
+	fake := "#!/bin/sh\necho called > \"" + root + "/called.txt\"\n"
+	os.WriteFile(filepath.Join(bin, "bdrive"), []byte(fake), 0o755)
+
+	// A registry naming the mount is what lets a session ABOVE it fire.
+	home := filepath.Join(root, "home")
+	os.MkdirAll(filepath.Join(home, ".bdrive"), 0o755)
+	os.WriteFile(filepath.Join(home, ".bdrive", "mounts.json"),
+		[]byte(`{"m-test":{"path":"`+mount+`"}}`), 0o644)
+
+	for _, tc := range []struct {
+		dir  string
+		want bool
+		why  string
+	}{
+		{mount, true, "at the mount root"},
+		{inside, true, "inside the mount (walk up)"},
+		{root, true, "above the mount (registry)"},
+		{unrelated, false, "a sibling folder with no mount"},
+		{home, false, "the home dir, whose .bdrive is device state"},
+	} {
+		os.Remove(filepath.Join(root, "called.txt"))
+		sh := "cd " + tc.dir + " && HOME=" + home + " BDRIVE_HOME=" + filepath.Join(home, ".bdrive") +
+			" PATH=" + bin + ":$PATH " + hookCommand("claude-code")
+		if err := runShell(t, sh, `{"session_id":"s1"}`); err != nil {
+			t.Fatalf("%s: %v", tc.why, err)
+		}
+		_, err := os.Stat(filepath.Join(root, "called.txt"))
+		if fired := err == nil; fired != tc.want {
+			t.Errorf("%s: hook fired = %v, want %v", tc.why, fired, tc.want)
+		}
+	}
+}
+
 func runShell(t *testing.T, script, stdin string) error {
 	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", script)
@@ -411,4 +482,54 @@ func runShell(t *testing.T, script, stdin string) error {
 		return fmt.Errorf("%v: %s", err, out)
 	}
 	return nil
+}
+
+// Uninstall is the exact inverse of install: our blocks go, everything the
+// user had stays, and a config we never touched is left byte-identical.
+func TestUninstallRemovesOnlyOurHooks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	folder := t.TempDir()
+	os.MkdirAll(filepath.Join(folder, ".claude"), 0o755)
+	os.MkdirAll(filepath.Dir(ConfigPath("", "claude")), 0o755)
+
+	pre := `{"permissions":{"allow":["Bash(ls:*)"]},"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo mine"}]}]}}`
+	os.WriteFile(ConfigPath("", "claude"), []byte(pre), 0o644)
+	before, _ := os.ReadFile(ConfigPath("", "claude"))
+
+	if _, err := Install(folder, []string{"claude"}); err != nil {
+		t.Fatal(err)
+	}
+	results, err := Uninstall([]string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !results[0].Changed {
+		t.Fatal("uninstall reported nothing removed")
+	}
+	after := readJSON(t, ConfigPath("", "claude"))
+	raw, _ := json.Marshal(after)
+	if strings.Contains(string(raw), "bdrive") {
+		t.Fatalf("uninstall left our hooks behind: %s", raw)
+	}
+	if !strings.Contains(string(raw), "echo mine") {
+		t.Fatalf("uninstall removed a hook that was not ours: %s", raw)
+	}
+	if _, ok := after["permissions"]; !ok {
+		t.Fatal("uninstall dropped unrelated settings keys")
+	}
+
+	// Round trip preserves the file's content (formatting may differ).
+	var b map[string]any
+	json.Unmarshal(before, &b)
+	rb, _ := json.Marshal(b)
+	if string(rb) != string(raw) {
+		t.Fatalf("install+uninstall changed the config:\nbefore %s\nafter  %s", rb, raw)
+	}
+
+	// Uninstalling again is a silent no-op.
+	results, err = Uninstall([]string{"claude"})
+	if err != nil || results[0].Changed {
+		t.Fatalf("second uninstall: changed=%v err=%v", results[0].Changed, err)
+	}
 }

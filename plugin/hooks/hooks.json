@@ -34,6 +34,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/beardrive-approve.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

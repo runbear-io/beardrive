@@ -67,8 +67,8 @@ $ bdrive login https://your-hub && cd ~/workspace && bdrive init
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file. Nothing is silently dropped.
 - **Selective sync** — a gitignore-style `.bdriveignore` opts files out, and
-  `bdrive init --shared <dirs>` (or the interactive prompt) narrows sync to
-  one or more shared subfolders (`--shared wiki,docs`, or repeat the flag).
+  `bdrive init . --only wiki,docs` (or the interactive prompt) narrows a mount
+  to some of its subfolders by writing those same rules for you.
 - **macOS & Linux.**
 
 ## Install
@@ -138,14 +138,14 @@ hub's own storage, never something a syncing client points at directly:
 |---|---|
 | `bdrive login [server-url]` | Sign this device in (browser flow; `--device` forces the code flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
-| `bdrive init [folder]` | Create/connect a project and start syncing — interactive on a TTY, flags (`--name/--project/--shared/--yes`) for scripts; re-run to resume |
+| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--only/--yes`) for scripts; registers agent sync hooks for detected platforms (`--no-hooks` skips); re-run to resume |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
-| `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync (the include list set by `init --shared`) — no JSON editing; the daemon picks changes up in seconds. `rm` deletes nothing, locally or on the hub |
+| `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes, so no one hand-writes negation syntax. The daemon picks changes up in seconds; `rm` deletes nothing, locally or on the hub |
 | `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
-| `bdrive hooks [install]` | Register turn-boundary sync hooks with detected agent platforms (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking; idempotent (`--agent` overrides detection) |
+| `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
 | `bdrive skill [install]` | Install the `beardrive` skill into detected agent platforms (`~/.codex/skills/beardrive/SKILL.md` and friends) so the agent can do the setup itself — sign in, `bdrive init`, and register the sync hooks; idempotent (`--agent` overrides detection) |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
@@ -312,8 +312,8 @@ folder to connect it to a project there; `bdrive logout` signs out entirely.
 `bdrive init` then, per
 project, walks you through it on a terminal: **create a new project or
 connect an existing one** (picked from the server's list), and **sync the
-whole folder or only a shared subfolder** (e.g. `./shared`). Every question
-has a flag (`--name`, `--project`, `--shared`, `--yes`), and without a TTY
+whole folder or only some of its subfolders** (e.g. `./wiki`). Every question
+has a flag (`--name`, `--project`, `--only`, `--yes`), and without a TTY
 init never prompts — it creates-or-joins a project named after the folder
 and syncs everything. It writes `.bdrive/config.json`, seeds a starter
 `.bdriveignore` (node_modules, build dirs, caches, `.env*`), and starts the
@@ -463,13 +463,14 @@ The plugin sets up everything at once:
   sign-in, project init (whole folder or a shared subfolder like `wiki/`),
   a consent-gated agent orientation — a synced `AGENTS.md` mapping the
   shared folder plus a repo-root pointer to it — and project-level sync
-  hooks in `.claude/settings.json`.
-- **`/beardrive:init [folder] [--name/--project/--shared]`** — just start
+  hooks registered in your user config.
+- **`/beardrive:init [folder] [--name/--project/--only]`** — just start
   syncing a project; `/beardrive:status` diagnoses problems.
-- **Turn-boundary sync hooks**, registered automatically: a blocking pull
-  when you send a message (Claude always reads fresh files) and an async
-  push when the turn ends. The hook no-ops instantly in folders without a
-  `.bdrive/` project, so it's safe globally.
+- **Turn-boundary sync hooks**, registered automatically in your user config
+  (once per machine, so every session in every folder is covered): a blocking
+  pull when you send a message (Claude always reads fresh files) and an async
+  push when the turn ends. The hook no-ops instantly outside BearDrive
+  projects, which is what makes a machine-wide registration safe.
 - **The `beardrive` skill** ([plugin/skills/beardrive](plugin/skills/beardrive/SKILL.md)),
   covering init/stop/sync, sharing by URL, backends and credentials,
   selective sync, and troubleshooting. Working in a clone of this repo
@@ -482,12 +483,13 @@ the folder you want the files and give it:
 
 ```
 Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to connect this folder to BearDrive project <project-id> on <hub-url>.
+to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sync.
 ```
 
 The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
-it: install the CLI, `bdrive skill install`, device-code sign-in, `bdrive
-init`, `bdrive hooks install`. The instructions live at that URL rather than
+it: install the CLI, `bdrive skill install`, device-code sign-in, and
+`bdrive init` — which also registers the sync hooks for every detected
+agent platform. The instructions live at that URL rather than
 inside the prompt so they never go stale in someone's copy — and the agent
 handles every deviation (already installed, no Homebrew, sign-in, wrong
 folder). The skill step is the durable part: `SKILL.md` is a cross-agent
@@ -496,7 +498,7 @@ ships to each detected platform's user-level skills directory
 (`~/.codex/skills/beardrive/SKILL.md`, `~/.gemini/…`, `~/.hermes/…`,
 `~/.claude/…`), so from then on "share this file" or "what changed?" just
 works. The hooks step is the one people skip when they copy commands by
-hand, which is exactly why the agent runs it.
+hand, which is exactly why `bdrive init` now does it itself.
 
 A project's home page in the web UI shows this with the hub URL and project
 id already filled in (plus the plain-terminal version). `bdrive skill` and

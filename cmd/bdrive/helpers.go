@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/mattn/go-isatty"
 
@@ -26,6 +28,63 @@ func absFolder(args []string) (string, error) {
 		arg = args[0]
 	}
 	return filepath.Abs(arg)
+}
+
+// findMountRoot walks up from folder to the nearest mount root. An agent
+// session usually starts wherever the user opened their editor, which may be
+// inside a synced subfolder rather than at its root.
+func findMountRoot(folder string) (string, bool) {
+	for cur := folder; ; cur = filepath.Dir(cur) {
+		if config.IsMount(cur) {
+			return cur, true
+		}
+		if filepath.Dir(cur) == cur {
+			return "", false
+		}
+	}
+}
+
+// mountsUnder lists the registered mount roots at or below folder, sorted.
+// The registry is the only thing that knows about mounts a walk up can't see.
+func mountsUnder(folder string) []string {
+	mounts, err := config.LoadMounts()
+	if err != nil {
+		return nil
+	}
+	root := resolvePath(folder) + string(filepath.Separator)
+	var out []string
+	for _, mi := range mounts {
+		if mi.Path != "" && strings.HasPrefix(resolvePath(mi.Path)+string(filepath.Separator), root) {
+			out = append(out, mi.Path)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// resolvePath expands symlinks so paths that name the same directory compare
+// equal: a mount registered as /private/tmp/x must still be found from a
+// session in /tmp/x (macOS symlinks /tmp, /var, and /etc).
+func resolvePath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
+// syncTargets resolves which mount roots a sync at folder covers: the folder
+// itself, else the mount enclosing it (session started inside a synced
+// subfolder), else every mount below it (session started at a repo root whose
+// wiki/ and docs/ are the mounts). Without this, turn hooks fire only when the
+// session's directory happens to be exactly the mount root.
+func syncTargets(folder string) []string {
+	if config.IsMount(folder) {
+		return []string{folder}
+	}
+	if root, ok := findMountRoot(folder); ok {
+		return []string{root}
+	}
+	return mountsUnder(folder)
 }
 
 // mustProject resolves a folder's project settings (from .bdrive/config.json,

@@ -62,7 +62,7 @@ func TestURLCommand(t *testing.T) {
 	}
 }
 
-// A --shared style mount (include list) refuses links outside the scope.
+// A legacy include-list mount refuses links outside the scope.
 func TestURLCommandIncludeScope(t *testing.T) {
 	t.Setenv("BDRIVE_HOME", t.TempDir())
 	folder := t.TempDir()

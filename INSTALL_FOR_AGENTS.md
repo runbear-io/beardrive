@@ -7,18 +7,31 @@ Steps marked **ask first** require the user's explicit answer — do not guess
 or skip them.
 
 BearDrive syncs a folder across a team and their agents through a hub, with
-per-file history and share links. Setting it up means: install the CLI, sign
-in, pick what to sync, and register turn-boundary sync hooks for your
-platform. Full documentation: https://docs.beardrive.ai (agent-readable
+per-file history and share links. Setup is short by design: make sure the CLI
+exists, ask the user what to sync, and run **one** `bdrive init` — it signs
+in, installs the skill, registers the sync hooks, starts syncing and prints
+the project link. Every extra command you invent is another permission prompt
+for the user. Full documentation: https://docs.beardrive.ai (agent-readable
 index at https://docs.beardrive.ai/llms.txt).
+
+**How to run commands, throughout.** Each distinct command you run may cost
+the user a permission prompt, so:
+
+- **one command per shell call** — never chain with `&&`, `;` or a pipe; a
+  compound command needs approval for every part;
+- **no preflight** — do not check versions or status "just to be sure";
+- **never retry a denied command** — say so once, hand the user the exact
+  `! <command>` to run plus the allow-rule `"Bash(bdrive:*)"`, then continue
+  with the steps that do not depend on it.
 
 > Maintainers: this is a condensed, URL-addressable version of
 > `plugin/commands/install.md` — that file is the source of truth. If the
 > two disagree, update this one.
 
-## 1. Install the CLI
+## 1. Install the CLI (only if it is missing)
 
-Check `command -v bdrive`. If missing:
+Run `command -v bdrive` — this is the one preflight worth a prompt. If it
+prints a path, go straight to step 2. If missing:
 
 ```sh
 brew install runbear-io/tap/beardrive      # macOS / Linuxbrew
@@ -29,73 +42,138 @@ https://github.com/runbear-io/beardrive/releases, or with a Go toolchain:
 `go install github.com/runbear-io/beardrive/cmd/bdrive@latest`. If nothing
 works, stop and tell the user.
 
-## 2. Teach yourself the CLI for future sessions
+## 2. Do not run a login command
 
-```sh
-bdrive skill install
-```
+`bdrive init` (step 3) signs the device in when there is no session, and
+without a TTY it uses the device-code flow automatically: it prints a URL and
+a short code for the user to approve in any browser. Pass the hub with
+`--server <hub-url>` and init signs in *there* — so a hub this device has
+never seen still needs no separate command.
 
-This detects your platform and installs the beardrive skill into its skills
-directory, so your later sessions understand `bdrive` conversationally.
+So: no `bdrive login`, no `bdrive login --status`. They are extra permission
+prompts for something init does anyway. The only time to run login on its own
+is when the user explicitly asks to switch hubs without connecting a folder.
 
-## 3. Sign in
+Init also installs the beardrive skill for every agent platform it detects,
+so later sessions understand `bdrive` conversationally. Not a separate
+command either.
 
-Check `bdrive login --status`. If there's no valid session:
+## 3. Initialize the project — **ask first**
 
-- **Default (BearDrive Cloud):** run `bdrive login` — a browser opens
-  beardrive.ai where the user signs in or signs up. A new account gets a free
-  personal workspace automatically; a pending team invite lands them in that
-  team. Warn the user a browser window is coming.
-- **Self-hosted hub:** if the user's team runs its own hub, ask for the URL
-  and run `bdrive login https://their-hub`.
-- **Headless (no browser):** `bdrive login --device <hub-url>` — show the
-  user the code and URL it prints.
+Two questions:
 
-## 4. Initialize the project — **ask first**
-
-Two questions (or infer from what the user already told you):
-
-1. **Create a new project or connect an existing one?**
+1. **Create a new project or connect an existing one?** (Skip only if the
+   user already gave a project id or name.)
    `bdrive init --name <name>` creates-or-joins by name;
    `bdrive init --project <p-id>` connects by id.
-2. **Whole folder, or shared subfolders?** Hard rule: **never sync a repo
-   root.** Inside a repo, sync scoped subfolders via `--shared`. Scan for
-   knowledge folders (`wiki/`, `docs/`, `notes/`, an Obsidian vault —
-   markdown-heavy, not source code) and propose candidates for confirmation.
-   Whole-folder is only for a dedicated knowledge folder that is the mount
-   itself.
+2. **Which folder syncs?** ALWAYS ask, and always ask with a named
+   recommendation — never an open-ended "which folder and what scope?".
+   Pick your recommendation with this rule, in order:
+   - **You found a knowledge folder** (markdown-heavy, not source code —
+     `wiki/`, `docs/`, `notes/`, an Obsidian vault, or any folder that
+     looks like one whatever its name): recommend it.
+   - **You found none** (including when the folder is empty):
+     **recommend creating a dedicated subfolder**, and name it —
+     "create `wiki/` here and sync that". An empty folder is not
+     evidence that it is meant to be the knowledge folder, and the
+     folder *not* being a git repo is not a reason to sync it whole —
+     the recommendation is the same either way. The repo-root rule
+     below is a separate, harder prohibition, not the only reason to
+     prefer a subfolder.
 
-If the chosen folder is git-tracked, git and BearDrive would both write it
+   Then list the alternatives: a different folder entirely (`bdrive init
+   <path>`), or the whole current folder — an alternative the user may
+   choose, never your recommendation.
+
+   Hard rule: **never mount a repo root bare.** The one sanctioned way to
+   sync inside a repo without picking a single subfolder is to mount the
+   root *narrowed*: `bdrive init . --only wiki,docs`, which syncs only
+   those subfolders. That is exactly how several sibling folders share
+   one project — do not propose moving folders around to give them a
+   common parent. Wait for the pick.
+
+   The shape to aim for: "I recommend creating `wiki/` here and syncing
+   that. Alternatives: a different path, or this whole folder if you
+   mean it to be the knowledge folder itself. Which do you want?"
+
+   **On Claude Code, ask with the AskUserQuestion tool** rather than
+   plain prose — one question, header "Sync folder", your recommendation
+   as the first option labelled "(Recommended)", then the alternatives.
+   The user picks instead of typing a path. Every other agent: prose.
+
+Executing the pick — **the mount is always exactly the folder you name.**
+`bdrive init wiki --project <p-id>` makes ./wiki the project, so the
+project's files land inside it. There is no flag that re-roots a mount
+somewhere else. Syncing only part of a folder is `--only`, which narrows
+a mount without moving it: `bdrive init . --only wiki,docs` keeps the
+mount at `.` and writes `.bdriveignore` rules so only those subfolders
+sync (their paths keep the `wiki/` prefix on the hub, which is what
+teammates then see).
+
+**Hard gate: do not run `bdrive init` until the user has answered
+the folder question in this conversation.** There is no exception — not for an
+empty folder, not for a non-repo, not for a non-interactive session. If
+you cannot ask, end your turn with the question instead of proceeding.
+
+Run init BEFORE the git handoff: init can refuse (e.g. this device already
+syncs that project somewhere else), and a refusal after you have already
+rewritten `.gitignore` and unstaged files leaves the repo half-changed. If
+the chosen folder is git-tracked, git and BearDrive would both write it
 (silent-revert hazard). Get consent, then `git rm -r --cached <dir>` and add
 `<dir>/` to `.gitignore`; stage but let the user commit.
 
-Then run non-interactively:
+Then run **one** command — init signs in if needed, installs the skill,
+registers the hooks, syncs, and prints the project link. Do not precede it
+with `command -v bdrive` or `bdrive --version`: every extra command is
+another permission prompt, and if the binary is missing this one says so.
 
 ```sh
-bdrive init --name <project> --yes              # dedicated knowledge folder
-bdrive init --name <project> --shared wiki,docs # in a repo: only these sync
+bdrive init wiki --project <p-id> --server <hub-url> --yes   # ./wiki is the project
+bdrive init . --name <project> --only wiki,docs --yes        # this folder, only those subfolders sync
 ```
+
+Drop `--server` when the user gave no hub URL (BearDrive Cloud is the
+default), and `--project`/`--name` follow the answer to question 1.
+
+**Run one command per shell call.** Never chain with `&&`, `;` or a pipe: a
+compound command needs approval for each part, so chaining multiplies the
+prompts.
+
+**If a command is blocked by your harness's permissions**, say so once and do
+not retry it. Hand the user both of these, then continue with every step that
+does not depend on it and re-check at the end:
+
+- the command to run themselves — in Claude Code, `! bdrive init …`
+- the allow-rule that prevents it recurring: `"Bash(bdrive:*)"`
+
+Approving with "don't ask again" also works, and since setup is a single
+command that is the last prompt they will see.
 
 After init: add `.bdrive/` to `.gitignore` (per-machine state, never
 committed). Re-running `bdrive init --yes` later is always safe. To change
 the scope later use `bdrive scope add/rm <dir>`, never hand-edit
 `.bdrive/config.json`.
 
-## 5. Register sync hooks — don't skip
+## 4. Confirm the sync hooks
 
-```sh
-bdrive hooks install
-```
+`bdrive init` already did this — do not run a separate hooks command. It
+registers turn-boundary hooks (pull before every turn, push right after
+edits, stamp changes with the agent session) **once per machine**, in each
+platform's own user config: `~/.claude/settings.json`, `~/.codex/hooks.json`,
+`~/.gemini/settings.json`, `~/.hermes/config.yaml`. That covers every session
+in every folder, and nothing is written inside the project — a hook file in a
+synced folder would travel to the whole team.
 
-This detects the agent platforms in use and idempotently merges BearDrive's
-hooks into each one's config: pull before every turn, push right after
-edits, stamp changes with the agent session. Project-level hook files ride
-the repo, so teammates get them too. Run `bdrive hooks` to show the status
-table and tell the user which platforms got hooks. (Codex users must run
-`/hooks` once inside Codex to trust the project layer; Hermes hooks are
-per-user — mention that, and skip Hermes unless the user uses it.)
+Read init's output for the platforms it registered and tell the user. One
+platform needs a manual step worth passing on: **Codex hooks are experimental
+and off by default** — the user enables them with `[features] codex_hooks =
+true` in `~/.codex/config.toml`, and Codex asks once to trust the hook.
 
-## 6. Claude Code only: install the plugin
+Only if a platform the user works with is missing from init's output: run
+`bdrive hooks install --agent <name>`. `bdrive hooks` shows the status table,
+`bdrive hooks uninstall` removes them again.
+
+## 5. Claude Code only: install the plugin
 
 If you are Claude Code, also register the marketplace and plugin so future
 sessions get the skill, `/beardrive:*` commands, and hooks built in:
@@ -105,18 +183,28 @@ claude plugin marketplace add runbear-io/beardrive
 claude plugin install beardrive@beardrive
 ```
 
+If it's already installed, upgrade it instead so this machine isn't on a
+stale version:
+
+```sh
+claude plugin marketplace update beardrive
+claude plugin update beardrive@beardrive
+```
+
 Tell the user the plugin loads on their next session (current session keeps
 working via the hooks from step 5). Other platforms: step 2 already covered
 you — skip this.
 
-## 7. Verify, then show the payoff
+## 6. Verify, then show the payoff
 
-Run `bdrive status` — confirm the daemon is running and pending is 0.
-Summarize what was set up, then pick a representative synced file (the
-wiki's index/README), run `bdrive url <file>`, and hand the user the link —
-seeing the folder rendered in the browser is the moment the setup clicks.
-Teammate links require sign-in; `bdrive share <file>` exists for fully
-public URLs.
+Init printed the project's hub link and a sync summary — use them rather
+than running more commands. Summarize what was set up and hand the user that
+link: seeing the folder rendered in the browser is the moment the setup
+clicks. Teammate links require sign-in; `bdrive share <file>` exists for
+fully public URLs.
+
+Only if something looked wrong in init's output: `bdrive status` shows the
+daemon and pending count, and `bdrive url <file>` links a specific file.
 
 ## Optional: teach agents about the folder — **ask first**
 
@@ -133,7 +221,7 @@ page shows it pre-filled):
 
 ```
 Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to connect this folder to BearDrive project <project-id> on <hub-url>.
+to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sync.
 ```
 
 On BearDrive Cloud, drop `on <hub-url>` — login defaults to beardrive.ai.

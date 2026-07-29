@@ -13,13 +13,13 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 
 | Action | Command |
 |---|---|
-| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--shared <dirs>` (comma-separated or repeated) / `--yes` for scripts and agents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session. |
+| Start syncing a project (create/connect; the front door) | `bdrive init [<folder>]` — interactive on a TTY; flags `--name <x>` / `--project <id>` / `--only <dirs>` (comma-separated) / `--yes` for scripts and agents. **The mount is always exactly the folder named** — `bdrive init wiki` makes ./wiki the project, whose contents are the project's contents (NEVER prompts without a TTY). Re-run to resume, including after the folder was renamed/moved. Runs the login flow first (against your hub URL) if the device has no session, and registers agent sync hooks for detected platforms (`--no-hooks` skips). |
 | Run the daemon in the foreground | `bdrive init -f` |
 | Stop syncing | `bdrive stop [<folder>]` — pauses daemon *and* agent hooks; `bdrive init` resumes (`--forget` also unregisters) |
-| Show/change which subfolders sync | `bdrive scope` / `bdrive scope add <dirs...>` / `bdrive scope rm <dirs...>` — edits the include list set by `init --shared` (run from the mount root; NEVER hand-edit config.json for this). The daemon applies it within seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub; removing the last entry is refused (that would flip to whole-folder sync — use `bdrive stop` instead) |
+| Show/change which subfolders sync | `bdrive scope` / `bdrive scope add <dirs...>` / `bdrive scope rm <dirs...>` — edits the managed block of `.bdriveignore` rules that `init --only` writes (run from the mount root; never hand-write the negation syntax). The daemon applies it within seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub; removing the last entry is refused (that would flip to whole-folder sync — use `bdrive stop` instead) |
 | One sync cycle now | `bdrive sync [<folder>]` — `--note <text>` stamps session context; `--prune` also removes from the hub whatever `.bdriveignore` now excludes (see below); `--hook <label>` is the Claude turn-start hook's plumbing (event JSON in, sync + note, gated-link formula out) |
 | Stop syncing a path **and** take it off the hub | `bdrive forget <path>...` — appends the rule to `.bdriveignore` (trailing `/` for a directory) and prunes in the same run. **Deletes nothing on disk**, here or on teammates' devices: they receive the rule with the removal and just stop tracking the path. Idempotent; a path outside the project errors and writes nothing. This is the ONLY way to clean up something that synced before you excluded it — plain `.bdriveignore` edits and `bdrive scope rm` leave the hub's copy in place |
-| Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install [<folder>]` — auto-detects the platforms in use and merges pull/push/session-note/read-tracking hooks into each one's own hook config, idempotently; bare `bdrive hooks` shows the status table |
+| Register agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes) | `bdrive hooks install` — merges pull/push/session-note/read-tracking hooks into each platform's USER config (`~/.claude/settings.json` and friends), once per machine, idempotently. `bdrive init` runs it automatically, so this is mainly for retries or `--agent`-targeting an undetected platform; bare `bdrive hooks` shows the status table; `bdrive hooks uninstall` removes only our entries |
 | Install this skill on another agent (Codex, Gemini CLI, Hermes, Claude Code) | `bdrive skill install [<folder>]` — writes the binary's own copy of this skill to each detected platform's user-level skills dir (`~/.codex/skills/beardrive/SKILL.md` and friends), idempotently; bare `bdrive skill` shows the status table. Then the user asks that agent to set the folder up and it runs `init` + `hooks install` itself |
 | Record agent file reads (hook plumbing) | `bdrive read-log [<folder>]` — parses a hook event JSON from stdin and queues in-project reads locally (native reads, grep matches, and files named in shell commands); drained to the hub on the next sync as agent traffic in the read heatmap. Registered automatically by `bdrive hooks install`; rarely run by hand |
 | Mounts + daemon + pending state | `bdrive status [<folder>]` |
@@ -41,7 +41,7 @@ Use this skill whenever the user is working with the `bdrive` CLI: initializing 
 Two files at the mount root control a folder's sync behavior:
 
 - **`.bdrive/`** — the folder's settings **directory**; `config.json` inside holds the **stable mount id** (`m-xxxxxxxx`) plus `volume`, `remote`, optional `include`. Written by `bdrive init`; safe to hand-edit (a running daemon picks changes up on its next tick). It is **never synced**, holds **no credentials** (the token lives in `~/.bdrive/settings.json`), and because all state is keyed by the mount id — not the path — the folder can be **renamed or moved freely**; the daemon exits on a move and the next bdrive command at the new location resumes.
-- **`.bdriveignore`** — opt-out list, gitignore-style. It **always syncs** — even on a `--shared <dir>` mount where it sits outside the include list, and even if a rule matches it — so all devices share the same rules. Syntax subset: `#` comments, `*` within a segment, `**` across segments, `?`, trailing `/` for directories-only, a `/` elsewhere anchors to the mount root, `!` re-includes.
+- **`.bdriveignore`** — opt-out list, gitignore-style. It **always syncs** — even when a rule matches it — so all devices share the same rules. It also carries the sync scope: `init --only` writes a managed `# bdrive scope` block of negation rules here (`/*` then `!/wiki/`), so scope is one mechanism, shared with the team, not a per-device setting. Syntax subset: `#` comments, `*` within a segment, `**` across segments, `?`, trailing `/` for directories-only, a `/` elsewhere anchors to the mount root, `!` re-includes.
 
 ```jsonc
 // .bdrive/config.json
@@ -49,7 +49,8 @@ Two files at the mount root control a folder's sync behavior:
   "id": "m-5a10b713",
   "volume": "agent-workspace",
   "remote": "https://drive.example.com/p/p-7f3a2c91",
-  "include": ["/shared/"]  // optional: sync ONLY these (init --shared; edit with bdrive scope add/rm)
+  // legacy: mounts created before the scope moved into .bdriveignore may
+  // carry "include": ["/shared/"] — still honored, never written now
 }
 ```
 
@@ -77,7 +78,7 @@ Selective-sync semantics — important when advising users:
 ### Init flow
 
 1. Sign-in happens lazily: `bdrive init` runs the login flow itself when the device has no session, so don't ask users to sign up ahead of time. Bare `bdrive login` targets BearDrive Cloud (beardrive.ai) — signing up in the browser auto-creates a free personal workspace; a pending team invite routes them into that team instead. Self-hosting teams: `bdrive login https://your-hub`.
-2. Pick what to sync BEFORE running init. In a repo, look for existing knowledge folders (`wiki/`, `docs/`, `notes/`, `handbook/`, an Obsidian vault) and propose them as `--shared <dirs>` — several folders can share one project (`--shared wiki,docs`) when the same people should see all of them; folders needing different access belong in separate projects. Confirm, don't interrogate. Never sync a repo root. Then run `bdrive init` in the folder. Interactive on a TTY (create new / connect existing project; whole folder / shared subfolder); with flags or without a TTY it creates-or-joins a project named after the folder and syncs everything. It:
+2. Pick what to sync BEFORE running init. In a repo, look for existing knowledge folders (`wiki/`, `docs/`, `notes/`, `handbook/`, an Obsidian vault) and propose mounting one of them (`bdrive init wiki`) — or, when several folders belong to the same project and the same people, mount their parent and narrow it: `bdrive init . --only wiki,docs`. Folders needing different access belong in separate projects. Confirm, don't interrogate. Never sync a repo root without `--only`. Then run init. Interactive on a TTY (create new / connect existing project; whole folder / only some subfolders); with flags or without a TTY it creates-or-joins a project named after the folder and syncs everything. It:
    - writes `<folder>/.bdrive/config.json` (mount id + project + remote) and registers the mount id in `~/.bdrive/mounts.json`,
    - seeds a starter `.bdriveignore` (node_modules, build dirs, caches, `.env*`) when none exists,
    - opens the volume store under `~/.bdrive/volumes/<mount-id>/`,
@@ -89,7 +90,7 @@ Selective-sync semantics — important when advising users:
 
 - `--name <x>` — project name to create-or-join (default: folder basename).
 - `--project <id>` — connect an existing project by id (`p-xxxxxxxx`).
-- `--shared <dirs>` — sync only these subfolders (repeatable or comma-separated: `--shared wiki,docs`; becomes the include list; remote paths keep the prefix so all devices see the same layout).
+- `--only <dirs>` — sync only these subfolders of the mount (comma-separated: `--only wiki,docs`). Writes `.bdriveignore` scope rules; the mount root is still the folder you named, so remote paths keep the `wiki/` prefix and every device sees the same layout.
 - `--yes, -y` — accept defaults, never prompt.
 - `--foreground, -f` — run the daemon in the foreground (systemd/launchd/containers).
 
@@ -141,13 +142,22 @@ conflict-copy ops keep their own `conflict copy of <path>` note.
 ### Agent sync hooks (Claude Code, Codex, Gemini CLI, Hermes)
 
 `bdrive hooks install [<folder>]` registers turn-boundary sync for every
-agent platform it detects (by config dir, in the project or home):
+agent platform it detects (by config dir, in the project or home).
+`bdrive init` runs the same registration automatically (skip with
+`--no-hooks`), so a plain init already covers hooks:
+
+**Hooks are user-level, once per machine.** Every platform reads hook config
+only from the directory a session started in — never a parent, never a
+subfolder — so a per-project file would cover only sessions that happen to
+start there, and inside a mount it would sync to the whole team. BearDrive
+therefore writes each platform's own user config and nothing inside a
+project. Sync still happens without hooks: the daemon's loop is independent.
 
 | Platform | Config it writes | Pull / push / read events |
 |---|---|---|
-| Claude Code (& Cowork) | `<project>/.claude/settings.json` | `UserPromptSubmit` (pull + injects the gated-link formula) / `PostToolUse` (Write\|Edit) / `PostToolUse` (Read\|Grep\|Bash) |
-| Codex (ChatGPT) | `<project>/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse` (apply_patch) / `PostToolUse` (read_file\|shell, best-effort) — user must `/hooks`-trust the layer once |
-| Gemini CLI | `<project>/.gemini/settings.json` | `BeforeAgent` / `AfterTool` (write_file\|replace) / `AfterTool` (read_file\|read_many_files\|search\|shell) |
+| Claude Code (& Cowork) | `~/.claude/settings.json` | `UserPromptSubmit` (pull + injects the gated-link formula) / `PostToolUse` (Write\|Edit) / `PostToolUse` (Read\|Grep\|Bash) |
+| Codex (ChatGPT) | `~/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse` (apply_patch) / `PostToolUse` (read_file\|shell, best-effort); experimental and off by default (`[features] codex_hooks = true` in `~/.codex/config.toml`), and Codex asks once to trust the hook |
+| Gemini CLI | `~/.gemini/settings.json` | `BeforeAgent` / `AfterTool` (write_file\|replace) / `AfterTool` (read_file\|read_many_files\|search\|shell) |
 | Hermes | `~/.hermes/config.yaml` (per-user) | `pre_llm_call` / `post_tool_call` (write_file\|patch) / `post_tool_call` (read_file\|grep\|bash) |
 
 Every platform pipes hook JSON with a `session_id`, so one hook command
@@ -164,12 +174,12 @@ missing group on re-install, and a registered hook's matcher is upgraded
 in place when coverage grows (re-run `bdrive hooks install` after upgrading
 the binary); `--agent claude,codex,gemini,hermes` overrides
 detection; bare `bdrive hooks` prints the detection/registration table.
-Project-level configs ride the repo, so hooks reach the whole team.
+Each device registers its own when it runs `bdrive init` — nothing rides the repo.
 
 **When a teammate is setting up on a non-Claude agent**, point them at
 `bdrive skill install` (see below) rather than a list of commands: the
-agent then runs `init` + `hooks install` itself, which is exactly the step
-hand-copied setups miss.
+agent then runs `init` itself — which also registers the hooks, exactly
+the step hand-copied setups miss.
 
 ### Installing this skill on other agents
 
@@ -189,11 +199,11 @@ agent has no BearDrive knowledge yet:
 
 ```
 Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to connect this folder to BearDrive project <project-id> on <hub-url>.
+to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sync.
 ```
 
 The fetched instructions cover install, `bdrive skill install`, sign-in,
-`bdrive init --project`, and `bdrive hooks install`. They use `login
+and `bdrive init --project` (which also registers the sync hooks). They use `login
 --device` because an agent is driving: a browser-callback sign-in is
 invisible to it mid-turn, while the device flow yields a code and URL it can
 hand back in chat. The hub's project home page renders this prompt with the
@@ -225,7 +235,7 @@ cd ~/agent-workspace && bdrive init
 bdrive init ~/agent-workspace --name agent-workspace --yes
 
 # Only share a subfolder
-bdrive init ./research --shared shared
+bdrive init ./research/shared
 
 # Pause syncing for the day
 bdrive stop ~/agent-workspace
@@ -239,7 +249,7 @@ bdrive stop ./notes --forget
 When guiding `bdrive init`, detect existing knowledge tooling and connect it instead of blind-syncing the folder. Two rules govern every case:
 
 - **One transport per folder.** Never sync a folder that has another writer. Git-tracked paths: a teammate's `git pull` or branch switch rewrites files with older content, and sync broadcasts that as a fresh edit — silently reverting the team's latest pages. A gbrain brain root: every private capture and overnight enrichment would become team-visible, and each member's cron rewriting the same pages fills the project with conflict copies. Moving a folder from git to beardrive is a **handoff**: `git rm -r --cached <dir>` + add `<dir>/` to `.gitignore`, stage the change but let the user commit it (teammates then pull and re-init; identical content converges with no conflicts). If they want a git record anyway, offer **one-way snapshots** (a scheduled job commits the synced folder's state to an archive branch — git only ever reads the folder) and note that hub history (`bdrive log -p <path>`) usually covers the need.
-- **Knowledge syncs as a scoped folder.** Inside a repo, always `--shared <dirs>` (one or more subfolders) — never the repo root. A dedicated knowledge folder (an empty dir, a standalone vault) may be the mount itself. The sync scope is per-device (`.bdrive/` never syncs), so recommend the same `--shared <dirs>` when each teammate connects.
+- **Knowledge syncs as a scoped folder.** Inside a repo, mount the knowledge subfolder itself (`bdrive init wiki`) — never the bare repo root. When several subfolders belong to one project, mount the repo root with `--only wiki,docs`; the scope rules land in the synced `.bdriveignore`, so every teammate inherits the same scope automatically. A dedicated knowledge folder (an empty dir, a standalone vault) may be the mount itself.
 
 Detection ladder — first match wins; if two rungs match, ask which to connect:
 
@@ -251,20 +261,20 @@ Detection ladder — first match wins; if two rungs match, ask which to connect:
    - gbrain's sync cron keeps re-indexing what beardrive pulls in; suggest switching it to `gbrain sync --no-pull` (ask before editing a crontab). On PGLite, remind: stop `gbrain serve` before large syncs (single-writer contention).
    - **One enrichment owner per shared folder.** Exactly one gbrain instance may write enrichment into the shared source — prefer a dedicated bot account/device (hub-side if possible) over a member's laptop; every other member indexes the source read-only with enrichment off for it. Members still capture: route each member's automated writes (email ingestion, meeting notes) into their own subtree (e.g. `inbox/<member>/`) so no path ever has two writers, and let the owner fold captures into canonical pages. Nothing enforces the election, so a `*.bdrive-conflict-*` file naming the owner's device is the canary that a second enricher (or a human race) appeared — surface it, don't ignore it.
    - **Owner's cycle discipline**: sync (pull) → `gbrain sync` (import human edits into the DB) → enrich → write back promptly, skipping files modified in the last few minutes and `*.bdrive-conflict-*` files. A write-back from a stale DB copy after a pull is causally "later," so it silently reverts the human's edit with **no conflict copy** — re-check the file changed since import before writing. Keep enrichment output deterministic (stable ordering, no embedded timestamps): byte-identical rewrites produce no op at all, so idempotent passes are free.
-2. **OKF** — markdown with OKF v0.1 frontmatter (confirm with `openknowledge validate` if the CLI is present; don't install just to detect). Offer: (a) connect the wiki dir via `--shared` — with the git handoff if tracked — or (b) keep the wiki PR-gated in git and create a new shared folder (starting-point menu below). Recommend (a) when the wiki is the team's knowledge, (b) when it's review-gated repo documentation.
+2. **OKF** — markdown with OKF v0.1 frontmatter (confirm with `openknowledge validate` if the CLI is present; don't install just to detect). Offer: (a) mount the wiki dir (`bdrive init <dir>`) — with the git handoff if tracked — or (b) keep the wiki PR-gated in git and create a new shared folder (starting-point menu below). Recommend (a) when the wiki is the team's knowledge, (b) when it's review-gated repo documentation.
 3. **Wiki-ish folder** — a markdown-dense dir named `docs`/`wiki`/`notes`/`kb` with no knowledge tooling. Check `git log -- <dir>`: dormant → recommend connecting it as the live team space (handoff included); active PR traffic → recommend a new shared folder instead, and say why. After connecting, offer — as a separate consent, it rewrites their files — an in-place upgrade to OKF (`openknowledge from <dir>`) for validation and agent-readability.
 4. **Nothing** — empty or unstructured folder: offer a starting point, in this order: **(a) OKF (recommended** — open spec, plain files, zero runtime, upgradeable to gbrain later**)**, (b) gbrain (full agent brain; heavier — per-member local DB), (c) blank, (d) describe-it (user describes the purpose; scaffold a custom OKF shape, redirecting to gbrain if the description is graph-shaped: entities, relationships, "who/what" queries).
 
 Conflict copies are named `<file>.bdrive-conflict-<device>-<timestamp>` and sync like normal files. `openknowledge validate` does **not** flag them (they aren't `.md`) — pair validate with a `*.bdrive-conflict-*` glob check when offering a post-edit validation hook.
 
-Every branch ends the same way: verify (`bdrive status`, pending 0), the consent-gated two-file agent orientation (next section), and the teammate onboarding sentence (invite link → `bdrive init` → same `--shared` scope).
+Every branch ends the same way: verify (`bdrive status`, pending 0), the consent-gated two-file agent orientation (next section), and the teammate onboarding sentence (invite link → `bdrive init` → the scope rides `.bdriveignore`, so it matches automatically).
 
 ### Teaching agents the folder (AGENTS.md)
 
 A newly mounted shared folder is hundreds of opaque files to an agent. Two files with different jobs fix that — offer each as its own consent, never write either silently:
 
 1. **The folder's own map — `<shared>/AGENTS.md` (synced, team-wide).** The single source of truth for conventions: what each area is for, naming patterns, where agents should *write* (e.g. reports → `reports/`), what not to touch. Because the folder syncs, the map travels with it — every member on every platform gets it, and hub history tracks who changed the rules. It is scaffolded **once, by the project creator** (explore the folder, draft it, keep it under a screen); joiners read it and follow it — a new member's agent must not rewrite team conventions on day one.
-2. **A root pointer (per machine, never synced).** For `--shared` mounts inside a repo, append 2–3 lines to the repo root's `AGENTS.md` and/or `CLAUDE.md` (both if both exist): the folder is shared via BearDrive, read `<shared>/AGENTS.md` before working there, put shareable artifacts there, no secrets. Point at the synced map — don't duplicate its conventions, or the copy goes stale.
+2. **A root pointer (per machine, never synced).** For mounts inside a repo, append 2–3 lines to the repo root's `AGENTS.md` and/or `CLAUDE.md` (both if both exist): the folder is shared via BearDrive, read `<shared>/AGENTS.md` before working there, put shareable artifacts there, no secrets. Point at the synced map — don't duplicate its conventions, or the copy goes stale.
 
 The pointer is not optional politeness — platform discovery differs:
 
