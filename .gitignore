@@ -2,6 +2,7 @@
 /dist/
 .DS_Store
 .omc
+.orca/
 /example/
 /cloud/
 .claude/worktrees/
