@@ -121,7 +121,7 @@ function FolderHistory(props: {
       <h3 className="dl-h3">Recent changes</h3>
       <div className="history dl-hlist">
         {entries.map((e, i) => (
-          <HistoryRow key={i} entry={e} onOpen={props.onOpen} />
+          <HistoryRow key={i} entry={e} apiBase={props.apiBase} onOpen={props.onOpen} />
         ))}
       </div>
       <button className="ai-btn dl-more" onClick={props.onFullHistory}>

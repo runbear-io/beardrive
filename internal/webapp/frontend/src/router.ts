@@ -48,6 +48,10 @@ export interface Route {
   // The URL used a renamed segment (e.g. /insights): the app replaces it
   // with the canonical one instead of leaving two URLs for one page.
   legacyView?: boolean;
+  // The URL carried a trailing separator (/notes/ — what a browser hands you
+  // when you copy a folder URL). Same treatment as legacyView: it resolves,
+  // then the app replaces it with the slash-free URL.
+  trailingSlash?: boolean;
   // A past version of `path`, by content hash (?v=<sha>). Not a view route:
   // the first segment after the project id is reserved for view names, and a
   // version is the same page pinned to older bytes, so it rides as a query
@@ -64,9 +68,20 @@ export function parseRoute(url: string, mode: "volume" | "hub"): Route {
   return r;
 }
 
+// Trailing separators are stripped off the raw (still-encoded) slice so a
+// percent-encoded slash inside a segment survives, and flagged only when
+// stripping actually changed the string — a bare "/p-1/" has nothing to
+// strip, so it never asks for a redirect.
+function withPath(r: Route, raw: string): Route {
+  const p = raw.replace(/\/+$/, "");
+  if (p !== raw) r.trailingSlash = true;
+  r.path = p ? decodePath(p) : "";
+  return r;
+}
+
 function parsePath(pathname: string, mode: "volume" | "hub"): Route {
   const raw = pathname.replace(/^\/+/, "");
-  if (mode !== "hub") return { path: raw ? decodePath(raw) : "" };
+  if (mode !== "hub") return withPath({ path: "" }, raw);
   if (raw === "orgs" || raw.startsWith("orgs/")) {
     return { org: raw.slice(5).replace(/\/+$/, ""), path: "" };
   }
@@ -75,7 +90,7 @@ function parsePath(pathname: string, mode: "volume" | "hub"): Route {
   }
   const slash = raw.indexOf("/");
   if (slash === -1) return { project: raw, path: "" };
-  const r: Route = { project: raw.slice(0, slash), path: decodePath(raw.slice(slash + 1)) };
+  const r = withPath({ project: raw.slice(0, slash), path: "" }, raw.slice(slash + 1));
   const seg = r.path.indexOf("/");
   const head = seg === -1 ? r.path : r.path.slice(0, seg);
   if (VIEW_ROUTES.has(head) || LEGACY_VIEWS[head]) {
