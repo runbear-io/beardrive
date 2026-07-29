@@ -113,6 +113,33 @@ func (db *ShareDB) Revoke(token string) bool {
 	return true
 }
 
+// SetExpiry re-dates a live share in place: ttl > 0 sets the expiry, ttl == 0
+// makes it permanent again. The token is untouched, so a URL already on
+// someone's clipboard keeps working — which is the point, and why this is not
+// revoke-and-remint.
+func (db *ShareDB) SetExpiry(token string, ttl time.Duration) (Share, bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	prev, ok := db.byToken[token]
+	if !ok || prev.expired() {
+		return Share{}, false, nil
+	}
+	s := prev
+	if ttl > 0 {
+		s.Expires = time.Now().UTC().Add(ttl)
+	} else {
+		s.Expires = time.Time{}
+	}
+	db.byToken[token] = s
+	if err := db.repo.Put(s); err != nil {
+		// Restore, don't delete: unlike Create's rollback the row already
+		// existed, and dropping it would revoke a live link over a disk hiccup.
+		db.byToken[token] = prev
+		return Share{}, false, err
+	}
+	return s, true, nil
+}
+
 // List returns a project's live shares.
 func (db *ShareDB) List(project string) []Share {
 	db.mu.Lock()
@@ -202,6 +229,49 @@ func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, "no such share", http.StatusNotFound)
+}
+
+// handleShareExpiry sets or clears the expiry on an existing link. Same shape
+// and same authority as revoke — the token stays valid, only its lifetime
+// changes.
+func (s *Server) handleShareExpiry(w http.ResponseWriter, r *http.Request) {
+	if s.Shares == nil {
+		http.Error(w, "sharing is not enabled on this server", http.StatusNotFound)
+		return
+	}
+	var req struct {
+		ExpiresIn string `json:"expires_in"` // Go duration, "" = permanent
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	sh, ok := s.Shares.Get(r.PathValue("token"))
+	if !ok {
+		http.Error(w, "no such share", http.StatusNotFound)
+		return
+	}
+	if !s.requirePerm(w, r, sh.Project, PermWrite) {
+		return
+	}
+	var ttl time.Duration
+	if req.ExpiresIn != "" {
+		var err error
+		if ttl, err = time.ParseDuration(req.ExpiresIn); err != nil || ttl <= 0 {
+			http.Error(w, "invalid expires_in", http.StatusBadRequest)
+			return
+		}
+	}
+	updated, ok, err := s.Shares.SetExpiry(sh.Token, ttl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "no such share", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, shareJSON(r, updated))
 }
 
 func shareJSON(r *http.Request, sh Share) map[string]any {

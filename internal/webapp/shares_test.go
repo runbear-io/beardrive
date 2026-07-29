@@ -137,6 +137,97 @@ func TestShareLinks(t *testing.T) {
 	}
 }
 
+// PATCH /api/shares/{token} re-dates a link the user already copied: same
+// token, same URL, only the lifetime moves.
+func TestShareSetExpiry(t *testing.T) {
+	srv, p, sharesPath, _, h := shareHub(t)
+	token, url := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	patch := func(t *testing.T, tok string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		req := jsonReq(t, "PATCH", "/api/shares/"+tok, body)
+		authAs(t, srv, req)
+		return doHTTP(h, req)
+	}
+	decode := func(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+		t.Helper()
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode %s: %v", rec.Body, err)
+		}
+		return out
+	}
+
+	// setting an expiry keeps the token and URL the caller already has
+	rec := patch(t, token, map[string]string{"expires_in": "24h"})
+	if rec.Code != 200 {
+		t.Fatalf("set expiry: %d %s", rec.Code, rec.Body)
+	}
+	out := decode(t, rec)
+	if out["token"] != token || out["url"] != url {
+		t.Fatalf("expiry changed the link: %v", out)
+	}
+	exp, _ := out["expires"].(string)
+	when, err := time.Parse(time.RFC3339Nano, exp)
+	if err != nil {
+		t.Fatalf("expires = %q: %v", exp, err)
+	}
+	if d := time.Until(when); d < 23*time.Hour || d > 25*time.Hour {
+		t.Fatalf("expires in %v, want ~24h", d)
+	}
+	// and it survives a registry reload
+	db2, err := OpenShareDB(sharesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := db2.Get(token); !ok || got.Expires.IsZero() {
+		t.Fatalf("expiry lost across reload: %+v", got)
+	}
+
+	// "" clears it back to permanent
+	rec = patch(t, token, map[string]string{"expires_in": ""})
+	if rec.Code != 200 {
+		t.Fatalf("clear expiry: %d %s", rec.Code, rec.Body)
+	}
+	if got, _ := srv.Shares.Get(token); !got.Expires.IsZero() {
+		t.Fatalf("cleared share still expires at %v", got.Expires)
+	}
+	if out := decode(t, rec); out["expires"] != nil {
+		t.Fatalf("clear left an expiry: %v", out)
+	}
+
+	// junk durations are refused
+	for _, bad := range []string{"nonsense", "0s", "-1h"} {
+		if rec := patch(t, token, map[string]string{"expires_in": bad}); rec.Code != http.StatusBadRequest {
+			t.Errorf("expires_in %q: %d, want 400", bad, rec.Code)
+		}
+	}
+	// unknown token
+	if rec := patch(t, strings.Repeat("f", 32), map[string]string{"expires_in": "24h"}); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown token: %d, want 404", rec.Code)
+	}
+	// (a read-only member gets 403: TestReadOnlyMemberRoutes, which has the
+	// directory this harness deliberately does without.)
+
+	// a PATCH-set expiry kills the link on time, and drops it from List
+	if rec := patch(t, token, map[string]string{"expires_in": "1ms"}); rec.Code != 200 {
+		t.Fatalf("short expiry: %d %s", rec.Code, rec.Body)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("expired link: %d, want 404", rec.Code)
+	}
+	req := jsonReq(t, "GET", "/api/p/"+p.ID+"/shares", nil)
+	authAs(t, srv, req)
+	if rec := doHTTP(h, req); strings.Contains(rec.Body.String(), token) {
+		t.Fatalf("expired share still listed: %s", rec.Body)
+	}
+	// an already-expired token is dead, not adjustable
+	if rec := patch(t, token, map[string]string{"expires_in": ""}); rec.Code != http.StatusNotFound {
+		t.Errorf("patch of expired share: %d, want 404", rec.Code)
+	}
+}
+
 func TestShareMarkdownRendersAndExpires(t *testing.T) {
 	srv, p, sharesPath, _, h := shareHub(t)
 

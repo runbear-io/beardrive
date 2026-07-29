@@ -146,7 +146,7 @@ classDiagram
     class ShareDB {
         -repo ShareRepo
         -byToken
-        +Create +Get +Revoke
+        +Create +Get +Revoke +SetExpiry
     }
     class Share {
         +Token +Project +Path +Creator +Expires
