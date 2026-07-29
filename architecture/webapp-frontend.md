@@ -32,6 +32,7 @@ classDiagram
         +top-level routes orgs billing
         +parseRoute(url, mode) Route
         +Route.version ?v= sha, one past version
+        +Route.trailingSlash notes/ resolves, then replaces to notes
         +urlForPath(path, projectId, version)
         +urlForView / encodePath / decodePath
     }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -113,7 +114,37 @@ func (db *ShareDB) Revoke(token string) bool {
 	return true
 }
 
-// List returns a project's live shares.
+// SetExpiry re-dates a live share in place: ttl > 0 sets the expiry, ttl == 0
+// makes it permanent again. The token is untouched, so a URL already on
+// someone's clipboard keeps working — which is the point, and why this is not
+// revoke-and-remint.
+func (db *ShareDB) SetExpiry(token string, ttl time.Duration) (Share, bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	prev, ok := db.byToken[token]
+	if !ok || prev.expired() {
+		return Share{}, false, nil
+	}
+	s := prev
+	if ttl > 0 {
+		s.Expires = time.Now().UTC().Add(ttl)
+	} else {
+		s.Expires = time.Time{}
+	}
+	db.byToken[token] = s
+	if err := db.repo.Put(s); err != nil {
+		// Restore, don't delete: unlike Create's rollback the row already
+		// existed, and dropping it would revoke a live link over a disk hiccup.
+		db.byToken[token] = prev
+		return Share{}, false, err
+	}
+	return s, true, nil
+}
+
+// List returns a project's live shares, newest first. The order has to be a
+// total one: byToken is a map, so without a sort every call reshuffles the
+// rows — and these rows carry a Revoke button, so "the second one" must mean
+// the same link on every load.
 func (db *ShareDB) List(project string) []Share {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -123,6 +154,19 @@ func (db *ShareDB) List(project string) []Share {
 			out = append(out, s)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		// Equal, not !=: a time.Time carries a monotonic reading and a
+		// location, so two logically-equal instants can compare unequal —
+		// which would make this comparator non-transitive and leave the
+		// order worse than the map iteration it replaces.
+		if !out[i].Created.Equal(out[j].Created) {
+			return out[i].Created.After(out[j].Created)
+		}
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Token < out[j].Token
+	})
 	return out
 }
 
@@ -204,6 +248,49 @@ func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "no such share", http.StatusNotFound)
 }
 
+// handleShareExpiry sets or clears the expiry on an existing link. Same shape
+// and same authority as revoke — the token stays valid, only its lifetime
+// changes.
+func (s *Server) handleShareExpiry(w http.ResponseWriter, r *http.Request) {
+	if s.Shares == nil {
+		http.Error(w, "sharing is not enabled on this server", http.StatusNotFound)
+		return
+	}
+	var req struct {
+		ExpiresIn string `json:"expires_in"` // Go duration, "" = permanent
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	sh, ok := s.Shares.Get(r.PathValue("token"))
+	if !ok {
+		http.Error(w, "no such share", http.StatusNotFound)
+		return
+	}
+	if !s.requirePerm(w, r, sh.Project, PermWrite) {
+		return
+	}
+	var ttl time.Duration
+	if req.ExpiresIn != "" {
+		var err error
+		if ttl, err = time.ParseDuration(req.ExpiresIn); err != nil || ttl <= 0 {
+			http.Error(w, "invalid expires_in", http.StatusBadRequest)
+			return
+		}
+	}
+	updated, ok, err := s.Shares.SetExpiry(sh.Token, ttl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "no such share", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, shareJSON(r, updated))
+}
+
 func shareJSON(r *http.Request, sh Share) map[string]any {
 	out := map[string]any{
 		"token": sh.Token, "path": sh.Path, "project": sh.Project,
@@ -283,7 +370,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, sharedMarkdownShell, html.EscapeString(path.Base(sh.Path)), body)
+		fmt.Fprintf(w, sharedMarkdownShell, html.EscapeString(path.Base(sh.Path)), updatedStamp(fi.Time), body)
 	case ".html", ".htm":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.Copy(w, rc)
@@ -294,7 +381,20 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// updatedStamp renders the "how old is this?" line a share page owes its
+// reader — the link promises the latest version, so it has to say when latest
+// was. Zero time (a source that doesn't know) prints nothing rather than 1970.
+func updatedStamp(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	t = t.UTC()
+	return fmt.Sprintf(`<div class="updated" title="%s">Last updated %s</div>`,
+		html.EscapeString(t.Format(time.RFC3339)), html.EscapeString(t.Format("2 Jan 2006")))
+}
+
 // sharedMarkdownShell wraps rendered markdown in a minimal readable page.
+// Verbs, in order: title, updated stamp, body.
 const sharedMarkdownShell = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title>
 <style>
@@ -318,7 +418,8 @@ table.frontmatter code{white-space:pre-wrap}
 pre{max-width:100%%}
 footer.bdrive{margin-top:64px;padding-top:14px;border-top:1px solid #d0d7de;font-size:12.5px;color:#57606a}
 footer.bdrive a{color:inherit}
-@media (prefers-color-scheme: dark){footer.bdrive{border-color:#3a3a44;color:#888}}
-</style></head><body>%s
+.updated{font-size:12.5px;color:#57606a;margin-bottom:28px}
+@media (prefers-color-scheme: dark){footer.bdrive{border-color:#3a3a44;color:#888}.updated{color:#888}}
+</style></head><body>%s%s
 <footer class="bdrive">Shared with <a href="https://github.com/runbear-io/beardrive" rel="noopener">BearDrive</a> — synced files for AI agent teams</footer>
 </body></html>`

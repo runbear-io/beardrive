@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ServerConfig } from "../api/types";
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
-import { parseRoute, urlForView } from "../router";
+import { parseRoute, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
@@ -212,6 +212,14 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // one so there is one live URL per page.
   if (route.legacyView && route.view) {
     return <Redirect to={urlForView(route.view, current.id, route.viewTarget)} />;
+  }
+
+  // /notes/ is the same page as /notes — resolve it, then take the slash off
+  // the address bar. After the rewrite the flag is false, so there is no
+  // second hop. Must stay below the unknown-project redirect above, or a bad
+  // project id would be normalized on the path and keep the wrong project.
+  if (route.trailingSlash && route.path) {
+    return <Redirect to={urlForPath(route.path, current.id, route.version)} />;
   }
 
   return (

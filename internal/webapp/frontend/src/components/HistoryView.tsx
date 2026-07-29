@@ -59,6 +59,7 @@ export function HistoryView(props: {
         <HistoryRow
           key={i}
           entry={e}
+          apiBase={apiBase}
           onOpen={props.onOpen}
           diff={perFile ? { apiBase, prev: prevBlob(i) } : undefined}
         />
