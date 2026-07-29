@@ -370,7 +370,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, sharedMarkdownShell, html.EscapeString(path.Base(sh.Path)), body)
+		fmt.Fprintf(w, sharedMarkdownShell, html.EscapeString(path.Base(sh.Path)), updatedStamp(fi.Time), body)
 	case ".html", ".htm":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.Copy(w, rc)
@@ -381,7 +381,20 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// updatedStamp renders the "how old is this?" line a share page owes its
+// reader — the link promises the latest version, so it has to say when latest
+// was. Zero time (a source that doesn't know) prints nothing rather than 1970.
+func updatedStamp(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	t = t.UTC()
+	return fmt.Sprintf(`<div class="updated" title="%s">Last updated %s</div>`,
+		html.EscapeString(t.Format(time.RFC3339)), html.EscapeString(t.Format("2 Jan 2006")))
+}
+
 // sharedMarkdownShell wraps rendered markdown in a minimal readable page.
+// Verbs, in order: title, updated stamp, body.
 const sharedMarkdownShell = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title>
 <style>
@@ -405,7 +418,8 @@ table.frontmatter code{white-space:pre-wrap}
 pre{max-width:100%%}
 footer.bdrive{margin-top:64px;padding-top:14px;border-top:1px solid #d0d7de;font-size:12.5px;color:#57606a}
 footer.bdrive a{color:inherit}
-@media (prefers-color-scheme: dark){footer.bdrive{border-color:#3a3a44;color:#888}}
-</style></head><body>%s
+.updated{font-size:12.5px;color:#57606a;margin-bottom:28px}
+@media (prefers-color-scheme: dark){footer.bdrive{border-color:#3a3a44;color:#888}.updated{color:#888}}
+</style></head><body>%s%s
 <footer class="bdrive">Shared with <a href="https://github.com/runbear-io/beardrive" rel="noopener">BearDrive</a> — synced files for AI agent teams</footer>
 </body></html>`
