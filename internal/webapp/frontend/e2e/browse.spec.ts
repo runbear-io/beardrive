@@ -155,13 +155,22 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   const pid = await wikiId(page);
   await page.goto(`/${pid}/guide.md`);
   await page.click("#share-btn");
+  // BEA-32: the modal hands over the URL and nothing destructive — Revoke is
+  // the banner's, and two of them for one link is what this asserts away.
+  await expect(page.locator(".modal .ai-del")).toHaveCount(0);
   const url = await page.locator(".modal-url").textContent();
   expect(url).toContain("/s/");
   const publicRes = await page.request.get(url!);
   expect(publicRes.status()).toBe(200);
   expect(await publicRes.text()).toContain("Second version");
-  await page.click(".modal .ai-del"); // revoke
-  await expectToast(page, "revoked");
+
+  // Revoke where the control actually lives, from the file page.
+  await page.click(".modal button:has-text('Done')");
+  const banner = page.locator(".share-banner");
+  await expect(banner).toBeVisible();
+  await banner.locator(".ai-del").click();
+  await page.click(".modal .danger-btn");
+  await expectToast(page, "Share revoked");
   const gone = await page.request.get(url!);
   expect(gone.status()).toBe(404);
 });
