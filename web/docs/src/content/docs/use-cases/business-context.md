@@ -27,9 +27,10 @@ Ask your agent, in the repo:
 
 > Set up BearDrive here, syncing only `context/`.
 
-That runs `bdrive init --shared context`, which writes `.bdrive/config.json`,
-creates the folder, and starts the daemon. Nothing outside `context/` is
-scanned or sent — `.git/` and `.bdrive/` never sync at all.
+That runs `bdrive init context`, which makes `./context` the project — creating
+the folder if it doesn't exist, writing `context/.bdrive/config.json`, and
+starting the daemon. Nothing outside `context/` is scanned or sent — `.git/` and
+`.bdrive/` never sync at all.
 
 ### Then tell git to ignore it
 
@@ -123,8 +124,8 @@ and it is also the thing to be deliberate about.
   [Turn a personal brain into a company brain](/use-cases/company-brain/) for
   how that model works.
 - **Opt things out** with `.bdriveignore` — see
-  [Scoping the folder](/guides/scoping/). It always syncs, even on a
-  `--shared` mount, so one person's rules apply for the whole team.
+  [Scoping the folder](/guides/scoping/). It always syncs, so one person's rules
+  apply for the whole team.
 - **Watch what actually gets read.** [Read heat](/guides/what-agents-read/)
   shows which context pages agents consume. Pages nothing has read in a month
   are candidates for deletion, and deleting them makes the rest work better.

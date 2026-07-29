@@ -26,13 +26,15 @@ The folder does not have to match across machines. State is keyed by a stable
 project id, never a path, so `~/work` on one and `~/Documents/work` on another
 are the same project. Moving or renaming a folder later is free.
 
-Install the skill and hooks **once per machine**, and the hooks once per project
-— that is what makes each agent pull before it answers. See
+The skill and the hooks are installed **once per machine** — `bdrive init` does
+both on each new device — and from then on they cover every folder that machine
+syncs. That is what makes each agent pull before it answers. See
 [skills and hooks in detail](/manual/skills-and-hooks/).
 
 ## More than one agent per machine
 
-The skill is a cross-agent format and the hooks are written per platform, so
+The skill is a cross-agent format and the hooks are written into each platform's
+own user config, so
 Claude Code, Codex, Gemini CLI, and Hermes can all be wired into the same folder
 at once. They read the same files and their writes are stamped with which agent
 session made them, so `bdrive log` and the hub's history stay legible even when
@@ -51,8 +53,8 @@ mechanism, just with a longer window.
 
 ## What matters for this case
 
-- **[Skills and hooks in detail](/manual/skills-and-hooks/)** — what to run on
-  each new machine, and why the pull hook is the one that matters.
+- **[Skills and hooks in detail](/manual/skills-and-hooks/)** — what each new
+  machine registers, and why the pull hook is the one that matters.
 - **[How sync works](/concepts/how-it-works/)** — journals, blobs, and
   deterministic replay, if you want to know why this converges rather than
   hoping it does.

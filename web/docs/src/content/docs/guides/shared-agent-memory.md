@@ -40,7 +40,7 @@ conventions on day one.
 
 **Per machine, never synced.**
 
-For `--shared` mounts inside a repository, append two or three lines to the
+For a synced subfolder inside a repository, append two or three lines to the
 repo root's `AGENTS.md` and/or `CLAUDE.md` (both, if both exist):
 
 ```markdown

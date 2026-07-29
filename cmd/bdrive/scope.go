@@ -13,19 +13,21 @@ import (
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
-// bdrive scope shows and edits the project's sync scope — the include list
-// in .bdrive/config.json that `init --shared` seeds — so growing or
-// shrinking what syncs never means hand-editing JSON. The daemon re-reads
-// the config every tick, so changes apply within seconds.
+// bdrive scope shows and edits which of the mount's subfolders sync. The
+// narrowing is ordinary .bdriveignore rules in a bdrive-managed block (see
+// scopefile.go) — there is no separate scope setting to keep in step, and no
+// reason to hand-write the negation syntax. The daemon re-reads the rules
+// every tick, so changes apply within seconds.
 func scopeCmd() *cobra.Command {
 	var explain bool
 	c := &cobra.Command{
 		Use:   "scope",
-		Short: "Show or change which subfolders sync (the include list)",
-		Long: `Show or change the project's sync scope: the include list in
-.bdrive/config.json, as set by init --shared. An empty list means the whole
-folder syncs. Run from the mount root; the daemon picks changes up within
-seconds.
+		Short: "Show or change which subfolders sync",
+		Long: `Show or change what syncs inside this mount.
+
+The whole mount syncs by default. Narrowing it writes a managed block of
+.bdriveignore rules ("only these folders"), which syncs to the team like any
+other rule — so everyone sees the same scope. Run from the mount root.
 
 --explain walks the folder and prints every path it found, split into what
 syncs and what does not, so you can verify what leaves this machine instead
@@ -48,7 +50,9 @@ too, use ` + "`bdrive forget <path>`" + `.`,
 			if err != nil {
 				return err
 			}
-			printScope(proj)
+			if err := printScope(folder, proj); err != nil {
+				return err
+			}
 			if !explain {
 				return nil
 			}
@@ -104,47 +108,48 @@ func comma(n int) string {
 func scopeAddCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "add <dir>...",
-		Short: "Add shared subfolders to the sync scope",
+		Short: "Add subfolders to what syncs",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			folder, err := absFolder(nil)
+			folder, proj, err := scopeTarget()
 			if err != nil {
 				return err
 			}
-			proj, err := mustProject(folder)
+			dirs, scoped, err := readScopeDirs(folder)
 			if err != nil {
 				return err
 			}
-			if len(proj.Include) == 0 {
-				return fmt.Errorf("this project syncs the whole folder; adding %s would narrow it to only that — re-run `bdrive init` with --shared if you want a scoped sync", strings.Join(args, ", "))
+			if !scoped {
+				return fmt.Errorf("this project syncs the whole folder already, so %s is included;\n"+
+					"to narrow it instead, re-run `bdrive init . --only %s`",
+					strings.Join(args, ", "), strings.Join(args, ","))
 			}
-			incs, err := cleanShared(args)
+			add, err := cleanScopeDirs(args)
 			if err != nil {
 				return err
 			}
 			seen := map[string]bool{}
-			for _, i := range proj.Include {
-				seen[i] = true
+			for _, d := range dirs {
+				seen[d] = true
 			}
 			added := 0
-			for _, inc := range incs {
-				if seen[inc] {
+			for _, d := range add {
+				if seen[d] {
 					continue
 				}
-				if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(strings.TrimSuffix(inc, "/"))), 0o755); err != nil {
+				if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(d)), 0o755); err != nil {
 					return err
 				}
-				proj.Include = append(proj.Include, inc)
-				seen[inc] = true
+				dirs = append(dirs, d)
+				seen[d] = true
 				added++
 			}
 			if added == 0 {
-				fmt.Println("already in the sync scope")
-			} else if _, err := config.SaveProject(folder, proj); err != nil {
+				fmt.Println("already syncing")
+			} else if err := writeScopeDirs(folder, dirs); err != nil {
 				return err
 			}
-			printScope(proj)
-			return nil
+			return printScope(folder, proj)
 		},
 	}
 }
@@ -152,52 +157,60 @@ func scopeAddCmd() *cobra.Command {
 func scopeRmCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rm <dir>...",
-		Short: "Remove shared subfolders from the sync scope (deletes nothing)",
+		Short: "Stop syncing subfolders (deletes nothing)",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			folder, err := absFolder(nil)
+			folder, proj, err := scopeTarget()
 			if err != nil {
 				return err
 			}
-			proj, err := mustProject(folder)
+			dirs, scoped, err := readScopeDirs(folder)
 			if err != nil {
 				return err
 			}
-			kept, err := scopeRemove(proj.Include, args)
+			if !scoped {
+				return fmt.Errorf("this project syncs the whole folder; add a plain .bdriveignore rule to exclude %s",
+					strings.Join(args, ", "))
+			}
+			kept, err := scopeRemove(dirs, args)
 			if err != nil {
 				return err
 			}
 			if len(kept) == 0 {
-				return fmt.Errorf("removing the last shared folder would switch to syncing the whole folder; run `bdrive stop` to stop syncing instead")
+				return fmt.Errorf("removing the last folder would switch to syncing the whole mount; run `bdrive stop` to stop syncing instead")
 			}
-			proj.Include = kept
-			if _, err := config.SaveProject(folder, proj); err != nil {
+			if err := writeScopeDirs(folder, kept); err != nil {
 				return err
 			}
 			fmt.Println("removed from the sync scope — nothing was deleted, locally or on the hub")
-			printScope(proj)
-			return nil
+			return printScope(folder, proj)
 		},
 	}
 }
 
-// scopeRemove drops the named dirs from the include list, matching each
-// argument literally, in normalized "/dir/" form, and in the pre-anchoring
-// "dir/" form that configs written before the anchoring fix still hold
-// (hand-edited configs may hold arbitrary patterns). Unknown entries are an
-// error.
-func scopeRemove(include, args []string) ([]string, error) {
+// scopeTarget resolves the mount the scope commands act on.
+func scopeTarget() (string, config.Project, error) {
+	folder, err := absFolder(nil)
+	if err != nil {
+		return "", config.Project{}, err
+	}
+	proj, err := mustProject(folder)
+	return folder, proj, err
+}
+
+// scopeRemove drops the named dirs from the scoped list, tolerating the
+// slash-decorated forms people type. Unknown entries are an error.
+func scopeRemove(dirs, args []string) ([]string, error) {
 	remove := map[string]bool{}
 	for _, a := range args {
-		keys := map[string]bool{strings.TrimSpace(a): true}
-		if norm, err := cleanShared([]string{a}); err == nil {
-			keys[norm[0]] = true
-			keys[strings.TrimPrefix(norm[0], "/")] = true
+		want, err := cleanScopeDirs([]string{a})
+		if err != nil {
+			return nil, err
 		}
 		found := false
-		for _, i := range include {
-			if keys[i] {
-				remove[i] = true
+		for _, d := range dirs {
+			if d == want[0] {
+				remove[d] = true
 				found = true
 			}
 		}
@@ -206,21 +219,36 @@ func scopeRemove(include, args []string) ([]string, error) {
 		}
 	}
 	var kept []string
-	for _, i := range include {
-		if !remove[i] {
-			kept = append(kept, i)
+	for _, d := range dirs {
+		if !remove[d] {
+			kept = append(kept, d)
 		}
 	}
 	return kept, nil
 }
 
-func printScope(proj config.Project) {
-	if len(proj.Include) == 0 {
-		fmt.Println("the whole folder syncs (no include list)")
-		return
+func printScope(folder string, proj config.Project) error {
+	dirs, scoped, err := readScopeDirs(folder)
+	if err != nil {
+		return err
+	}
+	// Mounts created before the scope moved into .bdriveignore still carry an
+	// include list in .bdrive/config.json; it is still honored, so report it.
+	if len(proj.Include) > 0 {
+		fmt.Println("syncing only (legacy include list in .bdrive/config.json):")
+		for _, i := range proj.Include {
+			fmt.Println("  ./" + strings.Trim(i, "/"))
+		}
+		fmt.Println("re-run `bdrive init . --only <dirs>` to move these into .bdriveignore")
+		return nil
+	}
+	if !scoped {
+		fmt.Println("the whole folder syncs")
+		return nil
 	}
 	fmt.Println("syncing only:")
-	for _, i := range proj.Include {
-		fmt.Println("  ./" + strings.Trim(i, "/"))
+	for _, d := range dirs {
+		fmt.Println("  ./" + d)
 	}
+	return nil
 }

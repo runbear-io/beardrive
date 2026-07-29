@@ -75,8 +75,8 @@ container platform works the same way.
 1. Open `https://your-hub/` and create your account. Use the signup posture you
    configured; hub admins are the `admins` emails.
 2. On any machine, `bdrive login https://your-hub`, then in the folder you want
-   synced: `bdrive init --name wiki --yes` — or `--shared docs` inside a
-   repository to sync only that subfolder.
+   synced: `bdrive init --name wiki --yes` — or, inside a repository,
+   `bdrive init docs --yes` to make that subfolder the project.
 3. Invite a teammate: sidebar footer → **Manage** → **New invite**. The join
    link both creates their account and adds them to your org.
 4. Connect agents: the project's home page shows one-paste setup for Claude

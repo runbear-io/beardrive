@@ -16,15 +16,19 @@ export const INSTALL_DOC = "https://raw.githubusercontent.com/runbear-io/beardri
 export function ConnectGuide({ project }: { project: Project }) {
   const origin = window.location.origin;
   const prompt =
-    "Follow " + INSTALL_DOC + "\nto connect this folder to BearDrive project " + project.id + " on " + origin + ".";
+    "Follow " +
+    INSTALL_DOC +
+    "\nto set up BearDrive project " +
+    project.id +
+    " on " +
+    origin +
+    ". Ask me which folder to sync.";
   const manual =
     "brew install runbear-io/tap/beardrive" +
-    "\nbdrive skill install" +
     "\nbdrive login " +
     origin +
     "\nbdrive init --project " +
-    project.id +
-    "\nbdrive hooks install";
+    project.id;
 
   return (
     <div className="guide">
@@ -59,20 +63,21 @@ export function ConnectGuide({ project }: { project: Project }) {
             <li>
               Sync hooks pull the latest before every agent turn, push edits seconds after they
               happen, and stamp each change with the session that made it; agent reads feed
-              Insights.
+              Insights. They register once per machine in your agent's own config, so every
+              session is covered and nothing is written into the synced folder.
             </li>
             <li>
               The beardrive skill (and on Claude Code, the plugin — shared with Cowork) is
               installed for later sessions, so from then on you can just ask.
             </li>
-            <li>Codex asks once to trust the project's hooks layer — answer yes, or run /hooks.</li>
+            <li>Codex hooks are off by default: set [features] codex_hooks = true in ~/.codex/config.toml.</li>
           </ul>
         </details>
         <details className="gd-manual">
           <summary>Or run it yourself</summary>
           <p className="gd-desc">
-            Same result, in the folder you want the files. Don't skip the last line — the hooks are
-            what keep every turn starting from the latest state.
+            Same result, in the folder you want the files. One command: init signs this device in,
+            installs the skill, registers the sync hooks and starts syncing.
           </p>
           <GuideCode code={manual} />
           <p className="gd-desc">

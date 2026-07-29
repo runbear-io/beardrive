@@ -9,18 +9,20 @@ project.
 ## `.bdrive/`
 
 The folder's settings directory. `config.json` holds the **stable mount id**
-plus project, remote, and include settings.
+plus the project and remote (older mounts may also carry a legacy `include`
+list — still honored, never written now).
 
 ```jsonc
 // .bdrive/config.json
 { "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["/shared/"] }
+  "remote": "https://drive.example.com/p/p-7f3a2c91" }
 ```
 
 Written by `bdrive init` and safe to hand-edit — a running daemon picks changes
-up automatically. The `include` list (which subfolders sync, set by
-`init --shared`) has a friendlier editor: `bdrive scope add`/`rm` from the
-mount root.
+up automatically. Which subfolders sync is *not* stored here: that lives in
+`.bdriveignore` (see below), edited with `bdrive scope add`/`rm`. Mounts created
+before that change may still carry an `include` list here; it is still honored,
+but nothing writes it any more.
 
 It is **never synced** and holds **no credentials**; the session token stays in
 `~/.bdrive`.
@@ -33,6 +35,15 @@ freely. Copy it to another machine and `bdrive init` resumes the same project.
 A gitignore-style opt-out list at the mount root. It syncs like a normal file,
 so every device shares the same rules. See
 [Scoping the folder](/guides/scoping/).
+
+## And nothing else
+
+Those two are all BearDrive puts in a project: `.bdrive/config.json`,
+`.bdriveignore`, and your own files. No agent-config directory is ever created
+here — the sync hooks live in each platform's user config
+(`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/settings.json`,
+`~/.hermes/config.yaml`), written once per machine. See
+[Skills and hooks in detail](/manual/skills-and-hooks/).
 
 ## Global state
 

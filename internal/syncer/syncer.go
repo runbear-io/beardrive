@@ -633,7 +633,7 @@ func (s *Session) materializeFile(rel string, want journal.FileState, cache map[
 // The rules are deliberately ignore-only. .bdriveignore syncs, so every
 // device agrees on it; the include list lives in this device's own
 // .bdrive/config.json and does not sync. Never reuse the cycle's main filter
-// here: a device with a narrow --shared scope would delete files a
+// here: a device with a legacy include-list scope would delete files a
 // whole-folder teammate legitimately syncs.
 func (s *Session) pruneOps(target map[string]journal.FileState, st *store.SyncState, seqBase int64) ([]journal.Op, error) {
 	shared, err := loadFilter(s.Folder, nil) // nil include: shared rules only
