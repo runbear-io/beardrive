@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,97 @@ func TestShareLinks(t *testing.T) {
 	}
 }
 
+// PATCH /api/shares/{token} re-dates a link the user already copied: same
+// token, same URL, only the lifetime moves.
+func TestShareSetExpiry(t *testing.T) {
+	srv, p, sharesPath, _, h := shareHub(t)
+	token, url := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	patch := func(t *testing.T, tok string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		req := jsonReq(t, "PATCH", "/api/shares/"+tok, body)
+		authAs(t, srv, req)
+		return doHTTP(h, req)
+	}
+	decode := func(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+		t.Helper()
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode %s: %v", rec.Body, err)
+		}
+		return out
+	}
+
+	// setting an expiry keeps the token and URL the caller already has
+	rec := patch(t, token, map[string]string{"expires_in": "24h"})
+	if rec.Code != 200 {
+		t.Fatalf("set expiry: %d %s", rec.Code, rec.Body)
+	}
+	out := decode(t, rec)
+	if out["token"] != token || out["url"] != url {
+		t.Fatalf("expiry changed the link: %v", out)
+	}
+	exp, _ := out["expires"].(string)
+	when, err := time.Parse(time.RFC3339Nano, exp)
+	if err != nil {
+		t.Fatalf("expires = %q: %v", exp, err)
+	}
+	if d := time.Until(when); d < 23*time.Hour || d > 25*time.Hour {
+		t.Fatalf("expires in %v, want ~24h", d)
+	}
+	// and it survives a registry reload
+	db2, err := OpenShareDB(sharesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := db2.Get(token); !ok || got.Expires.IsZero() {
+		t.Fatalf("expiry lost across reload: %+v", got)
+	}
+
+	// "" clears it back to permanent
+	rec = patch(t, token, map[string]string{"expires_in": ""})
+	if rec.Code != 200 {
+		t.Fatalf("clear expiry: %d %s", rec.Code, rec.Body)
+	}
+	if got, _ := srv.Shares.Get(token); !got.Expires.IsZero() {
+		t.Fatalf("cleared share still expires at %v", got.Expires)
+	}
+	if out := decode(t, rec); out["expires"] != nil {
+		t.Fatalf("clear left an expiry: %v", out)
+	}
+
+	// junk durations are refused
+	for _, bad := range []string{"nonsense", "0s", "-1h"} {
+		if rec := patch(t, token, map[string]string{"expires_in": bad}); rec.Code != http.StatusBadRequest {
+			t.Errorf("expires_in %q: %d, want 400", bad, rec.Code)
+		}
+	}
+	// unknown token
+	if rec := patch(t, strings.Repeat("f", 32), map[string]string{"expires_in": "24h"}); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown token: %d, want 404", rec.Code)
+	}
+	// (a read-only member gets 403: TestReadOnlyMemberRoutes, which has the
+	// directory this harness deliberately does without.)
+
+	// a PATCH-set expiry kills the link on time, and drops it from List
+	if rec := patch(t, token, map[string]string{"expires_in": "1ms"}); rec.Code != 200 {
+		t.Fatalf("short expiry: %d %s", rec.Code, rec.Body)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("expired link: %d, want 404", rec.Code)
+	}
+	req := jsonReq(t, "GET", "/api/p/"+p.ID+"/shares", nil)
+	authAs(t, srv, req)
+	if rec := doHTTP(h, req); strings.Contains(rec.Body.String(), token) {
+		t.Fatalf("expired share still listed: %s", rec.Body)
+	}
+	// an already-expired token is dead, not adjustable
+	if rec := patch(t, token, map[string]string{"expires_in": ""}); rec.Code != http.StatusNotFound {
+		t.Errorf("patch of expired share: %d, want 404", rec.Code)
+	}
+}
+
 func TestShareMarkdownRendersAndExpires(t *testing.T) {
 	srv, p, sharesPath, _, h := shareHub(t)
 
@@ -183,6 +275,92 @@ func TestShareMarkdownRendersAndExpires(t *testing.T) {
 	}
 	if _, ok := db2.Get(token); !ok {
 		t.Fatal("share lost across reload")
+	}
+}
+
+// A Revoke button sits on every row of the public-links table, so the row
+// order must not move between loads. byToken is a map, so List has to sort.
+func TestShareListIsDeterministic(t *testing.T) {
+	db, err := OpenShareDB(filepath.Join(t.TempDir(), "shares.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hand-set Created — Create stamps time.Now(), which never collides, so
+	// going through it would leave the tie-break path untested.
+	tick := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	for _, s := range []Share{
+		{Token: "t3", Project: "p", Path: "z.md", Created: tick},
+		{Token: "t2", Project: "p", Path: "a.md", Created: tick}, // same instant as t3
+		{Token: "t1", Project: "p", Path: "newest.md", Created: tick.Add(time.Hour)},
+		{Token: "t0", Project: "p", Path: "oldest.md", Created: tick.Add(-time.Hour)},
+		{Token: "x", Project: "other", Path: "a.md", Created: tick},
+		{Token: "dead", Project: "p", Path: "gone.md", Created: tick, Expires: tick},
+	} {
+		db.byToken[s.Token] = s
+		if err := db.repo.Put(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first := db.List("p")
+	want := []string{"t1", "t2", "t3", "t0"} // created desc, then path asc (a.md < z.md)
+	got := make([]string, len(first))
+	for i, s := range first {
+		got[i] = s.Token
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v (newest first, path tie-break)", got, want)
+	}
+	for i := 0; i < 10; i++ {
+		if !reflect.DeepEqual(db.List("p"), first) {
+			t.Fatalf("call %d reordered: %v vs %v", i, db.List("p"), first)
+		}
+	}
+	// A project with no shares still returns nil, not an empty slice.
+	if db.List("nobody") != nil {
+		t.Fatal("empty project should list as nil")
+	}
+}
+
+// Both share-listing APIs — the project settings table and the org-wide audit
+// — must hand back the same bytes on consecutive reads.
+func TestShareListAPIsAreStable(t *testing.T) {
+	h, srv, c, p := permHub(t)
+	// Mint directly: the HTTP route requires a synced file, and this test is
+	// about ordering, not about the mint path.
+	for _, path := range []string{"b.md", "a.md", "c.md"} {
+		if _, err := srv.Shares.Create(p.ID, path, "alice@x.io", 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, url := range []string{"/api/p/" + p.ID + "/shares", "/api/orgs/" + p.Org + "/shares"} {
+		first := doAs(t, h, "GET", url, nil, c["alice"])
+		if first.Code != 200 {
+			t.Fatalf("GET %s: %d %s", url, first.Code, first.Body)
+		}
+		if !strings.Contains(first.Body.String(), "a.md") {
+			t.Fatalf("GET %s listed no shares: %s", url, first.Body)
+		}
+		for i := 0; i < 5; i++ {
+			again := doAs(t, h, "GET", url, nil, c["alice"])
+			if again.Body.String() != first.Body.String() {
+				t.Fatalf("GET %s moved between loads:\n%s\n%s", url, first.Body, again.Body)
+			}
+		}
+	}
+	// The newest link is the first row — what you just minted is what you are
+	// most likely to want to undo.
+	rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/shares", nil, c["alice"])
+	var out struct {
+		Shares []struct {
+			Path string `json:"path"`
+		} `json:"shares"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Shares) != 3 || out.Shares[0].Path != "c.md" {
+		t.Fatalf("newest share is not first: %s", rec.Body)
 	}
 }
 
