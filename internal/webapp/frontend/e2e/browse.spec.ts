@@ -150,6 +150,32 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   expect(gone.status()).toBe(404);
 });
 
+// BEA-29: the CLI has had --expires all along; the dialog now offers it on
+// the link you just minted, without changing that link's URL.
+test("share dialog sets an expiry on the link it just minted", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/index.md`);
+  await page.click("#share-btn");
+  const url = (await page.locator(".modal-url").textContent())!;
+  await expect(page.locator(".modal-expiry-note")).toHaveText("no expiry");
+
+  await page.selectOption("#share-expiry", "168h");
+  await expect(page.locator(".modal-expiry-note")).toContainText("expires");
+  // Same link: the URL already on the clipboard keeps working.
+  expect(await page.locator(".modal-url").textContent()).toBe(url);
+  expect((await page.request.get(url)).status()).toBe(200);
+  await page.click(".modal button:has-text('Done')");
+
+  // …and Settings stops calling it permanent.
+  await page.goto(`/${pid}/settings`);
+  const row = page.locator(".admin-item", { hasText: "index.md" });
+  await expect(row.locator(".ai-tag")).toContainText("expires");
+  await expect(row.locator(".ai-tag")).not.toContainText("no expiry");
+
+  await page.request.delete(`/api/shares/${url.split("/s/")[1]}`);
+});
+
 test("no browser upload: content arrives via sync; the tree picks it up", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
