@@ -47,7 +47,7 @@ test("guide: manual fallback has the full command list and the docs link", async
   expect(manual).toContain("brew install runbear-io/tap/beardrive");
   expect(manual).toContain("bdrive login http://localhost:8993");
   expect(manual).toContain(`bdrive init --project ${pid}`);
-  expect(manual).toContain("bdrive hooks install");
+  expect(manual).not.toContain("bdrive hooks install"); // init registers hooks itself
   await expect(page.locator('.gd-manual a[href="https://docs.beardrive.ai/manual/install/"]')).toHaveCount(1);
 });
 

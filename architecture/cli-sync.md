@@ -40,7 +40,7 @@ classDiagram
         +Skip(rel) bool
         +PruneDir(rel) bool
     }
-    note for Filter "ignore.go — .bdriveignore rules + .bdrive include list, applied symmetrically in scan and materialize"
+    note for Filter "ignore.go — .bdriveignore rules (incl. the managed `# bdrive scope` negation block written by init --only / bdrive scope) + a legacy .bdrive include list, applied symmetrically in scan and materialize; Negated() is what makes sync --prune refuse on a scoped project"
 
     class Store {
         -dir volume dir
@@ -95,8 +95,9 @@ classDiagram
         sync stop scope forget status log
         restore url share export import
         web daemon hooks read-log skill
+        hook-approve PreToolUse
     }
-    note for Commands "cmd/bdrive — thin cobra layer; init is the front door, stop pauses"
+    note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + skill + hooks + sync + link), stop pauses; hook-approve auto-approves only bdrive's own setup subcommands for the plugin's PreToolUse hook"
 
     class syncBlocked {
         <<gate>>
@@ -118,7 +119,8 @@ classDiagram
 
     class Project {
         +ID stable mount id
-        +Volume +Remote +Include
+        +Volume +Remote
+        +Include legacy, read-only
     }
     note for Project ".bdrive/config.json — travels with the folder (git clone, copy); presence alone is NOT consent to sync"
 
@@ -136,12 +138,13 @@ classDiagram
     note for MountRegistry "internal/config — per-device state under BDRIVE_HOME; ResolveMount self-heals the path for enrolled mounts (renames/moves stay free)"
 
     class AgentHooks {
-        Detect / Install / Registered
+        Detect / Install / Uninstall / Registered
+        ConfigPath = USER config
         turn-start: sync --hook
         post-edit: sync --note
         post-read: read-log
     }
-    note for AgentHooks "internal/agenthooks — registers per-platform hook commands (claude, codex, gemini, hermes); they fire in every folder, every turn"
+    note for AgentHooks "internal/agenthooks — registers per-platform hook commands (claude, codex, gemini, hermes) in each platform's USER config, once per machine; they fire in every folder, every turn, and no-op outside mounts"
 
     class PausedMarker {
         volumes/id/paused
@@ -155,6 +158,7 @@ classDiagram
     note for AgentSkills "internal/agentskills — installs the beardrive skill user-level (per-platform skills dir) from the binary's embedded copy; idempotent, refreshed on upgrade"
 
     Commands --> AgentSkills : skill install
+    Commands --> AgentHooks : hooks install/uninstall (init runs install automatically)
     AgentHooks --> Commands : runs sync and read-log
     Commands --> syncBlocked : sync and read-log gate first
     syncBlocked --> MountRegistry : reads only, never enrolls

@@ -7,39 +7,75 @@ Shared agent memory works better when it's curated. A folder holding
 `node_modules/` and build output costs sync bandwidth, buries the documents that
 matter, and gives agents thousands of irrelevant paths to wander into.
 
-Two mechanisms control it: an **include list** that narrows the project to a
-subfolder, and **`.bdriveignore`** that opts individual paths out. Both are
-applied symmetrically — the same filter governs what's read from disk and what's
-written back to it.
+One mechanism controls it: **`.bdriveignore`**, a gitignore-style rule file at
+the mount root. It opts individual paths out, and — as a bdrive-managed block of
+"only these folders" rules — it narrows the project to chosen subfolders. Rules
+are applied symmetrically: the same filter governs what's read from disk and
+what's written back to it.
 
 ## Sync only subfolders
 
+A mount is always exactly the folder you name:
+
 ```sh
-bdrive init --shared wiki
-bdrive init --shared wiki,docs   # several subfolders, one project
+bdrive init wiki    # ./wiki is the project
 ```
 
-This is the right shape inside a code repository: sync `wiki/` or `docs/` and
-leave the source tree alone. The agent gets a knowledge folder; the code stays
-in git where it belongs. `--shared` takes one folder or several — comma-separated
-or repeated — and they all join the same project, with one membership and one
-permission set. The interactive `bdrive init` asks the same question.
+Its contents *are* the project's contents — no `wiki/` prefix on the hub — and
+nothing outside it is ever scanned. This is the right shape inside a code
+repository: sync `wiki/` or `docs/` and leave the source tree alone. The agent
+gets a knowledge folder; the code stays in git where it belongs.
 
-The result lands in `.bdrive/config.json` as an include list:
+When the project has to be the enclosing folder — several subfolders belonging
+to one project, or agents that work from the repo root — narrow it with
+`--only`:
 
-```jsonc
-{ "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["/wiki/"] }
+```sh
+bdrive init . --only wiki,docs
 ```
 
-The leading slash anchors each entry to the mount root: `/wiki/` means the
-`wiki` folder at the top of this project and nothing else, so a nested
-directory that happens to share the name never syncs.
+Both folders join the same project, with one membership and one permission set.
+The interactive `bdrive init` asks the same question.
+
+`--only` writes ordinary `.bdriveignore` rules, in a managed block at the top of
+the file:
+
+```gitignore
+# bdrive scope — only these folders sync (managed by bdrive; change with `bdrive scope add/rm`)
+/*
+!/wiki/
+!/docs/
+# end bdrive scope
+```
+
+`/*` excludes everything at the mount root; each `!` line re-includes one
+folder, anchored to that root — so a nested directory that happens to share the
+name never syncs. The block goes first because matching is last-match-wins:
+ordinary rules below it still apply, which keeps `node_modules/` excluded
+*inside* a scoped folder.
+
+There is no separate scope setting to keep in step.
+
+:::note[Legacy include lists]
+Projects created before the scope moved into `.bdriveignore` carry an `include`
+list in `.bdrive/config.json`. It is still honored, but never written any more —
+`bdrive scope` reports it and points you at `bdrive init . --only <dirs>` to
+move it into `.bdriveignore`.
+:::
+
+## The scope is the team's
+
+Because the rules live in `.bdriveignore`, and that file syncs, a narrow scope
+is the whole team's scope: every device that syncs the project picks it up.
+Widening or narrowing it is a change everyone sees, not a local preference.
+(Legacy include lists are the exception — they sit in the never-synced
+`.bdrive/config.json` and apply to one device only.)
 
 ## Change the scope later
 
-`bdrive scope` shows the include list; `scope add` / `scope rm` edit it — no
-JSON editing, and the running daemon applies the change within seconds:
+`bdrive scope` shows what syncs; `scope add` / `scope rm` edit the managed block
+— no hand-written negation syntax, and the running daemon applies the change
+within seconds:
 
 ```sh
 bdrive scope             # what syncs now
@@ -47,14 +83,19 @@ bdrive scope add notes   # also sync ./notes
 bdrive scope rm docs     # stop syncing ./docs
 ```
 
+Both act on an already-narrowed project; on a whole-folder mount `scope add`
+points you at `bdrive init . --only <dirs>` and `scope rm` at a plain
+`.bdriveignore` rule.
+
 Removing a folder stops syncing it but deletes nothing — local files stay, and
 the hub keeps everything already synced (the same
-[non-destructive rule](#opting-out-is-non-destructive) as `.bdriveignore`).
-Removing the *last* entry is refused, because an empty include list means the
-whole folder syncs; if you want to stop syncing entirely, that's `bdrive stop`.
+[non-destructive rule](#opting-out-is-non-destructive) as any other
+`.bdriveignore` change). Removing the *last* entry is refused, because an empty
+block means the whole folder syncs; if you want to stop syncing entirely, that's
+`bdrive stop`.
 
 :::tip
-A `--shared` mount is also where the two-file
+A scoped mount is also where the two-file
 [`AGENTS.md` pattern](/guides/shared-agent-memory/) earns its keep — the synced
 map lives in `wiki/`, and the repo root gets a pointer to it.
 :::
@@ -75,9 +116,9 @@ build/
 Supported: `#` comments, `*`, `**`, `?`, a trailing `/` for directories, a
 leading (or any) `/` for root-anchoring, and `!` to re-include.
 
-It always syncs — even on an include-list mount where it sits outside the
-scope, and even if a pattern matches it — so every device shares the same
-rules: one person excluding `*.tmp` fixes it for the whole team.
+It always syncs — even when the scope block excludes everything around it, and
+even if a pattern matches it — so every device shares the same rules: one
+person excluding `*.tmp` fixes it for the whole team.
 
 `bdrive init` seeds a starter one covering `node_modules`, build directories,
 caches, and `.env*`.
@@ -88,6 +129,14 @@ When a pattern starts matching an already-synced file, the file stops syncing
 but is **deleted nowhere**. The path is dropped from the local cache without a
 delete op, so opting out on your machine never removes the file from anyone
 else's.
+
+To take something off the hub as well, use `bdrive forget <path>`: it writes the
+rule and removes what already synced from the hub, keeping the local copy on
+every device. `bdrive sync --prune` does the same reconciliation for rules you
+added by hand — but it **refuses on a scoped project**, because "only these
+folders" rules exclude everything else the project holds, and pruning them would
+strip all of it from the hub for every teammate, not just this device. Name the
+specific paths with `bdrive forget` instead, or widen the rules first.
 
 ## What never syncs
 

@@ -6,10 +6,18 @@
 // command, pipe event JSON (with a session_id) on stdin — so one hook command
 // works everywhere; only the config file format and event names differ:
 //
-//	claude  .claude/settings.json    UserPromptSubmit / PostToolUse   (project)
-//	codex   .codex/hooks.json        UserPromptSubmit / PostToolUse   (project)
-//	gemini  .gemini/settings.json    BeforeAgent / AfterTool          (project)
-//	hermes  ~/.hermes/config.yaml    pre_llm_call / post_tool_call    (user)
+//	claude  ~/.claude/settings.json  UserPromptSubmit / PostToolUse
+//	codex   ~/.codex/hooks.json      UserPromptSubmit / PostToolUse
+//	gemini  ~/.gemini/settings.json  BeforeAgent / AfterTool
+//	hermes  ~/.hermes/config.yaml    pre_llm_call / post_tool_call
+//
+// Every config is USER-level, written once per machine. Platforms read hook
+// config only from the directory a session starts in — never a parent, never
+// a subfolder — so a per-project file would fire only for sessions that
+// happen to start there, and (living inside a mount) would sync to the whole
+// team. One user-level registration covers every session in every folder;
+// the guard below makes it a no-op outside BearDrive projects. Install
+// migrates away any project-level hooks earlier versions wrote.
 //
 // The hook syncs the project and stamps changes with "<agent> session <id>"
 // (see `bdrive sync --note`), so hub history links every change to the agent
@@ -54,14 +62,31 @@ type Result struct {
 	Path    string // config file the hooks live in
 	Changed bool   // false = already registered
 	Note    string // extra step the user must take, if any
+	// Migrated names a project-level config an earlier version wrote, whose
+	// hooks this run removed. Empty when there was nothing to clean up.
+	Migrated string
+}
+
+// mountGuard is the fast pre-check every hook opens with. It runs on every
+// tool call in every folder, so it stays pure shell — no process spawn on the
+// common "not a bdrive folder" path. It answers in both directions, because a
+// session's directory is rarely the mount root: walk up for an enclosing
+// mount (editor opened inside the synced wiki/), else ask the registry whether
+// any mount lives below (editor opened at the repo root above wiki/ and
+// docs/). Matching on .bdrive/config.json rather than the directory keeps
+// $BDRIVE_HOME (~/.bdrive, which has no config.json) from reading as a mount.
+func mountGuard() string {
+	return `cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0; ` +
+		`d=$PWD; while [ ! -f "$d/.bdrive/config.json" ]; do case "$d" in ""|/) d=; break;; esac; d=${d%/*}; done; ` +
+		`[ -n "$d" ] || grep -qF "\"$PWD/" "${BDRIVE_HOME:-$HOME/.bdrive}/mounts.json" 2>/dev/null || exit 0; ` +
+		`command -v bdrive >/dev/null || exit 0; `
 }
 
 // hookCommand is the one shell command every platform runs: sync the project
 // if it is a bdrive mount, stamping changes with the agent session id parsed
 // from the hook's stdin JSON. POSIX sh only — no jq, no bashisms.
 func hookCommand(label string) string {
-	return `sh -c '` +
-		`cd "${CLAUDE_PROJECT_DIR:-.}" && [ -d .bdrive ] && command -v bdrive >/dev/null || exit 0; ` +
+	return `sh -c '` + mountGuard() +
 		`s=; [ -t 0 ] || s=$(head -c 8192 2>/dev/null | tr -d \" | sed -n "s/.*session_id[[:space:]]*:[[:space:]]*\([a-zA-Z0-9_-]*\).*/\1/p" | head -n 1); ` +
 		`if [ -n "$s" ]; then bdrive sync . --note "` + label + ` session $s" >/dev/null 2>&1 || true; ` +
 		`else bdrive sync . >/dev/null 2>&1 || true; fi'`
@@ -73,8 +98,7 @@ func hookCommand(label string) string {
 // is why stdout must NOT be discarded here). Claude-only: the JSON
 // contract is Claude Code's.
 func hookPullCommand(label string) string {
-	return `sh -c '` +
-		`cd "${CLAUDE_PROJECT_DIR:-.}" && [ -d .bdrive ] && command -v bdrive >/dev/null || exit 0; ` +
+	return `sh -c '` + mountGuard() +
 		`bdrive sync . --hook ` + label + ` 2>/dev/null'`
 }
 
@@ -82,8 +106,7 @@ func hookPullCommand(label string) string {
 // `bdrive read-log` parses the hook's stdin JSON itself and only appends to
 // a local spool, so this stays cheap enough to run on every read-tool call.
 func readHookCommand() string {
-	return `sh -c '` +
-		`cd "${CLAUDE_PROJECT_DIR:-.}" && [ -d .bdrive ] && command -v bdrive >/dev/null || exit 0; ` +
+	return `sh -c '` + mountGuard() +
 		`bdrive read-log . >/dev/null 2>&1 || true'`
 }
 
@@ -99,12 +122,12 @@ var platforms = map[string]platform{
 	"claude": {
 		label:      "claude-code",
 		projectDir: ".claude",
-		install: func(folder string) (string, bool, error) {
+		install: func(string) (string, bool, error) {
 			// Reads happen through more than the Read tool: Grep consumes
 			// the files its matches come from, and Bash reads whatever
 			// files the command names (`read-log` mines both payloads).
 			// Glob stays unmatched on purpose — listing names isn't reading.
-			return mergeJSONHooks(filepath.Join(folder, ".claude", "settings.json"),
+			return mergeJSONHooks(ConfigPath("", "claude"),
 				"UserPromptSubmit", "PostToolUse", "Write|Edit|MultiEdit", "Read|Grep|Bash", "claude-code", 30, true,
 				hookPullCommand("claude-code"))
 		},
@@ -112,20 +135,22 @@ var platforms = map[string]platform{
 	"codex": {
 		label:      "codex",
 		projectDir: ".codex",
-		install: func(folder string) (string, bool, error) {
+		install: func(string) (string, bool, error) {
 			// Codex reads mostly happen through shell commands; read-log
 			// mines the command line for the files it names.
-			return mergeJSONHooks(filepath.Join(folder, ".codex", "hooks.json"),
+			return mergeJSONHooks(ConfigPath("", "codex"),
 				"UserPromptSubmit", "PostToolUse", "apply_patch", "read_file|shell", "codex", 30, false, "")
 		},
-		note: "run /hooks inside Codex once to trust the project's .codex layer",
+		// Codex hooks are experimental and off by default, and Codex asks
+		// the user to trust each hook definition once.
+		note: "enable hooks in ~/.codex/config.toml ([features] codex_hooks = true), then trust the hook when Codex asks",
 	},
 	"gemini": {
 		label:      "gemini",
 		projectDir: ".gemini",
-		install: func(folder string) (string, bool, error) {
+		install: func(string) (string, bool, error) {
 			// Gemini uses its own event names and millisecond timeouts.
-			return mergeJSONHooks(filepath.Join(folder, ".gemini", "settings.json"),
+			return mergeJSONHooks(ConfigPath("", "gemini"),
 				"BeforeAgent", "AfterTool", "write_file|replace|edit",
 				"read_file|read_many_files|search_file_content|run_shell_command", "gemini", 30000, false, "")
 		},
@@ -163,8 +188,28 @@ func Registered(folder, agent string) bool {
 	return err == nil && strings.Contains(string(data), marker)
 }
 
-// ConfigPath returns where an agent's hooks are (or would be) registered.
-func ConfigPath(folder, agent string) string {
+// ConfigPath returns where an agent's hooks are (or would be) registered:
+// always the platform's USER-level config. The folder argument is ignored and
+// kept only so callers read naturally; see the package doc for why hooks are
+// no longer written per project.
+func ConfigPath(_ string, agent string) string {
+	home, _ := os.UserHomeDir()
+	switch agent {
+	case "claude":
+		return filepath.Join(home, ".claude", "settings.json")
+	case "codex":
+		return filepath.Join(home, ".codex", "hooks.json")
+	case "gemini":
+		return filepath.Join(home, ".gemini", "settings.json")
+	case "hermes":
+		return filepath.Join(home, ".hermes", "config.yaml")
+	}
+	return ""
+}
+
+// projectConfigPath is where PREVIOUS versions wrote a platform's hooks. Only
+// the migration in Install reads these, to strip blocks it left behind.
+func projectConfigPath(folder, agent string) string {
 	switch agent {
 	case "claude":
 		return filepath.Join(folder, ".claude", "settings.json")
@@ -172,11 +217,8 @@ func ConfigPath(folder, agent string) string {
 		return filepath.Join(folder, ".codex", "hooks.json")
 	case "gemini":
 		return filepath.Join(folder, ".gemini", "settings.json")
-	case "hermes":
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, ".hermes", "config.yaml")
 	}
-	return ""
+	return "" // hermes was always user-level
 }
 
 // Install registers the sync hooks for the given agents ("auto"/empty =
@@ -196,9 +238,133 @@ func Install(folder string, agents []string) ([]Result, error) {
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", name, err)
 		}
-		out = append(out, Result{Agent: name, Path: path, Changed: changed, Note: p.note})
+		// Earlier versions wrote hooks into the project. Leaving those behind
+		// would run every hook twice — double-counting agent reads in the
+		// hub's heatmap — so installing also migrates them away.
+		migrated, err := removeProjectHooks(folder, name)
+		if err != nil {
+			return out, fmt.Errorf("%s: %w", name, err)
+		}
+		out = append(out, Result{Agent: name, Path: path, Changed: changed, Note: p.note, Migrated: migrated})
 	}
 	return out, nil
+}
+
+// Uninstall removes BearDrive's hooks from each agent's user config, leaving
+// every other hook in the file untouched.
+func Uninstall(agents []string) ([]Result, error) {
+	if len(agents) == 0 || (len(agents) == 1 && agents[0] == "auto") {
+		agents = Agents
+	}
+	var out []Result
+	for _, name := range agents {
+		if _, ok := platforms[name]; !ok {
+			return out, fmt.Errorf("unknown agent %q (supported: %s)", name, strings.Join(Agents, ", "))
+		}
+		path := ConfigPath("", name)
+		changed, err := removeHooks(path, name == "hermes")
+		if err != nil {
+			return out, fmt.Errorf("%s: %w", name, err)
+		}
+		out = append(out, Result{Agent: name, Path: path, Changed: changed})
+	}
+	return out, nil
+}
+
+// removeProjectHooks strips our blocks from every pre-user-scope location:
+// earlier versions wrote the mount, its enclosing repo root, and the working
+// directory init ran from.
+func removeProjectHooks(folder, agent string) (string, error) {
+	var cleaned []string
+	for _, dir := range legacyHookDirs(folder) {
+		path := projectConfigPath(dir, agent)
+		if path == "" {
+			continue
+		}
+		changed, err := removeHooks(path, false)
+		if err != nil {
+			return "", err
+		}
+		if changed {
+			cleaned = append(cleaned, path)
+		}
+	}
+	return strings.Join(cleaned, ", "), nil
+}
+
+// legacyHookDirs lists the directories a previous version may have written.
+func legacyHookDirs(folder string) []string {
+	dirs := []string{folder}
+	if root := gitRootOf(folder); root != "" && root != folder {
+		dirs = append(dirs, root)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		if abs, err := filepath.Abs(cwd); err == nil && abs != folder {
+			dirs = append(dirs, abs)
+		}
+	}
+	return dirs
+}
+
+// gitRootOf is the repository containing folder, if any.
+func gitRootOf(folder string) string {
+	for cur := folder; ; cur = filepath.Dir(cur) {
+		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+			return cur
+		}
+		if filepath.Dir(cur) == cur {
+			return ""
+		}
+	}
+}
+
+// removeHooks deletes every hook group carrying one of our markers, and
+// rewrites the file only if something was removed. A file we never touched is
+// left byte-identical.
+func removeHooks(path string, isYAML bool) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	root := map[string]any{}
+	unmarshal, marshal := json.Unmarshal, func() ([]byte, error) { return json.MarshalIndent(root, "", "  ") }
+	if isYAML {
+		unmarshal, marshal = yaml.Unmarshal, func() ([]byte, error) { return yaml.Marshal(root) }
+	}
+	if err := unmarshal(data, &root); err != nil {
+		return false, fmt.Errorf("parse %s: %w", path, err)
+	}
+	hooks, ok := root["hooks"].(map[string]any)
+	if !ok {
+		return false, nil
+	}
+	changed := false
+	for event, v := range hooks {
+		arr, _ := v.([]any)
+		var kept []any
+		for _, it := range arr {
+			if containsMarker(it, marker) || containsMarker(it, readMarker) {
+				changed = true
+				continue
+			}
+			kept = append(kept, it)
+		}
+		if len(kept) == 0 {
+			delete(hooks, event)
+			continue
+		}
+		hooks[event] = kept
+	}
+	if !changed {
+		return false, nil
+	}
+	if len(hooks) == 0 {
+		delete(root, "hooks")
+	}
+	return true, writeConfig(path, marshal)
 }
 
 // mergeJSONHooks adds the pull + push + read hook trio to a Claude-style

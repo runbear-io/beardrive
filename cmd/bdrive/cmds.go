@@ -27,9 +27,13 @@ and push.
 --prune additionally reconciles the hub against .bdriveignore: anything the
 hub still holds that the ignore rules now exclude is removed from the hub
 while staying on disk, here and on every teammate's device. That is the
-cleanup path for files that synced before the rule was added. It never
-prunes paths excluded only by this device's own sync scope (bdrive scope) —
-a narrow scope means "not on my disk", not "not on the hub".`,
+cleanup path for files that synced before the rule was added.
+
+It refuses outright when .bdriveignore narrows the sync scope with "!"
+rules (what bdrive scope and init --only write): there, pruning would mean
+removing everything outside the scope from the hub, for the whole team.
+Drop specific paths with bdrive forget instead. A legacy per-device include
+list in .bdrive/config.json is never pruned against either.`,
 		Example: `  bdrive sync
   bdrive sync --prune    # also drop hub files that .bdriveignore now excludes`,
 		Args: cobra.MaximumNArgs(1),
@@ -38,53 +42,86 @@ a narrow scope means "not on my disk", not "not on the hub".`,
 			if err != nil {
 				return err
 			}
-			// Gate before openSession: hooks fire in every folder on every
-			// turn, and must never enroll this device or resume a paused
-			// project — that is `bdrive init`'s job alone.
-			proj, ok, err := config.LoadProject(folder)
-			if hookLabel != "" {
-				// Agent-hook mode: event JSON on stdin, silent best-effort
-				// sync, link-formula context on stdout. Never fails.
-				if err != nil || !ok || syncBlocked(proj) != "" {
-					return nil
-				}
-				return runHookSync(cmd, folder, hookLabel)
-			}
-			if err != nil {
-				return err
-			}
-			if !ok {
-				return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", folder)
-			}
-			switch syncBlocked(proj) {
-			case "init":
-				return fmt.Errorf("%s is not synced on this device yet (run `bdrive init` there to connect it)", folder)
-			case "paused":
-				return fmt.Errorf("syncing is paused for %s (run `bdrive init` there to resume)", folder)
-			}
-			sess, proj, err := openSession(cmd.Context(), folder, true)
-			if err != nil {
-				return err
-			}
-			defer closeSession(sess)
-			if cmd.Flags().Changed("note") {
-				// Persist the note so the daemon's own scans stamp it too —
-				// history then links every change from this working session
-				// to its context, not just the ones this invocation catches.
-				// An explicit empty --note clears it. Expires after --note-ttl.
-				if err := sess.Store.SaveNote(note, noteTTL); err != nil {
+			// A folder resolves to the mount it is, the mount above it, or the
+			// mounts below it — a repo root with wiki/ and docs/ mounted syncs
+			// both, and a session inside a mount syncs its root.
+			targets := syncTargets(folder)
+
+			syncOne := func(target string) error {
+				// Gate before openSession: hooks fire in every folder on every
+				// turn, and must never enroll this device or resume a paused
+				// project — that is `bdrive init`'s job alone.
+				proj, ok, err := config.LoadProject(target)
+				if err != nil {
 					return err
 				}
-				sess.Note = note
+				if !ok {
+					return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", target)
+				}
+				switch syncBlocked(proj) {
+				case "init":
+					return fmt.Errorf("%s is not synced on this device yet (run `bdrive init` there to connect it)", target)
+				case "paused":
+					return fmt.Errorf("syncing is paused for %s (run `bdrive init` there to resume)", target)
+				}
+				sess, proj, err := openSession(cmd.Context(), target, true)
+				if err != nil {
+					return err
+				}
+				defer closeSession(sess)
+				if cmd.Flags().Changed("note") {
+					// Persist the note so the daemon's own scans stamp it too —
+					// history then links every change from this working session
+					// to its context, not just the ones this invocation catches.
+					// An explicit empty --note clears it. Expires after --note-ttl.
+					if err := sess.Store.SaveNote(note, noteTTL); err != nil {
+						return err
+					}
+					sess.Note = note
+				}
+				sess.Prune = prune
+				sess.OnProgress = progressReporter()
+				res, err := sess.Cycle(cmd.Context())
+				if err != nil {
+					return err
+				}
+				fmt.Printf("synced %s (project %q)\n", target, proj.Volume)
+				printCycle(res)
+				return nil
 			}
-			sess.Prune = prune
-			sess.OnProgress = progressReporter()
-			res, err := sess.Cycle(cmd.Context())
-			if err != nil {
-				return err
+
+			if hookLabel != "" {
+				// Agent-hook mode: event JSON on stdin, silent best-effort
+				// sync, link-formula context on stdout. Never fails. Only the
+				// first mount emits context — the JSON contract is one object,
+				// so a repo with several mounts links through the first.
+				emit := true
+				for _, target := range targets {
+					proj, ok, err := config.LoadProject(target)
+					if err != nil || !ok || syncBlocked(proj) != "" {
+						continue
+					}
+					if err := runHookSync(cmd, target, hookLabel, emit); err == nil && emit {
+						emit = false
+					}
+				}
+				return nil
 			}
-			fmt.Printf("synced %s (project %q)\n", folder, proj.Volume)
-			printCycle(res)
+			if len(targets) == 0 {
+				return fmt.Errorf("%s is not a beardrive project (run `bdrive init` there first)", folder)
+			}
+			if prune {
+				for _, target := range targets {
+					if err := pruneSafe(target); err != nil {
+						return err
+					}
+				}
+			}
+			for _, target := range targets {
+				if err := syncOne(target); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 	}
@@ -93,6 +130,24 @@ a narrow scope means "not on my disk", not "not on the hub".`,
 	c.Flags().DurationVar(&noteTTL, "note-ttl", 30*time.Minute, "how long the note keeps applying to daemon-committed changes")
 	c.Flags().StringVar(&hookLabel, "hook", "", "agent-hook mode: read the platform's hook event JSON from stdin, sync with a session note labeled by this value, and emit the project's link-formula context (Claude Code hook JSON) on stdout")
 	return c
+}
+
+// pruneSafe refuses --prune on a mount whose rules narrow the scope. Prune
+// removes from the hub everything the shared rules exclude — with "only
+// these folders" rules that is everything else the project holds, deleted
+// for every teammate on their next sync. Excluding one path is what
+// `bdrive forget` is for.
+func pruneSafe(folder string) error {
+	filter, err := syncer.LoadFilter(folder, nil)
+	if err != nil {
+		return err
+	}
+	if !filter.Negated() {
+		return nil
+	}
+	return fmt.Errorf("%s/.bdriveignore narrows the scope with `!` rules, so --prune would remove\n"+
+		"everything outside that scope from the hub — for every teammate, not just this device.\n"+
+		"drop specific paths with `bdrive forget <path>`, or widen the rules first", folder)
 }
 
 func statusCmd() *cobra.Command {

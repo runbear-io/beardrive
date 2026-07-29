@@ -51,7 +51,7 @@ func conflictFiles(t *testing.T, folder string) []string {
 	return out
 }
 
-// A repo shares only its knowledge subfolder (`bdrive init --shared Wiki`);
+// A repo shares only its knowledge subfolder (a legacy include-list mount);
 // a teammate connects from their own checkout with the same scope. Wiki
 // content flows both ways; each side's code never leaves its machine.
 func TestSharedSubfolderScopeBothDevices(t *testing.T) {

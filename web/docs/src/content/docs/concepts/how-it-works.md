@@ -54,7 +54,8 @@ overlap. Nothing is silently dropped.
 
 A per-mount daemon scans the folder every few seconds and exchanges with the
 remote every ~10s — or immediately after local edits. Tune with
-`--scan-interval` and `--remote-interval` on `bdrive init`.
+`--scan-interval` and `--remote-interval` on `bdrive daemon run` (init always
+uses the defaults).
 
 It re-reads `.bdrive/config.json` each tick. If that file vanishes because the
 folder was moved, renamed, or deleted, the daemon **exits cleanly without

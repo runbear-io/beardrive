@@ -24,7 +24,9 @@ import (
 // scans keep stamping this session's changes for a while.
 const hookNoteTTL = 30 * time.Minute
 
-func runHookSync(cmd *cobra.Command, folder, label string) error {
+// emitContext is false for every mount after the first in one hook run: the
+// hook's stdout contract is a single JSON object.
+func runHookSync(cmd *cobra.Command, folder, label string, emitContext bool) error {
 	// The platform pipes its event JSON on stdin; the session id is all we
 	// need from it here.
 	data, _ := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 1<<20))
@@ -52,6 +54,9 @@ func runHookSync(cmd *cobra.Command, folder, label string) error {
 		return nil // never break the turn
 	}
 
+	if !emitContext {
+		return nil
+	}
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {
 		return nil // non-hub remote: nothing to link to

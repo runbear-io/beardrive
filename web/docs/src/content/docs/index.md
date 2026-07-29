@@ -69,7 +69,7 @@ page.
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file.
 - **Selective sync** — a gitignore-style `.bdriveignore` opts files out, and
-  `bdrive init --shared <dir>` narrows sync to one subfolder.
+  `bdrive init . --only <dirs>` narrows sync to chosen subfolders.
 - **macOS and Linux.**
 
 ## Hub options

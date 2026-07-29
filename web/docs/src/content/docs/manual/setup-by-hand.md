@@ -7,9 +7,10 @@ This is [what your agent does for you](/start/setup/), one command at a time.
 Useful on a machine with no agent, when scripting a fleet, or when you simply
 want to see the moving parts.
 
-Three steps: sign the device in, start syncing a folder, work normally. Then
-[register the hooks](/manual/skills-and-hooks/) — that last step is what keeps
-an agent's files fresh, and it is the one hand-setups forget.
+Three steps: sign the device in, start syncing a folder, work normally. `init`
+installs the agent skill and [registers the hooks](/manual/skills-and-hooks/)
+along the way — that is what keeps an agent's files fresh, and it used to be the
+step hand-setups forgot.
 
 ## 1. Sign this device in
 
@@ -41,7 +42,10 @@ Once per project.
 ```console
 $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
+  server:  https://your-hub
   project: workspace (p-7f3a2c91)
+  skill:   installed for claude, codex
+  claude   hooks registered  →  /Users/snow/.claude/settings.json
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
 
@@ -49,20 +53,26 @@ On a terminal, `init` walks you through two questions: **create a new project or
 connect an existing one** (picked from the server's list), and **sync the whole
 folder or only a subfolder** such as `./shared`.
 
-Every question has a flag — `--name`, `--project`, `--shared`, `--yes` — and
+Every question has a flag — `--name`, `--project`, `--only`, `--yes` — and
 without a TTY init never prompts. It creates-or-joins a project named after the
 folder and syncs everything.
 
 Init writes `.bdrive/config.json`, seeds a starter `.bdriveignore`
-(node_modules, build dirs, caches, `.env*`), and starts the daemon. Not signed
-in yet? It runs the login flow first.
+(node_modules, build dirs, caches, `.env*`), starts the daemon, and prints the
+project's hub link. It also installs the `beardrive` skill and registers the sync
+hooks for any agent platform it detects — in that platform's **user** config, once
+per machine, so nothing lands inside the project. `--no-hooks` skips the hooks
+(the skill is installed either way). Not
+signed in yet? It runs the login flow first.
 
 :::tip[Working inside a repository]
-Sync subfolders rather than the repo root: `bdrive init --shared docs` (or
-several at once: `--shared wiki,docs`). Git directories are never synced
-(per-file last-writer-wins would corrupt a repository), but a narrower scope
-keeps the sync surface honest. Adjust it later with `bdrive scope add`/`rm` —
-see [Scoping the folder](/guides/scoping/).
+Sync a subfolder rather than the repo root: `bdrive init docs` makes `./docs`
+the project and scans nothing else. For several subfolders in one project, mount
+the repo and narrow it: `bdrive init . --only wiki,docs`, which writes the
+narrowing as `.bdriveignore` rules. Git directories are never synced (per-file
+last-writer-wins would corrupt a repository), but a narrower scope keeps the
+sync surface honest. Adjust it later with `bdrive scope add`/`rm` — see
+[Scoping the folder](/guides/scoping/).
 :::
 
 ## 3. Work normally
@@ -96,8 +106,8 @@ changes.
 
 ## Next
 
-- [Skills and hooks in detail](/manual/skills-and-hooks/) — the two commands
-  that make an agent read fresh files every turn. Don't stop before this one.
+- [Skills and hooks in detail](/manual/skills-and-hooks/) — what `init` wrote to
+  make an agent read fresh files every turn, and how to inspect or remove it.
 - [Shared agent memory](/guides/shared-agent-memory/) — orient agents in the
   folder so they know where to read and write.
 - [Artifacts and links](/guides/agent-artifacts/) — internal links for
