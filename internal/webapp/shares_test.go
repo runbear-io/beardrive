@@ -3,6 +3,7 @@ package webapp
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -186,6 +187,73 @@ func TestShareMarkdownRendersAndExpires(t *testing.T) {
 }
 
 // helpers
+
+// TestShareLastUpdatedStamp: a share page promises the latest version, so a
+// markdown page says when latest was — and nothing else gets injected into.
+func TestShareLastUpdatedStamp(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	const rawHTML = "<h1>Q3</h1><script>alert(1)</script>"
+	const pdf = "%PDF-1.4 fake\n"
+	f.put("dev1", "wiki/deck.pdf", pdf)
+
+	// markdown: the stamp is the FILE's time, human date + precise title=
+	when := time.Date(2026, 3, 14, 9, 26, 53, 0, time.UTC)
+	f.putAt("dev1", "wiki/notes.md", "# Notes\n\nhello **team**", when)
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+	rec := do(t, h, "GET", "/s/"+token, nil)
+	body := rec.Body.String()
+	if !strings.Contains(body, "Last updated 14 Mar 2026") {
+		t.Fatalf("no last-updated stamp: %s", body)
+	}
+	if !strings.Contains(body, `title="2026-03-14T09:26:53Z"`) {
+		t.Fatalf("no precise timestamp: %s", body)
+	}
+	// ...and it sits above the content, not after it
+	if strings.Index(body, "Last updated") > strings.Index(body, "<strong>team</strong>") {
+		t.Fatal("stamp must render before the content")
+	}
+	// the sandbox + footer survive
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-popups" {
+		t.Fatalf("CSP = %q", csp)
+	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("share headers = %v", rec.Header())
+	}
+	if !strings.Contains(body, "Shared with <a") {
+		t.Fatal("footer went missing")
+	}
+
+	// re-syncing the file moves the stamp; the token does not change
+	f.putAt("dev1", "wiki/notes.md", "# Notes\n\nhello **team**", when.AddDate(0, 0, 40))
+	rec = do(t, h, "GET", "/s/"+token, nil)
+	if !strings.Contains(rec.Body.String(), "Last updated 23 Apr 2026") {
+		t.Fatalf("stamp must track the file, got %s", rec.Body)
+	}
+
+	// zero time: no stamp at all, not a 1970 date
+	f.putAt("dev1", "wiki/notes.md", "# Notes\n\nhello **team**", time.Time{})
+	rec = do(t, h, "GET", "/s/"+token, nil)
+	if strings.Contains(rec.Body.String(), "Last updated") || strings.Contains(rec.Body.String(), `class="updated"`) {
+		t.Fatalf("zero time must print no stamp, got %s", rec.Body)
+	}
+
+	// HTML shares are served byte-for-byte — never injected into
+	htmlTok, _ := authedShare(t, srv, h, p.ID, "wiki/report.html")
+	rec = do(t, h, "GET", "/s/"+htmlTok, nil)
+	if !bytes.Equal(rec.Body.Bytes(), []byte(rawHTML)) {
+		t.Fatalf("html share must be byte-identical, got %q", rec.Body)
+	}
+
+	// so are binaries, Content-Length included
+	pdfTok, _ := authedShare(t, srv, h, p.ID, "wiki/deck.pdf")
+	rec = do(t, h, "GET", "/s/"+pdfTok, nil)
+	if !bytes.Equal(rec.Body.Bytes(), []byte(pdf)) {
+		t.Fatalf("binary share must be unchanged, got %q", rec.Body)
+	}
+	if cl := rec.Header().Get("Content-Length"); cl != fmt.Sprint(len(pdf)) {
+		t.Fatalf("Content-Length = %q, want %d", cl, len(pdf))
+	}
+}
 
 func jsonReq(t *testing.T, method, url string, body any) *http.Request {
 	t.Helper()
