@@ -126,10 +126,17 @@ func TestReadOnlyMemberRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := "/api/p/" + p.ID + "/"
+	// A live link to re-date: PATCH /api/shares/{token} resolves the token
+	// before the level check, so an unknown one would 404 instead of 403.
+	sh, err := srv.Shares.Create(p.ID, "x.md", "alice@x.io", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writes := []struct {
 		method, url string
 		body        any
 	}{
+		{"PATCH", "/api/shares/" + sh.Token, map[string]string{"expires_in": "24h"}},
 		{"POST", base + "upload/init", map[string]any{"path": "x.md", "sha256": strings.Repeat("a", 64), "size": 1}},
 		{"PUT", base + "upload/content?path=x.md", []byte("hi")},
 		{"POST", base + "upload/commit", map[string]any{"path": "x.md", "sha256": strings.Repeat("a", 64), "size": 1}},

@@ -48,6 +48,22 @@ test("folder listing: counts, change feed, heat dot on a read file", async ({ pa
   await expect(page.locator('.dl-row[title="notes/readme.md"] .heatdot')).toBeVisible();
 });
 
+// BEA-28: copying a folder URL hands you a trailing slash, and that URL used
+// to 404 while the sidebar showed the folder populated right next to it.
+test("folder URL with a trailing slash renders the listing and drops the slash", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  await page.goto(`/${pid}/notes/`);
+  await expect(page.locator(".dl-title")).toContainText("notes");
+  await expect(page.locator(".dl-history .dl-h3")).toHaveText("Recent changes");
+  await expect(page).toHaveURL(`/${pid}/notes`);
+  // Replaced, not pushed: Back leaves the folder instead of bouncing off the
+  // slashed URL and landing right back here.
+  await page.goBack();
+  await expect(page).toHaveURL(`/${pid}`);
+});
+
 // BEA-17: the kind glyph read as a disclosure toggle. It is now a text
 // badge, the row's only real expander is the note, and clicking the badge
 // navigates like the rest of the row — no dead zone, no second behavior.
@@ -148,6 +164,32 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   await expectToast(page, "revoked");
   const gone = await page.request.get(url!);
   expect(gone.status()).toBe(404);
+});
+
+// BEA-29: the CLI has had --expires all along; the dialog now offers it on
+// the link you just minted, without changing that link's URL.
+test("share dialog sets an expiry on the link it just minted", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/index.md`);
+  await page.click("#share-btn");
+  const url = (await page.locator(".modal-url").textContent())!;
+  await expect(page.locator(".modal-expiry-note")).toHaveText("no expiry");
+
+  await page.selectOption("#share-expiry", "168h");
+  await expect(page.locator(".modal-expiry-note")).toContainText("expires");
+  // Same link: the URL already on the clipboard keeps working.
+  expect(await page.locator(".modal-url").textContent()).toBe(url);
+  expect((await page.request.get(url)).status()).toBe(200);
+  await page.click(".modal button:has-text('Done')");
+
+  // …and Settings stops calling it permanent.
+  await page.goto(`/${pid}/settings`);
+  const row = page.locator(".admin-item", { hasText: "index.md" });
+  await expect(row.locator(".ai-tag")).toContainText("expires");
+  await expect(row.locator(".ai-tag")).not.toContainText("no expiry");
+
+  await page.request.delete(`/api/shares/${url.split("/s/")[1]}`);
 });
 
 test("no browser upload: content arrives via sync; the tree picks it up", async ({ page }) => {
@@ -447,4 +489,78 @@ test("a read-only member gets no restore buttons", async ({ page }) => {
   await page.goto(`/${pid}/history`);
   await expect(page.locator(".history .hentry").first()).toBeVisible();
   await expect(page.locator(".hrestore-btn")).toHaveCount(0);
+});
+
+// BEA-26: the row was already an address for its version — but a bare
+// role="button" div announces that to nobody, so a persona whose whole fear
+// is "an agent quietly rewrote my doc" concludes recovery is impossible.
+// The version now carries visible handles.
+
+test("history rows carry visible Open/Download controls for that version", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  const added = page.locator(".hentry.add"); // the first version of guide.md
+  await expect(added).toBeVisible();
+
+  const open = added.getByRole("button", { name: /Open guide\.md as of/ });
+  const dl = added.getByRole("link", { name: /Download guide\.md as of/ });
+  await expect(open).toBeVisible();
+  await expect(dl).toBeVisible();
+  // Neither claims to expand anything (BEA-17's invariant).
+  await expect(page.locator(".history [aria-expanded]:not(.hnote):not(.hdiff-btn)")).toHaveCount(0);
+
+  // The download is that version's bytes, not the current file's.
+  const href = await dl.getAttribute("href");
+  expect(href).toMatch(/blob\?sha=[0-9a-f]{64}&name=guide\.md&download=1$/);
+  const body = await (await page.request.get(href!)).text();
+  expect(body).toContain("First version");
+  expect(body).not.toContain("Second version");
+
+  // Open lands on the file pinned to that version, and fires once.
+  await open.click();
+  await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
+  await expect(page.locator(".vbanner")).toBeVisible();
+  await expect(page.locator("#content")).toContainText("First version");
+});
+
+test("version controls are keyboard-reachable and don't double-fire the row", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/guide.md`);
+  const open = page.locator(".hentry.add").getByRole("button", { name: /Open guide\.md as of/ });
+  await open.focus();
+  await expect(open).toBeFocused();
+  await open.press("Enter");
+  await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
+  await expect(page.locator("#content")).toContainText("First version");
+  // One entry in history, not two: the row's own handler never also ran.
+  await page.goBack();
+  await expect(page).toHaveURL(`/${pid}/history/guide.md`);
+});
+
+test("a delete row offers no version to open or download", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/scratch.md`);
+  const del = page.locator(".hentry.delete");
+  await expect(del).toBeVisible();
+  await expect(del.locator(".hver-btn")).toHaveCount(0);
+});
+
+test("the folder change feed carries the version controls too", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/notes`);
+  // This feed passes no `diff` prop at all — the controls must not be
+  // gated behind it.
+  const row = page.locator(".dl-history .hentry").first();
+  await expect(row).toBeVisible();
+  await expect(row.locator(".hdiff-btn")).toHaveCount(0);
+  const dl = row.getByRole("link", { name: /^Download .* as of/ });
+  await expect(dl).toBeVisible();
+  await expect(dl).toHaveAttribute("href", /blob\?sha=[0-9a-f]{64}&name=[^&]+&download=1$/);
+  await row.getByRole("button", { name: /^Open .* as of/ }).click();
+  await page.waitForURL(new RegExp(`/${pid}/notes/.*\\?v=[0-9a-f]{64}$`));
+  await expect(page.locator(".vbanner")).toBeVisible();
 });

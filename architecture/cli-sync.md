@@ -40,7 +40,24 @@ classDiagram
         +Skip(rel) bool
         +PruneDir(rel) bool
     }
-    note for Filter "ignore.go — .bdriveignore rules (incl. the managed `# bdrive scope` negation block written by init --only / bdrive scope) + a legacy .bdrive include list, applied symmetrically in scan and materialize; Negated() is what makes sync --prune refuse on a scoped project"
+    note for Filter "ignore.go — .bdriveignore rules (incl. the managed `# bdrive scope` negation block written by init --only / bdrive scope) + a legacy .bdrive include list, applied symmetrically in scan and materialize; Negated() is what makes sync --prune refuse on a scoped project. NOT the whole predicate: walkFolder adds .git/.bdrive pruning, non-regular and .DS_Store/.bdrive-tmp-* skips, and nested-mount handoff"
+
+    class walkFolder {
+        +walkFolder(folder, filter, fn)
+        verdict: vSync vSkipFile vDescend vPruneDir vNested
+    }
+    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan and Explain both go through it, so what --explain reports cannot drift from what leaves"
+
+    class Explain {
+        +Explain(folder, include) two lists
+        +NotSyncedFiles(entries) int
+    }
+    class Entry {
+        +Path string
+        +Files int
+        +Nested bool
+    }
+    note for Explain "explain.go — bdrive scope --explain. Pure read: own Filter, no Session, no flock, no network. Collapses fully-excluded dirs to one counted line; nested mounts annotated, counted as zero (they sync via their own project)"
 
     class Store {
         -dir volume dir
@@ -78,6 +95,11 @@ classDiagram
     Session --> Store : volume state
     Session --> Backend : pull and push
     Session --> Filter : scan and materialize
+    Session --> walkFolder : scan
+    Explain --> walkFolder : same predicate
+    Explain --> Filter : own fresh instance
+    Explain ..> Entry : not-synced lines
+    walkFolder --> Filter : Skip / PruneDir / addNestedMount
     Session ..> Op : commits, replays
     Session --> Result
     Store o-- Op : journal files

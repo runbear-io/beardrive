@@ -43,6 +43,7 @@ export function NoteText({ text }: { text: string }) {
 
 export function HistoryRow({
   entry: e,
+  apiBase,
   onOpen,
   diff,
   restore,
@@ -50,6 +51,9 @@ export function HistoryRow({
   inRun,
 }: {
   entry: HistoryEntry;
+  // Its own prop, not something nested in `diff`: the version controls below
+  // belong on every feed, and `diff` is per-file-only by design.
+  apiBase: string;
   // The row's own version (e.blob) rides along: a row is an address for the
   // bytes it describes, not a shortcut to whatever the file says now.
   onOpen: (path: string, version?: string) => void;
@@ -81,6 +85,13 @@ export function HistoryRow({
   const createdByRun = !!inRun && kind === "add";
   const restorable = !!restore && !!restoreSha && !createdByRun;
   const busy = !!restore?.busy && restore.busy === e.path + restoreSha;
+  // The row already *is* a link to its version — but a bare div says so to
+  // nobody, so the version gets visible handles too (BEA-26). Gated on
+  // content, never on `diff`, or the subtree and folder feeds lose them.
+  const versioned = clickable && !!e.blob;
+  const base = e.path.split("/").pop() || e.path;
+  const when = new Date(e.time).toLocaleString();
+  const dl = apiBase + "blob?sha=" + e.blob + "&name=" + encodeURIComponent(base) + "&download=1";
   const toggleDiff = () => setDiffOpen(!diffOpen);
   const open = (ev: React.MouseEvent | React.KeyboardEvent) => {
     if ((ev.target as HTMLElement).tagName === "A") return;
@@ -102,7 +113,7 @@ export function HistoryRow({
       <div className="hline">
         <span className="hkind">{KIND_LABEL[kind] || kind}</span>
         <span className="hpath">{e.path}</span>
-        <span className="htime">{new Date(e.time).toLocaleString()}</span>
+        <span className="htime">{when}</span>
       </div>
       <div className="hmeta">
         <span className="hwho">{who}</span>
@@ -160,33 +171,73 @@ export function HistoryRow({
           <NoteText text={e.note} />
         </div>
       )}
-      {/* Its own control, never the kind glyph: expanding a row must not
-          navigate, so this stops the click from reaching the row. */}
-      {diffable &&
-        (diff!.prev ? (
-          <>
-            <button
-              type="button"
-              className={"hdiff-btn" + (diffOpen ? " open" : "")}
-              aria-expanded={diffOpen}
-              onClick={(ev) => {
-                ev.stopPropagation();
-                toggleDiff();
-              }}
-              onKeyDown={(ev) => ev.stopPropagation()}
-            >
-              <Icon name={diffOpen ? "chevd" : "chev"} />
-              {diffOpen ? "hide changes" : "show changes"}
-            </button>
-            {diffOpen && (
-              <div onClick={(ev) => ev.stopPropagation()}>
-                <DiffView apiBase={diff!.apiBase} path={e.path} prev={diff!.prev} cur={e.blob!} />
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="hdiff-none">First version — nothing to compare against</div>
-        ))}
+      {/* Each control is its own: acting on a row must not double as
+          navigating it, so every one stops the click reaching the row.
+          None of them claims aria-expanded — only the note and the diff
+          disclosure actually expand anything. */}
+      {(diffable || versioned) && (
+        <div className="hactions">
+          {diffable &&
+            (diff!.prev ? (
+              <button
+                type="button"
+                className={"hdiff-btn" + (diffOpen ? " open" : "")}
+                aria-expanded={diffOpen}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  toggleDiff();
+                }}
+                onKeyDown={(ev) => ev.stopPropagation()}
+              >
+                <Icon name={diffOpen ? "chevd" : "chev"} />
+                {diffOpen ? "hide changes" : "show changes"}
+              </button>
+            ) : (
+              <div className="hdiff-none">First version — nothing to compare against</div>
+            ))}
+          {versioned && (
+            <>
+              <button
+                type="button"
+                className="hver-btn"
+                aria-label={`Open ${base} as of ${when}`}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  onOpen(e.path, e.blob);
+                }}
+                onKeyDown={(ev) => ev.stopPropagation()}
+              >
+                <Icon name="clock" />
+                Open this version
+              </button>
+              <a
+                className="hver-btn"
+                download
+                href={dl}
+                aria-label={`Download ${base} as of ${when}`}
+                onClick={(ev) => ev.stopPropagation()}
+                onKeyDown={(ev) => {
+                  ev.stopPropagation();
+                  // Enter follows a link natively; Space does not, and the
+                  // row's own handler must not get it either way.
+                  if (ev.key === " ") {
+                    ev.preventDefault();
+                    ev.currentTarget.click();
+                  }
+                }}
+              >
+                <Icon name="download" />
+                Download
+              </a>
+            </>
+          )}
+        </div>
+      )}
+      {diffable && diff!.prev && diffOpen && (
+        <div onClick={(ev) => ev.stopPropagation()}>
+          <DiffView apiBase={diff!.apiBase} path={e.path} prev={diff!.prev} cur={e.blob!} />
+        </div>
+      )}
     </div>
   );
 }

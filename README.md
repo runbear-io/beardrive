@@ -146,7 +146,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--yes`) for scripts; installs the agent skill, registers agent sync hooks in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
-| `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes, so no one hand-writes negation syntax. The daemon picks changes up in seconds; `rm` deletes nothing, locally or on the hub |
+| `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes, so no one hand-writes negation syntax. The daemon picks changes up in seconds; `rm` deletes nothing, locally or on the hub. `--explain` lists every path in the folder split into what syncs and what does not, so you can verify what leaves this machine (pure read — no daemon, no lock, no network) |
 | `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
@@ -365,7 +365,9 @@ https://drive.example.com/s/eacc1df3ee6a6ebbdacc535c2796dc30
 Links always serve the file's **latest** synced content (right for wiki
 pages and living reports), and live until revoked — `bdrive share --list`
 and `--revoke <token-or-url>` manage them, `--expires 24h` makes one
-self-destruct. The web UI has a Share button on every file.
+self-destruct. The web UI has a Share button on every file, and its
+dialog can put an expiry on the link it just minted (24 hours, 7 days,
+30 days) without changing the URL you already copied.
 
 Shared HTML renders as a real page, markdown renders like the viewer
 (with a small "Shared with BearDrive" footer; raw HTML is served
