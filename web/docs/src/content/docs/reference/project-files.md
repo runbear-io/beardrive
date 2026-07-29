@@ -9,7 +9,8 @@ project.
 ## `.bdrive/`
 
 The folder's settings directory. `config.json` holds the **stable mount id**
-plus project, remote, and include settings.
+plus the project and remote (older mounts may also carry a legacy `include`
+list — still honored, never written now).
 
 ```jsonc
 // .bdrive/config.json

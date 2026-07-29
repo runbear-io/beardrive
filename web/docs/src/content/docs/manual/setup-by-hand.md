@@ -42,7 +42,10 @@ Once per project.
 ```console
 $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
+  server:  https://your-hub
   project: workspace (p-7f3a2c91)
+  skill:   installed for claude, codex
+  claude   hooks registered  →  /Users/snow/.claude/settings.json
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
 
@@ -58,7 +61,8 @@ Init writes `.bdrive/config.json`, seeds a starter `.bdriveignore`
 (node_modules, build dirs, caches, `.env*`), starts the daemon, and prints the
 project's hub link. It also installs the `beardrive` skill and registers the sync
 hooks for any agent platform it detects — in that platform's **user** config, once
-per machine, so nothing lands inside the project. `--no-hooks` skips both. Not
+per machine, so nothing lands inside the project. `--no-hooks` skips the hooks
+(the skill is installed either way). Not
 signed in yet? It runs the login flow first.
 
 :::tip[Working inside a repository]

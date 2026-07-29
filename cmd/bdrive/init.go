@@ -97,8 +97,27 @@ the folder was renamed or moved.`,
 				return err
 			} else if ok && proj.Remote != "" {
 				fmt.Printf("resuming %s (project %s)\n", folder, proj.Volume)
+				// --only on an existing mount narrows it in place: the scope is
+				// just .bdriveignore rules, so re-running init is a legitimate
+				// way to set them (and is what `bdrive scope` points at).
 				if cmd.Flags().Changed("only") {
-					fmt.Println("note: --only is ignored on resume — change what syncs with `bdrive scope add`/`rm`")
+					scope, err := cleanScopeDirs(only)
+					if err != nil {
+						return err
+					}
+					for _, dir := range scope {
+						if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(dir)), 0o755); err != nil {
+							return err
+						}
+					}
+					if err := writeScopeDirs(folder, scope); err != nil {
+						return err
+					}
+					if len(scope) == 0 {
+						fmt.Println("  syncing: the whole folder (scope rules removed)")
+					} else {
+						fmt.Printf("  syncing: ./%s only (rules written to .bdriveignore)\n", strings.Join(scope, ", ./"))
+					}
 				}
 				installSkill(folder)
 				if !noHooks {

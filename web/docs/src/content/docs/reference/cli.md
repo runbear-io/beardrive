@@ -11,7 +11,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 |---|---|
 | `bdrive login [server-url]` | Sign this device in. Browser flow; `--device` forces the code flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
 | `bdrive logout` | Sign this device out — clear the saved token and account. `--forget` also drops the remembered server |
-| `bdrive init [folder]` | Create or connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY; flags (`--name`, `--project`, `--only`, `--yes`) for scripts. Also installs the agent skill, registers agent sync hooks for detected platforms (`--no-hooks` skips both), and prints the project's hub link. Re-run to resume |
+| `bdrive init [folder]` | Create or connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY; flags (`--name`, `--project`, `--server`, `--only`, `--yes`) for scripts. Also installs the agent skill, registers agent sync hooks for detected platforms (`--no-hooks` skips the hooks only), and prints the project's hub link. Re-run to resume |
 | `bdrive stop [folder]` | Stop syncing — daemon and agent sync hooks both pause. Files stay on disk; `bdrive init` resumes |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes. Run from the mount root; the daemon picks changes up in seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub |
 | `bdrive forget <path>...` | Stop syncing a path and remove it from the hub. Adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
@@ -20,6 +20,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each detected agent platform's user config — once per machine, covering every folder. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection. `uninstall` removes only BearDrive's own hook entries |
 | `bdrive skill [install]` | Install the `beardrive` skill into detected agent platforms so the agent can do setup itself. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection |
+| `bdrive hook-approve` | Hook plumbing: answers the beardrive plugin's `PreToolUse` hook, auto-approving bare `bdrive init\|login\|hooks\|status\|sync\|url` so setup costs no permission prompts. Anything with a shell operator is left to the normal prompt |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
@@ -48,7 +49,7 @@ it never prompts without a TTY.
 It runs the login flow first when there is no session, writes
 `.bdrive/config.json`, seeds `.bdriveignore`, installs the `beardrive` skill and
 registers agent sync hooks for every detected platform (Claude Code, Codex,
-Gemini CLI, Hermes — `--no-hooks` skips both), starts sync, and prints the
+Gemini CLI, Hermes — `--no-hooks` skips the hooks; the skill is installed either way), starts sync, and prints the
 project's hub link. That is deliberate: one command means one permission prompt
 for an agent, instead of four. Re-running it resumes — including after a folder
 move.
@@ -58,8 +59,8 @@ friends), once per machine, so they cover every session in every folder; nothing
 is written inside the project. See
 [Skills and hooks in detail](/manual/skills-and-hooks/).
 
-Daemon intervals are tunable here: `--scan-interval` (default 3s) and
-`--remote-interval` (default 10s).
+The daemon scans every 3s and talks to the hub every 10s; those intervals are
+tunable on `bdrive daemon run`, not on init.
 
 ### `bdrive sync --note`
 

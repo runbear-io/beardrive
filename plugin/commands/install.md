@@ -1,5 +1,5 @@
 ---
-description: Set up BearDrive for this project — install the CLI, sign in, create/connect a project, optionally document the shared folder in CLAUDE.md, and register project-level sync hooks so every teammate's files stay fresh during Claude sessions
+description: Set up BearDrive for this project — install the CLI, sign in, create/connect a project, optionally document the shared folder in CLAUDE.md, and register machine-wide sync hooks in your agent's user config so files stay fresh in every session
 argument-hint: "[project-name] [--only <dirs>]"
 ---
 

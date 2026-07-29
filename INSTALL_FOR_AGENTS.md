@@ -192,7 +192,7 @@ claude plugin update beardrive@beardrive
 ```
 
 Tell the user the plugin loads on their next session (current session keeps
-working via the hooks from step 5). Other platforms: step 2 already covered
+working via the hooks from step 4). Other platforms: init already covered
 you — skip this.
 
 ## 6. Verify, then show the payoff

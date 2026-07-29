@@ -28,7 +28,10 @@ agents actually read (and which hot-but-stale docs nobody maintains).
 $ bdrive login https://your-hub   # once per device — self-host a hub in ~10 min (docs/self-hosting.md)
 $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
+  server:  https://your-hub
   project: workspace (p-7f3a2c91)
+  skill:   installed for claude, codex
+  claude   hooks registered  →  /Users/snow/.claude/settings.json
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
 
@@ -138,7 +141,7 @@ hub's own storage, never something a syncing client points at directly:
 |---|---|
 | `bdrive login [server-url]` | Sign this device in (browser flow; `--device` forces the code flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
-| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--only/--yes`) for scripts; registers agent sync hooks for detected platforms (`--no-hooks` skips); re-run to resume |
+| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--yes`) for scripts; installs the agent skill, registers agent sync hooks in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes, so no one hand-writes negation syntax. The daemon picks changes up in seconds; `rm` deletes nothing, locally or on the hub |
 | `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
@@ -162,7 +165,8 @@ Each mounted folder carries its own settings, so configuration travels with
 the project:
 
 - **`.bdrive/`** — the folder's settings directory: `config.json` holds the
-  **stable mount id** plus project/remote/include settings. Written by
+  **stable mount id** plus the project and remote (and, on older mounts, a
+  legacy `include` list — still honored, never written now). Written by
   `bdrive init`, safe to hand-edit (a running daemon picks changes up
   automatically). Never synced, and it holds no credentials (the session
   token stays in `~/.bdrive`). Because everything is keyed by the mount id,
@@ -176,7 +180,7 @@ the project:
 ```jsonc
 // .bdrive/config.json
 { "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/p-7f3a2c91", "include": ["/shared/"] }
+  "remote": "https://drive.example.com/p/p-7f3a2c91" }
 ```
 
 Opting out is non-destructive: when a pattern starts matching an
@@ -376,8 +380,8 @@ makes agents fluent in all of this, and **`/beardrive:install`** sets a
 project up conversationally: installs the CLI, signs in, creates or
 connects a project (whole folder or a shared subfolder like `wiki/`),
 offers to document the shared folder in CLAUDE.md so agents proactively
-put shareable artifacts there, and registers project-level hooks in
-`.claude/settings.json` — a blocking pull when you submit a prompt (Claude
+put shareable artifacts there, and registers hooks in your user config
+(`~/.claude/settings.json`, once per machine) — a blocking pull when you submit a prompt (Claude
 reads fresh team files) and an async push after every file edit (artifacts
 are on the server seconds after Claude writes them), for every teammate
 whether or not they installed the plugin. The payoff: "write a report and
@@ -462,8 +466,8 @@ The plugin sets up everything at once:
 - **`/beardrive:install`** — the full team setup, conversationally: CLI,
   sign-in, project init (whole folder or a shared subfolder like `wiki/`),
   a consent-gated agent orientation — a synced `AGENTS.md` mapping the
-  shared folder plus a repo-root pointer to it — and project-level sync
-  hooks registered in your user config.
+  shared folder plus a repo-root pointer to it — and sync hooks registered in
+  your user config, once per machine.
 - **`/beardrive:init [folder] [--name/--project/--only]`** — just start
   syncing a project; `/beardrive:status` diagnoses problems.
 - **Turn-boundary sync hooks**, registered automatically in your user config
@@ -471,6 +475,10 @@ The plugin sets up everything at once:
   pull when you send a message (Claude always reads fresh files) and an async
   push when the turn ends. The hook no-ops instantly outside BearDrive
   projects, which is what makes a machine-wide registration safe.
+- **No permission gauntlet** — the plugin auto-approves beardrive's own setup
+  commands (`init`, `login`, `hooks`, `status`, `sync`, `url`) through a
+  `PreToolUse` hook, and only as bare invocations: anything with a shell
+  operator falls through to the normal prompt.
 - **The `beardrive` skill** ([plugin/skills/beardrive](plugin/skills/beardrive/SKILL.md)),
   covering init/stop/sync, sharing by URL, backends and credentials,
   selective sync, and troubleshooting. Working in a clone of this repo
@@ -487,9 +495,9 @@ to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sy
 ```
 
 The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
-it: install the CLI, `bdrive skill install`, device-code sign-in, and
-`bdrive init` — which also registers the sync hooks for every detected
-agent platform. The instructions live at that URL rather than
+it: install the CLI, then one `bdrive init` — which signs in (device code
+when there is no browser), installs the skill, registers the sync hooks and
+prints the project link. The instructions live at that URL rather than
 inside the prompt so they never go stale in someone's copy — and the agent
 handles every deviation (already installed, no Homebrew, sign-in, wrong
 folder). The skill step is the durable part: `SKILL.md` is a cross-agent
@@ -529,8 +537,8 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
   as a conflict-copy file by the device that detects the overlap.
 - A per-mount **daemon** scans the folder every few seconds (cheap
   size+mtime check) and exchanges with the remote every ~10s — or
-  immediately after local edits. Tune with --scan-interval and
-  --remote-interval on `bdrive init`.
+  immediately after local edits. Tunable with --scan-interval and
+  --remote-interval on the daemon (defaults 3s / 10s).
 
 ### What beardrive does not sync
 

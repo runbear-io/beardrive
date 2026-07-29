@@ -88,5 +88,5 @@ Follow these steps:
    teammates connect (invite link → `bdrive init`; the scope rides
    `.bdriveignore`, so it matches automatically).
 
-For the full team setup (the AGENTS.md orientation + per-project sync
-hooks in `.claude/settings.json`), suggest `/beardrive:install` instead.
+For the full team setup (the AGENTS.md orientation + the sync hooks init
+registers in `~/.claude/settings.json`), suggest `/beardrive:install` instead.
