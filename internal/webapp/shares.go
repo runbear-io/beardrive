@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -113,7 +114,10 @@ func (db *ShareDB) Revoke(token string) bool {
 	return true
 }
 
-// List returns a project's live shares.
+// List returns a project's live shares, newest first. The order has to be a
+// total one: byToken is a map, so without a sort every call reshuffles the
+// rows — and these rows carry a Revoke button, so "the second one" must mean
+// the same link on every load.
 func (db *ShareDB) List(project string) []Share {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -123,6 +127,19 @@ func (db *ShareDB) List(project string) []Share {
 			out = append(out, s)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		// Equal, not !=: a time.Time carries a monotonic reading and a
+		// location, so two logically-equal instants can compare unequal —
+		// which would make this comparator non-transitive and leave the
+		// order worse than the map iteration it replaces.
+		if !out[i].Created.Equal(out[j].Created) {
+			return out[i].Created.After(out[j].Created)
+		}
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Token < out[j].Token
+	})
 	return out
 }
 

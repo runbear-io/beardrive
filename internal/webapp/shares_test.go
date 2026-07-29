@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -182,6 +183,92 @@ func TestShareMarkdownRendersAndExpires(t *testing.T) {
 	}
 	if _, ok := db2.Get(token); !ok {
 		t.Fatal("share lost across reload")
+	}
+}
+
+// A Revoke button sits on every row of the public-links table, so the row
+// order must not move between loads. byToken is a map, so List has to sort.
+func TestShareListIsDeterministic(t *testing.T) {
+	db, err := OpenShareDB(filepath.Join(t.TempDir(), "shares.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hand-set Created — Create stamps time.Now(), which never collides, so
+	// going through it would leave the tie-break path untested.
+	tick := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	for _, s := range []Share{
+		{Token: "t3", Project: "p", Path: "z.md", Created: tick},
+		{Token: "t2", Project: "p", Path: "a.md", Created: tick}, // same instant as t3
+		{Token: "t1", Project: "p", Path: "newest.md", Created: tick.Add(time.Hour)},
+		{Token: "t0", Project: "p", Path: "oldest.md", Created: tick.Add(-time.Hour)},
+		{Token: "x", Project: "other", Path: "a.md", Created: tick},
+		{Token: "dead", Project: "p", Path: "gone.md", Created: tick, Expires: tick},
+	} {
+		db.byToken[s.Token] = s
+		if err := db.repo.Put(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first := db.List("p")
+	want := []string{"t1", "t2", "t3", "t0"} // created desc, then path asc (a.md < z.md)
+	got := make([]string, len(first))
+	for i, s := range first {
+		got[i] = s.Token
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v (newest first, path tie-break)", got, want)
+	}
+	for i := 0; i < 10; i++ {
+		if !reflect.DeepEqual(db.List("p"), first) {
+			t.Fatalf("call %d reordered: %v vs %v", i, db.List("p"), first)
+		}
+	}
+	// A project with no shares still returns nil, not an empty slice.
+	if db.List("nobody") != nil {
+		t.Fatal("empty project should list as nil")
+	}
+}
+
+// Both share-listing APIs — the project settings table and the org-wide audit
+// — must hand back the same bytes on consecutive reads.
+func TestShareListAPIsAreStable(t *testing.T) {
+	h, srv, c, p := permHub(t)
+	// Mint directly: the HTTP route requires a synced file, and this test is
+	// about ordering, not about the mint path.
+	for _, path := range []string{"b.md", "a.md", "c.md"} {
+		if _, err := srv.Shares.Create(p.ID, path, "alice@x.io", 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, url := range []string{"/api/p/" + p.ID + "/shares", "/api/orgs/" + p.Org + "/shares"} {
+		first := doAs(t, h, "GET", url, nil, c["alice"])
+		if first.Code != 200 {
+			t.Fatalf("GET %s: %d %s", url, first.Code, first.Body)
+		}
+		if !strings.Contains(first.Body.String(), "a.md") {
+			t.Fatalf("GET %s listed no shares: %s", url, first.Body)
+		}
+		for i := 0; i < 5; i++ {
+			again := doAs(t, h, "GET", url, nil, c["alice"])
+			if again.Body.String() != first.Body.String() {
+				t.Fatalf("GET %s moved between loads:\n%s\n%s", url, first.Body, again.Body)
+			}
+		}
+	}
+	// The newest link is the first row — what you just minted is what you are
+	// most likely to want to undo.
+	rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/shares", nil, c["alice"])
+	var out struct {
+		Shares []struct {
+			Path string `json:"path"`
+		} `json:"shares"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Shares) != 3 || out.Shares[0].Path != "c.md" {
+		t.Fatalf("newest share is not first: %s", rec.Body)
 	}
 }
 
