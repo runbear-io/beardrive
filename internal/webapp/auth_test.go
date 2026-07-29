@@ -510,3 +510,39 @@ func TestConfigBillingSeam(t *testing.T) {
 		t.Fatal("billing shown to a user the hook declined")
 	}
 }
+
+// TestConfigAnalyticsSeam: an unconfigured hub says nothing about analytics —
+// that silence is what keeps a self-hosted frontend from loading a tracker —
+// and a configured one hands over the key with a default host.
+func TestConfigAnalyticsSeam(t *testing.T) {
+	config := func(srv *Server) map[string]json.RawMessage {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/api/config", nil))
+		if rec.Code != 200 {
+			t.Fatalf("config: %d %s", rec.Code, rec.Body)
+		}
+		var out map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	srv, _, _ := authHub(t, true)
+	if _, ok := config(srv)["analytics"]; ok {
+		t.Fatal("an unconfigured hub advertised analytics")
+	}
+
+	// Signed out on purpose: the block must not depend on a session, or a
+	// hub with auth off would never be measurable.
+	srv.Analytics = AnalyticsConfig{Key: "phc_test"}
+	if got := string(config(srv)["analytics"]); got != `{"host":"`+DefaultAnalyticsHost+`","key":"phc_test"}` {
+		t.Fatalf("analytics block = %s", got)
+	}
+
+	srv.Analytics.Host = "https://eu.i.posthog.com"
+	if got := string(config(srv)["analytics"]); got != `{"host":"https://eu.i.posthog.com","key":"phc_test"}` {
+		t.Fatalf("analytics host override = %s", got)
+	}
+}

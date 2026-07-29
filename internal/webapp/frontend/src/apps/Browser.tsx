@@ -17,6 +17,7 @@ import { currentNavType, navigate, useLocationPath } from "../nav";
 import { HTML_EXT, copyText } from "../util";
 import { toast } from "../toast";
 import { onSearchRequest } from "../search";
+import { track } from "../analytics";
 import { AppShell, Icon, Page, Topbar, closeSidebarOnMobile, type PageWidth } from "../components/shell";
 import { FileTree, ancestorsOf } from "../components/FileTree";
 import { Breadcrumbs } from "../components/Breadcrumbs";
@@ -191,6 +192,9 @@ export default function Browser(props: {
       });
       if (!r.ok) throw new Error(await r.text());
       const s = await r.json();
+      // Fired here rather than by the table in api/http.ts, because this is
+      // the one write in the app that goes out as a raw fetch.
+      track("share_created");
       const copied = await copyText(s.url);
       setShare({ url: s.url, copied });
       refreshShares(); // the banner appears (or stays) without a reload
