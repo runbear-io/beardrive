@@ -48,6 +48,22 @@ test("folder listing: counts, change feed, heat dot on a read file", async ({ pa
   await expect(page.locator('.dl-row[title="notes/readme.md"] .heatdot')).toBeVisible();
 });
 
+// BEA-28: copying a folder URL hands you a trailing slash, and that URL used
+// to 404 while the sidebar showed the folder populated right next to it.
+test("folder URL with a trailing slash renders the listing and drops the slash", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  await page.goto(`/${pid}/notes/`);
+  await expect(page.locator(".dl-title")).toContainText("notes");
+  await expect(page.locator(".dl-history .dl-h3")).toHaveText("Recent changes");
+  await expect(page).toHaveURL(`/${pid}/notes`);
+  // Replaced, not pushed: Back leaves the folder instead of bouncing off the
+  // slashed URL and landing right back here.
+  await page.goBack();
+  await expect(page).toHaveURL(`/${pid}`);
+});
+
 // BEA-17: the kind glyph read as a disclosure toggle. It is now a text
 // badge, the row's only real expander is the note, and clicking the badge
 // navigates like the rest of the row — no dead zone, no second behavior.
