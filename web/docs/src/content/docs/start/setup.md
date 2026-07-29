@@ -35,10 +35,11 @@ Two more commands come with the plugin: **`/beardrive:init`** to start syncing
 without the full setup conversation, and **`/beardrive:status`** to diagnose a
 sync problem.
 
-:::tip[Project-level hooks reach the whole team]
-`/beardrive:install` writes hooks into `.claude/settings.json`, which is
-committed with the repository — so **teammates sync whether or not they
-installed the plugin**.
+:::tip[Hooks are registered once per machine]
+`/beardrive:install` writes hooks into your user config (`~/.claude/settings.json`
+and friends), so **every session in every folder is covered** — not just the ones
+started where you ran setup. Nothing is written into the project, and each
+teammate registers their own the first time they set up.
 :::
 
 ## Codex, Gemini CLI, and Hermes
@@ -49,7 +50,7 @@ and paste:
 
 ```
 Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to connect this folder to BearDrive project <project-id> on <hub-url>.
+to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sync.
 ```
 
 The agent fetches that page and works through it — install the CLI, sign in
@@ -76,11 +77,12 @@ Two things, worth knowing by name:
   Codex, Gemini CLI, and Hermes.
 - **The hooks** — a blocking pull when you send a message, so the agent always
   reads the team's current files, and an async push when the turn ends, so what
-  it writes reaches everyone else within seconds.
+  it writes reaches everyone else within seconds. They go in the agent's user
+  config, once per machine, and are a no-op outside BearDrive folders.
 
-The hooks are what make syncing automatic, and they are the step people skip
-when they set up by hand. [Skills and hooks in detail](/manual/skills-and-hooks/)
-covers what gets written where.
+The hooks are what make syncing automatic. `bdrive init` registers them for you,
+so there is nothing extra to run — [skills and hooks in
+detail](/manual/skills-and-hooks/) covers what gets written where.
 
 ## Check it worked
 
@@ -89,7 +91,7 @@ Ask the agent — "is BearDrive set up in this folder?" — or look yourself:
 ```sh
 bdrive status    # projects, daemon state, pending changes
 bdrive skill     # which agents know the CLI on this machine
-bdrive hooks     # which agents sync this project automatically
+bdrive hooks     # which agents on this machine sync automatically
 ```
 
 ## Next

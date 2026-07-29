@@ -78,7 +78,7 @@ test("no-org account gets the onboarding empty state with the agent prompt", asy
   // The agent paste-prompt is the one path, with this hub's real origin
   // filled in; the by-hand route is a docs link.
   await expect(page.locator(".onboard .gd-code code")).toContainText(
-    "to connect this folder to a new BearDrive project on http://localhost:8993.",
+    "to set up a new BearDrive project on http://localhost:8993. Ask me which folder to sync.",
   );
   await expect(page.locator(".ob-alt a")).toHaveAttribute(
     "href",

@@ -109,7 +109,7 @@ bdrive init --project <id>.`,
 				return err
 			}
 			defer f.Close()
-			settings, err := ensureLogin()
+			settings, err := ensureLogin("")
 			if err != nil {
 				return err
 			}

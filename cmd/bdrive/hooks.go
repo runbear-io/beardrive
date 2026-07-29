@@ -37,7 +37,14 @@ func hooksCmd() *cobra.Command {
 				}
 				fmt.Printf("  %-8s %-32s %s\n", a, state, agenthooks.ConfigPath(folder, a))
 			}
-			fmt.Println("\nregister with: bdrive hooks install [--agent claude,codex,gemini,hermes]")
+			fmt.Println("\nhooks are registered once per machine, in each platform's own user config —")
+			fmt.Println("they cover every session in every folder, and no project file is written.")
+			if detected["codex"] {
+				fmt.Println("\ncodex: hooks are experimental and off by default — enable them with")
+				fmt.Println("  [features] codex_hooks = true   in ~/.codex/config.toml")
+			}
+			fmt.Println("\nregister with:   bdrive hooks install [--agent claude,codex,gemini,hermes]")
+			fmt.Println("remove with:     bdrive hooks uninstall")
 			return nil
 		},
 	}
@@ -75,6 +82,9 @@ func hooksCmd() *cobra.Command {
 					state = "registered"
 				}
 				fmt.Printf("  %-8s %s  →  %s\n", r.Agent, state, r.Path)
+				if r.Migrated != "" {
+					fmt.Printf("           moved out of %s (project hooks are no longer used)\n", r.Migrated)
+				}
 				if r.Note != "" {
 					fmt.Printf("           note: %s\n", r.Note)
 				}
@@ -83,6 +93,38 @@ func hooksCmd() *cobra.Command {
 		},
 	}
 	install.Flags().StringVar(&agentsFlag, "agent", "auto", "comma-separated platforms (claude,codex,gemini,hermes) or auto")
-	c.AddCommand(install)
+
+	var uninstallAgents string
+	uninstall := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove beardrive's sync hooks from every agent platform",
+		Long: "Removes only beardrive's own hook entries from each platform's user\n" +
+			"config, leaving any other hooks in those files untouched. Syncing itself\n" +
+			"is unaffected — the daemon keeps running; only turn-boundary sync stops.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var agents []string
+			if uninstallAgents != "" && uninstallAgents != "auto" {
+				agents = strings.Split(uninstallAgents, ",")
+			}
+			results, err := agenthooks.Uninstall(agents)
+			if err != nil {
+				return err
+			}
+			removed := 0
+			for _, r := range results {
+				if r.Changed {
+					removed++
+					fmt.Printf("  %-8s removed  →  %s\n", r.Agent, r.Path)
+				}
+			}
+			if removed == 0 {
+				fmt.Println("no beardrive hooks were registered")
+			}
+			return nil
+		},
+	}
+	uninstall.Flags().StringVar(&uninstallAgents, "agent", "auto", "comma-separated platforms (claude,codex,gemini,hermes) or auto")
+	c.AddCommand(install, uninstall)
 	return c
 }

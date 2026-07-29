@@ -32,8 +32,9 @@ Same as any project — [ask your agent](/start/setup/), in the brain folder:
 
 > Set up BearDrive here and invite my team.
 
-If the brain is a subfolder of something larger, sync just that subfolder:
-`bdrive init --shared brain/`. Teammates mount the same project on their own
+If the brain is a subfolder of something larger, name it and only it:
+`bdrive init brain` — the folder you name is the project, and nothing outside it
+is scanned. Teammates mount the same project on their own
 machines, wherever they like it on disk, and keep running their own local brain
 against the synced files.
 

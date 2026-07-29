@@ -29,7 +29,7 @@ bdrive url --sync wiki/report.html
 With no argument, `bdrive url` gives the project home.
 
 :::tip[Agents do this automatically]
-The sync hook installed by `bdrive hooks install` injects the project's
+The sync hook `bdrive init` registers injects the project's
 gated-link formula into the agent's context, so a connected agent appends
 `path` [🔗](link) to every synced path it mentions — without being asked. See
 [Set up with your agent](/start/setup/).

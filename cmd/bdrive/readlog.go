@@ -40,47 +40,56 @@ to run it by hand.`,
 			if err != nil {
 				return nil
 			}
-			// LoadProject, not ResolveMount: a hook must never enroll this
-			// device (registry self-heal) — and syncBlocked keeps a paused
-			// or never-inited project's spool from even being created.
-			proj, found, err := config.LoadProject(folder)
-			if err != nil || !found || syncBlocked(proj) != "" {
-				return nil // not an actively synced project: fast no-op
-			}
 			data, _ := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 1<<20))
-			paths := extractEventPaths(data, folder)
-			if len(paths) == 0 {
-				return nil
-			}
-			filter, err := syncer.LoadFilter(folder, proj.Include)
-			if err != nil {
-				return nil
-			}
-			vdir, err := config.VolumeDir(proj.ID)
-			if err != nil {
-				return nil
-			}
-			st, err := store.Open(vdir)
-			if err != nil {
-				return nil
-			}
-			for _, p := range paths {
-				abs := p
-				if !filepath.IsAbs(abs) {
-					abs = filepath.Join(folder, p)
-				}
-				rel, err := filepath.Rel(folder, abs)
-				if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
-					continue // outside the mount
-				}
-				rel = filepath.ToSlash(rel)
-				if filter.Skip(rel) {
-					continue // not part of the project (ignore/include rules)
-				}
-				st.LogRead(rel) // best-effort; the hook must never fail the turn
+			// The session's directory is rarely the mount root, so reads are
+			// attributed to whichever mount actually contains them.
+			for _, target := range syncTargets(folder) {
+				logReads(target, data)
 			}
 			return nil
 		},
+	}
+}
+
+// logReads spools the reads from one hook event that fall inside one mount.
+func logReads(folder string, data []byte) {
+	// LoadProject, not ResolveMount: a hook must never enroll this
+	// device (registry self-heal) — and syncBlocked keeps a paused
+	// or never-inited project's spool from even being created.
+	proj, found, err := config.LoadProject(folder)
+	if err != nil || !found || syncBlocked(proj) != "" {
+		return // not an actively synced project: fast no-op
+	}
+	paths := extractEventPaths(data, folder)
+	if len(paths) == 0 {
+		return
+	}
+	filter, err := syncer.LoadFilter(folder, proj.Include)
+	if err != nil {
+		return
+	}
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		return
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		return
+	}
+	for _, p := range paths {
+		abs := p
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(folder, p)
+		}
+		rel, err := filepath.Rel(folder, abs)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			continue // outside the mount
+		}
+		rel = filepath.ToSlash(rel)
+		if filter.Skip(rel) {
+			continue // not part of the project (ignore/include rules)
+		}
+		st.LogRead(rel) // best-effort; the hook must never fail the turn
 	}
 }
 
