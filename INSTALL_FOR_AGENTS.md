@@ -166,7 +166,7 @@ project, so an empty folder *now* means there is genuinely nothing to build on.
 already here — say nothing.) Ask: start from a structure, or from scratch?
 
 > On Claude Code use `AskUserQuestion`, header "Starting point", with
-> **Plain docs + ADRs** — `docs/`, `decisions/` — first and labelled
+> **Docs + decision records** — `docs/`, `decisions/` — first and labelled
 > "(Recommended)", then **PARA** — `projects/`, `areas/`, `resources/`,
 > `archives/` — then **Start from scratch**. Every other agent: prose.
 

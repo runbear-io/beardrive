@@ -1,9 +1,9 @@
 # How this folder is organized
 
-This project uses the **plain docs + ADRs** structure. Everything here syncs to
-every teammate and every one of their agents, so the filing rules below are not
-a preference — they are what keeps the folder readable for people who did not
-write the file.
+This project uses the **docs + decision records** structure. Everything here
+syncs to every teammate and every one of their agents, so the filing rules below
+are not a preference — they are what keeps the folder readable for people who
+did not write the file.
 
 ## Where a new file goes
 

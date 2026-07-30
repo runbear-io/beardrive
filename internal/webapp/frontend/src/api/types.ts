@@ -47,7 +47,7 @@ export interface BillingInfo {
 // One entry of /api/config's `templates` (templates.Template).
 export interface StartTemplate {
   name: string; // the API/flag value, e.g. "docs"
-  title: string; // menu label, e.g. "Plain docs + ADRs"
+  title: string; // menu label, e.g. "Docs + decision records"
   blurb: string; // the one-line shape, e.g. "docs/, decisions/"
 }
 

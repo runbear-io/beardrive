@@ -26,6 +26,9 @@ this directory. Copy the shape of this one:
 Number sequentially, never reuse a number, and write the record when the
 decision is made rather than when someone remembers.
 
+(The format has a name — an **architecture decision record**, or ADR — if you
+want to read more about it. Nothing here depends on knowing that.)
+
 A record is written once and not edited afterwards. Reversing a decision means a
 new record, plus one line here — `Superseded by NNNN-....md` — so the trail stays
 readable in both directions.

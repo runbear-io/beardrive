@@ -41,7 +41,7 @@ type File struct {
 // Template is one starting structure.
 type Template struct {
 	Name  string `json:"name"`  // the flag/API value, e.g. "docs"
-	Title string `json:"title"` // what a menu shows, e.g. "Plain docs + ADRs"
+	Title string `json:"title"` // what a menu shows, e.g. "Docs + decision records"
 	Blurb string `json:"blurb"` // the one-line shape, e.g. "docs/, decisions/"
 	Files []File `json:"-"`
 }
@@ -50,7 +50,7 @@ type Template struct {
 // recommended one first. Adding a template is a directory under files/ plus
 // a row here — no other code.
 var shipped = []struct{ Name, Title, Blurb string }{
-	{"docs", "Plain docs + ADRs", "docs/, decisions/"},
+	{"docs", "Docs + decision records", "docs/, decisions/"},
 	{"para", "PARA", "projects/, areas/, resources/, archives/"},
 }
 

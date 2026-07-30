@@ -112,8 +112,8 @@ test("new project from a template", async ({ page }) => {
   await login(page);
   await page.click("#projects .nav-add");
   await page.fill(".modal-input", "from-template");
-  await page.click('.start-point:has-text("Plain docs + ADRs")');
-  await expect(page.locator(".start-point.on")).toContainText("Plain docs + ADRs");
+  await page.click('.start-point:has-text("Docs + decision records")');
+  await expect(page.locator(".start-point.on")).toContainText("Docs + decision records");
   await page.click(".modal .pbtn");
   await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("from-template");

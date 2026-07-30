@@ -34,7 +34,7 @@ names the new project `shared`.
 
 If the folder turns out to be empty once it is connected, the agent offers one
 more choice: start from a structure, or from scratch. Two are shipped — **plain
-docs + ADRs** (`docs/`, `decisions/`) and **PARA** (`projects/`, `areas/`,
+docs + decision records** (`docs/`, `decisions/`) and **PARA** (`projects/`, `areas/`,
 `resources/`, `archives/`) — and each is a small skeleton plus an `AGENTS.md`
 telling every agent on the team where a new note goes, when something is
 archived, and what a good filename looks like. That file is the point; the
