@@ -124,12 +124,38 @@ func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (i
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
-	pid := cmd.Process.Pid
-	if err := os.WriteFile(PidPath(volDir), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
-		return pid, err
+	if err := cmd.Process.Release(); err != nil {
+		return 0, err
 	}
-	return pid, cmd.Process.Release()
+
+	// The child announces its own pid, and only once it holds the lifetime
+	// lock (see Run). The parent must NOT write PidPath: a child that loses
+	// the lock race exits without ever being the daemon, and its pid written
+	// here would outlive it — leaving Stop signalling a corpse (ESRCH) while
+	// the daemon that won keeps syncing, and status printing a phantom pid.
+	//
+	// So wait for the lock instead of assuming the spawn worked. A caller
+	// that gets a pid back can trust that a daemon owns it. In a race the pid
+	// is the winner's rather than the child just spawned, which is the honest
+	// answer to "which pid is the daemon" — callers that need to distinguish
+	// starting from adopting check Running first (see `bdrive resume`).
+	deadline := time.Now().Add(startTimeout)
+	for {
+		if pid, ok := Running(volDir); ok && pid > 0 {
+			return pid, nil
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("daemon did not come up within %s; see %s",
+				startTimeout, LogPath(volDir))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
+
+// startTimeout bounds how long Start waits for the child to take the lock and
+// write its pid. Generous on purpose: it covers a cold binary on a loaded
+// machine, and the only cost of waiting is a slower `bdrive init`.
+const startTimeout = 10 * time.Second
 
 // Stop terminates the daemon for a mount and waits for it to exit. Exit is
 // observed by the lock being released, not by the pid disappearing: the pid
