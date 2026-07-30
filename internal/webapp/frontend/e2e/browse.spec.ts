@@ -459,18 +459,43 @@ test("history groups one agent run into a single card", async ({ page }) => {
   await expect(page).toHaveURL(`/${pid}/history`);
 });
 
-test("a file the run created says why it can't be undone", async ({ page }) => {
+// BEA-35: the one thing history couldn't reverse was a file a run CREATED.
+// Undo removes it (via a delete op the hub journals), and the DELETED row it
+// leaves behind restores it — so the round trip is what the test asserts, and
+// the seeded run is left exactly as it was found.
+test("a file the run created can be undone, and comes back", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/history`);
   const created = page.locator('.hrun .hentry.add:has-text("runbook.md")');
   await expect(created).toBeVisible();
+  // An add has no old bytes to put back — its undo is a removal.
   await expect(created.locator(".hrestore-btn")).toHaveCount(0);
-  await expect(created.locator(".hrestore-gap")).toContainText("created by this run");
-  // The file it edited does offer one.
+  await expect(created.locator(".hremove-btn")).toBeVisible();
+  // The file it edited still offers a restore.
   await expect(
     page.locator('.hrun .hentry.edit:has-text("notes/readme.md") .hrestore-btn'),
   ).toBeVisible();
+
+  // It reaches every device, so it always asks first — and Cancel means no.
+  await created.locator(".hremove-btn").click();
+  const modal = page.locator(".modal");
+  await expect(modal).toContainText("Remove runbook.md?");
+  await expect(modal).toContainText("every synced device");
+  await modal.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.locator(`.hentry.delete:has-text("runbook.md")`)).toHaveCount(0);
+
+  await created.locator(".hremove-btn").click();
+  await page.locator(".modal .danger-btn").click();
+  await expectToast(page, /Removed runbook\.md/);
+  const gone = page.locator('.history > .hentry.delete:has-text("runbook.md")').first();
+  await expect(gone).toBeVisible();
+
+  // ...and the delete row puts it back, bytes and all.
+  await gone.locator(".hrestore-btn").click();
+  await expectToast(page, /Restored runbook\.md/);
+  await page.goto(`/${pid}/runbook.md`);
+  await expect(page.locator("#content")).toContainText("Created during the agent run");
 });
 
 test("restoring an old version brings its content back", async ({ page }) => {
@@ -495,12 +520,13 @@ test("restoring an old version brings its content back", async ({ page }) => {
   await expect(page.locator("#content")).toContainText("The good version");
 });
 
-test("a read-only member gets no restore buttons", async ({ page }) => {
+test("a read-only member gets no restore or remove buttons", async ({ page }) => {
   await login(page, READER);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/history`);
   await expect(page.locator(".history .hentry").first()).toBeVisible();
   await expect(page.locator(".hrestore-btn")).toHaveCount(0);
+  await expect(page.locator(".hremove-btn")).toHaveCount(0);
 });
 
 // BEA-26: the row was already an address for its version — but a bare

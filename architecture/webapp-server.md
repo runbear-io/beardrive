@@ -50,6 +50,8 @@ classDiagram
     class RemoteSource {
         +Backend remote.Backend
         +Device Identity
+        +Remove(ctx, path, who, note)
+        -appendOp(ctx, op)
     }
     class Uploader {
         <<interface>>
@@ -62,6 +64,7 @@ classDiagram
         +Commit(ctx, path, blob, size, who, note)
     }
     note for DirectUploader "Commit's note is \"\" for an upload and \"restore &lt;path&gt;@&lt;sha8&gt;\" for POST /api/p/{id}/restore — which is the upload commit minus the upload: find the historical op for (path, sha), journal a NEW put at its blob. Never rewrites a journal."
+    note for RemoteSource "Every write ends at appendOp: stamp Seq/Lamport/Time + this server's Identity, append ONE op to journal/&lt;own-device&gt;.jsonl. Commit does that for a put; Remove (POST /api/p/{id}/remove, restore's gates + a snapshot existence check) does it for a delete — the only server path that takes a file away, and itself undone by restoring the DELETED row."
 
     class Backend {
         <<interface>>
