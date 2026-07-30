@@ -68,6 +68,8 @@ Authentication (`webapp/auth.go`, `authlocal.go`, `mail.go`) is **mandatory in h
 
 The real coverage is the integration tests in `internal/syncer/syncer_test.go`: each test builds multiple simulated devices (`newDevice`) syncing through a shared `file://` remote (`sharedRemote`), then drives explicit `cycle()` calls to test convergence, offline operation, and concurrent-edit conflicts. Extend these when touching sync behavior — a new sync feature without a multi-device test is untested where it matters.
 
+`sandbox/` is a disposable Linux container to run a scenario in **when it needs one** — an environment, not a test suite (`./sandbox/run.sh`, which cross-builds the binary and takes `BDRIVE_SRC=<other checkout>` to test a branch without disturbing your tree). It provides a hub, a seeded account, browserless sign-in (`bdrive-signin`), Claude Code, and a `$HOME` that is thrown away, so `bdrive init` writes its device identity and its agent hooks somewhere other than yours. Reach for it only when a Go test cannot do the job: a real `claude` session with the real permission classifier, Linux-only paths like the systemd user unit, or a reboot simulated by killing processes while the filesystem survives. Everything deterministic and machine-local belongs in `internal/webapp/cli_e2e_test.go` (which already isolates `HOME` and drives the real binary) or `internal/syncer` — **if it doesn't need a conversation or an OS, it's a Go test.** The two scripts it ships (`onboarding.sh`, `daemon-linux.sh`) are the scenarios that cannot live anywhere else; don't grow a suite in here.
+
 ## Agent integration
 
 There is no Claude Code plugin and no bundled skill: the integration is
