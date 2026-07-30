@@ -80,6 +80,7 @@ classDiagram
         +diff.ts splitLines lcsDiff diffText
         +runs.ts groupRuns runFileCount
         +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
+        +heat.ts ageRange isFlatRange ageSpanLabel (treemap scale)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +utils.ts
     }

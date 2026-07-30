@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node } from "../api/types";
 import { heatTotal, hotPathSplit } from "../hooks/useBrowse";
+import { ageRange, ageSpanLabel, isFlatRange } from "../lib/heat";
 
 /* ---- the project Dashboard: the read×write matrix ----
    Every file plotted by how much it is read (30 days, from the heat API)
@@ -111,7 +112,7 @@ export function Insights(props: {
         ))}
       </div>
 
-      <h3 className="dl-h3">Map — cell size = reads, color = freshness</h3>
+      <h3 className="dl-h3">Map — cell size = reads, color = freshness (scale below)</h3>
       <Treemap pts={pts} onOpenFile={props.onOpenFile} onOpenFolder={props.onOpenFolder} isFolder={props.isFolder} />
 
       <h3 className="dl-h3">Reads × freshness</h3>
@@ -201,6 +202,20 @@ function squarify<T extends TmItem>(
 
 const TM_HEADER = 15; // group label strip height
 
+/* A cell label with its read count, sized to the cell. The count is part of
+   the string the fit is measured against, so it can never overflow; when it
+   won't fit, the label falls back to the bare name truncated as before rather
+   than to a chopped-off number. Returns `fit` so callers can still drop the
+   label entirely on very narrow cells. */
+function tmLabel(name: string, reads: number, w: number): { label: string; fit: number } {
+  const fit = Math.floor((w - 8) / 6);
+  const full = `${name} · ${reads}`;
+  if (full.length <= fit) return { label: full, fit };
+  return { label: name.length > fit ? name.slice(0, Math.max(1, fit - 1)) + "…" : name, fit };
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
 function Treemap({
   pts,
   onOpenFile,
@@ -215,18 +230,20 @@ function Treemap({
   const W = 720,
     H = 480;
   // Two levels: top-level folder groups, files within each.
-  const groups = new Map<string, { name: string; files: Pt[]; value: number }>();
+  const groups = new Map<string, { name: string; files: Pt[]; value: number; reads: number }>();
   for (const p of pts) {
     const top = p.path.includes("/") ? p.path.split("/")[0] : "/";
     let g = groups.get(top);
-    if (!g) groups.set(top, (g = { name: top, files: [], value: 0 }));
+    if (!g) groups.set(top, (g = { name: top, files: [], value: 0, reads: 0 }));
     g.files.push(p);
     g.value += p.reads + 1; // +1: unread files still occupy a sliver
+    g.reads += p.reads; // the true total — `value` is padded, so it over-reports
   }
   const cells: React.ReactNode[] = [];
   for (const gc of squarify([...groups.values()], 0, 0, W, H)) {
     const g = gc.item;
     const dir = g.name === "/" ? "" : g.name;
+    const gname = g.name === "/" ? "(root)" : g.name;
     cells.push(
       <rect
         key={"g" + g.name}
@@ -237,12 +254,16 @@ function Treemap({
         rx={3}
         className="in-tm-group"
         data-dir={dir}
-      />,
+      >
+        {/* So a group whose cells are all too small to label is still
+            identifiable on hover. */}
+        <title>
+          {`${g.name === "/" ? "(root)" : g.name + "/"} — ${plural(g.reads, "read")}/30d · ${plural(g.files.length, "file")}`}
+        </title>
+      </rect>,
     );
     if (gc.w > 46 && gc.h > TM_HEADER + 10) {
-      let label = g.name === "/" ? "(root)" : g.name;
-      const fit = Math.floor((gc.w - 8) / 6);
-      if (label.length > fit) label = label.slice(0, Math.max(1, fit - 1)) + "…";
+      const { label } = tmLabel(gname, g.reads, gc.w);
       cells.push(
         <text key={"gl" + g.name} x={gc.x + 5} y={gc.y + 12} className="in-tm-glabel" data-dir={dir}>
           {label}
@@ -275,9 +296,7 @@ function Treemap({
         </rect>,
       );
       if (c.w > 54 && c.h > 16) {
-        const fit = Math.floor((c.w - 8) / 6);
-        let label = (c.item.danger ? "⚠ " : "") + c.item.name;
-        if (label.length > fit) label = label.slice(0, Math.max(1, fit - 1)) + "…";
+        const { label, fit } = tmLabel((c.item.danger ? "⚠ " : "") + c.item.name, c.item.reads, c.w);
         if (fit >= 5)
           cells.push(
             <text key={"l" + c.item.path} x={c.x + 4.5} y={c.y + 12.5} className="in-tm-label" data-path={c.item.path}>
@@ -288,21 +307,49 @@ function Treemap({
     }
   }
   return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      className="in-chart in-treemap"
-      onClick={(e) => {
-        // One delegated click handler for thousands of cells.
-        const t = (e.target as Element).closest("[data-path], [data-dir]");
-        if (!t) return;
-        const path = t.getAttribute("data-path");
-        if (path) return onOpenFile(path);
-        const dir = t.getAttribute("data-dir");
-        if (dir && isFolder(dir)) onOpenFolder(dir);
-      }}
-    >
-      {cells}
-    </svg>
+    <>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="in-chart in-treemap"
+        onClick={(e) => {
+          // One delegated click handler for thousands of cells.
+          const t = (e.target as Element).closest("[data-path], [data-dir]");
+          if (!t) return;
+          const path = t.getAttribute("data-path");
+          if (path) return onOpenFile(path);
+          const dir = t.getAttribute("data-dir");
+          if (dir && isFolder(dir)) onOpenFolder(dir);
+        }}
+      >
+        {cells}
+      </svg>
+      <FreshnessLegend pts={pts} />
+    </>
+  );
+}
+
+/* The colour scale, plus the age span actually present in this scope+lens.
+   On a young project the whole scope lands inside one colour stop, and saying
+   so is the honest thing — the alternative, a relative scale, would paint a
+   3-day-old file the red that means hot-and-stale everywhere else here. */
+function FreshnessLegend({ pts }: { pts: Pt[] }) {
+  const r = ageRange(pts.map((p) => p.days));
+  if (!r) return null;
+  const span = ageSpanLabel(r.min, r.max);
+  return (
+    <p className="in-legend in-tm-legend">
+      freshness 0d
+      <span
+        className="in-sw in-sw-age"
+        style={{ background: `linear-gradient(to right, ${[0, 60, 150, 300].map(staleColor).join(", ")})` }}
+      />
+      300d+
+      <span className="in-tm-range">
+        {isFlatRange(r.min, r.max)
+          ? `all files here: ${span} old — colour carries no signal in this range`
+          : `observed: ${span} old`}
+      </span>
+    </p>
   );
 }
 
