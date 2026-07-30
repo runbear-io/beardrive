@@ -78,9 +78,10 @@ classDiagram
 
     class lib {
         +diff.ts splitLines lcsDiff diffText
+        +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
         +utils.ts
     }
-    note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package"
+    note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it"
 
     App --> HubApp
     App --> VolumeApp
@@ -91,7 +92,8 @@ classDiagram
     Browser --> components
     HubApp --> components
     components --> nav : linkProps navigate
-    components --> lib : diffText
+    components --> lib : diffText hotPathSplit
+    hooks --> lib : re-exports heat.ts
     hooks --> api
     Browser --> hooks
     HubApp --> hooks
