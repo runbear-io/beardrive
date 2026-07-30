@@ -2,6 +2,42 @@
 // deep path like /<project>/<dir>/<file> must never break relative
 // resolution.
 
+import { track } from "../analytics";
+
+// Product events, derived from the write that just succeeded rather than
+// hand-fired at each button. Every mutating call in the app goes through
+// api() or postJSON(), so this table is the whole instrumentation surface —
+// a new write shows up here or nowhere, instead of silently going unmeasured
+// because someone forgot a capture() call. The one write that bypasses these
+// helpers (share creation, a raw fetch in Browser.tsx) fires its own.
+//
+// Nothing here carries a path, project name, email or token: the event says
+// what kind of thing happened, never to which customer object.
+//
+// Two writes are deliberately absent. POST .../reads is read telemetry, not a
+// user action — counting it would mean the analytics of our analytics. The
+// /store/* routes are device replication, which is a sync cycle rather than
+// anything a person did.
+const PRODUCT_EVENTS: [RegExp, string][] = [
+  [/^POST \/api\/projects$/, "project_created"],
+  [/^DELETE \/api\/projects\//, "project_deleted"],
+  [/^POST \/api\/p\/[^/]+\/restore$/, "file_restored"],
+  [/^DELETE \/api\/shares\//, "share_revoked"],
+  [/^PATCH \/api\/shares\//, "share_expiry_changed"],
+  [/^POST \/api\/orgs\/[^/]+\/invites$/, "invite_created"],
+  [/^DELETE \/api\/orgs\/[^/]+\/invites\//, "invite_revoked"],
+  [/^POST \/api\/invites\//, "invite_accepted"],
+  [/^PUT \/api\/p\/[^/]+\/permissions\/./, "project_access_granted"],
+  [/^DELETE \/api\/p\/[^/]+\/permissions\/./, "project_access_revoked"],
+];
+
+function trackWrite(method: string, url: string) {
+  // The query string can hold a path; match on the path alone.
+  const key = method + " " + url.split("?")[0];
+  const hit = PRODUCT_EVENTS.find(([re]) => re.test(key));
+  if (hit) track(hit[1]);
+}
+
 function toLogin(): never {
   // Auth required: sign in, then come back to the current route.
   location.href =
@@ -68,6 +104,7 @@ export async function api<T = unknown>(method: string, url: string, body?: unkno
   }
   const r = await fetch(url, opt);
   if (!r.ok) await fail(r);
+  trackWrite(method, url);
   return r.status === 204 ? ({} as T) : r.json();
 }
 
@@ -79,5 +116,6 @@ export async function postJSON<T>(url: string, body?: unknown): Promise<T> {
   });
   if (r.status === 401) toLogin();
   if (!r.ok) await fail(r);
+  trackWrite("POST", url);
   return r.json();
 }

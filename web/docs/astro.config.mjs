@@ -23,6 +23,7 @@ export default defineConfig({
     "/start/install": "/manual/install/",
     "/start/quickstart": "/manual/setup-by-hand/",
     "/guides/connect-an-agent": "/start/setup/",
+    "/manual/skills-and-hooks": "/manual/hooks/",
   },
   integrations: [
     starlight({
@@ -81,7 +82,7 @@ export default defineConfig({
           items: [
             { label: "Install the CLI", slug: "manual/install" },
             { label: "Set up by hand", slug: "manual/setup-by-hand" },
-            { label: "Skills and hooks in detail", slug: "manual/skills-and-hooks" },
+            { label: "Hooks in detail", slug: "manual/hooks" },
           ],
         },
         {

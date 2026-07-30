@@ -1,6 +1,6 @@
 ---
 title: Set up with your agent
-description: You don't install BearDrive — you ask your agent to. One command in Claude Code, or one paste in Codex, Gemini CLI, or Hermes, and the folder syncs from then on.
+description: You don't install BearDrive — you ask your agent to. One paste in Claude Code, Cowork, Codex, Gemini CLI, or Hermes, and the folder syncs from then on.
 ---
 
 You don't set BearDrive up. Your agent does.
@@ -9,59 +9,31 @@ Give it one instruction and it installs the CLI, signs this machine in, connects
 the folder to a project, and registers the hooks that keep everything in sync —
 then tells you what it did. You never open a config file.
 
-## Claude Code and Cowork
+## Any agent: one paste
 
-Install the plugin once, in any session:
-
-```
-/plugin marketplace add runbear-io/beardrive
-/plugin install beardrive@beardrive
-```
-
-Then, in the folder you want synced:
-
-```
-/beardrive:install
-```
-
-It walks you through it: creates or connects a project, asks whether to sync the
-whole folder or a subfolder like `wiki/`, offers to write the
-[agent orientation files](/guides/shared-agent-memory/), and registers the sync
-hooks. It asks before anything it changes.
-
-Cowork shares Claude Code's plugins, so installing it once covers both.
-
-Two more commands come with the plugin: **`/beardrive:init`** to start syncing
-without the full setup conversation, and **`/beardrive:status`** to diagnose a
-sync problem.
-
-:::tip[Hooks are registered once per machine]
-`/beardrive:install` writes hooks into your user config (`~/.claude/settings.json`
-and friends), so **every session in every folder is covered** — not just the ones
-started where you ran setup. Nothing is written into the project, and each
-teammate registers their own the first time they set up.
-:::
-
-## Codex, Gemini CLI, and Hermes
-
-These agents ship no BearDrive knowledge yet, so the prompt points them at the
-canonical instructions instead. Start the agent in the folder you want synced
-and paste:
+Start the agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the folder
+you want synced, and paste:
 
 ```
 Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sync.
+to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to
+sync (the project is named "<project-name>").
 ```
 
 The agent fetches that page and works through it — install the CLI, sign in
-with a device code, connect the project, register the sync hooks. You copy one
+(it prints a link you approve in the browser), connect the project, register
+the sync hooks. You copy one
 thing; the agent handles every deviation — already installed, no Homebrew,
 browser sign-in, wrong folder. On BearDrive Cloud, drop `on <hub-url>` —
 sign-in defaults to beardrive.ai.
 
-The skill step in those instructions is the durable part. Once the skill is
-installed the agent knows the CLI from then on, so "share this file" or "what
-changed?" work without you explaining anything again.
+The project name is in the prompt because the agent recommends a folder of
+the same name — so `handbook` on the hub is `handbook/` on everyone's disk.
+Starting from nothing (no project id, no name), it recommends `shared/` and
+names the new project `shared`.
+
+The hooks step is the durable part: once they are registered, every later
+session in every folder syncs automatically, with nothing to remember.
 
 :::tip[Don't retype this for teammates]
 A project's home page in the hub shows this same paste with your hub URL and
@@ -70,19 +42,21 @@ project id already filled in. Send people there.
 
 ## What your agent just set up
 
-Two things, worth knowing by name:
+The sync hooks, and nothing else you have to think about:
 
-- **The skill** — a `SKILL.md` in the agent's own skills directory, teaching it
-  the `bdrive` CLI. It is a cross-agent format, so one file works in Claude Code,
-  Codex, Gemini CLI, and Hermes.
-- **The hooks** — a blocking pull when you send a message, so the agent always
-  reads the team's current files, and an async push when the turn ends, so what
-  it writes reaches everyone else within seconds. They go in the agent's user
-  config, once per machine, and are a no-op outside BearDrive folders.
+- a **blocking pull** when you send a message, so the agent always reads the
+  team's current files — it also tells the agent your project's link
+  convention, so it can hand you a hub link for any file it mentions;
+- an **async push** after every file edit, so what it writes reaches everyone
+  else within seconds;
+- **read tracking**, so the hub's Dashboard can show what your agents actually
+  read.
 
-The hooks are what make syncing automatic. `bdrive init` registers them for you,
-so there is nothing extra to run — [skills and hooks in
-detail](/manual/skills-and-hooks/) covers what gets written where.
+They go in the agent's user config, once per machine, and are a no-op outside
+BearDrive folders. Your agent also registers a login item, so syncing comes
+back on its own after a reboot rather than waiting for the next session. `bdrive init` registers them for you, so there is nothing
+extra to run — [hooks in detail](/manual/hooks/) covers what gets written
+where.
 
 ## Check it worked
 
@@ -90,7 +64,6 @@ Ask the agent — "is BearDrive set up in this folder?" — or look yourself:
 
 ```sh
 bdrive status    # projects, daemon state, pending changes
-bdrive skill     # which agents know the CLI on this machine
 bdrive hooks     # which agents on this machine sync automatically
 ```
 

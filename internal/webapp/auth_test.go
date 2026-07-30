@@ -3,11 +3,13 @@ package webapp
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -223,8 +225,24 @@ func TestCLICallbackFlow(t *testing.T) {
 		t.Fatalf("cli without session: %d %s", rec.Code, rec.Header().Get("Location"))
 	}
 
-	// with a session: redirect back to the loopback with code+state
-	req = httptest.NewRequest("GET", "/auth/cli?redirect="+url.QueryEscape("http://127.0.0.1:9999/callback")+"&state=s1", nil)
+	// with a session, a GET asks first — it names the account the terminal
+	// would act as and offers to switch, and grants nothing on its own.
+	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"
+	req = httptest.NewRequest("GET", cliURL, nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cli confirmation page: %d, want 200", rec.Code)
+	}
+	for _, want := range []string{"cli@x.io", "Switch account", "127.0.0.1:9999", "Approve"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("confirmation page missing %q:\n%s", want, rec.Body)
+		}
+	}
+
+	// approving posts back to the same URL and lands on the loopback listener
+	req = httptest.NewRequest("POST", cliURL, nil)
 	req.AddCookie(cookie)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -271,16 +289,26 @@ func TestDeviceCodeFlow(t *testing.T) {
 	h := srv.Handler()
 	cookie := signupAndSession(t, h, "dev@x.io", "Dev", "password1")
 
-	rec := do(t, h, "POST", "/api/auth/device/start", map[string]string{"device": "server-1"})
+	rec := do(t, h, "POST", "/api/auth/device/start", map[string]string{"device": "server-1", "os": "linux"})
 	if rec.Code != 200 {
 		t.Fatalf("start: %d %s", rec.Code, rec.Body)
 	}
 	var start struct {
-		Code string `json:"code"`
+		Code      string `json:"code"`
+		VerifyURL string `json:"verify_url"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil || start.Code == "" {
 		t.Fatalf("start = %s (%v)", rec.Body, err)
 	}
+	// The link is the secret, so it must be a real token, and it must carry
+	// the code in the path — nobody types this in.
+	if len(start.Code) < 32 {
+		t.Fatalf("device code %q is too short to be a URL secret", start.Code)
+	}
+	if !strings.HasSuffix(start.VerifyURL, "/auth/device/"+start.Code) {
+		t.Fatalf("verify_url = %q, want .../auth/device/<code>", start.VerifyURL)
+	}
+	approve := "/auth/device/" + start.Code
 
 	// pending until approved
 	rec = do(t, h, "POST", "/api/auth/device/poll", map[string]string{"code": start.Code})
@@ -288,10 +316,23 @@ func TestDeviceCodeFlow(t *testing.T) {
 		t.Fatalf("poll before approve: %d %s", rec.Code, rec.Body)
 	}
 
+	// The approval page names the account being granted, offers a way off it,
+	// and says what is asking — approving is handing that box a token.
+	req := httptest.NewRequest("GET", approve, nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	for _, want := range []string{"dev@x.io", "server-1", "linux", "Switch account", url.QueryEscape(approve)} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("approval page missing %q:\n%s", want, rec.Body)
+		}
+	}
+	if strings.Contains(rec.Body.String(), `name="code"`) {
+		t.Fatal("approval page still asks for a typed code")
+	}
+
 	// approve from a signed-in browser
-	form := url.Values{"code": {start.Code}}
-	req := httptest.NewRequest("POST", "/auth/device", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = httptest.NewRequest("POST", approve, nil)
 	req.AddCookie(cookie)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -509,4 +550,181 @@ func TestConfigBillingSeam(t *testing.T) {
 	if _, ok := get(other)["billing"]; ok {
 		t.Fatal("billing shown to a user the hook declined")
 	}
+}
+
+// TestConfigAnalyticsSeam: an unconfigured hub says nothing about analytics —
+// that silence is what keeps a self-hosted frontend from loading a tracker —
+// and a configured one hands over the key with a default host.
+func TestConfigAnalyticsSeam(t *testing.T) {
+	config := func(srv *Server) map[string]json.RawMessage {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/api/config", nil))
+		if rec.Code != 200 {
+			t.Fatalf("config: %d %s", rec.Code, rec.Body)
+		}
+		var out map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	srv, _, _ := authHub(t, true)
+	if _, ok := config(srv)["analytics"]; ok {
+		t.Fatal("an unconfigured hub advertised analytics")
+	}
+
+	// Signed out on purpose: the block must not depend on a session, or a
+	// hub with auth off would never be measurable.
+	srv.Analytics = AnalyticsConfig{Key: "phc_test"}
+	if got := string(config(srv)["analytics"]); got != `{"host":"`+DefaultAnalyticsHost+`","key":"phc_test"}` {
+		t.Fatalf("analytics block = %s", got)
+	}
+
+	srv.Analytics.Host = "https://eu.i.posthog.com"
+	if got := string(config(srv)["analytics"]); got != `{"host":"https://eu.i.posthog.com","key":"phc_test"}` {
+		t.Fatalf("analytics host override = %s", got)
+	}
+}
+
+// The reason the CLI flow confirms at all: the browser's session is often not
+// the account the user meant the terminal to act as. Switching must come back
+// to the same pending sign-in rather than dumping them on the home page.
+func TestCLILoginSwitchAccount(t *testing.T) {
+	srv, _, _ := authHub(t, true)
+	h := srv.Handler()
+	personal := signupAndSession(t, h, "me@personal.io", "Me", "password1")
+
+	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"
+
+	// the page offers a way out, carrying this sign-in along
+	req := httptest.NewRequest("GET", cliURL, nil)
+	req.AddCookie(personal)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	swap := regexp.MustCompile(`href="(/auth/logout\?next=[^"]+)"`).FindStringSubmatch(rec.Body.String())
+	if swap == nil {
+		t.Fatalf("no switch-account link on the confirmation page:\n%s", rec.Body)
+	}
+
+	// following it drops the session and heads for a fresh login
+	req = httptest.NewRequest("GET", html.UnescapeString(swap[1]), nil)
+	req.AddCookie(personal)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	loc := rec.Header().Get("Location")
+	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(loc, "/auth/login?next=") {
+		t.Fatalf("switch account = %d %s", rec.Code, loc)
+	}
+	next, err := url.QueryUnescape(strings.TrimPrefix(loc, "/auth/login?next="))
+	if err != nil || next != cliURL {
+		t.Fatalf("switch account loses the pending sign-in: next=%q want %q", next, cliURL)
+	}
+
+	// signing in as someone else returns to the same confirmation, now naming them
+	work := signupAndSession(t, h, "me@work.io", "Me At Work", "password2")
+	req = httptest.NewRequest("GET", next, nil)
+	req.AddCookie(work)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "me@work.io") {
+		t.Fatalf("after switching, confirmation does not name the new account: %d\n%s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "me@personal.io") {
+		t.Fatalf("confirmation still shows the old account:\n%s", rec.Body)
+	}
+
+	// and approving as them grants to them
+	req = httptest.NewRequest("POST", next, nil)
+	req.AddCookie(work)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("approve after switch: %d", rec.Code)
+	}
+	cb, _ := url.Parse(rec.Header().Get("Location"))
+	out := do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": cb.Query().Get("code"), "device": "laptop"})
+	if !strings.Contains(out.Body.String(), "me@work.io") {
+		t.Fatalf("token issued to the wrong account: %s", out.Body)
+	}
+}
+
+// Both sign-in flows must behave identically for someone with no web session:
+// sign in, then explicitly approve. Nothing may shortcut the approval — that
+// page is where the user sees which account a machine is about to act as.
+func TestBothFlowsAlwaysAskToApprove(t *testing.T) {
+	srv, auth, _ := authHub(t, true)
+	h := srv.Handler()
+	signupAndSession(t, h, "first@x.io", "First", "password1")
+
+	// a pending device request, so both flows have something real to approve
+	rec := do(t, h, "POST", "/api/auth/device/start", map[string]string{"device": "laptop", "os": "linux"})
+	var start struct{ Code string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil || start.Code == "" {
+		t.Fatalf("device start: %s", rec.Body)
+	}
+
+	for _, tc := range []struct{ name, url string }{
+		{"cli", "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"},
+		{"device", "/auth/device/" + start.Code},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// no session: sent to sign in, carrying this request
+			req := httptest.NewRequest("GET", tc.url, nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			loginURL := rec.Header().Get("Location")
+			if rec.Code != http.StatusSeeOther || !strings.HasPrefix(loginURL, "/auth/login?next=") {
+				t.Fatalf("without a session = %d %s", rec.Code, loginURL)
+			}
+
+			// signing in returns to the request and must NOT grant on the way
+			form := url.Values{"email": {"first@x.io"}, "password": {"password1"}, "next": {tc.url}}
+			req = httptest.NewRequest("POST", loginURL, strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != tc.url {
+				t.Fatalf("login should return to the pending request: %d %s", rec.Code, rec.Header().Get("Location"))
+			}
+			var session *http.Cookie
+			for _, c := range rec.Result().Cookies() {
+				if c.Name == sessionCookie {
+					session = c
+				}
+			}
+			if session == nil {
+				t.Fatal("login started no session")
+			}
+
+			// and there the approval page waits — every time, for both flows
+			req = httptest.NewRequest("GET", tc.url, nil)
+			req.AddCookie(session)
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("signing in must not shortcut the approval: %d %s", rec.Code, rec.Header().Get("Location"))
+			}
+			for _, want := range []string{"first@x.io", "Switch account", "Approve"} {
+				if !strings.Contains(rec.Body.String(), want) {
+					t.Fatalf("approval page missing %q:\n%s", want, rec.Body)
+				}
+			}
+
+			// only the POST grants
+			req = httptest.NewRequest("POST", tc.url, nil)
+			req.AddCookie(session)
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if tc.name == "cli" {
+				if rec.Code != http.StatusSeeOther {
+					t.Fatalf("approve: %d", rec.Code)
+				}
+			} else if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Device connected") {
+				t.Fatalf("approve: %d\n%s", rec.Code, rec.Body)
+			}
+		})
+	}
+	_ = auth
 }

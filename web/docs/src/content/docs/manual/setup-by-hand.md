@@ -8,7 +8,7 @@ Useful on a machine with no agent, when scripting a fleet, or when you simply
 want to see the moving parts.
 
 Three steps: sign the device in, start syncing a folder, work normally. `init`
-installs the agent skill and [registers the hooks](/manual/skills-and-hooks/)
+[registers the hooks](/manual/hooks/)
 along the way — that is what keeps an agent's files fresh, and it used to be the
 step hand-setups forgot.
 
@@ -30,8 +30,8 @@ bdrive login https://your-hub
 
 This opens your browser, and the terminal finishes on its own. On a headless or
 SSH machine login falls back to the device-code flow automatically (no TTY, or
-no browser can open): it prints a short code you approve from any signed-in
-browser. `bdrive login --device` forces that flow.
+no browser can open): it prints one link you open in any signed-in browser and
+approve — nothing to retype. `bdrive login --device` forces that flow.
 
 `bdrive login --status` shows the current server and account.
 
@@ -43,8 +43,7 @@ Once per project.
 $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
   server:  https://your-hub
-  project: workspace (p-7f3a2c91)
-  skill:   installed for claude, codex
+  project: workspace (7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4)
   claude   hooks registered  →  /Users/snow/.claude/settings.json
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
@@ -59,10 +58,9 @@ folder and syncs everything.
 
 Init writes `.bdrive/config.json`, seeds a starter `.bdriveignore`
 (node_modules, build dirs, caches, `.env*`), starts the daemon, and prints the
-project's hub link. It also installs the `beardrive` skill and registers the sync
+project's hub link. It also registers the sync
 hooks for any agent platform it detects — in that platform's **user** config, once
-per machine, so nothing lands inside the project. `--no-hooks` skips the hooks
-(the skill is installed either way). Not
+per machine, so nothing lands inside the project. `--no-hooks` skips them. Not
 signed in yet? It runs the login flow first.
 
 :::tip[Working inside a repository]
@@ -106,7 +104,7 @@ changes.
 
 ## Next
 
-- [Skills and hooks in detail](/manual/skills-and-hooks/) — what `init` wrote to
+- [Hooks in detail](/manual/hooks/) — what `init` wrote to
   make an agent read fresh files every turn, and how to inspect or remove it.
 - [Shared agent memory](/guides/shared-agent-memory/) — orient agents in the
   folder so they know where to read and write.

@@ -12,7 +12,7 @@ one paste in Codex, Gemini CLI, or Hermes, and the folder is connected: your
 agent reads the team's current files before it answers and pushes whatever it
 writes when the turn ends.
 
-Underneath there is a CLI called `bdrive` and a **hub** — a `bdrive web` server
+Underneath there is a CLI called `bdrive` and a **hub** — a `bdrive serve` server
 you (or we) run on an object store, which clients sync through over HTTPS and
 never touch the storage directly. You can drive all of it by hand, and most
 people never do.
