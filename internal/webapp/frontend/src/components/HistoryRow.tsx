@@ -73,7 +73,7 @@ export function HistoryRow({
   const [diffOpen, setDiffOpen] = useState(false);
   const kind = e.kind === "put" ? "edit" : e.kind; // older servers report raw "put" ops
   const who = whoChanged(e);
-  const dev = [e.device.name || e.device.id, e.device.os, e.device.ip].filter(Boolean).join(" · ");
+  const dev = [e.device.name || e.device.id, e.device.os].filter(Boolean).join(" · ");
   const clickable = kind !== "delete";
   // A delete has no content, and a first version has nothing behind it.
   const diffable = !!diff && kind !== "delete" && !!e.blob;

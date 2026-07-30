@@ -151,7 +151,6 @@ export interface DeviceInfo {
   id?: string;
   name?: string;
   os?: string;
-  ip?: string;
 }
 export interface HistoryEntry {
   time: string;
