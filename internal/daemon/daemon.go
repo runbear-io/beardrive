@@ -35,20 +35,70 @@ func LogPath(volDir string) string {
 	return filepath.Join(volDir, "daemon.log")
 }
 
-// Running reports the daemon pid for a mount if one is alive.
+// LockPath is the file a live daemon holds an exclusive flock on for its
+// whole lifetime. Liveness is the LOCK, not the pidfile: the kernel drops a
+// flock when the holder dies — including at reboot, and including a crash —
+// so a leftover daemon.pid can never be mistaken for a running daemon.
+//
+// The pid alone cannot answer this. `kill(pid, 0)` only asks "does some
+// process own this number", and daemon.pid outlives the process (it sits in
+// ~/.bdrive, which survives reboots). Any same-user process that later
+// recycles the pid used to read as a live daemon — which made `bdrive status`
+// lie and, worse, made Start() a silent no-op, so the one documented recovery
+// (`bdrive init`) left the folder unsynced.
+func LockPath(volDir string) string {
+	return filepath.Join(volDir, "daemon.lock")
+}
+
+// Running reports the daemon pid for a mount if one is alive. The pid is
+// informational (for display and for Stop's signal); aliveness comes from
+// LockPath — see the comment there.
 func Running(volDir string) (int, bool) {
+	if !locked(LockPath(volDir)) {
+		return 0, false
+	}
 	data, err := os.ReadFile(PidPath(volDir))
 	if err != nil {
-		return 0, false
+		return 0, true // held by a daemon whose pidfile we can't read
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || pid <= 0 {
-		return 0, false
-	}
-	if err := syscall.Kill(pid, 0); err != nil {
-		return 0, false
+		return 0, true
 	}
 	return pid, true
+}
+
+// locked reports whether another process holds the lock file. Taking it
+// non-blocking and immediately releasing is the probe: success means nobody
+// held it (so: no daemon), failure means someone does.
+func locked(path string) bool {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return false // can't tell; treat as not running so Start can try
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true
+	}
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
+}
+
+// hold takes the daemon's lifetime lock. The returned closer releases it;
+// process death releases it too, which is the point.
+func hold(path string) (func(), error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("another daemon is already running for this mount: %w", err)
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 // Start launches a detached daemon for the folder (no-op if already running).
@@ -81,19 +131,26 @@ func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (i
 	return pid, cmd.Process.Release()
 }
 
-// Stop terminates the daemon for a mount and waits for it to exit.
+// Stop terminates the daemon for a mount and waits for it to exit. Exit is
+// observed by the lock being released, not by the pid disappearing: the pid
+// could be recycled while we wait, and the lock cannot.
 func Stop(volDir string) (bool, error) {
 	pid, ok := Running(volDir)
 	if !ok {
 		os.Remove(PidPath(volDir))
 		return false, nil
 	}
+	if pid <= 0 {
+		// Alive (lock held) but no readable pid — nothing to signal.
+		return false, fmt.Errorf("a daemon holds %s but %s is unreadable; kill it by hand",
+			LockPath(volDir), PidPath(volDir))
+	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		return false, err
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
+		if !locked(LockPath(volDir)) {
 			os.Remove(PidPath(volDir))
 			return true, nil
 		}
@@ -129,6 +186,15 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	if err != nil {
 		return err
 	}
+	// Hold the lifetime lock before announcing the pid: it is what makes
+	// "is a daemon running" answerable, and it also makes a double start
+	// impossible (two daemons on one mount would write one journal twice).
+	release, err := hold(LockPath(volDir))
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	if err := os.WriteFile(PidPath(volDir), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
 		return err
 	}

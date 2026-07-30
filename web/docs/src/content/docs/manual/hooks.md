@@ -79,3 +79,25 @@ without a `.bdrive/` directory, which is what makes registering it globally safe
 `bdrive hooks uninstall` takes them back out — it removes only BearDrive's own
 entries and leaves every other hook in those files untouched. Syncing itself is
 unaffected; only turn-boundary sync stops.
+
+## Surviving a reboot
+
+The sync daemon is an ordinary background process, so a restart ends it. `bdrive
+init` therefore also registers a login item that runs `bdrive resume`, which
+starts a daemon for every project this device syncs and has not paused:
+
+```sh
+bdrive autostart              # is it registered?
+bdrive autostart install      # register it (init already did)
+bdrive autostart uninstall    # stop starting sync at login
+bdrive resume                 # start the daemons right now
+```
+
+One registration covers every project — add or remove projects freely, nothing
+to re-register. Projects paused with `bdrive stop` stay paused; only `bdrive
+init` resumes those.
+
+On macOS this is a user LaunchAgent at
+`~/Library/LaunchAgents/ai.beardrive.daemon.plist` — no `sudo`, nothing
+machine-wide. Linux and Windows don't have it yet: run `bdrive resume` after a
+reboot, or just keep working — an agent turn in a project syncs it anyway.

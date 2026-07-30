@@ -9,7 +9,8 @@ or skip them.
 BearDrive syncs a folder across a team and their agents through a hub, with
 per-file history and share links. Setup is short by design: make sure the CLI
 exists, ask the user what to sync, and run **one** `bdrive init` — it signs
-in, registers the sync hooks, starts syncing and prints the project link. Every extra command you invent is another permission prompt
+in, registers the sync hooks (and, on macOS, a login item so sync resumes
+after a reboot), starts syncing and prints the project link. Every extra command you invent is another permission prompt
 for the user. Full documentation: https://docs.beardrive.ai (agent-readable
 index at https://docs.beardrive.ai/llms.txt).
 
@@ -116,8 +117,8 @@ the chosen folder is git-tracked, git and BearDrive would both write it
 (silent-revert hazard). Get consent, then `git rm -r --cached <dir>` and add
 `<dir>/` to `.gitignore`; stage but let the user commit.
 
-Then run **one** command — init signs in if needed, registers the hooks,
-syncs, and prints the project link. Do not precede it
+Then run **one** command — init signs in if needed, registers the hooks and
+the login autostart, syncs, and prints the project link. Do not precede it
 with `command -v bdrive` or `bdrive --version`: every extra command is
 another permission prompt, and if the binary is missing this one says so.
 

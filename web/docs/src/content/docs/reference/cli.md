@@ -11,7 +11,9 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 |---|---|
 | `bdrive login [server-url]` | Sign this device in. Browser flow; `--device` forces the approval-link flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
 | `bdrive logout` | Sign this device out — clear the saved token and account. `--forget` also drops the remembered server |
-| `bdrive init [folder]` | Create or connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY; flags (`--name`, `--project`, `--server`, `--only`, `--yes`) for scripts. Also registers agent sync hooks for detected platforms (`--no-hooks` skips them), and prints the project's hub link. Re-run to resume |
+| `bdrive init [folder]` | Create or connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY; flags (`--name`, `--project`, `--server`, `--only`, `--yes`) for scripts. Also registers agent sync hooks for detected platforms (`--no-hooks` skips them) and a login item so sync resumes after a reboot (`--no-autostart` skips), and prints the project's hub link. Re-run to resume |
+| `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent, so running it twice is harmless. This is what the login item runs |
+| `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot. macOS today (a user LaunchAgent); Linux and Windows fall back to running `bdrive resume` yourself. `bdrive init` installs it; `--no-autostart` skips it |
 | `bdrive stop [folder]` | Stop syncing — daemon and agent sync hooks both pause. Files stay on disk; `bdrive init` resumes |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes. Run from the mount root; the daemon picks changes up in seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub |
 | `bdrive scope --explain` | List every path in the folder, split into what syncs and what does not, with counts — the verifiable answer to "what leaves this machine". Pure read: no daemon, no lock, no network |
@@ -49,7 +51,8 @@ it never prompts without a TTY.
 It runs the login flow first when there is no session, writes
 `.bdrive/config.json`, seeds `.bdriveignore`, registers agent sync hooks for
 every detected platform (Claude Code, Codex, Gemini CLI, Hermes — `--no-hooks`
-skips them), starts sync, and prints the
+skips them) and a login item that restarts syncing after a reboot
+(`--no-autostart` skips), starts sync, and prints the
 project's hub link. That is deliberate: one command means one permission prompt
 for an agent, instead of four. Re-running it resumes — including after a folder
 move.
