@@ -1,36 +1,11 @@
 ---
-title: Skills and hooks in detail
-description: What bdrive skill install and bdrive hooks install actually write — the user-level config paths, hook events, idempotency, and when to re-run them.
+title: Hooks in detail
+description: What bdrive hooks install actually writes — the user-level config paths, hook events, idempotency, and when to re-run it.
 ---
 
-`bdrive init` runs both of these for you — that is why setup is one command. This
-is what they do, for when you want to run them yourself, review what changed, or
-debug a folder that isn't syncing.
-
-## The skill
-
-```sh
-bdrive skill install            # every detected platform
-bdrive skill install --agent codex,hermes
-bdrive skill                    # status table
-```
-
-It writes one `SKILL.md` — the cross-agent format — into each platform's
-user-level skills directory:
-
-| Platform | Path |
-|---|---|
-| Claude Code | `~/.claude/skills/beardrive/SKILL.md` |
-| Codex | `~/.codex/skills/beardrive/SKILL.md` |
-| Gemini CLI | `~/.gemini/skills/beardrive/SKILL.md` |
-| Hermes | `~/.hermes/skills/beardrive/SKILL.md` |
-
-Installs are user-level on purpose: the skill is about the CLI, not about one
-folder, and a synced project folder should never carry it. The file is the
-binary's own copy, so re-running after a CLI upgrade refreshes a stale one.
-
-The Claude Code plugin ships the same skill, so `/plugin install
-beardrive@beardrive` covers Claude without this command.
+`bdrive init` runs this for you — that is why setup is one command. This is what
+it does, for when you want to run it yourself, review what changed, or debug a
+folder that isn't syncing.
 
 ## The hooks
 
@@ -82,8 +57,7 @@ Merging is idempotent and preserves hooks you already have. Each hook carries
 its own marker, so a config written before a hook existed gains just the missing
 one, and a registered hook's matcher is upgraded in place when coverage grows.
 
-Re-run after a CLI upgrade: `bdrive hooks install` and `bdrive skill install`,
-once per machine each.
+Re-run `bdrive hooks install` after a CLI upgrade, once per machine.
 
 ## Where they live matters
 

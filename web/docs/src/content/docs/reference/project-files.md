@@ -43,7 +43,7 @@ Those two are all BearDrive puts in a project: `.bdrive/config.json`,
 here — the sync hooks live in each platform's user config
 (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/settings.json`,
 `~/.hermes/config.yaml`), written once per machine. See
-[Skills and hooks in detail](/manual/skills-and-hooks/).
+[Hooks in detail](/manual/hooks/).
 
 ## Global state
 

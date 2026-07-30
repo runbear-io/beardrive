@@ -17,7 +17,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/agenthooks"
-	"github.com/runbear-io/beardrive/internal/agentskills"
 	"github.com/runbear-io/beardrive/internal/config"
 )
 
@@ -119,7 +118,6 @@ the folder was renamed or moved.`,
 						fmt.Printf("  syncing: ./%s only (rules written to .bdriveignore)\n", strings.Join(scope, ", ./"))
 					}
 				}
-				installSkill(folder)
 				if !noHooks {
 					installAgentHooks(folder)
 				}
@@ -194,7 +192,6 @@ the folder was renamed or moved.`,
 				}
 			}
 			fmt.Printf("initialized %s\n  server:  %s\n  project: %s (%s)\n", folder, server, p.Name, p.ID)
-			installSkill(folder)
 			if !noHooks {
 				installAgentHooks(folder)
 			}
@@ -262,25 +259,6 @@ func installAgentHooks(folder string) {
 		if r.Note != "" {
 			fmt.Printf("           note: %s\n", r.Note)
 		}
-	}
-}
-
-// installSkill teaches every detected platform the bdrive CLI, so later
-// sessions are conversational. Folded into init deliberately: a separate
-// `bdrive skill install` is another approval prompt for no decision.
-func installSkill(folder string) {
-	results, err := agentskills.Install(folder, nil)
-	if err != nil {
-		return // best effort: the skill is a convenience, not a requirement
-	}
-	var installed []string
-	for _, r := range results {
-		if r.Changed {
-			installed = append(installed, r.Agent)
-		}
-	}
-	if len(installed) > 0 {
-		fmt.Printf("  skill:   installed for %s\n", strings.Join(installed, ", "))
 	}
 }
 

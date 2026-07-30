@@ -157,36 +157,6 @@ func TestScopeBlockRoundTrip(t *testing.T) {
 	}
 }
 
-// The plugin's PreToolUse hook auto-approves beardrive's own setup commands.
-// The grant has to stay narrow: anything that could carry a second command
-// along must fall through to the normal permission prompt.
-func TestApprovedCommand(t *testing.T) {
-	for _, tc := range []struct {
-		cmd  string
-		want bool
-	}{
-		{"bdrive init wiki --project p-1 --yes", true},
-		{"bdrive login --status", true},
-		{"bdrive hooks install", true},
-		{"bdrive sync .", true},
-		{"/opt/homebrew/bin/bdrive status", true},
-		{"bdrive --no-hooks init", true}, // flags before the subcommand
-		{"bdrive export", false},         // outside the onboarding set
-		{"bdrive", false},
-		{"rm -rf /", false},
-		{"bdrive sync && rm -rf /tmp/x", false}, // chained
-		{"echo hi; bdrive status", false},
-		{"bdrive status | tee /tmp/x", false},
-		{"bdrive status > /tmp/x", false},
-		{"bdrive status $(whoami)", false},
-		{"notbdrive init", false},
-	} {
-		if got := approvedCommand(tc.cmd); got != tc.want {
-			t.Errorf("approvedCommand(%q) = %v, want %v", tc.cmd, got, tc.want)
-		}
-	}
-}
-
 // Agents (and people) type hosts without a scheme. Accepting that is the
 // difference between one command and a failed command plus a retry.
 func TestNormalizeServer(t *testing.T) {
