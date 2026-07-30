@@ -50,11 +50,6 @@ type BuiltinAuth struct {
 	// Ephemeral single-use state; a server restart just cancels pending
 	// logins and resets.
 	pending map[string]pendingGrant // auth codes, device codes, reset tokens
-
-	// fresh records that an account authenticated *for a specific pending
-	// sign-in*, so that sign-in doesn't ask again. Keyed by user id + the exact
-	// next URL, single use, short lived. See markFreshAuth.
-	fresh map[string]time.Time
 }
 
 type authUser struct {
@@ -101,7 +96,6 @@ func NewBuiltinAuth(store AccountRepo, allowSignup bool, mail *Mailer) (*Builtin
 		users:   make(map[string]*authUser),
 		tokens:  make(map[string]authToken),
 		pending: make(map[string]pendingGrant),
-		fresh:   make(map[string]time.Time),
 	}
 	users, tokens, policy, err := store.Load()
 	if err != nil {
@@ -550,35 +544,6 @@ func (a *BuiltinAuth) sessionUser(r *http.Request) (User, bool) {
 // cliSignIn reports whether a next URL is a pending CLI sign-in.
 func cliSignIn(next string) bool { return strings.HasPrefix(next, "/auth/cli?") }
 
-// markFreshAuth records that userID just proved who they are in order to reach
-// this exact pending sign-in. Signing in IS the consent in that case: the user
-// chose the account seconds ago, for this, so a confirmation page would ask a
-// question they just answered — and a first `bdrive init` would cost two web
-// steps instead of one.
-//
-// Bound to the exact next and single use, so it can only ever skip the page for
-// the sign-in it was granted for, and only once. It is not reachable without
-// authenticating: an attacker who could set this could already click Approve.
-func (a *BuiltinAuth) markFreshAuth(userID, next string) {
-	if !cliSignIn(next) {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.fresh[userID+"\x00"+next] = time.Now().Add(2 * time.Minute)
-}
-
-// consumeFreshAuth spends a marker if one is live, reporting whether the caller
-// may skip the confirmation.
-func (a *BuiltinAuth) consumeFreshAuth(userID, next string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	k := userID + "\x00" + next
-	exp, ok := a.fresh[k]
-	delete(a.fresh, k)
-	return ok && time.Now().Before(exp)
-}
-
 func (a *BuiltinAuth) startSession(w http.ResponseWriter, userID string) error {
 	tok, err := a.issueToken(userID, "web-session")
 	if err != nil {
@@ -600,10 +565,10 @@ func inviteBanner(next string) string {
 	return `<p class="msg" style="margin:0 0 14px">You've been invited to a team. Sign in (or sign up) to accept.</p>`
 }
 
-// cliBanner says what a sign-in reached from `bdrive login` is for. Without it
-// the form is a bare password prompt that happens to grant a terminal a token —
-// and since signing in here skips the confirmation page (see markFreshAuth),
-// this line is where that consent is actually informed.
+// cliBanner says what a sign-in reached from `bdrive login` is for, so the form
+// is not a bare password prompt appearing for no visible reason. Approving is
+// still its own step on the next page — this only explains why signing in is
+// being asked for at all.
 func cliBanner(next string) string {
 	if !cliSignIn(next) {
 		return ""
@@ -759,7 +724,6 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
-				a.markFreshAuth(u.ID, next)
 				http.Redirect(w, r, next, http.StatusSeeOther)
 				return
 			}
@@ -836,7 +800,6 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			a.markFreshAuth(u.ID, next)
 			http.Redirect(w, r, next, http.StatusSeeOther)
 			return
 		}
@@ -908,13 +871,6 @@ type authRequest struct {
 	// it — so it must be evaluated at render time, not at call time.
 	detail func() [][2]string
 
-	// freshAuthSkips lets authenticating for this request count as approving
-	// it, so a first sign-in is one web step rather than two. True only for the
-	// local flow: signing in and approving are the same act when the terminal
-	// is on this machine, and are emphatically not when the token goes to
-	// another one — see markFreshAuth.
-	freshAuthSkips bool
-
 	// live, when set, runs once the session is known and before anything is
 	// shown or granted, reporting whether the request still exists — having
 	// already written its own explanation when it doesn't. The device flow's
@@ -936,8 +892,7 @@ func (a *BuiltinAuth) pageAuth(w http.ResponseWriter, r *http.Request, req authR
 	if req.live != nil && !req.live() {
 		return
 	}
-	if r.Method == http.MethodPost ||
-		(req.freshAuthSkips && a.consumeFreshAuth(user.ID, r.URL.RequestURI())) {
+	if r.Method == http.MethodPost {
 		req.approve(user)
 		return
 	}
@@ -962,7 +917,6 @@ func (a *BuiltinAuth) pageCLI(w http.ResponseWriter, r *http.Request) {
 		},
 		note: `Approve this only if you just ran ` +
 			`<code style="white-space:nowrap">bdrive login</code> yourself.`,
-		freshAuthSkips: true,
 		approve: func(user User) {
 			code := a.newGrant("code", user.ID, "", true, time.Minute)
 			q := u.Query()

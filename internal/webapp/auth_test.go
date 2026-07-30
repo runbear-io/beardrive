@@ -650,78 +650,81 @@ func TestCLILoginSwitchAccount(t *testing.T) {
 	}
 }
 
-// A first `bdrive init` on a fresh machine must cost ONE web step, not two.
-// Signing in for this very sign-in is the consent, so the confirmation page is
-// skipped — but only for that sign-in, and only once.
-func TestCLILoginFirstTimeIsOneStep(t *testing.T) {
-	srv, _, _ := authHub(t, true)
+// Both sign-in flows must behave identically for someone with no web session:
+// sign in, then explicitly approve. Nothing may shortcut the approval — that
+// page is where the user sees which account a machine is about to act as.
+func TestBothFlowsAlwaysAskToApprove(t *testing.T) {
+	srv, auth, _ := authHub(t, true)
 	h := srv.Handler()
 	signupAndSession(t, h, "first@x.io", "First", "password1")
 
-	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"
-
-	// no session: the CLI sign-in sends them to log in, saying what it is for
-	req := httptest.NewRequest("GET", cliURL, nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	loginURL := rec.Header().Get("Location")
-	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(loginURL, "/auth/login?next=") {
-		t.Fatalf("cli without session = %d %s", rec.Code, loginURL)
-	}
-	req = httptest.NewRequest("GET", loginURL, nil)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if !strings.Contains(rec.Body.String(), "A terminal on this computer is waiting to sign in") {
-		t.Fatalf("login page does not say what it is authorizing:\n%s", rec.Body)
+	// a pending device request, so both flows have something real to approve
+	rec := do(t, h, "POST", "/api/auth/device/start", map[string]string{"device": "laptop", "os": "linux"})
+	var start struct{ Code string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil || start.Code == "" {
+		t.Fatalf("device start: %s", rec.Body)
 	}
 
-	// logging in lands straight on the loopback listener — no second page
-	form := url.Values{"email": {"first@x.io"}, "password": {"password1"}, "next": {cliURL}}
-	req = httptest.NewRequest("POST", loginURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("login: %d %s", rec.Code, rec.Body)
-	}
-	var session *http.Cookie
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == sessionCookie {
-			session = c
-		}
-	}
-	if session == nil {
-		t.Fatal("login started no session")
-	}
+	for _, tc := range []struct{ name, url string }{
+		{"cli", "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"},
+		{"device", "/auth/device/" + start.Code},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// no session: sent to sign in, carrying this request
+			req := httptest.NewRequest("GET", tc.url, nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			loginURL := rec.Header().Get("Location")
+			if rec.Code != http.StatusSeeOther || !strings.HasPrefix(loginURL, "/auth/login?next=") {
+				t.Fatalf("without a session = %d %s", rec.Code, loginURL)
+			}
 
-	req = httptest.NewRequest("GET", rec.Header().Get("Location"), nil)
-	req.AddCookie(session)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("fresh sign-in should grant without asking again: %d\n%s", rec.Code, rec.Body)
-	}
-	cb, _ := url.Parse(rec.Header().Get("Location"))
-	if cb.Host != "127.0.0.1:9999" || cb.Query().Get("code") == "" {
-		t.Fatalf("no code delivered to the listener: %s", rec.Header().Get("Location"))
-	}
+			// signing in returns to the request and must NOT grant on the way
+			form := url.Values{"email": {"first@x.io"}, "password": {"password1"}, "next": {tc.url}}
+			req = httptest.NewRequest("POST", loginURL, strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != tc.url {
+				t.Fatalf("login should return to the pending request: %d %s", rec.Code, rec.Header().Get("Location"))
+			}
+			var session *http.Cookie
+			for _, c := range rec.Result().Cookies() {
+				if c.Name == sessionCookie {
+					session = c
+				}
+			}
+			if session == nil {
+				t.Fatal("login started no session")
+			}
 
-	// the skip is spent: the same session visiting again must be asked
-	req = httptest.NewRequest("GET", cliURL, nil)
-	req.AddCookie(session)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Approve") {
-		t.Fatalf("a second sign-in must ask: %d\n%s", rec.Code, rec.Body)
-	}
+			// and there the approval page waits — every time, for both flows
+			req = httptest.NewRequest("GET", tc.url, nil)
+			req.AddCookie(session)
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("signing in must not shortcut the approval: %d %s", rec.Code, rec.Header().Get("Location"))
+			}
+			for _, want := range []string{"first@x.io", "Switch account", "Approve"} {
+				if !strings.Contains(rec.Body.String(), want) {
+					t.Fatalf("approval page missing %q:\n%s", want, rec.Body)
+				}
+			}
 
-	// and it never applied to a different pending sign-in
-	other := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:7777/callback") + "&state=s2"
-	req = httptest.NewRequest("GET", other, nil)
-	req.AddCookie(session)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("a different sign-in must ask: %d", rec.Code)
+			// only the POST grants
+			req = httptest.NewRequest("POST", tc.url, nil)
+			req.AddCookie(session)
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if tc.name == "cli" {
+				if rec.Code != http.StatusSeeOther {
+					t.Fatalf("approve: %d", rec.Code)
+				}
+			} else if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Device connected") {
+				t.Fatalf("approve: %d\n%s", rec.Code, rec.Body)
+			}
+		})
 	}
+	_ = auth
 }
