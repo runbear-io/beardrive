@@ -15,7 +15,7 @@ list — still honored, never written now).
 ```jsonc
 // .bdrive/config.json
 { "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/p-7f3a2c91" }
+  "remote": "https://drive.example.com/p/7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4" }
 ```
 
 Written by `bdrive init` and safe to hand-edit — a running daemon picks changes

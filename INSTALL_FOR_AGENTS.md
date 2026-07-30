@@ -63,12 +63,19 @@ Two questions:
 2. **Which folder syncs?** ALWAYS ask, and always ask with a named
    recommendation — never an open-ended "which folder and what scope?".
    Pick your recommendation with this rule, in order:
+   - **You know the project's name** (the paste prompt carries it, or the
+     user gave one): **recommend a folder of that name** — "create
+     `<project-name>/` here and sync that", lowercased with spaces as
+     dashes. Folder name = project name is what makes every teammate's
+     checkout look the same and the hub links read right.
    - **You found a knowledge folder** (markdown-heavy, not source code —
-     `wiki/`, `docs/`, `notes/`, an Obsidian vault, or any folder that
+     `docs/`, `notes/`, an Obsidian vault, or any folder that
      looks like one whatever its name): recommend it.
-   - **You found none** (including when the folder is empty):
-     **recommend creating a dedicated subfolder**, and name it —
-     "create `wiki/` here and sync that". An empty folder is not
+   - **Neither** (no project name given, no knowledge folder, including
+     when the folder is empty): **recommend creating `shared/`** —
+     "create `shared/` here and sync that". `bdrive init shared` names the
+     new project after the folder, so the project is `shared` too, and
+     that pairing is the default for a fresh setup. An empty folder is not
      evidence that it is meant to be the knowledge folder, and the
      folder *not* being a git repo is not a reason to sync it whole —
      the recommendation is the same either way. The repo-root rule
@@ -81,14 +88,15 @@ Two questions:
 
    Hard rule: **never mount a repo root bare.** The one sanctioned way to
    sync inside a repo without picking a single subfolder is to mount the
-   root *narrowed*: `bdrive init . --only wiki,docs`, which syncs only
+   root *narrowed*: `bdrive init . --only docs,notes`, which syncs only
    those subfolders. That is exactly how several sibling folders share
    one project — do not propose moving folders around to give them a
    common parent. Wait for the pick.
 
-   The shape to aim for: "I recommend creating `wiki/` here and syncing
+   The shape to aim for: "I recommend creating `shared/` here and syncing
    that. Alternatives: a different path, or this whole folder if you
-   mean it to be the knowledge folder itself. Which do you want?"
+   mean it to be the knowledge folder itself. Which do you want?" — with
+   `shared/` replaced by the project's name when you have one.
 
    **On Claude Code, ask with the AskUserQuestion tool** rather than
    plain prose — one question, header "Sync folder", your recommendation
@@ -96,12 +104,12 @@ Two questions:
    The user picks instead of typing a path. Every other agent: prose.
 
 Executing the pick — **the mount is always exactly the folder you name.**
-`bdrive init wiki --project <p-id>` makes ./wiki the project, so the
+`bdrive init shared --project <p-id>` makes ./shared the project, so the
 project's files land inside it. There is no flag that re-roots a mount
 somewhere else. Syncing only part of a folder is `--only`, which narrows
-a mount without moving it: `bdrive init . --only wiki,docs` keeps the
+a mount without moving it: `bdrive init . --only docs,notes` keeps the
 mount at `.` and writes `.bdriveignore` rules so only those subfolders
-sync (their paths keep the `wiki/` prefix on the hub, which is what
+sync (their paths keep the `docs/` prefix on the hub, which is what
 teammates then see).
 
 **Hard gate: do not run `bdrive init` until the user has answered
@@ -122,12 +130,15 @@ with `command -v bdrive` or `bdrive --version`: every extra command is
 another permission prompt, and if the binary is missing this one says so.
 
 ```sh
-bdrive init wiki --project <p-id> --server <hub-url> --yes   # ./wiki is the project
-bdrive init . --name <project> --only wiki,docs --yes        # this folder, only those subfolders sync
+bdrive init <project-name> --project <p-id> --server <hub-url> --yes  # that subfolder is the project
+bdrive init shared --yes                                              # fresh setup: ./shared, project "shared"
+bdrive init . --name <project> --only docs,notes --yes                # this folder, only those subfolders sync
 ```
 
 Drop `--server` when the user gave no hub URL (BearDrive Cloud is the
-default), and `--project`/`--name` follow the answer to question 1.
+default), and `--project`/`--name` follow the answer to question 1 — with
+no name given, `bdrive init shared` names the project after the folder,
+so no `--name` is needed.
 
 **Run one command per shell call.** Never chain with `&&`, `;` or a pipe: a
 compound command needs approval for each part, so chaining multiplies the
@@ -193,7 +204,11 @@ page shows it pre-filled):
 
 ```
 Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sync.
+to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to
+sync (the project is named "<project-name>").
 ```
+
+The project name is in the prompt so the agent can recommend a folder of the
+same name; without it, the recommendation is `shared/`.
 
 On BearDrive Cloud, drop `on <hub-url>` — login defaults to beardrive.ai.

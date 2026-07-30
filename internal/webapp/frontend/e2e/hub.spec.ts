@@ -25,7 +25,7 @@ test("deep link to a project resolves after reload", async ({ page }) => {
 test("unknown project id falls back to a real project", async ({ page }) => {
   await login(page);
   await page.goto("/p-00000000");
-  await page.waitForURL(/\/p-[0-9a-f]{8}$/);
+  await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText(/.+/);
 });
 
@@ -65,7 +65,7 @@ test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await p2.fill('input[name="password"]', PASSWORD);
   await p2.click("form button");
   await expectToast(p2, "you joined");
-  await p2.waitForURL(/\/p-[0-9a-f]{8}$/); // lands on the org's project
+  await p2.waitForURL(/\/[0-9a-f-]{36}$/); // lands on the org's project
   await ctx.close();
 });
 
@@ -91,13 +91,13 @@ test("new project via the sidebar + modal", async ({ page }) => {
   await page.click("#projects .nav-add");
   await page.fill(".modal-input", "scratch");
   await page.click(".modal .pbtn");
-  await page.waitForURL(/\/p-[0-9a-f]{8}$/);
+  await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("scratch");
   // Open the switcher: both projects listed; picking one navigates.
   await page.click("#project-select");
   await expect(page.getByRole("option", { name: "wiki" })).toBeVisible();
   await page.getByRole("option", { name: "wiki" }).click();
-  await page.waitForURL(/\/p-[0-9a-f]{8}$/);
+  await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("wiki");
   await expectToast(page, "Created");
 });

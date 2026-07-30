@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/runbear-io/beardrive/internal/remote"
 )
 
@@ -56,7 +57,10 @@ func TestProjectAPI(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if !out.Created || out.Project.Name != "my-app" || !strings.HasPrefix(out.Project.ID, "p-") {
+	// New ids are UUIDs (and must satisfy the route validator, which also
+	// still accepts the legacy p-xxxxxxxx ids old hubs minted).
+	if !out.Created || out.Project.Name != "my-app" ||
+		uuid.Validate(out.Project.ID) != nil || !projectIDRe.MatchString(out.Project.ID) {
 		t.Fatalf("create = %+v", out)
 	}
 	id := out.Project.ID

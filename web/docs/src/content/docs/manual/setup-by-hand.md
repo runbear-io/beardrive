@@ -43,7 +43,7 @@ Once per project.
 $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
   server:  https://your-hub
-  project: workspace (p-7f3a2c91)
+  project: workspace (7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4)
   claude   hooks registered  →  /Users/snow/.claude/settings.json
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```

@@ -16,7 +16,8 @@ you want synced, and paste:
 
 ```
 Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sync.
+to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to
+sync (the project is named "<project-name>").
 ```
 
 The agent fetches that page and works through it — install the CLI, sign in
@@ -25,6 +26,11 @@ the sync hooks. You copy one
 thing; the agent handles every deviation — already installed, no Homebrew,
 browser sign-in, wrong folder. On BearDrive Cloud, drop `on <hub-url>` —
 sign-in defaults to beardrive.ai.
+
+The project name is in the prompt because the agent recommends a folder of
+the same name — so `handbook` on the hub is `handbook/` on everyone's disk.
+Starting from nothing (no project id, no name), it recommends `shared/` and
+names the new project `shared`.
 
 The hooks step is the durable part: once they are registered, every later
 session in every folder syncs automatically, with nothing to remember.
