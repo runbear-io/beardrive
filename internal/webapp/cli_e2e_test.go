@@ -661,6 +661,32 @@ func TestCLITemplateRefusals(t *testing.T) {
 		t.Fatal("a refused init still seeded files")
 	}
 
+	// Joining a project that already exists never restructures it: the
+	// refusal has to name what it was actually created from.
+	first := filepath.Join(t.TempDir(), "first")
+	if err := os.MkdirAll(first, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(first, "init", "--name", "taken", "--template", "docs", "--yes"); err != nil {
+		t.Fatalf("init first: %v\n%s", err, out)
+	}
+	defer run(first, "stop", first)
+	second := filepath.Join(t.TempDir(), "second")
+	if err := os.MkdirAll(second, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(second, "init", "--name", "taken", "--template", "para", "--yes")
+	defer run(second, "stop", second)
+	if err == nil {
+		t.Fatalf("a template on an existing project should be refused:\n%s", out)
+	}
+	if !strings.Contains(out, "docs") {
+		t.Fatalf("the refusal should name the project's existing template:\n%s", out)
+	}
+	if fileExists(filepath.Join(second, "projects", "README.md")) {
+		t.Fatal("a refused init still wrote the para skeleton")
+	}
+
 	bad := filepath.Join(t.TempDir(), "bad")
 	if err := os.MkdirAll(bad, 0o755); err != nil {
 		t.Fatal(err)
