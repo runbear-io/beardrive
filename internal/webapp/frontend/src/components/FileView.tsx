@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
-import { HTML_EXT, IMG_EXT, MD_EXT, TEXT_EXT, joinPath } from "../util";
+import { HTML_EXT, IMG_EXT, MD_EXT, TEXT_EXT, joinPath, whoChanged } from "../util";
 
 export function FileView(props: {
   apiBase: string;
@@ -82,7 +82,12 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   useEffect(() => {
     if (!doc) return;
     const parts: string[] = [];
-    if (doc.author) parts.push(doc.author + (doc.device ? " on " + doc.device : ""));
+    // Guard on the raw fields, not on whoChanged's result: it answers
+    // "unknown" rather than "" , and plain-folder mode (no identity at
+    // all) has always printed nothing here.
+    if (doc.user_name || doc.user || doc.author) {
+      parts.push(whoChanged(doc) + (doc.device ? " on " + doc.device : ""));
+    }
     if (doc.time) parts.push(new Date(doc.time).toLocaleString());
     // Read counts belong to the path, not to one version — showing them
     // beside content the banner just called historical reads as if they

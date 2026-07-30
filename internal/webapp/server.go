@@ -156,11 +156,17 @@ func (c UploadConfig) ttl() time.Duration {
 // FileInfo is the resolved state of one path: content identity (Blob doubles
 // as the ETag), plus provenance where the source knows it.
 type FileInfo struct {
-	Blob   string
-	Size   int64
-	Time   time.Time
-	Author string
-	Device string
+	Blob string
+	Size int64
+	Time time.Time
+	// User/UserName are the signed-in account behind the change; Author is
+	// the git/OS identity an offline device falls back to. History renders
+	// the account and falls back to Author, so the viewer needs all three
+	// to give the same answer — see whoChanged() in the frontend.
+	User     string
+	UserName string
+	Author   string
+	Device   string
 }
 
 // volume is one browsable/syncable file set: a source plus its snapshot
@@ -304,6 +310,7 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 		case journal.KindPut:
 			files[op.Path] = FileInfo{
 				Blob: op.Blob, Size: op.Size, Time: op.Time,
+				User: op.User, UserName: op.UserName,
 				Author: op.Author, Device: op.DeviceName,
 			}
 		case journal.KindDelete:
@@ -688,10 +695,14 @@ type Node struct {
 	Path     string    `json:"path"`
 	Dir      bool      `json:"dir"`
 	Size     int64     `json:"size,omitempty"`
-	Time     time.Time `json:"time,omitzero"`
-	Author   string    `json:"author,omitempty"`
-	Device   string    `json:"device,omitempty"`
-	Children []*Node   `json:"children,omitempty"`
+	Time time.Time `json:"time,omitzero"`
+	// Same three-field "who" shape as HistoryEntry (history.go), so the
+	// frontend has one attribution helper for every surface.
+	User     string  `json:"user,omitempty"`
+	UserName string  `json:"user_name,omitempty"`
+	Author   string  `json:"author,omitempty"`
+	Device   string  `json:"device,omitempty"`
+	Children []*Node `json:"children,omitempty"`
 }
 
 func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -722,7 +733,8 @@ func buildTree(files map[string]FileInfo) *Node {
 		}
 		parent.Children = append(parent.Children, &Node{
 			Name: segs[len(segs)-1], Path: p,
-			Size: fi.Size, Time: fi.Time, Author: fi.Author, Device: fi.Device,
+			Size: fi.Size, Time: fi.Time,
+			User: fi.User, UserName: fi.UserName, Author: fi.Author, Device: fi.Device,
 		})
 	}
 	sortTree(root)
@@ -833,10 +845,19 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, fmt.Sprintf("render: %v", err), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{
+	doc := map[string]any{
 		"path": p, "html": html,
 		"size": fi.Size, "time": fi.Time, "author": fi.Author, "device": fi.Device,
-	})
+	}
+	// Omitted rather than sent empty, so a journal from before accounts
+	// existed still renders its Author instead of a blank attribution.
+	if fi.User != "" {
+		doc["user"] = fi.User
+	}
+	if fi.UserName != "" {
+		doc["user_name"] = fi.UserName
+	}
+	writeJSON(w, doc)
 }
 
 // renderVersion renders one exact past version by content hash — the

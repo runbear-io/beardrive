@@ -187,6 +187,59 @@ func TestRenderMarkdown(t *testing.T) {
 	}
 }
 
+// The viewer used to credit only Op.Author (the git/OS fallback) while
+// History credited the signed-in account, so the same op got two different
+// answers to "who changed this?". /render and /tree must carry the account.
+func TestViewerCreditsSignedInAccount(t *testing.T) {
+	f := newFakeRemote(t)
+	f.putAs("deva", "solo@example.com", "E2E Solo", "memory.md", "# notes")
+	f.put("devb", "old.md", "# pre-accounts") // pre-accounts shape: Author only
+	h := f.server().Handler()
+
+	type who struct {
+		User     string `json:"user"`
+		UserName string `json:"user_name"`
+		Author   string `json:"author"`
+	}
+	var doc who
+	if err := json.Unmarshal(get(t, h, "/api/render?path=memory.md").Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.User != "solo@example.com" || doc.UserName != "E2E Solo" || doc.Author != "deva@test" {
+		t.Errorf("render who = %+v, want all three fields", doc)
+	}
+
+	// An op written before accounts existed keeps its Author and sends no
+	// empty user fields — whoChanged() would print "unknown" for those.
+	raw := get(t, h, "/api/render?path=old.md").Body.String()
+	if strings.Contains(raw, `"user"`) || strings.Contains(raw, `"user_name"`) {
+		t.Errorf("no-account op leaked user fields: %s", raw)
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Author != "devb@test" {
+		t.Errorf("no-account op author = %q, want devb@test", doc.Author)
+	}
+
+	var root Node
+	if err := json.Unmarshal(get(t, h, "/api/tree").Body.Bytes(), &root); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range root.Children {
+		switch n.Name {
+		case "memory.md":
+			if n.User != "solo@example.com" || n.UserName != "E2E Solo" || n.Author != "deva@test" {
+				t.Errorf("tree node = %+v, want all three fields", n)
+			}
+		case "old.md":
+			if n.User != "" || n.UserName != "" || n.Author != "devb@test" {
+				t.Errorf("no-account tree node = %+v, want author only", n)
+			}
+		}
+	}
+}
+
 func TestDownload(t *testing.T) {
 	f := newFakeRemote(t)
 	f.put("deva", "notes/plan.md", "content")
