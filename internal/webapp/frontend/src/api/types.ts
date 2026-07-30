@@ -19,6 +19,9 @@ export interface ServerConfig {
   me?: { email: string; name: string };
   // Managed deployments only: where billing lives + the user's current plan.
   billing?: { plan: string; url: string };
+  // Managed deployments only: PostHog project key + ingestion host. Absent
+  // on a self-hosted hub, and absence is what keeps analytics.ts inert.
+  analytics?: { key: string; host: string };
 }
 
 // GET <config.billing.url> with Accept: application/json (managed hubs).
