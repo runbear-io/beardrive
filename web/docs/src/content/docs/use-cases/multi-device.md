@@ -20,7 +20,7 @@ nothing about the first.
 one, connect the *same project* rather than making a new one — the agent needs
 the project id, which the hub shows on the project's home page:
 
-> Set up BearDrive here, connecting to project `p-79d0a07c`.
+> Set up BearDrive here, connecting to project `79d0a07c-1b2c-4d3e-8f90-a1b2c3d4e5f6`.
 
 The folder does not have to match across machines. State is keyed by a stable
 project id, never a path, so `~/work` on one and `~/Documents/work` on another

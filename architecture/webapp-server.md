@@ -1,4 +1,4 @@
-# `bdrive web` server — class diagram
+# `bdrive serve` server — class diagram
 
 Source of truth: `internal/webapp` (server, services, persistence) and
 `internal/remote` (storage backends). Reflects the code as of this commit;

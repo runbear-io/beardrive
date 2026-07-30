@@ -23,8 +23,8 @@ change lands inside exactly one detail diagram's scope (plus the overview
 when the package map or cross-piece wiring changes):
 
 - [overview.md](overview.md) — system diagram: every package and surface on one page, and how they connect
-- [cli-sync.md](cli-sync.md) — class diagram of the CLI and sync engine (`cmd/bdrive` + `internal/{syncer,store,journal,config,daemon,agenthooks}`)
-- [webapp-server.md](webapp-server.md) — class diagram of the `bdrive web` server (`internal/webapp` + its `internal/remote` seam)
+- [cli-sync.md](cli-sync.md) — class diagram of the CLI and sync engine (`cmd/bdrive` + `internal/{syncer,store,journal,config,daemon,agenthooks,autostart}`)
+- [webapp-server.md](webapp-server.md) — class diagram of the `bdrive serve` server (`internal/webapp` + its `internal/remote` seam)
 - [webapp-frontend.md](webapp-frontend.md) — module diagram of the hub's React SPA (`internal/webapp/frontend/src`)
 
 Not covered on purpose: `web/docs` (content site, no application code) and

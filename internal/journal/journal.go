@@ -39,6 +39,10 @@ type Op struct {
 	Size       int64     `json:"size,omitempty"`
 	Mode       uint32    `json:"mode,omitempty"` // permission bits
 	Note       string    `json:"note,omitempty"` // e.g. "conflict copy of <path>"
+	// Mtime is when the file was last written, as opposed to Time, which is
+	// when the op was committed. Display only — never an input to Less or
+	// Replay, since it comes from the filesystem and can be anything.
+	Mtime time.Time `json:"mtime,omitzero"` // put only
 }
 
 // Less defines the total order used to replay ops from many devices.

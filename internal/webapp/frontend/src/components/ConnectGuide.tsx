@@ -6,8 +6,9 @@ import { projColor } from "./ProjectNav";
 
 /* ---- project home guide ----
    One paste sets up any coding agent: the prompt points at the canonical
-   INSTALL_FOR_AGENTS.md with this hub's URL and this project's id filled
-   in. The agent fetches the doc and handles every deviation — already
+   INSTALL_FOR_AGENTS.md with this hub's URL and this project's id and
+   name filled in (the name is what the agent recommends as the folder
+   name). The agent fetches the doc and handles every deviation — already
    installed, no Homebrew, sign-in, wrong folder — so the page itself
    stays to one line of prose; detail lives in the collapsed sections. */
 
@@ -22,7 +23,9 @@ export function ConnectGuide({ project }: { project: Project }) {
     project.id +
     " on " +
     origin +
-    ". Ask me which folder to sync.";
+    '. Ask me which folder to sync (the project is named "' +
+    project.name +
+    '").';
   const manual =
     "brew install runbear-io/tap/beardrive" +
     "\nbdrive login " +
