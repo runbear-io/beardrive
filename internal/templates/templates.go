@@ -51,6 +51,7 @@ type Template struct {
 // a row here — no other code.
 var shipped = []struct{ Name, Title, Blurb string }{
 	{"docs", "Docs + decision records", "docs/, decisions/"},
+	{"wiki", "LLM wiki", "sources/, wiki/, index.md, log.md"},
 	{"para", "PARA", "projects/, areas/, resources/, archives/"},
 }
 

@@ -30,7 +30,7 @@ flowchart LR
 
     store["object store (hub-owned)<br/>internal/remote: file:// s3:// gs://<br/>blobs + per-device journals"]
 
-    tpl["internal/templates<br/>go:embed'ed starting structures<br/>(docs, para: skeleton + AGENTS.md)"]
+    tpl["internal/templates<br/>go:embed'ed starting structures<br/>(docs, wiki, para: skeleton + AGENTS.md)"]
 
     docs["web/docs — docs.beardrive.ai<br/>Astro/Starlight, deploys separately"]
     cloud["cloud/ (PRIVATE nested repo, gitignored)<br/>managed beardrive.ai: swaps AuthProvider,<br/>QuotaProvider, MetaStore seams"]

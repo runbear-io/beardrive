@@ -165,10 +165,11 @@ project, so an empty folder *now* means there is genuinely nothing to build on.
 (If the project was created from a template in the browser, its files are
 already here — say nothing.) Ask: start from a structure, or from scratch?
 
-> On Claude Code use `AskUserQuestion`, header "Starting point", with
-> **Docs + decision records** — `docs/`, `decisions/` — first and labelled
-> "(Recommended)", then **PARA** — `projects/`, `areas/`, `resources/`,
-> `archives/` — then **Start from scratch**. Every other agent: prose.
+> On Claude Code use `AskUserQuestion`, header "Starting point", in this
+> order: **Docs + decision records** — `docs/`, `decisions/` — labelled
+> "(Recommended)"; **LLM wiki** — you curate sources, the agent writes and
+> maintains every page; **PARA** — `projects/`, `areas/`, `resources/`,
+> `archives/`; then **Start from scratch**. Every other agent: prose.
 
 Each template is a directory skeleton plus an `AGENTS.md` saying where a new
 note goes, when something is archived, and what a good filename looks like —

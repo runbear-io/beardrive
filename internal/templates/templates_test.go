@@ -47,10 +47,21 @@ func TestShippedTemplates(t *testing.T) {
 		if strings.TrimSpace(agents) == "" {
 			t.Errorf("%s: no AGENTS.md at the root — the instructions are the deliverable", tpl.Name)
 		}
-		// The three questions an AGENTS.md exists to answer.
-		for _, want := range []string{"goes", "rchiv", "ilename"} {
-			if !strings.Contains(agents, want) {
-				t.Errorf("%s: AGENTS.md says nothing about %q", tpl.Name, want)
+		// The three questions an AGENTS.md exists to answer. Each is checked
+		// through a set of alternatives, because the honest vocabulary
+		// differs by structure: PARA archives, a wiki supersedes and revises
+		// stale claims. What must not vary is that the question is answered.
+		for question, words := range map[string][]string{
+			"where a new file goes":     {"goes"},
+			"what happens when something stops being true": {"rchiv", "supersede", "stale"},
+			"what a good filename looks like":              {"ilename"},
+		} {
+			answered := false
+			for _, w := range words {
+				answered = answered || strings.Contains(agents, w)
+			}
+			if !answered {
+				t.Errorf("%s: AGENTS.md does not answer %s", tpl.Name, question)
 			}
 		}
 		for _, dir := range tpl.Dirs() {

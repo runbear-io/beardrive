@@ -123,7 +123,7 @@ classDiagram
 
     class Templates {
         <<internal/templates>>
-        go:embed files/docs, files/para
+        go:embed files/docs, files/wiki, files/para
         List / Get / Names
         WriteTo(dir) skips existing paths
     }
