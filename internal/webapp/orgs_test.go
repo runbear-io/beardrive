@@ -192,6 +192,8 @@ func TestOrgWallsProjectRoutes(t *testing.T) {
 		{"POST", base + "upload/init", map[string]any{"path": "x.md", "sha256": strings.Repeat("a", 64), "size": 1}},
 		{"PUT", base + "upload/content?path=x.md", []byte("hi")},
 		{"POST", base + "upload/commit", map[string]any{"path": "x.md", "sha256": strings.Repeat("a", 64), "size": 1}},
+		{"POST", base + "restore", map[string]any{"path": "x.md", "sha": strings.Repeat("a", 64)}},
+		{"POST", base + "remove", map[string]any{"path": "x.md"}},
 		{"GET", base + "store/list?prefix=journal/", nil},
 		{"GET", base + "store/object?key=journal/d.jsonl", nil},
 		{"GET", base + "store/exists?key=journal/d.jsonl", nil},

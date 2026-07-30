@@ -352,6 +352,9 @@ function Scatter({ pts, onOpenFile }: { pts: Pt[]; onOpenFile: (p: string) => vo
       <text x={W - M.r - 6} y={H - M.b - 8} className="in-quad" textAnchor="end">
         cold + stale
       </text>
+      <text x={M.l + 6} y={H - M.b - 8} className="in-quad">
+        cold + fresh
+      </text>
       <text x={W - M.r - 6} y={M.t + 28} className="in-label" textAnchor="end">
         dot size = agent share of reads
       </text>

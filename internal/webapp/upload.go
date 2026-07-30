@@ -106,7 +106,16 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, w
 	if !ok {
 		return errBlobMissing
 	}
+	return r.appendOp(ctx, journal.Op{
+		Kind: journal.KindPut, Path: p, Blob: blob, Size: size, Mode: 0o644,
+		User: who.Email, UserName: who.Name, Note: note,
+	})
+}
 
+// appendOp stamps op with this server's identity and ordering and appends it
+// to this server's own journal. Callers fill in Kind/Path and the content
+// fields; Seq, Lamport, Time and the device fields belong to us.
+func (r *RemoteSource) appendOp(ctx context.Context, op journal.Op) error {
 	r.upmu.Lock()
 	defer r.upmu.Unlock()
 
@@ -115,19 +124,14 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, w
 		return err
 	}
 	var maxLamport, mySeq int64
-	for _, op := range all {
-		maxLamport = max(maxLamport, op.Lamport)
-		if op.Device == r.Device.ID {
-			mySeq = max(mySeq, op.Seq)
+	for _, prev := range all {
+		maxLamport = max(maxLamport, prev.Lamport)
+		if prev.Device == r.Device.ID {
+			mySeq = max(mySeq, prev.Seq)
 		}
 	}
-	op := journal.Op{
-		Seq: mySeq + 1, Lamport: maxLamport + 1, Time: time.Now().UTC(),
-		Device: r.Device.ID, DeviceName: r.Device.Name, Author: r.Device.Author,
-		User: who.Email, UserName: who.Name,
-		Kind: journal.KindPut, Path: p, Blob: blob, Size: size, Mode: 0o644,
-		Note: note,
-	}
+	op.Seq, op.Lamport, op.Time = mySeq+1, maxLamport+1, time.Now().UTC()
+	op.Device, op.DeviceName, op.Author = r.Device.ID, r.Device.Name, r.Device.Author
 
 	// Read-modify-write of our own journal. A transient read error must fail
 	// the commit — treating it as "no journal yet" would rewrite the key

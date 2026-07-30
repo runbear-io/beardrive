@@ -33,8 +33,9 @@ With no version, restores the one immediately before the current content. A
 version is a short content hash from "bdrive log" or --list; any unambiguous
 prefix works.
 
-Known gap: a file that was created (rather than edited) can't be un-created
-yet — restore puts content back, it does not delete.`,
+Restore puts content back; it does not delete. To un-create a file a run
+created, use the undo button on that row in the hub's History view — or just
+delete the file here and let the next sync carry it.`,
 		Example: `  bdrive restore docs/spec.md              # the previous version
   bdrive restore docs/spec.md --list       # what versions exist
   bdrive restore docs/spec.md a3f9c1e2     # a specific one`,

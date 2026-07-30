@@ -673,14 +673,14 @@ a.ai-main:hover { color: var(--accent); }
 .hrun-body { border-top: 1px solid var(--border); }
 .hrun-body .hentry:last-child { border-bottom: none; }
 
-/* ---- restore ---- */
-.hrestore-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 2px 8px 2px 5px; border: 1px solid var(--border); border-radius: 5px; background: none; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; }
+/* ---- restore / remove ---- */
+.hrestore-btn, .hremove-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 2px 8px 2px 5px; border: 1px solid var(--border); border-radius: 5px; background: none; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; }
 .hrestore-btn:hover { color: var(--accent-bright); border-color: var(--border-2); background: var(--hover); }
-.hrestore-btn:disabled { opacity: .5; cursor: default; }
-.hrestore-btn .ico { width: 12px; height: 12px; }
-/* The gap has to explain itself: nothing writes a delete op yet, so a file
-   a run created cannot be un-created. */
-.hrestore-gap { margin-left: auto; color: var(--text-ghost); font-size: 11.5px; }
+/* Removing takes a file away on every device, so its hover reads as danger
+   rather than as the neighbouring restore. */
+.hremove-btn:hover { color: var(--del); border-color: rgba(242, 109, 109, .38); background: var(--hover); }
+.hrestore-btn:disabled, .hremove-btn:disabled { opacity: .5; cursor: default; }
+.hrestore-btn .ico, .hremove-btn .ico { width: 12px; height: 12px; }
 
 /* ---- a row's controls: diff (per-file only) + this version's handles ---- */
 .hactions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 0 23px; }
