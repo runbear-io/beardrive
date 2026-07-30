@@ -24,6 +24,7 @@ classDiagram
         +Cycle(ctx) Result
         +Restore(ctx, path, sha) error
     }
+    note for Session "syncer also exposes LogEntries (causal order, what bdrive restore walks) plus DisplayTime / SortForDisplay — the newest-first-by-clock order bdrive log prints"
     note for Session "Restore writes a historical blob back into the working folder as an ordinary edit (fetching it from the hub when this device never held it) — the next Cycle journals it like any other change; it takes no lock and appends to no journal itself"
     note for Session "internal/syncer — scan → commit local ops → pull peer journals → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
     note for Session "Prune (bdrive forget / sync --prune, never the daemon) journals a delete for every replayed path the SHARED ignore rules exclude — the include scope is per-device and must never prune it"
@@ -76,8 +77,9 @@ classDiagram
         +Author +User +UserName
         +Kind put or delete
         +Path +Blob +Size +Mode +Note
+        +Mtime when the file was written
     }
-    note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal"
+    note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay"
 
     class Backend {
         <<interface>>

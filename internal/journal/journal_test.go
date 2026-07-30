@@ -3,6 +3,7 @@ package journal
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -91,5 +92,39 @@ func TestParseSkipsBlankLines(t *testing.T) {
 	got, err := ReadFile(p)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("got %v %v", got, err)
+	}
+}
+
+// TestMtimeIsAdditive pins the wire shape: an op carrying Mtime round-trips,
+// and an op without one emits no "mtime" key at all — so a journal written by
+// this code still parses in the old shape. (omitempty would not do this: it
+// does not omit a zero struct.)
+func TestMtimeIsAdditive(t *testing.T) {
+	mt := time.Unix(1700000000, 0).UTC()
+	with := op(1, "a", 1, KindPut, "x.txt", "blob1")
+	with.Mtime = mt
+	without := op(2, "a", 2, KindDelete, "x.txt", "")
+
+	data, err := Marshal([]Op{with, without})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if !strings.Contains(lines[0], `"mtime"`) {
+		t.Fatalf("put op lost its mtime: %s", lines[0])
+	}
+	if strings.Contains(lines[1], "mtime") {
+		t.Fatalf("op without mtime should emit no mtime key: %s", lines[1])
+	}
+
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[0].Mtime.Equal(mt) {
+		t.Fatalf("Mtime = %v, want %v", got[0].Mtime, mt)
+	}
+	if !got[1].Mtime.IsZero() {
+		t.Fatalf("Mtime should be zero, got %v", got[1].Mtime)
 	}
 }
