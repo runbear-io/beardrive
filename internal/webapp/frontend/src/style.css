@@ -625,6 +625,9 @@ a.ai-main:hover { color: var(--accent); }
 .in-sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; }
 .in-sw.agent { background: var(--accent); }
 .in-sw.human { background: #5b8def; }
+/* the treemap's freshness scale: one gradient bar, not a row of chips */
+.in-sw-age { width: 84px; margin: 0 5px; }
+.in-tm-range { margin-left: 14px; color: var(--text-ghost); }
 /* coverage matrix */
 .in-matrix rect { transition: opacity .1s; }
 .in-matrix rect:hover { opacity: .85; }
