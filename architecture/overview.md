@@ -20,10 +20,9 @@ flowchart LR
 
     subgraph agents["Agent platforms (claude / codex / gemini / hermes)"]
         hooks["internal/agenthooks<br/>turn-boundary sync hooks"]
-        skills["internal/agentskills + plugin/<br/>SKILL.md, commands, hook scripts"]
     end
 
-    subgraph hub["bdrive web hub"]
+    subgraph hub["bdrive serve hub"]
         srv["internal/webapp Server<br/>auth, orgs, projects, shares,<br/>history, read heat, store proxy"]
         fe["webapp/frontend React SPA<br/>committed dist go:embed'ed at webapp/static"]
         meta["MetaStore: file JSON (default)<br/>or sqlite / postgres (db_sql)"]
@@ -41,7 +40,6 @@ flowchart LR
     eng --> vs
     eng <-->|"https:// backend (internal/remote/http.go)<br/>device token, /api/p/id/store/*"| srv
     hooks -->|"bdrive sync --hook / --note, read-log<br/>gated: enrolled + not paused"| cli
-    skills -.->|teach agents the CLI| agents
     srv --> store
     srv --> meta
     fe -->|/api/config, /api/projects, viewer APIs| srv

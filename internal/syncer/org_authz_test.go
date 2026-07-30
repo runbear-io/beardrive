@@ -87,7 +87,9 @@ func signupDeviceToken(t *testing.T, ts *httptest.Server, email, name string) st
 		t.Fatalf("signup(%s) set no session cookie: %d", email, resp.StatusCode)
 	}
 
-	req, _ := http.NewRequest("GET", ts.URL+"/auth/cli?redirect="+url.QueryEscape("http://127.0.0.1:1/cb")+"&state=s", nil)
+	// POST, not GET: /auth/cli shows a confirmation page first, and approving
+	// it is what mints the code — the same click a user makes in the browser.
+	req, _ := http.NewRequest("POST", ts.URL+"/auth/cli?redirect="+url.QueryEscape("http://127.0.0.1:1/cb")+"&state=s", nil)
 	req.AddCookie(session)
 	resp, err = jarless.Do(req)
 	if err != nil {

@@ -912,7 +912,7 @@ button:disabled, .btn:disabled { cursor: default; }
 input[type="checkbox"] { accent-color: var(--accent); }
 
 /* rendered HTML files: a sandboxed page in a framed viewport */
-.htmlview { display: block; width: 100%; height: calc(100vh - 150px); border: 1px solid var(--border); border-radius: var(--r-card); background: #fff; }
+.htmlview, .pdfview { display: block; width: 100%; height: calc(100vh - 150px); border: 1px solid var(--border); border-radius: var(--r-card); background: #fff; }
 
 /* missing path: friendly not-found with the uploading hint */
 .notfound { margin-top: var(--hero-top); text-align: center; color: var(--text-dim); }

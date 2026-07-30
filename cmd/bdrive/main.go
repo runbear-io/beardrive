@@ -37,7 +37,7 @@ func main() {
 system for AI agents.
 
 Mount any folder and BearDrive keeps it synchronized across your devices and
-teammates through a BearDrive hub (bdrive web — self-hosted or BearDrive
+teammates through a BearDrive hub (bdrive serve — self-hosted or BearDrive
 Cloud). Every change is journaled — you can always see which device and
 author changed which file, and when. Files are real files on disk, so
 everything keeps working offline; changes sync when the remote is reachable.`,
@@ -56,9 +56,9 @@ everything keeps working offline; changes sync when the remote is reachable.`,
 		forgetCmd(),
 		syncCmd(),
 		readLogCmd(),
-		hookApproveCmd(),
 		hooksCmd(),
-		skillCmd(),
+		resumeCmd(),
+		autostartCmd(),
 		statusCmd(),
 		logCmd(),
 		restoreCmd(),
