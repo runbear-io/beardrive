@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
-import type { HeatEntry, HeatMap, HistoryEntry, Node } from "../api/types";
+import type { HeatMap, HistoryEntry, Node } from "../api/types";
 
 // The volume's file tree, polled so synced changes appear without a
 // reload. react-query's structural sharing keeps identical polls from
@@ -63,48 +63,6 @@ export function useFolderHistory(apiBase: string, prefix: string, enabled: boole
   return q.data?.entries ?? null;
 }
 
-/* Heat for one listing entry: a file's own bucket, or the subtree sum for a
-   folder. Null when there is nothing to show. */
-export function heatFor(heatMap: HeatMap | null, path: string, isDir: boolean): HeatEntry | null {
-  if (!heatMap) return null;
-  if (!isDir) return heatMap[path] || null;
-  const agg = { human: 0, agent: 0, share: 0 };
-  for (const [p, e] of Object.entries(heatMap)) {
-    if (!p.startsWith(path + "/")) continue;
-    agg.human += e.human || 0;
-    agg.agent += e.agent || 0;
-    agg.share += e.share || 0;
-  }
-  return agg.human || agg.agent || agg.share ? agg : null;
-}
-
-export function heatTotal(e: HeatEntry): number {
-  return (e.human || 0) + (e.agent || 0) + (e.share || 0);
-}
-
-/* The total mixes three kinds of reader with independent debounces: your own
-   revisits fold into one visit, but an agent or a share-link hit on the
-   same file still moves the number. Break it out whenever more than people
-   are reading, so a count that changed while you watched says who it
-   counted — an unexplained total reads as a double-count. */
-export function heatText(e: HeatEntry): string {
-  const total = heatTotal(e);
-  if (!total) return "";
-  const s = total + (total === 1 ? " read" : " reads");
-  if (!e.agent && !e.share) return s;
-  const parts: string[] = [];
-  if (e.human) parts.push(e.human + " human");
-  if (e.agent) parts.push(e.agent + " agent");
-  if (e.share) parts.push(e.share + " shared");
-  return s + " (" + parts.join(", ") + ")";
-}
-
-/* Dot intensity 1–4, log-ish steps: 1–2, 3–9, 10–29, 30+ reads. */
-export function heatLevel(e: HeatEntry): number {
-  const total = heatTotal(e);
-  if (!total) return 0;
-  if (total < 3) return 1;
-  if (total < 10) return 2;
-  if (total < 30) return 3;
-  return 4;
-}
+/* The heat arithmetic itself is pure and lives in lib/heat.ts (unit-tested
+   without React); re-exported here so import sites don't care. */
+export { heatFor, heatLevel, heatText, heatTotal, hotPathSplit } from "../lib/heat";
