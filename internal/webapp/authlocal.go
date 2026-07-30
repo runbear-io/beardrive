@@ -911,7 +911,7 @@ func (a *BuiltinAuth) pageCLI(w http.ResponseWriter, r *http.Request) {
 			`<p class="lede">A terminal on this computer is asking to sign in to BearDrive.</p>
 %s%s
 <form method="post"><button>Approve</button></form>
-<p class="alt">Approve this only if you just ran <code>bdrive login</code> yourself.</p>`,
+<p class="alt">Approve this only if you just ran <code style="white-space:nowrap">bdrive login</code> yourself.</p>`,
 			whoBlock(user, r.URL.RequestURI()),
 			rows([2]string{"Application", "bdrive command line"}, [2]string{"Waiting at", u.Host})))
 		return
