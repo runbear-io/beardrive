@@ -62,9 +62,9 @@ classDiagram
         +useConfig
         +useHub
         +useBrowse
-        +useBlobText (sha-keyed, immutable)
+        +useTextAt (any URL) → useBlobText (sha-keyed, immutable)
     }
-    note for hooks "TanStack Query wrappers over the viewer APIs"
+    note for hooks "TanStack Query wrappers over the viewer APIs. useTextAt fetches any URL and sniffs it — the Content-Length cheap-out lives here (HTTP), the byte decision in lib/sniff.ts (pure). A live path must not be cached immutable; a sha can be"
 
     class components {
         FileView FolderListing FileTree
@@ -78,6 +78,7 @@ classDiagram
 
     class lib {
         +diff.ts splitLines lcsDiff diffText
+        +sniff.ts sniffBytes BlobText MAX_BYTES
         +utils.ts
     }
     note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package"
@@ -92,6 +93,7 @@ classDiagram
     HubApp --> components
     components --> nav : linkProps navigate
     components --> lib : diffText
+    hooks --> lib : sniffBytes
     hooks --> api
     Browser --> hooks
     HubApp --> hooks
