@@ -31,6 +31,7 @@ initialized /Users/snow/workspace
   server:  https://your-hub
   project: workspace (p-7f3a2c91)
   claude   hooks registered  →  /Users/snow/.claude/settings.json
+  login:   autostart registered  →  ~/Library/LaunchAgents/ai.beardrive.daemon.plist
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
 
@@ -143,7 +144,9 @@ hub's own storage, never something a syncing client points at directly:
 |---|---|
 | `bdrive login [server-url]` | Sign this device in (browser flow; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
-| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--yes`) for scripts; registers agent sync hooks in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
+| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--yes`) for scripts; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
+| `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent; this is what the login agent runs |
+| `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot — a launchd user agent on macOS, a systemd user unit on Linux, an HKCU Run entry on Windows. `bdrive init` installs it; `--no-autostart` skips it |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes, so no one hand-writes negation syntax. The daemon picks changes up in seconds; `rm` deletes nothing, locally or on the hub. `--explain` lists every path in the folder split into what syncs and what does not, so you can verify what leaves this machine (pure read — no daemon, no lock, no network) |
 | `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |

@@ -79,3 +79,39 @@ without a `.bdrive/` directory, which is what makes registering it globally safe
 `bdrive hooks uninstall` takes them back out — it removes only BearDrive's own
 entries and leaves every other hook in those files untouched. Syncing itself is
 unaffected; only turn-boundary sync stops.
+
+## Surviving a reboot
+
+The sync daemon is an ordinary background process, so a restart ends it. `bdrive
+init` therefore also registers a login item that runs `bdrive resume`, which
+starts a daemon for every project this device syncs and has not paused:
+
+```sh
+bdrive autostart              # is it registered?
+bdrive autostart install      # register it (init already did)
+bdrive autostart uninstall    # stop starting sync at login
+bdrive resume                 # start the daemons right now
+```
+
+One registration covers every project — add or remove projects freely, nothing
+to re-register. Projects paused with `bdrive stop` stay paused; only `bdrive
+init` resumes those.
+
+Where it lives, per platform — user-level either way, no `sudo`, nothing
+machine-wide:
+
+| Platform | What gets written |
+|---|---|
+| macOS | `~/Library/LaunchAgents/ai.beardrive.daemon.plist` (launchd loads it at login) |
+| Linux | `~/.config/systemd/user/beardrive.service` plus the `default.target.wants` symlink that enables it (honors `XDG_CONFIG_HOME`) |
+| Windows | a `BearDrive` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` — visible in Task Manager's Startup tab, where you can disable it |
+
+Linux needs systemd as the init system. Without it — Alpine or another
+runit/OpenRC distro, WSL1, a slim container — `bdrive autostart` says so rather
+than writing a unit nothing would read.
+
+On Windows you may see a console window flicker at logon: bdrive is a console
+program and `resume` exits in milliseconds. Nothing is wrong.
+
+Either way this is not the only thing that recovers sync: an agent turn in a
+project syncs it too, so a machine you actually work on catches up on its own.

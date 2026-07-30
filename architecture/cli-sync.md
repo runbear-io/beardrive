@@ -1,7 +1,7 @@
 # `bdrive` CLI & sync engine — class diagram
 
 Source of truth: `cmd/bdrive` (commands, gates) and `internal/{syncer,store,
-journal,config,daemon,agenthooks}`; the `internal/remote` seam is drawn in
+journal,config,daemon,agenthooks,autostart}`; the `internal/remote` seam is drawn in
 [webapp-server.md](webapp-server.md). Reflects the code as of this commit;
 update this file in any PR that changes these types or their relationships.
 
@@ -117,6 +117,7 @@ classDiagram
         sync stop scope forget status log
         restore url share export import
         web daemon hooks read-log
+        resume autostart
     }
     note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"
 
@@ -172,6 +173,22 @@ classDiagram
     }
     note for PausedMarker "set by bdrive stop, cleared only by bdrive init (startSync)"
 
+    class Autostart {
+        Install / Uninstall / Installed / Path
+        launchd | systemd | HKCU Run
+        ErrUnsupported (BSD, no-systemd)
+    }
+    note for Autostart "internal/autostart — ONE login unit per machine that runs `bdrive resume`: darwin a LaunchAgents plist (RunAtLoad, no KeepAlive), linux a systemd user unit + its default.target.wants symlink (needs sd_booted), windows an HKCU Run value. Writes the registration only — never launchctl/systemctl/schtasks"
+
+    class DaemonLock {
+        volumes/id/daemon.lock
+        volumes/id/daemon.pid
+    }
+    note for DaemonLock "internal/daemon — liveness is the flock, held for the daemon's lifetime; the kernel drops it at death/reboot, so a leftover pid can never read as running (pid is display + signal only)"
+
+    Commands --> Autostart : autostart install/uninstall (init runs install automatically)
+    Autostart ..> Commands : login runs `bdrive resume`
+    Commands --> DaemonLock : Running / Start / Stop
     Commands --> AgentHooks : hooks install/uninstall (init runs install automatically)
     AgentHooks --> Commands : runs sync and read-log
     Commands --> syncBlocked : sync and read-log gate first
