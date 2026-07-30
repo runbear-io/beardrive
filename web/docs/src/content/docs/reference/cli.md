@@ -88,9 +88,11 @@ versions in between stay in the history, the restore itself shows up in
 teammate like any other edit — so you can restore away from a restore. The hub
 has the same button on every history row.
 
-**Known gap:** restore puts content back; it cannot yet remove a file, so a
-file that a run *created* cannot be un-created. Delete it yourself and let the
-next sync carry that.
+**Restore puts content back; it does not delete.** To un-create a file an agent
+run *created*, open that run in the hub's History view and use the row's
+**undo — remove file** button (it asks first: the file leaves every synced
+device, and the DELETED row it leaves behind restores it). From the CLI, delete
+the file yourself and let the next sync carry that.
 
 ### `bdrive forget` and `bdrive sync --prune` — cleaning up the hub
 

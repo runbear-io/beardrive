@@ -16,6 +16,7 @@ import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
 import { HTML_EXT, copyText } from "../util";
 import { toast } from "../toast";
+import { modalConfirm } from "../modal";
 import { onSearchRequest } from "../search";
 import { AppShell, Icon, Page, Topbar, closeSidebarOnMobile, type PageWidth } from "../components/shell";
 import { FileTree, ancestorsOf } from "../components/FileTree";
@@ -224,6 +225,39 @@ export default function Browser(props: {
     [apiBase, qc],
   );
 
+  /* ---- undo a file a run created ----
+     The other half of restore: it takes a file away, on every synced device,
+     so it always asks first. History keeps it — the DELETED row it leaves
+     restores it back — which is what the confirm says. */
+  const [removing, setRemoving] = useState("");
+  const onRemove = useCallback(
+    async (p: string) => {
+      if (
+        !(await modalConfirm(
+          "Remove " + p + "?",
+          "It disappears from every synced device. History keeps it — you can restore it from the DELETED row afterwards.",
+          "Remove file",
+          true,
+        ))
+      )
+        return;
+      setRemoving(p);
+      try {
+        await postJSON(apiBase + "remove", { path: p });
+        qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        qc.invalidateQueries({ queryKey: ["render", apiBase, p] });
+        qc.invalidateQueries({ queryKey: ["text"] });
+        toast("Removed " + p + " — it syncs to every device like any other change.");
+      } catch (err) {
+        toast("Remove failed: " + (err as Error).message, true);
+      } finally {
+        setRemoving("");
+      }
+    },
+    [apiBase, qc],
+  );
+
   const historyNow = useCallback(() => {
     if (!path) return openHistory("");
     openHistory(isDir ? path + "/" : path);
@@ -308,6 +342,7 @@ export default function Browser(props: {
         onMeta={setMeta}
         onRendered={onRendered}
         restore={canRestore ? { onRestore, busy: restoring } : undefined}
+        remove={canRestore ? { onRemove, busy: removing } : undefined}
       />
     );
   } else if (path) {
