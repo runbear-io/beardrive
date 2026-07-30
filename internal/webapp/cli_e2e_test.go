@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -119,6 +120,43 @@ func TestCLIOnboardingE2E(t *testing.T) {
 	// Nothing agent-shaped may be created inside the project: it would sync.
 	assertNoProjectHookFiles(t, work)
 
+	// A reboot kills the daemon, so init registers the login agent that
+	// brings it back. It must land in the user's own LaunchAgents dir (this
+	// test's isolated HOME) and point at `bdrive resume`, which covers every
+	// mount rather than needing one registration per project.
+	if runtime.GOOS == "darwin" {
+		plist := filepath.Join(e.home, "Library", "LaunchAgents", "ai.beardrive.daemon.plist")
+		body, err := os.ReadFile(plist)
+		if err != nil {
+			t.Fatalf("init did not register the login agent: %v", err)
+		}
+		if !strings.Contains(string(body), "<string>resume</string>") {
+			t.Fatalf("login agent does not run `bdrive resume`:\n%s", body)
+		}
+		if out, err := run(work, "autostart"); err != nil || !strings.Contains(out, "registered") {
+			t.Fatalf("autostart status: %v\n%s", err, out)
+		}
+	}
+
+	// resume is idempotent against a live daemon — the login agent runs it on
+	// a machine where nothing is stopped, and must not start a second one.
+	out, err = run(work, "resume")
+	if err != nil || !strings.Contains(out, "already running 1") {
+		t.Fatalf("resume should have found the running daemon: %v\n%s", err, out)
+	}
+
+	// The hooks are the whole agent integration: init must not install a
+	// skill file anywhere, and no `skill` subcommand may come back.
+	for _, agent := range []string{"claude", "codex", "gemini", "hermes"} {
+		p := filepath.Join(e.home, "."+agent, "skills", "beardrive", "SKILL.md")
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("init installed a skill at %s — the hooks are the integration now", p)
+		}
+	}
+	if out, err := run(work, "skill"); err == nil {
+		t.Fatalf("`bdrive skill` still exists:\n%s", out)
+	}
+
 	// The project must actually exist on the hub, created under the account.
 	if projects := hubProjects(t, browser, hub.URL); !strings.Contains(projects, "cli-e2e") {
 		t.Fatalf("hub project list missing cli-e2e: %s", projects)
@@ -153,12 +191,15 @@ func TestCLIOnboardingE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer run(work2, "stop", work2)
-	out, err = run(work2, "init", "--name", "cli-e2e-nohooks", "--yes", "--no-hooks")
+	out, err = run(work2, "init", "--name", "cli-e2e-nohooks", "--yes", "--no-hooks", "--no-autostart")
 	if err != nil {
 		t.Fatalf("init --no-hooks: %v\n%s", err, out)
 	}
 	if _, err := os.Stat(filepath.Join(work2, ".claude", "settings.json")); !os.IsNotExist(err) {
 		t.Fatalf("--no-hooks still wrote .claude/settings.json (stat err: %v)", err)
+	}
+	if strings.Contains(out, "login:") {
+		t.Fatalf("--no-autostart still touched the login agent:\n%s", out)
 	}
 	if out, err = run(work2, "stop", work2); err != nil {
 		t.Fatalf("stop: %v\n%s", err, out)

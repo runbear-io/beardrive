@@ -39,7 +39,7 @@ export interface Route {
   org?: string;
   // Billing (managed hubs) is hub-level like the org route; the URL comes
   // from /api/config's billing block. Reserved only in hub mode — project
-  // ids are p-… so the segment can't collide with a project.
+  // ids are UUIDs (or legacy p-…), so the segment can't collide with one.
   billing?: boolean;
   project?: string;
   path: string;

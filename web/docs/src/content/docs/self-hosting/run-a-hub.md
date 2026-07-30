@@ -59,7 +59,7 @@ Every knob: [Hub config](/reference/hub-config/). Signup postures and SMTP:
 ## 4. Run it
 
 ```sh
-bdrive web -c config.json
+bdrive serve -c config.json
 ```
 
 Put TLS in front — Caddy, nginx, or your platform's load balancer. Device tokens

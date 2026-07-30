@@ -567,3 +567,91 @@ test("the folder change feed carries the version controls too", async ({ page })
   await page.waitForURL(new RegExp(`/${pid}/notes/.*\\?v=[0-9a-f]{64}$`));
   await expect(page.locator(".vbanner")).toBeVisible();
 });
+
+// BEA-44: the viewer used to decide on the extension, so every extensionless
+// file an agent wrote — Dockerfile, LICENSE, .bdriveignore — hit a dead
+// "No preview" card. It decides on the bytes now, and renders PDFs.
+
+test("an extensionless UTF-8 file previews as text", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=sniff/Dockerfile`, {
+    data: "FROM alpine\nRUN apk add --no-cache curl\n",
+  });
+  await page.goto(`/${pid}/sniff/Dockerfile`);
+  await expect(page.locator("#content pre.plain")).toContainText("RUN apk add --no-cache curl");
+});
+
+test("an unlisted extension previews as text too", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=sniff/main.tf`, {
+    data: 'resource "aws_s3_bucket" "b" {}\n',
+  });
+  await page.goto(`/${pid}/sniff/main.tf`);
+  await expect(page.locator("#content pre.plain")).toContainText("aws_s3_bucket");
+});
+
+test("binary bytes get the no-preview card, never dumped into the page", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=sniff/model.bin`, {
+    data: Buffer.from([0x89, 0x50, 0x00, 0x01, 0x02, 0xff, 0xfe]),
+  });
+  await page.goto(`/${pid}/sniff/model.bin`);
+  const card = page.locator("#content .filecard");
+  await expect(card).toContainText("No preview for this file type.");
+  await expect(page.locator("#content pre.plain")).toHaveCount(0);
+  await expect(card.getByRole("link", { name: "Download" })).toHaveAttribute(
+    "href",
+    /download\?path=sniff%2Fmodel\.bin$/,
+  );
+});
+
+test("a text file past the 1 MB cap says so instead of loading it", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=sniff/huge.dat`, {
+    data: "x".repeat((1 << 20) + 1024),
+  });
+  await page.goto(`/${pid}/sniff/huge.dat`);
+  await expect(page.locator("#content .filecard")).toContainText(/Too large to preview \(1\.0 MB\)/);
+});
+
+test("a pdf renders in the browser's viewer, in the wide column", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  // Smallest thing Chromium's viewer accepts; the assertion is the frame,
+  // not the glyphs.
+  const pdf =
+    "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n" +
+    "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n" +
+    "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n" +
+    "trailer<</Root 1 0 R>>\n%%EOF\n";
+  await page.request.put(`/api/p/${pid}/upload/content?path=sniff/report.pdf`, { data: pdf });
+  await page.goto(`/${pid}/sniff/report.pdf`);
+  const frame = page.locator("#content iframe.pdfview");
+  await expect(frame).toBeVisible();
+  await expect(frame).toHaveAttribute("src", /file\?path=sniff%2Freport\.pdf$/);
+  // No sandbox attribute: the PDF viewer is not this page's JS realm, and
+  // sandboxing without allow-same-origin breaks Firefox's pdf.js.
+  await expect(frame).not.toHaveAttribute("sandbox", /./);
+  await expect(page.locator(".page.wide")).toBeVisible();
+});
+
+test("an old version of an extensionless file previews the same way", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const url = `/api/p/${pid}/upload/content?path=sniff/LICENSE`;
+  await page.request.put(url, { data: "MIT License — the first draft.\n" });
+  await page.request.put(url, { data: "Apache 2.0 — the second draft.\n" });
+  await page.goto(`/${pid}/history/sniff/LICENSE`);
+  const older = page.locator(".hentry.add");
+  await expect(older).toBeVisible();
+  await older.getByRole("button", { name: /^Open .* as of/ }).click();
+  await page.waitForURL(new RegExp(`/${pid}/sniff/LICENSE\\?v=[0-9a-f]{64}$`));
+  await expect(page.locator("#content pre.plain")).toContainText("the first draft");
+  // A bad sha still explains itself rather than previewing nothing.
+  await page.goto(`/${pid}/sniff/LICENSE?v=${"0".repeat(64)}`);
+  await expect(page.locator("#content .empty")).toContainText("That version isn't available.");
+});

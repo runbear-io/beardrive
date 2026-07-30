@@ -3,7 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
-import { HTML_EXT, IMG_EXT, MD_EXT, TEXT_EXT, joinPath, whoChanged } from "../util";
+import { useTextAt } from "../hooks/useBlob";
+import { HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, TEXT_EXT, humanSize, joinPath, whoChanged } from "../util";
 
 export function FileView(props: {
   apiBase: string;
@@ -41,15 +42,69 @@ export function FileView(props: {
       />
     );
   }
+  if (PDF_EXT.test(path)) {
+    // The browser's own viewer, streaming — no byte cap needed, nothing is
+    // held in JS memory. Deliberately NOT sandboxed: the PDF viewer is not
+    // this page's JS realm, so it can't reach the hub API or its cookies,
+    // and sandbox without allow-same-origin breaks Firefox's pdf.js.
+    return <iframe className="pdfview" src={fileURL} title={path} onLoad={props.onRendered} />;
+  }
   if (IMG_EXT.test(path)) {
     return <ImgView src={fileURL} alt={path} version={version} onRendered={props.onRendered} />;
   }
   if (TEXT_EXT.test(path)) return <TextView {...props} fileURL={fileURL} />;
+  // No extension we recognize: decide on the bytes instead of giving up.
+  return <SniffView {...props} fileURL={fileURL} />;
+}
+
+/* The fallthrough: one fetch, then text / binary / too-large. Only files
+   that used to show the dead "No preview" card get here, so nothing that
+   already previewed pays for the extra request. */
+function SniffView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
+  const { apiBase, path, version, fileURL, onRendered } = props;
+  // The ["text", url] family is what a restore invalidates (Browser.tsx);
+  // an immutable ["blob", …] key on a live path would go stale after a
+  // teammate's edit. A ?v= URL is content-addressed, so it can be pinned.
+  const { data, error } = useTextAt(fileURL, ["text", fileURL], true, !!version);
+  useEffect(() => {
+    if (data) onRendered?.();
+  }, [data, onRendered]);
+  if (error) return <LoadError version={version} err={error as Error} />;
+  if (!data) return null;
+  if (data.kind === "text")
+    return (
+      <pre className="plain" key={path}>
+        {data.text}
+      </pre>
+    );
+  return (
+    <FileCard apiBase={apiBase} path={path} version={version} fileURL={fileURL}>
+      {data.kind === "too-large"
+        ? `Too large to preview (${humanSize(data.size)}).`
+        : "No preview for this file type."}
+    </FileCard>
+  );
+}
+
+function FileCard(props: {
+  apiBase: string;
+  path: string;
+  version?: string;
+  fileURL: string;
+  children: React.ReactNode;
+}) {
+  const { apiBase, path, version, fileURL } = props;
   return (
     <div className="filecard">
       <div className="name">{path.split("/").pop()}</div>
-      <p>No preview for this file type.</p>
-      <a className="btn" download href={version ? fileURL + "&download=1" : apiBase + "download?path=" + encodeURIComponent(path)}>
+      <p>{props.children}</p>
+      <a
+        className="btn"
+        download
+        href={
+          version ? fileURL + "&download=1" : apiBase + "download?path=" + encodeURIComponent(path)
+        }
+      >
         Download
       </a>
     </div>
