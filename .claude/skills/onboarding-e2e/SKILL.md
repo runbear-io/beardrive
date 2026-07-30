@@ -1,6 +1,6 @@
 ---
 name: onboarding-e2e
-description: "Live end-to-end test of BearDrive's agent-first onboarding: run the real paste-prompt flow in a fresh headless Claude session (and optionally a full role-played user conversation) against a seeded local hub, asserting the scope hard-gate, hooks-via-init, and plugin-upgrade behaviors, and report transcripts plus doc-vs-reality findings. Self-bootstrapping — no inputs needed. Use when INSTALL_FOR_AGENTS.md, plugin/commands/install.md, the CLI init/login/hooks flow, or hub auth changed. Args: [hub-url] [authenticated BDRIVE_HOME] [bdrive-binary] (all optional)"
+description: "Live end-to-end test of BearDrive's agent-first onboarding: run the real paste-prompt flow in a fresh headless Claude session (and optionally a full role-played user conversation) against a seeded local hub, asserting the scope hard-gate and hooks-via-init behaviors, and report transcripts plus doc-vs-reality findings. Self-bootstrapping — no inputs needed. Use when INSTALL_FOR_AGENTS.md, the CLI init/login/hooks flow, or hub auth changed. Args: [hub-url] [authenticated BDRIVE_HOME] [bdrive-binary] (all optional)"
 ---
 
 # Agent-onboarding live E2E
@@ -68,9 +68,9 @@ must be *offered*, and denied if attempted).
    whole folder"` (same env, same cwd). Now init must run and its output
    must show hooks registered *inline* — no separate `bdrive hooks
    install` invocation anywhere in the transcript.
-3. **Plugin upgrade**: for an already-installed plugin the agent offers
-   `claude plugin marketplace update beardrive` + `claude plugin update
-   beardrive@beardrive` — offered to the user, never silently run.
+3. **No plugin, no skill**: the transcript must not try to install a
+   Claude plugin, a marketplace, or a `SKILL.md` — the hooks that `init`
+   registers are the whole integration.
 4. **Payoff**: the final message hands a hub link; verify it serves real
    content with an authenticated `curl -b $jar`.
 
@@ -167,5 +167,5 @@ even if the run "worked".
   "ok (cached)" and no server.
 - `command -v bdrive` may find a Homebrew binary older than the tree under
   test — always prepend `$W` to PATH and watch for version skew.
-- The agent's `bdrive skill install` writes to the real `~/.codex`,
-  `~/.gemini`, `~/.hermes` skill dirs (user-level); harmless but expect it.
+- `bdrive init` writes hooks into the real `~/.claude/settings.json` (and
+  friends) — user-level, idempotent, but expect it on the test machine.

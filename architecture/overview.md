@@ -20,7 +20,6 @@ flowchart LR
 
     subgraph agents["Agent platforms (claude / codex / gemini / hermes)"]
         hooks["internal/agenthooks<br/>turn-boundary sync hooks"]
-        skills["internal/agentskills + plugin/<br/>SKILL.md, commands, hook scripts"]
     end
 
     subgraph hub["bdrive web hub"]
@@ -41,7 +40,6 @@ flowchart LR
     eng --> vs
     eng <-->|"https:// backend (internal/remote/http.go)<br/>device token, /api/p/id/store/*"| srv
     hooks -->|"bdrive sync --hook / --note, read-log<br/>gated: enrolled + not paused"| cli
-    skills -.->|teach agents the CLI| agents
     srv --> store
     srv --> meta
     fe -->|/api/config, /api/projects, viewer APIs| srv

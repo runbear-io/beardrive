@@ -66,10 +66,6 @@ export function ConnectGuide({ project }: { project: Project }) {
               Insights. They register once per machine in your agent's own config, so every
               session is covered and nothing is written into the synced folder.
             </li>
-            <li>
-              The beardrive skill (and on Claude Code, the plugin — shared with Cowork) is
-              installed for later sessions, so from then on you can just ask.
-            </li>
             <li>Codex hooks are off by default: set [features] codex_hooks = true in ~/.codex/config.toml.</li>
           </ul>
         </details>
@@ -77,7 +73,7 @@ export function ConnectGuide({ project }: { project: Project }) {
           <summary>Or run it yourself</summary>
           <p className="gd-desc">
             Same result, in the folder you want the files. One command: init signs this device in,
-            installs the skill, registers the sync hooks and starts syncing.
+            registers the sync hooks and starts syncing.
           </p>
           <GuideCode code={manual} />
           <p className="gd-desc">

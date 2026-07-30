@@ -119,6 +119,18 @@ func TestCLIOnboardingE2E(t *testing.T) {
 	// Nothing agent-shaped may be created inside the project: it would sync.
 	assertNoProjectHookFiles(t, work)
 
+	// The hooks are the whole agent integration: init must not install a
+	// skill file anywhere, and no `skill` subcommand may come back.
+	for _, agent := range []string{"claude", "codex", "gemini", "hermes"} {
+		p := filepath.Join(e.home, "."+agent, "skills", "beardrive", "SKILL.md")
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("init installed a skill at %s — the hooks are the integration now", p)
+		}
+	}
+	if out, err := run(work, "skill"); err == nil {
+		t.Fatalf("`bdrive skill` still exists:\n%s", out)
+	}
+
 	// The project must actually exist on the hub, created under the account.
 	if projects := hubProjects(t, browser, hub.URL); !strings.Contains(projects, "cli-e2e") {
 		t.Fatalf("hub project list missing cli-e2e: %s", projects)

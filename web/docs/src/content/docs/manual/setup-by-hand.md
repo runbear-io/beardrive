@@ -8,7 +8,7 @@ Useful on a machine with no agent, when scripting a fleet, or when you simply
 want to see the moving parts.
 
 Three steps: sign the device in, start syncing a folder, work normally. `init`
-installs the agent skill and [registers the hooks](/manual/skills-and-hooks/)
+[registers the hooks](/manual/hooks/)
 along the way — that is what keeps an agent's files fresh, and it used to be the
 step hand-setups forgot.
 
@@ -44,7 +44,6 @@ $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
   server:  https://your-hub
   project: workspace (p-7f3a2c91)
-  skill:   installed for claude, codex
   claude   hooks registered  →  /Users/snow/.claude/settings.json
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
@@ -59,10 +58,9 @@ folder and syncs everything.
 
 Init writes `.bdrive/config.json`, seeds a starter `.bdriveignore`
 (node_modules, build dirs, caches, `.env*`), starts the daemon, and prints the
-project's hub link. It also installs the `beardrive` skill and registers the sync
+project's hub link. It also registers the sync
 hooks for any agent platform it detects — in that platform's **user** config, once
-per machine, so nothing lands inside the project. `--no-hooks` skips the hooks
-(the skill is installed either way). Not
+per machine, so nothing lands inside the project. `--no-hooks` skips them. Not
 signed in yet? It runs the login flow first.
 
 :::tip[Working inside a repository]
@@ -106,7 +104,7 @@ changes.
 
 ## Next
 
-- [Skills and hooks in detail](/manual/skills-and-hooks/) — what `init` wrote to
+- [Hooks in detail](/manual/hooks/) — what `init` wrote to
   make an agent read fresh files every turn, and how to inspect or remove it.
 - [Shared agent memory](/guides/shared-agent-memory/) — orient agents in the
   folder so they know where to read and write.

@@ -9,8 +9,7 @@ or skip them.
 BearDrive syncs a folder across a team and their agents through a hub, with
 per-file history and share links. Setup is short by design: make sure the CLI
 exists, ask the user what to sync, and run **one** `bdrive init` — it signs
-in, installs the skill, registers the sync hooks, starts syncing and prints
-the project link. Every extra command you invent is another permission prompt
+in, registers the sync hooks, starts syncing and prints the project link. Every extra command you invent is another permission prompt
 for the user. Full documentation: https://docs.beardrive.ai (agent-readable
 index at https://docs.beardrive.ai/llms.txt).
 
@@ -24,9 +23,8 @@ the user a permission prompt, so:
   `! <command>` to run plus the allow-rule `"Bash(bdrive:*)"`, then continue
   with the steps that do not depend on it.
 
-> Maintainers: this is a condensed, URL-addressable version of
-> `plugin/commands/install.md` — that file is the source of truth. If the
-> two disagree, update this one.
+> Maintainers: this file is the source of truth for agent onboarding. When
+> the CLI's init/login/hooks flow changes, update it here.
 
 ## 1. Install the CLI (only if it is missing)
 
@@ -53,10 +51,6 @@ never seen still needs no separate command.
 So: no `bdrive login`, no `bdrive login --status`. They are extra permission
 prompts for something init does anyway. The only time to run login on its own
 is when the user explicitly asks to switch hubs without connecting a folder.
-
-Init also installs the beardrive skill for every agent platform it detects,
-so later sessions understand `bdrive` conversationally. Not a separate
-command either.
 
 ## 3. Initialize the project — **ask first**
 
@@ -122,8 +116,8 @@ the chosen folder is git-tracked, git and BearDrive would both write it
 (silent-revert hazard). Get consent, then `git rm -r --cached <dir>` and add
 `<dir>/` to `.gitignore`; stage but let the user commit.
 
-Then run **one** command — init signs in if needed, installs the skill,
-registers the hooks, syncs, and prints the project link. Do not precede it
+Then run **one** command — init signs in if needed, registers the hooks,
+syncs, and prints the project link. Do not precede it
 with `command -v bdrive` or `bdrive --version`: every extra command is
 another permission prompt, and if the binary is missing this one says so.
 
@@ -173,29 +167,7 @@ Only if a platform the user works with is missing from init's output: run
 `bdrive hooks install --agent <name>`. `bdrive hooks` shows the status table,
 `bdrive hooks uninstall` removes them again.
 
-## 5. Claude Code only: install the plugin
-
-If you are Claude Code, also register the marketplace and plugin so future
-sessions get the skill, `/beardrive:*` commands, and hooks built in:
-
-```sh
-claude plugin marketplace add runbear-io/beardrive
-claude plugin install beardrive@beardrive
-```
-
-If it's already installed, upgrade it instead so this machine isn't on a
-stale version:
-
-```sh
-claude plugin marketplace update beardrive
-claude plugin update beardrive@beardrive
-```
-
-Tell the user the plugin loads on their next session (current session keeps
-working via the hooks from step 4). Other platforms: init already covered
-you — skip this.
-
-## 6. Verify, then show the payoff
+## 5. Verify, then show the payoff
 
 Init printed the project's hub link and a sync summary — use them rather
 than running more commands. Summarize what was set up and hand the user that
@@ -208,8 +180,8 @@ daemon and pending count, and `bdrive url <file>` links a specific file.
 
 ## Optional: teach agents about the folder — **ask first**
 
-Offer (never do silently) the two-file orientation from
-`plugin/commands/install.md` step 4: a synced `<shared>/AGENTS.md` mapping
+Offer (never do silently) a two-file orientation: a synced
+`<shared>/AGENTS.md` mapping
 the folder for the whole team (if one exists already, follow it — don't
 rewrite it), and a short pointer section in the repo root's `AGENTS.md` /
 `CLAUDE.md` so agents know the folder matters.

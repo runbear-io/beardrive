@@ -30,7 +30,6 @@ $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
   server:  https://your-hub
   project: workspace (p-7f3a2c91)
-  skill:   installed for claude, codex
   claude   hooks registered  →  /Users/snow/.claude/settings.json
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
@@ -144,7 +143,7 @@ hub's own storage, never something a syncing client points at directly:
 |---|---|
 | `bdrive login [server-url]` | Sign this device in (browser flow; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
-| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--yes`) for scripts; installs the agent skill, registers agent sync hooks in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
+| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--yes`) for scripts; registers agent sync hooks in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes, so no one hand-writes negation syntax. The daemon picks changes up in seconds; `rm` deletes nothing, locally or on the hub. `--explain` lists every path in the folder split into what syncs and what does not, so you can verify what leaves this machine (pure read — no daemon, no lock, no network) |
 | `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
@@ -152,7 +151,6 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
-| `bdrive skill [install]` | Install the `beardrive` skill into detected agent platforms (`~/.codex/skills/beardrive/SKILL.md` and friends) so the agent can do the setup itself — sign in, `bdrive init`, and register the sync hooks; idempotent (`--agent` overrides detection) |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
@@ -325,8 +323,8 @@ has a flag (`--name`, `--project`, `--only`, `--yes`), and without a TTY
 init never prompts — it creates-or-joins a project named after the folder
 and syncs everything. It writes `.bdrive/config.json`, seeds a starter
 `.bdriveignore` (node_modules, build dirs, caches, `.env*`), and starts the
-daemon — local changes are detected within seconds, and the Claude Code
-plugin syncs at every session step. Not signed in yet? init runs the login
+daemon — local changes are detected within seconds, and the agent sync
+hooks sync at every turn boundary. Not signed in yet? init runs the login
 flow first.
 
 Under the hood the `https://` remote speaks the hub's per-project
@@ -379,20 +377,18 @@ Any org member can mint links, and a link is public to whoever has the
 URL — don't share folders that hold secrets, and note a LAN-bound hub
 means LAN-only links.
 
-### Claude Code integration
+### Agent integration
 
-The BearDrive plugin (`/plugin marketplace add runbear-io/beardrive`)
-makes agents fluent in all of this, and **`/beardrive:install`** sets a
-project up conversationally: installs the CLI, signs in, creates or
-connects a project (whole folder or a shared subfolder like `wiki/`),
-offers to document the shared folder in CLAUDE.md so agents proactively
-put shareable artifacts there, and registers hooks in your user config
-(`~/.claude/settings.json`, once per machine) — a blocking pull when you submit a prompt (Claude
-reads fresh team files) and an async push after every file edit (artifacts
-are on the server seconds after Claude writes them), for every teammate
-whether or not they installed the plugin. The payoff: "write a report and
-share it" becomes Claude generating `wiki/report.html` and replying with a
-public URL.
+Point any agent at [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) (see
+[Set up an agent to do it for you](#set-up-an-agent-to-do-it-for-you)) and it
+sets a project up conversationally: install the CLI, sign in, create or
+connect a project (whole folder or a shared subfolder like `wiki/`), and
+register the sync hooks in your user config (`~/.claude/settings.json` and
+friends, once per machine) — a blocking pull when you submit a prompt so the
+agent reads fresh team files, and an async push after every file edit so
+artifacts are on the hub seconds after the agent writes them. The payoff:
+"write a report and share it" becomes the agent generating
+`wiki/report.html` and replying with a link.
 
 The web UI lists your orgs' projects in the sidebar (⌘K opens a command
 palette: fuzzy file search, project switching, share/history/upload
@@ -458,42 +454,10 @@ With `--upload` set, the server decides per upload how the bytes travel:
   (object store + journal, or straight to disk for a served folder, where
   the daemon will pick it up like any local edit).
 
-## Claude Code plugin
+## Set up an agent to do it for you
 
-Install beardrive support in Claude Code with two commands:
-
-```
-/plugin marketplace add runbear-io/beardrive
-/plugin install beardrive@beardrive
-```
-
-The plugin sets up everything at once:
-
-- **`/beardrive:install`** — the full team setup, conversationally: CLI,
-  sign-in, project init (whole folder or a shared subfolder like `wiki/`),
-  a consent-gated agent orientation — a synced `AGENTS.md` mapping the
-  shared folder plus a repo-root pointer to it — and sync hooks registered in
-  your user config, once per machine.
-- **`/beardrive:init [folder] [--name/--project/--only]`** — just start
-  syncing a project; `/beardrive:status` diagnoses problems.
-- **Turn-boundary sync hooks**, registered automatically in your user config
-  (once per machine, so every session in every folder is covered): a blocking
-  pull when you send a message (Claude always reads fresh files) and an async
-  push when the turn ends. The hook no-ops instantly outside BearDrive
-  projects, which is what makes a machine-wide registration safe.
-- **No permission gauntlet** — the plugin auto-approves beardrive's own setup
-  commands (`init`, `login`, `hooks`, `status`, `sync`, `url`) through a
-  `PreToolUse` hook, and only as bare invocations: anything with a shell
-  operator falls through to the normal prompt.
-- **The `beardrive` skill** ([plugin/skills/beardrive](plugin/skills/beardrive/SKILL.md)),
-  covering init/stop/sync, sharing by URL, backends and credentials,
-  selective sync, and troubleshooting. Working in a clone of this repo
-  picks the same skill up automatically via `.claude/skills/`.
-
-## Other agents: Codex, Gemini CLI, Hermes
-
-No terminal needed here either — the setup is one paste. Start the agent in
-the folder you want the files and give it:
+No terminal needed: start any agent (Claude Code, Codex, Gemini CLI, Hermes)
+in the folder you want synced and give it one paste:
 
 ```
 Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
@@ -501,23 +465,30 @@ to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sy
 ```
 
 The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
-it: install the CLI, then one `bdrive init` — which signs in (an approval
-link when there is no local browser), installs the skill, registers the sync hooks and
-prints the project link. The instructions live at that URL rather than
-inside the prompt so they never go stale in someone's copy — and the agent
-handles every deviation (already installed, no Homebrew, sign-in, wrong
-folder). The skill step is the durable part: `SKILL.md` is a cross-agent
-format, and `bdrive skill install` writes the very skill the Claude plugin
-ships to each detected platform's user-level skills directory
-(`~/.codex/skills/beardrive/SKILL.md`, `~/.gemini/…`, `~/.hermes/…`,
-`~/.claude/…`), so from then on "share this file" or "what changed?" just
-works. The hooks step is the one people skip when they copy commands by
-hand, which is exactly why `bdrive init` now does it itself.
+it: install the CLI, then one `bdrive init` — which signs in (an approval link
+when there is no local browser), registers the sync hooks, and prints the
+project link. The instructions live at that URL rather than inside the prompt
+so they never go stale in someone's copy, and the agent handles every
+deviation (already installed, no Homebrew, sign-in, wrong folder).
 
-A project's home page in the web UI shows this with the hub URL and project
-id already filled in (plus the plain-terminal version). `bdrive skill` and
-`bdrive hooks` print what's set up on this machine; re-run either after a CLI
-upgrade to refresh.
+Those hooks are the whole integration, and `bdrive init` registers them in
+each platform's user config (`~/.claude/settings.json` and friends), once per
+machine, so every session in every folder is covered:
+
+- a **blocking pull** when you send a message, so the agent always reads
+  fresh team files — it also injects the project's link convention, so the
+  agent appends a hub link to any synced path it mentions;
+- an **async push** after every file edit, so artifacts are on the hub
+  seconds after the agent writes them;
+- **read tracking**, so the hub's Dashboard can show what your agents
+  actually read.
+
+Each hook no-ops instantly outside BearDrive projects, which is what makes a
+machine-wide registration safe. `bdrive hooks` prints what's set up on this
+machine; re-run it after a CLI upgrade.
+
+A project's home page in the web UI shows this paste with the hub URL and
+project id already filled in (plus the plain-terminal version).
 
 ## How it works
 
