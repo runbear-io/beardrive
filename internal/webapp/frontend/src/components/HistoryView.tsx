@@ -5,6 +5,7 @@ import type { HistoryEntry } from "../api/types";
 import { HistoryRow, NoteText, type RemoveAction, type RestoreAction } from "./HistoryRow";
 import { Icon } from "./shell";
 import { whoChanged } from "../util";
+import { groupRuns, runFileCount, type Run } from "../lib/runs";
 
 /* ---- history ----
    Every change ever made, straight from the journals: who (account), when,
@@ -104,43 +105,6 @@ export function HistoryView(props: {
   );
 }
 
-// One run: the entries that share a (note, device), with the index each came
-// from so diff lookups still address the flat feed.
-type Run = { note: string; entries: HistoryEntry[]; idx: number[] };
-type Item = { run?: Run; i: number };
-
-/* Group key = note + device id, exact match. Deliberately simple, and it
-   guarantees a group never spans two journals — one writer, one op range —
-   which is what a later run-wide restore needs. Two devices that happen to
-   write the same note are two runs. Grouping spans the whole window rather
-   than only consecutive rows, so a run whose ops interleave with another
-   device's still reads as one thing; each group sits where its newest
-   member did, keeping the feed newest-first. */
-export function groupRuns(entries: HistoryEntry[]): Item[] {
-  const runs = new Map<string, Run>();
-  const out: Item[] = [];
-  entries.forEach((e, i) => {
-    if (!e.note) {
-      out.push({ i });
-      return;
-    }
-    const key = e.note + "\0" + (e.device?.id ?? "");
-    const run = runs.get(key);
-    if (run) {
-      run.entries.push(e);
-      run.idx.push(i);
-      return;
-    }
-    const fresh: Run = { note: e.note, entries: [e], idx: [i] };
-    runs.set(key, fresh);
-    out.push({ run: fresh, i });
-  });
-  // A run that touched one file is not worth a card: the row already shows
-  // its note, and wrapping it would say the same thing twice. Grouping earns
-  // its chrome from the second file on.
-  return out.map((item) => (item.run && item.run.entries.length < 2 ? { i: item.i } : item));
-}
-
 function RunGroup({
   run,
   onOpen,
@@ -166,7 +130,9 @@ function RunGroup({
   const dev = [first.device.name || first.device.id, first.device.os].filter(Boolean).join(" · ");
   const times = run.entries.map((e) => new Date(e.time).getTime());
   const span = fmtSpan(Math.min(...times), Math.max(...times));
-  const n = run.entries.length;
+  // Distinct paths, not ops: repeat edits to one file must not inflate the
+  // one number that sizes a run (BEA-39). Every op is still a row below.
+  const n = runFileCount(run);
   return (
     <div className={"hrun" + (open ? " open" : "")}>
       <div className="hrun-head">

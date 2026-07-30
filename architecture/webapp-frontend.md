@@ -78,6 +78,7 @@ classDiagram
 
     class lib {
         +diff.ts splitLines lcsDiff diffText
+        +runs.ts groupRuns runFileCount
         +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +utils.ts
@@ -93,7 +94,7 @@ classDiagram
     Browser --> components
     HubApp --> components
     components --> nav : linkProps navigate
-    components --> lib : diffText hotPathSplit
+    components --> lib : diffText groupRuns hotPathSplit
     hooks --> lib : re-exports heat.ts, sniffBytes
     hooks --> api
     Browser --> hooks
