@@ -45,8 +45,8 @@ works, stop and tell the user.
 ## 2. Do not run a login command
 
 `bdrive init` (step 3) signs the device in when there is no session, and
-without a TTY it uses the device-code flow automatically: it prints a URL and
-a short code for the user to approve in any browser. Pass the hub with
+without a TTY it uses the device-code flow automatically: it prints one link
+for the user to open in any browser and approve — no code to type. Pass the hub with
 `--server <hub-url>` and init signs in *there* — so a hub this device has
 never seen still needs no separate command.
 

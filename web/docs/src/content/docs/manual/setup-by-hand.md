@@ -30,8 +30,8 @@ bdrive login https://your-hub
 
 This opens your browser, and the terminal finishes on its own. On a headless or
 SSH machine login falls back to the device-code flow automatically (no TTY, or
-no browser can open): it prints a short code you approve from any signed-in
-browser. `bdrive login --device` forces that flow.
+no browser can open): it prints one link you open in any signed-in browser and
+approve — nothing to retype. `bdrive login --device` forces that flow.
 
 `bdrive login --status` shows the current server and account.
 

@@ -77,9 +77,9 @@ func newCLIEnv(t *testing.T) cliEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { login.Process.Kill() })
-	code := waitForCode(t, logFile)
+	approve := waitForApprovalLink(t, logFile)
 	browser := signedInBrowser(t, hub.URL)
-	if _, err := browser.PostForm(hub.URL+"/auth/device", url.Values{"code": {code}}); err != nil {
+	if _, err := browser.PostForm(approve, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := login.Wait(); err != nil {
@@ -500,21 +500,21 @@ func hubProjects(t *testing.T, browser *http.Client, hubURL string) string {
 	return string(data)
 }
 
-var codeRe = regexp.MustCompile(`approve code: ([a-z0-9]+)`)
+var approveRe = regexp.MustCompile(`(https?://\S+/auth/device/[a-f0-9]+)`)
 
 // waitForCode polls the login command's output for the device code it prints.
-func waitForCode(t *testing.T, logFile string) string {
+func waitForApprovalLink(t *testing.T, logFile string) string {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		data, _ := os.ReadFile(logFile)
-		if m := codeRe.FindSubmatch(data); m != nil {
+		if m := approveRe.FindSubmatch(data); m != nil {
 			return string(m[1])
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	data, _ := os.ReadFile(logFile)
-	t.Fatalf("login --device never printed a device code:\n%s", data)
+	t.Fatalf("login --device never printed an approval link:\n%s", data)
 	return ""
 }
 

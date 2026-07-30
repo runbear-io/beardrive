@@ -271,16 +271,26 @@ func TestDeviceCodeFlow(t *testing.T) {
 	h := srv.Handler()
 	cookie := signupAndSession(t, h, "dev@x.io", "Dev", "password1")
 
-	rec := do(t, h, "POST", "/api/auth/device/start", map[string]string{"device": "server-1"})
+	rec := do(t, h, "POST", "/api/auth/device/start", map[string]string{"device": "server-1", "os": "linux"})
 	if rec.Code != 200 {
 		t.Fatalf("start: %d %s", rec.Code, rec.Body)
 	}
 	var start struct {
-		Code string `json:"code"`
+		Code      string `json:"code"`
+		VerifyURL string `json:"verify_url"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil || start.Code == "" {
 		t.Fatalf("start = %s (%v)", rec.Body, err)
 	}
+	// The link is the secret, so it must be a real token, and it must carry
+	// the code in the path — nobody types this in.
+	if len(start.Code) < 32 {
+		t.Fatalf("device code %q is too short to be a URL secret", start.Code)
+	}
+	if !strings.HasSuffix(start.VerifyURL, "/auth/device/"+start.Code) {
+		t.Fatalf("verify_url = %q, want .../auth/device/<code>", start.VerifyURL)
+	}
+	approve := "/auth/device/" + start.Code
 
 	// pending until approved
 	rec = do(t, h, "POST", "/api/auth/device/poll", map[string]string{"code": start.Code})
@@ -288,10 +298,23 @@ func TestDeviceCodeFlow(t *testing.T) {
 		t.Fatalf("poll before approve: %d %s", rec.Code, rec.Body)
 	}
 
+	// The approval page names the account being granted, offers a way off it,
+	// and says what is asking — approving is handing that box a token.
+	req := httptest.NewRequest("GET", approve, nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	for _, want := range []string{"dev@x.io", "server-1", "linux", "Switch account", url.QueryEscape(approve)} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("approval page missing %q:\n%s", want, rec.Body)
+		}
+	}
+	if strings.Contains(rec.Body.String(), `name="code"`) {
+		t.Fatal("approval page still asks for a typed code")
+	}
+
 	// approve from a signed-in browser
-	form := url.Values{"code": {start.Code}}
-	req := httptest.NewRequest("POST", "/auth/device", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = httptest.NewRequest("POST", approve, nil)
 	req.AddCookie(cookie)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

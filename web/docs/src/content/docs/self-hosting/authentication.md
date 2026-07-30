@@ -64,8 +64,12 @@ to the CLI's loopback listener and the terminal finishes on its own, storing a
 long-lived per-device token that is revocable server-side.
 
 On headless or SSH machines login falls back to the device-code flow
-automatically (no TTY, or no browser can open): it prints a short code to
-approve from any signed-in browser. `bdrive login --device` forces that flow.
+automatically (no TTY, or no browser can open): it prints one approval link to
+open in any signed-in browser. The link carries the request, so there is no code
+to retype; the page it opens names the account you would be granting, the device
+asking, its OS, and the address it came from, so an unexpected approval request
+is visible rather than anonymous. Approving is a POST from that page — a link
+alone can't grant. `bdrive login --device` forces that flow.
 
 Every sync and every `bdrive init` then authenticates with that token. The hub's
 device registry records per-device name, OS, account, and the IP the server
