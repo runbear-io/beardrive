@@ -28,7 +28,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change. No version restores the previous one; `--list` shows the versions with their short hashes |
 | `bdrive export [folder]` | Export the whole project — all devices' history and content — to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides the archive's name) |
-| `bdrive web [folder \| storage-root-url]` | Web server: viewer, uploads, multi-project sync hub |
+| `bdrive serve [folder \| storage-root-url]` | Web server: viewer, uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
 | `bdrive whoami` | Signed-in account and device identity used in change tracking |
 | `bdrive version` | Version (also `bdrive --version`) |
 

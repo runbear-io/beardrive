@@ -18,7 +18,7 @@ that's a member of the project.
 - A device that syncs the project (any member device works).
 - An account on the destination hub (sign up there first if you don't have one).
 - Uploads enabled on the destination hub (`--upload` on a self-hosted
-  `bdrive web`; BearDrive Cloud has them on).
+  `bdrive serve`; BearDrive Cloud has them on).
 
 ## Step 1 — sync, so the export is complete
 

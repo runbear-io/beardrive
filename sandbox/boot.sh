@@ -95,7 +95,7 @@ if [ ! -f /data/hub.json ]; then
 JSON
 fi
 
-BDRIVE_HOME=/data/hubhome bdrive web -c /data/hub.json >/data/hub.log 2>&1 &
+BDRIVE_HOME=/data/hubhome bdrive serve -c /data/hub.json >/data/hub.log 2>&1 &
 for _ in $(seq 1 40); do
   curl -sf -o /dev/null "$HUB/auth/login" && break
   sleep 1

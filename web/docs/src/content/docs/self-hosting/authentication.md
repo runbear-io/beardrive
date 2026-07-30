@@ -6,7 +6,7 @@ description: The three signup postures, admin controls, device sign-in, and SMTP
 Hubs always require sign-in — every change is attributed to a real account. The
 whole API (web UI, uploads, project creation, device sync) needs a session; only
 `/api/config` and the auth pages stay open. The plain-folder viewer,
-`bdrive web ./folder`, remains auth-free.
+`bdrive serve ./folder`, remains auth-free.
 
 Accounts are email, password, and name, kept in a file-backed registry
 (`auth.json`): bcrypt password hashes and SHA-256 token digests, atomically
