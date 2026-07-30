@@ -184,7 +184,7 @@ classDiagram
         volumes/id/daemon.lock
         volumes/id/daemon.pid
     }
-    note for DaemonLock "internal/daemon — liveness is the flock, held for the daemon's lifetime; the kernel drops it at death/reboot, so a leftover pid can never read as running (pid is display + signal only)"
+    note for DaemonLock "internal/daemon — liveness is the flock, held for the daemon's lifetime; the kernel drops it at death/reboot, so a leftover pid can never read as running (pid is display + signal only). The daemon writes daemon.pid ITSELF, after taking the lock, and removes it on exit: only the lock holder may name itself there, or Stop signals a pid that lost the start race. Start writes no pid — it waits for the lock, so a returned pid always has a daemon behind it"
 
     Commands --> Autostart : autostart install/uninstall (init runs install automatically)
     Autostart ..> Commands : login runs `bdrive resume`
