@@ -13,7 +13,7 @@ sign-in and org membership, and a **public link** that needs no account.
 
 ```console
 $ bdrive url wiki/report.html
-https://drive.example.com/p-1a2b3c4d/wiki/report.html
+https://drive.example.com/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d/wiki/report.html
 ```
 
 Computed locally with no network call, always shows the latest synced content,

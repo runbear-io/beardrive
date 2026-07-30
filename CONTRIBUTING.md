@@ -21,7 +21,7 @@ touch your real `~/.bdrive`.
 ```sh
 go build -o bdrive ./cmd/bdrive
 mkdir -p /tmp/hub-storage
-./bdrive web /tmp/hub-storage --addr :8080 --upload   # plain-folder viewer
+./bdrive serve /tmp/hub-storage --addr :8080 --upload   # plain-folder viewer
 ```
 
 For hub mode with accounts, see the self-hosting guide

@@ -28,6 +28,8 @@ test("guide: one paste for every agent, one line of prose, details collapsed", a
     "Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md",
   );
   expect(prompt).toContain(`project ${pid} on http://localhost:8993`);
+  // The name rides along so the agent can recommend it as the folder name.
+  expect(prompt).toContain('the project is named "wiki"');
   expect(prompt).not.toContain("brew install");
   // Detail lives behind the two collapsed sections.
   await expect(page.locator(".gd-manual > summary")).toHaveText([

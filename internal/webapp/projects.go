@@ -1,8 +1,6 @@
 package webapp
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"sort"
@@ -10,6 +8,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // Project is one synced project hosted by this server. Its storage lives
@@ -41,7 +41,12 @@ func (p Project) level() string {
 	return p.Default
 }
 
-var projectIDRe = regexp.MustCompile(`^p-[0-9a-f]{8}$`)
+// projectIDRe is the authority on what a project id may look like: a UUID
+// (what new projects get) or the legacy `p-xxxxxxxx` form hubs minted before
+// — ids are permanent, so the old shape stays valid forever. Client-side
+// parsers (remote/http.go, the share command) only check the loose shape and
+// let the hub decide.
+var projectIDRe = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|p-[0-9a-f]{8})$`)
 
 // iconRe validates the *shape* of an icon name only. The list of icons a
 // project may pick from lives in the frontend (shell.tsx's PROJECT_ICONS) —
@@ -122,11 +127,7 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 			return p, false, nil
 		}
 	}
-	var buf [4]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return Project{}, false, err
-	}
-	p := Project{ID: "p-" + hex.EncodeToString(buf[:]), Name: name, Org: org, Created: time.Now().UTC()}
+	p := Project{ID: uuid.NewString(), Name: name, Org: org, Created: time.Now().UTC()}
 	db.byID[p.ID] = p
 	if err := db.repo.Put(p); err != nil {
 		delete(db.byID, p.ID)
