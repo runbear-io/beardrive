@@ -14,7 +14,7 @@ import { useHeat, useTree } from "../hooks/useBrowse";
 import { useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { HTML_EXT, copyText } from "../util";
+import { HTML_EXT, PDF_EXT, copyText } from "../util";
 import { toast } from "../toast";
 import { onSearchRequest } from "../search";
 import { track } from "../analytics";
@@ -352,7 +352,8 @@ export default function Browser(props: {
         />
       );
     } else {
-      pageWidth = HTML_EXT.test(path) ? "wide" : "read";
+      // A PDF page is unreadable squeezed into the 768px reading column.
+      pageWidth = HTML_EXT.test(path) || PDF_EXT.test(path) ? "wide" : "read";
       pageClass = "markdown";
       view = (
         <>

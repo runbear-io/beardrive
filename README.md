@@ -4,7 +4,7 @@
 synchronized across all your devices and teammates through a BearDrive
 **hub**, every change is tracked (who, when, on which device), and
 everything keeps working offline. The CLI is `bdrive`; a hub is a
-`bdrive web` server you (or we) run on an object store — clients sync
+`bdrive serve` server you (or we) run on an object store — clients sync
 through it over HTTPS and never touch the storage directly.
 
 What it's for, first and foremost: **sharing context across AI agents** —
@@ -46,6 +46,41 @@ $ bdrive login https://your-hub && cd ~/workspace && bdrive init
 # … connect the same project; the files appear and stay in sync
 ```
 
+## What this looks like
+
+Say your teammate Dana spent yesterday afternoon with her agent working out
+why checkout fails for EU cards, and the agent wrote it down. Today you hit a
+related bug. Here's the difference a shared folder makes.
+
+**Without one**, your agent starts from nothing:
+
+> **You:** why do EU checkouts fail?
+>
+> **Agent:** Let me investigate — searching the payment flow…
+
+Some minutes and a few thousand tokens later it rediscovers what Dana's agent
+already knew. Or it reaches a different conclusion and writes a second doc
+that quietly contradicts hers.
+
+**With BearDrive**, the folder is already fresh before the agent reads a
+single file — the pull hook runs the moment you hit enter:
+
+> **You:** why do EU checkouts fail?
+>
+> **Agent:** `shared/findings/eu-checkout.md` [🔗](https://your-hub/p/…)
+> covers this. Dana's agent traced it to the 3-D Secure redirect dropping the
+> session cookie on Safari, and the fix it proposes isn't applied yet. Want me
+> to apply it?
+
+When your agent writes its own findings down, the push hook puts them on the
+hub seconds later, and Dana's next session starts from *your* work. Both
+directions, no one exporting or pasting anything.
+
+Because these are real files, the same folder is also a website: any file can
+become a public link that renders as a page, the History view shows who
+changed what from which device, and the Dashboard shows which docs your agents
+actually read (and which hot ones nobody maintains).
+
 ## Features
 
 - **Any folder is a project** — `bdrive init` turns any folder into a synced
@@ -75,6 +110,51 @@ $ bdrive login https://your-hub && cd ~/workspace && bdrive init
 - **macOS & Linux.**
 
 ## Install
+
+BearDrive is meant to be set up by the agent that will use it. The fastest
+path is to have your agent do it; the CLI route below is the same
+destination, by hand.
+
+### Have your agent set it up (recommended)
+
+No terminal needed: start any agent (Claude Code, Codex, Gemini CLI, Hermes)
+in the folder you want synced and give it one paste:
+
+```
+Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
+to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to
+sync (the project is named "<project-name>").
+```
+
+Joining a teammate's project? They can copy that paste with the hub URL and
+project id already filled in from the project's home page in the web UI.
+Starting fresh, drop the trailing sentence — the agent recommends `shared/`
+and names the new project `shared`.
+
+The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
+it: install the CLI, then one `bdrive init` — which signs in (an approval link
+when there is no local browser), registers the sync hooks, and prints the
+project link. The instructions live at that URL rather than inside the prompt
+so they never go stale in someone's copy, and the agent handles every
+deviation (already installed, no Homebrew, sign-in, wrong folder).
+
+Those hooks are the whole integration, and `bdrive init` registers them in
+each platform's user config (`~/.claude/settings.json` and friends), once per
+machine, so every session in every folder is covered:
+
+- a **blocking pull** when you send a message, so the agent always reads
+  fresh team files — it also injects the project's link convention, so the
+  agent appends a hub link to any synced path it mentions;
+- an **async push** after every file edit, so artifacts are on the hub
+  seconds after the agent writes them;
+- **read tracking**, so the hub's Dashboard can show what your agents
+  actually read.
+
+Each hook no-ops instantly outside BearDrive projects, which is what makes a
+machine-wide registration safe. `bdrive hooks` prints what's set up on this
+machine; re-run it after a CLI upgrade.
+
+### Install the CLI yourself
 
 ```sh
 brew install runbear-io/tap/beardrive  # macOS (and Linuxbrew); installs the `bdrive` CLI
@@ -136,13 +216,13 @@ hub's own storage, never something a syncing client points at directly:
 | `s3://bucket/prefix` | `AWS_PROFILE`, `~/.aws/credentials`, env vars, IAM roles. S3-compatible stores via `AWS_ENDPOINT_URL`. |
 | `gs://bucket/prefix` | Application Default Credentials (`gcloud auth application-default login`) or `GOOGLE_APPLICATION_CREDENTIALS`. |
 | `file:///path` | none — any local or network-mounted directory |
-| `https://host:port/p/<id>` | none — syncs through a bdrive web hub; only the server holds storage credentials (see [The sync hub and `bdrive init`](#the-sync-hub-and-bdrive-init)) |
+| `https://host:port/p/<id>` | none — syncs through a BearDrive hub; only the server holds storage credentials (see [The sync hub and `bdrive init`](#the-sync-hub-and-bdrive-init)) |
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
+| `bdrive login [server-url]` | Sign this device in (browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--yes`) for scripts; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent; this is what the login agent runs |
@@ -156,11 +236,11 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
-| `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
+| `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the file was written (ops recorded before this was tracked, and deletes, show their sync time instead) |
 | `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change (`--list` shows the versions; no version = the previous one). Nothing is erased and it syncs everywhere like any edit. A file that was *created* can't be un-created yet |
 | `bdrive export [folder]` | Export the whole project — every device's journal, all blobs, full history — from its hub to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides); history and authorship carry over. Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
-| `bdrive web [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub |
+| `bdrive serve [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
 | `bdrive whoami` | Signed-in account and device identity used in change tracking |
 | `bdrive version` | Print the version (also `bdrive --version`) |
 
@@ -197,16 +277,16 @@ removal and simply stops tracking the path.
 
 ## Web server
 
-`bdrive web` serves a website — browse folders and files, read markdown
+`bdrive serve` serves a website — browse folders and files, read markdown
 rendered Obsidian-style (including `[[wikilinks]]`, task lists, and
 tables), download any file — and, pointed at a storage root, becomes a
 **multi-project sync hub**. It is read-only unless started with `--upload`.
 
 ```sh
-bdrive web                              # serve the current directory (viewer)
-bdrive web ./notes                      # serve a folder from disk (viewer)
-bdrive web -c config.json               # everything from a config file
-bdrive web s3://my-bucket/root --upload # multi-project sync hub
+bdrive serve                              # serve the current directory (viewer)
+bdrive serve ./notes                      # serve a folder from disk (viewer)
+bdrive serve -c config.json               # everything from a config file
+bdrive serve s3://my-bucket/root --upload # multi-project sync hub
 ```
 
 With a folder it serves files straight from disk — on a BearDrive mount the
@@ -222,7 +302,7 @@ the positional argument), `--upload` (allow client writes, off by default),
 `-c/--config` (read all of the above from a JSON file; explicit flags win):
 
 ```jsonc
-// bdrive web -c config.json
+// bdrive serve -c config.json
 {
   "remote": "s3://my-bucket/root",   // storage root (hub) — or "dir": "./folder" (viewer)
   "addr": ":4173",
@@ -304,7 +384,7 @@ access does not kill links they already minted.
 
 ```sh
 # On the server device (knows the storage)
-bdrive web -c config.json
+bdrive serve -c config.json
 
 # On each client device (knows only the server) — one command does it all:
 bdrive login https://drive.example.com:4173   # once per device
@@ -382,16 +462,10 @@ means LAN-only links.
 
 ### Agent integration
 
-Point any agent at [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) (see
-[Set up an agent to do it for you](#set-up-an-agent-to-do-it-for-you)) and it
-sets a project up conversationally: install the CLI, sign in, create or
-connect a project (whole folder or a shared subfolder like `wiki/`), and
-register the sync hooks in your user config (`~/.claude/settings.json` and
-friends, once per machine) — a blocking pull when you submit a prompt so the
-agent reads fresh team files, and an async push after every file edit so
-artifacts are on the hub seconds after the agent writes them. The payoff:
-"write a report and share it" becomes the agent generating
-`wiki/report.html` and replying with a link.
+Setup is conversational — one paste and the agent does the rest, hooks
+included ([Have your agent set it up](#have-your-agent-set-it-up-recommended)).
+The payoff, once those hooks are in place: "write a report and share it"
+becomes the agent generating `wiki/report.html` and replying with a link.
 
 The web UI lists your orgs' projects in the sidebar (⌘K opens a command
 palette: fuzzy file search, project switching, share/history/upload
@@ -456,47 +530,6 @@ With `--upload` set, the server decides per upload how the bytes travel:
   presign, so the client sends content to the server, which stores it
   (object store + journal, or straight to disk for a served folder, where
   the daemon will pick it up like any local edit).
-
-## Set up an agent to do it for you
-
-No terminal needed: start any agent (Claude Code, Codex, Gemini CLI, Hermes)
-in the folder you want synced and give it one paste:
-
-```
-Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to
-sync (the project is named "<project-name>").
-```
-
-Naming the project makes the agent recommend a folder of the same name, so
-every teammate's checkout looks alike; with no project at all it recommends
-`shared/` and names the new project `shared`.
-
-The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
-it: install the CLI, then one `bdrive init` — which signs in (an approval link
-when there is no local browser), registers the sync hooks, and prints the
-project link. The instructions live at that URL rather than inside the prompt
-so they never go stale in someone's copy, and the agent handles every
-deviation (already installed, no Homebrew, sign-in, wrong folder).
-
-Those hooks are the whole integration, and `bdrive init` registers them in
-each platform's user config (`~/.claude/settings.json` and friends), once per
-machine, so every session in every folder is covered:
-
-- a **blocking pull** when you send a message, so the agent always reads
-  fresh team files — it also injects the project's link convention, so the
-  agent appends a hub link to any synced path it mentions;
-- an **async push** after every file edit, so artifacts are on the hub
-  seconds after the agent writes them;
-- **read tracking**, so the hub's Dashboard can show what your agents
-  actually read.
-
-Each hook no-ops instantly outside BearDrive projects, which is what makes a
-machine-wide registration safe. `bdrive hooks` prints what's set up on this
-machine; re-run it after a CLI upgrade.
-
-A project's home page in the web UI shows this paste with the hub URL and
-project id already filled in (plus the plain-terminal version).
 
 ## How it works
 
