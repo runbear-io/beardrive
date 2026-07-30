@@ -78,6 +78,7 @@ classDiagram
 
     class lib {
         +diff.ts splitLines lcsDiff diffText
+        +heat.ts ageRange isFlatRange ageSpanLabel
         +utils.ts
     }
     note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package"
