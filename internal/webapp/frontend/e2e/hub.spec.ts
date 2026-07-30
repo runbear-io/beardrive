@@ -90,6 +90,10 @@ test("new project via the sidebar + modal", async ({ page }) => {
   await login(page);
   await page.click("#projects .nav-add");
   await page.fill(".modal-input", "scratch");
+  // The starting point defaults to an empty project, so this path still
+  // describes exactly what it did before templates existed.
+  await expect(page.locator(".start-points")).toBeVisible();
+  await expect(page.locator(".start-point.on")).toContainText("Empty project");
   await page.click(".modal .pbtn");
   await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("scratch");
@@ -100,6 +104,22 @@ test("new project via the sidebar + modal", async ({ page }) => {
   await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("wiki");
   await expectToast(page, "Created");
+});
+
+// Picking a template seeds the project on the hub, so the folder listing
+// shows the structure before any device has ever connected.
+test("new project from a template", async ({ page }) => {
+  await login(page);
+  await page.click("#projects .nav-add");
+  await page.fill(".modal-input", "from-template");
+  await page.click('.start-point:has-text("Plain docs + ADRs")');
+  await expect(page.locator(".start-point.on")).toContainText("Plain docs + ADRs");
+  await page.click(".modal .pbtn");
+  await page.waitForURL(/\/[0-9a-f-]{36}$/);
+  await expect(page.locator("#project-select")).toContainText("from-template");
+  for (const name of ["docs", "decisions", "AGENTS.md"]) {
+    await expect(page.locator("#content").getByText(name, { exact: true }).first()).toBeVisible();
+  }
 });
 
 test("account menu closes on Escape and outside click", async ({ page }) => {

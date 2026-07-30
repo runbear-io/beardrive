@@ -9,10 +9,12 @@ import {
 } from "@/components/ui/select";
 import { postJSON } from "../api/http";
 import type { Project, ProjectCreated } from "../api/types";
-import { modalPrompt } from "../modal";
 import { toast } from "../toast";
+import { useConfig } from "../hooks/useConfig";
 import { useHubRefresh } from "../hooks/useHub";
+import { NewProjectDialog } from "./NewProjectDialog";
 import { closeSidebarOnMobile } from "./shell";
+import { useState } from "react";
 
 // Deterministic accent for a project's letter-mark, so each project keeps a
 // stable color across reloads without any server state.
@@ -41,13 +43,14 @@ export function ProjectNav({
   menu?: ProjectMenu;
 }) {
   const refresh = useHubRefresh();
+  const cfg = useConfig().data;
+  const [creating, setCreating] = useState(false);
   const current = projects.find((p) => p.id === currentId);
 
-  const create = async () => {
-    const name = await modalPrompt("New project", "Project name", "", "Create");
-    if (name === null) return;
+  const create = async (name: string, template: string) => {
     try {
-      const out = await postJSON<ProjectCreated>("/api/projects", { name });
+      const out = await postJSON<ProjectCreated>("/api/projects", { name, template });
+      setCreating(false);
       await refresh();
       navigate("/" + out.project.id);
       toast(`Created “${out.project.name}”.`);
@@ -60,10 +63,22 @@ export function ProjectNav({
     <nav id="projects" aria-label="Projects">
       <div className="nav-head">
         <span>Projects</span>
-        <button className="nav-add" title="New project" aria-label="New project" onClick={create}>
+        <button
+          className="nav-add"
+          title="New project"
+          aria-label="New project"
+          onClick={() => setCreating(true)}
+        >
           +
         </button>
       </div>
+      {creating && (
+        <NewProjectDialog
+          templates={cfg?.templates ?? []}
+          onCreate={create}
+          onClose={() => setCreating(false)}
+        />
+      )}
       <div className="proj-row">
         <Select
           value={currentId || ""}

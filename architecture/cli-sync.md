@@ -121,6 +121,14 @@ classDiagram
     }
     note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"
 
+    class Templates {
+        <<internal/templates>>
+        go:embed files/docs, files/para
+        List / Get / Names
+        WriteTo(dir) skips existing paths
+    }
+    note for Templates "init --template <name>: refused with --only and on an unknown name BEFORE any write. The hub seeds at creation (the CLI creates through POST /api/projects), so WriteTo runs only as the fallback for a hub too old to know the field, and in an already-initialized folder — the agent's post-init path. Skipping existing paths is what makes a double-seed a no-op"
+
     class syncBlocked {
         <<gate>>
         enrolled in mounts.json?
@@ -196,6 +204,7 @@ classDiagram
     syncBlocked --> PausedMarker : Paused check
     Commands --> openSession : after the gate
     openSession --> MountRegistry : path self-heal (enrolled only)
+    Commands --> Templates : init --template (seed) / init resume (agent's post-init path)
     Commands --> startSync : init
     startSync --> MountRegistry : enrolls
     startSync --> PausedMarker : clears

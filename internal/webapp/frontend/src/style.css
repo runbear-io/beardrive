@@ -751,6 +751,19 @@ a.ai-main:hover { color: var(--accent); }
 .modal-input { width: 100%; height: 36px; padding: 0 12px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 14px; margin-bottom: 16px; outline: none; }
 .modal-input:focus { border-color: var(--accent); background: var(--hover); }
 
+/* starting-point picker (new-project dialog) — native radios, styled with
+   the accent token; no extra ui/* component for three options. */
+.start-points { border: 0; margin: 0 0 18px; padding: 0; }
+.start-points legend { padding: 0; }
+.start-point { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--surface); cursor: pointer; margin-bottom: 6px; }
+.start-point:hover { background: var(--hover); }
+.start-point.on { border-color: var(--accent); background: var(--hover); }
+.start-point input { accent-color: var(--accent); margin: 2px 0 0; flex: none; }
+.sp-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sp-title { font-size: 13.5px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.sp-rec { font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px; line-height: 15px; }
+.sp-blurb { font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
+
 /* ---- toast ---- */
 [data-sonner-toast] { background: var(--bg-raise) !important; color: var(--text) !important; border: 1px solid var(--border-2) !important; border-radius: 10px !important; font-size: 13.5px !important; box-shadow: 0 18px 44px -12px rgba(0,0,0,.7) !important; }
 [data-sonner-toast][data-type="error"] { border-color: rgba(242,109,109,.5) !important; color: #ffb0aa !important; }

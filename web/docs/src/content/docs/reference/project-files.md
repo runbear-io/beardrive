@@ -39,7 +39,10 @@ so every device shares the same rules. See
 ## And nothing else
 
 Those two are all BearDrive puts in a project: `.bdrive/config.json`,
-`.bdriveignore`, and your own files. No agent-config directory is ever created
+`.bdriveignore`, and your own files. (A project created from a template also
+starts with an `AGENTS.md` and a directory skeleton — but those are ordinary
+synced files, yours to edit or delete like any other; nothing reads them but
+your agents.) No agent-config directory is ever created
 here — the sync hooks live in each platform's user config
 (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/settings.json`,
 `~/.hermes/config.yaml`), written once per machine. See

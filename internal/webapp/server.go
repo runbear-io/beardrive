@@ -37,6 +37,7 @@ import (
 
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/templates"
 )
 
 //go:embed static
@@ -513,6 +514,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		"auth":  auth,
 		"reads": map[string]any{"enabled": s.Reads != nil},
+		// The starting structures the create dialog offers. Served rather
+		// than hardcoded in the frontend so a hub that ships another one
+		// needs no frontend change.
+		"templates": templates.List(),
 	}
 	// Outside a managed deployment this block is absent and the frontend
 	// never loads a tracker. Outside the `me` check on purpose: a hub with
@@ -601,10 +606,23 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 		Org  string `json:"org,omitempty"`
+		// Template is the starting structure to seed, "" for an empty
+		// project (the historical behavior).
+		Template string `json:"template,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	// Resolve the template before anything is created, so an unknown name
+	// leaves no project behind.
+	var tpl templates.Template
+	if req.Template != "" {
+		var err error
+		if tpl, err = templates.Get(req.Template); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	org, err := s.orgForCreate(r, req.Org)
 	if err != nil {
@@ -640,6 +658,22 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
+			}
+			p, _ = s.Projects.Get(p.ID)
+		}
+		if tpl.Name != "" {
+			// Seeding failure leaves a real, usable project holding part of a
+			// template. Say so rather than reporting success; there is no
+			// rollback, and deleting a project over a storage hiccup is worse
+			// than an honest error.
+			if err := s.seedTemplate(r.Context(), p.ID, tpl, s.requestUser(r)); err != nil {
+				http.Error(w, fmt.Sprintf("project %s was created, but seeding the %s template failed: %v",
+					p.Name, tpl.Name, err), http.StatusBadGateway)
+				return
+			}
+			if err := s.Projects.SetTemplate(p.ID, tpl.Name); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
 			}
 			p, _ = s.Projects.Get(p.ID)
 		}
