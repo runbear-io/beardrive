@@ -18,7 +18,10 @@ test("markdown file: rendered content, crumb, meta, download + share buttons", a
   await page.waitForURL(`/${pid}/index.md`);
   await expect(page.locator("#content h1")).toHaveText("Wiki");
   await expect(page.locator("#crumb")).toContainText("index.md");
-  await expect(page.locator("#meta")).toContainText("alice@x.io");
+  // The full whoChanged() string, not just the address: the seed's Author
+  // equals its User, so "alice@x.io" alone passed even when the viewer was
+  // rendering the git/OS identity instead of the signed-in account.
+  await expect(page.locator("#meta")).toContainText("Alice <alice@x.io>");
   // Download lives in the ⋯ menu now; the hidden anchor powers it.
   await expect(page.locator("#download")).toHaveCount(1);
   await expect(page.locator("#more-btn")).toBeVisible();
