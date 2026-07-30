@@ -29,7 +29,7 @@ $ bdrive login https://your-hub   # once per device — self-host a hub in ~10 m
 $ cd ~/workspace && bdrive init
 initialized /Users/snow/workspace
   server:  https://your-hub
-  project: workspace (p-7f3a2c91)
+  project: workspace (7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4)
   claude   hooks registered  →  /Users/snow/.claude/settings.json
   login:   autostart registered  →  ~/Library/LaunchAgents/ai.beardrive.daemon.plist
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
@@ -185,7 +185,7 @@ the project:
 ```jsonc
 // .bdrive/config.json
 { "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/p-7f3a2c91" }
+  "remote": "https://drive.example.com/p/7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4" }
 ```
 
 Opting out is non-destructive: when a pattern starts matching an
@@ -346,7 +346,7 @@ viewer URL, gated by sign-in and the project's org membership:
 
 ```console
 $ bdrive url wiki/report.html
-https://drive.example.com/p-1a2b3c4d/wiki/report.html
+https://drive.example.com/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d/wiki/report.html
 ```
 
 It's computed locally (no network), always shows the latest synced
@@ -464,8 +464,13 @@ in the folder you want synced and give it one paste:
 
 ```
 Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sync.
+to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to
+sync (the project is named "<project-name>").
 ```
+
+Naming the project makes the agent recommend a folder of the same name, so
+every teammate's checkout looks alike; with no project at all it recommends
+`shared/` and names the new project `shared`.
 
 The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
 it: install the CLI, then one `bdrive init` — which signs in (an approval link

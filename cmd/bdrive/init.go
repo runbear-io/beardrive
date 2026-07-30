@@ -79,8 +79,8 @@ the folder was renamed or moved.`,
 		Example: `  bdrive init                        # interactive
   bdrive init wiki                   # ./wiki is the project
   bdrive init ./notes --name shared-notes
-  bdrive init --project p-7f3a2c91   # connect an existing project
-  bdrive init --project p-7f3a2c91 --server https://hub.example.com
+  bdrive init --project 7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4   # connect an existing project
+  bdrive init --project 7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4 --server https://hub.example.com
   bdrive init . --only wiki,docs     # this folder, but only ./wiki and ./docs sync
   bdrive init --yes                  # accept all defaults (no prompts)`,
 		Args: cobra.MaximumNArgs(1),
