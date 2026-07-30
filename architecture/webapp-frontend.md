@@ -78,6 +78,7 @@ classDiagram
 
     class lib {
         +diff.ts splitLines lcsDiff diffText
+        +runs.ts groupRuns runFileCount
         +utils.ts
     }
     note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package"
@@ -91,7 +92,7 @@ classDiagram
     Browser --> components
     HubApp --> components
     components --> nav : linkProps navigate
-    components --> lib : diffText
+    components --> lib : diffText groupRuns
     hooks --> api
     Browser --> hooks
     HubApp --> hooks
