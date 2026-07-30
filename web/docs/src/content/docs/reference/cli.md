@@ -9,9 +9,11 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in. Browser flow; `--device` forces the code flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
+| `bdrive login [server-url]` | Sign this device in. Browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
 | `bdrive logout` | Sign this device out — clear the saved token and account. `--forget` also drops the remembered server |
-| `bdrive init [folder]` | Create or connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY; flags (`--name`, `--project`, `--server`, `--only`, `--yes`) for scripts. Also installs the agent skill, registers agent sync hooks for detected platforms (`--no-hooks` skips the hooks only), and prints the project's hub link. Re-run to resume |
+| `bdrive init [folder]` | Create or connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY; flags (`--name`, `--project`, `--server`, `--only`, `--yes`) for scripts. Also registers agent sync hooks for detected platforms (`--no-hooks` skips them) and a login item so sync resumes after a reboot (`--no-autostart` skips), and prints the project's hub link. Re-run to resume |
+| `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent, so running it twice is harmless. This is what the login item runs |
+| `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot: a user LaunchAgent on macOS, a systemd user unit on Linux (needs systemd), a per-user Run entry on Windows. `bdrive init` installs it; `--no-autostart` skips it |
 | `bdrive stop [folder]` | Stop syncing — daemon and agent sync hooks both pause. Files stay on disk; `bdrive init` resumes |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes. Run from the mount root; the daemon picks changes up in seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub |
 | `bdrive scope --explain` | List every path in the folder, split into what syncs and what does not, with counts — the verifiable answer to "what leaves this machine". Pure read: no daemon, no lock, no network |
@@ -20,15 +22,13 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive share <file>` | Public URL for a synced file. `--list`, `--revoke`, `--expires` (the hub's Share dialog can also set an expiry on an existing link) |
 | `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each detected agent platform's user config — once per machine, covering every folder. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection. `uninstall` removes only BearDrive's own hook entries |
-| `bdrive skill [install]` | Install the `beardrive` skill into detected agent platforms so the agent can do setup itself. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection |
-| `bdrive hook-approve` | Hook plumbing: answers the beardrive plugin's `PreToolUse` hook, auto-approving bare `bdrive init\|login\|hooks\|status\|sync\|url` so setup costs no permission prompts. Anything with a shell operator is left to the normal prompt |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
-| `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
+| `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the file was written (ops recorded before this was tracked, and deletes, show their sync time instead) |
 | `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change. No version restores the previous one; `--list` shows the versions with their short hashes |
 | `bdrive export [folder]` | Export the whole project — all devices' history and content — to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides the archive's name) |
-| `bdrive web [folder \| storage-root-url]` | Web server: viewer, uploads, multi-project sync hub |
+| `bdrive serve [folder \| storage-root-url]` | Web server: viewer, uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
 | `bdrive whoami` | Signed-in account and device identity used in change tracking |
 | `bdrive version` | Version (also `bdrive --version`) |
 
@@ -49,9 +49,10 @@ setting. Full flag bypass with `--name`, `--project`, `--only`, `--yes`, and
 it never prompts without a TTY.
 
 It runs the login flow first when there is no session, writes
-`.bdrive/config.json`, seeds `.bdriveignore`, installs the `beardrive` skill and
-registers agent sync hooks for every detected platform (Claude Code, Codex,
-Gemini CLI, Hermes — `--no-hooks` skips the hooks; the skill is installed either way), starts sync, and prints the
+`.bdrive/config.json`, seeds `.bdriveignore`, registers agent sync hooks for
+every detected platform (Claude Code, Codex, Gemini CLI, Hermes — `--no-hooks`
+skips them) and a login item that restarts syncing after a reboot
+(`--no-autostart` skips), starts sync, and prints the
 project's hub link. That is deliberate: one command means one permission prompt
 for an agent, instead of four. Re-running it resumes — including after a folder
 move.
@@ -59,7 +60,7 @@ move.
 The hooks land in each platform's **user** config (`~/.claude/settings.json` and
 friends), once per machine, so they cover every session in every folder; nothing
 is written inside the project. See
-[Skills and hooks in detail](/manual/skills-and-hooks/).
+[Hooks in detail](/manual/hooks/).
 
 The daemon scans every 3s and talks to the hub every 10s; those intervals are
 tunable on `bdrive daemon run`, not on init.

@@ -19,8 +19,8 @@ import (
 	"github.com/runbear-io/beardrive/internal/webapp"
 )
 
-// webConfig mirrors the web command's flags so a server can be configured
-// from a file (bdrive web -c config.json). Explicitly-passed flags win over
+// webConfig mirrors the serve command's flags so a server can be configured
+// from a file (bdrive serve -c config.json). Explicitly-passed flags win over
 // file values.
 type webConfig struct {
 	Remote     string `json:"remote,omitempty"`
@@ -87,8 +87,9 @@ func webCmd() *cobra.Command {
 	var upload bool
 	var cfg webConfig
 	c := &cobra.Command{
-		Use:   "web [folder | storage-root-url]",
-		Short: "Serve the bdrive web server: viewer, uploads, and sync hub",
+		Use:     "serve [folder | storage-root-url]",
+		Aliases: []string{"web"},
+		Short:   "Serve the bdrive web server: viewer, uploads, and sync hub",
 		Long: `Serve the bdrive web server: browse folders and files, read rendered
 markdown (Obsidian-style, including [[wikilinks]]), and download any file.
 
@@ -106,10 +107,12 @@ The server is read-only unless --upload is set. With uploads on, content
 travels directly between clients and the object store through short-lived
 presigned URLs when the backend supports it (S3, GCS with signing
 credentials); otherwise it is relayed through this server.`,
-		Example: `  bdrive web                          # serve the current directory
-  bdrive web ./notes                  # serve a folder
-  bdrive web -c config.json           # everything from a config file
-  bdrive web s3://bucket/root --upload  # multi-project sync hub`,
+		Example: `  bdrive serve                          # serve the current directory
+  bdrive serve ./notes                  # serve a folder
+  bdrive serve -c config.json           # everything from a config file
+  bdrive serve s3://bucket/root --upload  # multi-project sync hub
+
+  bdrive web                            # deprecated alias for "bdrive serve"`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Config file first; flags that were explicitly passed override
