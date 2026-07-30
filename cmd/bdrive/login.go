@@ -297,7 +297,7 @@ func browserLogin(server, loginPath string) (string, serverUser, error) {
 		// a URL the user pastes elsewhere would dead-end — use the code flow.
 		return "", serverUser{}, errNoBrowser
 	}
-	fmt.Println("waiting for the browser sign-in… (no browser here? Ctrl-C and run `bdrive login --device`)")
+	fmt.Println("waiting for you to approve the sign-in in your browser… (no browser here? Ctrl-C and run `bdrive login --device`)")
 
 	select {
 	case code := <-codeCh:
@@ -330,10 +330,13 @@ func exchangeCode(server, code string) (string, serverUser, error) {
 	return out.Token, out.User, nil
 }
 
-// deviceCodeLogin runs the headless flow: show a code, poll until the user
-// approves it from any browser.
+// deviceCodeLogin runs the headless flow: print one approval link, poll until
+// the user opens it in a signed-in browser. The link carries the secret, so
+// there is no code to read off this screen and type into another — and the
+// page it opens names this device, so the approver can see what they're
+// approving.
 func deviceCodeLogin(server string) (string, serverUser, error) {
-	body, _ := json.Marshal(map[string]string{"device": deviceName()})
+	body, _ := json.Marshal(map[string]string{"device": deviceName(), "os": runtime.GOOS})
 	resp, err := initClient.Post(server+"/api/auth/device/start", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", serverUser{}, err
@@ -351,7 +354,13 @@ func deviceCodeLogin(server string) (string, serverUser, error) {
 	if start.Interval <= 0 {
 		start.Interval = 2
 	}
-	fmt.Printf("on any signed-in browser, open:\n  %s\nand approve code: %s\n", start.VerifyURL, start.Code)
+	// Older hubs (pre-0.13) hand back a short code and expect it typed into
+	// /auth/device; keep that instruction for them.
+	if start.VerifyURL == "" {
+		fmt.Printf("on any signed-in browser, open:\n  %s/auth/device\nand approve code: %s\n", server, start.Code)
+	} else {
+		fmt.Printf("to finish signing in, open this link in any browser:\n  %s\n", start.VerifyURL)
+	}
 
 	deadline := time.Now().Add(10 * time.Minute)
 	for time.Now().Before(deadline) {

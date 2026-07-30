@@ -1,4 +1,4 @@
-# `bdrive web` server — class diagram
+# `bdrive serve` server — class diagram
 
 Source of truth: `internal/webapp` (server, services, persistence) and
 `internal/remote` (storage backends). Reflects the code as of this commit;
@@ -25,6 +25,7 @@ classDiagram
         +Dir Directory
         +Quota QuotaProvider
         +Billing func(email) (plan, url, ok)
+        +Analytics AnalyticsConfig
         +ShareRPM int
         -vols per-project volume cache
         +Handler() http.Handler
@@ -187,6 +188,13 @@ classDiagram
     }
     class UnlimitedQuota
 
+    class AnalyticsConfig {
+        +Key string
+        +Host string
+        +Endpoint() string
+    }
+    note for AnalyticsConfig "Third managed-deployment seam beside Quota and Billing, but a value rather than an interface — there is nothing to implement, only a project to name. Emitted as /api/config `analytics` when Key is set; empty means the frontend loads no tracker and contacts nobody, which is what a self-hosted hub gets. Endpoint() is exported because the cloud module renders its own loader from the same value."
+
     Server o-- "0..1" Source : single-volume mode
     Server o-- "0..1" Backend : Root (hub mode)
     Server o-- ProjectDB
@@ -196,6 +204,7 @@ classDiagram
     Server o-- ShareDB
     Server o-- ReadLedger
     Server o-- QuotaProvider
+    Server *-- AnalyticsConfig
     Server *-- volume : per project, cached
     volume o-- Source
 

@@ -1,7 +1,7 @@
 # `bdrive` CLI & sync engine — class diagram
 
 Source of truth: `cmd/bdrive` (commands, gates) and `internal/{syncer,store,
-journal,config,daemon,agenthooks,agentskills}`; the `internal/remote` seam is drawn in
+journal,config,daemon,agenthooks,autostart}`; the `internal/remote` seam is drawn in
 [webapp-server.md](webapp-server.md). Reflects the code as of this commit;
 update this file in any PR that changes these types or their relationships.
 
@@ -24,6 +24,7 @@ classDiagram
         +Cycle(ctx) Result
         +Restore(ctx, path, sha) error
     }
+    note for Session "syncer also exposes LogEntries (causal order, what bdrive restore walks) plus DisplayTime / SortForDisplay — the newest-first-by-clock order bdrive log prints"
     note for Session "Restore writes a historical blob back into the working folder as an ordinary edit (fetching it from the hub when this device never held it) — the next Cycle journals it like any other change; it takes no lock and appends to no journal itself"
     note for Session "internal/syncer — scan → commit local ops → pull peer journals → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
     note for Session "Prune (bdrive forget / sync --prune, never the daemon) journals a delete for every replayed path the SHARED ignore rules exclude — the include scope is per-device and must never prune it"
@@ -76,8 +77,9 @@ classDiagram
         +Author +User +UserName
         +Kind put or delete
         +Path +Blob +Size +Mode +Note
+        +Mtime when the file was written
     }
-    note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal"
+    note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay"
 
     class Backend {
         <<interface>>
@@ -116,10 +118,10 @@ classDiagram
         init login logout
         sync stop scope forget status log
         restore url share export import
-        web daemon hooks read-log skill
-        hook-approve PreToolUse
+        web daemon hooks read-log
+        resume autostart
     }
-    note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + skill + hooks + sync + link), stop pauses; hook-approve auto-approves only bdrive's own setup subcommands for the plugin's PreToolUse hook"
+    note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"
 
     class syncBlocked {
         <<gate>>
@@ -173,13 +175,22 @@ classDiagram
     }
     note for PausedMarker "set by bdrive stop, cleared only by bdrive init (startSync)"
 
-    class AgentSkills {
-        Detect / Install
-        embedded SKILL.md
+    class Autostart {
+        Install / Uninstall / Installed / Path
+        launchd | systemd | HKCU Run
+        ErrUnsupported (BSD, no-systemd)
     }
-    note for AgentSkills "internal/agentskills — installs the beardrive skill user-level (per-platform skills dir) from the binary's embedded copy; idempotent, refreshed on upgrade"
+    note for Autostart "internal/autostart — ONE login unit per machine that runs `bdrive resume`: darwin a LaunchAgents plist (RunAtLoad, no KeepAlive), linux a systemd user unit + its default.target.wants symlink (needs sd_booted), windows an HKCU Run value. Writes the registration only — never launchctl/systemctl/schtasks"
 
-    Commands --> AgentSkills : skill install
+    class DaemonLock {
+        volumes/id/daemon.lock
+        volumes/id/daemon.pid
+    }
+    note for DaemonLock "internal/daemon — liveness is the flock, held for the daemon's lifetime; the kernel drops it at death/reboot, so a leftover pid can never read as running (pid is display + signal only). The daemon writes daemon.pid ITSELF, after taking the lock, and removes it on exit: only the lock holder may name itself there, or Stop signals a pid that lost the start race. Start writes no pid — it waits for the lock, so a returned pid always has a daemon behind it"
+
+    Commands --> Autostart : autostart install/uninstall (init runs install automatically)
+    Autostart ..> Commands : login runs `bdrive resume`
+    Commands --> DaemonLock : Running / Start / Stop
     Commands --> AgentHooks : hooks install/uninstall (init runs install automatically)
     AgentHooks --> Commands : runs sync and read-log
     Commands --> syncBlocked : sync and read-log gate first

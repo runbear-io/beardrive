@@ -1,36 +1,11 @@
 ---
-title: Skills and hooks in detail
-description: What bdrive skill install and bdrive hooks install actually write — the user-level config paths, hook events, idempotency, and when to re-run them.
+title: Hooks in detail
+description: What bdrive hooks install actually writes — the user-level config paths, hook events, idempotency, and when to re-run it.
 ---
 
-`bdrive init` runs both of these for you — that is why setup is one command. This
-is what they do, for when you want to run them yourself, review what changed, or
-debug a folder that isn't syncing.
-
-## The skill
-
-```sh
-bdrive skill install            # every detected platform
-bdrive skill install --agent codex,hermes
-bdrive skill                    # status table
-```
-
-It writes one `SKILL.md` — the cross-agent format — into each platform's
-user-level skills directory:
-
-| Platform | Path |
-|---|---|
-| Claude Code | `~/.claude/skills/beardrive/SKILL.md` |
-| Codex | `~/.codex/skills/beardrive/SKILL.md` |
-| Gemini CLI | `~/.gemini/skills/beardrive/SKILL.md` |
-| Hermes | `~/.hermes/skills/beardrive/SKILL.md` |
-
-Installs are user-level on purpose: the skill is about the CLI, not about one
-folder, and a synced project folder should never carry it. The file is the
-binary's own copy, so re-running after a CLI upgrade refreshes a stale one.
-
-The Claude Code plugin ships the same skill, so `/plugin install
-beardrive@beardrive` covers Claude without this command.
+`bdrive init` runs this for you — that is why setup is one command. This is what
+it does, for when you want to run it yourself, review what changed, or debug a
+folder that isn't syncing.
 
 ## The hooks
 
@@ -82,8 +57,7 @@ Merging is idempotent and preserves hooks you already have. Each hook carries
 its own marker, so a config written before a hook existed gains just the missing
 one, and a registered hook's matcher is upgraded in place when coverage grows.
 
-Re-run after a CLI upgrade: `bdrive hooks install` and `bdrive skill install`,
-once per machine each.
+Re-run `bdrive hooks install` after a CLI upgrade, once per machine.
 
 ## Where they live matters
 
@@ -105,3 +79,39 @@ without a `.bdrive/` directory, which is what makes registering it globally safe
 `bdrive hooks uninstall` takes them back out — it removes only BearDrive's own
 entries and leaves every other hook in those files untouched. Syncing itself is
 unaffected; only turn-boundary sync stops.
+
+## Surviving a reboot
+
+The sync daemon is an ordinary background process, so a restart ends it. `bdrive
+init` therefore also registers a login item that runs `bdrive resume`, which
+starts a daemon for every project this device syncs and has not paused:
+
+```sh
+bdrive autostart              # is it registered?
+bdrive autostart install      # register it (init already did)
+bdrive autostart uninstall    # stop starting sync at login
+bdrive resume                 # start the daemons right now
+```
+
+One registration covers every project — add or remove projects freely, nothing
+to re-register. Projects paused with `bdrive stop` stay paused; only `bdrive
+init` resumes those.
+
+Where it lives, per platform — user-level either way, no `sudo`, nothing
+machine-wide:
+
+| Platform | What gets written |
+|---|---|
+| macOS | `~/Library/LaunchAgents/ai.beardrive.daemon.plist` (launchd loads it at login) |
+| Linux | `~/.config/systemd/user/beardrive.service` plus the `default.target.wants` symlink that enables it (honors `XDG_CONFIG_HOME`) |
+| Windows | a `BearDrive` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` — visible in Task Manager's Startup tab, where you can disable it |
+
+Linux needs systemd as the init system. Without it — Alpine or another
+runit/OpenRC distro, WSL1, a slim container — `bdrive autostart` says so rather
+than writing a unit nothing would read.
+
+On Windows you may see a console window flicker at logon: bdrive is a console
+program and `resume` exits in milliseconds. Nothing is wrong.
+
+Either way this is not the only thing that recovers sync: an agent turn in a
+project syncs it too, so a machine you actually work on catches up on its own.

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/agenthooks"
-	"github.com/runbear-io/beardrive/internal/agentskills"
+	"github.com/runbear-io/beardrive/internal/autostart"
 	"github.com/runbear-io/beardrive/internal/config"
 )
 
@@ -51,7 +52,7 @@ venv/
 func initCmd() *cobra.Command {
 	var projectID, projectName, serverURL string
 	var only []string
-	var yes, foreground, noHooks bool
+	var yes, foreground, noHooks, noAutostart bool
 	c := &cobra.Command{
 		Use:   "init [folder]",
 		Short: "Start syncing a project in this folder",
@@ -78,8 +79,8 @@ the folder was renamed or moved.`,
 		Example: `  bdrive init                        # interactive
   bdrive init wiki                   # ./wiki is the project
   bdrive init ./notes --name shared-notes
-  bdrive init --project p-7f3a2c91   # connect an existing project
-  bdrive init --project p-7f3a2c91 --server https://hub.example.com
+  bdrive init --project 7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4   # connect an existing project
+  bdrive init --project 7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4 --server https://hub.example.com
   bdrive init . --only wiki,docs     # this folder, but only ./wiki and ./docs sync
   bdrive init --yes                  # accept all defaults (no prompts)`,
 		Args: cobra.MaximumNArgs(1),
@@ -119,9 +120,11 @@ the folder was renamed or moved.`,
 						fmt.Printf("  syncing: ./%s only (rules written to .bdriveignore)\n", strings.Join(scope, ", ./"))
 					}
 				}
-				installSkill(folder)
 				if !noHooks {
 					installAgentHooks(folder)
+				}
+				if !noAutostart {
+					installAutostart()
 				}
 				return startSync(cmd.Context(), folder, proj, foreground, 3*time.Second, 10*time.Second)
 			}
@@ -194,9 +197,11 @@ the folder was renamed or moved.`,
 				}
 			}
 			fmt.Printf("initialized %s\n  server:  %s\n  project: %s (%s)\n", folder, server, p.Name, p.ID)
-			installSkill(folder)
 			if !noHooks {
 				installAgentHooks(folder)
+			}
+			if !noAutostart {
+				installAutostart()
 			}
 			if len(scope) > 0 {
 				dirs := make([]string, len(scope))
@@ -231,6 +236,7 @@ next steps:
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "accept defaults, never prompt")
 	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run the sync daemon in the foreground")
 	c.Flags().BoolVar(&noHooks, "no-hooks", false, "skip registering agent sync hooks")
+	c.Flags().BoolVar(&noAutostart, "no-autostart", false, "skip registering sync to restart at login")
 	return c
 }
 
@@ -265,23 +271,24 @@ func installAgentHooks(folder string) {
 	}
 }
 
-// installSkill teaches every detected platform the bdrive CLI, so later
-// sessions are conversational. Folded into init deliberately: a separate
-// `bdrive skill install` is another approval prompt for no decision.
-func installSkill(folder string) {
-	results, err := agentskills.Install(folder, nil)
+// installAutostart registers the login unit so a reboot doesn't quietly stop
+// sync. Best effort and one line of output: a platform without one (a BSD, or
+// Linux without systemd) or an unwritable config dir is not a reason to fail
+// an init that otherwise worked — the folder syncs, it just won't come back by
+// itself.
+func installAutostart() {
+	res, err := autostart.Install()
 	if err != nil {
-		return // best effort: the skill is a convenience, not a requirement
-	}
-	var installed []string
-	for _, r := range results {
-		if r.Changed {
-			installed = append(installed, r.Agent)
+		if !errors.Is(err, autostart.ErrUnsupported) {
+			fmt.Printf("  login:   autostart not registered (%v) — run `bdrive resume` after a reboot\n", err)
 		}
+		return
 	}
-	if len(installed) > 0 {
-		fmt.Printf("  skill:   installed for %s\n", strings.Join(installed, ", "))
+	state := "autostart registered"
+	if !res.Changed {
+		state = "autostart already registered"
 	}
+	fmt.Printf("  login:   %s  →  %s\n", state, res.Path)
 }
 
 // checkNotAlreadyMounted refuses a second folder for a project this device

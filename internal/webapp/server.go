@@ -91,6 +91,13 @@ type Server struct {
 	// hides the entry. The mirror of the Quota seam: Quota enforces the
 	// plan, Billing displays it.
 	Billing func(email string) (plan, url string, ok bool)
+	// Analytics, when its Key is set, tells the frontend to load PostHog
+	// (/api/config `analytics`). The third managed-deployment seam beside
+	// Quota and Billing, and deliberately server-supplied rather than
+	// bundled: with no key the OSS frontend ships no analytics code and
+	// makes no third-party request, so a self-hosted hub cannot phone home
+	// even by accident.
+	Analytics AnalyticsConfig
 	// ShareRPM is the per-IP request rate on public share links (/s/*);
 	// 0 means DefaultShareRPM.
 	ShareRPM int
@@ -112,6 +119,27 @@ type UploadConfig struct {
 	Enabled bool
 	// TTL bounds the lifetime of presigned direct-upload URLs.
 	TTL time.Duration
+}
+
+// AnalyticsConfig points the frontend at a PostHog project. The key is a
+// public write-only project token, not a credential — it is served to signed-
+// out visitors too, because the app shell loads before login.
+type AnalyticsConfig struct {
+	Key  string // PostHog project key; empty disables analytics entirely
+	Host string // PostHog API host; empty means DefaultAnalyticsHost
+}
+
+// DefaultAnalyticsHost is PostHog's US cloud ingestion host.
+const DefaultAnalyticsHost = "https://us.i.posthog.com"
+
+// Endpoint is Host with the default applied. Exported because the same
+// config drives more than the app shell in a managed deployment (the cloud
+// module's marketing pages render their own loader from it).
+func (a AnalyticsConfig) Endpoint() string {
+	if a.Host != "" {
+		return a.Host
+	}
+	return DefaultAnalyticsHost
 }
 
 // DefaultUploadTTL is used when UploadConfig.TTL is unset: long enough for a
@@ -487,6 +515,18 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		"auth":  auth,
 		"reads": map[string]any{"enabled": s.Reads != nil},
+	}
+	// Outside a managed deployment this block is absent and the frontend
+	// never loads a tracker. Outside the `me` check on purpose: a hub with
+	// auth off has no signed-in user and should still be measurable.
+	// Note the funnel gap this leaves — /auth/* is server-rendered HTML
+	// (authlocal.go authPage) with no analytics, so a visitor is counted on
+	// the marketing page and again once the app boots, but the signup page
+	// itself reports nothing. Same origin means the anonymous id survives
+	// the round trip, so attribution holds; only signup-page drop-off is
+	// invisible. Wire authPage up if that becomes the question.
+	if s.Analytics.Key != "" {
+		out["analytics"] = map[string]string{"key": s.Analytics.Key, "host": s.Analytics.Endpoint()}
 	}
 	if me.Email != "" {
 		out["me"] = map[string]string{"email": me.Email, "name": me.Name}
