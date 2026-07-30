@@ -36,7 +36,10 @@ type httpBackend struct {
 	hc      *http.Client
 }
 
-var projectPathRe = regexp.MustCompile(`^/p/(p-[0-9a-f]{8})/?$`)
+// The id is whatever the hub minted (a UUID today, `p-xxxxxxxx` on older
+// hubs), so this only checks the shape of a URL segment — the hub is the
+// authority on which ids exist.
+var projectPathRe = regexp.MustCompile(`^/p/([A-Za-z0-9._-]{4,64})/?$`)
 
 func newHTTPBackend(raw string) (*httpBackend, error) {
 	u, err := url.Parse(raw)

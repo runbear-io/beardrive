@@ -23,7 +23,7 @@ body:
       label: Where does it happen?
       options:
         - Syncing client (bdrive CLI / daemon)
-        - Self-hosted hub (bdrive web)
+        - Self-hosted hub (bdrive serve)
         - Web UI in the browser
         - Claude Code plugin / agent hooks
         - Not sure

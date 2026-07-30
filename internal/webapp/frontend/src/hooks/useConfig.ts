@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
+import { initAnalytics } from "../analytics";
 import type { ServerConfig } from "../api/types";
 
 // The first request the app makes; everything else keys off its answer.
@@ -17,6 +18,10 @@ export function useConfig() {
           encodeURIComponent(location.pathname + location.search);
         await new Promise(() => {}); // never resolve; we're navigating away
       }
+      // The one place the config lands, and it lands once (staleTime
+      // Infinity) — no effect needed, and identify() gets the user in the
+      // same breath. A no-op unless the server configured analytics.
+      initAnalytics(cfg);
       return cfg;
     },
     staleTime: Infinity,

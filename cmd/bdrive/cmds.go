@@ -266,16 +266,23 @@ func logCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, err := syncer.LogEntries(sess.Store, pathFilter, limit)
+			// Limit after the display sort, not before: -n 25 means the 25
+			// newest by the time shown, not the 25 highest lamport.
+			entries, err := syncer.LogEntries(sess.Store, pathFilter, 0)
 			if err != nil {
 				return err
 			}
+			syncer.SortForDisplay(entries)
+			if limit > 0 && len(entries) > limit {
+				entries = entries[:limit]
+			}
+			out := cmd.OutOrStdout()
 			if len(entries) == 0 {
-				fmt.Println("no history yet")
+				fmt.Fprintln(out, "no history yet")
 				return nil
 			}
 			for _, op := range entries {
-				when := op.Time.Local().Format("2006-01-02 15:04:05")
+				when := syncer.DisplayTime(op).Local().Format("2006-01-02 15:04:05")
 				kind := op.Kind
 				if kind == journal.KindPut {
 					kind = "put   "
@@ -298,7 +305,7 @@ func logCmd() *cobra.Command {
 				if op.Note != "" {
 					line += "  [" + op.Note + "]"
 				}
-				fmt.Println(line)
+				fmt.Fprintln(out, line)
 			}
 			return nil
 		},

@@ -18,14 +18,13 @@ person's agent re-does work that already exists.
 
 ## Set it up
 
-Install the plugin once — Cowork and Claude Code share plugins, so this covers
-both — then run `/beardrive:install` in the folder you want shared.
-[Set up with your agent](/start/setup/) has the two commands.
+Start your agent in the folder you want shared and give it the one paste from
+[Set up with your agent](/start/setup/).
 
 Nobody on the team needs to open a terminal: the agent installs what it needs
 and reports back. Invite teammates from the hub's sidebar (**Manage → New
 invite**); the link creates their account and adds them in one step, and they
-run the same `/beardrive:install` on their own machine.
+give their own agent the same paste.
 
 If the shared work should live in one subfolder rather than everything on your
 disk, say so — "sync only `client-work/`" — and the agent scopes it.

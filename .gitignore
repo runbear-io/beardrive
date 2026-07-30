@@ -2,9 +2,11 @@
 /dist/
 .DS_Store
 .omc
+.orca/
 /example/
 /cloud/
 .claude/worktrees/
 /docs/
 /.review-shots/
 .env
+sandbox/bdrive

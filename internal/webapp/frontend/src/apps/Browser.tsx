@@ -14,9 +14,10 @@ import { useHeat, useTree } from "../hooks/useBrowse";
 import { useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { HTML_EXT, copyText } from "../util";
+import { HTML_EXT, PDF_EXT, copyText } from "../util";
 import { toast } from "../toast";
 import { onSearchRequest } from "../search";
+import { track } from "../analytics";
 import { AppShell, Icon, Page, Topbar, closeSidebarOnMobile, type PageWidth } from "../components/shell";
 import { FileTree, ancestorsOf } from "../components/FileTree";
 import { Breadcrumbs } from "../components/Breadcrumbs";
@@ -191,6 +192,9 @@ export default function Browser(props: {
       });
       if (!r.ok) throw new Error(await r.text());
       const s = await r.json();
+      // Fired here rather than by the table in api/http.ts, because this is
+      // the one write in the app that goes out as a raw fetch.
+      track("share_created");
       const copied = await copyText(s.url);
       setShare({ url: s.url, copied });
       refreshShares(); // the banner appears (or stays) without a reload
@@ -348,7 +352,8 @@ export default function Browser(props: {
         />
       );
     } else {
-      pageWidth = HTML_EXT.test(path) ? "wide" : "read";
+      // A PDF page is unreadable squeezed into the 768px reading column.
+      pageWidth = HTML_EXT.test(path) || PDF_EXT.test(path) ? "wide" : "read";
       pageClass = "markdown";
       view = (
         <>

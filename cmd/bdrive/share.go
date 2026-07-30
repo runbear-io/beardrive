@@ -197,7 +197,9 @@ func findProject(dir string) (string, config.Project, error) {
 	}
 }
 
-var hubRemoteRe = regexp.MustCompile(`^(https?://[^/]+)/p/(p-[0-9a-f]{8})$`)
+// Same loose id shape as remote/http.go: UUID today, legacy `p-xxxxxxxx` on
+// older hubs — the hub validates, this only splits the URL.
+var hubRemoteRe = regexp.MustCompile(`^(https?://[^/]+)/p/([A-Za-z0-9._-]{4,64})$`)
 
 // splitHubRemote splits an https://host/p/<id> remote into server + project.
 func splitHubRemote(remote string) (string, string, error) {
