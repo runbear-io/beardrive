@@ -47,9 +47,8 @@ The sync hooks, and nothing else you have to think about:
   read.
 
 They go in the agent's user config, once per machine, and are a no-op outside
-BearDrive folders. On macOS and Linux your agent also registers a login item,
-so syncing comes back on its own after a reboot rather than waiting for the
-next session. `bdrive init` registers them for you, so there is nothing
+BearDrive folders. Your agent also registers a login item, so syncing comes
+back on its own after a reboot rather than waiting for the next session. `bdrive init` registers them for you, so there is nothing
 extra to run — [hooks in detail](/manual/hooks/) covers what gets written
 where.
 

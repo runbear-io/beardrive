@@ -12,18 +12,18 @@
 // every enrolled, unpaused mount — so mounts added or removed later need no
 // change to the registration, and `bdrive stop` keeps meaning "stay stopped".
 //
-// Platform support: macOS (launchd user agent) and Linux (systemd user unit).
-// Windows (a Startup entry or a logon task) is the same three functions with a
-// different file; the unsupported stub returns ErrUnsupported so callers are
-// already written for it.
+// Platform support: macOS (launchd user agent), Linux (systemd user unit), and
+// Windows (a per-user Run entry). Anything else gets the stub, which returns
+// ErrUnsupported — callers already treat that as "nothing to do".
 //
-// Neither implementation shells out to the service manager (`launchctl`,
-// `systemctl`). Writing the files IS the registration: launchd reads
-// ~/Library/LaunchAgents at login, and systemd reads the enable symlink in
-// default.target.wants. Both matter only at the NEXT login — the caller has
-// just started the daemon for this session — and shelling out would let a test
-// or a packaging script register something real as a side effect, or fail on a
-// machine with no session bus at all (ssh, container, CI).
+// No implementation shells out to a service manager (`launchctl`, `systemctl`,
+// `schtasks`). Writing the registration IS the registration: launchd reads
+// ~/Library/LaunchAgents at login, systemd reads the enable symlink in
+// default.target.wants, Explorer reads HKCU\...\Run at logon. All of them
+// matter only at the NEXT login — the caller has just started the daemon for
+// this session — and shelling out would let a test or a packaging script
+// register something real as a side effect, or fail on a machine with no
+// session bus at all (ssh, container, CI).
 package autostart
 
 import (

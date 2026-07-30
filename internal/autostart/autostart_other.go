@@ -1,11 +1,11 @@
-//go:build !darwin && !linux
+//go:build !darwin && !linux && !windows
 
 package autostart
 
-// Windows is the remaining platform: a shortcut in the per-user Startup folder
-// (%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup) or a Task
-// Scheduler logon task. Either is this file plus the same three functions;
-// `bdrive resume` is already the command it needs to run.
+// Everything that is not macOS, Linux, or Windows lands here — the BSDs
+// mainly, where the answer would be an rc.d script or the desktop's own
+// autostart directory. `bdrive resume` is already the command to run; only the
+// registration differs.
 
 func Path() (string, error)      { return "", ErrUnsupported }
 func Install() (Result, error)   { return Result{}, ErrUnsupported }

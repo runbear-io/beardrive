@@ -114,7 +114,8 @@ reboot. It runs ` + "`bdrive resume`" + `, so it covers every project this devic
 — one registration per machine, not one per project.
 
 macOS uses a launchd user agent, Linux a systemd user unit (systemd must be the
-init system). Both are user-level: no sudo, nothing machine-wide.
+init system), Windows a per-user Run entry. All are user-level: no sudo,
+nothing machine-wide.
 
 ` + "`bdrive init`" + ` installs it for you; these subcommands are for checking,
 retrying, or opting out.`,
@@ -122,7 +123,7 @@ retrying, or opting out.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := autostart.Path()
 			if errors.Is(err, autostart.ErrUnsupported) {
-				fmt.Println("autostart: not available here (needs macOS, or Linux with systemd)")
+				fmt.Println("autostart: not available here (needs macOS, Windows, or Linux with systemd)")
 				fmt.Println("  after a reboot, run `bdrive resume` (or `bdrive init` in a project) to start syncing again")
 				return nil
 			}
@@ -144,7 +145,7 @@ retrying, or opting out.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			res, err := autostart.Install()
 			if errors.Is(err, autostart.ErrUnsupported) {
-				fmt.Println("autostart: not available here (needs macOS, or Linux with systemd) — run `bdrive resume` after a reboot")
+				fmt.Println("autostart: not available here (needs macOS, Windows, or Linux with systemd) — run `bdrive resume` after a reboot")
 				return nil
 			}
 			if err != nil {

@@ -175,10 +175,10 @@ classDiagram
 
     class Autostart {
         Install / Uninstall / Installed / Path
-        darwin: launchd | linux: systemd
-        ErrUnsupported (windows, no-systemd)
+        launchd | systemd | HKCU Run
+        ErrUnsupported (BSD, no-systemd)
     }
-    note for Autostart "internal/autostart — ONE login unit per machine that runs `bdrive resume`: darwin a LaunchAgents plist (RunAtLoad, no KeepAlive), linux a systemd user unit + its default.target.wants symlink (needs sd_booted). Writes files only — never launchctl/systemctl. Windows = ErrUnsupported"
+    note for Autostart "internal/autostart — ONE login unit per machine that runs `bdrive resume`: darwin a LaunchAgents plist (RunAtLoad, no KeepAlive), linux a systemd user unit + its default.target.wants symlink (needs sd_booted), windows an HKCU Run value. Writes the registration only — never launchctl/systemctl/schtasks"
 
     class DaemonLock {
         volumes/id/daemon.lock
