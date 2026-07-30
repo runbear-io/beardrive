@@ -22,6 +22,14 @@ export type RestoreAction = {
   busy?: string; // path+sha currently in flight
 };
 
+// Un-creating a file a run added — restore's other half, and the only op the
+// hub writes that takes content away, so it always goes through a
+// confirmation the caller owns. Same visibility rule as RestoreAction.
+export type RemoveAction = {
+  onRemove: (path: string) => void;
+  busy?: string; // path currently in flight
+};
+
 // Linkify http(s) URLs (e.g. a Claude session link); everything else stays
 // plain text — notes are user/agent input, never markup. Shared with the run
 // card's header, which shows the same note.
@@ -47,6 +55,7 @@ export function HistoryRow({
   onOpen,
   diff,
   restore,
+  remove,
   restoreSha,
   inRun,
 }: {
@@ -62,6 +71,9 @@ export function HistoryRow({
   // same path; absent means this is the first version.
   diff?: { apiBase: string; prev?: string };
   restore?: RestoreAction;
+  // Only ever offered on an add inside a run card, where "this run created
+  // the file" is a statement we can make.
+  remove?: RemoveAction;
   // The version this row puts back: its own bytes, or — for a delete — the
   // content it removed. The view computes it, since it needs the whole feed.
   restoreSha?: string;
@@ -78,13 +90,14 @@ export function HistoryRow({
   // A delete has no content, and a first version has nothing behind it.
   const diffable = !!diff && kind !== "delete" && !!e.blob;
   // Inside a run card an "add" is a file the run CREATED: putting its bytes
-  // back would be a no-op, and removing it is the thing we can't do yet — so
-  // that row explains itself instead of offering a button. Everywhere else
-  // (the per-file version list) a first version is very much restorable —
-  // it is usually the version someone wants back.
+  // back would be a no-op, so the undo it wants is a removal instead.
+  // Everywhere else (the per-file version list) a first version is very much
+  // restorable — it is usually the version someone wants back.
   const createdByRun = !!inRun && kind === "add";
   const restorable = !!restore && !!restoreSha && !createdByRun;
+  const removable = !!remove && createdByRun;
   const busy = !!restore?.busy && restore.busy === e.path + restoreSha;
+  const removing = !!remove?.busy && remove.busy === e.path;
   // The row already *is* a link to its version — but a bare div says so to
   // nobody, so the version gets visible handles too (BEA-26). Gated on
   // content, never on `diff`, or the subtree and folder feeds lose them.
@@ -137,13 +150,24 @@ export function HistoryRow({
             {busy ? "restoring…" : "restore"}
           </button>
         )}
-        {/* Never a missing button with no explanation: nothing in the hub
-            writes a delete op yet, so a file a run created can't be
-            un-created. Say so where the button would have been. */}
-        {restore && createdByRun && (
-          <span className="hrestore-gap" title="Restore puts old content back; it can't remove a file yet.">
-            created by this run — can't be undone yet
-          </span>
+        {/* The run created this file, so the undo is a removal, not a
+            restore. It reaches every synced device, so onRemove confirms
+            before it fires. */}
+        {removable && (
+          <button
+            type="button"
+            className="hremove-btn"
+            disabled={removing}
+            title={"Remove " + e.path + " — this run created it"}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              remove!.onRemove(e.path);
+            }}
+            onKeyDown={(ev) => ev.stopPropagation()}
+          >
+            <Icon name="trash" />
+            {removing ? "removing…" : "undo — remove file"}
+          </button>
         )}
       </div>
       {/* Inside a run card the note is the card's header — repeating it on

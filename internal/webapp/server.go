@@ -395,8 +395,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/p/{project}/history", proj(PermRead, s.handleHistory))
 	mux.HandleFunc("GET /api/p/{project}/blob", proj(PermRead, s.handleBlob))
 	// Restore needs a journal to look the version up in, so it exists only
-	// per project — never on the single-volume (DirSource) prefix.
+	// per project — never on the single-volume (DirSource) prefix. Remove
+	// writes to that same journal, so it lives here too.
 	mux.HandleFunc("POST /api/p/{project}/restore", proj(PermWrite, s.handleRestore))
+	mux.HandleFunc("POST /api/p/{project}/remove", proj(PermWrite, s.handleRemove))
 	mux.HandleFunc("GET /api/p/{project}/heat", proj(PermRead, s.handleHeat))
 	mux.HandleFunc("POST /api/p/{project}/reads", proj(PermRead, s.handleReadReport))
 	mux.HandleFunc("POST /api/p/{project}/shares", proj(PermWrite, s.handleShareCreate))
