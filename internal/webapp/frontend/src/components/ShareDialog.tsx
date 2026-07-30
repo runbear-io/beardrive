@@ -20,9 +20,13 @@ const EXPIRY_PRESETS = [
 ];
 
 /* A clear, explicitly-public share confirmation: warns that anyone with the
-   link can view, and offers copy / open / revoke. The title says "Public
+   link can view, and offers copy / open / expiry. The title says "Public
    link", not "created": ShareDB.Create hands back the file's existing live
-   link when there is one, so a second Share click is not a second link. */
+   link when there is one, so a second Share click is not a second link.
+
+   Revoke lives on the ShareBanner, not here: this modal is a transient
+   handoff of the URL, the banner is what is still on the file after it
+   closes. Two Revokes for one link is a destructive control shown twice. */
 export function ShareDialog({
   url,
   copied,
@@ -104,20 +108,6 @@ export function ShareDialog({
           </Button>
           <Button variant="subtle" onClick={() => window.open(url, "_blank")}>
             Open
-          </Button>
-          <Button
-            variant="subtle" className="ai-del"
-            onClick={async () => {
-              try {
-                await api("DELETE", "/api/shares/" + token);
-                toast("Link revoked — it no longer works.");
-                onClose();
-              } catch (e) {
-                toast((e as Error).message, true);
-              }
-            }}
-          >
-            Revoke
           </Button>
           <Button variant="subtle" onClick={onClose}>
             Done
