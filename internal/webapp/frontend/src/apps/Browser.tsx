@@ -515,7 +515,10 @@ export default function Browser(props: {
           copied={share.copied}
           onClose={() => {
             setShare(null);
-            refreshShares(); // the dialog can revoke; the banner must agree
+            // Create may have handed back an existing link, in which case
+            // shareNow's own invalidation raced a stale cache. Refresh again
+            // so the banner agrees with what the dialog just showed.
+            refreshShares();
           }}
         />
       )}
