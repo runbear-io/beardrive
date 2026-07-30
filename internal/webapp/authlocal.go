@@ -518,6 +518,7 @@ func (a *BuiltinAuth) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /auth/signup", a.pageSignup)
 	mux.HandleFunc("GET /auth/logout", a.pageLogout)
 	mux.HandleFunc("GET /auth/cli", a.pageCLI)
+	mux.HandleFunc("POST /auth/cli", a.pageCLI)
 	mux.HandleFunc("GET /auth/device/{token}", a.pageDevice)
 	mux.HandleFunc("POST /auth/device/{token}", a.pageDevice)
 	mux.HandleFunc("GET /auth/device", a.pageDeviceLegacy)
@@ -825,13 +826,21 @@ func (a *BuiltinAuth) pageLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, dest, http.StatusSeeOther)
 }
 
-// pageCLI completes `bdrive login`: once the browser has a session, mint a
-// one-time code and bounce it to the CLI's loopback listener. Redirects are
-// restricted to loopback addresses so the code can't be sent anywhere else.
+// pageCLI completes `bdrive login`: confirm who the terminal will act as, then
+// mint a one-time code and bounce it to the CLI's loopback listener. Redirects
+// are restricted to loopback addresses so the code can't be sent anywhere else.
+//
+// The confirmation is the point, not ceremony. Whoever the browser happens to
+// be signed in as is who the terminal becomes, and that is frequently not the
+// account the user meant — a personal login left open, a teammate's session on
+// a shared machine. Granting silently means the mistake surfaces later, as a
+// synced folder full of commits authored by the wrong person, which is far
+// more work to undo than one click now.
+//
+// It also means a GET no longer grants anything, so a link someone else got
+// you to open can't mint a code on your behalf.
 func (a *BuiltinAuth) pageCLI(w http.ResponseWriter, r *http.Request) {
-	redirect := r.URL.Query().Get("redirect")
-	state := r.URL.Query().Get("state")
-	u, err := url.Parse(redirect)
+	u, err := url.Parse(r.URL.Query().Get("redirect"))
 	if err != nil || (u.Scheme != "http") || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1") {
 		http.Error(w, "invalid redirect (must be a loopback URL)", http.StatusBadRequest)
 		return
@@ -841,10 +850,22 @@ func (a *BuiltinAuth) pageCLI(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(r.URL.String()), http.StatusSeeOther)
 		return
 	}
+
+	if r.Method != http.MethodPost {
+		authPage(w, "Sign in on this computer", fmt.Sprintf(
+			`<p class="lede">A terminal on this computer is asking to sign in to BearDrive.</p>
+%s%s
+<form method="post"><button>Approve</button></form>
+<p class="alt">Approve this only if you just ran <code>bdrive login</code> yourself.</p>`,
+			whoBlock(user, r.URL.RequestURI()),
+			rows([2]string{"Application", "bdrive command line"}, [2]string{"Waiting at", u.Host})))
+		return
+	}
+
 	code := a.newGrant("code", user.ID, "", true, time.Minute)
 	q := u.Query()
 	q.Set("code", code)
-	q.Set("state", state)
+	q.Set("state", r.URL.Query().Get("state"))
 	u.RawQuery = q.Encode()
 	http.Redirect(w, r, u.String(), http.StatusSeeOther)
 }
@@ -879,15 +900,22 @@ func (a *BuiltinAuth) pageDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authPage(w, "Connect a device", fmt.Sprintf(`<p class="lede">A device is asking to sign in to BearDrive.</p>
-%s
+%s%s
 <form method="post"><button>Approve</button></form>
 <p class="alt">Approve this only if you just started a sign-in on that machine.</p>`,
-		whoBlock(user, g, r.URL.RequestURI())))
+		whoBlock(user, r.URL.RequestURI()),
+		rows([2]string{"Device", g.device}, [2]string{"System", g.os}, [2]string{"Address", g.ip})))
 }
 
-// whoBlock renders the two things the approver needs: who they'd be granting
-// as (with an escape hatch back to this same page), and what is asking.
-func whoBlock(user User, g pendingGrant, back string) string {
+// whoBlock renders who the approver would be granting as, with an escape hatch
+// back to this same page. Approving on either flow hands a machine a token
+// that acts as you, so "as whom" is the question worth answering loudest — and
+// the browser's session is often not the account the user meant to use.
+//
+// What is asking differs per flow (a device has a name and an OS; a CLI on
+// this computer has a loopback port), so each page renders its own rows rather
+// than this pretending to a shape neither quite fits.
+func whoBlock(user User, back string) string {
 	name := user.Name
 	if name == "" {
 		name = user.Email
@@ -895,10 +923,20 @@ func whoBlock(user User, g pendingGrant, back string) string {
 	return fmt.Sprintf(`<div class="who">
 <div class="who-id"><span class="who-l">Signing in as</span><b>%s</b><span class="who-sub">%s</span></div>
 <a class="who-swap" href="/auth/logout?next=%s">Switch account</a>
-</div>
-<dl class="rows"><dt>Device</dt><dd>%s</dd><dt>System</dt><dd>%s</dd><dt>Address</dt><dd>%s</dd></dl>`,
-		html.EscapeString(name), html.EscapeString(user.Email), url.QueryEscape(safeNext(back)),
-		html.EscapeString(orDash(g.device)), html.EscapeString(orDash(g.os)), html.EscapeString(orDash(g.ip)))
+</div>`,
+		html.EscapeString(name), html.EscapeString(user.Email), url.QueryEscape(safeNext(back)))
+}
+
+// rows renders a label/value list, dashing out the blanks.
+func rows(pairs ...[2]string) string {
+	var b strings.Builder
+	b.WriteString(`<dl class="rows">`)
+	for _, p := range pairs {
+		fmt.Fprintf(&b, "<dt>%s</dt><dd>%s</dd>",
+			html.EscapeString(p[0]), html.EscapeString(orDash(p[1])))
+	}
+	b.WriteString(`</dl>`)
+	return b.String()
 }
 
 func orDash(s string) string {
