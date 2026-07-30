@@ -649,3 +649,79 @@ func TestCLILoginSwitchAccount(t *testing.T) {
 		t.Fatalf("token issued to the wrong account: %s", out.Body)
 	}
 }
+
+// A first `bdrive init` on a fresh machine must cost ONE web step, not two.
+// Signing in for this very sign-in is the consent, so the confirmation page is
+// skipped — but only for that sign-in, and only once.
+func TestCLILoginFirstTimeIsOneStep(t *testing.T) {
+	srv, _, _ := authHub(t, true)
+	h := srv.Handler()
+	signupAndSession(t, h, "first@x.io", "First", "password1")
+
+	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"
+
+	// no session: the CLI sign-in sends them to log in, saying what it is for
+	req := httptest.NewRequest("GET", cliURL, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	loginURL := rec.Header().Get("Location")
+	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(loginURL, "/auth/login?next=") {
+		t.Fatalf("cli without session = %d %s", rec.Code, loginURL)
+	}
+	req = httptest.NewRequest("GET", loginURL, nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "A terminal on this computer is waiting to sign in") {
+		t.Fatalf("login page does not say what it is authorizing:\n%s", rec.Body)
+	}
+
+	// logging in lands straight on the loopback listener — no second page
+	form := url.Values{"email": {"first@x.io"}, "password": {"password1"}, "next": {cliURL}}
+	req = httptest.NewRequest("POST", loginURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body)
+	}
+	var session *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie {
+			session = c
+		}
+	}
+	if session == nil {
+		t.Fatal("login started no session")
+	}
+
+	req = httptest.NewRequest("GET", rec.Header().Get("Location"), nil)
+	req.AddCookie(session)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("fresh sign-in should grant without asking again: %d\n%s", rec.Code, rec.Body)
+	}
+	cb, _ := url.Parse(rec.Header().Get("Location"))
+	if cb.Host != "127.0.0.1:9999" || cb.Query().Get("code") == "" {
+		t.Fatalf("no code delivered to the listener: %s", rec.Header().Get("Location"))
+	}
+
+	// the skip is spent: the same session visiting again must be asked
+	req = httptest.NewRequest("GET", cliURL, nil)
+	req.AddCookie(session)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Approve") {
+		t.Fatalf("a second sign-in must ask: %d\n%s", rec.Code, rec.Body)
+	}
+
+	// and it never applied to a different pending sign-in
+	other := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:7777/callback") + "&state=s2"
+	req = httptest.NewRequest("GET", other, nil)
+	req.AddCookie(session)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a different sign-in must ask: %d", rec.Code)
+	}
+}

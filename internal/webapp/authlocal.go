@@ -50,6 +50,11 @@ type BuiltinAuth struct {
 	// Ephemeral single-use state; a server restart just cancels pending
 	// logins and resets.
 	pending map[string]pendingGrant // auth codes, device codes, reset tokens
+
+	// fresh records that an account authenticated *for a specific pending
+	// sign-in*, so that sign-in doesn't ask again. Keyed by user id + the exact
+	// next URL, single use, short lived. See markFreshAuth.
+	fresh map[string]time.Time
 }
 
 type authUser struct {
@@ -96,6 +101,7 @@ func NewBuiltinAuth(store AccountRepo, allowSignup bool, mail *Mailer) (*Builtin
 		users:   make(map[string]*authUser),
 		tokens:  make(map[string]authToken),
 		pending: make(map[string]pendingGrant),
+		fresh:   make(map[string]time.Time),
 	}
 	users, tokens, policy, err := store.Load()
 	if err != nil {
@@ -541,6 +547,38 @@ func (a *BuiltinAuth) sessionUser(r *http.Request) (User, bool) {
 	return User{}, false
 }
 
+// cliSignIn reports whether a next URL is a pending CLI sign-in.
+func cliSignIn(next string) bool { return strings.HasPrefix(next, "/auth/cli?") }
+
+// markFreshAuth records that userID just proved who they are in order to reach
+// this exact pending sign-in. Signing in IS the consent in that case: the user
+// chose the account seconds ago, for this, so a confirmation page would ask a
+// question they just answered — and a first `bdrive init` would cost two web
+// steps instead of one.
+//
+// Bound to the exact next and single use, so it can only ever skip the page for
+// the sign-in it was granted for, and only once. It is not reachable without
+// authenticating: an attacker who could set this could already click Approve.
+func (a *BuiltinAuth) markFreshAuth(userID, next string) {
+	if !cliSignIn(next) {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fresh[userID+"\x00"+next] = time.Now().Add(2 * time.Minute)
+}
+
+// consumeFreshAuth spends a marker if one is live, reporting whether the caller
+// may skip the confirmation.
+func (a *BuiltinAuth) consumeFreshAuth(userID, next string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	k := userID + "\x00" + next
+	exp, ok := a.fresh[k]
+	delete(a.fresh, k)
+	return ok && time.Now().Before(exp)
+}
+
 func (a *BuiltinAuth) startSession(w http.ResponseWriter, userID string) error {
 	tok, err := a.issueToken(userID, "web-session")
 	if err != nil {
@@ -560,6 +598,18 @@ func inviteBanner(next string) string {
 		return ""
 	}
 	return `<p class="msg" style="margin:0 0 14px">You've been invited to a team. Sign in (or sign up) to accept.</p>`
+}
+
+// cliBanner says what a sign-in reached from `bdrive login` is for. Without it
+// the form is a bare password prompt that happens to grant a terminal a token —
+// and since signing in here skips the confirmation page (see markFreshAuth),
+// this line is where that consent is actually informed.
+func cliBanner(next string) string {
+	if !cliSignIn(next) {
+		return ""
+	}
+	return `<p class="msg" style="margin:0 0 14px">A terminal on this computer is waiting to sign in. ` +
+		`The account you use here is the one it will act as.</p>`
 }
 
 // safeNext keeps post-login redirects on this site.
@@ -709,6 +759,7 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
+				a.markFreshAuth(u.ID, next)
 				http.Redirect(w, r, next, http.StatusSeeOther)
 				return
 			}
@@ -735,7 +786,7 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 	if a.Brand != "" {
 		brand = `<p class="alt" style="margin:0 0 14px;color:var(--dim)">` + html.EscapeString(a.Brand) + `</p>`
 	}
-	authPage(w, "Sign in", brand+inviteBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
+	authPage(w, "Sign in", brand+inviteBanner(next)+cliBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
 %s<p class="alt"><a href="/auth/reset">Forgot password?</a></p>`,
 		url.QueryEscape(next),
 		field("Email", "email", "email", r.FormValue("email")),
@@ -785,6 +836,7 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			a.markFreshAuth(u.ID, next)
 			http.Redirect(w, r, next, http.StatusSeeOther)
 			return
 		}
@@ -801,7 +853,7 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 	if a.Brand != "" {
 		brand = `<p class="alt" style="margin:0 0 14px;color:var(--dim)">` + html.EscapeString(a.Brand) + `</p>`
 	}
-	authPage(w, "Create account", brand+inviteBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/signup?next=%s">%s%s%s%s%s<button>Sign up</button></form>
+	authPage(w, "Create account", brand+inviteBanner(next)+cliBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/signup?next=%s">%s%s%s%s%s<button>Sign up</button></form>
 <p class="alt">Have an account? <a href="/auth/login?next=%s">Sign in</a></p>`,
 		url.QueryEscape(next),
 		field("Name", "name", "text", r.FormValue("name")),
@@ -851,7 +903,10 @@ func (a *BuiltinAuth) pageCLI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method != http.MethodPost {
+	// Signing in for this very sign-in already answered the question the page
+	// asks, so don't ask it twice: a first `bdrive init` would otherwise cost
+	// two web steps (sign in, then approve) where one will do.
+	if r.Method != http.MethodPost && !a.consumeFreshAuth(user.ID, r.URL.RequestURI()) {
 		authPage(w, "Sign in on this computer", fmt.Sprintf(
 			`<p class="lede">A terminal on this computer is asking to sign in to BearDrive.</p>
 %s%s
