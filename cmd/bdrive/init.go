@@ -271,10 +271,11 @@ func installAgentHooks(folder string) {
 	}
 }
 
-// installAutostart registers the login agent so a reboot doesn't quietly stop
-// sync. Best effort and one line of output: an unsupported platform or a
-// read-only LaunchAgents dir is not a reason to fail an init that otherwise
-// worked — the folder syncs, it just won't come back by itself.
+// installAutostart registers the login unit so a reboot doesn't quietly stop
+// sync. Best effort and one line of output: a platform without one (Windows,
+// or Linux without systemd) or an unwritable config dir is not a reason to
+// fail an init that otherwise worked — the folder syncs, it just won't come
+// back by itself.
 func installAutostart() {
 	res, err := autostart.Install()
 	if err != nil {

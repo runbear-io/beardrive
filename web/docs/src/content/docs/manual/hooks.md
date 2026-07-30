@@ -97,7 +97,18 @@ One registration covers every project — add or remove projects freely, nothing
 to re-register. Projects paused with `bdrive stop` stay paused; only `bdrive
 init` resumes those.
 
-On macOS this is a user LaunchAgent at
-`~/Library/LaunchAgents/ai.beardrive.daemon.plist` — no `sudo`, nothing
-machine-wide. Linux and Windows don't have it yet: run `bdrive resume` after a
-reboot, or just keep working — an agent turn in a project syncs it anyway.
+Where it lives, per platform — user-level either way, no `sudo`, nothing
+machine-wide:
+
+| Platform | What gets written |
+|---|---|
+| macOS | `~/Library/LaunchAgents/ai.beardrive.daemon.plist` (launchd loads it at login) |
+| Linux | `~/.config/systemd/user/beardrive.service` plus the `default.target.wants` symlink that enables it (honors `XDG_CONFIG_HOME`) |
+| Windows | not yet — run `bdrive resume` after a reboot |
+
+Linux needs systemd as the init system. Without it — Alpine or another
+runit/OpenRC distro, WSL1, a slim container — `bdrive autostart` says so rather
+than writing a unit nothing would read.
+
+Either way this is not the only thing that recovers sync: an agent turn in a
+project syncs it too, so a machine you actually work on catches up on its own.

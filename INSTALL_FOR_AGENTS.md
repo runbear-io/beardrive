@@ -9,8 +9,8 @@ or skip them.
 BearDrive syncs a folder across a team and their agents through a hub, with
 per-file history and share links. Setup is short by design: make sure the CLI
 exists, ask the user what to sync, and run **one** `bdrive init` — it signs
-in, registers the sync hooks (and, on macOS, a login item so sync resumes
-after a reboot), starts syncing and prints the project link. Every extra command you invent is another permission prompt
+in, registers the sync hooks (and, on macOS and Linux, a login item so sync
+resumes after a reboot), starts syncing and prints the project link. Every extra command you invent is another permission prompt
 for the user. Full documentation: https://docs.beardrive.ai (agent-readable
 index at https://docs.beardrive.ai/llms.txt).
 

@@ -12,13 +12,25 @@
 // every enrolled, unpaused mount — so mounts added or removed later need no
 // change to the registration, and `bdrive stop` keeps meaning "stay stopped".
 //
-// Platform support: macOS (launchd user agent) today. Linux (systemd user
-// unit) and Windows (Startup task) are the same three functions with a
+// Platform support: macOS (launchd user agent) and Linux (systemd user unit).
+// Windows (a Startup entry or a logon task) is the same three functions with a
 // different file; the unsupported stub returns ErrUnsupported so callers are
-// already written for them.
+// already written for it.
+//
+// Neither implementation shells out to the service manager (`launchctl`,
+// `systemctl`). Writing the files IS the registration: launchd reads
+// ~/Library/LaunchAgents at login, and systemd reads the enable symlink in
+// default.target.wants. Both matter only at the NEXT login — the caller has
+// just started the daemon for this session — and shelling out would let a test
+// or a packaging script register something real as a side effect, or fail on a
+// machine with no session bus at all (ssh, container, CI).
 package autostart
 
-import "errors"
+import (
+	"errors"
+	"os"
+	"path/filepath"
+)
 
 // ErrUnsupported is returned by Install/Uninstall on platforms that have no
 // implementation yet. Callers treat it as "nothing to do", never as failure:
@@ -31,4 +43,45 @@ var ErrUnsupported = errors.New("autostart is not supported on this platform yet
 type Result struct {
 	Path    string // the file written (or that would be)
 	Changed bool   // false when it was already correct
+}
+
+// writeIfDifferent writes content to path unless it is already exactly that,
+// and reports whether it wrote. Atomic (temp + rename) with the repo's
+// .bdrive-tmp- prefix, so a crash mid-write can't leave the service manager
+// reading half a unit file.
+//
+// "Unless already exactly that" is what makes Install idempotent enough for
+// `bdrive init` to call on every run, while still correcting a stale binary
+// path (a Homebrew prefix change, a moved binary) instead of skipping it.
+func writeIfDifferent(path, content string) (bool, error) {
+	if have, err := os.ReadFile(path); err == nil && string(have) == content {
+		return false, nil
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false, err
+	}
+	tmp := filepath.Join(dir, ".bdrive-tmp-"+filepath.Base(path))
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return false, err
+	}
+	return true, nil
+}
+
+// selfPath is the binary to register. Symlinks are resolved because the
+// service manager holds this path for the next login: Homebrew installs a
+// symlink into its prefix, and an upgrade can repoint it.
+func selfPath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		return resolved, nil
+	}
+	return exe, nil
 }

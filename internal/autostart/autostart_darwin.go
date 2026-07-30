@@ -45,48 +45,23 @@ func plist(exe string) string {
 `
 }
 
-// Install writes (or refreshes) the LaunchAgent. Idempotent: an identical
-// plist is left alone and reported as unchanged, so `bdrive init` can call
-// this on every run.
-//
-// Writing the file is the whole job — launchd loads agents in this directory
-// at login, which is the only moment that matters here. There is deliberately
-// no `launchctl bootstrap`: the caller has just started the daemon for this
-// session, so activating the job now would at best re-run `bdrive resume`
-// against already-running daemons, and shelling out to launchctl from a test
-// or a packaging script would register a real login item as a side effect.
-//
-// The binary path is baked in, so an upgrade that moves the binary (Homebrew
-// prefix change, a move out of /usr/local) needs a re-run — which init does
-// anyway, and which is why a stale path rewrites rather than being skipped.
+// Install writes (or refreshes) the LaunchAgent. Writing the file is the whole
+// job: launchd loads agents from this directory at login. See the package doc
+// for why there is no `launchctl` call.
 func Install() (Result, error) {
 	path, err := Path()
 	if err != nil {
 		return Result{}, err
 	}
-	exe, err := os.Executable()
+	exe, err := selfPath()
 	if err != nil {
 		return Result{}, err
 	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved // Homebrew installs a symlink; launchd should hold the real path
-	}
-	want := plist(exe)
-	if have, err := os.ReadFile(path); err == nil && string(have) == want {
-		return Result{Path: path, Changed: false}, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	changed, err := writeIfDifferent(path, plist(exe))
+	if err != nil {
 		return Result{}, err
 	}
-	tmp := filepath.Join(filepath.Dir(path), ".bdrive-tmp-"+Label+".plist")
-	if err := os.WriteFile(tmp, []byte(want), 0o644); err != nil {
-		return Result{}, err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return Result{}, err
-	}
-	return Result{Path: path, Changed: true}, nil
+	return Result{Path: path, Changed: changed}, nil
 }
 
 // Installed reports whether the agent file is in place.

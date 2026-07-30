@@ -175,9 +175,10 @@ classDiagram
 
     class Autostart {
         Install / Uninstall / Installed / Path
-        ErrUnsupported (non-darwin)
+        darwin: launchd | linux: systemd
+        ErrUnsupported (windows, no-systemd)
     }
-    note for Autostart "internal/autostart — ONE login unit per machine (darwin: ~/Library/LaunchAgents plist, RunAtLoad, no KeepAlive) that runs `bdrive resume`; writes the file only, never shells out to launchctl"
+    note for Autostart "internal/autostart — ONE login unit per machine that runs `bdrive resume`: darwin a LaunchAgents plist (RunAtLoad, no KeepAlive), linux a systemd user unit + its default.target.wants symlink (needs sd_booted). Writes files only — never launchctl/systemctl. Windows = ErrUnsupported"
 
     class DaemonLock {
         volumes/id/daemon.lock
