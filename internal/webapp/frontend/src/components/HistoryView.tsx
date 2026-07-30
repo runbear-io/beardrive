@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HistoryEntry } from "../api/types";
-import { HistoryRow, NoteText, type RestoreAction } from "./HistoryRow";
+import { HistoryRow, NoteText, type RemoveAction, type RestoreAction } from "./HistoryRow";
 import { Icon } from "./shell";
 import { whoChanged } from "../util";
 import { groupRuns, runFileCount, type Run } from "../lib/runs";
@@ -27,8 +27,9 @@ export function HistoryView(props: {
   onMeta: (meta: string) => void;
   onRendered?: () => void;
   restore?: RestoreAction;
+  remove?: RemoveAction;
 }) {
-  const { apiBase, target, isFolder, onMeta, onRendered, restore } = props;
+  const { apiBase, target, isFolder, onMeta, onRendered, restore, remove } = props;
   const q = !target
     ? { prefix: "" }
     : isFolder(target)
@@ -84,6 +85,7 @@ export function HistoryView(props: {
             prevBlob={prevBlob}
             restoreSha={restoreSha}
             restore={restore}
+            remove={remove}
           />
         ) : (
           <HistoryRow
@@ -94,6 +96,8 @@ export function HistoryView(props: {
             diff={perFile ? { apiBase, prev: prevBlob(item.i) } : undefined}
             restore={restore}
             restoreSha={restoreSha(item.i)}
+            /* no `remove`: an add outside a run card isn't attributable to a
+               run, so the undo has nothing to claim (follow-up issue). */
           />
         ),
       )}
@@ -109,6 +113,7 @@ function RunGroup({
   prevBlob,
   restoreSha,
   restore,
+  remove,
 }: {
   run: Run;
   onOpen: (path: string, version?: string) => void;
@@ -117,6 +122,7 @@ function RunGroup({
   prevBlob: (i: number) => string | undefined;
   restoreSha: (i: number) => string | undefined;
   restore?: RestoreAction;
+  remove?: RemoveAction;
 }) {
   const [open, setOpen] = useState(true);
   const first = run.entries[0];
@@ -160,6 +166,7 @@ function RunGroup({
               onOpen={onOpen}
               diff={perFile ? { apiBase, prev: prevBlob(run.idx[k]) } : undefined}
               restore={restore}
+              remove={remove}
               restoreSha={restoreSha(run.idx[k])}
               inRun
             />

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node } from "../api/types";
-import { heatTotal } from "../hooks/useBrowse";
+import { heatTotal, hotPathSplit } from "../hooks/useBrowse";
 
 /* ---- the project Dashboard: the read×write matrix ----
    Every file plotted by how much it is read (30 days, from the heat API)
@@ -37,7 +37,11 @@ export function useInsightsDevices(apiBase: string, enabled: boolean) {
 interface Pt {
   path: string;
   reads: number;
+  // The three readers, stored rather than derived: the bar paints each from
+  // its own count (hotPathSplit), so share reads never land in human.
   agent: number;
+  human: number;
+  share: number;
   total: number;
   days: number;
   danger: boolean;
@@ -79,6 +83,8 @@ export function Insights(props: {
       path: f.path,
       reads,
       agent: e.agent || 0,
+      human: e.human || 0,
+      share: e.share || 0,
       total: heatTotal(e),
       days,
       danger: reads >= HOT_READS && days >= STALE_DAYS,
@@ -346,6 +352,9 @@ function Scatter({ pts, onOpenFile }: { pts: Pt[]; onOpenFile: (p: string) => vo
       <text x={W - M.r - 6} y={H - M.b - 8} className="in-quad" textAnchor="end">
         cold + stale
       </text>
+      <text x={M.l + 6} y={H - M.b - 8} className="in-quad">
+        cold + fresh
+      </text>
       <text x={W - M.r - 6} y={M.t + 28} className="in-label" textAnchor="end">
         dot size = agent share of reads
       </text>
@@ -372,7 +381,7 @@ function Scatter({ pts, onOpenFile }: { pts: Pt[]; onOpenFile: (p: string) => vo
   );
 }
 
-/* ---- hot path: top-20 files by reads, agent/human split ---- */
+/* ---- hot path: top-20 files by reads, agent/human/share split ---- */
 function HotPath({
   pts,
   lens,
@@ -388,12 +397,18 @@ function HotPath({
     .slice(0, 20);
   if (!top.length) return <div className="dl-empty">No reads in the window yet.</div>;
   const max = top[0].reads;
+  const anyShare = top.some((p) => p.share > 0);
   return (
     <>
       <div className="in-hotpath">
         {top.map((p) => {
           // Split of the lens reads: pure lenses are single-color by definition.
-          const aFrac = lens === "agent" ? 1 : lens === "human" ? 0 : p.total ? p.agent / p.total : 0;
+          const f =
+            lens === "agent"
+              ? { agent: 1, human: 0, share: 0 }
+              : lens === "human"
+                ? { agent: 0, human: 1, share: 0 }
+                : hotPathSplit(p);
           const pct = (p.reads / max) * 100;
           return (
             <div
@@ -418,8 +433,9 @@ function HotPath({
                 {p.path + (p.danger ? " ⚠" : "")}
               </span>
               <span className="in-hp-bar">
-                <span className="in-hp-agent" style={{ width: (pct * aFrac).toFixed(1) + "%" }} />
-                <span className="in-hp-human" style={{ width: (pct * (1 - aFrac)).toFixed(1) + "%" }} />
+                <span className="in-hp-agent" style={{ width: (pct * f.agent).toFixed(1) + "%" }} />
+                <span className="in-hp-human" style={{ width: (pct * f.human).toFixed(1) + "%" }} />
+                <span className="in-hp-share" style={{ width: (pct * f.share).toFixed(1) + "%" }} />
               </span>
               <span className="in-hp-count">{p.reads}</span>
             </div>
@@ -428,6 +444,12 @@ function HotPath({
       </div>
       <p className="in-legend">
         <span className="in-sw agent" /> agent reads <span className="in-sw human" /> human reads
+        {anyShare && (
+          <>
+            {" "}
+            <span className="in-sw share" /> shared reads
+          </>
+        )}
       </p>
     </>
   );

@@ -26,6 +26,9 @@ func newHub(t *testing.T, storage remote.Backend, upload bool) (*httptest.Server
 	}
 	srv := &webapp.Server{
 		Root: storage, Projects: db, Refresh: 0,
+		// The hub journals its own ops (browser uploads, restore, remove)
+		// under this identity — a separate writer from every device's.
+		Device: webapp.Identity{ID: "hubdev", Name: "hub", Author: "hub@test"},
 		Upload: webapp.UploadConfig{Enabled: upload},
 	}
 	ts := httptest.NewServer(srv.Handler())
