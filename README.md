@@ -142,7 +142,7 @@ hub's own storage, never something a syncing client points at directly:
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` forces the code flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
+| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--yes`) for scripts; installs the agent skill, registers agent sync hooks in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
@@ -501,8 +501,8 @@ to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sy
 ```
 
 The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
-it: install the CLI, then one `bdrive init` — which signs in (device code
-when there is no browser), installs the skill, registers the sync hooks and
+it: install the CLI, then one `bdrive init` — which signs in (an approval
+link when there is no local browser), installs the skill, registers the sync hooks and
 prints the project link. The instructions live at that URL rather than
 inside the prompt so they never go stale in someone's copy — and the agent
 handles every deviation (already installed, no Homebrew, sign-in, wrong

@@ -54,7 +54,8 @@ to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to sy
 ```
 
 The agent fetches that page and works through it — install the CLI, sign in
-with a device code, connect the project, register the sync hooks. You copy one
+(it prints a link you approve in the browser), connect the project, register
+the sync hooks. You copy one
 thing; the agent handles every deviation — already installed, no Homebrew,
 browser sign-in, wrong folder. On BearDrive Cloud, drop `on <hub-url>` —
 sign-in defaults to beardrive.ai.
