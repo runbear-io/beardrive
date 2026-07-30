@@ -297,7 +297,7 @@ func browserLogin(server, loginPath string) (string, serverUser, error) {
 		// a URL the user pastes elsewhere would dead-end — use the code flow.
 		return "", serverUser{}, errNoBrowser
 	}
-	fmt.Println("waiting for the browser sign-in… (no browser here? Ctrl-C and run `bdrive login --device`)")
+	fmt.Println("waiting for you to approve the sign-in in your browser… (no browser here? Ctrl-C and run `bdrive login --device`)")
 
 	select {
 	case code := <-codeCh:
