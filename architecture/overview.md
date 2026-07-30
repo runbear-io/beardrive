@@ -22,7 +22,7 @@ flowchart LR
         hooks["internal/agenthooks<br/>turn-boundary sync hooks"]
     end
 
-    subgraph hub["bdrive web hub"]
+    subgraph hub["bdrive serve hub"]
         srv["internal/webapp Server<br/>auth, orgs, projects, shares,<br/>history, read heat, store proxy"]
         fe["webapp/frontend React SPA<br/>committed dist go:embed'ed at webapp/static"]
         meta["MetaStore: file JSON (default)<br/>or sqlite / postgres (db_sql)"]

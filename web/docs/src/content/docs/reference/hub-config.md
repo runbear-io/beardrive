@@ -1,19 +1,19 @@
 ---
 title: Hub config
-description: Every bdrive web flag and config-file key.
+description: Every bdrive serve flag and config-file key.
 ---
 
-`bdrive web` serves a website — browse folders and files, read markdown rendered
+`bdrive serve` serves a website — browse folders and files, read markdown rendered
 Obsidian-style (including `[[wikilinks]]`, task lists, and tables), download any
 file. Pointed at a storage root, it becomes a multi-project sync hub.
 
 It is read-only unless started with `--upload`.
 
 ```sh
-bdrive web                              # serve the current directory (viewer)
-bdrive web ./notes                      # serve a folder from disk (viewer)
-bdrive web -c config.json               # everything from a config file
-bdrive web s3://my-bucket/root --upload # multi-project sync hub
+bdrive serve                              # serve the current directory (viewer)
+bdrive serve ./notes                      # serve a folder from disk (viewer)
+bdrive serve -c config.json               # everything from a config file
+bdrive serve s3://my-bucket/root --upload # multi-project sync hub
 ```
 
 With a folder it serves files straight from disk. On a BearDrive mount the
@@ -36,7 +36,7 @@ cloud credentials on the serving machine.
 ## Config file
 
 ```jsonc
-// bdrive web -c config.json
+// bdrive serve -c config.json
 {
   "remote": "s3://my-bucket/root",   // storage root (hub) — or "dir": "./folder" (viewer)
   "addr": ":4173",
