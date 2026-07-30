@@ -891,75 +891,129 @@ func (a *BuiltinAuth) pageLogout(w http.ResponseWriter, r *http.Request) {
 //
 // It also means a GET no longer grants anything, so a link someone else got
 // you to open can't mint a code on your behalf.
+// authRequest describes a pending sign-in to pageAuth. Both flows ask the user
+// the same question — "shall this thing act as you?" — and differ only in how
+// the request is identified, what is asking, and what approving does. Keeping
+// that difference in data rather than in two copies of the page is what stops
+// the two from drifting apart, which matters here: a flow whose disclosure
+// quietly falls behind the other's is the failure mode this page exists to
+// prevent.
+type authRequest struct {
+	title string // heading
+	lede  string // one line naming what is asking (plain text)
+	note  string // when approving is the right call — trusted markup
+
+	// detail is what is asking, in detail. A function because the device flow
+	// reads it off the pending grant, which only exists once live() has found
+	// it — so it must be evaluated at render time, not at call time.
+	detail func() [][2]string
+
+	// freshAuthSkips lets authenticating for this request count as approving
+	// it, so a first sign-in is one web step rather than two. True only for the
+	// local flow: signing in and approving are the same act when the terminal
+	// is on this machine, and are emphatically not when the token goes to
+	// another one — see markFreshAuth.
+	freshAuthSkips bool
+
+	// live, when set, runs once the session is known and before anything is
+	// shown or granted, reporting whether the request still exists — having
+	// already written its own explanation when it doesn't. The device flow's
+	// link expires; the CLI flow carries its whole request in the URL and has
+	// nothing to expire.
+	live func() bool
+
+	// approve performs the grant and writes the response.
+	approve func(user User)
+}
+
+// pageAuth is the approval page both sign-in flows share.
+func (a *BuiltinAuth) pageAuth(w http.ResponseWriter, r *http.Request, req authRequest) {
+	user, ok := a.sessionUser(r)
+	if !ok {
+		http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+		return
+	}
+	if req.live != nil && !req.live() {
+		return
+	}
+	if r.Method == http.MethodPost ||
+		(req.freshAuthSkips && a.consumeFreshAuth(user.ID, r.URL.RequestURI())) {
+		req.approve(user)
+		return
+	}
+	authPage(w, req.title, fmt.Sprintf(`<p class="lede">%s</p>
+%s%s
+<form method="post"><button>Approve</button></form>
+<p class="alt">%s</p>`,
+		html.EscapeString(req.lede), whoBlock(user, r.URL.RequestURI()), rows(req.detail()...), req.note))
+}
+
 func (a *BuiltinAuth) pageCLI(w http.ResponseWriter, r *http.Request) {
 	u, err := url.Parse(r.URL.Query().Get("redirect"))
 	if err != nil || (u.Scheme != "http") || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1") {
 		http.Error(w, "invalid redirect (must be a loopback URL)", http.StatusBadRequest)
 		return
 	}
-	user, ok := a.sessionUser(r)
-	if !ok {
-		http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(r.URL.String()), http.StatusSeeOther)
-		return
-	}
-
-	// Signing in for this very sign-in already answered the question the page
-	// asks, so don't ask it twice: a first `bdrive init` would otherwise cost
-	// two web steps (sign in, then approve) where one will do.
-	if r.Method != http.MethodPost && !a.consumeFreshAuth(user.ID, r.URL.RequestURI()) {
-		authPage(w, "Sign in on this computer", fmt.Sprintf(
-			`<p class="lede">A terminal on this computer is asking to sign in to BearDrive.</p>
-%s%s
-<form method="post"><button>Approve</button></form>
-<p class="alt">Approve this only if you just ran <code style="white-space:nowrap">bdrive login</code> yourself.</p>`,
-			whoBlock(user, r.URL.RequestURI()),
-			rows([2]string{"Application", "bdrive command line"}, [2]string{"Waiting at", u.Host})))
-		return
-	}
-
-	code := a.newGrant("code", user.ID, "", true, time.Minute)
-	q := u.Query()
-	q.Set("code", code)
-	q.Set("state", r.URL.Query().Get("state"))
-	u.RawQuery = q.Encode()
-	http.Redirect(w, r, u.String(), http.StatusSeeOther)
+	a.pageAuth(w, r, authRequest{
+		title: "Sign in on this computer",
+		lede:  "A terminal on this computer is asking to sign in to BearDrive.",
+		detail: func() [][2]string {
+			return [][2]string{{"Application", "bdrive command line"}, {"Waiting at", u.Host}}
+		},
+		note: `Approve this only if you just ran ` +
+			`<code style="white-space:nowrap">bdrive login</code> yourself.`,
+		freshAuthSkips: true,
+		approve: func(user User) {
+			code := a.newGrant("code", user.ID, "", true, time.Minute)
+			q := u.Query()
+			q.Set("code", code)
+			q.Set("state", r.URL.Query().Get("state"))
+			u.RawQuery = q.Encode()
+			http.Redirect(w, r, u.String(), http.StatusSeeOther)
+		},
+	})
 }
 
 // pageDevice is the headless-login approval page, reached by opening the link
 // `bdrive login` printed: the token lives in the path, so there is no code to
-// read off one screen and type into another. It names the account the device
-// will act as (with a way to switch), and what is asking, because approving
-// hands that machine a token that acts as you.
+// read off one screen and type into another.
+//
+// Unlike the local flow this one never skips the page. The machine being
+// granted is not the one reading this, so the account, the device name, its OS
+// and its address are the only things standing between an approval and a
+// stranger's pending link.
 func (a *BuiltinAuth) pageDevice(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
-	user, ok := a.sessionUser(r)
-	if !ok {
-		http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
-		return
+	var g pendingGrant
+	expired := func(when string) {
+		authPage(w, "Link expired", `<p class="err">This sign-in link `+when+`.</p>
+<p class="alt">Run <code style="white-space:nowrap">bdrive login --device</code> again for a fresh one.</p>`)
 	}
-	g, ok := a.peekGrant("device", token)
-	if !ok {
-		authPage(w, "Link expired", `<p class="err">This sign-in link is invalid, already used, or older than 10 minutes.</p>
-<p class="alt">Run <code>bdrive login --device</code> again for a fresh one.</p>`)
-		return
-	}
-	if r.Method == http.MethodPost {
-		if !a.grantDevice(token, user.ID) {
-			authPage(w, "Link expired", `<p class="err">This sign-in link expired while the page was open.</p>
-<p class="alt">Run <code>bdrive login --device</code> again for a fresh one.</p>`)
-			return
-		}
-		authPage(w, "Device connected", fmt.Sprintf(`<p class="msg">%s can now sync as %s.</p>
+	a.pageAuth(w, r, authRequest{
+		title: "Connect a device",
+		lede:  "A device is asking to sign in to BearDrive.",
+		note:  "Approve this only if you just started a sign-in on that machine.",
+		detail: func() [][2]string {
+			return [][2]string{{"Device", g.device}, {"System", g.os}, {"Address", g.ip}}
+		},
+		live: func() bool {
+			var ok bool
+			if g, ok = a.peekGrant("device", token); !ok {
+				expired("is invalid, already used, or older than 10 minutes")
+				return false
+			}
+			return true
+		},
+		approve: func(user User) {
+			if !a.grantDevice(token, user.ID) {
+				expired("expired while the page was open")
+				return
+			}
+			authPage(w, "Device connected", fmt.Sprintf(`<p class="msg">%s can now sync as %s.</p>
 <p class="alt">You can close this tab — the terminal finishes on its own.</p>`,
-			html.EscapeString(orDash(g.device)), html.EscapeString(user.Email)))
-		return
-	}
-	authPage(w, "Connect a device", fmt.Sprintf(`<p class="lede">A device is asking to sign in to BearDrive.</p>
-%s%s
-<form method="post"><button>Approve</button></form>
-<p class="alt">Approve this only if you just started a sign-in on that machine.</p>`,
-		whoBlock(user, r.URL.RequestURI()),
-		rows([2]string{"Device", g.device}, [2]string{"System", g.os}, [2]string{"Address", g.ip})))
+				html.EscapeString(orDash(g.device)), html.EscapeString(user.Email)))
+		},
+	})
 }
 
 // whoBlock renders who the approver would be granting as, with an escape hatch
