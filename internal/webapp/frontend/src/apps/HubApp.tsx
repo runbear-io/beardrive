@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { postJSON } from "../api/http";
-import type { InviteAccepted, Project, ServerConfig } from "../api/types";
+import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
 import { parseRoute, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
@@ -13,6 +13,7 @@ import { BillingView } from "../components/BillingView";
 import { ProjectSettings } from "../components/ProjectSettings";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { EmptyState } from "../components/EmptyState";
+import { EXISTING, NewProjectDialog } from "../components/NewProjectDialog";
 import { toast } from "../toast";
 import Browser from "./Browser";
 
@@ -39,6 +40,52 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   const { data: pending } = usePending(isAdmin);
 
   const route = useMemo(() => parseRoute(loc, "hub"), [loc]);
+
+  // Creating a project is asked for from three places — the sidebar's +, the
+  // empty state's button, and the auto-open below — so the dialog and its one
+  // handler live here rather than in any of them.
+  const [creating, setCreating] = useState(false);
+  // A read-only hub refuses creation server-side (403), so never offer it.
+  const canCreate = config.upload.enabled;
+
+  const createProject = async (name: string, template: string) => {
+    // "I already have a folder" is an empty project with a different next
+    // screen: the server never hears the sentinel, and the intent rides in
+    // the URL instead of onto the project record — it belongs to whoever is
+    // connecting right now, not to the project forever.
+    const existing = template === EXISTING;
+    try {
+      const out = await postJSON<ProjectCreated>("/api/projects", {
+        name,
+        template: existing ? "" : template,
+      });
+      setCreating(false);
+      await refresh();
+      navigate("/" + out.project.id + (existing ? "?connect=existing" : ""));
+      toast(`Created “${out.project.name}”.`);
+    } catch (e) {
+      toast("Could not create the project: " + (e as Error).message, true);
+    }
+  };
+
+  // With no projects at all there is nothing else on the page to do, so the
+  // dialog opens itself. Once per mount, keyed off a ref rather than the
+  // empty state — otherwise closing it would immediately reopen it.
+  const autoOpened = useRef(false);
+  useEffect(() => {
+    if (autoOpened.current || joinToken) return;
+    if (!projects || projects.length > 0 || !canCreate) return;
+    autoOpened.current = true;
+    setCreating(true);
+  }, [projects, canCreate, joinToken]);
+
+  const newProjectDialog = creating ? (
+    <NewProjectDialog
+      templates={config.templates ?? []}
+      onCreate={createProject}
+      onClose={() => setCreating(false)}
+    />
+  ) : null;
 
   const current: Project | null = useMemo(() => {
     if (!projects) return null;
@@ -110,13 +157,14 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     return (
       <AppShell
         vault={vault}
-        projectsNav={<ProjectNav projects={projects} />}
+        projectsNav={<ProjectNav projects={projects} onNew={() => setCreating(true)} />}
         orgBar={accountBar}
         topbar={<Topbar />}
       >
         <Page>
-          <EmptyState />
+          <EmptyState onNew={() => setCreating(true)} canCreate={canCreate} />
         </Page>
+        {newProjectDialog}
       </AppShell>
     );
   }
@@ -223,7 +271,8 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   }
 
   return (
-    <Browser
+    <>
+      <Browser
       key={current.id} // fresh tree/fold state per project
       config={config}
       apiBase={"/api/p/" + current.id + "/"}
@@ -237,6 +286,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           <ProjectNav
             projects={projects}
             currentId={current.id}
+            onNew={() => setCreating(true)}
             menu={{
               // Scoped views (/dashboard/<path>, /history/<path>) belong to
               // the file/folder — the tree carries the selection, no menu
@@ -281,7 +331,9 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       }}
       panel={activePanel || orgPage || billingPage || routePage}
       onClosePanel={() => setPanel(null)}
-    />
+      />
+      {newProjectDialog}
+    </>
   );
 }
 

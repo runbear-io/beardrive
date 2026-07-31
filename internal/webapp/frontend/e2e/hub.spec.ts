@@ -69,14 +69,27 @@ test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await ctx.close();
 });
 
-test("no-org account gets the onboarding empty state with the agent prompt", async ({
+test("no projects: the create dialog opens itself, and the page behind is no dead end", async ({
   page,
 }) => {
   await login(page, "solo@example.com");
+  // With nothing to browse, the one useful action opens on arrival.
+  await expect(page.locator(".modal .start-points")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".modal-input")).toHaveCount(0);
+
+  // Closing it leaves a page that says what to do — and a way back in.
   await expect(page.locator(".onboard h1")).toHaveText("Welcome to BearDrive");
-  await expect(page.locator(".ob-card h3")).toHaveText("Connect a new drive to your project");
-  // The agent paste-prompt is the one path, with this hub's real origin
-  // filled in; the by-hand route is a docs link.
+  await expect(page.locator(".ob-start h3")).toHaveText("Start a project");
+  await page.click("#ob-new");
+  await expect(page.locator(".modal-input")).toBeVisible();
+  await page.keyboard.press("Escape");
+  // Dismissed once, it stays dismissed until asked for again.
+  await expect(page.locator(".modal-input")).toHaveCount(0);
+
+  // The agent paste-prompt is still the other path, with this hub's real
+  // origin filled in; the by-hand route is a docs link.
+  await expect(page.locator(".ob-agent h3")).toHaveText("Or let your agent do it");
   await expect(page.locator(".onboard .gd-code code")).toContainText(
     "to set up a new BearDrive project on http://localhost:8993. Ask me which folder to sync.",
   );
@@ -84,6 +97,13 @@ test("no-org account gets the onboarding empty state with the agent prompt", asy
     "href",
     "https://docs.beardrive.ai/manual/setup-by-hand/",
   );
+});
+
+// An account that already has projects must not get the dialog thrown at it.
+test("the create dialog does not open itself when projects exist", async ({ page }) => {
+  await login(page);
+  await expect(page.locator("#project-select")).toBeVisible();
+  await expect(page.locator(".modal-input")).toHaveCount(0);
 });
 
 test("new project via the sidebar + modal", async ({ page }) => {

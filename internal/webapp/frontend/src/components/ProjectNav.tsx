@@ -7,14 +7,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { postJSON } from "../api/http";
-import type { Project, ProjectCreated } from "../api/types";
-import { toast } from "../toast";
-import { useConfig } from "../hooks/useConfig";
-import { useHubRefresh } from "../hooks/useHub";
-import { EXISTING, NewProjectDialog } from "./NewProjectDialog";
+import type { Project } from "../api/types";
 import { closeSidebarOnMobile } from "./shell";
-import { useState } from "react";
 
 // Deterministic accent for a project's letter-mark, so each project keeps a
 // stable color across reloads without any server state.
@@ -37,35 +31,17 @@ export function ProjectNav({
   projects,
   currentId,
   menu,
+  onNew,
 }: {
   projects: Project[];
   currentId?: string;
   menu?: ProjectMenu;
+  // Opening the create dialog belongs to HubApp: three things ask for it now
+  // (this button, the empty state's button, and the auto-open when a signed-in
+  // account has no projects at all), and one owner beats three copies.
+  onNew: () => void;
 }) {
-  const refresh = useHubRefresh();
-  const cfg = useConfig().data;
-  const [creating, setCreating] = useState(false);
   const current = projects.find((p) => p.id === currentId);
-
-  const create = async (name: string, template: string) => {
-    // "I already have a folder" is an empty project with a different next
-    // screen: the server never hears the sentinel, and the intent rides in
-    // the URL instead of onto the project record — it belongs to whoever is
-    // connecting right now, not to the project forever.
-    const existing = template === EXISTING;
-    try {
-      const out = await postJSON<ProjectCreated>("/api/projects", {
-        name,
-        template: existing ? "" : template,
-      });
-      setCreating(false);
-      await refresh();
-      navigate("/" + out.project.id + (existing ? "?connect=existing" : ""));
-      toast(`Created “${out.project.name}”.`);
-    } catch (e) {
-      toast("Could not create the project: " + (e as Error).message, true);
-    }
-  };
 
   return (
     <nav id="projects" aria-label="Projects">
@@ -75,18 +51,11 @@ export function ProjectNav({
           className="nav-add"
           title="New project"
           aria-label="New project"
-          onClick={() => setCreating(true)}
+          onClick={onNew}
         >
           +
         </button>
       </div>
-      {creating && (
-        <NewProjectDialog
-          templates={cfg?.templates ?? []}
-          onCreate={create}
-          onClose={() => setCreating(false)}
-        />
-      )}
       <div className="proj-row">
         <Select
           value={currentId || ""}

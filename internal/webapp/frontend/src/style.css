@@ -394,6 +394,10 @@ button, input, a.btn { font-family: inherit; }
 .ob-card { background: var(--bg-side); border: 1px solid var(--border); border-radius: var(--r-card); padding: 20px 22px; margin-bottom: 14px; }
 .ob-card h3 { margin: 0 0 6px; font-size: 14.5px; font-weight: 600; }
 .ob-card p { margin: 0 0 14px; font-size: 13px; color: var(--text-dim); }
+/* The create-here card leads; the agent-paste card follows it. Accent edge
+   marks which one is the primary path without a second button competing. */
+.ob-card.ob-start { border-color: var(--border-2); box-shadow: inset 2px 0 0 var(--accent); }
+.ob-card.ob-start .pbtn { margin-top: 2px; }
 .ob-alt { margin: 12px 0 0; }
 .ob-alt a { color: var(--text-faint); font-size: 12.5px; font-weight: 600; text-decoration: none; }
 .ob-alt a:hover { color: var(--text); }
