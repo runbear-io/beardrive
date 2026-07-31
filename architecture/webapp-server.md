@@ -96,6 +96,15 @@ classDiagram
         +InviteValid func(token)
         -store AccountRepo
         -users, tokens, pending
+        -cli CLIAuth
+    }
+    class CLIAuth {
+        +Register(mux)
+        -session func(r) User
+        -issue func(w, user, device)
+        -pending map~cliGrant~
+        /auth/cli, /auth/device/{token}
+        /api/auth/exchange, /api/auth/device/*
     }
     class Mailer
     class User {
@@ -217,6 +226,7 @@ classDiagram
 
     AuthProvider <|.. BuiltinAuth
     AccountApprover <|.. BuiltinAuth
+    BuiltinAuth *-- CLIAuth : serves bdrive login
     BuiltinAuth o-- Mailer : nil → log links
     AuthProvider ..> User
 
