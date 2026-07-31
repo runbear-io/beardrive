@@ -408,7 +408,7 @@ button, input, a.btn { font-family: inherit; }
 .ob-alt a:hover { color: var(--text); }
 
 /* primary + secondary buttons */
-.pbtn { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: var(--accent); color: #241704; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.pbtn { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: var(--accent); color: #241704; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; text-decoration: none; }
 .pbtn:hover { background: var(--accent-bright); }
 .pbtn .ico { width: 15px; height: 15px; }
 .danger-btn { display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: #b3382e; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
@@ -597,6 +597,12 @@ a.ai-main:hover { color: var(--accent); }
 .gd-head .proj-mark { width: 22px; height: 22px; border-radius: 6px; }
 .gd-head .proj-mark svg { width: 13px; height: 13px; }
 .in-desc { color: var(--text-dim); font-size: 13.5px; line-height: 1.55; margin: 0 0 10px; max-width: 62ch; }
+/* Zero files: one empty state in place of the lens switcher and all three
+   panels, so nothing draws a frame around no data. */
+.in-blank { display: grid; justify-items: center; gap: 10px; padding: 40px 18px; margin-top: 14px; max-width: 760px; }
+.in-blank p { margin: 0; max-width: 52ch; line-height: 1.55; }
+.in-blank p:first-child { color: var(--text); font-size: 14.5px; font-weight: 600; }
+.in-blank .pbtn { margin-top: 6px; }
 .in-lens { display: flex; gap: 6px; margin: 0 0 14px; }
 .in-lens-btn { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--text-faint); cursor: pointer; }
 .in-lens-btn:hover { color: var(--text); }
