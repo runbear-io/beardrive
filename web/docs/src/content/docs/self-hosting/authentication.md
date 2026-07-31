@@ -82,7 +82,8 @@ alone can't grant. `bdrive login --device` forces that flow.
 
 Every sync and every `bdrive init` then authenticates with that token. The hub's
 device registry records per-device name, OS, account, and the IP the server
-observed — that's what History displays.
+observed. History shows the device name and OS; the IP stays in the registry
+and is never reported to project members.
 
 ## Password reset
 

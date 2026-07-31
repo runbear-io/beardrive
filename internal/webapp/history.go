@@ -19,18 +19,29 @@ import (
 // the revert/rollback phase, where restoring is just writing an old blob
 // back as a new op.
 
+// historyDevice is the slice of the device registry history is allowed to
+// report: who/what made the change, not where they connected from. The
+// registry keeps observing and persisting the IP (devices.go) — it just
+// doesn't ride along here, where every project member reads it. Mirrors
+// heatByDevice (reads.go).
+type historyDevice struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	OS   string `json:"os,omitempty"`
+}
+
 // HistoryEntry is one change as the history API reports it.
 type HistoryEntry struct {
-	Time     string     `json:"time"`
-	Kind     string     `json:"kind"` // add | edit | delete
-	Path     string     `json:"path"`
-	Size     int64      `json:"size,omitempty"`
-	Blob     string     `json:"blob,omitempty"` // sha256; fetch via the blob endpoint
-	User     string     `json:"user,omitempty"`
-	UserName string     `json:"user_name,omitempty"`
-	Author   string     `json:"author,omitempty"` // offline/git fallback identity
-	Device   DeviceInfo `json:"device"`
-	Note     string     `json:"note,omitempty"`
+	Time     string        `json:"time"`
+	Kind     string        `json:"kind"` // add | edit | delete
+	Path     string        `json:"path"`
+	Size     int64         `json:"size,omitempty"`
+	Blob     string        `json:"blob,omitempty"` // sha256; fetch via the blob endpoint
+	User     string        `json:"user,omitempty"`
+	UserName string        `json:"user_name,omitempty"`
+	Author   string        `json:"author,omitempty"` // offline/git fallback identity
+	Device   historyDevice `json:"device"`
+	Note     string        `json:"note,omitempty"`
 }
 
 // handleHistory serves ?path=<file> (one file's versions) or
@@ -92,9 +103,11 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		case path == "" && prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/"):
 			continue
 		}
-		dev, _ := s.Devices.Get(op.Device)
-		if dev.ID == "" {
-			dev = DeviceInfo{ID: op.Device, Name: op.DeviceName}
+		// Unregistered device (or volume mode, where Devices is nil): fall back
+		// to the op's own id + self-reported name.
+		dev := historyDevice{ID: op.Device, Name: op.DeviceName}
+		if info, ok := s.Devices.Get(op.Device); ok && info.ID != "" {
+			dev = historyDevice{ID: info.ID, Name: info.Name, OS: info.OS}
 		}
 		matched = append(matched, timed{HistoryEntry{
 			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: kinds[i],

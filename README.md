@@ -91,7 +91,7 @@ actually read (and which hot ones nobody maintains).
   device only writes its own append-only journal, so no locking service is
   needed; the hub can be backed by any object store.
 - **Change tracking** — `bdrive log` and the web UI's History view show
-  which account changed which file, when, from which device (name, OS, IP).
+  which account changed which file, when, from which device (name, OS).
   Content is stored content-addressed, so every version is retained — view
   or download any point in a file's history.
 - **Cloud-provider agnostic** — a hub can store on Amazon S3 (`s3://`),
@@ -471,8 +471,8 @@ The web UI lists your orgs' projects in the sidebar (⌘K opens a command
 palette: fuzzy file search, project switching, share/history/upload
 actions); selecting one browses that project's files, and the **History**
 view shows every change — which
-account made it, when, from which device (name, OS, and the IP the server
-observed), with view/download of any past version (content is
+account made it, when, from which device (name and OS — never the connecting
+IP), with view/download of any past version (content is
 content-addressed and retained forever; reverting to a version is the next
 phase and the API is already shaped for it). Folder rows have a history
 shortcut for a subtree feed; the topbar button shows the current file's

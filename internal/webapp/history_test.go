@@ -100,9 +100,22 @@ func TestHistoryAPI(t *testing.T) {
 	if newest.User != "alice@x.io" || newest.UserName != "Alice" {
 		t.Fatalf("user = %+v", newest)
 	}
-	// device joined from the registry: name, OS, server-observed IP
-	if newest.Device.Name != "alice-laptop" || newest.Device.OS != "darwin/arm64" || newest.Device.IP != "203.0.113.7" {
+	// device joined from the registry: name and OS only — the server-observed
+	// IP stays in the registry and out of every member's history feed (BEA-43).
+	// The id always rides along, so a nameless device still renders as something.
+	if newest.Device.ID != "dev1" || newest.Device.Name != "alice-laptop" || newest.Device.OS != "darwin/arm64" {
 		t.Fatalf("device = %+v", newest.Device)
+	}
+	// asserted on the raw body, not the struct: a typed unmarshal would pass
+	// even if the server still emitted the key.
+	if strings.Contains(rec.Body.String(), "203.0.113.7") {
+		t.Fatalf("history response leaks the device IP: %s", rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "last_seen") {
+		t.Fatalf("history response carries registry internals: %s", rec.Body)
+	}
+	if d, ok := srv.Devices.Get("dev1"); !ok || d.IP != "203.0.113.7" {
+		t.Fatalf("registry must keep observing the IP: %+v %v", d, ok)
 	}
 	if newest.Blob == "" || oldest.Blob == "" {
 		t.Fatal("entries must link to their exact content")
@@ -124,8 +137,12 @@ func TestHistoryAPI(t *testing.T) {
 		t.Fatalf("entry before the delete = %+v, want other.md's add", out.Entries[1])
 	}
 	// a device the registry never saw falls back to the op's own info
-	if out.Entries[0].Device.Name != "dev2" {
+	if out.Entries[0].Device.ID != "dev2" || out.Entries[0].Device.Name != "dev2" {
 		t.Fatalf("unknown device fallback = %+v", out.Entries[0].Device)
+	}
+	// the prefix feed is the same projection — no IP there either
+	if strings.Contains(rec.Body.String(), "203.0.113.7") {
+		t.Fatalf("prefix feed leaks the device IP: %s", rec.Body)
 	}
 
 	// whole-project feed + n limit
