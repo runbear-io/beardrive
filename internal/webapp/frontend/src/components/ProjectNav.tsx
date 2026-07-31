@@ -12,7 +12,7 @@ import type { Project, ProjectCreated } from "../api/types";
 import { toast } from "../toast";
 import { useConfig } from "../hooks/useConfig";
 import { useHubRefresh } from "../hooks/useHub";
-import { NewProjectDialog } from "./NewProjectDialog";
+import { EXISTING, NewProjectDialog } from "./NewProjectDialog";
 import { closeSidebarOnMobile } from "./shell";
 import { useState } from "react";
 
@@ -48,11 +48,19 @@ export function ProjectNav({
   const current = projects.find((p) => p.id === currentId);
 
   const create = async (name: string, template: string) => {
+    // "I already have a folder" is an empty project with a different next
+    // screen: the server never hears the sentinel, and the intent rides in
+    // the URL instead of onto the project record — it belongs to whoever is
+    // connecting right now, not to the project forever.
+    const existing = template === EXISTING;
     try {
-      const out = await postJSON<ProjectCreated>("/api/projects", { name, template });
+      const out = await postJSON<ProjectCreated>("/api/projects", {
+        name,
+        template: existing ? "" : template,
+      });
       setCreating(false);
       await refresh();
-      navigate("/" + out.project.id);
+      navigate("/" + out.project.id + (existing ? "?connect=existing" : ""));
       toast(`Created “${out.project.name}”.`);
     } catch (e) {
       toast("Could not create the project: " + (e as Error).message, true);

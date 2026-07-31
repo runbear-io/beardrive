@@ -122,6 +122,30 @@ test("new project from a template", async ({ page }) => {
   }
 });
 
+// "I already have a folder" creates the same empty project as "Empty
+// project" — the browser cannot touch your disk — so what it must change is
+// the next screen: the paste prompt stops telling the agent to make a new
+// folder, and the reassurance appears. The intent rides in the URL, so it
+// survives a reload.
+test("new project from an existing folder", async ({ page }) => {
+  await login(page);
+  await page.click("#projects .nav-add");
+  await page.fill(".modal-input", "brought-my-own");
+  await page.click('.start-point:has-text("I already have a folder")');
+  await page.click(".modal .pbtn");
+  await page.waitForURL(/connect=existing/);
+  await expect(page.locator(".gd-note")).toContainText("never moves, renames or overwrites");
+  await expect(page.locator(".gd-code code").first()).toContainText(
+    "I already have a folder of notes — ask me which one to sync",
+  );
+  // Nothing was seeded: same artifact as an empty project. Checked on the
+  // file tree, not #content — the paste prompt names INSTALL_FOR_AGENTS.md,
+  // which a substring match on "AGENTS.md" happily finds.
+  await expect(page.locator("#sidebar").getByText("AGENTS.md", { exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator(".gd-note")).toBeVisible();
+});
+
 test("account menu closes on Escape and outside click", async ({ page }) => {
   await login(page);
   await page.click("#account-btn");

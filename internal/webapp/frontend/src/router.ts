@@ -57,14 +57,23 @@ export interface Route {
   // version is the same page pinned to older bytes, so it rides as a query
   // param on the file route.
   version?: string;
+  // How the creator said they'd fill this project ("existing" = they already
+  // have a folder). Rides as a query param rather than living on the project
+  // record on purpose: it is one person's intent for their next five minutes,
+  // not a property of the project — a teammate connecting next week has their
+  // own answer, and would be told the wrong thing by a persisted flag.
+  connect?: string;
 }
 
 // `url` is pathname + search (what useLocationPath hands back).
 export function parseRoute(url: string, mode: "volume" | "hub"): Route {
   const qi = url.indexOf("?");
-  const version = qi === -1 ? "" : new URLSearchParams(url.slice(qi)).get("v") || "";
+  const q = qi === -1 ? null : new URLSearchParams(url.slice(qi));
+  const version = q?.get("v") || "";
+  const connect = q?.get("connect") || "";
   const r = parsePath(qi === -1 ? url : url.slice(0, qi), mode);
   if (version) r.version = version;
+  if (connect) r.connect = connect;
   return r;
 }
 

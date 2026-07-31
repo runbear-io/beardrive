@@ -383,7 +383,7 @@ export default function Browser(props: {
     // dashboard below it.
     view = (
       <>
-        <ConnectGuide project={project!} />
+        <ConnectGuide project={project!} existing={route.connect === "existing"} />
         <div className="home-insights">
           <Insights
             flatFiles={flatFiles}

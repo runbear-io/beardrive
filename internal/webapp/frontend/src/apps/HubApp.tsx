@@ -196,7 +196,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             // it used to sit in the .onboard card, 320px narrower and 90px
             // lower than home, two sidebar items apart.
             crumb: "Installation",
-            body: <ConnectGuide project={current} />,
+            body: <ConnectGuide project={current} existing={route.connect === "existing"} />,
           }
         : null;
 

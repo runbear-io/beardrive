@@ -763,6 +763,18 @@ a.ai-main:hover { color: var(--accent); }
 .sp-title { font-size: 13.5px; color: var(--text); display: flex; align-items: center; gap: 8px; }
 .sp-rec { font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px; line-height: 15px; }
 .sp-blurb { font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
+/* Extra space separates "seed something" from "seed nothing" — the two rows
+   below it produce the same empty project and differ only in intent. A
+   hairline was tried here first and dropped: --border is 7% white, which at
+   1px in a gap renders as nothing. The gap is the cue that actually reads,
+   and both rows say "nothing is seeded" in their own words anyway. */
+.start-point.sp-rule { margin-top: 16px; }
+/* Five rows can outgrow a short viewport; the dialog scrolls rather than
+   pushing Create off-screen. */
+.modal { max-height: calc(100vh - 32px); overflow-y: auto; }
+/* The reassurance on the connect guide — the question people actually have
+   when they point BearDrive at notes they already care about. */
+.gd-note { margin: -4px 0 16px; font-size: 13px; color: var(--text-dim); border-left: 2px solid var(--accent); padding-left: 11px; line-height: 1.55; }
 
 /* ---- toast ---- */
 [data-sonner-toast] { background: var(--bg-raise) !important; color: var(--text) !important; border: 1px solid var(--border-2) !important; border-radius: 10px !important; font-size: 13.5px !important; box-shadow: 0 18px 44px -12px rgba(0,0,0,.7) !important; }

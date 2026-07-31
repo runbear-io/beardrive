@@ -3,6 +3,13 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { StartTemplate } from "../api/types";
 
+// The "I already have a folder" pick. It creates the same empty project the
+// "Empty project" pick does — the browser cannot reach your disk, so this can
+// only change what you are told next, never what is created. Create therefore
+// stays enabled: disabling it would leave the dialog a dead end AND produce no
+// project id, which is the one thing the paste prompt actually needs.
+export const EXISTING = "__existing__";
+
 // The create-project dialog: a name, plus where the project starts from.
 //
 // Not a modalPrompt() variant on purpose — that API exists for one-field
@@ -23,6 +30,8 @@ export function NewProjectDialog({
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
+  // "" is an empty project; EXISTING is also an empty project — same artifact,
+  // different intent, and the intent is what the next screen needs to know.
   const [template, setTemplate] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -41,11 +50,18 @@ export function NewProjectDialog({
     }
   };
 
-  // Recommended first, then the rest, then "empty" — the order the spec's
-  // mock shows, with the default at the bottom where it reads as the opt-out.
+  // Recommended first, then the rest, then the two that seed nothing. The
+  // divider before them is doing real work: everything above answers "what
+  // should we put in it", everything below answers "nothing".
   const options = [
-    ...templates.map((t) => ({ value: t.name, title: t.title, blurb: t.blurb })),
-    { value: "", title: "Empty project", blurb: "just the folder" },
+    ...templates.map((t) => ({ value: t.name, title: t.title, blurb: t.blurb, rule: false })),
+    {
+      value: EXISTING,
+      title: "I already have a folder",
+      blurb: "nothing is seeded — connect it and your files stay as they are",
+      rule: true,
+    },
+    { value: "", title: "Empty project", blurb: "just the folder", rule: false },
   ];
 
   return (
@@ -82,7 +98,12 @@ export function NewProjectDialog({
           <fieldset className="start-points">
             <legend className="modal-label">Starting point</legend>
             {options.map((o, i) => (
-              <label key={o.value} className={"start-point" + (template === o.value ? " on" : "")}>
+              <label
+                key={o.value}
+                className={
+                  "start-point" + (template === o.value ? " on" : "") + (o.rule ? " sp-rule" : "")
+                }
+              >
                 <input
                   type="radio"
                   name="template"
