@@ -332,6 +332,7 @@ export default function Browser(props: {
         scope={route.viewTarget || ""}
         onOpenFile={openPath}
         onOpenFolder={openPath}
+        onOpenHistory={openHistory}
         isFolder={isFolderFn}
       />
     );
@@ -426,6 +427,7 @@ export default function Browser(props: {
             devices={devices}
             onOpenFile={openPath}
             onOpenFolder={openPath}
+            onOpenHistory={openHistory}
             isFolder={isFolderFn}
           />
         </div>

@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node } from "../api/types";
 import { heatTotal, hotPathSplit } from "../hooks/useBrowse";
-import { ageRange, ageSpanLabel, isFlatRange } from "../lib/heat";
+import { ageRange, ageSpanLabel, isFlatRange, orphanPaths } from "../lib/heat";
 
 /* ---- the project Dashboard: the read×write matrix ----
    Every file plotted by how much it is read (30 days, from the heat API)
@@ -46,6 +46,9 @@ interface Pt {
   total: number;
   days: number;
   danger: boolean;
+  // A heat row whose path is no longer in the tree: it has reads but no
+  // mtime, so it is ranked but never plotted (any position would be invented).
+  orphan?: boolean;
 }
 
 type Lens = "all" | "human" | "agent";
@@ -57,6 +60,7 @@ export function Insights(props: {
   scope?: string; // "" = whole project; a folder scopes to its subtree, a file to itself
   onOpenFile: (path: string) => void;
   onOpenFolder: (path: string) => void;
+  onOpenHistory: (path: string) => void;
   isFolder: (path: string) => boolean;
 }) {
   const [lens, setLens] = useState<Lens>("all");
@@ -92,6 +96,38 @@ export function Insights(props: {
     };
   });
 
+  /* Reads whose file left the project. They can't be plotted — both plots
+     position by freshness and a path with no tree entry has no mtime — but
+     dropping them is how "the doc everyone was reading just vanished" became
+     invisible, so Hot path ranks them alongside the tree and the plots carry
+     a count. */
+  const orphans: Pt[] = orphanPaths(heatMap, new Set(flatFiles.map((f) => f.path)))
+    .filter(inScope)
+    .map((path) => {
+      const e = heatMap![path];
+      return {
+        path,
+        reads: lens === "all" ? heatTotal(e) : e[lens] || 0,
+        agent: e.agent || 0,
+        human: e.human || 0,
+        share: e.share || 0,
+        total: heatTotal(e),
+        days: 0,
+        danger: false,
+        orphan: true,
+      };
+    })
+    // Nothing to say about a path with no reads under the current lens: Hot
+    // path wouldn't list it, so the footnote must not count it either.
+    .filter((p) => p.reads > 0);
+  const orphanNote =
+    orphans.length > 0 ? (
+      <p className="in-legend in-orphan-note">
+        {plural(orphans.length, "file")} with reads {orphans.length === 1 ? "is" : "are"} no
+        longer in the project — see Hot path.
+      </p>
+    ) : null;
+
   return (
     <div className="insights">
       <h1 className="in-title">Knowledge insights{scope ? <span className="in-scope"> · {scope}</span> : null}</h1>
@@ -114,12 +150,19 @@ export function Insights(props: {
 
       <h3 className="dl-h3">Map — cell size = reads, color = freshness (scale below)</h3>
       <Treemap pts={pts} onOpenFile={props.onOpenFile} onOpenFolder={props.onOpenFolder} isFolder={props.isFolder} />
+      {orphanNote}
 
       <h3 className="dl-h3">Reads × freshness</h3>
       <Scatter pts={pts} onOpenFile={props.onOpenFile} />
+      {orphanNote}
 
       <h3 className="dl-h3">Hot path — top files by reads</h3>
-      <HotPath pts={pts} lens={lens} onOpenFile={props.onOpenFile} />
+      <HotPath
+        pts={[...pts, ...orphans]}
+        lens={lens}
+        onOpenFile={props.onOpenFile}
+        onOpenHistory={props.onOpenHistory}
+      />
 
       {scopedDevices && scopedDevices.length > 0 && (
         <>
@@ -433,10 +476,12 @@ function HotPath({
   pts,
   lens,
   onOpenFile,
+  onOpenHistory,
 }: {
   pts: Pt[];
   lens: Lens;
   onOpenFile: (p: string) => void;
+  onOpenHistory: (p: string) => void;
 }) {
   const top = pts
     .filter((p) => p.reads > 0)
@@ -457,6 +502,9 @@ function HotPath({
                 ? { agent: 0, human: 1, share: 0 }
                 : hotPathSplit(p);
           const pct = (p.reads / max) * 100;
+          // The file view would land on the not-found page for a path that
+          // left the project; History still has the content.
+          const open = () => (p.orphan ? onOpenHistory(p.path) : onOpenFile(p.path));
           return (
             <div
               key={p.path}
@@ -464,21 +512,24 @@ function HotPath({
               tabIndex={0}
               role="button"
               title={
-                p.danger
-                  ? `${p.reads} read${p.reads === 1 ? "" : "s"}/30d · unchanged ${Math.round(p.days)}d — review this file`
-                  : p.path
+                p.orphan
+                  ? `${p.reads} read${p.reads === 1 ? "" : "s"}/30d · no longer in the project — open its history`
+                  : p.danger
+                    ? `${p.reads} read${p.reads === 1 ? "" : "s"}/30d · unchanged ${Math.round(p.days)}d — review this file`
+                    : p.path
               }
-              onClick={() => onOpenFile(p.path)}
+              onClick={open}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  onOpenFile(p.path);
+                  open();
                 }
               }}
             >
               <span className={"in-hp-name" + (p.danger ? " danger" : "")}>
                 {p.path + (p.danger ? " ⚠" : "")}
               </span>
+              {p.orphan && <span className="in-hp-gone">· no longer in the project</span>}
               <span className="in-hp-bar">
                 <span className="in-hp-agent" style={{ width: (pct * f.agent).toFixed(1) + "%" }} />
                 <span className="in-hp-human" style={{ width: (pct * f.human).toFixed(1) + "%" }} />

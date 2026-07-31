@@ -66,6 +66,17 @@ export function hotPathSplit(e: HeatEntry): { agent: number; human: number; shar
   };
 }
 
+/* Heat rows for paths the tree no longer has. A deleted or renamed file keeps
+   its read history, and dropping it is how "the doc everyone read just
+   vanished" became invisible — the Dashboard joined heat onto the file tree
+   and silently discarded whatever didn't match. */
+export function orphanPaths(heatMap: HeatMap | null, known: Set<string>): string[] {
+  if (!heatMap) return [];
+  return Object.keys(heatMap)
+    .filter((p) => !known.has(p))
+    .sort();
+}
+
 /* Freshness-scale helpers for the Dashboard treemap legend.
    Pure and dependency-free so they can be unit-tested (Insights.tsx can't —
    node's test runner doesn't do JSX). */
