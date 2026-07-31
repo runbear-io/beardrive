@@ -7,11 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { postJSON } from "../api/http";
-import type { Project, ProjectCreated } from "../api/types";
-import { modalPrompt } from "../modal";
-import { toast } from "../toast";
-import { useHubRefresh } from "../hooks/useHub";
+import type { Project } from "../api/types";
 import { closeSidebarOnMobile } from "./shell";
 
 // Deterministic accent for a project's letter-mark, so each project keeps a
@@ -35,32 +31,28 @@ export function ProjectNav({
   projects,
   currentId,
   menu,
+  onNew,
 }: {
   projects: Project[];
   currentId?: string;
   menu?: ProjectMenu;
+  // Opening the create dialog belongs to HubApp: three things ask for it now
+  // (this button, the empty state's button, and the auto-open when a signed-in
+  // account has no projects at all), and one owner beats three copies.
+  onNew: () => void;
 }) {
-  const refresh = useHubRefresh();
   const current = projects.find((p) => p.id === currentId);
-
-  const create = async () => {
-    const name = await modalPrompt("New project", "Project name", "", "Create");
-    if (name === null) return;
-    try {
-      const out = await postJSON<ProjectCreated>("/api/projects", { name });
-      await refresh();
-      navigate("/" + out.project.id);
-      toast(`Created “${out.project.name}”.`);
-    } catch (e) {
-      toast("Could not create the project: " + (e as Error).message, true);
-    }
-  };
 
   return (
     <nav id="projects" aria-label="Projects">
       <div className="nav-head">
         <span>Projects</span>
-        <button className="nav-add" title="New project" aria-label="New project" onClick={create}>
+        <button
+          className="nav-add"
+          title="New project"
+          aria-label="New project"
+          onClick={onNew}
+        >
           +
         </button>
       </div>

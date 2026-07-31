@@ -92,19 +92,22 @@ list in .bdrive/config.json is never pruned against either.`,
 
 			if hookLabel != "" {
 				// Agent-hook mode: event JSON on stdin, silent best-effort
-				// sync, link-formula context on stdout. Never fails. Only the
-				// first mount emits context — the JSON contract is one object,
-				// so a repo with several mounts links through the first.
-				emit := true
+				// sync, link-formula context on stdout. Never fails. Every
+				// mount contributes its own prefix→URL pair; the JSON
+				// contract is one object, so they are emitted together after
+				// the loop.
+				sessionID := hookSessionID(cmd)
+				var links []hookLink
 				for _, target := range targets {
 					proj, ok, err := config.LoadProject(target)
 					if err != nil || !ok || syncBlocked(proj) != "" {
 						continue
 					}
-					if err := runHookSync(cmd, target, hookLabel, emit); err == nil && emit {
-						emit = false
+					if base, ok := runHookSync(cmd, target, sessionID, hookLabel); ok {
+						links = append(links, hookLinkFor(folder, target, base))
 					}
 				}
+				emitHookContext(cmd, links)
 				return nil
 			}
 			if len(targets) == 0 {

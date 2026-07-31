@@ -63,7 +63,7 @@ classDiagram
         +HasBlob(ctx, blob)
         +Commit(ctx, path, blob, size, who, note)
     }
-    note for DirectUploader "Commit's note is \"\" for an upload and \"restore &lt;path&gt;@&lt;sha8&gt;\" for POST /api/p/{id}/restore — which is the upload commit minus the upload: find the historical op for (path, sha), journal a NEW put at its blob. Never rewrites a journal."
+    note for DirectUploader "Commit's note is &quot;&quot; for an upload and &quot;restore &lt;path&gt;@&lt;sha8&gt;&quot; for POST /api/p/{id}/restore — which is the upload commit minus the upload: find the historical op for (path, sha), journal a NEW put at its blob. Never rewrites a journal."
     note for RemoteSource "Every write ends at appendOp: stamp Seq/Lamport/Time + this server's Identity, append ONE op to journal/&lt;own-device&gt;.jsonl. Commit does that for a put; Remove (POST /api/p/{id}/remove, restore's gates + a snapshot existence check) does it for a delete — the only server path that takes a file away, and itself undone by restoring the DELETED row."
 
     class Backend {
@@ -96,7 +96,15 @@ classDiagram
         +InviteValid func(token)
         -store AccountRepo
         -users, tokens, pending
+        -cli CLIAuth
     }
+    class CLIAuth {
+        +Register(mux)
+        -session func(r) User
+        -issue func(w, user, device)
+        -pending map~cliGrant~
+    }
+    note for CLIAuth "The paths bdrive login POSTs by name, served the same way for every provider: /auth/cli, /auth/device/&lt;token&gt;, /api/auth/exchange, /api/auth/device/start, /api/auth/device/poll."
     class Mailer
     class User {
         +ID +Email +Name +Admin
@@ -127,17 +135,26 @@ classDiagram
         -repo ProjectRepo
         -byID
         +Get +Create +Update +Rename +List
-        +SetCreator +SetDefault
+        +SetCreator +SetDefault +SetTemplate
         +SetPerm +ClearPerm
     }
     class Project {
         +ID +Name +Org +Created
         +Description +Icon
         +Creator string
+        +Template string
         +Default string
         +Perms map email→level
     }
-    note for Project "Default == \"\" means write — the historical behavior, so an upgraded hub needs no migration. SetPerm/ClearPerm refuse to drop the last explicit admin."
+    class seedTemplate {
+        <<Server method>>
+        POST /api/projects `template`
+        templates.Get before GetOrCreate → 400
+        Upload() per file, hub's own device
+        skips paths that already exist
+        CheckWrite / RecordUsage
+    }
+    note for Project "Default == &quot;&quot; means write — the historical behavior, so an upgraded hub needs no migration. SetPerm/ClearPerm refuse to drop the last explicit admin."
 
     class projectPerm {
         <<resolver>>
@@ -217,6 +234,7 @@ classDiagram
 
     AuthProvider <|.. BuiltinAuth
     AccountApprover <|.. BuiltinAuth
+    BuiltinAuth *-- CLIAuth : serves bdrive login
     BuiltinAuth o-- Mailer : nil → log links
     AuthProvider ..> User
 
@@ -227,6 +245,9 @@ classDiagram
     BuiltinAuth ..> OrgDB : InviteValid wiring
 
     ProjectDB ..> Project
+    Server *-- seedTemplate : on create, when `template` is set
+    seedTemplate ..> Uploader : RemoteSource.Upload (blob, then journal)
+    seedTemplate ..> ProjectDB : SetTemplate records it once
     Server *-- projectPerm : gates every per-project route
     projectPerm ..> Project : Perms + Default
     projectPerm ..> Directory : org role
