@@ -135,15 +135,24 @@ classDiagram
         -repo ProjectRepo
         -byID
         +Get +Create +Update +Rename +List
-        +SetCreator +SetDefault
+        +SetCreator +SetDefault +SetTemplate
         +SetPerm +ClearPerm
     }
     class Project {
         +ID +Name +Org +Created
         +Description +Icon
         +Creator string
+        +Template string
         +Default string
         +Perms map email→level
+    }
+    class seedTemplate {
+        <<Server method>>
+        POST /api/projects `template`
+        templates.Get before GetOrCreate → 400
+        Upload() per file, hub's own device
+        skips paths that already exist
+        CheckWrite / RecordUsage
     }
     note for Project "Default == &quot;&quot; means write — the historical behavior, so an upgraded hub needs no migration. SetPerm/ClearPerm refuse to drop the last explicit admin."
 
@@ -236,6 +245,9 @@ classDiagram
     BuiltinAuth ..> OrgDB : InviteValid wiring
 
     ProjectDB ..> Project
+    Server *-- seedTemplate : on create, when `template` is set
+    seedTemplate ..> Uploader : RemoteSource.Upload (blob, then journal)
+    seedTemplate ..> ProjectDB : SetTemplate records it once
     Server *-- projectPerm : gates every per-project route
     projectPerm ..> Project : Perms + Default
     projectPerm ..> Directory : org role

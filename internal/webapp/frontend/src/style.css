@@ -394,6 +394,10 @@ button, input, a.btn { font-family: inherit; }
 .ob-card { background: var(--bg-side); border: 1px solid var(--border); border-radius: var(--r-card); padding: 20px 22px; margin-bottom: 14px; }
 .ob-card h3 { margin: 0 0 6px; font-size: 14.5px; font-weight: 600; }
 .ob-card p { margin: 0 0 14px; font-size: 13px; color: var(--text-dim); }
+/* The create-here card leads; the agent-paste card follows it. Accent edge
+   marks which one is the primary path without a second button competing. */
+.ob-card.ob-start { border-color: var(--border-2); box-shadow: inset 2px 0 0 var(--accent); }
+.ob-card.ob-start .pbtn { margin-top: 2px; }
 .ob-alt { margin: 12px 0 0; }
 .ob-alt a { color: var(--text-faint); font-size: 12.5px; font-weight: 600; text-decoration: none; }
 .ob-alt a:hover { color: var(--text); }
@@ -756,6 +760,31 @@ a.ai-main:hover { color: var(--accent); }
 .modal-msg { margin: 0 0 16px; font-size: 13.5px; color: var(--text-dim); line-height: 1.55; }
 .modal-input { width: 100%; height: 36px; padding: 0 12px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 14px; margin-bottom: 16px; outline: none; }
 .modal-input:focus { border-color: var(--accent); background: var(--hover); }
+
+/* starting-point picker (new-project dialog) — native radios, styled with
+   the accent token; no extra ui/* component for three options. */
+.start-points { border: 0; margin: 0 0 18px; padding: 0; }
+.start-points legend { padding: 0; }
+.start-point { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--surface); cursor: pointer; margin-bottom: 6px; }
+.start-point:hover { background: var(--hover); }
+.start-point.on { border-color: var(--accent); background: var(--hover); }
+.start-point input { accent-color: var(--accent); margin: 2px 0 0; flex: none; }
+.sp-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sp-title { font-size: 13.5px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.sp-rec { font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px; line-height: 15px; }
+.sp-blurb { font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
+/* Extra space separates "seed something" from "seed nothing" — the two rows
+   below it produce the same empty project and differ only in intent. A
+   hairline was tried here first and dropped: --border is 7% white, which at
+   1px in a gap renders as nothing. The gap is the cue that actually reads,
+   and both rows say "nothing is seeded" in their own words anyway. */
+.start-point.sp-rule { margin-top: 16px; }
+/* Five rows can outgrow a short viewport; the dialog scrolls rather than
+   pushing Create off-screen. */
+.modal { max-height: calc(100vh - 32px); overflow-y: auto; }
+/* The reassurance on the connect guide — the question people actually have
+   when they point BearDrive at notes they already care about. */
+.gd-note { margin: -4px 0 16px; font-size: 13px; color: var(--text-dim); border-left: 2px solid var(--accent); padding-left: 11px; line-height: 1.55; }
 
 /* ---- toast ---- */
 [data-sonner-toast] { background: var(--bg-raise) !important; color: var(--text) !important; border: 1px solid var(--border-2) !important; border-radius: 10px !important; font-size: 13.5px !important; box-shadow: 0 18px 44px -12px rgba(0,0,0,.7) !important; }

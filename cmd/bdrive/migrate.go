@@ -128,7 +128,7 @@ bdrive init --project <id>.`,
 			if name == "" {
 				return fmt.Errorf("archive has no manifest; pass --name")
 			}
-			p, created, err := createProject(settings.Server, settings.Token, name)
+			p, created, err := createProject(settings.Server, settings.Token, name, "")
 			if err != nil {
 				return fmt.Errorf("cannot create project on %s: %w", settings.Server, err)
 			}

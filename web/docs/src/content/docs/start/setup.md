@@ -32,6 +32,26 @@ the same name — so `handbook` on the hub is `handbook/` on everyone's disk.
 Starting from nothing (no project id, no name), it recommends `shared/` and
 names the new project `shared`.
 
+If the folder turns out to be empty once it is connected, the agent offers one
+more choice: start from a structure, or from scratch. Three are shipped:
+
+- **Docs + decision records** (`docs/`, `decisions/`) — the boring default, and
+  the one to take if you are not sure.
+- **LLM wiki** (`sources/`, `wiki/`, `index.md`, `log.md`) — you curate the raw
+  material and ask the questions; the agent writes and maintains every page,
+  keeps the index current, and health-checks the whole thing for stale claims
+  and orphans. It suits accumulating knowledge over weeks — research, a
+  competitor file, a company brain fed by transcripts and threads.
+- **PARA** (`projects/`, `areas/`, `resources/`, `archives/`) — sorted by how
+  actionable something is, with explicit archiving.
+
+Each is a small skeleton plus an `AGENTS.md` telling every agent on the team
+where a new file goes, when something is archived or superseded, and what a good
+filename looks like. That file is the point; the folders are scaffolding. A
+folder that already has files in it is never restructured, and "from scratch"
+stays a real answer. The same choices appear when you create a project in the
+hub, and on the command line as `bdrive init --template docs`.
+
 The hooks step is the durable part: once they are registered, every later
 session in every folder syncs automatically, with nothing to remember.
 
