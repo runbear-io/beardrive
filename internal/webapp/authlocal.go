@@ -750,7 +750,7 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 	if a.Brand != "" {
 		brand = `<p class="alt" style="margin:0 0 14px;color:var(--dim)">` + html.EscapeString(a.Brand) + `</p>`
 	}
-	authPage(w, "Sign in", brand+inviteBanner(next)+cliBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
+	authPage(w, "Sign in", brand+inviteBanner(next)+cliBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button type="submit">Sign in</button></form>
 %s<p class="alt"><a href="/auth/reset">Forgot password?</a></p>`,
 		url.QueryEscape(next),
 		field("Email", "email", "email", r.FormValue("email")),
@@ -816,7 +816,7 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 	if a.Brand != "" {
 		brand = `<p class="alt" style="margin:0 0 14px;color:var(--dim)">` + html.EscapeString(a.Brand) + `</p>`
 	}
-	authPage(w, "Create account", brand+inviteBanner(next)+cliBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/signup?next=%s">%s%s%s%s%s<button>Sign up</button></form>
+	authPage(w, "Create account", brand+inviteBanner(next)+cliBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/signup?next=%s">%s%s%s%s%s<button type="submit">Sign up</button></form>
 <p class="alt">Have an account? <a href="/auth/login?next=%s">Sign in</a></p>`,
 		url.QueryEscape(next),
 		field("Name", "name", "text", r.FormValue("name")),
@@ -898,7 +898,7 @@ func (a *BuiltinAuth) pageAuth(w http.ResponseWriter, r *http.Request, req authR
 	}
 	authPage(w, req.title, fmt.Sprintf(`<p class="lede">%s</p>
 %s%s
-<form method="post"><button>Approve</button></form>
+<form method="post"><button type="submit">Approve</button></form>
 <p class="alt">%s</p>`,
 		html.EscapeString(req.lede), whoBlock(user, r.URL.RequestURI()), rows(req.detail()...), req.note))
 }
@@ -1071,7 +1071,7 @@ func (a *BuiltinAuth) pageReset(w http.ResponseWriter, r *http.Request) {
 <p class="alt">No email configured on this server? The link is in the server log.</p>`)
 		return
 	}
-	authPage(w, "Reset password", fmt.Sprintf(`<form method="post">%s<button>Send reset link</button></form>
+	authPage(w, "Reset password", fmt.Sprintf(`<form method="post">%s<button type="submit">Send reset link</button></form>
 <p class="alt"><a href="/auth/login">Back to sign in</a></p>`,
 		field("Email", "email", "email", "")))
 }
@@ -1108,7 +1108,7 @@ func (a *BuiltinAuth) pageResetConfirm(w http.ResponseWriter, r *http.Request) {
 }
 
 func resetForm(token, msg string) string {
-	return fmt.Sprintf(`<form method="post"><input type="hidden" name="token" value=%q>%s%s<button>Set password</button></form>`,
+	return fmt.Sprintf(`<form method="post"><input type="hidden" name="token" value=%q>%s%s<button type="submit">Set password</button></form>`,
 		html.EscapeString(token), newPasswordField("New password (min 8 chars)", "password"), msg)
 }
 
