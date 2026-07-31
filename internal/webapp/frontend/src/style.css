@@ -658,6 +658,10 @@ a.ai-main:hover { color: var(--accent); }
 .hpath { font-weight: 500; cursor: pointer; color: var(--text); font-size: 13px; }
 .hpath:hover { color: var(--accent-bright); }
 .htime { margin-left: auto; color: var(--text-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Foot of a paged feed: says out loud that older changes exist, which is
+   the whole point — the list used to just stop. */
+.hmore { display: flex; margin: 14px auto; }
+.hmore:disabled { opacity: .6; cursor: default; }
 .hmeta { display: flex; align-items: center; gap: 14px; margin-top: 4px; padding-left: var(--hindent); font-size: 12px; color: var(--text-dim); }
 .hdev, .hsize { color: var(--text-faint); }
 .hsize { font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
