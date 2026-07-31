@@ -31,7 +31,9 @@ With no argument, `bdrive url` gives the project home.
 :::tip[Agents do this automatically]
 The sync hook `bdrive init` registers injects the project's
 gated-link formula into the agent's context, so a connected agent appends
-`path` [🔗](link) to every synced path it mentions — without being asked. See
+`path` [🔗](link) to every synced path it mentions — without being asked. If a
+session's root holds several connected folders, each one's URL goes in, so a
+path is always linked to the project it actually lives in. See
 [Set up with your agent](/start/setup/).
 :::
 
