@@ -63,7 +63,7 @@ test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await p2.waitForURL(/auth\/login/);
   await p2.fill('input[name="email"]', MEMBER);
   await p2.fill('input[name="password"]', PASSWORD);
-  await p2.click("form button");
+  await p2.click("button[type=submit]");
   await expectToast(p2, "you joined");
   await p2.waitForURL(/\/[0-9a-f-]{36}$/); // lands on the org's project
   await ctx.close();

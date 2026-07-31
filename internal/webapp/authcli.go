@@ -162,7 +162,7 @@ func (c *CLIAuth) pageAuth(w http.ResponseWriter, r *http.Request, req authReque
 	}
 	authPage(w, req.title, fmt.Sprintf(`<p class="lede">%s</p>
 %s%s
-<form method="post"><button>Approve</button></form>
+<form method="post"><button type="submit">Approve</button></form>
 <p class="alt">%s</p>`,
 		html.EscapeString(req.lede), whoBlock(user, r.URL.RequestURI()), rows(req.detail()...), req.note))
 }
