@@ -137,8 +137,11 @@ test("new project from a template", async ({ page }) => {
   await page.click(".modal .pbtn");
   await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("from-template");
+  // Asserted on the file tree, not #content: a brand-new project's dashboard
+  // deliberately paints no treemap cells (#93), so #content is not where a
+  // seeded file reliably shows up.
   for (const name of ["docs", "decisions", "AGENTS.md"]) {
-    await expect(page.locator("#content").getByText(name, { exact: true }).first()).toBeVisible();
+    await expect(page.locator("#sidebar").getByText(name, { exact: true }).first()).toBeVisible();
   }
 });
 

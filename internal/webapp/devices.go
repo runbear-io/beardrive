@@ -11,8 +11,9 @@ import (
 // DeviceInfo is what the server knows about one syncing device: self-reported
 // name/OS (headers sent by the client), plus what the server itself observed
 // (public IP of the last push, last activity, the signed-in account). History
-// joins ops against this registry, so IPs are real — as the server saw them —
-// and ops stay small.
+// joins ops against this registry so ops stay small — but it reports only
+// id/name/os (historyDevice, history.go): the IP is recorded here, not
+// repeated to every project member on every change.
 type DeviceInfo struct {
 	ID       string    `json:"id"`
 	Name     string    `json:"name,omitempty"`

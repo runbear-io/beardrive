@@ -137,6 +137,8 @@ export interface Node {
   dir?: boolean;
   size?: number;
   time?: string;
+  user?: string;
+  user_name?: string;
   author?: string;
   device?: string;
   children?: Node[];
@@ -148,6 +150,8 @@ export interface RenderDoc {
   html: string;
   size: number;
   time?: string;
+  user?: string;
+  user_name?: string;
   author?: string;
   device?: string;
 }
@@ -167,7 +171,6 @@ export interface DeviceInfo {
   id?: string;
   name?: string;
   os?: string;
-  ip?: string;
 }
 export interface HistoryEntry {
   time: string;

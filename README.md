@@ -91,7 +91,7 @@ actually read (and which hot ones nobody maintains).
   device only writes its own append-only journal, so no locking service is
   needed; the hub can be backed by any object store.
 - **Change tracking** — `bdrive log` and the web UI's History view show
-  which account changed which file, when, from which device (name, OS, IP).
+  which account changed which file, when, from which device (name, OS).
   Content is stored content-addressed, so every version is retained — view
   or download any point in a file's history.
 - **Cloud-provider agnostic** — a hub can store on Amazon S3 (`s3://`),
@@ -222,7 +222,7 @@ hub's own storage, never something a syncing client points at directly:
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in (browser flow; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
+| `bdrive login [server-url]` | Sign this device in (browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--template/--yes`) for scripts; `--template docs\|wiki\|para` starts the project from a structure (directories plus the `AGENTS.md` that explains them) instead of an empty folder; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent; this is what the login agent runs |
@@ -236,8 +236,8 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
-| `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
-| `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change (`--list` shows the versions; no version = the previous one). Nothing is erased and it syncs everywhere like any edit. A file that was *created* can't be un-created yet |
+| `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the file was written (ops recorded before this was tracked, and deletes, show their sync time instead) |
+| `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change (`--list` shows the versions; no version = the previous one). Nothing is erased and it syncs everywhere like any edit. To un-create a file a run *created*, use **undo — remove file** on that row in the hub's History view |
 | `bdrive export [folder]` | Export the whole project — every device's journal, all blobs, full history — from its hub to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides); history and authorship carry over. Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
 | `bdrive serve [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
@@ -484,8 +484,8 @@ The web UI lists your orgs' projects in the sidebar (⌘K opens a command
 palette: fuzzy file search, project switching, share/history/upload
 actions); selecting one browses that project's files, and the **History**
 view shows every change — which
-account made it, when, from which device (name, OS, and the IP the server
-observed), with view/download of any past version (content is
+account made it, when, from which device (name and OS — never the connecting
+IP), with view/download of any past version (content is
 content-addressed and retained forever; reverting to a version is the next
 phase and the API is already shaped for it). Folder rows have a history
 shortcut for a subtree feed; the topbar button shows the current file's

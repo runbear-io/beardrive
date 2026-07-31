@@ -360,6 +360,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 		op := nextOp(journal.KindPut, rel)
 		op.Blob, op.Size, op.Mode = sum, n, mode
+		op.Mtime = info.ModTime().UTC()
 		ops = append(ops, op)
 		cache[rel] = store.CachedFile{Blob: sum, Size: n, Mode: mode, MTimeNS: mt}
 		return nil
@@ -820,6 +821,31 @@ func pruneEmptyDirs(root, dir string) {
 		}
 		dir = filepath.Dir(dir)
 	}
+}
+
+// DisplayTime is the timestamp to show a human for an op: when the file was
+// written if we know it, otherwise when the op was committed. Ops written
+// before Op.Mtime existed, and deletes (no file left to stat), fall back.
+func DisplayTime(op journal.Op) time.Time {
+	if !op.Mtime.IsZero() {
+		return op.Mtime
+	}
+	return op.Time
+}
+
+// SortForDisplay orders ops newest-first by DisplayTime — the timestamp the
+// user actually sees, so the list reads as a timeline. Ties fall back to
+// reversed journal.Less to stay deterministic. This is deliberately NOT the
+// replay order: LogEntries keeps returning causal order because
+// bdrive restore walks it to find a file's previous version.
+func SortForDisplay(ops []journal.Op) {
+	sort.SliceStable(ops, func(i, j int) bool {
+		ti, tj := DisplayTime(ops[i]), DisplayTime(ops[j])
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return journal.Less(ops[j], ops[i])
+	})
 }
 
 // LogEntries returns the volume history, newest first.

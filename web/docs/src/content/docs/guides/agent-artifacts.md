@@ -94,8 +94,7 @@ bdrive log -n 50              # more of them
 ```
 
 The web UI's **History** view shows the same thing with view and download of any
-past version, including which device (name, OS, and the IP the server observed)
-made each change. Folder rows have a history shortcut for a subtree feed.
+past version, including which device (name and OS) made each change. Folder rows have a history shortcut for a subtree feed.
 
 This is the part a memory API can't give you: when an agent asserts something,
 you can see which agent wrote it, when, from where, and what the file said

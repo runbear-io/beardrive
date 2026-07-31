@@ -4,10 +4,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -43,13 +41,18 @@ type BuiltinAuth struct {
 
 	store AccountRepo
 
+	// cli serves `bdrive login` — the browser and device flows, shared with
+	// every other provider (see CLIAuth), which is why nothing about them
+	// lives in this file.
+	cli *CLIAuth
+
 	mu     sync.Mutex
 	users  map[string]*authUser // by id
 	tokens map[string]authToken // by sha256(token)
 
 	// Ephemeral single-use state; a server restart just cancels pending
-	// logins and resets.
-	pending map[string]pendingGrant // auth codes, device codes, reset tokens
+	// verifications and resets.
+	pending map[string]pendingGrant // verification links, reset tokens
 }
 
 type authUser struct {
@@ -79,12 +82,8 @@ type authToken struct {
 }
 
 type pendingGrant struct {
-	kind    string // "code" (CLI callback), "device" (poll flow), "reset"
-	user    string // set once granted
-	device  string // device flow: requested device name
-	os      string // device flow: requested device's OS
-	ip      string // device flow: where the request came from, as the server saw it
-	granted bool
+	kind    string // "verify" (email link) | "reset" (password reset link)
+	user    string
 	expires time.Time
 }
 
@@ -97,6 +96,7 @@ func NewBuiltinAuth(store AccountRepo, allowSignup bool, mail *Mailer) (*Builtin
 		tokens:  make(map[string]authToken),
 		pending: make(map[string]pendingGrant),
 	}
+	a.cli = NewCLIAuth(a.sessionUser, a.finishLogin)
 	users, tokens, policy, err := store.Load()
 	if err != nil {
 		return nil, err
@@ -354,7 +354,7 @@ func (a *BuiltinAuth) userForToken(tok string) (User, bool) {
 
 // sendVerification emails (or logs) a verification link for the account.
 func (a *BuiltinAuth) sendVerification(r *http.Request, u *authUser) {
-	tok := a.newGrant("verify", u.ID, "", true, 24*time.Hour)
+	tok := a.newGrant("verify", u.ID, 24*time.Hour)
 	link := requestBaseURL(r) + "/auth/verify?token=" + tok
 	subject := "Verify your BearDrive account"
 	body := "Confirm your email to activate your BearDrive account:\n\n  " + link +
@@ -368,11 +368,12 @@ func (a *BuiltinAuth) sendVerification(r *http.Request, u *authUser) {
 	}
 }
 
-// grant helpers: single-use codes with expiry.
-func (a *BuiltinAuth) newGrant(kind, user, device string, granted bool, ttl time.Duration) string {
+// grant helpers: single-use email links with expiry (verification, reset).
+// The CLI's own pending sign-ins live in CLIAuth, not here.
+func (a *BuiltinAuth) newGrant(kind, user string, ttl time.Duration) string {
 	id := randHex(16)
 	a.mu.Lock()
-	a.pending[id] = pendingGrant{kind: kind, user: user, device: device, granted: granted, expires: time.Now().Add(ttl)}
+	a.pending[id] = pendingGrant{kind: kind, user: user, expires: time.Now().Add(ttl)}
 	a.mu.Unlock()
 	return id
 }
@@ -387,29 +388,6 @@ func (a *BuiltinAuth) takeGrant(kind, id string) (pendingGrant, bool) {
 	}
 	delete(a.pending, id)
 	return g, true
-}
-
-// peekGrant reads without consuming (device polling).
-func (a *BuiltinAuth) peekGrant(kind, id string) (pendingGrant, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	g, ok := a.pending[id]
-	if !ok || g.kind != kind || time.Now().After(g.expires) {
-		return pendingGrant{}, false
-	}
-	return g, true
-}
-
-func (a *BuiltinAuth) grantDevice(id, userID string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	g, ok := a.pending[id]
-	if !ok || g.kind != "device" || time.Now().After(g.expires) {
-		return false
-	}
-	g.user, g.granted = userID, true
-	a.pending[id] = g
-	return true
 }
 
 // Branding is the hub name this provider renders on its own pages.
@@ -517,19 +495,13 @@ func (a *BuiltinAuth) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/signup", a.pageSignup)
 	mux.HandleFunc("POST /auth/signup", a.pageSignup)
 	mux.HandleFunc("GET /auth/logout", a.pageLogout)
-	mux.HandleFunc("GET /auth/cli", a.pageCLI)
-	mux.HandleFunc("GET /auth/device/{token}", a.pageDevice)
-	mux.HandleFunc("POST /auth/device/{token}", a.pageDevice)
-	mux.HandleFunc("GET /auth/device", a.pageDeviceLegacy)
 	mux.HandleFunc("GET /auth/verify", a.pageVerify)
 	mux.HandleFunc("GET /auth/reset", a.pageReset)
 	mux.HandleFunc("POST /auth/reset", a.pageReset)
 	mux.HandleFunc("GET /auth/reset/confirm", a.pageResetConfirm)
 	mux.HandleFunc("POST /auth/reset/confirm", a.pageResetConfirm)
-	mux.HandleFunc("POST /api/auth/exchange", a.apiExchange)
-	mux.HandleFunc("POST /api/auth/device/start", a.apiDeviceStart)
-	mux.HandleFunc("POST /api/auth/device/poll", a.apiDevicePoll)
 	mux.HandleFunc("GET /api/auth/me", a.apiMe)
+	a.cli.Register(mux)
 }
 
 // sessionUser resolves the browser session (cookie only, not Bearer).
@@ -539,6 +511,9 @@ func (a *BuiltinAuth) sessionUser(r *http.Request) (User, bool) {
 	}
 	return User{}, false
 }
+
+// cliSignIn reports whether a next URL is a pending CLI sign-in.
+func cliSignIn(next string) bool { return strings.HasPrefix(next, "/auth/cli?") }
 
 func (a *BuiltinAuth) startSession(w http.ResponseWriter, userID string) error {
 	tok, err := a.issueToken(userID, "web-session")
@@ -559,6 +534,18 @@ func inviteBanner(next string) string {
 		return ""
 	}
 	return `<p class="msg" style="margin:0 0 14px">You've been invited to a team. Sign in (or sign up) to accept.</p>`
+}
+
+// cliBanner says what a sign-in reached from `bdrive login` is for, so the form
+// is not a bare password prompt appearing for no visible reason. Approving is
+// still its own step on the next page — this only explains why signing in is
+// being asked for at all.
+func cliBanner(next string) string {
+	if !cliSignIn(next) {
+		return ""
+	}
+	return `<p class="msg" style="margin:0 0 14px">A terminal on this computer is waiting to sign in. ` +
+		`The account you use here is the one it will act as.</p>`
 }
 
 // safeNext keeps post-login redirects on this site.
@@ -655,8 +642,8 @@ padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius-ctl);b
 @media (max-width:900px){input{height:44px}button{height:44px}}
 code{background:var(--hovered);border:1px solid var(--line);padding:2px 6px;border-radius:5px;
 font-family:var(--mono)}
-</style></head><body><div class="card"><div class="logo"><svg viewBox="0 0 32 32" role="img" aria-label="BearDrive">` +
-		`<rect x="4" y="4" width="5.6" height="24"/><rect x="11.2" y="4" width="14.4" height="11.2"/>` +
+</style></head><body><div class="card"><div class="logo"><svg viewBox="0 0 32 32" role="img" aria-label="BearDrive">`+
+		`<rect x="4" y="4" width="5.6" height="24"/><rect x="11.2" y="4" width="14.4" height="11.2"/>`+
 		`<rect x="11.2" y="16.8" width="16.8" height="11.2"/></svg></div><h1>%s</h1>%s</div></body></html>`,
 		html.EscapeString(title), html.EscapeString(title), body)
 }
@@ -734,7 +721,7 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 	if a.Brand != "" {
 		brand = `<p class="alt" style="margin:0 0 14px;color:var(--dim)">` + html.EscapeString(a.Brand) + `</p>`
 	}
-	authPage(w, "Sign in", brand+inviteBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
+	authPage(w, "Sign in", brand+inviteBanner(next)+cliBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/login?next=%s">%s%s%s<button>Sign in</button></form>
 %s<p class="alt"><a href="/auth/reset">Forgot password?</a></p>`,
 		url.QueryEscape(next),
 		field("Email", "email", "email", r.FormValue("email")),
@@ -800,7 +787,7 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 	if a.Brand != "" {
 		brand = `<p class="alt" style="margin:0 0 14px;color:var(--dim)">` + html.EscapeString(a.Brand) + `</p>`
 	}
-	authPage(w, "Create account", brand+inviteBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/signup?next=%s">%s%s%s%s%s<button>Sign up</button></form>
+	authPage(w, "Create account", brand+inviteBanner(next)+cliBanner(next)+fmt.Sprintf(`<form method="post" action="/auth/signup?next=%s">%s%s%s%s%s<button>Sign up</button></form>
 <p class="alt">Have an account? <a href="/auth/login?next=%s">Sign in</a></p>`,
 		url.QueryEscape(next),
 		field("Name", "name", "text", r.FormValue("name")),
@@ -823,100 +810,6 @@ func (a *BuiltinAuth) pageLogout(w http.ResponseWriter, r *http.Request) {
 		dest += "?next=" + url.QueryEscape(next)
 	}
 	http.Redirect(w, r, dest, http.StatusSeeOther)
-}
-
-// pageCLI completes `bdrive login`: once the browser has a session, mint a
-// one-time code and bounce it to the CLI's loopback listener. Redirects are
-// restricted to loopback addresses so the code can't be sent anywhere else.
-func (a *BuiltinAuth) pageCLI(w http.ResponseWriter, r *http.Request) {
-	redirect := r.URL.Query().Get("redirect")
-	state := r.URL.Query().Get("state")
-	u, err := url.Parse(redirect)
-	if err != nil || (u.Scheme != "http") || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1") {
-		http.Error(w, "invalid redirect (must be a loopback URL)", http.StatusBadRequest)
-		return
-	}
-	user, ok := a.sessionUser(r)
-	if !ok {
-		http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(r.URL.String()), http.StatusSeeOther)
-		return
-	}
-	code := a.newGrant("code", user.ID, "", true, time.Minute)
-	q := u.Query()
-	q.Set("code", code)
-	q.Set("state", state)
-	u.RawQuery = q.Encode()
-	http.Redirect(w, r, u.String(), http.StatusSeeOther)
-}
-
-// pageDevice is the headless-login approval page, reached by opening the link
-// `bdrive login` printed: the token lives in the path, so there is no code to
-// read off one screen and type into another. It names the account the device
-// will act as (with a way to switch), and what is asking, because approving
-// hands that machine a token that acts as you.
-func (a *BuiltinAuth) pageDevice(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-	user, ok := a.sessionUser(r)
-	if !ok {
-		http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
-		return
-	}
-	g, ok := a.peekGrant("device", token)
-	if !ok {
-		authPage(w, "Link expired", `<p class="err">This sign-in link is invalid, already used, or older than 10 minutes.</p>
-<p class="alt">Run <code>bdrive login --device</code> again for a fresh one.</p>`)
-		return
-	}
-	if r.Method == http.MethodPost {
-		if !a.grantDevice(token, user.ID) {
-			authPage(w, "Link expired", `<p class="err">This sign-in link expired while the page was open.</p>
-<p class="alt">Run <code>bdrive login --device</code> again for a fresh one.</p>`)
-			return
-		}
-		authPage(w, "Device connected", fmt.Sprintf(`<p class="msg">%s can now sync as %s.</p>
-<p class="alt">You can close this tab — the terminal finishes on its own.</p>`,
-			html.EscapeString(orDash(g.device)), html.EscapeString(user.Email)))
-		return
-	}
-	authPage(w, "Connect a device", fmt.Sprintf(`<p class="lede">A device is asking to sign in to BearDrive.</p>
-%s
-<form method="post"><button>Approve</button></form>
-<p class="alt">Approve this only if you just started a sign-in on that machine.</p>`,
-		whoBlock(user, g, r.URL.RequestURI())))
-}
-
-// whoBlock renders the two things the approver needs: who they'd be granting
-// as (with an escape hatch back to this same page), and what is asking.
-func whoBlock(user User, g pendingGrant, back string) string {
-	name := user.Name
-	if name == "" {
-		name = user.Email
-	}
-	return fmt.Sprintf(`<div class="who">
-<div class="who-id"><span class="who-l">Signing in as</span><b>%s</b><span class="who-sub">%s</span></div>
-<a class="who-swap" href="/auth/logout?next=%s">Switch account</a>
-</div>
-<dl class="rows"><dt>Device</dt><dd>%s</dd><dt>System</dt><dd>%s</dd><dt>Address</dt><dd>%s</dd></dl>`,
-		html.EscapeString(name), html.EscapeString(user.Email), url.QueryEscape(safeNext(back)),
-		html.EscapeString(orDash(g.device)), html.EscapeString(orDash(g.os)), html.EscapeString(orDash(g.ip)))
-}
-
-func orDash(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "—"
-	}
-	return s
-}
-
-// pageDeviceLegacy forwards the pre-0.13 link shape (/auth/device?code=…),
-// which older CLIs still print, to the path form.
-func (a *BuiltinAuth) pageDeviceLegacy(w http.ResponseWriter, r *http.Request) {
-	code := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("code")))
-	if code == "" {
-		authPage(w, "Connect a device", `<p>Run <code>bdrive login --device</code> on the machine you want to connect; it prints a link to open here.</p>`)
-		return
-	}
-	http.Redirect(w, r, "/auth/device/"+url.PathEscape(code), http.StatusSeeOther)
 }
 
 // pageVerify activates an account from an email link, then either starts a
@@ -956,7 +849,7 @@ func (a *BuiltinAuth) pageReset(w http.ResponseWriter, r *http.Request) {
 		u := a.findByEmail(email)
 		a.mu.Unlock()
 		if u != nil {
-			tok := a.newGrant("reset", u.ID, "", true, time.Hour)
+			tok := a.newGrant("reset", u.ID, time.Hour)
 			link := requestBaseURL(r) + "/auth/reset/confirm?token=" + tok
 			subject := "Reset your BearDrive password"
 			body := "Someone (hopefully you) asked to reset the BearDrive password for " + u.Email +
@@ -1020,86 +913,6 @@ func requestBaseURL(r *http.Request) string {
 }
 
 // ---- CLI API ----
-
-// apiExchange trades the one-time code from the browser redirect for a
-// long-lived device token.
-func (a *BuiltinAuth) apiExchange(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Code   string `json:"code"`
-		Device string `json:"device"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	g, ok := a.takeGrant("code", req.Code)
-	if !ok || !g.granted {
-		http.Error(w, "invalid or expired code", http.StatusUnauthorized)
-		return
-	}
-	a.finishLogin(w, g.user, req.Device)
-}
-
-// apiDeviceStart begins the headless flow: the CLI prints the approval link,
-// the user opens it in any signed-in browser, the CLI polls. The link itself
-// is the secret (RFC 8628 calls this verification_uri_complete), so it is a
-// full-length token, not something short enough to retype — nobody has to
-// read a code off one screen and type it into another.
-//
-// The requesting device's name, OS, and address are recorded here so the
-// approval page can show WHAT is being approved: this flow's weakness is that
-// a stranger can send you their own pending link, and a page that just says
-// "Approve" gives you nothing to notice with.
-func (a *BuiltinAuth) apiDeviceStart(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Device string `json:"device"`
-		OS     string `json:"os"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	code := randHex(16)
-	a.mu.Lock()
-	a.pending[code] = pendingGrant{
-		kind: "device", device: req.Device, os: req.OS, ip: requestIP(r),
-		expires: time.Now().Add(10 * time.Minute),
-	}
-	a.mu.Unlock()
-	writeJSON(w, map[string]any{
-		// "code" keeps its wire name: it is what the CLI polls with, and
-		// older clients still print it.
-		"code":       code,
-		"verify_url": requestBaseURL(r) + "/auth/device/" + code,
-		"interval":   2,
-	})
-}
-
-func (a *BuiltinAuth) apiDevicePoll(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Code   string `json:"code"`
-		Device string `json:"device"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	g, ok := a.peekGrant("device", req.Code)
-	if !ok {
-		http.Error(w, "invalid or expired code", http.StatusUnauthorized)
-		return
-	}
-	if !g.granted {
-		writeJSON(w, map[string]any{"pending": true})
-		return
-	}
-	a.takeGrant("device", req.Code)
-	device := req.Device
-	if device == "" {
-		device = g.device
-	}
-	a.finishLogin(w, g.user, device)
-}
 
 func (a *BuiltinAuth) finishLogin(w http.ResponseWriter, userID, device string) {
 	if device == "" {

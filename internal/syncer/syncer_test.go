@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
 )
@@ -575,4 +576,137 @@ func snapshotDir(t *testing.T, folder string) map[string]string {
 		t.Fatal(err)
 	}
 	return out
+}
+
+func touch(t *testing.T, folder, rel string, when time.Time) {
+	t.Helper()
+	abs := filepath.Join(folder, filepath.FromSlash(rel))
+	if err := os.Chtimes(abs, when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLogDisplayOrder builds exactly the skew that made `bdrive log`
+// unreadable: device B commits after pulling A, so B's op carries the HIGHER
+// lamport, while B's file was written hours EARLIER on the wall clock. Causal
+// order and clock order disagree — the display sort must follow the clock.
+func TestLogDisplayOrder(t *testing.T) {
+	be := sharedRemote(t)
+	a, b := newDevice(t, "deva", be), newDevice(t, "devb", be)
+
+	write(t, b.Folder, "early.md", "written two hours ago")
+	touch(t, b.Folder, "early.md", time.Now().Add(-2*time.Hour))
+	write(t, a.Folder, "late.md", "written just now")
+
+	cycle(t, a) // lamport 1
+	cycle(t, b) // pulls A (lamport 1), commits its own op at lamport 2
+	cycle(t, a) // pull B, so A's store holds both journals
+
+	entries, err := LogEntries(a.Store, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2: %+v", len(entries), entries)
+	}
+	// Precondition: the two orders really do disagree. Without this, the
+	// assertion below would pass even if SortForDisplay did nothing.
+	if entries[0].Path != "early.md" {
+		t.Fatalf("causal order should lead with the higher-lamport op early.md, got %q", entries[0].Path)
+	}
+
+	SortForDisplay(entries)
+	if entries[0].Path != "late.md" {
+		t.Fatalf("display order should lead with the newest file late.md, got %q", entries[0].Path)
+	}
+	assertNonIncreasing(t, entries)
+}
+
+// TestLogDisplayTimeIsEditTime covers the other half of the report: 22 ops of
+// one agent run all printed the same stamp because Time is the commit time.
+// Two files written a minute apart and committed in ONE cycle must carry two
+// different display times.
+func TestLogDisplayTimeIsEditTime(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+	write(t, a.Folder, "first.md", "one")
+	write(t, a.Folder, "second.md", "two")
+	touch(t, a.Folder, "first.md", time.Now().Add(-2*time.Minute))
+	touch(t, a.Folder, "second.md", time.Now().Add(-1*time.Minute))
+	cycle(t, a)
+
+	entries, err := LogEntries(a.Store, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+	byPath := map[string]journal.Op{}
+	for _, op := range entries {
+		if op.Mtime.IsZero() {
+			t.Fatalf("put op %s has no Mtime", op.Path)
+		}
+		// Commit times are microseconds apart — indistinguishable at the
+		// second resolution `bdrive log` prints, which is why one scan used
+		// to collapse a whole agent run onto a single stamp.
+		if d := op.Time.Sub(entries[0].Time); d > time.Second || d < -time.Second {
+			t.Fatalf("expected both ops committed in one batch, Time differs by %v", d)
+		}
+		byPath[op.Path] = op
+	}
+	gap := DisplayTime(byPath["second.md"]).Sub(DisplayTime(byPath["first.md"]))
+	if gap < 30*time.Second {
+		t.Fatalf("display times only %v apart; one scan collapsed them again", gap)
+	}
+
+	SortForDisplay(entries)
+	if entries[0].Path != "second.md" {
+		t.Fatalf("newest edit should lead, got %q", entries[0].Path)
+	}
+}
+
+// TestSortForDisplayFallsBackToTime covers journals written before Op.Mtime
+// existed, and deletes, which never carry one: they sort and print by Time and
+// must not sink to the bottom as zero-time rows.
+func TestSortForDisplayFallsBackToTime(t *testing.T) {
+	base := time.Date(2026, 7, 29, 6, 0, 0, 0, time.UTC)
+	mk := func(path string, lamport int64, kind string, commit, mtime time.Time) journal.Op {
+		return journal.Op{
+			Seq: lamport, Lamport: lamport, Time: commit, Mtime: mtime,
+			Device: "deva", Kind: kind, Path: path,
+		}
+	}
+	ops := []journal.Op{
+		mk("legacy-old.md", 1, journal.KindPut, base, time.Time{}), // no mtime
+		mk("gone.md", 2, journal.KindDelete, base.Add(3*time.Minute), time.Time{}),
+		mk("legacy-new.md", 3, journal.KindPut, base.Add(4*time.Minute), time.Time{}),
+		mk("fresh.md", 4, journal.KindPut, base.Add(9*time.Minute), base.Add(2*time.Minute)),
+	}
+	SortForDisplay(ops)
+
+	want := []string{"legacy-new.md", "gone.md", "fresh.md", "legacy-old.md"}
+	for i, w := range want {
+		if ops[i].Path != w {
+			t.Fatalf("order[%d] = %q, want %q (full: %v)", i, ops[i].Path, w, paths(ops))
+		}
+	}
+	assertNonIncreasing(t, ops)
+}
+
+func paths(ops []journal.Op) []string {
+	out := make([]string, len(ops))
+	for i, op := range ops {
+		out[i] = op.Path
+	}
+	return out
+}
+
+func assertNonIncreasing(t *testing.T, ops []journal.Op) {
+	t.Helper()
+	for i := 1; i < len(ops); i++ {
+		if DisplayTime(ops[i]).After(DisplayTime(ops[i-1])) {
+			t.Fatalf("display order not newest-first at %d: %v then %v",
+				i, DisplayTime(ops[i-1]), DisplayTime(ops[i]))
+		}
+	}
 }

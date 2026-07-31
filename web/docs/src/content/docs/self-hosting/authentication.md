@@ -58,10 +58,19 @@ server-config-owned, so a browser session can never widen who gets in.
 
 ## Device sign-in
 
+Both sign-in flows end the same way: **an approval page you have to click.** It
+names the account the machine would act as, because that is what approving
+grants — whichever account the browser is signed in as is the one the terminal
+becomes, and it is often not the one you meant (a personal login left open, a
+teammate's session on a shared machine). **Switch account** signs you out and
+returns to the same pending sign-in, so picking the right one costs a click
+rather than a re-run. Approval is a POST from that page, so merely opening a
+sign-in link grants nothing.
+
 `bdrive login <url>` opens the server's sign-in page in a browser — sign up
-right there if needed. When the user signs in, the page bounces a one-time code
-to the CLI's loopback listener and the terminal finishes on its own, storing a
-long-lived per-device token that is revocable server-side.
+right there if needed — and lands on that approval page. Approving bounces a
+one-time code to the CLI's loopback listener and the terminal finishes on its
+own, storing a long-lived per-device token that is revocable server-side.
 
 On headless or SSH machines login falls back to the device-code flow
 automatically (no TTY, or no browser can open): it prints one approval link to
@@ -73,7 +82,8 @@ alone can't grant. `bdrive login --device` forces that flow.
 
 Every sync and every `bdrive init` then authenticates with that token. The hub's
 device registry records per-device name, OS, account, and the IP the server
-observed — that's what History displays.
+observed. History shows the device name and OS; the IP stays in the registry
+and is never reported to project members.
 
 ## Password reset
 

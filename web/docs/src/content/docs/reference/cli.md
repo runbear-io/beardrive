@@ -9,7 +9,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 
 | Command | Description |
 |---|---|
-| `bdrive login [server-url]` | Sign this device in. Browser flow; `--device` forces the approval-link flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
+| `bdrive login [server-url]` | Sign this device in. Browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
 | `bdrive logout` | Sign this device out — clear the saved token and account. `--forget` also drops the remembered server |
 | `bdrive init [folder]` | Create or connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY; flags (`--name`, `--project`, `--server`, `--only`, `--template`, `--yes`) for scripts. `--template docs\|wiki\|para` starts a new project from a structure instead of an empty folder. Also registers agent sync hooks for detected platforms (`--no-hooks` skips them) and a login item so sync resumes after a reboot (`--no-autostart` skips), and prints the project's hub link. Re-run to resume |
 | `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent, so running it twice is harmless. This is what the login item runs |
@@ -24,7 +24,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each detected agent platform's user config — once per machine, covering every folder. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection. `uninstall` removes only BearDrive's own hook entries |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
-| `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file |
+| `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the file was written (ops recorded before this was tracked, and deletes, show their sync time instead) |
 | `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change. No version restores the previous one; `--list` shows the versions with their short hashes |
 | `bdrive export [folder]` | Export the whole project — all devices' history and content — to a portable `.tar.gz` (`-o` names the file) |
 | `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides the archive's name) |
@@ -106,9 +106,11 @@ versions in between stay in the history, the restore itself shows up in
 teammate like any other edit — so you can restore away from a restore. The hub
 has the same button on every history row.
 
-**Known gap:** restore puts content back; it cannot yet remove a file, so a
-file that a run *created* cannot be un-created. Delete it yourself and let the
-next sync carry that.
+**Restore puts content back; it does not delete.** To un-create a file an agent
+run *created*, open that run in the hub's History view and use the row's
+**undo — remove file** button (it asks first: the file leaves every synced
+device, and the DELETED row it leaves behind restores it). From the CLI, delete
+the file yourself and let the next sync carry that.
 
 ### `bdrive forget` and `bdrive sync --prune` — cleaning up the hub
 
