@@ -58,6 +58,12 @@ func TestDirSourceServesFolder(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Local") {
 		t.Fatalf("render: %d %s", rec.Code, rec.Body)
 	}
+	// A plain folder has no account behind a file. Sending empty user
+	// fields would make the viewer's attribution helper print "unknown"
+	// where this mode has always printed nothing.
+	if strings.Contains(rec.Body.String(), `"user"`) || strings.Contains(rec.Body.String(), `"user_name"`) {
+		t.Errorf("plain-folder render carries identity: %s", rec.Body)
+	}
 
 	if rec := get(t, h, "/api/file?path=.git/config"); rec.Code != 404 {
 		t.Fatalf(".git content must be hidden, got %d", rec.Code)

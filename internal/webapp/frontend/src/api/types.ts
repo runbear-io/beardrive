@@ -124,6 +124,8 @@ export interface Node {
   dir?: boolean;
   size?: number;
   time?: string;
+  user?: string;
+  user_name?: string;
   author?: string;
   device?: string;
   children?: Node[];
@@ -135,6 +137,8 @@ export interface RenderDoc {
   html: string;
   size: number;
   time?: string;
+  user?: string;
+  user_name?: string;
   author?: string;
   device?: string;
 }
