@@ -2,6 +2,11 @@
    Design language: Linear-grade restraint; the one accent (honey) is spent
    only on active state, the live/brand mark, and the palette selection. */
 :root {
+  /* The app is dark-only. Without this, anything the UA paints itself —
+     scrollbars, autofill, select/date popups, and any control that loses its
+     author `color` — resolves in the light scheme. That trapdoor is how
+     BEA-54 turned one dead selector into black-on-black text. */
+  color-scheme: dark;
   --bg: #0a0b0d;              /* main ground */
   --bg-side: #0c0e10;         /* sidebar / panels */
   --bg-raise: #15171b;        /* palette, modals, elevated cards */
@@ -82,7 +87,7 @@ body {
 [role="dialog"] input[aria-invalid="true"] { border-color: var(--del); }
 [role="dialog"] input[aria-invalid="true"]:focus-visible { outline-color: var(--del); }
 button:disabled, .btn:disabled { cursor: default; }
-input[type="checkbox"] { accent-color: var(--accent); width: 20px; height: 20px; color-scheme: dark; }
+input[type="checkbox"] { accent-color: var(--accent); width: 20px; height: 20px; }
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
@@ -721,27 +726,27 @@ a.ai-main:hover { color: var(--accent); }
 #palette-inputwrap { display: flex; align-items: center; gap: 11px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 #palette-inputwrap [data-slot="command-input-wrapper"] { flex: 1; display: flex; border-bottom: 0; padding: 0; height: auto; }
 #palette-inputwrap [data-slot="command-input-wrapper"] > svg:not(.ico) { display: none; }
-#palette input, #palette input:focus { border: none; background: transparent; box-shadow: none; outline: none; padding: 0; }
+/* Never anchor palette rules on an id handed to a cmdk primitive: cmdk
+   spreads caller props and then writes its own generated `id`, so
+   `#palette-input` / `#palette-results` silently stopped matching at the
+   cmdk migration (b7ce76b) and the input fell back to the UA's black
+   `fieldtext`. `#palette` / `#palette-inputwrap` are our own elements and
+   survive; `[cmdk-*]` are cmdk's documented styling hooks. (BEA-54) */
+#palette input, #palette input:focus { flex: 1; width: 100%; border: none; background: transparent; box-shadow: none; color: var(--text); font: inherit; font-size: 15px; letter-spacing: -.01em; outline: none; padding: 0; }
+#palette input::placeholder { color: var(--text-ghost); }
 #palette-inputwrap .ico { width: 17px; height: 17px; color: var(--text-faint); }
-#palette-input { flex: 1; width: 100%; border: none; background: transparent; color: var(--text); font: inherit; font-size: 15px; letter-spacing: -.01em; outline: none; padding: 0; }
-#palette-input::placeholder { color: var(--text-ghost); }
-#palette-results { list-style: none; margin: 0; padding: 8px; max-height: 46vh; overflow-y: auto; }
-#palette-results [cmdk-item] { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--text-dim); font-size: 13.5px; }
-#palette-results [cmdk-item][data-selected="true"] { background: var(--glow); }
-#palette-results [cmdk-item][data-selected="true"] .picon { color: var(--accent); }
-#palette-results [cmdk-item][data-selected="true"] .plabel { color: var(--accent-bright); }
-#palette-results [cmdk-item][data-selected="true"] .plabel b { color: var(--accent-bright); }
-#palette-results li { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--text-dim); font-size: 13.5px; }
-#palette-results li.selected { background: var(--glow); }
-#palette-results li.selected .picon { color: var(--accent); }
-#palette-results li.selected .plabel { color: var(--accent-bright); }
-#palette-results li.selected .plabel b { color: var(--accent-bright); }
-#palette-results li .picon { width: 18px; flex: none; display: flex; justify-content: center; color: var(--text-faint); }
-#palette-results li .picon .ico { width: 15px; height: 15px; }
-#palette-results li .plabel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
-#palette-results li .plabel b { color: var(--accent-bright); font-weight: 600; }
-#palette-results li .pkind { flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-ghost); }
-#palette-results .pempty { color: var(--text-faint); cursor: default; justify-content: center; height: auto; padding: 14px; }
+#palette [cmdk-list] { list-style: none; margin: 0; padding: 8px; max-height: 46vh; overflow-y: auto; }
+#palette [cmdk-item] { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--text-dim); font-size: 13.5px; }
+#palette [cmdk-item][data-selected="true"] { background: var(--glow); }
+#palette [cmdk-item][data-selected="true"] .picon { color: var(--accent); }
+#palette [cmdk-item][data-selected="true"] .plabel { color: var(--accent-bright); }
+#palette [cmdk-item][data-selected="true"] .plabel b { color: var(--accent-bright); }
+#palette [cmdk-item] .picon { width: 18px; flex: none; display: flex; justify-content: center; color: var(--text-faint); }
+#palette [cmdk-item] .picon .ico { width: 15px; height: 15px; }
+#palette [cmdk-item] .plabel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+#palette [cmdk-item] .plabel b { color: var(--accent-bright); font-weight: 600; }
+#palette [cmdk-item] .pkind { flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-ghost); }
+#palette [cmdk-list] .pempty { color: var(--text-faint); cursor: default; justify-content: center; height: auto; padding: 14px; }
 #palette-hint { padding: 9px 16px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-ghost); }
 
 /* ---- modal ---- */
@@ -878,7 +883,7 @@ a.ai-main:hover { color: var(--accent); }
   .modal-actions button { height: auto; min-height: 44px; }
   .modal-expiry select { height: 44px; }
   .pbtn { height: auto; min-height: 44px; }
-  #palette-results li { height: auto; min-height: 44px; }
+  #palette [cmdk-item] { height: auto; min-height: 44px; }
   .more-item { min-height: 44px; }
 }
 
