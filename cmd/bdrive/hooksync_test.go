@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -147,6 +148,124 @@ func TestSyncHookModeNoOps(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"hookSpecificOutput"`) {
 		t.Fatalf("formula not emitted on garbage stdin: %s", out.String())
+	}
+}
+
+// mountAt creates a project folder under parent and enrolls it on this
+// device, as `bdrive init` would.
+func mountAt(t *testing.T, parent, name, remote string) config.Project {
+	t.Helper()
+	dir := filepath.Join(parent, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := config.SaveProject(dir, config.Project{Volume: name, Remote: remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := config.ResolveMount(dir); err != nil {
+		t.Fatal(err)
+	}
+	return proj
+}
+
+func runHook(t *testing.T, folder string) string {
+	t.Helper()
+	c := syncCmd()
+	var out bytes.Buffer
+	c.SetOut(&out)
+	c.SetIn(strings.NewReader(`{"session_id":"sess-42"}`))
+	c.SetArgs([]string{folder, "--hook", "claude-code"})
+	if err := c.Execute(); err != nil {
+		t.Fatalf("hook mode must never fail: %v", err)
+	}
+	return out.String()
+}
+
+// A session at a root whose subfolders are separate projects must get EVERY
+// project's URL, each keyed by the prefix the agent sees — emitting only the
+// first mount's base made agents hang one project's paths on another
+// project's URL.
+func TestSyncHookModeMultipleMounts(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	a := mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
+	b := mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
+
+	got := runHook(t, root)
+
+	// One JSON object: the hook's stdout contract.
+	if n := strings.Count(strings.TrimSpace(got), "\n"); n != 0 {
+		t.Fatalf("hook emitted %d objects, want 1:\n%s", n+1, got)
+	}
+	for _, want := range []string{
+		"https://hub.example.com/p-aaaaaaaa",
+		"https://hub.example.com/p-bbbbbbbb",
+		"`projA/`",
+		"`projB/`",
+		"matches the path longest", // how to pick between them
+		"do not link it",           // a path in neither is not synced
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hook output missing %q:\n%s", want, got)
+		}
+	}
+
+	// stdin is consumed once, so the note must still reach every mount.
+	for _, proj := range []config.Project{a, b} {
+		vdir, err := config.VolumeDir(proj.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.Open(vdir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if note := st.LoadNote(); note != "claude-code session sess-42" {
+			t.Errorf("%s: note = %q, want the stamped session", proj.Volume, note)
+		}
+	}
+}
+
+// A mount that has no hub URL must not swallow the context for the mounts
+// that do — the old "first mount emits" guard could never detect a mount
+// that emitted nothing, because hook mode never returns an error.
+func TestSyncHookModeSkipsNonHubMount(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	mountAt(t, root, "a-plain", "file://"+t.TempDir()) // sorts first, no hub
+	mountAt(t, root, "b-hub", "https://hub.example.com/p/p-bbbbbbbb")
+
+	got := runHook(t, root)
+	if !strings.Contains(got, "https://hub.example.com/p-bbbbbbbb") {
+		t.Errorf("hub mount lost its link behind a non-hub mount:\n%s", got)
+	}
+	if !strings.Contains(got, "`b-hub/`") {
+		t.Errorf("hub mount missing its prefix:\n%s", got)
+	}
+	if strings.Contains(got, "a-plain") {
+		t.Errorf("non-hub mount has no URL and must not be listed:\n%s", got)
+	}
+}
+
+// A session started inside a mount writes paths relative to its own
+// directory, so that subpath belongs in the base URL — there is no prefix
+// for the agent to strip.
+func TestSyncHookModeInsideMount(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+	sub := filepath.Join(root, "wiki", "docs", "notes")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runHook(t, sub)
+	if !strings.Contains(got, "https://hub.example.com/p-12345678/docs/notes") {
+		t.Errorf("base URL missing the session's subpath (and `/` must stay literal):\n%s", got)
 	}
 }
 

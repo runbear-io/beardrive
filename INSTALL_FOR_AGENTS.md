@@ -160,6 +160,31 @@ committed). Re-running `bdrive init --yes` later is always safe. To change
 the scope later use `bdrive scope add/rm <dir>`, never hand-edit
 `.bdrive/config.json`.
 
+**If the folder is empty after init — ask once.** Init has already pulled the
+project, so an empty folder *now* means there is genuinely nothing to build on.
+(If the project was created from a template in the browser, its files are
+already here — say nothing.) Ask: start from a structure, or from scratch?
+
+> On Claude Code use `AskUserQuestion`, header "Starting point", in this
+> order: **Docs + decision records** — `docs/`, `decisions/` — labelled
+> "(Recommended)"; **LLM wiki** — you curate sources, the agent writes and
+> maintains every page; **PARA** — `projects/`, `areas/`, `resources/`,
+> `archives/`; then **Start from scratch**. Every other agent: prose.
+
+Each template is a directory skeleton plus an `AGENTS.md` saying where a new
+note goes, when something is archived, and what a good filename looks like —
+follow that file from then on, the same way you would one the user wrote. On a
+pick, run one command in the same folder:
+
+```sh
+bdrive init --template docs --yes
+```
+
+**A folder with files in it skips this entirely.** Never offer to restructure
+someone's existing notes, and never ask before init — before init you cannot
+know whether the project already has a structure, which is how you end up with
+two copies.
+
 ## 4. Confirm the sync hooks
 
 `bdrive init` already did this — do not run a separate hooks command. It
