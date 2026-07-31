@@ -26,6 +26,11 @@ type Project struct {
 	// explicit admin grant at creation. Empty on projects that predate
 	// per-project permissions — those are governed by org owners.
 	Creator string `json:"creator,omitempty"`
+	// Template is the starting structure the project was created from
+	// (internal/templates), empty for an empty project. Set once, at
+	// creation, by whoever seeded it — it is what stops a second surface
+	// seeding a second copy.
+	Template string `json:"template,omitempty"`
 	// Default is the level every org member gets without an explicit grant.
 	// Empty means write: the historical behavior, so no row needs migrating.
 	Default string `json:"default,omitempty"`
@@ -215,6 +220,19 @@ func (db *ProjectDB) SetCreator(id, email string) error {
 		return fmt.Errorf("no such project %q", id)
 	}
 	p.Creator = normEmail(email)
+	db.byID[id] = p
+	return db.repo.Put(p)
+}
+
+// SetTemplate records the starting structure a project was seeded from.
+func (db *ProjectDB) SetTemplate(id, name string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	p.Template = name
 	db.byID[id] = p
 	return db.repo.Put(p)
 }

@@ -103,8 +103,10 @@ export function Palette({
         <Command shouldFilter={false} loop>
           <div id="palette-inputwrap">
             <Icon name="search" />
+            {/* No id here (nor on CommandList): cmdk writes its own after our
+                props, so one never reaches the DOM. Style off #palette /
+                #palette-inputwrap or [cmdk-*] instead. (BEA-54) */}
             <CommandInput
-              id="palette-input"
               placeholder="Search file names, projects, actions…"
               autoComplete="off"
               spellCheck={false}
@@ -112,7 +114,7 @@ export function Palette({
               onValueChange={setQuery}
             />
           </div>
-          <CommandList id="palette-results">
+          <CommandList>
             {items.length === 0 ? (
               <div className="pempty">No matches — search covers file names, projects, and actions</div>
             ) : (

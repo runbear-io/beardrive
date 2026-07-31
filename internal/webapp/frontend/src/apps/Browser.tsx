@@ -420,7 +420,7 @@ export default function Browser(props: {
     // dashboard below it.
     view = (
       <>
-        <ConnectGuide project={project!} />
+        <ConnectGuide project={project!} existing={route.connect === "existing"} />
         <div className="home-insights">
           {/* No install CTA here: ConnectGuide directly above IS the set-up-a-
               device guide, and a second button six inches under the first

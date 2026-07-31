@@ -15,7 +15,7 @@ import (
 )
 
 // newHub builds a hub server over a fresh storage root with one project.
-func newHub(t *testing.T, upload bool, wrap func(remote.Backend) remote.Backend) (*Server, Project, string) {
+func newHub(t testing.TB, upload bool, wrap func(remote.Backend) remote.Backend) (*Server, Project, string) {
 	t.Helper()
 	root := t.TempDir()
 	be, err := remote.Open(context.Background(), "file://"+root)

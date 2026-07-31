@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,6 +19,12 @@ import (
 // project's gated-link formula as additionalContext, so the agent can
 // append a hub link to any synced file path it mentions.
 //
+// One run can cover several mounts (a repo root whose wiki/ and docs/ are
+// separate projects, see syncTargets), and the hook's stdout contract is a
+// single JSON object — so every mount's link goes into one context, keyed
+// by the path prefix an agent sees. Emitting only the first mount's URL
+// made agents hang one project's base URL on another project's paths.
+//
 // Everything is best-effort: a hook must never fail the turn, so every
 // error path is a silent, successful exit.
 
@@ -24,25 +32,35 @@ import (
 // scans keep stamping this session's changes for a while.
 const hookNoteTTL = 30 * time.Minute
 
-// emitContext is false for every mount after the first in one hook run: the
-// hook's stdout contract is a single JSON object.
-func runHookSync(cmd *cobra.Command, folder, label string, emitContext bool) error {
-	// The platform pipes its event JSON on stdin; the session id is all we
-	// need from it here.
+// hookLink pairs the path prefix an agent writes with the hub URL that
+// prefix maps to.
+type hookLink struct {
+	prefix string // "wiki/", or "" when the hook ran at or inside the mount
+	base   string // https://hub/<project-id>[/<the run folder's subpath>]
+}
+
+// hookSessionID reads the platform's event JSON from stdin — once per run,
+// since stdin can only be consumed once and the sync loop may cover several
+// mounts.
+func hookSessionID(cmd *cobra.Command) string {
 	data, _ := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 1<<20))
 	var event struct {
 		SessionID string `json:"session_id"`
 	}
 	_ = json.Unmarshal(data, &event) // malformed input: just sync
+	return event.SessionID
+}
 
-	sess, proj, err := openSession(cmd.Context(), folder, true)
+// runHookSync syncs one mount and reports its hub base URL, if it has one.
+func runHookSync(cmd *cobra.Command, target, sessionID, label string) (string, bool) {
+	sess, proj, err := openSession(cmd.Context(), target, true)
 	if err != nil {
-		return nil // not a mount / no session: fast no-op
+		return "", false // not a mount / no session: fast no-op
 	}
 	defer closeSession(sess)
 
-	if event.SessionID != "" {
-		note := label + " session " + event.SessionID
+	if sessionID != "" {
+		note := label + " session " + sessionID
 		if err := sess.Store.SaveNote(note, hookNoteTTL); err == nil {
 			sess.Note = note
 		}
@@ -51,34 +69,90 @@ func runHookSync(cmd *cobra.Command, folder, label string, emitContext bool) err
 	// The pull. Offline is fine — the link formula below is still valid
 	// for teammates who are online.
 	if _, err := sess.Cycle(cmd.Context()); err != nil {
-		return nil // never break the turn
-	}
-
-	if !emitContext {
-		return nil
+		return "", false // never break the turn
 	}
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {
-		return nil // non-hub remote: nothing to link to
+		return "", false // non-hub remote: nothing to link to
 	}
-	base := server + "/" + projectID
+	return server + "/" + projectID, true
+}
+
+// hookLinkFor places one mount relative to the folder the hook ran in.
+// Agents write paths as they see them from that folder, so the mount's
+// position there is what turns a path into a URL: a mount BELOW the folder
+// contributes a prefix to strip, while a run INSIDE a mount contributes a
+// subpath that belongs in the base instead (there is no prefix to strip —
+// every path the agent writes is already inside the mount).
+func hookLinkFor(folder, target, base string) hookLink {
+	// resolvePath: registry paths and the run folder can name the same
+	// directory through different symlinks (macOS /tmp).
+	rel, err := filepath.Rel(resolvePath(folder), resolvePath(target))
+	if err != nil {
+		return hookLink{base: base}
+	}
+	rel = filepath.ToSlash(rel)
+	switch {
+	case rel == ".":
+		return hookLink{base: base}
+	case rel == ".." || strings.HasPrefix(rel, "../"):
+		sub, err := filepath.Rel(resolvePath(target), resolvePath(folder))
+		if err != nil {
+			return hookLink{base: base}
+		}
+		return hookLink{base: base + "/" + encodePathSegments(filepath.ToSlash(sub))}
+	default:
+		return hookLink{prefix: rel + "/", base: base}
+	}
+}
+
+// emitHookContext writes the turn's additionalContext — one JSON object, no
+// matter how many mounts the run covered.
+func emitHookContext(cmd *cobra.Command, links []hookLink) {
+	if len(links) == 0 {
+		return
+	}
+
+	// Shared tail: what the links mean and when NOT to use them.
+	const tail = "These links require hub sign-in + project membership, so they are safe to paste anywhere internal. " +
+		"Only link files that actually sync (inside the shared scope, not ignored); keep paths inside code blocks or commands plain; give a raw URL only when the user needs to paste it outside this conversation. " +
+		"`bdrive share <file>` mints PUBLIC no-account links — use it only when the user explicitly asks for a public link."
+
+	var context string
+	if len(links) == 1 && links[0].prefix == "" {
+		// The common case: one project, paths already relative to its root.
+		// Kept as short as possible — this is paid on every turn.
+		b := links[0].base
+		context = fmt.Sprintf(
+			"beardrive: this folder syncs to %s (the project's hub page; files are at %s/<url-encoded path>). "+
+				"Link convention: whenever you mention a synced file's path in prose, append its gated hub link on an emoji, formatted exactly as: `<path>` [🔗](%s/<url-encoded path>) — the path stays plain text, the hyperlink goes on the emoji only. "+
+				"The URL path is the file's path relative to this folder, with each segment percent-encoded and the `/` separators left literal. "+
+				tail, b, b, b)
+	} else {
+		parts := make([]string, len(links))
+		for i, l := range links {
+			p := l.prefix
+			if p == "" {
+				p = "./"
+			}
+			parts[i] = fmt.Sprintf("`%s` → %s", p, l.base)
+		}
+		context = fmt.Sprintf(
+			"beardrive: hub URLs for the synced folders here — %s. "+
+				"Link convention: whenever you mention a synced file's path in prose, append its gated hub link on an emoji, formatted exactly as: `<path>` [🔗](<that folder's URL>/<url-encoded path within it>) — the path stays plain text, the hyperlink goes on the emoji only. "+
+				"Pick the folder whose prefix above matches the path longest, strip that prefix, then percent-encode each remaining segment and leave the `/` separators literal. A path matching none of these folders is not synced — do not link it, and never hang one folder's path on another folder's URL. "+
+				tail, strings.Join(parts, ", "))
+	}
 
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
-			"hookEventName": "UserPromptSubmit",
-			"additionalContext": fmt.Sprintf(
-				"beardrive: this folder syncs to %s (the project's hub page; files are at %s/<url-encoded path>). "+
-					"Link convention: whenever you mention a synced file's path in prose, append its gated hub link on an emoji, formatted exactly as: `<path>` [🔗](%s/<url-encoded path>) — the path stays plain text, the hyperlink goes on the emoji only. "+
-					"These links require hub sign-in + project membership, so they are safe to paste anywhere internal. "+
-					"Only link files that actually sync (inside the shared scope, not ignored); keep paths inside code blocks or commands plain; give a raw URL only when the user needs to paste it outside this conversation. "+
-					"`bdrive share <file>` mints PUBLIC no-account links — use it only when the user explicitly asks for a public link.",
-				base, base, base),
+			"hookEventName":     "UserPromptSubmit",
+			"additionalContext": context,
 		},
 	}
 	enc, err := json.Marshal(out)
 	if err != nil {
-		return nil
+		return
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), string(enc))
-	return nil
 }

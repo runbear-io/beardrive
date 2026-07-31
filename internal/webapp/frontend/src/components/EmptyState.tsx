@@ -1,16 +1,35 @@
+import { Button } from "@/components/ui/button";
 import { GuideCode, INSTALL_DOC } from "./ConnectGuide";
 
 // Onboarding: a signed-in account with no projects shouldn't hit a blank
-// sidebar. One path in — paste the canonical install prompt into a coding
-// agent — with the by-hand route a docs link away.
+// sidebar. Two paths in, in the order most people want them — create the
+// project here and pick what it starts from, or paste the install prompt into
+// a coding agent and let it do the whole thing. The by-hand route stays a
+// docs link away.
+//
+// The create dialog also opens itself on arrival (HubApp): with no projects
+// there is nothing else on this page to do. This page is what is left when
+// someone closes it, so it must not be a dead end — hence the button.
 
-export function EmptyState() {
+export function EmptyState({ onNew, canCreate }: { onNew: () => void; canCreate: boolean }) {
   return (
     <div className="onboard">
       <h1>Welcome to BearDrive</h1>
       <p>You're signed in, but you're not part of any project yet.</p>
-      <div className="ob-card">
-        <h3>Connect a new drive to your project</h3>
+      {canCreate && (
+        <div className="ob-card ob-start">
+          <h3>Start a project</h3>
+          <p>
+            Name it and pick what it starts from — a structure, or nothing at all. Then connect a
+            folder on any machine and it stays in sync.
+          </p>
+          <Button variant="primary" id="ob-new" onClick={onNew}>
+            New project
+          </Button>
+        </div>
+      )}
+      <div className="ob-card ob-agent">
+        <h3>{canCreate ? "Or let your agent do it" : "Connect a new drive to your project"}</h3>
         <p>
           Paste into your coding agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the
           folder where you want the files. It creates the project and starts syncing:

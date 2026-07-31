@@ -113,3 +113,19 @@ test("note-less changes stay bare rows, cards sit where their newest op did", ()
   assert.equal(items[1].run?.entries.length, 2);
   assert.deepEqual(items[2], { i: 2 });
 });
+
+// Pagination leans on this: the History view accumulates pages into one
+// array, so a run whose ops straddle a page boundary must become ONE card
+// when the next page lands — and a run that looked single-file on page 1
+// must grow into a card, not sit beside a second copy of itself.
+test("a run split across two pages groups into one card", () => {
+  const note = "session-1";
+  const page1 = [e("plain.md"), e("a.md", note)];
+  const page2 = [e("b.md", note), e("c.md", note)];
+  assert.deepEqual(groupRuns(page1), [{ i: 0 }, { i: 1 }]); // page 1 alone: bare rows
+  const items = groupRuns(page1.concat(page2));
+  assert.equal(items.length, 2);
+  assert.deepEqual(items[0], { i: 0 });
+  assert.deepEqual(items[1].run?.entries.map((x) => x.path), ["a.md", "b.md", "c.md"]);
+  assert.deepEqual(items[1].run?.idx, [1, 2, 3]); // idx still addresses the flat feed
+});

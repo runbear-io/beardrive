@@ -78,7 +78,13 @@ onboarding runbook every agent follows. `bdrive init` registers the hooks in
 each platform's USER config (`~/.claude/settings.json` and friends), once per
 machine: a blocking pull at UserPromptSubmit — which, via `bdrive sync
 --hook`, also injects the project's gated-link formula as additionalContext
-so agents append `path` [🔗](hub link) to every synced path they mention — an
+so agents append `path` [🔗](hub link) to every synced path they mention. One
+run can cover several mounts (`syncTargets`) and the hook's stdout contract is
+a single JSON object, so the formula carries **every** mount as a `prefix →
+URL` pair — the prefix being the mount's path as the agent sees it from the
+session's folder, or an empty prefix with the session's own subpath baked into
+the URL when the session runs inside the mount; emitting only the first mount
+hung one project's paths on another project's base URL. Then an
 async push on PostToolUse Write/Edit, and `bdrive read-log` on
 Read/Grep/Bash for the read heatmap. The inline hook commands
 `internal/agenthooks` writes must stay a fast no-op outside BearDrive folders

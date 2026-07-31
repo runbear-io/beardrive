@@ -11,6 +11,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
+	"github.com/runbear-io/beardrive/internal/templates"
 )
 
 // End-to-end scenarios for the init knowledge flows documented in
@@ -273,5 +274,66 @@ func TestSessionNoteStampsOps(t *testing.T) {
 	}
 	if got := a.Store.LoadNote(); got != "" {
 		t.Fatalf("cleared note = %q", got)
+	}
+}
+
+// A template is inert files, so it has to converge like any other content —
+// and the double-seed case has to be a no-op rather than a divergence. One
+// device seeds a structure, a teammate connects and gets it byte-for-byte;
+// then the teammate seeds the same template again (an agent that asked when
+// it shouldn't have) and nothing forks: no second copy, no conflict copies.
+func TestTemplateSeedConverges(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+
+	tpl, err := templates.Get("docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tpl.WriteTo(a.Folder); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	cycle(t, b)
+
+	for _, f := range tpl.Files {
+		if got := read(t, b.Folder, f.Path); got != f.Content {
+			t.Fatalf("%s did not reach devb intact:\n%q", f.Path, got)
+		}
+	}
+
+	// devb seeds the same template on top of what it just pulled. WriteTo
+	// skips every existing path, so this writes nothing at all.
+	wrote, err := tpl.WriteTo(b.Folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wrote) != 0 {
+		t.Fatalf("re-seeding an already-seeded folder wrote %v", wrote)
+	}
+	cycle(t, b)
+	cycle(t, a)
+
+	for _, d := range []*Session{a, b} {
+		if got := conflictFiles(t, d.Folder); len(got) != 0 {
+			t.Fatalf("%s: double-seed made conflict copies: %v", d.Device.ID, got)
+		}
+		for _, f := range tpl.Files {
+			if read(t, d.Folder, f.Path) != f.Content {
+				t.Fatalf("%s: %s diverged after the second seed", d.Device.ID, f.Path)
+			}
+		}
+	}
+	// One op per file per device that wrote it: no path was journaled twice.
+	ops, err := a.Store.DeviceOps("deva")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != len(tpl.Files) {
+		t.Fatalf("deva journaled %d ops for a %d-file template: %+v", len(ops), len(tpl.Files), ops)
+	}
+	if ops, err := b.Store.DeviceOps("devb"); err != nil || len(ops) != 0 {
+		t.Fatalf("devb journaled %d ops for files it only pulled (err %v)", len(ops), err)
 	}
 }
