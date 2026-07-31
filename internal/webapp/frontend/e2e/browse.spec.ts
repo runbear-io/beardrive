@@ -153,6 +153,30 @@ test("palette (⌘K) fuzzy-jumps to a file", async ({ page }) => {
   await expect(page.locator("#content h1")).toHaveText("Topic");
 });
 
+// BEA-52: on a path that doesn't resolve the tree entries are gone and the
+// switcher lists only other projects, so the palette used to offer no way
+// back. cmdk owns the list's id (it overwrites ours), hence [cmdk-list].
+test("palette on a dead route still offers the way back", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/does-not-exist.md`);
+  await expect(page.locator(".notfound")).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  for (const label of ["Go to project root", "Dashboard", "Installation", "Settings"]) {
+    await expect(page.locator("#palette [cmdk-list]")).toContainText(label);
+  }
+  // exactly one whole-project history entry, no duplicate
+  expect(
+    await page.locator("#palette [cmdk-item]", { hasText: "History: whole project" }).count(),
+  ).toBe(1);
+  await page.fill("#palette input", "Dashboard");
+  await page.keyboard.press("Enter");
+  await page.waitForURL(`/${pid}/dashboard`);
+  await page.reload(); // the entries are real URLs, not panel state
+  await expect(page.locator(".in-treemap")).toBeVisible();
+});
+
 test("share mints a public link that serves the file, revoke kills it", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
