@@ -148,7 +148,6 @@ const ICONS: Record<string, LucideIcon> = {
   search: Search,
   share: Share2,
   shield: Shield,
-  star: Star,
   terminal: SquareTerminal,
   trash: Trash2,
   upload: Upload,
