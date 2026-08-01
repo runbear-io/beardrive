@@ -93,7 +93,7 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 	}
 	objs, err := rs.Backend.List(r.Context(), prefix)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
 		return
 	}
 	writeJSON(w, map[string]any{"objects": objs})
@@ -111,7 +111,9 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	}
 	rc, err := rs.Backend.Get(r.Context(), key)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		// Fixed message: os.Open's error names the hub's absolute storage
+		// path, and S3's names the bucket and key.
+		storageErr(w, http.StatusNotFound, "no such object", err)
 		return
 	}
 	defer rc.Close()
@@ -131,7 +133,7 @@ func (s *Server) handleStoreExists(v *volume, w http.ResponseWriter, r *http.Req
 	}
 	exists, err := rs.Backend.Exists(r.Context(), key)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
 		return
 	}
 	writeJSON(w, map[string]any{"exists": exists})
@@ -219,7 +221,7 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	// put free). Cost: one temp file per put on the hub's busiest write path.
 	tmp, size, sum, err := spool(r.Body)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "could not store the object", err)
 		return
 	}
 	defer os.Remove(tmp.Name())
@@ -234,7 +236,7 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := rs.Backend.Put(r.Context(), key, tmp, size); err != nil {
-		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "could not store the object", err)
 		return
 	}
 	s.quota().RecordUsage(org, size)

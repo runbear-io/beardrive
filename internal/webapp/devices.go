@@ -60,6 +60,17 @@ func (r *DeviceRegistry) Observe(d DeviceInfo) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cur := r.byID[d.ID]
+	// The registry is hub-wide but device ids are client-asserted, so the
+	// first account to be seen using a device owns the row: anyone else
+	// naming that id (any project, any org) is claiming a device they do not
+	// own, and History joins this table — a forged name would surface in the
+	// victim org's change feed. Refuse silently: the caller's request is
+	// about something else, and telemetry never fails it. A caller claiming
+	// no account at all (auth-less hub) asserts no identity, so it merges as
+	// before — it can only refresh what it observed, never re-own the row.
+	if cur.User != "" && d.User != "" && d.User != cur.User {
+		return
+	}
 	changed := cur.ID == "" || cur.Name != d.Name || cur.OS != d.OS || cur.User != d.User || cur.IP != d.IP
 	cur.ID = d.ID
 	if d.Name != "" {
@@ -103,6 +114,26 @@ func requestIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// ownsDevice reports whether the caller may act AS the device id it named.
+// The id is a request header, so anyone can name any device: it is only
+// theirs if the registry already knows it (from this device's own sync
+// traffic, which is what registers a device) and the row is unowned or owned
+// by this account. Call it BEFORE observeDevice — observing an unknown id
+// creates the row, which would make every id "known".
+//
+// A hub with no registry cannot judge, and has no accounts to impersonate
+// either (single-volume / auth-less), so it allows.
+func (s *Server) ownsDevice(r *http.Request, id string) bool {
+	if s.Devices == nil {
+		return true
+	}
+	d, ok := s.Devices.Get(id)
+	if !ok {
+		return false
+	}
+	return d.User == "" || d.User == s.requestUser(r).Email
 }
 
 // observeDevice records the device behind a store-API request.

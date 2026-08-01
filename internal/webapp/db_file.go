@@ -15,10 +15,13 @@ import (
 // running hub upgrades with no migration.
 
 // writeFileAtomic writes data to path via a temp file + rename. Files land at
-// 0600 (os.CreateTemp's default); dirMode controls the parent directory.
-func writeFileAtomic(path string, data []byte, dirMode os.FileMode) error {
+// 0600 and their directory at 0700 — one mode for the whole store, because
+// every repo writes into the SAME hub data directory and MkdirAll is a no-op
+// once it exists: a per-repo mode meant whichever file was written first
+// decided whether the directory holding auth.json was world-readable.
+func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, dirMode); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".bdrive-tmp-*")
@@ -139,7 +142,7 @@ func (r *fileAccountRepo) write() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(r.path, append(data, '\n'), 0o700) // holds password hashes
+	return writeFileAtomic(r.path, append(data, '\n')) // holds password hashes
 }
 
 func (r *fileAccountRepo) PutAccount(u *authUser) error {
@@ -217,7 +220,7 @@ func (r *fileProjectRepo) write() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(r.path, append(data, '\n'), 0o755)
+	return writeFileAtomic(r.path, append(data, '\n'))
 }
 
 func (r *fileProjectRepo) Put(p Project) error {
@@ -287,7 +290,7 @@ func (r *fileOrgRepo) write() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(r.path, append(data, '\n'), 0o755)
+	return writeFileAtomic(r.path, append(data, '\n'))
 }
 
 func (r *fileOrgRepo) PutOrg(o Org) error {
@@ -357,7 +360,7 @@ func (r *fileShareRepo) write() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(r.path, append(data, '\n'), 0o755)
+	return writeFileAtomic(r.path, append(data, '\n'))
 }
 
 func (r *fileShareRepo) Put(s Share) error {
@@ -413,7 +416,7 @@ func (r *fileDeviceRepo) write() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(r.path, append(data, '\n'), 0o755)
+	return writeFileAtomic(r.path, append(data, '\n'))
 }
 
 func (r *fileDeviceRepo) Put(d DeviceInfo) error {
@@ -471,7 +474,7 @@ func (r *fileReadRepo) write() error {
 		return err
 	}
 	// 0700 dir: buckets carry actor emails, like auth.json carries accounts.
-	return writeFileAtomic(r.path, append(data, '\n'), 0o700)
+	return writeFileAtomic(r.path, append(data, '\n'))
 }
 
 func (r *fileReadRepo) PutBatch(stats []ReadStat) error {

@@ -202,6 +202,13 @@ func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
+	// cleanUploadPath rules out "..", but a path with no ".." in it still
+	// leaves the folder by walking through a symlinked directory that was
+	// already there. The viewer promises "this folder": resolve where the
+	// write would actually land and refuse anything outside Root.
+	if err := underRoot(d.Root, filepath.Dir(dst)); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bdrive-tmp-")
 	if err != nil {
 		return err
@@ -215,6 +222,23 @@ func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, 
 		return err
 	}
 	return os.Rename(tmp.Name(), dst)
+}
+
+// underRoot reports whether dir, with every symlink resolved, is root or
+// inside it.
+func underRoot(root, dir string) error {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return err
+	}
+	if realDir != realRoot && !strings.HasPrefix(realDir, realRoot+string(filepath.Separator)) {
+		return fmt.Errorf("path leaves the served folder")
+	}
+	return nil
 }
 
 // ---- HTTP handlers ----

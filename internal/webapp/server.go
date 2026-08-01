@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"maps"
 	"mime"
 	"net/http"
@@ -118,6 +119,13 @@ type Server struct {
 
 	volsMu sync.Mutex
 	vols   map[string]*volume // hub mode: per-project, keyed by project id
+
+	// joinMu serializes invite redemption: the seat check reads the member
+	// count and the join adds to it, and two clicks on the same link at the
+	// same moment would otherwise both see the last seat free.
+	// ponytail: one hub-wide lock; redemption is a rare, human-paced request —
+	// make it per-org if that ever stops being true.
+	joinMu sync.Mutex
 }
 
 // UploadConfig controls whether and how clients may write.
@@ -314,6 +322,15 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 	for _, op := range all {
 		switch op.Kind {
 		case journal.KindPut:
+			// A journal is arbitrary JSONL a device pushed: Blob is a storage
+			// key suffix ("blobs/"+Blob), not a checked field, so anything but
+			// a bare sha256 is a path the writer chose — another project's
+			// prefix, or out of the storage root entirely. Same rule as every
+			// ?sha= route. An op that fails it is ignored (the path keeps its
+			// previous version) rather than treated as a delete.
+			if !blobRe.MatchString(op.Blob) {
+				continue
+			}
 			files[op.Path] = FileInfo{
 				Blob: op.Blob, Size: op.Size, Time: op.Time,
 				User: op.User, UserName: op.UserName,
@@ -327,6 +344,11 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 }
 
 func (r *RemoteSource) Open(ctx context.Context, _ string, fi FileInfo) (io.ReadCloser, error) {
+	// Files already drops ops with a bogus Blob; re-checked here because this
+	// is where the key is built, and a FileInfo can reach it from anywhere.
+	if !blobRe.MatchString(fi.Blob) {
+		return nil, fmt.Errorf("invalid content reference")
+	}
 	return r.Backend.Get(ctx, "blobs/"+fi.Blob)
 }
 
@@ -805,7 +827,8 @@ func lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
 	}
 	snap, err := v.snapshot(r.Context())
 	if err != nil {
-		return "", FileInfo{}, http.StatusBadGateway, err
+		log.Printf("beardrive: read project snapshot: %v", err)
+		return "", FileInfo{}, http.StatusBadGateway, fmt.Errorf("content temporarily unavailable")
 	}
 	fi, ok := snap.files[p]
 	if !ok {
@@ -830,7 +853,7 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	}
 	rc, err := v.source.Open(r.Context(), p, fi)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("fetch content: %v", err), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
 		return
 	}
 	defer rc.Close()
@@ -840,13 +863,8 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	w.Header().Set("Content-Length", fmt.Sprint(fi.Size))
 	if attach {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(p)))
-	} else if strings.HasPrefix(ct, "text/html") || strings.HasPrefix(ct, "image/svg") {
-		// Synced HTML (and scriptable SVG) served inline must never run
-		// with the hub origin's session — same posture as /s/* share
-		// pages: an opaque sandboxed origin that can't touch the API or
-		// cookies. The viewer renders these in a sandboxed iframe; direct
-		// navigation gets the same wall.
-		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
+	} else {
+		sandboxInline(w, ct)
 	}
 	io.Copy(w, rc)
 }
@@ -872,7 +890,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 	s.recordRead(r, p)
 	rc, err := v.source.Open(r.Context(), p, fi)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("fetch content: %v", err), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
 		return
 	}
 	src, err := io.ReadAll(rc)
@@ -936,6 +954,19 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 	})
 }
 
+// sandboxInline walls off markup the hub serves from its own origin: synced
+// HTML (any flavour) and scriptable SVG run in an opaque sandboxed origin —
+// same posture as /s/* share pages — so they can never touch the API or the
+// reader's session cookie. Every route that streams stored bytes inline calls
+// this: the live file (serveBlob) and any past version (history's handleBlob),
+// which serve identical content and must not differ in their wall.
+func sandboxInline(w http.ResponseWriter, ct string) {
+	if strings.HasPrefix(ct, "text/html") || strings.HasPrefix(ct, "image/svg") ||
+		strings.Contains(ct, "xhtml") {
+		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
+	}
+}
+
 func contentType(p string) string {
 	switch strings.ToLower(path.Ext(p)) {
 	case ".md", ".markdown":
@@ -949,6 +980,15 @@ func contentType(p string) string {
 		return t
 	}
 	return "application/octet-stream"
+}
+
+// storageErr answers a failed storage operation. The detail goes to the log,
+// never to the client: an object-store error names the hub's absolute path
+// (or, on S3, its bucket and key), which no project member has any business
+// learning from a missing file.
+func storageErr(w http.ResponseWriter, code int, msg string, err error) {
+	log.Printf("beardrive: %s: %v", msg, err)
+	http.Error(w, msg, code)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -78,6 +78,12 @@ type Result struct {
 func mountGuard() string {
 	return `cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0; ` +
 		`d=$PWD; while [ ! -f "$d/.bdrive/config.json" ]; do case "$d" in ""|/) d=; break;; esac; d=${d%/*}; done; ` +
+		// $PWD is interpolated into the grep pattern below, and grep -F reads
+		// every LINE of its pattern as a separate alternative — a directory
+		// name containing a newline splits it, and a blank line among the
+		// pieces is the empty pattern, which matches every mount. No mount
+		// path can contain a newline anyway, so such a folder is never one.
+		"[ -n \"$d\" ] || case \"$PWD\" in *\"\n\"*) exit 0;; esac; " +
 		`[ -n "$d" ] || grep -qF "\"$PWD/" "${BDRIVE_HOME:-$HOME/.bdrive}/mounts.json" 2>/dev/null || exit 0; ` +
 		`command -v bdrive >/dev/null || exit 0; `
 }
@@ -276,9 +282,14 @@ func Uninstall(agents []string) ([]Result, error) {
 // directory init ran from.
 func removeProjectHooks(folder, agent string) (string, error) {
 	var cleaned []string
+	user := ConfigPath("", agent)
 	for _, dir := range legacyHookDirs(folder) {
 		path := projectConfigPath(dir, agent)
-		if path == "" {
+		// The USER config is the project config of whatever directory it sits
+		// in: when $HOME is a git repo (dotfiles) or init runs from $HOME, it
+		// lands in legacyHookDirs and the "migration" would delete the hooks
+		// this same Install call just wrote — silently, machine-wide.
+		if path == "" || path == user {
 			continue
 		}
 		changed, err := removeHooks(path, false)
@@ -306,13 +317,17 @@ func legacyHookDirs(folder string) []string {
 	return dirs
 }
 
-// gitRootOf is the repository containing folder, if any.
+// gitRootOf is the repository containing folder, if any. The walk stops at
+// $HOME: above it nothing is "this project's repo", and a dotfiles repo at
+// $HOME would hand back the home directory itself — whose agent config is the
+// user config, not a legacy project one.
 func gitRootOf(folder string) string {
+	home, _ := os.UserHomeDir()
 	for cur := folder; ; cur = filepath.Dir(cur) {
 		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
 			return cur
 		}
-		if filepath.Dir(cur) == cur {
+		if cur == home || filepath.Dir(cur) == cur {
 			return ""
 		}
 	}

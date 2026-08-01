@@ -26,7 +26,14 @@ import (
 //
 // Privacy: rows are daily aggregation buckets, never an event log. The actor
 // column (account email / device id / share token) exists only to count
-// distinct readers and never appears in an API response.
+// distinct readers and never appears in an API response — with exactly one
+// stated exception, ?by=device (handleHeat), which reports the ids of agent
+// devices. A device id is not a person and is already visible to every
+// project member through History's device join; nothing else in the column —
+// no email, no share token, no unowned device id — ever leaves the server.
+// The exception is only sound because the ingest path validates the id
+// (handleReadReport → ownsDevice): an actor recorded as an agent is a device
+// the reporting account owns, never a string it chose.
 
 // Read kinds.
 const (
@@ -381,9 +388,9 @@ func (s *Server) recordRead(r *http.Request, path string) {
 // handleHeat serves per-path read aggregates: ?prefix= bounds to a folder,
 // ?days= bounds the window (default 30, 0 = all time). With ?by=device it
 // returns the agent-kind breakdown instead: per device (registry-joined),
-// reads per top-level folder. In both shapes, counts only — human actor
-// identities never leave the server (agent devices are already public via
-// history, so naming them here is consistent).
+// reads per top-level folder — the one place an actor id is reported, and
+// only ever a device the reporting account owned (see the package comment).
+// Human and share actors never leave the server in any shape.
 func (s *Server) handleHeat(v *volume, w http.ResponseWriter, r *http.Request) {
 	if s.Reads == nil {
 		http.Error(w, "read tracking is not enabled on this server", http.StatusNotFound)
@@ -486,12 +493,21 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		http.Error(w, "too many reads in one report", http.StatusBadRequest)
 		return
 	}
+	// The device id becomes the actor these buckets are keyed by, and /heat
+	// reports agent actors — so an unvalidated header would let any member
+	// plant any string (an id from another org, or an account email) and have
+	// the hub serve it back to the whole project as a reader. Checked before
+	// observeDevice, which would otherwise register the forged id itself.
+	mine := s.ownsDevice(r, device)
 	s.observeDevice(r)
 	project := projectID(r)
 	n := 0
 	for _, e := range req.Reads {
 		if e.Path == "" || strings.Contains(e.Path, "..") {
 			continue
+		}
+		if !mine {
+			continue // not this account's device: counted for nobody
 		}
 		s.Reads.Record(project, e.Path, ReadKindAgent, device)
 		n++

@@ -563,9 +563,24 @@ func cliBanner(next string) string {
 		`The account you use here is the one it will act as.</p>`
 }
 
-// safeNext keeps post-login redirects on this site.
+// safeNext keeps post-login redirects on this site. A browser fills in the
+// authority slot for anything that looks like "//host", and it does that
+// AFTER stripping tab/CR/LF and after treating a backslash as a separator —
+// so "/\evil.example", "/\t/evil.example" and "//evil.example" are all the
+// same off-site jump, arriving straight from the page where the user just
+// typed their password. Strip what a browser strips, then demand a single
+// leading slash followed by neither.
 func safeNext(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+	next = strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, next)
+	if len(next) < 1 || next[0] != '/' {
+		return "/"
+	}
+	if len(next) > 1 && (next[1] == '/' || next[1] == '\\') {
 		return "/"
 	}
 	return next

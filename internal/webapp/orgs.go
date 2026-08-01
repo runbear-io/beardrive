@@ -93,6 +93,32 @@ func OpenOrgDB(path string) (*OrgDB, error) {
 
 func normEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
 
+// clone copies an Org so its Members map never leaves the registry: Org is a
+// value but the map inside it is a pointer, and a caller holding the live map
+// can write roles straight past SetRole, the last-owner guard and the store —
+// or race a concurrent mutator while handleOrgList ranges over it.
+func (o Org) clone() Org {
+	c := o
+	c.Members = make(map[string]string, len(o.Members))
+	for k, v := range o.Members {
+		c.Members[k] = v
+	}
+	return c
+}
+
+// putOrg persists a mutated org, restoring the previous value if the store
+// refuses. Callers hold mu. Without the rollback a refused write still reads
+// as applied until the hub restarts, when it silently reverts — a demotion
+// that un-demotes itself.
+func (db *OrgDB) putOrg(prev, o Org) error {
+	db.byID[o.ID] = o
+	if err := db.repo.PutOrg(o); err != nil {
+		db.byID[o.ID] = prev
+		return err
+	}
+	return nil
+}
+
 // Create makes a new org owned by ownerEmail.
 func (db *OrgDB) Create(name, ownerEmail string) (Org, error) {
 	name = trimName(name)
@@ -113,14 +139,17 @@ func (db *OrgDB) Create(name, ownerEmail string) (Org, error) {
 		delete(db.byID, o.ID)
 		return Org{}, err
 	}
-	return o, nil
+	return o.clone(), nil
 }
 
 func (db *OrgDB) Get(id string) (Org, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	o, ok := db.byID[id]
-	return o, ok
+	if !ok {
+		return Org{}, false
+	}
+	return o.clone(), true
 }
 
 // Role returns the account's role in the org, or "" for non-members.
@@ -142,7 +171,7 @@ func (db *OrgDB) OrgsFor(email string) []Org {
 	var out []Org
 	for _, o := range db.byID {
 		if o.Members[e] != "" {
-			out = append(out, o)
+			out = append(out, o.clone())
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -168,9 +197,9 @@ func (db *OrgDB) AddMember(orgID, email, role string) error {
 	if o.Members[e] == RoleOwner {
 		return nil
 	}
-	o.Members[e] = role
-	db.byID[orgID] = o
-	return db.repo.PutOrg(o)
+	next := o.clone()
+	next.Members[e] = role
+	return db.putOrg(o, next)
 }
 
 // RemoveMember drops an account from the org. The last owner cannot be
@@ -189,9 +218,9 @@ func (db *OrgDB) RemoveMember(orgID, email string) error {
 	if o.Members[e] == RoleOwner && db.ownerCount(o) <= 1 {
 		return fmt.Errorf("cannot remove the last owner")
 	}
-	delete(o.Members, e)
-	db.byID[orgID] = o
-	return db.repo.PutOrg(o)
+	next := o.clone()
+	delete(next.Members, e)
+	return db.putOrg(o, next)
 }
 
 // SetRole changes an account's role. Demoting the last owner is refused.
@@ -212,9 +241,9 @@ func (db *OrgDB) SetRole(orgID, email, role string) error {
 	if o.Members[e] == RoleOwner && role == RoleMember && db.ownerCount(o) <= 1 {
 		return fmt.Errorf("cannot demote the last owner")
 	}
-	o.Members[e] = role
-	db.byID[orgID] = o
-	return db.repo.PutOrg(o)
+	next := o.clone()
+	next.Members[e] = role
+	return db.putOrg(o, next)
 }
 
 // Rename changes the org's display name.
@@ -229,9 +258,9 @@ func (db *OrgDB) Rename(orgID, name string) error {
 	if !ok {
 		return fmt.Errorf("no such organization")
 	}
-	o.Name = name
-	db.byID[orgID] = o
-	return db.repo.PutOrg(o)
+	next := o
+	next.Name = name
+	return db.putOrg(o, next)
 }
 
 // ownerCount counts owners in an org. Callers hold mu.
@@ -263,11 +292,19 @@ func (db *OrgDB) ListInvites(orgID string) []OrgInvite {
 func (db *OrgDB) RevokeInvite(token string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	if _, ok := db.invites[token]; !ok {
+	inv, ok := db.invites[token]
+	if !ok {
 		return false
 	}
 	delete(db.invites, token)
-	db.repo.DeleteInvite(token)
+	if err := db.repo.DeleteInvite(token); err != nil {
+		// Revocation is the emergency stop for a leaked join link, and on an
+		// invite-only hub that link bootstraps accounts. A delete the store
+		// refused would come back at the next restart, so put it back and
+		// report the failure instead of reporting a revocation that isn't one.
+		db.invites[token] = inv
+		return false
+	}
 	return true
 }
 
@@ -557,6 +594,10 @@ func (s *Server) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sign in to accept an invite", http.StatusUnauthorized)
 		return
 	}
+	// Check-and-add is one operation: the seat check counts members and the
+	// join adds one, so without this the last seat can be sold twice.
+	s.joinMu.Lock()
+	defer s.joinMu.Unlock()
 	inv, ok := s.Dir.Redeem(r.PathValue("token"))
 	if !ok {
 		http.Error(w, "this invite is invalid or expired", http.StatusNotFound)

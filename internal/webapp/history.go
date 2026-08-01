@@ -131,7 +131,7 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	all, err := rs.loadOps(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
 	journal.Sort(all)
@@ -231,7 +231,9 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 	defer rc.Close()
 	name := r.URL.Query().Get("name")
 	if name != "" {
-		w.Header().Set("Content-Type", contentType(name))
+		ct := contentType(name)
+		w.Header().Set("Content-Type", ct)
+		sandboxInline(w, ct)
 		if r.URL.Query().Get("download") == "1" {
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(name)))
 		}

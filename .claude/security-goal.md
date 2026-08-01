@@ -44,49 +44,64 @@ Every row starts `untested`. States: `untested` → `exploit (test name)` →
 `fixed (test name)` , or `untested` → `clean (test name)`.
 `clean` still needs a test — one that asserts the attack is refused.
 
-| # | Boundary | State after round 1 | Attacks that must be tried |
+| # | Boundary | State after round 2 | Attacks that must be tried |
 |---|----------|---------------------|----------------------------|
-| 1 | Auth gate (`auth.go:authGate`) | **clean** — `TestSec_AuthGate_AnonymousPathTricksCannotReadAPI`, `…CannotWrite`, `…ConfigLeaksNothingToAnonymous`. Only the open-path half. **Forged/tampered credential never exercised.** | reach any `/api/**` with no/expired/forged credential; abuse the `!HasPrefix("/api/")` open-path rule to hit something sensitive; path tricks (`//api/`, `/api/../`, encoded) that route to a handler but read as "open" |
-| 2 | Per-project permission choke point (`perms.go:projectPerm/requirePerm`, `server.go` route table) | **fixed** — `TestSec_Perms_RemovedOrgMemberLosesProjectAccess` (grant outlived org membership), `TestSec_Perms_OrgLessProjectIsNotAdminForEveryone` (fail-open `p.Org == ""` / unknown id). **clean** — `…ReadOnlyMemberCannotWrite`, `…WriteMemberCannotAdmin`, `…NoneMemberReachesNothing`, `…CorruptGrantFailsClosed`. `s.Dir == nil \|\| s.Auth == nil → PermAdmin` **still open, deliberately deferred** (see below), untested. | `read` member performing any `PermWrite` action; `write` member performing `PermAdmin`; `none`/non-member reaching a project; the fail-open escapes (`s.Dir == nil`, `p.Org == ""`) reachable on a configured hub |
-| 3 | Routes **outside** `proj()` | **fixed** — `TestSec_Row3_OrgSharesLeaksDeniedProject`, `TestSec_Row3_ExpiredShareRevokableByOutsider`. **clean** — `…ShareMutationByOutsider`, `…PermissionRoutes`, `…ProjectLifecycleRoutes`, `…OrgRoutes`, `…InviteAccept`, `…AdminRoutes`. | each one, exercised by a non-member, a read-only member, and a non-owner — these bypass the wrapper and check themselves, so each needs its own test |
-| 4 | Cross-org isolation (`orgs.go`, `projects.go`, `directory.go`) | **clean** — `TestSec_CrossOrg_ProjectRoutesRefuseOutsider`, `TestSec_CrossOrg_OrgRoutesRefuseOutsiderAndNonOwner`. | project id from org B against every route; `/api/projects` and `/api/orgs` leaking names/ids of orgs you're not in; org rename/member routes on someone else's org |
-| 5 | Sync proxy `/store/*` (`store.go`, `remote/http.go`) | **fixed** — `TestSec_Store_ForeignDeviceJournalWrite` (one-writer invariant), `…BlobContentMustMatchItsKey`, `…QuotaHonorsUnsizedPut`. **clean** — `…KeyEscapesRefused`. Per-level access to `/store/*` covered by row 2's tests, not by the store tests (they ran on an auth-less hub). **Device identity is still client-asserted** — see gaps. | write a **different device's** journal key (breaks the one-writer invariant); key traversal escaping `<root>/<project-id>/`; read another project's blob by sha; `store/sign` minting a URL outside the project prefix or for a journal key (journals must never be presigned) |
-| 6 | Upload (`upload.go`) | **fixed** — `TestSec_Upload_ReservedDirsRefused` + `TestSec_Sync_PeerJournalCannotMaterializeReservedPaths` (`internal/syncer`, the materialize half), `TestSec_Upload_QuotaUsesRealSize`. **clean** — `…TargetStaysInProject`. | presigned target outside the project prefix; `upload/commit` journaling a path with `..` or an absolute path; committing content the caller never uploaded; quota (`quota.go`) bypass on any write path |
-| 7 | Share links (`shares.go`, `ratelimit.go`, `server.go:handleShared`) | **fixed** — `TestSec_Share_OrgAuditLeaksDeniedProjectTokens`, `…RateLimitIgnoresSpoofedForwardedFor`, `…ErrorResponsesKeepSandboxCSP`, `…OutsiderCannotRevokeExpiredShare`. **clean** — `…RevokedAndExpiredTokensAreDead`, `…NoAuthCookieOnPublicResponse`, `…LiveShareMutationNeedsWrite`. **"share by a member who since lost access" never exercised.** | revoked or expired token still serves; token guessable/enumerable; CSP `sandbox` header missing on any `/s/*` response (incl. errors, markdown, downloads); auth cookie present on a `/s/*` response; rate-limit bypass (header spoofing, `X-Forwarded-For`); share created by a member who has since lost access still serving |
-| 8 | Invites & signup (`authlocal.go`, `authcli.go`, `orgs.go`) | **clean** — `TestSec_Invite_ForgedExpiredRevokedCannotCreateAccount`, `…RedemptionIsOrgScopedAndRevocable`, `…OnlyOwnersMintAndListLinks`, `…CLIOneTimeCodesAreNotReplayable`. **Seat/quota check on redemption (`CheckSeat`) never exercised.** | account created while `allow_signup:false` without a valid invite; invite reused past expiry or after revocation; invite for org A joining org B; `signupInvited` skipping domain/verification gates via a forged token; seat/quota check skipped; CLI one-time codes (`/api/auth/exchange`, device poll) replayable or brute-forceable |
-| 9 | Password & token handling (`authlocal.go`) | **fixed** — `TestSec_Password_ResetRevokesExistingTokens`. **clean** — `…ResetGrantIsSingleUseAndExpires`, `…LoginAndResetDoNotEnumerateAccounts` (body/status only), `…NoCredentialMaterialInResponses` (responses only). **Timing-based enumeration and log-line leakage never exercised.** | reset token replay/expiry; reset for another account; user enumeration via response or timing difference on login/reset; token compared non-constant-time; any password or token appearing in a log line or an API response |
-| 10 | Read-heat privacy (`reads.go`, `handleHeat`) | **untested** — no test asserts identity-free `/heat` output. The permission half ("heat for a project you can't read") is covered only incidentally by row 2's route sweeps. | any email, device id, or token reaching a client through `/heat`, its errors, or `/api/p/<id>/reads`; heat for a project you can't read |
-| 11 | Path handling (`dir.go`, `handleFile/Download/Render/Blob`) | **untested** — `TestSec_Store_KeyEscapesRefused` covers store *keys* only. No test sends `..`, an absolute path, a symlink, an encoded separator or a NUL to a viewer read route. | `..`, absolute paths, symlinks, encoded separators, NUL — reaching a file outside the project root or outside the served folder |
-| 12 | Secret leakage (`handleConfig`, `web.go`, error bodies) | **untested** — only the anonymous `/api/config` body is asserted (`TestSec_AuthGate_ConfigLeaksNothingToAnonymous`, `TestSec_Password_NoCredentialMaterialInResponses`). DSN, SMTP password, the hub's own device token, error bodies and stack traces: never exercised. | storage credentials, bucket URL, DB DSN, SMTP password, or the server's own device token reachable by any client; stack traces or internal paths in error responses |
-| 13 | Agent hook guard (`internal/agenthooks`) | **untested** — zero `TestSec_*` tests exist in this package. Highest blast radius on the board. | shell injection through a mount path, project name, or file path into the inline hook command — it runs on **every** tool call on the machine, so this is the highest-blast-radius row |
-| 14 | Metadata store (`db_sql.go`, `db_file.go`) | **untested** — zero `TestSec_*` tests. `db_conformance_test.go` is a functional test, not an attack. | SQL injection on any repo method; a record write crossing org/project scope; the file backend's atomic-rewrite path corrupting or exposing another tenant's rows |
+| 1 | Auth gate (`auth.go:authGate`) | **clean** — `TestSec_AuthGate_AnonymousPathTricksCannotReadAPI`, `…CannotWrite`, `…ConfigLeaksNothingToAnonymous`, `…ForgedAndTamperedCredentialsRefused`, `…CredentialDiesWithAccountAndMembership`, `TestSec_Path_LogoutRevokesTheTokenNotJustTheCookie`. **No TTL exists to test** — see "nothing expires" below. | reach any `/api/**` with no/expired/forged credential; abuse the `!HasPrefix("/api/")` open-path rule; path tricks (`//api/`, `/api/../`, encoded) that route to a handler but read as "open" |
+| 2 | Per-project permission choke point (`perms.go:projectPerm/requirePerm`, `server.go` route table) | **fixed** (r1) — `TestSec_Perms_RemovedOrgMemberLosesProjectAccess`, `…OrgLessProjectIsNotAdminForEveryone`. **clean** — `…ReadOnlyMemberCannotWrite`, `…WriteMemberCannotAdmin`, `…NoneMemberReachesNothing`, `…CorruptGrantFailsClosed`, `…NoneMemberCannotListProjectSharesViaOrg`, `…StoreAndUploadRoutesUnderDeviceToken`. `s.Dir == nil \|\| s.Auth == nil → PermAdmin` **still open, still deliberately deferred**, untested. | `read` member performing any `PermWrite` action; `write` member performing `PermAdmin`; `none`/non-member reaching a project; the fail-open escapes reachable on a configured hub |
+| 3 | Routes **outside** `proj()` | **fixed** (r1) — `TestSec_Row3_OrgSharesLeaksDeniedProject`, `…ExpiredShareRevokableByOutsider`. **clean** — `…ShareMutationByOutsider`, `…PermissionRoutes`, `…ProjectLifecycleRoutes`, `…OrgRoutes`, `…InviteAccept`, `…AdminRoutes`. | each one, exercised by a non-member, a read-only member, and a non-owner |
+| 4 | Cross-org isolation (`orgs.go`, `projects.go`, `directory.go`) | **clean** — `TestSec_CrossOrg_ProjectRoutesRefuseOutsider`, `…OrgRoutesRefuseOutsiderAndNonOwner`. Round 2 found two cross-org leaks that entered through OTHER surfaces (rows 10 and 11), both now **fixed**. | project id from org B against every route; `/api/projects` and `/api/orgs` leaking names/ids; org rename/member routes on someone else's org |
+| 5 | Sync proxy `/store/*` (`store.go`, `remote/http.go`) | **fixed** (r1) — `TestSec_Store_ForeignDeviceJournalWrite`, `…BlobContentMustMatchItsKey`, `…QuotaHonorsUnsizedPut`. **clean** — `…KeyEscapesRefused`. **fixed** (r2) — `TestSec_Leak_ErrorBodiesRevealServerFilesystemPaths` (storage errors relayed verbatim). **Device identity is still client-asserted**, and the journal BODY is still unvalidated apart from `Blob` (see gaps). | write a different device's journal key; key traversal; read another project's blob by sha; `store/sign` minting a URL outside the prefix or for a journal key |
+| 6 | Upload (`upload.go`) | **fixed** (r1) — `TestSec_Upload_ReservedDirsRefused` + `TestSec_Sync_PeerJournalCannotMaterializeReservedPaths` (`internal/syncer`), `…QuotaUsesRealSize`. **fixed** (r2) — `TestSec_Path_DirUploadCannotEscapeThroughSymlink` (single-volume upload through a pre-existing symlink). **clean** — `…TargetStaysInProject`, `TestSec_Path_WriteRoutesRefuseTraversal`, `TestSec_Path_RestoreRefusesForeignSHA`. | presigned target outside the project prefix; `upload/commit` journaling `..`/absolute; committing content never uploaded; quota bypass |
+| 7 | Share links (`shares.go`, `ratelimit.go`, `server.go:handleShared`) | **fixed** (r1) — `TestSec_Share_OrgAuditLeaksDeniedProjectTokens`, `…RateLimitIgnoresSpoofedForwardedFor`, `…ErrorResponsesKeepSandboxCSP`, `…OutsiderCannotRevokeExpiredShare`. **fixed** (r2) — `TestSec_Share_RemovedOrgMemberLinkStopsServing` (offboarding now ends a link; resolved at read time in `shareCreatorStillBelongs`). **clean** — `…RevokedAndExpiredTokensAreDead`, `…NoAuthCookieOnPublicResponse`, `…LiveShareMutationNeedsWrite`, `…DemotedMinterCannotManageTheirLink`. | revoked/expired token still serves; token guessable; missing CSP `sandbox`; auth cookie on `/s/*`; rate-limit bypass; share by someone who lost access |
+| 8 | Invites & signup (`authlocal.go`, `authcli.go`, `orgs.go`) | **clean** — `TestSec_Invite_ForgedExpiredRevokedCannotCreateAccount`, `…RedemptionIsOrgScopedAndRevocable`, `…OnlyOwnersMintAndListLinks`, `…CLIOneTimeCodesAreNotReplayable`, `…SeatCheckCannotBeSkipped`. **fixed** (r2) — `TestSec_Invite_SeatCheckIsAtomic` (check-then-act race on the last seat), `TestSec_DB_RevokedInviteMustNotSurviveAFailedWrite` (revocation that only looked durable). | account created while `allow_signup:false`; invite reused past expiry/revocation; invite for org A joining org B; `signupInvited` skipping gates; seat check skipped or raced; CLI codes replayable |
+| 9 | Password & token handling (`authlocal.go`) | **fixed** (r1) — `TestSec_Password_ResetRevokesExistingTokens`. **fixed** (r2) — `TestSec_Path_AuthNextCannotLeaveTheHub` (open redirect off the sign-in page via `/\`, `/<TAB>/`). **clean** — `…ResetGrantIsSingleUseAndExpires`, `…LoginAndResetDoNotEnumerateAccounts` (body/status only), `…NoCredentialMaterialInResponses` (responses only), `…ResetKillsCLIIssuedToken`, `TestSec_Path_VerifyGrantIsSingleUseAndTypeBound`. **Timing-based enumeration and log-line leakage still never exercised.** | reset token replay/expiry; reset for another account; enumeration via response or timing; non-constant-time compare; credentials in a log line |
+| 10 | Read-heat privacy (`reads.go`, `handleHeat`) | **fixed** — `TestSec_Heat_ByDeviceLeaksForeignDeviceMetadata`, `TestSec_Heat_ReadReportCannotInjectAnIdentity`, `TestSec_Reads_ReportCannotRewriteAnotherOrgsDevice` (the device id a client reports is now validated against the registry's owner before it becomes an actor, `devices.go:ownsDevice`). **clean** — `…NoQueryShapeLeaksAnActor`, `…RefusedWithoutReadPermission`, `TestSec_Reads_MalformedReportsStayHarmless`. Design conflict resolved in favour of "`?by=device` may report an owned device id"; `reads.go`'s comment and CLAUDE.md now say the same thing. | any email, device id or token reaching a client through `/heat`, its errors, or `/api/p/<id>/reads`; heat for a project you can't read; **the reader-differencing oracle (never tried)** |
+| 11 | Path handling (`dir.go`, `handleFile/Download/Render/Blob`) | **fixed** — `TestSec_Path_ViewerBlobEscapesProjectPrefix`, `TestSec_Path_MemberReadsAnotherOrgsBlob` (a journal's `Blob` was an unvalidated storage key: read any file on the hub host, any org's), `TestSec_Path_BlobInlineHTMLIsSandboxed` (stored XSS on the hub origin via history `/blob`). **clean** — `…ShaParamsRejectNonHex`, `…ShaFromAnotherProjectMisses`, `…DirViewerRefusesTraversal`, `…DirSymlinkIsNotServed`, `…SingleVolumeRoutesAreModeScoped`. | `..`, absolute paths, symlinks, encoded separators, NUL — reaching a file outside the project root or the served folder; **any other journal field used as a key or a path (only `Blob` was audited)** |
+| 12 | Secret leakage (`handleConfig`, `web.go`, error bodies) | **fixed** — `TestSec_Leak_ErrorBodiesRevealServerFilesystemPaths` (storage paths / bucket+key in `/store/object`, `/file`, `/download`, `/render`). **clean** — `TestSec_Leak_NothingSensitiveForAnOrdinaryMember`, `TestSec_AuthGate_ConfigLeaksNothingToAnonymous`, `TestSec_Password_NoCredentialMaterialInResponses`. **A hub built by `cmd/bdrive/web.go` — the only place a real DSN or SMTP password exists — is still never instantiated by any test.** | storage credentials, bucket URL, DB DSN, SMTP password, the hub's own device token reachable by any client; stack traces or internal paths in errors |
+| 13 | Agent hook guard (`internal/agenthooks`) | **fixed** — `TestSec_Hooks_GuardNeverSpawnsBdriveOutsideAMount` (a newline in a directory name split the `grep -F` pattern and matched every mount), `TestSec_Hooks_InstallKeepsItsOwnUserConfig`, `…InstallFromHomeKeepsItsOwnUserConfig` (init silently deleted the hooks it had just written when `$HOME` is a git repo). **clean** — `…MountPathMetacharactersNeverExecute`, `…RegistryContentsNeverExecute`, `…EveryHookCommandIsGuarded`. | shell injection through a mount path, project name, or file path into the inline hook command |
+| 14 | Metadata store (`db_sql.go`, `db_file.go`) | **clean** — `TestSec_DB_HostileStringsStayDataOnEveryBackend`, `…NULBytesDoNotTruncateRecords` — **on the file and sqlite backends only**. **fixed** — `…OrgMemberMapDoesNotEscapeTheRegistry`, `…ProjectPermsMapDoesNotEscapeTheRegistry` (live maps handed out — a role/grant writable past every guard, plus a real `concurrent map iteration and map write` crash), `…FailedGrantWriteLeavesRegistryAgreeingWithDisk` (refused writes applied in memory), `…RevokedInviteMustNotSurviveAFailedWrite`, `…FileBackendSecretsDirectoryIsNotWorldReadable`. | SQL injection on any repo method; a record write crossing org/project scope; the file backend's atomic-rewrite path corrupting or exposing another tenant's rows |
 
-Round 1 result: 12 holes closed, 43 `TestSec_*` tests green, whole suite green.
-Rows 10–14 were never reached by any attacker and are round 2's targets.
+Round 1 result: 12 holes closed, 43 `TestSec_*` tests green.
+Round 2 result: **17 holes closed** (4 hackers, 19 failing tests), **86 `TestSec_*`
+tests green** (85 in `internal/webapp` + `internal/agenthooks`, 1 in
+`internal/syncer`), whole suite green. Rows 10–14, untouched by round 1, are
+now all exercised — and rows 10, 11, 13 and 14 each held a real hole; the
+worst (row 11) crossed every org boundary on the hub with no victim action.
 
 Rows 1–3 and 5 are the highest value: they are choke points, so a hole there
 is a hole everywhere downstream.
 
-### Known-open, deliberately deferred (round 1)
+### Known-open, deliberately deferred
 
-Neither has a reproducer, and both are one design decision wide. They are
-listed here so nobody reads a green board as "nothing left".
+Carried from round 1 (still open, still no reproducer):
 
 - **`projectPerm` returns `PermAdmin` when `s.Dir == nil || s.Auth == nil`.**
   Unreachable on a configured hub (`cmd/bdrive/web.go` sets both together),
   but a provider swap that leaves one nil makes every account admin hub-wide.
-  Failing closed here is a two-line change and a large test-fixture change:
-  `newHub`, `authHub` and `shareHub` all build servers without a `Dir`, so the
-  escape is what makes most of the suite's project routes reachable. Closing
-  it means deciding what an auth-without-orgs hub means first.
+  Closing it means deciding what an auth-without-orgs hub means first, and
+  rewriting `newHub`/`authHub`/`shareHub`, which rely on the escape.
 - **`Op.User`/`UserName` on `/store/*` pushes are whatever the client claims**,
-  and now so is `X-Bdrive-Device`: the hub holds one request to one journal,
-  but nothing binds that journal to the account or device that owns it. So
-  History attribution is client-asserted. The fix is to *verify and reject*
-  (compare the pushed ops' `User` against the authenticated account, and the
-  device id against the device registry's owner) — never to rewrite the
-  journal, which would break replay determinism between a device and its own
-  remote copy.
+  and so is `X-Bdrive-Device`. Round 2 narrowed the blast radius — a forged
+  device id can no longer take over a registry row (`DeviceRegistry.Observe`)
+  or become a heat actor (`ownsDevice`) — but History attribution is still
+  client-asserted. The fix remains verify-and-reject, never rewrite the
+  journal (that would break replay determinism between a device and its
+  remote copy).
+
+New from round 2:
+
+- **Nothing expires.** Device tokens and session cookies have no server-side
+  TTL and the cookie carries no `Expires`, so a stolen credential is valid
+  until a password reset or an explicit logout. "Test an expired session" is
+  untestable because the concept does not exist in the code. This is a design
+  decision to make, not a bug to patch.
+- **Only `Blob` is validated on an incoming journal.** `handleStorePut`
+  checks the KEY and (since round 1) a blob's content hash, but a journal is
+  arbitrary JSONL: `Path`, `Note`, `Device`, `Lamport`, `Mtime` and `Mode`
+  all enter the model unchecked. Round 2 closed `Blob` at the read side
+  (`RemoteSource.Files`/`Open`) plus a `localBackend` root check as defence in
+  depth; a peer-journal `Path` is filtered at materialize time (row 6's syncer
+  test) but nothing validates the rest at ingest.
 
 ## Out of scope
 
@@ -162,3 +177,59 @@ Rules that keep four attackers from colliding in one package:
 - Every helper you add is prefixed with your file's slug (`gateDo`, `permsDo`)
   so two files can't declare the same name.
 - Reuse the helpers above by calling them; do not copy them.
+
+## Coverage gaps after round 2 — the next round's targets
+
+Written by the CISO, verified against the tests that actually exist. A row
+being `clean` or `fixed` above means one attack was refused, not that the
+boundary is exhausted.
+
+**Never exercised by any round (no test names it at all):**
+
+- `GET /` — `Server.frontend`: the SPA fallback and the embedded-asset
+  handler. The only route in `server.go` with zero `TestSec_*` coverage. Path
+  handling into `fs.Sub(staticFiles)`, the asset/no-cache header split, and
+  whether a crafted path can be served as an asset are all untested.
+- **A hub built the way production builds one.** `cmd/bdrive/web.go` is never
+  instantiated by a webapp test, so a hub with a real `database` DSN, a real
+  SMTP password, or `TrustProxy` on has never been probed for leakage or
+  behaviour. Row 12 is `clean` only for hubs the test fixtures build.
+- **Postgres.** `metaBackends` skips it unless `BDRIVE_TEST_POSTGRES` is set,
+  and it was not set in any round-2 run (the helper logs
+  "postgres backend UNTESTED in this run"). Postgres is the only backend where
+  `q()`'s `?`→`$N` rewrite is live, so row 14's SQL-injection result covers
+  **file and sqlite only**.
+- **Timing-based user enumeration** on login/reset. Row 9's test compares
+  bodies and status codes, never durations.
+- **Credential leakage into log lines.** Row 9 and row 12 assert on responses
+  only. Round 2 added `storageErr`, which deliberately logs what it refuses to
+  return — nothing checks what else reaches the log.
+- **The reader-differencing oracle on `/heat`.** `readers` is a distinct-actor
+  count; polling it around a known event can still identify who read what,
+  without any identity ever appearing in a response.
+- **`/s/*` → `ReadKindShare` recording.** The share read path writes a bucket
+  keyed by token+IP; no test drives it.
+- **Rate limiting on anything but `/s/*`.** Login has a limiter
+  (`authLim`); no `TestSec_*` exercises it.
+
+**Claimed but thin — a test exists, but only for one narrow shape:**
+
+- Row 5's `/store/*`: every route is covered for permission LEVEL (row 2's
+  sweeps) and for key shape, but `store/sign` has no test of its own beyond
+  the level sweep — no test asserts a signed URL's target, TTL, or that a
+  journal key is never signed on a backend that CAN sign (the fixtures use
+  `file://`, which cannot).
+- Row 11: only `Blob` was audited among journal fields (see above).
+- Row 14: `clean` is per-backend, and one backend of three never ran.
+- Row 1: the credential tests cover forged/tampered/deleted — never expired,
+  because expiry does not exist.
+
+**Fixes made this round that deserve their own next-round attack:**
+
+- `ownsDevice` (reads.go/devices.go) — first-caller-wins ownership of a device
+  row. Is there a way to register a device id before its real owner does?
+- `shareCreatorStillBelongs` (shares.go) — a read-time membership check on a
+  public route. What happens to it when `Dir` is a remote directory whose
+  `Role` is cache-backed?
+- `safeNext` — verified against tab/CR/LF and backslash. Not against
+  percent-encoded or unicode look-alike separators.

@@ -323,6 +323,29 @@ func shareJSON(r *http.Request, sh Share) map[string]any {
 	return out
 }
 
+// shareCreatorStillBelongs reports whether the account that minted a link is
+// still in the project's org. A share is the strongest grant on the hub — the
+// org's live content, to anyone with the URL, forever — so offboarding has to
+// reach it: the day someone leaves, every link they minted stops serving.
+//
+// Resolved at read time rather than by walking shares.json on RemoveMember,
+// for the same reason projectPerm resolves membership instead of walking grant
+// maps: one rule, no sweep to forget, and it self-heals if the account rejoins.
+// Suspended, not deleted — an owner still sees the orphaned link in the
+// project's share list and can revoke it for good. Demotion (write → read) is
+// deliberately NOT covered: "a link lives until revoked" is the contract, and
+// only leaving the org ends it.
+func (s *Server) shareCreatorStillBelongs(sh Share) bool {
+	if s.Dir == nil || sh.Creator == "" {
+		return true // no membership model (single-volume), or a pre-accounts link
+	}
+	org := s.orgOf(sh.Project)
+	if org == "" {
+		return true
+	}
+	return s.Dir.Role(org, sh.Creator) != ""
+}
+
 // handleShared serves a share link: public, sandboxed, always the latest
 // synced content.
 func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
@@ -341,6 +364,10 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	}
 	sh, ok := s.Shares.Get(r.PathValue("token"))
 	if !ok {
+		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
+		return
+	}
+	if !s.shareCreatorStillBelongs(sh) {
 		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
 		return
 	}

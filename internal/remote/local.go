@@ -26,12 +26,23 @@ func newLocal(root string) (*localBackend, error) {
 	return &localBackend{root: root}, nil
 }
 
-func (b *localBackend) path(key string) string {
-	return filepath.Join(b.root, filepath.FromSlash(key))
+// path resolves a key under the root and refuses one that climbs out of it.
+// Keys come from journals and API callers, so "the key is well-formed" is a
+// caller's promise, not a fact — this is the last place to check it before a
+// traversal becomes a read or a write anywhere on the hub host.
+func (b *localBackend) path(key string) (string, error) {
+	p := filepath.Join(b.root, filepath.FromSlash(key))
+	if p != b.root && !strings.HasPrefix(p, b.root+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid key %q", key)
+	}
+	return p, nil
 }
 
 func (b *localBackend) Put(_ context.Context, key string, r io.Reader, _ int64) error {
-	dst := b.path(key)
+	dst, err := b.path(key)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
@@ -51,7 +62,11 @@ func (b *localBackend) Put(_ context.Context, key string, r io.Reader, _ int64) 
 }
 
 func (b *localBackend) Get(_ context.Context, key string) (io.ReadCloser, error) {
-	return os.Open(b.path(key))
+	p, err := b.path(key)
+	if err != nil {
+		return nil, err
+	}
+	return os.Open(p)
 }
 
 func (b *localBackend) List(_ context.Context, prefix string) ([]Object, error) {
@@ -82,7 +97,11 @@ func (b *localBackend) List(_ context.Context, prefix string) ([]Object, error) 
 }
 
 func (b *localBackend) Exists(_ context.Context, key string) (bool, error) {
-	_, err := os.Stat(b.path(key))
+	p, perr := b.path(key)
+	if perr != nil {
+		return false, perr
+	}
+	_, err := os.Stat(p)
 	if err == nil {
 		return true, nil
 	}

@@ -94,11 +94,39 @@ func OpenProjectDB(path string) (*ProjectDB, error) {
 	return NewProjectDB(newFileProjectRepo(path))
 }
 
+// clone copies a Project so its Perms map never leaves the registry: the
+// struct is a value but the map inside it is a pointer, and a caller holding
+// the live map could grant itself PermAdmin without SetPerm, its last-admin
+// guard, or a store write.
+func (p Project) clone() Project {
+	c := p
+	if p.Perms != nil {
+		c.Perms = make(map[string]string, len(p.Perms))
+		for k, v := range p.Perms {
+			c.Perms[k] = v
+		}
+	}
+	return c
+}
+
+// put persists a mutated project, restoring the previous value if the store
+// refuses. Callers hold mu. Without the rollback a refused write reads as
+// applied until the hub restarts and then reverts — a demotion that quietly
+// un-demotes itself. (GetOrCreate has always rolled back; this is the rest.)
+func (db *ProjectDB) put(prev, p Project) error {
+	db.byID[p.ID] = p
+	if err := db.repo.Put(p); err != nil {
+		db.byID[p.ID] = prev
+		return err
+	}
+	return nil
+}
+
 // list returns projects sorted by name. Callers hold mu.
 func (db *ProjectDB) list() []Project {
 	out := make([]Project, 0, len(db.byID))
 	for _, p := range db.byID {
-		out = append(out, p)
+		out = append(out, p.clone())
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -114,7 +142,10 @@ func (db *ProjectDB) Get(id string) (Project, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	p, ok := db.byID[id]
-	return p, ok
+	if !ok {
+		return Project{}, false
+	}
+	return p.clone(), true
 }
 
 // GetOrCreate returns the project with the given name in the org, creating
@@ -129,7 +160,7 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 	defer db.mu.Unlock()
 	for _, p := range db.byID {
 		if p.Name == name && p.Org == org {
-			return p, false, nil
+			return p.clone(), false, nil
 		}
 	}
 	p := Project{ID: uuid.NewString(), Name: name, Org: org, Created: time.Now().UTC()}
@@ -138,7 +169,7 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 		delete(db.byID, p.ID)
 		return Project{}, false, err
 	}
-	return p, true, nil
+	return p.clone(), true, nil
 }
 
 // Update changes a project's editable metadata. Each field is a pointer so
@@ -175,22 +206,22 @@ func (db *ProjectDB) Update(id string, name, description, icon *string) error {
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
 	}
+	next := p
 	if name != nil {
 		for _, other := range db.byID {
 			if other.ID != id && other.Name == newName && other.Org == p.Org {
 				return fmt.Errorf("a project named %q already exists in this organization", newName)
 			}
 		}
-		p.Name = newName
+		next.Name = newName
 	}
 	if description != nil {
-		p.Description = newDesc
+		next.Description = newDesc
 	}
 	if icon != nil {
-		p.Icon = newIcon
+		next.Icon = newIcon
 	}
-	db.byID[id] = p
-	return db.repo.Put(p)
+	return db.put(p, next)
 }
 
 // Rename changes a project's display name (its id and storage are permanent).
@@ -219,9 +250,9 @@ func (db *ProjectDB) SetCreator(id, email string) error {
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
 	}
-	p.Creator = normEmail(email)
-	db.byID[id] = p
-	return db.repo.Put(p)
+	next := p
+	next.Creator = normEmail(email)
+	return db.put(p, next)
 }
 
 // SetTemplate records the starting structure a project was seeded from.
@@ -232,9 +263,9 @@ func (db *ProjectDB) SetTemplate(id, name string) error {
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
 	}
-	p.Template = name
-	db.byID[id] = p
-	return db.repo.Put(p)
+	next := p
+	next.Template = name
+	return db.put(p, next)
 }
 
 // SetDefault sets the level org members get without an explicit grant.
@@ -248,9 +279,9 @@ func (db *ProjectDB) SetDefault(id, level string) error {
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
 	}
-	p.Default = level
-	db.byID[id] = p
-	return db.repo.Put(p)
+	next := p
+	next.Default = level
+	return db.put(p, next)
 }
 
 // SetPerm grants one account an explicit level on the project. Demoting the
@@ -274,14 +305,12 @@ func (db *ProjectDB) SetPerm(id, email, level string) error {
 	if level != PermAdmin && p.Perms[e] == PermAdmin && adminCount(p) <= 1 {
 		return fmt.Errorf("cannot demote the last project admin")
 	}
-	perms := make(map[string]string, len(p.Perms)+1)
-	for k, v := range p.Perms {
-		perms[k] = v
+	next := p.clone()
+	if next.Perms == nil {
+		next.Perms = map[string]string{}
 	}
-	perms[e] = level
-	p.Perms = perms
-	db.byID[id] = p
-	return db.repo.Put(p)
+	next.Perms[e] = level
+	return db.put(p, next)
 }
 
 // ClearPerm drops an explicit grant, reverting the account to the default.
@@ -299,15 +328,9 @@ func (db *ProjectDB) ClearPerm(id, email string) error {
 	if p.Perms[e] == PermAdmin && adminCount(p) <= 1 {
 		return fmt.Errorf("cannot remove the last project admin")
 	}
-	perms := make(map[string]string, len(p.Perms))
-	for k, v := range p.Perms {
-		if k != e {
-			perms[k] = v
-		}
-	}
-	p.Perms = perms
-	db.byID[id] = p
-	return db.repo.Put(p)
+	next := p.clone()
+	delete(next.Perms, e)
+	return db.put(p, next)
 }
 
 // adminCount counts explicit admin grants on a project.
@@ -329,9 +352,9 @@ func (db *ProjectDB) SetOrg(id, org string) error {
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
 	}
-	p.Org = org
-	db.byID[id] = p
-	return db.repo.Put(p)
+	next := p
+	next.Org = org
+	return db.put(p, next)
 }
 
 // trimName normalizes a name on the *creation* path, where an over-long name
