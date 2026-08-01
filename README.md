@@ -1,5 +1,9 @@
 # BearDrive — Google Drive for AI agents
 
+[![Star on GitHub](https://img.shields.io/github/stars/runbear-io/beardrive?style=flat&logo=github&label=star%20this%20repo&color=f5a623)](https://github.com/runbear-io/beardrive)
+[![Go Reference](https://pkg.go.dev/badge/github.com/runbear-io/beardrive.svg)](https://pkg.go.dev/github.com/runbear-io/beardrive)
+[![Docs](https://img.shields.io/badge/docs-beardrive.ai-2f81f7)](https://docs.beardrive.ai)
+
 **BearDrive** mounts any folder as a synced volume: its contents stay
 synchronized across all your devices and teammates through a BearDrive
 **hub**, every change is tracked (who, when, on which device), and

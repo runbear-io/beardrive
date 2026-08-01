@@ -11,6 +11,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+const REPO_URL = "https://github.com/runbear-io/beardrive";
+
 // The sidebar footer is the account row: avatar, name, email. Clicking it
 // opens a menu with the workspace (org) and account actions — settings,
 // hub administration for admins, and sign-out. Radix owns open/dismiss
@@ -44,6 +46,17 @@ export function AccountBar({
   const billingLink = billing ? linkProps(billing.url) : null;
   return (
     <footer id="accountbar">
+      {/* The star ask is a link that sits there, never a banner that
+          interrupts: it is dim, one click, and identical on every render, so
+          it reads as social proof rather than as a request. Anything
+          dismissible would need dismissal state and would still have
+          interrupted once. */}
+      <a className="gh-star" href={REPO_URL} target="_blank" rel="noreferrer">
+        <Icon name="star" />
+        <span>Star on GitHub</span>
+        <span className="ext" aria-hidden="true">↗</span>
+        <span className="sr-only"> (opens in a new tab)</span>
+      </a>
       <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <button id="account-btn" className={orgActive ? "active" : undefined} aria-label="Account menu">

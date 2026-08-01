@@ -288,6 +288,14 @@ button, input, a.btn { font-family: inherit; }
 
 /* ---- account bar ---- */
 #accountbar { position: relative; border-top: 1px solid var(--border); padding: 7px 10px; }
+.gh-star {
+  display: flex; align-items: center; gap: 9px;
+  padding: 5px 8px; margin-bottom: 2px; border-radius: 7px;
+  color: var(--text-faint); font-size: 12px; text-decoration: none;
+}
+.gh-star:hover { background: var(--hover); color: var(--text); }
+.gh-star > .ico { width: 14px; height: 14px; }
+.gh-star .ext { margin-left: auto; font-size: 10px; }
 #account-btn {
   width: 100%; display: flex; align-items: center; gap: 9px; text-align: left;
   padding: 6px 8px; border: none; border-radius: 7px;
