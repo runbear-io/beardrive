@@ -113,15 +113,13 @@ func (r *Result) Activity() bool {
 	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Pruned > 0 || r.Materialized > 0
 }
 
-// The .bdrive settings dir (config.ProjectDir) never syncs: it is the
-// mount's local identity, and syncing it would let one device silently
-// repoint another.
-var ignoreNames = map[string]bool{".DS_Store": true}
-var ignoreDirs = map[string]bool{".git": true, config.ProjectDir: true}
+// The builtin exclusions (.bdrive — the mount's local identity, syncing it
+// would let one device silently repoint another — and .git) are defined once
+// in config, because the hub enforces the same set on the paths clients
+// upload. Local aliases so the walk and the path checks below read plainly.
+var ignoreDirs = config.ReservedDirs
 
-func ignoredFile(name string) bool {
-	return ignoreNames[name] || strings.HasPrefix(name, ".bdrive-tmp-")
-}
+func ignoredFile(name string) bool { return config.ReservedName(name) }
 
 // Cycle runs one full scan/sync/materialize pass under the volume lock.
 func (s *Session) Cycle(ctx context.Context) (*Result, error) {
@@ -542,7 +540,12 @@ func sanitize(s string) string {
 func (s *Session) materialize(target map[string]journal.FileState, cache map[string]store.CachedFile, filter *Filter) (int, error) {
 	changed := 0
 	for rel, want := range target {
-		if filter.Skip(rel) {
+		// neverSync as well as the ignore filter: the builtin exclusions are
+		// what keep .bdrive/ and .git/ off this device's disk, and an op
+		// naming one arrives from a peer's journal — where the scan-side
+		// check never ran. Writing it would let one device repoint another's
+		// mount (or drop a git hook that runs on the next commit).
+		if filter.Skip(rel) || neverSync(rel) {
 			continue
 		}
 		wrote, err := s.materializeFile(rel, want, cache)

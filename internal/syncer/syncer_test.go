@@ -2,6 +2,8 @@ package syncer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -709,4 +711,57 @@ func assertNonIncreasing(t *testing.T, ops []journal.Op) {
 				i, DisplayTime(ops[i-1]), DisplayTime(ops[i]))
 		}
 	}
+}
+
+// A peer's journal is untrusted input: the scan-side exclusions (.bdrive/,
+// .git/) never ran on the device that wrote it. Materializing an op that
+// names one would let a compromised peer — or a poisoned hub — repoint this
+// mount's own settings or drop a git hook that runs on the next commit.
+func TestSec_Sync_PeerJournalCannotMaterializeReservedPaths(t *testing.T) {
+	ctx := context.Background()
+	be := sharedRemote(t)
+	victim := newDevice(t, "victim", be)
+
+	const content = "hostile"
+	sum := sha256hex(content)
+	if err := be.Put(ctx, "blobs/"+sum, strings.NewReader(content), int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+	op := func(seq int64, p string) journal.Op {
+		return journal.Op{
+			Seq: seq, Lamport: seq, Time: time.Now().UTC(),
+			Device: "attacker", DeviceName: "attacker", Author: "attacker@test",
+			Kind: journal.KindPut, Path: p, Blob: sum, Size: int64(len(content)), Mode: 0o644,
+		}
+	}
+	data, err := journal.Marshal([]journal.Op{
+		op(1, ".bdrive/config.json"),
+		op(2, ".git/hooks/pre-commit"),
+		op(3, "docs/.bdrive/config.json"),
+		op(4, "notes/ok.md"), // control: an ordinary op from the same journal
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := be.Put(ctx, "journal/attacker.jsonl", strings.NewReader(string(data)), int64(len(data))); err != nil {
+		t.Fatal(err)
+	}
+
+	cycle(t, victim)
+
+	// Control first: if this fails the pull didn't happen and the rest proves
+	// nothing.
+	if got := read(t, victim.Folder, "notes/ok.md"); got != content {
+		t.Fatalf("control op did not materialize: %q", got)
+	}
+	for _, rel := range []string{".bdrive/config.json", ".git/hooks/pre-commit", "docs/.bdrive/config.json"} {
+		if _, err := os.Stat(filepath.Join(victim.Folder, filepath.FromSlash(rel))); err == nil {
+			t.Errorf("a peer journal materialized %s into the mount", rel)
+		}
+	}
+}
+
+func sha256hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }

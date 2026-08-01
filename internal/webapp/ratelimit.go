@@ -72,12 +72,20 @@ func (l *rateLimiter) allow(key string) bool {
 	return true
 }
 
-// clientIP is the rate-limit key: the first X-Forwarded-For hop when a
-// proxy fronts the server, else the connection's address.
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first, _, ok := strings.Cut(xff, ","); ok || first != "" {
-			return strings.TrimSpace(first)
+// clientIP is the rate-limit key: the connection's address, or the first
+// X-Forwarded-For hop when the operator has said a proxy fronts this hub.
+//
+// The header is attacker-controlled on a directly-reachable hub, and this key
+// is what throttles both /s/* and the login endpoint — so trusting it by
+// default hands anyone an unlimited-rate bucket per request and turns off the
+// password brute-force limiter. TrustProxy is therefore opt-in: a hub behind a
+// load balancer sets it, a hub on the open internet must not.
+func (s *Server) clientIP(r *http.Request) string {
+	if s.TrustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
+				return strings.TrimSpace(first)
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -110,7 +118,7 @@ func (s *Server) rateLimitAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		if r.Method == http.MethodPost && (p == "/auth/login" || p == "/auth/signup") {
-			if !s.authLimiter().allow(clientIP(r)) {
+			if !s.authLimiter().allow(s.clientIP(r)) {
 				http.Error(w, "too many attempts — wait a minute and try again", http.StatusTooManyRequests)
 				return
 			}

@@ -45,6 +45,7 @@ cloud credentials on the serving machine.
   "refresh": "10s",
   "projects_db": "/var/lib/bdrive/projects.json",
   "share_rpm": 120,                  // per-IP rate limit on public /s/* links
+  "trust_proxy": false,              // true only when a reverse proxy fronts the hub
   "auth": {                          // optional knobs; hub auth is always on
     // Signup is invite-only by default. To allow self-service signup,
     // open it WITH a gate (an ungated open hub is refused at startup):
@@ -66,6 +67,25 @@ cloud credentials on the serving machine.
 
 See [Authentication](/self-hosting/authentication/) for the `auth` block and
 [Database](/self-hosting/database/) for `database`.
+
+## Running behind a reverse proxy
+
+`trust_proxy` (default `false`) decides where the hub reads a caller's IP
+address from. It keys two rate limiters: the one on public share links
+(`share_rpm`) and the one on `POST /auth/login` and `/auth/signup` that blunts
+password brute-force.
+
+- **Default (`false`)** — the address is the connection's own. Correct for a
+  hub clients reach directly.
+- **`true`** — the first `X-Forwarded-For` hop is used instead. Set this only
+  when a proxy you control (nginx, Caddy, a cloud load balancer) sits in front
+  of the hub and overwrites that header. **Make sure it overwrites rather than
+  appends**, or a client can prepend a hop of its own.
+
+Leaving it `false` behind a proxy costs you accuracy: every request looks like
+it comes from the proxy, so the limiters throttle all your users as one. Turning
+it `true` on a directly-reachable hub costs you the limiters entirely — any
+caller can pick a fresh address per request and never be throttled.
 
 ## Uploads
 

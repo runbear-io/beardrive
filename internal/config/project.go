@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -17,6 +18,31 @@ import (
 // same project) but is never synced, and it holds no session credentials —
 // those stay in the bdrive home.
 const ProjectDir = ".bdrive"
+
+// ReservedDirs are directory names BearDrive never syncs, at any depth in a
+// mount: .bdrive is the mount's own identity (syncing it would let one device
+// silently repoint another) and .git carries hook scripts that would run on a
+// teammate's next commit. The rule lives here beside ProjectDir because two
+// packages enforce it — the sync engine on scan and on materialize, the hub
+// on every destination path a client names — and two copies would drift.
+var ReservedDirs = map[string]bool{".git": true, ProjectDir: true}
+
+// ReservedName reports whether a bare file name never syncs.
+func ReservedName(name string) bool {
+	return name == ".DS_Store" || strings.HasPrefix(name, ".bdrive-tmp-")
+}
+
+// ReservedPath reports whether a slash-separated path is one BearDrive never
+// carries: under a reserved directory, named like one, or a reserved file
+// name.
+func ReservedPath(p string) bool {
+	for _, part := range strings.Split(p, "/") {
+		if ReservedDirs[part] {
+			return true
+		}
+	}
+	return ReservedName(path.Base(p))
+}
 
 // Project holds the settings stored in <folder>/.bdrive/config.json.
 type Project struct {

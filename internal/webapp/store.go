@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 
@@ -48,6 +49,34 @@ func (s *Server) storeKey(w http.ResponseWriter, r *http.Request) (string, bool)
 		return "", false
 	}
 	return key, true
+}
+
+// ownJournal binds a journal key to the calling device. "Each device writes
+// only its own journal" is why no journal object ever has two writers and why
+// the hub needs no locking service — write permission on the project is not
+// permission to rewrite a peer's log (or the hub's own), where a forged op
+// with a high lamport wins replay on every device and History blames the
+// victim. Blob keys are content-addressed and immutable, so they carry no
+// owner.
+//
+// A caller that names no device writes no journal either, but that is a 400:
+// the request never said who is writing, which is a malformed sync request
+// rather than a refused one. Only a caller claiming to be a device it is not
+// gets the 403.
+func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string) bool {
+	if !strings.HasPrefix(key, "journal/") {
+		return true
+	}
+	dev := r.Header.Get("X-Bdrive-Device")
+	if dev == "" {
+		http.Error(w, "a journal write must identify its device (X-Bdrive-Device)", http.StatusBadRequest)
+		return false
+	}
+	if key != "journal/"+dev+".jsonl" {
+		http.Error(w, "a device may only write its own journal", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -133,6 +162,14 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 		http.Error(w, fmt.Sprintf("invalid store key %q", req.Key), http.StatusBadRequest)
 		return
 	}
+	// Signing grants nothing for a journal (journals are never presigned; the
+	// answer is always "come through the server"), so an unidentified caller
+	// is fine here — the write itself is where ownership is enforced. A
+	// caller that does name a device is held to it, so a forged sync fails at
+	// the first step instead of after uploading.
+	if r.Header.Get("X-Bdrive-Device") != "" && !s.ownJournal(w, r, req.Key) {
+		return
+	}
 	if err := s.quota().CheckWrite(s.orgOf(r.PathValue("project")), req.Size); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
@@ -172,12 +209,31 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	org, size := s.orgOf(r.PathValue("project")), max(r.ContentLength, 0)
+	if !s.ownJournal(w, r, key) {
+		return
+	}
+	// Spool the body before storing any of it. Both things this handler has to
+	// be sure of are properties of the bytes, not of the headers the client
+	// sent: what a blob key promises (its sha256) and what the write costs
+	// (Content-Length is -1 on any chunked request, which made every unsized
+	// put free). Cost: one temp file per put on the hub's busiest write path.
+	tmp, size, sum, err := spool(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob && blob != sum {
+		http.Error(w, "content does not hash to its key", http.StatusBadRequest)
+		return
+	}
+	org := s.orgOf(r.PathValue("project"))
 	if err := s.quota().CheckWrite(org, size); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := rs.Backend.Put(r.Context(), key, r.Body, r.ContentLength); err != nil {
+	if err := rs.Backend.Put(r.Context(), key, tmp, size); err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
 	}

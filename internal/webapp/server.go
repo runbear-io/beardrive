@@ -102,6 +102,11 @@ type Server struct {
 	// ShareRPM is the per-IP request rate on public share links (/s/*);
 	// 0 means DefaultShareRPM.
 	ShareRPM int
+	// TrustProxy says a reverse proxy fronts this hub, so X-Forwarded-For
+	// carries the real client address. Off by default: on a directly-
+	// reachable hub the header is attacker-supplied, and it keys both the
+	// /s/* and the login rate limiters.
+	TrustProxy bool
 
 	shareLimOnce sync.Once
 	shareLim     *rateLimiter

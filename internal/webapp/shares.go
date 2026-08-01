@@ -103,6 +103,20 @@ func (db *ShareDB) Get(token string) (Share, bool) {
 	return s, true
 }
 
+// lookup resolves a share regardless of expiry. Authorization must not depend
+// on the clock: Get filters expired rows, so a handler that skips its
+// permission check when the lookup misses lets anyone delete an expired
+// share — and learn from the answer that it existed.
+func (db *ShareDB) lookup(token string) (Share, bool) {
+	if db == nil {
+		return Share{}, false
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	s, ok := db.byToken[token]
+	return s, ok
+}
+
 func (db *ShareDB) Revoke(token string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -237,8 +251,12 @@ func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 	// This route is /api/shares/{token} — outside the proj() wrapper — so the
 	// level check lives here: minting and killing public links are the same
 	// authority.
-	sh, ok := s.Shares.Get(r.PathValue("token"))
-	if ok && !s.requirePerm(w, r, sh.Project, PermWrite) {
+	sh, ok := s.Shares.lookup(r.PathValue("token"))
+	if !ok {
+		http.Error(w, "no such share", http.StatusNotFound)
+		return
+	}
+	if !s.requirePerm(w, r, sh.Project, PermWrite) {
 		return
 	}
 	if s.Shares.Revoke(r.PathValue("token")) {
@@ -308,7 +326,16 @@ func shareJSON(r *http.Request, sh Share) map[string]any {
 // handleShared serves a share link: public, sandboxed, always the latest
 // synced content.
 func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
-	if !s.shareLimiter().allow(clientIP(r)) {
+	// Sandbox everything under /s/ before anything can answer the request:
+	// shared content executes in an opaque origin (scripts allowed — charts in
+	// reports — but no cookies, no same-origin reach back into the hub), and
+	// an error page is a /s/ response like any other. Set here, not at the
+	// end, so the 429 and the 404s cannot go out bare.
+	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-popups")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+
+	if !s.shareLimiter().allow(s.clientIP(r)) {
 		http.Error(w, "too many requests — slow down", http.StatusTooManyRequests)
 		return
 	}
@@ -334,14 +361,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	}
 	// A share hit is external consumption. Actor is token+IP: one audience
 	// member reloading is debounced to a visit, distinct visitors still count.
-	s.Reads.Record(sh.Project, sh.Path, ReadKindShare, sh.Token+"/"+clientIP(r))
-
-	// Sandbox everything under /s/: shared content executes in an opaque
-	// origin (scripts allowed — charts in reports — but no cookies, no
-	// same-origin reach back into the hub).
-	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-popups")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	s.Reads.Record(sh.Project, sh.Path, ReadKindShare, sh.Token+"/"+s.clientIP(r))
 
 	rc, err := v.source.Open(r.Context(), sh.Path, fi)
 	if err != nil {

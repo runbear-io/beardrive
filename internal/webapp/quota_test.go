@@ -95,9 +95,15 @@ func TestQuotaHooks(t *testing.T) {
 		t.Fatalf("RecordUsage calls = %+v", q.usage)
 	}
 
-	// device sync store put: same discipline
+	// device sync store put: same discipline. A journal write has to name the
+	// device writing it (one journal, one writer), so this goes through a
+	// request carrying the header a real sync client sends.
 	jl := []byte(`{"seq":1}`)
-	rec = doAs(t, h, "PUT", "/api/p/"+pa.ID+"/store/object?key=journal/dev1.jsonl", jl, alice)
+	jreq := httptest.NewRequest("PUT", "/api/p/"+pa.ID+"/store/object?key=journal/dev1.jsonl", strings.NewReader(string(jl)))
+	jreq.AddCookie(alice)
+	jreq.Header.Set("X-Bdrive-Device", "dev1")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, jreq)
 	if rec.Code != 200 {
 		t.Fatalf("store put: %d %s", rec.Code, rec.Body)
 	}

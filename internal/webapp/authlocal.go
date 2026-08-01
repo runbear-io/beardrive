@@ -338,6 +338,21 @@ func (a *BuiltinAuth) revokeToken(tok string) {
 	}
 }
 
+// revokeTokensFor kills every credential a user holds — browser sessions and
+// device tokens alike, since both are rows in a.tokens. Used by the password
+// reset: re-keying an account that a thief still has a live token for would
+// recover nothing.
+func (a *BuiltinAuth) revokeTokensFor(userID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for hash, t := range a.tokens {
+		if t.User == userID {
+			delete(a.tokens, hash)
+			a.store.DeleteToken(hash)
+		}
+	}
+}
+
 func (a *BuiltinAuth) userForToken(tok string) (User, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -892,6 +907,10 @@ func (a *BuiltinAuth) pageResetConfirm(w http.ResponseWriter, r *http.Request) {
 			a.store.PutAccount(u)
 		}
 		a.mu.Unlock()
+		// A reset is the documented recovery for a stolen account, so it has
+		// to end the thief's access too: every session cookie and device token
+		// minted under the old password dies with it.
+		a.revokeTokensFor(g.user)
 		authPage(w, "Password updated", `<p class="msg">Your password is updated.</p>
 <p class="alt"><a href="/auth/login">Sign in</a></p>`)
 		return

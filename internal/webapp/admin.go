@@ -70,6 +70,13 @@ func (s *Server) handleOrgShares(w http.ResponseWriter, r *http.Request) {
 		if p.Org != orgID {
 			continue
 		}
+		// Org membership is not access to every project in the org: a share
+		// row carries the public /s/ token, so listing one to a member who is
+		// denied that project hands them the file the denial exists to
+		// withhold. Same resolver the per-project /shares route uses.
+		if !atLeast(s.projectPerm(r, p.ID), PermRead) {
+			continue
+		}
 		for _, sh := range s.Shares.List(p.ID) {
 			j := shareJSON(r, sh)
 			j["project_name"] = p.Name

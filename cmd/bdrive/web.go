@@ -32,6 +32,12 @@ type webConfig struct {
 	UploadTTL  string `json:"upload_ttl,omitempty"`  // duration, e.g. "15m"
 	ProjectsDB string `json:"projects_db,omitempty"` // hub project registry path
 	ShareRPM   int    `json:"share_rpm,omitempty"`   // per-IP rate on /s/* (default 120/min)
+	// TrustProxy makes the rate limiters read the client address from
+	// X-Forwarded-For. Set it only when a reverse proxy you control fronts
+	// the hub: on a directly-reachable hub the header is client-supplied, and
+	// trusting it lets one connection get a fresh bucket per request — which
+	// disables the share limiter and the login brute-force limiter alike.
+	TrustProxy bool `json:"trust_proxy,omitempty"`
 	// Auth tunes the hub's (always-on) authentication; hubs require
 	// sign-in unconditionally, only these knobs are optional.
 	Auth *struct {
@@ -174,9 +180,10 @@ credentials); otherwise it is relayed through this server.`,
 			}
 
 			srv := &webapp.Server{
-				Refresh:  refresh,
-				Upload:   webapp.UploadConfig{Enabled: upload, TTL: uploadTTL},
-				ShareRPM: cfg.ShareRPM,
+				Refresh:    refresh,
+				Upload:     webapp.UploadConfig{Enabled: upload, TTL: uploadTTL},
+				ShareRPM:   cfg.ShareRPM,
+				TrustProxy: cfg.TrustProxy,
 			}
 			var display string
 			var meta webapp.MetaStore // hub metadata store; nil means the file backend

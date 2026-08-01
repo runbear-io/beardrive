@@ -76,11 +76,28 @@ func (b *httpBackend) do(req *http.Request) (*http.Response, error) {
 		req.Header.Set("Authorization", "Bearer "+b.token)
 	}
 	if b.device.ID != "" {
-		req.Header.Set("X-Bdrive-Device", b.device.ID)
+		// A journal request already named its device (nameJournalDevice); the
+		// name and OS describe this machine either way.
+		if req.Header.Get("X-Bdrive-Device") == "" {
+			req.Header.Set("X-Bdrive-Device", b.device.ID)
+		}
 		req.Header.Set("X-Bdrive-Device-Name", b.device.Name)
 		req.Header.Set("X-Bdrive-Os", runtime.GOOS+"/"+runtime.GOARCH)
 	}
 	return b.hc.Do(req)
+}
+
+var journalKeyRe = regexp.MustCompile(`^journal/([A-Za-z0-9._-]+)\.jsonl$`)
+
+// nameJournalDevice tells the hub which device a journal request is about.
+// The hub holds one request to one device's journal — the one-writer
+// invariant it can't otherwise check — and a session's device is not
+// necessarily this process's identity file (the sync engine only ever writes
+// its own journal, so the key is the authority here).
+func nameJournalDevice(req *http.Request, key string) {
+	if m := journalKeyRe.FindStringSubmatch(key); m != nil {
+		req.Header.Set("X-Bdrive-Device", m[1])
+	}
 }
 
 func (b *httpBackend) endpoint(name string, q url.Values) string {
@@ -203,6 +220,7 @@ func (b *httpBackend) sign(ctx context.Context, key string, size int64) (putPlan
 		return plan, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	nameJournalDevice(req, key)
 	resp, err := b.do(req)
 	if err != nil {
 		return plan, err
@@ -250,6 +268,7 @@ func (b *httpBackend) putViaServer(ctx context.Context, key string, r io.Reader,
 	if err != nil {
 		return err
 	}
+	nameJournalDevice(req, key)
 	req.ContentLength = size
 	resp, err := b.do(req)
 	if err != nil {
