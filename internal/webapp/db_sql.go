@@ -153,9 +153,27 @@ func (s *sqlMetaStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS shares (
 			token TEXT PRIMARY KEY, project TEXT NOT NULL, path TEXT NOT NULL,
 			creator TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '')`,
+		// device_rows replaces the original `devices` table, whose primary key
+		// was the id alone: two accounts naming one device id collapsed into a
+		// single row, so a restart handed the device to whoever wrote last and
+		// the hub then refused its real owner. The key is (user_email, id),
+		// matching DeviceRegistry. The old table is left in place — it is a
+		// display cache that every device rebuilds on its next sync cycle, and
+		// the rows worth keeping are copied over once below.
 		`CREATE TABLE IF NOT EXISTS devices (
 			id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '',
 			user_email TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '', last_seen TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS device_rows (
+			user_email TEXT NOT NULL DEFAULT '', id TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '',
+			ip TEXT NOT NULL DEFAULT '', first_seen TEXT NOT NULL DEFAULT '',
+			last_seen TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_email, id))`,
+		// The WHERE is not redundant: SQLite cannot parse ON CONFLICT directly
+		// after an INSERT…SELECT (it reads as the SELECT's own ON clause), and
+		// Postgres accepts it either way.
+		`INSERT INTO device_rows (user_email,id,name,os,ip,first_seen,last_seen)
+			SELECT user_email,id,name,os,ip,last_seen,last_seen FROM devices
+			WHERE 1=1 ON CONFLICT (user_email,id) DO NOTHING`,
 		`CREATE TABLE IF NOT EXISTS read_stats (
 			project TEXT NOT NULL, path TEXT NOT NULL, day TEXT NOT NULL DEFAULT '',
 			kind TEXT NOT NULL, actor TEXT NOT NULL,
@@ -555,7 +573,7 @@ func (r *sqlShareRepo) Delete(token string) error {
 type sqlDeviceRepo struct{ s *sqlMetaStore }
 
 func (r *sqlDeviceRepo) Load() ([]DeviceInfo, error) {
-	rows, err := r.s.db.Query(`SELECT id, name, os, user_email, ip, last_seen FROM devices`)
+	rows, err := r.s.db.Query(`SELECT id, name, os, user_email, ip, first_seen, last_seen FROM device_rows`)
 	if err != nil {
 		return nil, err
 	}
@@ -563,21 +581,21 @@ func (r *sqlDeviceRepo) Load() ([]DeviceInfo, error) {
 	var out []DeviceInfo
 	for rows.Next() {
 		var d DeviceInfo
-		var lastSeen string
-		if err := rows.Scan(&d.ID, &d.Name, &d.OS, &d.User, &d.IP, &lastSeen); err != nil {
+		var firstSeen, lastSeen string
+		if err := rows.Scan(&d.ID, &d.Name, &d.OS, &d.User, &d.IP, &firstSeen, &lastSeen); err != nil {
 			return nil, err
 		}
-		d.LastSeen = tdec(lastSeen)
+		d.FirstSeen, d.LastSeen = tdec(firstSeen), tdec(lastSeen)
 		out = append(out, d)
 	}
 	return out, rows.Err()
 }
 
 func (r *sqlDeviceRepo) Put(d DeviceInfo) error {
-	return r.s.exec(`INSERT INTO devices (id,name,os,user_email,ip,last_seen) VALUES (?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET name=excluded.name, os=excluded.os, user_email=excluded.user_email,
+	return r.s.exec(`INSERT INTO device_rows (user_email,id,name,os,ip,first_seen,last_seen) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(user_email,id) DO UPDATE SET name=excluded.name, os=excluded.os,
 		ip=excluded.ip, last_seen=excluded.last_seen`,
-		d.ID, d.Name, d.OS, d.User, d.IP, tenc(d.LastSeen))
+		d.User, d.ID, d.Name, d.OS, d.IP, tenc(d.FirstSeen), tenc(d.LastSeen))
 }
 
 // ---- reads ----

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 // localBackend stores objects in a plain directory. Useful for tests and for
@@ -30,9 +32,18 @@ func newLocal(root string) (*localBackend, error) {
 // Keys come from journals and API callers, so "the key is well-formed" is a
 // caller's promise, not a fact — this is the last place to check it before a
 // traversal becomes a read or a write anywhere on the hub host.
+//
+// Two checks, because they answer different questions: the lexical one rejects
+// ".." in the key, and store.UnderRoot rejects a key whose path resolves out
+// through a symlink planted inside the storage root — os.Open and os.Rename
+// follow those, so the string staying under the root says nothing about where
+// the bytes come from or land.
 func (b *localBackend) path(key string) (string, error) {
 	p := filepath.Join(b.root, filepath.FromSlash(key))
 	if p != b.root && !strings.HasPrefix(p, b.root+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid key %q", key)
+	}
+	if !store.UnderRoot(b.root, p) {
 		return "", fmt.Errorf("invalid key %q", key)
 	}
 	return p, nil

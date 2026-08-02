@@ -192,6 +192,17 @@ var errBlobMissing = fmt.Errorf("content not uploaded yet")
 // emptyBlob is sha256(""), the only content whose size is legitimately zero.
 const emptyBlob = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
+// sizeFitsContentAddress is the one lie about a declared upload size that is
+// provable before the bytes exist: zero, for content that is not the empty
+// blob. In direct mode the bytes never pass through the hub, so the size is
+// the caller's word — and it is the number the quota is charged against, which
+// makes this exactly the lie that buys an unmetered presigned URL. Shared,
+// because both doors take the number: /upload/init (browsers) and /store/sign
+// (devices), and for a while only one of them checked.
+func sizeFitsContentAddress(sha string, size int64) bool {
+	return size > 0 || sha == emptyBlob
+}
+
 // ---- DirSource: writes land straight in the folder ----
 
 // Upload writes the file atomically under Root. There is no journal here;
@@ -342,11 +353,7 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	// In direct mode the bytes never pass through here, so the size is the
-	// caller's word until commit checks it against storage. The one lie
-	// provable now is a zero size for content that is not the empty blob —
-	// and it is exactly the lie that buys an unmetered presigned URL.
-	if req.Size == 0 && req.SHA256 != emptyBlob {
+	if !sizeFitsContentAddress(req.SHA256, req.Size) {
 		http.Error(w, "declared size does not match the content address", http.StatusForbidden)
 		return
 	}

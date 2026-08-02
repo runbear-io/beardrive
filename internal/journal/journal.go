@@ -9,13 +9,13 @@
 package journal
 
 import (
-	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"os"
 	"sort"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -45,7 +45,51 @@ type Op struct {
 	Mtime time.Time `json:"mtime,omitzero"` // put only
 }
 
+// opWire is Op without its JSON methods, so the marshallers below can reuse
+// the struct tags without recursing.
+type opWire Op
+
+// pathRaw carries Op.Path byte-exactly when it is not valid UTF-8.
+// encoding/json rewrites an invalid byte to U+FFFD, and any byte but NUL and
+// '/' is a legal unix filename — so without this, "caf\xe9.md" and
+// "caf\xff.md" both arrive at every peer as the same path and one file
+// silently overwrites the other. The extra field is emitted only for the paths
+// that need it, and an older reader still sees the (lossy) path field.
+type pathRaw struct {
+	opWire
+	PathRaw string `json:"path_raw,omitempty"`
+}
+
+func (o Op) MarshalJSON() ([]byte, error) {
+	w := pathRaw{opWire: opWire(o)}
+	if !utf8.ValidString(o.Path) {
+		w.PathRaw = base64.StdEncoding.EncodeToString([]byte(o.Path))
+	}
+	return json.Marshal(w)
+}
+
+func (o *Op) UnmarshalJSON(data []byte) error {
+	var w pathRaw
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*o = Op(w.opWire)
+	if w.PathRaw != "" {
+		if raw, err := base64.StdEncoding.DecodeString(w.PathRaw); err == nil {
+			o.Path = string(raw)
+		}
+	}
+	return nil
+}
+
 // Less defines the total order used to replay ops from many devices.
+//
+// The trailing comparisons are what make it a TOTAL order rather than a
+// pre-order: (lamport, time, device, seq) is forgeable — a peer may push two
+// ops sharing all four — and Sort is only stable, so without them the winner
+// of a tie would be whatever order the caller happened to collect the ops in.
+// Everything Replay reads is compared here, so any two ops that still tie fold
+// to the same state and the invariant holds on the ops themselves.
 func Less(a, b Op) bool {
 	if a.Lamport != b.Lamport {
 		return a.Lamport < b.Lamport
@@ -56,7 +100,22 @@ func Less(a, b Op) bool {
 	if a.Device != b.Device {
 		return a.Device < b.Device
 	}
-	return a.Seq < b.Seq
+	if a.Seq != b.Seq {
+		return a.Seq < b.Seq
+	}
+	if a.Kind != b.Kind {
+		return a.Kind < b.Kind
+	}
+	if a.Path != b.Path {
+		return a.Path < b.Path
+	}
+	if a.Blob != b.Blob {
+		return a.Blob < b.Blob
+	}
+	if a.Size != b.Size {
+		return a.Size < b.Size
+	}
+	return a.Mode < b.Mode
 }
 
 func Sort(ops []Op) {
@@ -88,23 +147,27 @@ func Replay(ops []Op) map[string]FileState {
 }
 
 // Parse decodes a JSONL journal.
+//
+// A line that does not decode is skipped, never fatal. Append is a plain
+// O_APPEND write (the one state file that cannot be written atomically — it
+// only ever grows), so a crash or a full disk leaves a torn final line; and a
+// peer's journal is bytes someone else chose. All-or-nothing parsing turned
+// either of those into "every op this device ever committed is unreadable",
+// with no recovery path in the CLI. The ops that did decode are still the
+// device's history, and every reader drops the same lines from the same bytes,
+// so replay stays in agreement.
 func Parse(data []byte) ([]Op, error) {
 	var ops []Op
-	sc := bufio.NewScanner(bytes.NewReader(data))
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
+	for _, raw := range bytes.Split(data, []byte("\n")) {
+		line := bytes.TrimSpace(raw)
 		if len(line) == 0 {
 			continue
 		}
 		var op Op
 		if err := json.Unmarshal(line, &op); err != nil {
-			return nil, fmt.Errorf("parse journal line %d: %w", len(ops)+1, err)
+			continue
 		}
 		ops = append(ops, op)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
 	}
 	return ops, nil
 }
@@ -144,7 +207,10 @@ func Append(path string, ops []Op) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// 0600: a journal is the full path list, authorship and signed-in email
+	// addresses of a private project, and it lives in $BDRIVE_HOME, whose
+	// directories are 0755.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}

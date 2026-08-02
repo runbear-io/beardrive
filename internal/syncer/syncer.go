@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -140,8 +142,16 @@ func absorbLamport(cur, peer int64) int64 {
 	return cur
 }
 
+// tickLamport is the local increment. The cap is on what this device ABSORBS,
+// not on what it writes: a device that legitimately absorbed the ceiling must
+// still be able to write an op that sorts after it, or the clock is frozen
+// there forever and every later local edit falls through to Time — which the
+// peer that sent the ceiling also chose. That is the same silent write lock
+// the cap exists to prevent, reachable with the one value the cap accepts.
+// Ticking past the ceiling is safe: it only ever climbs by one per local op,
+// so only the wrap itself is refused.
 func tickLamport(cur int64) int64 {
-	if cur >= maxLamport {
+	if cur == math.MaxInt64 {
 		return cur
 	}
 	return cur + 1
@@ -245,13 +255,22 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	if want, ok := target[IgnoreFile]; ok && len(pulled) > 0 {
 		wrote, err := s.materializeFile(IgnoreFile, want, cache)
 		if err != nil {
-			return nil, fmt.Errorf("materialize %s: %w", IgnoreFile, err)
+			log.Printf("beardrive: could not write %s this cycle: %v", IgnoreFile, err)
 		}
 		if wrote {
 			res.Materialized++
+			// The reload rebuilds the rules from the new file — and only the
+			// rules. Filter.nested is what walkFolder discovered during the
+			// scan at the top of this cycle: it marks subfolders that sync
+			// through their OWN project, with their own member list, so it is
+			// a project boundary rather than an ignore rule. A fresh filter's
+			// empty nested list would let this project's ops write into that
+			// one, where its daemon picks them up and pushes them on.
+			nested := filter.nested
 			if filter, err = loadFilter(s.Folder, proj.Include); err != nil {
 				return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
 			}
+			filter.nested = nested
 		}
 		// If the blob isn't fetched yet materializeFile skips it and the old
 		// rules stand: the usual retry-next-cycle posture, and the guard in
@@ -457,14 +476,20 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 	}
 
 	// Fetch content for new ops. Blobs are uploaded before journals on push,
-	// so anything referenced should exist.
+	// so anything referenced should exist — but Op.Blob is a string a peer
+	// chose, so "missing" is a case this loop has to survive rather than a
+	// contradiction. A blob that cannot be fetched is left unfetched:
+	// materializeFile skips a path whose content is not in the store yet and
+	// the next cycle retries, which is this package's posture for everything
+	// transient. Abandoning the loop instead meant one op naming a blob that
+	// was never pushed stopped every complete op behind it from ever landing.
 	for _, op := range newOps {
 		if op.Kind != journal.KindPut || op.Blob == "" || s.Store.HasBlob(op.Blob) {
 			continue
 		}
 		rc, err := s.Backend.Get(ctx, "blobs/"+op.Blob)
 		if err != nil {
-			return newOps, fmt.Errorf("fetch blob %s: %w", op.Blob[:12], err)
+			continue
 		}
 		sum, _, err := s.Store.PutBlobReader(rc)
 		rc.Close()
@@ -472,10 +497,20 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 			return newOps, err
 		}
 		if sum != op.Blob {
-			return newOps, fmt.Errorf("blob %s corrupt on remote (got %s)", op.Blob[:12], sum[:12])
+			return newOps, fmt.Errorf("blob %s corrupt on remote (got %s)", shortSha(op.Blob), shortSha(sum))
 		}
 	}
 	return newOps, nil
+}
+
+// shortSha trims a blob string for a message. Op.Blob is arbitrary JSON off a
+// peer's journal, not necessarily 64 hex characters, so slicing it directly
+// panicked the daemon on every device that pulled the line.
+func shortSha(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }
 
 // conflictCopies detects paths edited concurrently — we hold a not-yet-pushed
@@ -542,8 +577,24 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 	return out, nil
 }
 
+// conflictName builds the copy's name. Both variable parts are bounded: the
+// loser's DeviceName is an unvalidated string off a peer's journal, and the
+// result has to be a name the filesystem accepts (NAME_MAX is 255 everywhere
+// beardrive runs). An unwritable name is worse than an ugly one — the op is
+// already in this device's own journal by the time the write is attempted, so
+// it would replay and fail on every cycle from then on, triggered by one
+// ordinary concurrent edit.
 func conflictName(p, deviceName string, t time.Time) string {
-	return p + ".bdrive-conflict-" + sanitize(deviceName) + "-" + t.UTC().Format("20060102T150405Z")
+	suffix := ".bdrive-conflict-" + clip(sanitize(deviceName), 32) + "-" + t.UTC().Format("20060102T150405Z")
+	dir, base := path.Split(p)
+	return dir + clip(base, 255-len(suffix)) + suffix
+}
+
+func clip(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 func sanitize(s string) string {
@@ -561,8 +612,27 @@ func sanitize(s string) string {
 // clobbering files that changed since the scan earlier in this cycle.
 // Filtered paths are not written: other devices' files that match the local
 // ignore/include rules simply don't appear here.
+// A path that cannot be written is skipped, not fatal. Op.Path is a peer's
+// string and the working folder is a real filesystem: a NUL byte, a 400-byte
+// segment, a put for "docs/child.md" after a put for "docs", or a directory in
+// the way are all ordinary refusals from the kernel. Failing the cycle on one
+// of them wedged the device permanently — the op stays in the pulled journal,
+// so every later cycle replayed it and died at the same line, and Cycle
+// returns before finish() so the state cache was never saved either.
 func (s *Session) materialize(target map[string]journal.FileState, cache map[string]store.CachedFile, filter *Filter) (int, error) {
-	changed := 0
+	changed, skipped := 0, 0
+	var firstErr error
+	skip := func(err error) {
+		skipped++
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	defer func() {
+		if skipped > 0 {
+			log.Printf("beardrive: %d path(s) could not be written this cycle (first: %v)", skipped, firstErr)
+		}
+	}()
 	for rel, want := range target {
 		// neverSync as well as the ignore filter: the builtin exclusions are
 		// what keep .bdrive/ and .git/ off this device's disk, and an op
@@ -574,7 +644,8 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 		}
 		wrote, err := s.materializeFile(rel, want, cache)
 		if err != nil {
-			return changed, err
+			skip(err)
+			continue
 		}
 		if wrote {
 			changed++
@@ -600,7 +671,8 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 				continue // dirty; do not delete fresh local edits
 			}
 			if err := os.Remove(abs); err != nil {
-				return changed, err
+				skip(err)
+				continue
 			}
 			pruneEmptyDirs(s.Folder, filepath.Dir(abs))
 		}
@@ -669,6 +741,16 @@ func (s *Session) pruneOps(target map[string]journal.FileState, st *store.SyncSt
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
 	}
+	// The `!` refusal has to be made against the rules the prune is about to
+	// APPLY. The CLI's pruneSafe reads .bdriveignore before the cycle; the
+	// pull then materializes whatever version a peer pushed, and this reads it
+	// again — two reads of two different files, so a teammate running `bdrive
+	// scope`/`--only` (which writes exactly these rules) turned a cleared
+	// prune into a hub-wide delete of everything outside their scope. No
+	// malice required. The CLI check stays, as a nicer early error.
+	if shared.Negated() {
+		return nil, nil
+	}
 	var paths []string
 	for rel := range target {
 		if shared.Skip(rel) || neverSync(rel) {
@@ -729,6 +811,16 @@ func unsafeRel(rel string) bool {
 func safeMode(m uint32) uint32 { return m & 0o777 &^ 0o022 }
 
 func (s *Session) writeFile(abs string, want journal.FileState) error {
+	// unsafeRel judged the path's SPELLING; this is the same boundary on disk.
+	// MkdirAll, CreateTemp and Rename all follow symlinks, so a directory
+	// inside the mount that is a symlink makes "docs/x.md" a perfectly clean
+	// relative path landing outside the mount — and walkFolder refuses to
+	// descend into one, so such a directory is a one-way door: it takes peer
+	// writes and never reports them. Checked before MkdirAll, so a refused op
+	// does not even build the parent chain on the far side.
+	if !store.UnderRoot(s.Folder, abs) {
+		return fmt.Errorf("resolves outside the mount root")
+	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return err
 	}

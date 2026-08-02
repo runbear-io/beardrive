@@ -19,7 +19,9 @@ package webapp
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -276,6 +278,64 @@ type RemoteSource struct {
 	Device Identity
 
 	upmu sync.Mutex // serializes read-modify-write of our own journal
+
+	vmu      sync.Mutex // guards verified
+	verified map[string]bool
+}
+
+// OpenBlob is the one way a blob's bytes leave the hub, and on a hub whose
+// storage can presign it is also the only place left that can tell a content
+// address the truth. handleStorePut hashes what it relays — but a presigned
+// PUT writes straight into the object store, so those bytes were never
+// examined by anything: any device with write permission could store arbitrary
+// content under a sha256 it chose, and the viewer, share links, history and
+// every peer would then serve it.
+//
+// Verified once per blob per process (blobs are immutable), and skipped
+// entirely on a backend that cannot presign, where the write path already
+// checked. ponytail: costs one extra storage read per blob per hub process on
+// S3/GCS; a persisted verified-set is the upgrade if that ever shows up in a
+// profile.
+func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser, error) {
+	if !blobRe.MatchString(sha) {
+		return nil, fmt.Errorf("invalid content reference")
+	}
+	if err := r.verify(ctx, sha); err != nil {
+		return nil, err
+	}
+	return r.Backend.Get(ctx, "blobs/"+sha)
+}
+
+func (r *RemoteSource) verify(ctx context.Context, sha string) error {
+	if _, canSign := r.Backend.(remote.PutSigner); !canSign {
+		return nil
+	}
+	r.vmu.Lock()
+	done := r.verified[sha]
+	r.vmu.Unlock()
+	if done {
+		return nil
+	}
+	rc, err := r.Backend.Get(ctx, "blobs/"+sha)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	_, err = io.Copy(h, rc)
+	rc.Close()
+	if err != nil {
+		return err
+	}
+	if hex.EncodeToString(h.Sum(nil)) != sha {
+		return fmt.Errorf("stored content does not hash to its key")
+	}
+	r.vmu.Lock()
+	if r.verified == nil {
+		r.verified = map[string]bool{}
+	}
+	r.verified[sha] = true
+	r.vmu.Unlock()
+	return nil
 }
 
 // Identity is the device identity uploads are journaled under.
@@ -368,12 +428,9 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 }
 
 func (r *RemoteSource) Open(ctx context.Context, _ string, fi FileInfo) (io.ReadCloser, error) {
-	// Files already drops ops with a bogus Blob; re-checked here because this
-	// is where the key is built, and a FileInfo can reach it from anywhere.
-	if !blobRe.MatchString(fi.Blob) {
-		return nil, fmt.Errorf("invalid content reference")
-	}
-	return r.Backend.Get(ctx, "blobs/"+fi.Blob)
+	// Files already drops ops with a bogus Blob; re-checked in OpenBlob because
+	// that is where the key is built, and a FileInfo can reach it from anywhere.
+	return r.OpenBlob(ctx, fi.Blob)
 }
 
 // Handler returns the HTTP handler: /api/* plus the embedded frontend.
@@ -787,10 +844,10 @@ func (s *Server) orgForCreate(r *http.Request, requested string) (string, error)
 
 // Node is one entry of the file tree returned by the tree endpoint.
 type Node struct {
-	Name     string    `json:"name"`
-	Path     string    `json:"path"`
-	Dir      bool      `json:"dir"`
-	Size     int64     `json:"size,omitempty"`
+	Name string    `json:"name"`
+	Path string    `json:"path"`
+	Dir  bool      `json:"dir"`
+	Size int64     `json:"size,omitempty"`
 	Time time.Time `json:"time,omitzero"`
 	// Same three-field "who" shape as HistoryEntry (history.go), so the
 	// frontend has one attribution helper for every surface.
@@ -984,7 +1041,7 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 	if rs == nil {
 		return
 	}
-	rc, err := rs.Backend.Get(r.Context(), "blobs/"+sha)
+	rc, err := rs.OpenBlob(r.Context(), sha)
 	if err != nil {
 		http.Error(w, "no such version", http.StatusNotFound)
 		return

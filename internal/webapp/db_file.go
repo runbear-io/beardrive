@@ -379,14 +379,19 @@ func (r *fileShareRepo) Delete(token string) error {
 
 // ---- devices (devices.json) ----
 
+// The row key is (user, id), matching the registry above it. Keyed by id
+// alone, two accounts' rows collapsed into one on disk and whichever wrote
+// last was the only one a restart reloaded — so the whole per-account model
+// lived exactly as long as the process, and after any deploy the hub believed
+// a device belonged to whoever named it last.
 type fileDeviceRepo struct {
 	path string
 	mu   sync.Mutex
-	byID map[string]DeviceInfo
+	rows map[devKey]DeviceInfo
 }
 
 func newFileDeviceRepo(path string) *fileDeviceRepo {
-	return &fileDeviceRepo{path: path, byID: map[string]DeviceInfo{}}
+	return &fileDeviceRepo{path: path, rows: map[devKey]DeviceInfo{}}
 }
 
 func (r *fileDeviceRepo) Load() ([]DeviceInfo, error) {
@@ -398,9 +403,9 @@ func (r *fileDeviceRepo) Load() ([]DeviceInfo, error) {
 	if _, err := readJSONFile(r.path, &f); err != nil {
 		return nil, err
 	}
-	r.byID = map[string]DeviceInfo{}
+	r.rows = map[devKey]DeviceInfo{}
 	for _, d := range f.Devices {
-		r.byID[d.ID] = d
+		r.rows[devKey{d.User, d.ID}] = d
 	}
 	return f.Devices, nil
 }
@@ -409,7 +414,7 @@ func (r *fileDeviceRepo) write() error {
 	var f struct {
 		Devices []DeviceInfo `json:"devices"`
 	}
-	for _, d := range r.byID {
+	for _, d := range r.rows {
 		f.Devices = append(f.Devices, d)
 	}
 	data, err := json.MarshalIndent(f, "", "  ")
@@ -422,7 +427,7 @@ func (r *fileDeviceRepo) write() error {
 func (r *fileDeviceRepo) Put(d DeviceInfo) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.byID[d.ID] = d
+	r.rows[devKey{d.User, d.ID}] = d
 	return r.write()
 }
 

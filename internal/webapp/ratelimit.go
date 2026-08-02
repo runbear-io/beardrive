@@ -86,10 +86,17 @@ func (l *rateLimiter) allow(key string) bool {
 // its forged value at the head, and the entry our proxy added is at the tail.
 // Reading the first entry meant turning TrustProxy on disabled the limiter it
 // was added to fix: every request got a fresh bucket of the client's choosing.
+//
+// And the last entry has to be read from the last FIELD LINE. Header.Get
+// returns only the first line, but a request may carry several X-Forwarded-For
+// lines — RFC 9110 says they are the comma-joined list, in order — and a proxy
+// that ADDS its own line rather than rewriting the client's puts the trusted
+// hop in the last one. With Get, a client that sends its own line was the
+// entire key again.
 func (s *Server) clientIP(r *http.Request) string {
 	if s.TrustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
+		if lines := r.Header.Values("X-Forwarded-For"); len(lines) > 0 {
+			parts := strings.Split(lines[len(lines)-1], ",")
 			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
 				return last
 			}

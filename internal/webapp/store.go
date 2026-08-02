@@ -76,6 +76,22 @@ func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string) 
 		http.Error(w, "a device may only write its own journal", http.StatusForbidden)
 		return false
 	}
+	// Matching the key against the header binds nothing on its own: the same
+	// request supplies both, so moving them together satisfies the check by
+	// construction and any member could replace any peer's journal object —
+	// their ops gone, every peer replaying the forged ones, History crediting
+	// them to the victim. The device has to belong to the ACCOUNT as well.
+	//
+	// LookupIn is the resolver, for the two properties it already has: it
+	// returns the FIRST account seen syncing under an id (a later caller
+	// cannot manufacture that — its own request registers a row on the way
+	// in), and it is scoped to the project's org, so a device registered in
+	// some unrelated org does not reserve that journal key here.
+	if info, ok := s.Devices.LookupIn(dev, s.deviceVisibleIn(r.PathValue("project"))); ok &&
+		info.User != "" && info.User != s.requestUser(r).Email {
+		http.Error(w, "a device may only write its own journal", http.StatusForbidden)
+		return false
+	}
 	return true
 }
 
@@ -109,7 +125,15 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	rc, err := rs.Backend.Get(r.Context(), key)
+	// Blobs go through OpenBlob so a presigned write cannot make this route
+	// serve content that does not hash to the key it is stored under.
+	var rc io.ReadCloser
+	var err error
+	if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
+		rc, err = rs.OpenBlob(r.Context(), blob)
+	} else {
+		rc, err = rs.Backend.Get(r.Context(), key)
+	}
 	if err != nil {
 		// Fixed message: os.Open's error names the hub's absolute storage
 		// path, and S3's names the bucket and key.
@@ -172,20 +196,31 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 	if r.Header.Get("X-Bdrive-Device") != "" && !s.ownJournal(w, r, req.Key) {
 		return
 	}
-	if err := s.quota().CheckWrite(s.orgOf(r.PathValue("project")), req.Size); err != nil {
+	org := s.orgOf(r.PathValue("project"))
+	if err := s.quota().CheckWrite(org, req.Size); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 	// Only blobs are presigned. They are content-addressed and immutable, so
 	// a leaked URL can at worst re-upload identical bytes. Journals are
 	// mutable state and always flow through the server.
-	if strings.HasPrefix(req.Key, "blobs/") {
+	if blob, isBlob := strings.CutPrefix(req.Key, "blobs/"); isBlob {
+		if !sizeFitsContentAddress(blob, req.Size) {
+			http.Error(w, "declared size does not match the content address", http.StatusForbidden)
+			return
+		}
 		if exists, err := rs.Backend.Exists(r.Context(), req.Key); err == nil && exists {
 			writeJSON(w, map[string]any{"mode": "direct", "exists": true})
 			return
 		}
 		if signer, ok := rs.Backend.(remote.PutSigner); ok {
 			if signed, err := signer.SignPut(r.Context(), req.Key, req.Size, s.Upload.ttl()); err == nil {
+				// Book it here or never: the bytes go straight to storage, and
+				// unlike the browser flow /store/* has no commit step to book
+				// them afterwards — so on any presigning hub every blob a
+				// device pushed was free. The size is the declared one, which
+				// is why the zero-size lie above has to be refused first.
+				s.quota().RecordUsage(org, req.Size)
 				writeJSON(w, map[string]any{
 					"mode": "direct", "url": signed.URL, "method": signed.Method,
 					"headers": signed.Headers, "expires": signed.Expires.UTC(),

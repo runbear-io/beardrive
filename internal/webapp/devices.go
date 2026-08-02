@@ -17,12 +17,18 @@ import (
 // id/name/os (historyDevice, history.go): the IP is recorded here, not
 // repeated to every project member on every change.
 type DeviceInfo struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name,omitempty"`
-	OS       string    `json:"os,omitempty"`
-	User     string    `json:"user,omitempty"` // account email last seen using this device
-	IP       string    `json:"ip,omitempty"`   // as observed by the server
-	LastSeen time.Time `json:"last_seen"`
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	OS   string `json:"os,omitempty"`
+	User string `json:"user,omitempty"` // account email last seen using this device
+	IP   string `json:"ip,omitempty"`   // as observed by the server
+	// FirstSeen is when this account was first observed syncing under this id.
+	// It is the only ownership fact the hub actually holds: a row is created by
+	// the caller's own header, so "does this account have a row" is a question
+	// the asking request already answered for itself, while "who was here
+	// first" is something a later caller cannot manufacture.
+	FirstSeen time.Time `json:"first_seen,omitzero"`
+	LastSeen  time.Time `json:"last_seen"`
 }
 
 // deviceIDRe is the shape of a device identity. `bdrive` mints 12 hex chars,
@@ -114,6 +120,9 @@ func (r *DeviceRegistry) Observe(d DeviceInfo) {
 	}
 	cur := r.byKey[k]
 	changed := cur.ID == "" || cur.Name != d.Name || cur.OS != d.OS || cur.IP != d.IP
+	if cur.FirstSeen.IsZero() {
+		cur.FirstSeen = time.Now().UTC()
+	}
 	cur.ID = d.ID
 	if d.Name != "" {
 		cur.Name = d.Name
@@ -161,10 +170,16 @@ func (r *DeviceRegistry) Get(id string) (DeviceInfo, bool) {
 	return d, ok
 }
 
-// LookupIn returns the most recently observed row for an id whose owner passes
-// allowed — the join every per-project surface uses, so a device belonging to
-// an account outside the project's org resolves to nothing instead of leaking
-// its machine name and OS (and confirming that the id exists at all).
+// LookupIn returns the row for an id whose owner passes allowed — the join
+// every per-project surface uses, so a device belonging to an account outside
+// the project's org resolves to nothing instead of leaking its machine name
+// and OS (and confirming that the id exists at all).
+//
+// When several accounts hold rows for one id, the FIRST claim wins. Picking
+// the most recently observed row instead meant the second account to name an
+// id decided what the whole project sees: one ordinary store request relabels
+// a peer's device in History and in /heat?by=device, which is the forgery the
+// per-account rekey was supposed to end.
 func (r *DeviceRegistry) LookupIn(id string, allowed func(user string) bool) (DeviceInfo, bool) {
 	if r == nil {
 		return DeviceInfo{}, false
@@ -177,11 +192,22 @@ func (r *DeviceRegistry) LookupIn(id string, allowed func(user string) bool) (De
 		if k.ID != id || !allowed(k.User) {
 			continue
 		}
-		if !found || d.LastSeen.After(best.LastSeen) {
+		if !found || claimedBefore(d, best) {
 			best, found = d, true
 		}
 	}
 	return best, found
+}
+
+// claimedBefore orders two rows for the same id by when their account first
+// appeared under it. A zero FirstSeen is a row written before the field
+// existed, and sorts oldest — the safe direction: an established device keeps
+// its identity against a newcomer.
+func claimedBefore(a, b DeviceInfo) bool {
+	if a.FirstSeen.IsZero() != b.FirstSeen.IsZero() {
+		return a.FirstSeen.IsZero()
+	}
+	return a.FirstSeen.Before(b.FirstSeen)
 }
 
 // MayActAs reports whether an account may name a device id as itself: yes if
@@ -190,9 +216,9 @@ func (r *DeviceRegistry) LookupIn(id string, allowed func(user string) bool) (De
 // arrives before its first push, and refusing it would mean read heat never
 // starts. What it refuses is naming a device another account is syncing.
 //
-// Registry rows come only from /store/* traffic (observeDevice), so "seen
-// syncing" is a fact the hub observed, not a claim the caller made in this
-// request.
+// This is the permissive question, and it is the right one for telemetry: a
+// squatted id must still count its real owner's reads. Anything that WRITES on
+// the strength of a device identity asks OwnerOf instead.
 func (r *DeviceRegistry) MayActAs(user, id string) bool {
 	if r == nil {
 		return true
@@ -208,18 +234,6 @@ func (r *DeviceRegistry) MayActAs(user, id string) bool {
 		}
 	}
 	return true
-}
-
-// requestIP extracts the client address the server actually saw.
-func requestIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 // ownsDevice reports whether the caller may act AS the device id it named.
@@ -269,8 +283,24 @@ func (s *Server) observeDevice(r *http.Request) {
 		Name: printableOnly(r.Header.Get("X-Bdrive-Device-Name")),
 		OS:   printableOnly(r.Header.Get("X-Bdrive-Os")),
 		User: s.requestUser(r).Email,
-		IP:   requestIP(r),
+		// clientIP, not the raw X-Forwarded-For: the recorded address is the
+		// one the server actually saw unless the operator says a proxy fronts
+		// this hub, so a client cannot choose what the registry says about it.
+		IP: s.clientIP(r),
 	})
+}
+
+// requestIP is the address the server actually saw on the connection. It
+// ignores X-Forwarded-For on purpose: its caller (the CLI device grant) has no
+// TrustProxy setting to consult, and an address the client chose, recorded as
+// one the server observed, is worse than the proxy's own address recorded
+// honestly. Anything that has a *Server uses s.clientIP.
+func requestIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // deviceVisibleIn is the predicate LookupIn takes for one project: a device

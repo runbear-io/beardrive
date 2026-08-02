@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -45,12 +46,26 @@ func (s *Store) tmpDir() string { return filepath.Join(s.dir, "tmp") }
 
 // ---- blobs ----
 
+// blobSumRe is the only thing BlobPath will resolve. Op.Blob is copied
+// verbatim out of a peer's journal, so it is a string someone else chose, not
+// a hash: "../secret.txt" made HasBlob answer true for a file outside the
+// store and OpenBlob hand its contents to writeFile as that path's content —
+// a peer reading any file on every teammate's machine — and a Blob shorter
+// than two characters panicked the daemon on sum[:2].
+var blobSumRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// BlobPath is the on-disk location of a blob. A key that is not a sha256
+// resolves to a name inside the blob dir that PutBlobReader never writes, so
+// HasBlob and OpenBlob fail naturally instead of reaching somewhere else.
 func (s *Store) BlobPath(sum string) string {
+	if !blobSumRe.MatchString(sum) {
+		return filepath.Join(s.dir, "blobs", "invalid")
+	}
 	return filepath.Join(s.dir, "blobs", sum[:2], sum)
 }
 
 func (s *Store) HasBlob(sum string) bool {
-	if len(sum) < 3 {
+	if !blobSumRe.MatchString(sum) {
 		return false
 	}
 	_, err := os.Stat(s.BlobPath(sum))
@@ -163,20 +178,36 @@ type CachedFile struct {
 	MTimeNS int64  `json:"mtime_ns"`
 }
 
-func (s *Store) cachePath(mountID string) string {
-	return filepath.Join(s.dir, "state-"+mountID+".json")
+// cachePath names the per-mount state file. The mount id comes from a folder's
+// .bdrive/config.json — a file that travels with the folder — so it is checked
+// here as well as where it is read: "state-"+mountID+".json" is joined onto the
+// volume dir, and a separator in it puts the cache (and everything keyed the
+// same way) wherever its author chose.
+func (s *Store) cachePath(mountID string) (string, error) {
+	if mountID == "" || mountID == "." || mountID == ".." || strings.ContainsAny(mountID, `/\`) {
+		return "", fmt.Errorf("invalid mount id %q", mountID)
+	}
+	return filepath.Join(s.dir, "state-"+mountID+".json"), nil
 }
 
 func (s *Store) LoadCache(mountID string) (map[string]CachedFile, error) {
+	p, err := s.cachePath(mountID)
+	if err != nil {
+		return nil, err
+	}
 	out := map[string]CachedFile{}
-	if err := readJSON(s.cachePath(mountID), &out); err != nil {
+	if err := readJSON(p, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
 func (s *Store) SaveCache(mountID string, c map[string]CachedFile) error {
-	return WriteJSONAtomic(s.cachePath(mountID), c)
+	p, err := s.cachePath(mountID)
+	if err != nil {
+		return err
+	}
+	return WriteJSONAtomic(p, c)
 }
 
 // ---- sync state (sync.json) ----
@@ -241,13 +272,15 @@ func readJSON(path string, v any) error {
 	return json.Unmarshal(data, v)
 }
 
-// WriteJSONAtomic writes v as JSON via temp-file + rename.
+// WriteJSONAtomic writes v as JSON via temp-file + rename. 0600 for the same
+// reason as the journals: these files list a private project's paths and the
+// accounts that touched them, inside a 0755 $BDRIVE_HOME.
 func WriteJSONAtomic(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return WriteFileAtomic(path, data, 0o644)
+	return WriteFileAtomic(path, data, 0o600)
 }
 
 // WriteFileAtomic writes data via a temp file in the same directory + rename.

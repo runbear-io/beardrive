@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -33,8 +34,14 @@ const ProjectDir = ".bdrive"
 var ReservedDirs = map[string]bool{".git": true, ProjectDir: true}
 
 // ReservedDir reports whether a path segment names a reserved directory,
-// case-insensitively.
+// under every spelling a filesystem folds onto the same directory.
+//
+// Case is one such folding (APFS, NTFS). Trailing dots and spaces are another:
+// NTFS and SMB strip them when opening a path, so ".git./hooks/pre-commit" IS
+// .git/hooks/pre-commit there — the same executable-hook plant an exact-match
+// guard let through as ".GIT".
 func ReservedDir(name string) bool {
+	name = strings.TrimRight(name, ". ")
 	for reserved := range ReservedDirs {
 		if strings.EqualFold(name, reserved) {
 			return true
@@ -75,6 +82,20 @@ type Project struct {
 	Include []string `json:"include,omitempty"`
 }
 
+// mountIDRe is the shape of a mount identity. The id is read verbatim from a
+// folder's .bdrive/config.json — a file that arrives with the folder (a zip, a
+// clone, a colleague's copy) — and is then joined straight onto $BDRIVE_HOME
+// by VolumeDir and onto the volume dir by the store's state cache. Checking it
+// here, where it is read, is what stops the whole volume store (cached blobs
+// of every synced file, journals, the daemon's pid and lock) being created
+// wherever the config's author chose.
+var mountIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// ValidMountID reports whether id may be used as a mount identity.
+func ValidMountID(id string) bool {
+	return id != "." && id != ".." && mountIDRe.MatchString(id)
+}
+
 // NewMountID mints a stable mount identity.
 func NewMountID() string {
 	b := make([]byte, 4)
@@ -107,6 +128,11 @@ func LoadProject(folder string) (Project, bool, error) {
 	}
 	if err := json.Unmarshal(data, &p); err != nil {
 		return p, false, fmt.Errorf("parse %s: %w", projectConfigPath(folder), err)
+	}
+	// An empty id is a config written before one was assigned; anything else
+	// has to be a mount id, since everything downstream builds a path from it.
+	if p.ID != "" && !ValidMountID(p.ID) {
+		return Project{}, false, fmt.Errorf("%s: invalid mount id", projectConfigPath(folder))
 	}
 	p.Include = normalizeInclude(p.Include)
 	return p, true, nil

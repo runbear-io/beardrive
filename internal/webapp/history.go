@@ -233,7 +233,7 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid sha", http.StatusBadRequest)
 		return
 	}
-	rc, err := rs.Backend.Get(r.Context(), "blobs/"+sha)
+	rc, err := rs.OpenBlob(r.Context(), sha)
 	if err != nil {
 		http.Error(w, "no such version", http.StatusNotFound)
 		return

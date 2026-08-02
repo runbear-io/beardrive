@@ -178,6 +178,13 @@ func exportStore(ctx context.Context, be remote.Backend, w io.Writer, man export
 			return blobs, journals, size, fmt.Errorf("list %s: %w", prefix, err)
 		}
 		for _, o := range objs {
+			// The hub named these keys and they become tar member names in a
+			// file the export's own advice tells the user to pass around.
+			// `bdrive import` refuses a member outside the store layout;
+			// `tar xzf` does not. Same allowlist, applied on the way out.
+			if !journalKeyRe.MatchString(o.Key) && !blobKeyRe.MatchString(o.Key) {
+				continue
+			}
 			rc, err := be.Get(ctx, o.Key)
 			if err != nil {
 				return blobs, journals, size, fmt.Errorf("get %s: %w", o.Key, err)
@@ -253,12 +260,26 @@ func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *
 			journals++
 			size += hdr.Size
 		case blobKeyRe.MatchString(key):
-			h := sha256.New()
-			if err := be.Put(ctx, key, io.TeeReader(tr, h), hdr.Size); err != nil {
-				return blobs, journals, size, fmt.Errorf("put %s: %w", key, err)
+			// Spool first, store second: hashing while streaming into Put
+			// notices the mismatch only after the object is already in the
+			// target store, under a content address promising different
+			// content — next to the journals that reference it, which are
+			// written first. Every device that later connects then fails its
+			// pull with "blob corrupt on remote" and never recovers.
+			tmp, n, got, err := spoolBlob(tr)
+			if err != nil {
+				return blobs, journals, size, err
 			}
-			if got := hex.EncodeToString(h.Sum(nil)); got != strings.TrimPrefix(key, "blobs/") {
+			if got != strings.TrimPrefix(key, "blobs/") {
+				tmp.Close()
+				os.Remove(tmp.Name())
 				return blobs, journals, size, fmt.Errorf("corrupt archive: %s has content hash %s", key, got)
+			}
+			err = be.Put(ctx, key, tmp, n)
+			tmp.Close()
+			os.Remove(tmp.Name())
+			if err != nil {
+				return blobs, journals, size, fmt.Errorf("put %s: %w", key, err)
 			}
 			blobs++
 			size += hdr.Size
@@ -271,6 +292,27 @@ func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *
 		return blobs, journals, size, fmt.Errorf("archive contains no journals — nothing to import")
 	}
 	return blobs, journals, size, nil
+}
+
+// spoolBlob copies one archive member to a temp file, returning it rewound
+// with its size and sha256 — so the caller can decide whether the bytes belong
+// under their key BEFORE anything is stored. The caller closes and removes it.
+func spoolBlob(r io.Reader) (*os.File, int64, string, error) {
+	tmp, err := os.CreateTemp("", "bdrive-import-*")
+	if err != nil {
+		return nil, 0, "", err
+	}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, h), r)
+	if err == nil {
+		_, err = tmp.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, 0, "", err
+	}
+	return tmp, n, hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func writeTarFile(tw *tar.Writer, name string, b []byte) error {

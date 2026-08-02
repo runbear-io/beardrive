@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"runtime"
 	"strings"
@@ -52,20 +53,62 @@ func newHTTPBackend(raw string) (*httpBackend, error) {
 	}
 	base := (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
 	dev, _ := config.LoadDevice()
-	return &httpBackend{base: base, project: m[1], token: deviceToken(), device: dev, hc: &http.Client{Timeout: 5 * time.Minute}}, nil
+	hc := &http.Client{Timeout: 5 * time.Minute, CheckRedirect: dropCredentialOffOrigin}
+	return &httpBackend{base: base, project: m[1], token: deviceToken(base), device: dev, hc: hc}, nil
 }
 
-// deviceToken finds this device's credential for the server: BDRIVE_TOKEN
-// wins (tests, CI), otherwise the token `bdrive login` stored in settings.
-func deviceToken() string {
+// deviceToken finds this device's credential for the server at base:
+// BDRIVE_TOKEN wins (tests, CI), otherwise the token `bdrive login` stored in
+// settings — but only for the server it was issued for.
+//
+// The remote URL comes from a folder's .bdrive/config.json, which travels with
+// the folder: without the origin check, a folder someone shares with you
+// chooses where your hub credential is sent, plaintext http included. The same
+// binding covers `bdrive login <other-hub>`, after which every old mount would
+// otherwise ship the new hub's token to the old host.
+func deviceToken(base string) string {
 	if t := os.Getenv("BDRIVE_TOKEN"); t != "" {
 		return t
 	}
 	s, err := config.LoadSettings()
-	if err != nil {
+	if err != nil || s.Token == "" || !sameOrigin(base, s.Server) {
 		return ""
 	}
 	return s.Token
+}
+
+// sameOrigin compares scheme+host, the only thing that decides who receives a
+// bearer token. A bare host in settings is read as https, which is what
+// `bdrive login` writes it as.
+func sameOrigin(a, b string) bool {
+	norm := func(raw string) string {
+		if raw != "" && !strings.Contains(raw, "://") {
+			raw = "https://" + raw
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return ""
+		}
+		return strings.ToLower(u.Scheme + "://" + u.Host)
+	}
+	x, y := norm(a), norm(b)
+	return x != "" && x == y
+}
+
+// dropCredentialOffOrigin strips the device token when a hub redirects the
+// request somewhere else. net/http only removes Authorization when the
+// HOSTNAME changes, ignoring scheme and port — so a hub's 302 hands the
+// credential to another port on the same box, an https→http downgrade, or a
+// sibling subdomain. Every endpoint this backend calls is the hub's own API,
+// where a 3xx is not part of the contract anyway.
+func dropCredentialOffOrigin(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	if len(via) > 0 && !sameOrigin(req.URL.String(), via[0].URL.String()) {
+		req.Header.Del("Authorization")
+	}
+	return nil
 }
 
 // do sends the request with this device's credential attached, plus the
@@ -141,7 +184,21 @@ func (b *httpBackend) List(ctx context.Context, prefix string) ([]Object, error)
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
-	return out.Objects, nil
+	// The hub names its own objects, and the device believes it: these keys
+	// become local journal file names (syncer.pull) and tar member names
+	// (`bdrive export`). Nothing downstream re-checks the shape, so a hostile
+	// or compromised hub would be choosing paths on the victim's disk. Keys
+	// that are not keys are dropped rather than fatal — one bad listing must
+	// not stop the rest of the project syncing.
+	kept := out.Objects[:0]
+	for _, o := range out.Objects {
+		if o.Key == "" || strings.HasPrefix(o.Key, "/") || o.Key != path.Clean(o.Key) ||
+			o.Key == ".." || strings.HasPrefix(o.Key, "../") {
+			continue
+		}
+		kept = append(kept, o)
+	}
+	return kept, nil
 }
 
 func (b *httpBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {

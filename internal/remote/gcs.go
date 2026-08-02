@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,17 +55,26 @@ func (b *gcsBackend) Put(ctx context.Context, key string, r io.Reader, _ int64) 
 // bytes (a service account key, or iam.serviceAccounts.signBlob rights);
 // plain end-user ADC cannot, in which case callers fall back to uploading
 // through the server.
-func (b *gcsBackend) SignPut(_ context.Context, key string, _ int64, ttl time.Duration) (*SignedPut, error) {
+// SignPut mints a presigned PUT. The size is signed into the request, not just
+// known to the hub: a presigned URL is a grant, and a grant that takes a body
+// of any length is unmetered for its whole TTL — the hub quota-checked a number
+// nothing then enforces. (The S3 arm signs Content-Length the same way.)
+func (b *gcsBackend) SignPut(_ context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error) {
 	expires := time.Now().Add(ttl)
+	length := strconv.FormatInt(size, 10)
 	u, err := b.bucket.SignedURL(b.key(key), &gcs.SignedURLOptions{
 		Scheme:  gcs.SigningSchemeV4,
 		Method:  http.MethodPut,
 		Expires: expires,
+		Headers: []string{"Content-Length:" + length},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sign gcs put: %w", err)
 	}
-	return &SignedPut{URL: u, Method: http.MethodPut, Expires: expires}, nil
+	return &SignedPut{
+		URL: u, Method: http.MethodPut, Expires: expires,
+		Headers: map[string]string{"Content-Length": length},
+	}, nil
 }
 
 func (b *gcsBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {

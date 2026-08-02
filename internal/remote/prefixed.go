@@ -2,7 +2,9 @@ package remote
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"path"
 	"strings"
 	"time"
 )
@@ -25,22 +27,64 @@ type prefixed struct {
 	prefix string
 }
 
-func (p *prefixed) key(key string) string { return p.prefix + "/" + key }
+// safeKey reports whether a key stays inside the namespace once the storage
+// normalizes it. This is the whole containment check: p.key is string
+// concatenation, and S3, GCS and the filesystem all resolve ".." for
+// themselves, so one such segment crosses into another project's prefix on
+// every operation. Nothing is normalized here — a key is either already safe
+// or refused, because rewriting it would silently retarget a caller's object.
+// A trailing slash is kept: List takes a directory-ish prefix.
+func safeKey(key string) bool {
+	if key == "" {
+		return true // the whole namespace: List("")
+	}
+	if strings.HasPrefix(key, "/") {
+		return false
+	}
+	trimmed := strings.TrimSuffix(key, "/")
+	if trimmed == "" || trimmed == ".." || strings.HasPrefix(trimmed, "../") {
+		return false
+	}
+	return path.Clean(trimmed) == trimmed
+}
+
+func (p *prefixed) key(key string) (string, error) {
+	if !safeKey(key) {
+		return "", fmt.Errorf("invalid key %q", key)
+	}
+	return p.prefix + "/" + key, nil
+}
 
 func (p *prefixed) Put(ctx context.Context, key string, r io.Reader, size int64) error {
-	return p.be.Put(ctx, p.key(key), r, size)
+	k, err := p.key(key)
+	if err != nil {
+		return err
+	}
+	return p.be.Put(ctx, k, r, size)
 }
 
 func (p *prefixed) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	return p.be.Get(ctx, p.key(key))
+	k, err := p.key(key)
+	if err != nil {
+		return nil, err
+	}
+	return p.be.Get(ctx, k)
 }
 
 func (p *prefixed) Exists(ctx context.Context, key string) (bool, error) {
-	return p.be.Exists(ctx, p.key(key))
+	k, err := p.key(key)
+	if err != nil {
+		return false, err
+	}
+	return p.be.Exists(ctx, k)
 }
 
 func (p *prefixed) List(ctx context.Context, prefix string) ([]Object, error) {
-	objs, err := p.be.List(ctx, p.key(prefix))
+	k, err := p.key(prefix)
+	if err != nil {
+		return nil, err
+	}
+	objs, err := p.be.List(ctx, k)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +94,15 @@ func (p *prefixed) List(ctx context.Context, prefix string) ([]Object, error) {
 		if !strings.HasPrefix(o.Key, strip) {
 			continue
 		}
-		out = append(out, Object{Key: strings.TrimPrefix(o.Key, strip), Size: o.Size})
+		// The namespace has to survive the way out too: a stored key like
+		// "<project>/../victim/x" passes the HasPrefix filter and comes back
+		// looking in-project, and every caller feeds what List named straight
+		// back to Get.
+		rel := strings.TrimPrefix(o.Key, strip)
+		if !safeKey(rel) {
+			continue
+		}
+		out = append(out, Object{Key: rel, Size: o.Size})
 	}
 	return out, nil
 }
@@ -65,5 +117,9 @@ type prefixedSigner struct {
 }
 
 func (p *prefixedSigner) SignPut(ctx context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error) {
-	return p.signer.SignPut(ctx, p.key(key), size, ttl)
+	k, err := p.key(key)
+	if err != nil {
+		return nil, err
+	}
+	return p.signer.SignPut(ctx, k, size, ttl)
 }
