@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
@@ -54,7 +55,19 @@ too, use ` + "`bdrive forget <path>`" + `.`,
 			if !explain {
 				return nil
 			}
-			synced, notSynced, err := syncer.Explain(folder, proj.Include)
+			// The rules this device has ACCEPTED, so the explanation matches
+			// what the cycle actually uploads (syncer.Filter.SkipUp). A store
+			// that will not open is not worth failing `bdrive scope` over: the
+			// answer degrades to the live rules, which is what it always was.
+			var accepted string
+			if vdir, verr := config.VolumeDir(proj.ID); verr == nil {
+				if st, serr := store.Open(vdir); serr == nil {
+					if sync, serr := st.LoadSync(); serr == nil {
+						accepted = sync.IgnoreAccepted
+					}
+				}
+			}
+			synced, notSynced, err := syncer.Explain(folder, proj.Include, accepted)
 			if err != nil {
 				return err
 			}

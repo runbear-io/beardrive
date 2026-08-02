@@ -23,13 +23,22 @@ func (e Entry) IsDir() bool { return strings.HasSuffix(e.Path, "/") }
 // Explain reports what the sync cycle would and would not send for a folder.
 // It is a pure read: no Session, no volume lock, no network, no writes — the
 // answer comes from the same walk the cycle itself uses, so it cannot drift.
-func Explain(folder string, include []string) (synced []string, notSynced []Entry, err error) {
+//
+// accepted is the ignore text this device has accepted (store.SyncState's
+// IgnoreAccepted; "" when there is none). It is a parameter rather than
+// something loadFilter finds for itself because the answer lives in the volume
+// store and this function deliberately does not open one — but it has to be
+// passed, because the scan applies it (Filter.SkipUp) and an explanation that
+// omits it would report a peer's `!` rule as syncing a file the cycle will not
+// send. That drift is the one thing this function exists not to have.
+func Explain(folder string, include []string, accepted string) (synced []string, notSynced []Entry, err error) {
 	// A fresh filter: addNestedMount mutates it during the walk, so this must
 	// never be shared with a live cycle.
 	filter, err := loadFilter(folder, include)
 	if err != nil {
 		return nil, nil, err
 	}
+	filter.AcceptRules(accepted)
 
 	var skipped []string
 	dirs := map[string]*Entry{}

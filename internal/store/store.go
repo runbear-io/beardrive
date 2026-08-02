@@ -246,6 +246,14 @@ type SyncState struct {
 	Lamport   int64  `json:"lamport"`
 	PushedOps int64  `json:"pushed_ops"`       // how many of our own ops the remote has
 	Access    string `json:"access,omitempty"` // "", "read-only", or "no-access"
+
+	// IgnoreAccepted is the .bdriveignore text whose scan scope THIS device has
+	// accepted, and IgnorePulled is the text a peer's version last wrote here.
+	// Together they tell a locally-authored rule change from one that arrived
+	// over the wire, which is what keeps a teammate's `!` from widening what
+	// leaves this disk. See syncer.Filter.SkipUp.
+	IgnoreAccepted string `json:"ignore_accepted,omitempty"`
+	IgnorePulled   string `json:"ignore_pulled,omitempty"`
 }
 
 func (s *Store) LoadSync() (SyncState, error) {

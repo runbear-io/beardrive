@@ -98,9 +98,6 @@ With no argument the remembered server is used, or ` + config.DefaultServer + `.
 				fmt.Printf("logged in to %s (no sign-in required by this server)\n", server)
 				return nil
 			}
-			if u.Scheme == "http" && u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" {
-				fmt.Println("warning: signing in over plain http — credentials travel unencrypted; prefer https (reverse proxy or tailscale)")
-			}
 			return runLogin(server, cfg, useDevice)
 		},
 	}
@@ -201,6 +198,16 @@ Your synced folders are untouched; this only affects this device's session.`,
 // runLogin executes the sign-in flow against a server known to require auth
 // and persists server + token + account to settings.
 func runLogin(server string, cfg serverConfig, useDevice bool) error {
+	// Here, not in loginCmd's RunE. The warning used to sit above this function
+	// and only `bdrive login` reached it, while `bdrive init --server <url>`
+	// came through ensureLogin straight into this same credential exchange and
+	// said nothing — and INSTALL_FOR_AGENTS.md step 2 is titled "Do not run a
+	// login command", so every onboarding agent was routed onto the silent
+	// path. One sign-in door, one warning.
+	if u, err := url.Parse(server); err == nil && u.Scheme == "http" &&
+		u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1" {
+		fmt.Println("warning: signing in over plain http — credentials travel unencrypted; prefer https (reverse proxy or tailscale)")
+	}
 	loginPath := cfg.Auth.CLILogin
 	if loginPath == "" {
 		loginPath = "/auth/cli"
@@ -430,7 +437,7 @@ func deviceCodeLogin(server string) (string, serverUser, error) {
 	if start.VerifyURL == "" {
 		fmt.Printf("on any signed-in browser, open:\n  %s/auth/device\nand approve code: %s\n", server, safeField(start.Code, 64))
 	} else {
-		fmt.Printf("to finish signing in, open this link in any browser:\n  %s\n", safeField(start.VerifyURL, 300))
+		fmt.Printf("to finish signing in, open this link in any browser:\n  %s\n", safeField(sameOriginLink(server, start.VerifyURL), 300))
 	}
 
 	deadline := time.Now().Add(10 * time.Minute)
@@ -460,6 +467,33 @@ func deviceCodeLogin(server string) (string, serverUser, error) {
 		}
 	}
 	return "", serverUser{}, errors.New("timed out waiting for approval")
+}
+
+// sameOriginLink returns the hub's chosen sign-in link if it lives on the hub
+// being signed in to, and the hub's own /auth/device otherwise.
+//
+// safeField scrubs control characters and truncates; it never looked at the
+// ORIGIN, so the hub could point the person at any host it liked — and the
+// sentence framing it ("to finish signing in, open this link in any browser")
+// comes from the trusted local CLI, not from the hub. The runbook makes init
+// non-interactive, so this is the DEFAULT path, and its step 5 has the agent
+// hand init's output to the user: a credential-harvesting page reaches a human
+// relayed by their own agent, in the CLI's voice.
+//
+// Falling back rather than failing: the link is a convenience over a page the
+// hub always serves, so a hub that names someone else's host loses the
+// convenience and the sign-in still completes.
+func sameOriginLink(server, link string) string {
+	fallback := strings.TrimSuffix(server, "/") + "/auth/device"
+	su, err := url.Parse(server)
+	if err != nil {
+		return fallback
+	}
+	lu, err := url.Parse(link)
+	if err != nil || lu.Scheme != su.Scheme || lu.Host != su.Host {
+		return fallback
+	}
+	return link
 }
 
 func openBrowser(url string) error {

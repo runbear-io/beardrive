@@ -45,7 +45,16 @@ type Filter struct {
 	// nestedMiss memoizes directories already checked and found not to be
 	// mounts, so the disk check costs one stat per directory per cycle.
 	nestedMiss map[string]bool
+
+	// upGuard is the ignore rules this device has ACCEPTED, and it only ever
+	// applies to what leaves the machine (SkipUp, i.e. the scan walk). See
+	// SkipUp for why the upload direction needs a second opinion.
+	upGuard []pattern
 }
+
+// AcceptRules installs the rules this device has accepted as the floor on what
+// may be uploaded. Passing "" installs no floor.
+func (f *Filter) AcceptRules(text string) { f.upGuard = compileRules(text) }
 
 // addNestedMount records a nested mount root (slash-relative to the parent
 // mount) so Skip excludes everything under it for the rest of the cycle.
@@ -117,17 +126,26 @@ func loadFilter(folder string, include []string) (*Filter, error) {
 		}
 		return nil, err
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		p, ok := compile(line)
-		if !ok {
-			continue
-		}
+	for _, p := range compileRules(string(data)) {
 		f.ignore = append(f.ignore, p)
 		if p.negate {
 			f.negated = true
 		}
 	}
 	return f, nil
+}
+
+// compileRules parses the ignore dialect out of a whole file's text. Split out
+// so the accepted-rules floor (SkipUp) is parsed by the same code as the live
+// rules rather than by a second copy of the dialect.
+func compileRules(text string) []pattern {
+	var out []pattern
+	for _, line := range strings.Split(text, "\n") {
+		if p, ok := compile(line); ok {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // EscapeIgnore turns a literal project-relative path into a rule line that
@@ -271,6 +289,46 @@ func (f *Filter) Skip(rel string) bool {
 	return true
 }
 
+// SkipUp is Skip for the UPLOAD direction: a path syncs out of this machine
+// only if neither the live rules nor the rules this device has ACCEPTED
+// exclude it.
+//
+// .bdriveignore syncs, deliberately — scope is team-wide, and round 4 made
+// `sync --prune` refuse when `!` rules are present precisely because of that.
+// That reasoning covered DELETION. Nobody asked what a pulled negation does to
+// the SCAN, and the answer was that one member adding `!.env` to the shared
+// file uploaded every other member's local .env on their next cycle: a file
+// that had never been shared, with no prompt and no local change. The runbook
+// recommends `bdrive init . --only docs,notes` for a repository, which puts the
+// WHOLE repo under the mount with only this synced, teammate-writable file
+// holding the rest of it back.
+//
+// The asymmetry is the fix, not a ban on shared rules:
+//
+//   - Pulled rules that NARROW apply immediately, both directions. A teammate
+//     excluding something takes effect everywhere, as designed.
+//   - Pulled rules that WIDEN apply to materialize (a peer's scope decision
+//     still delivers their files down) but not to scan. Widening what leaves
+//     your disk is a local decision.
+//   - A device ACCEPTS the current rules the moment it authors them itself —
+//     `bdrive init --only`, `bdrive scope add/rm`, or editing the file by hand.
+//     That is the acknowledgement, and it is the same act in every case: this
+//     machine's user changed the shared rules.
+//
+// A device joining a project has accepted nothing, so the floor excludes
+// nothing and the pulled rules stand on their own — team-wide scope still
+// works for a new member, which is what a blanket "ignore pulled negations"
+// would have broken.
+func (f *Filter) SkipUp(rel string) bool {
+	if f.Skip(rel) {
+		return true
+	}
+	if rel == IgnoreFile || len(f.upGuard) == 0 {
+		return false
+	}
+	return ignoredBy(f.upGuard, rel)
+}
+
 // Negated reports whether any `!` rule is in play. Scope narrowing is
 // written as negation rules, so this is how callers tell "these rules
 // exclude a few things" from "these rules exclude everything but a few
@@ -289,9 +347,11 @@ func (f *Filter) PruneDir(rel string) bool {
 
 // ignoredFile applies the ignore rules in order; the last match wins, so
 // `!` patterns can re-include what an earlier pattern excluded.
-func (f *Filter) ignoredFile(rel string) bool {
+func (f *Filter) ignoredFile(rel string) bool { return ignoredBy(f.ignore, rel) }
+
+func ignoredBy(pats []pattern, rel string) bool {
 	ignored := false
-	for _, p := range f.ignore {
+	for _, p := range pats {
 		if p.re.MatchString(rel) {
 			ignored = !p.negate
 		}

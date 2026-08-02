@@ -150,7 +150,15 @@ func TestSec_Explain_ReportsNothingTheCycleWouldRefuse(t *testing.T) {
 	write(t, a.Folder, "vendor/big.bin", "x")
 	write(t, a.Folder, IgnoreFile, "vendor/\n")
 
-	synced, notSynced, err := Explain(a.Folder, nil)
+	// The device's REAL accepted-rules floor, not a hardcoded "", so this keeps
+	// asserting that Explain agrees with the walk rather than agreeing with a
+	// constant. (No cycle has run here, so it is empty — which is the point:
+	// the value comes from the same place the cycle reads it from.)
+	sync, err := a.Store.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	synced, notSynced, err := Explain(a.Folder, nil, sync.IgnoreAccepted)
 	if err != nil {
 		t.Fatal(err)
 	}

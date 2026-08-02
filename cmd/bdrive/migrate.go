@@ -116,7 +116,7 @@ bdrive init --project <id>.`,
 				return err
 			}
 			defer f.Close()
-			settings, err := ensureLogin("")
+			settings, _, err := ensureLogin("") // no --server here: nothing to strand
 			if err != nil {
 				return err
 			}

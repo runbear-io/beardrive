@@ -186,11 +186,24 @@ the folder was renamed or moved.`,
 			}
 
 			// Sign in first if this device has no (valid) session.
-			settings, err := ensureLogin(serverURL)
+			settings, restoreSession, err := ensureLogin(serverURL)
 			if err != nil {
 				return err
 			}
 			server := settings.Server
+
+			// A new session is not committed until this hub has proved usable:
+			// it answered with a project, and this device can open that
+			// project's remote. Everything between here and hubUsable is that
+			// proof, and anything that fails in it puts the previous session
+			// back — one arm point and one disarm point rather than a restore
+			// call bolted onto each early return. See ensureLogin.
+			hubUsable := false
+			defer func() {
+				if !hubUsable {
+					restoreSession()
+				}
+			}()
 
 			interactive := stdinIsTTY() && !yes
 
@@ -234,6 +247,7 @@ the folder was renamed or moved.`,
 			if err := checkNotAlreadyMounted(remoteURL, folder, p.Name); err != nil {
 				return err
 			}
+			hubUsable = true // the session is this device's default from here on
 
 			// All of this folder, or only some of it?
 			if len(only) == 0 && interactive && !cmd.Flags().Changed("only") {
@@ -452,10 +466,32 @@ func installHooksIn(folder string) {
 // exists at all: without it, connecting to a hub this device has never seen
 // takes a separate `bdrive login <url>` first, and every extra command is
 // another permission prompt for whoever is driving.
-func ensureLogin(wantServer string) (config.Settings, error) {
+// It also returns a rollback: `--server` is the one value the runbook has an
+// agent take on faith out of a paste prompt, and signing in to it drops the
+// session this device already had (see the comment on the `server != prev`
+// branch below). Nothing put that back, so one mistyped or hostile URL signed
+// the device OUT of its real hub and left it defaulting to the other one — on
+// a run that ended in "Error:" — after which the next bare `bdrive login`,
+// `bdrive init` or `bdrive status` targeted the attacker. The caller commits
+// the new session only once the hub has proved usable.
+//
+// The rollback is a no-op when there was no session to lose: a device signing
+// in for the first time keeps the token it just minted, because there is
+// nothing to strand it away from and re-doing the device flow on the retry
+// helps nobody.
+func ensureLogin(wantServer string) (config.Settings, func(), error) {
 	settings, err := config.LoadSettings()
 	if err != nil {
-		return settings, err
+		return settings, func() {}, err
+	}
+	before := settings
+	rollback := func() {}
+	if before.Token != "" {
+		rollback = func() {
+			if err := config.SaveSettings(before); err != nil {
+				fmt.Printf("warning: could not restore this device's session on %s: %v\n", before.Server, err)
+			}
+		}
 	}
 	server := settings.Server
 	if wantServer != "" {
@@ -466,7 +502,7 @@ func ensureLogin(wantServer string) (config.Settings, error) {
 	}
 	cfg, err := fetchServerConfig(server)
 	if err != nil {
-		return settings, fmt.Errorf("cannot reach bdrive server at %s: %w (set one with `bdrive login <url>`)", server, err)
+		return settings, rollback, fmt.Errorf("cannot reach bdrive server at %s: %w (set one with `bdrive login <url>`)", server, err)
 	}
 	prev := settings.Server
 	// A device token belongs to the hub that issued it, and settings.Server is
@@ -480,22 +516,26 @@ func ensureLogin(wantServer string) (config.Settings, error) {
 	}
 	if !cfg.Auth.Enabled {
 		settings.Server = server
-		return settings, config.SaveSettings(settings)
+		return settings, rollback, config.SaveSettings(settings)
 	}
 	settings.Server = server
 	switch {
 	case settings.Token != "" && prev == server:
 		if _, err := whoAmIOnServer(server, settings.Token); err == nil {
-			return settings, nil
+			// Same hub, same live session: nothing was replaced, so nothing
+			// needs putting back.
+			return settings, func() {}, nil
 		}
 		fmt.Println("session expired — signing in again")
 	case prev != "" && prev != server:
 		fmt.Printf("signing in to %s (this device was signed in to %s)\n", server, prev)
 	}
 	if err := runLogin(server, cfg, false); err != nil {
-		return settings, err
+		rollback()
+		return settings, func() {}, err
 	}
-	return config.LoadSettings()
+	settings, err = config.LoadSettings()
+	return settings, rollback, err
 }
 
 // normalizeServer accepts what people (and agents) actually type: a bare

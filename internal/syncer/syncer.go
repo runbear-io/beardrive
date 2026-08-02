@@ -193,6 +193,17 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
 	}
+	// Accept the rules on disk as this device's own whenever they are not the
+	// copy a peer's version last wrote here — i.e. whenever somebody at this
+	// machine authored them (`bdrive init --only`, `bdrive scope`, an editor).
+	// Runs before the scan and before the pull, so the floor the scan applies
+	// is always the last rules this device agreed to. See Filter.SkipUp.
+	if cur, err := os.ReadFile(filepath.Join(s.Folder, IgnoreFile)); err == nil || os.IsNotExist(err) {
+		if text := string(cur); text != st.IgnorePulled {
+			st.IgnoreAccepted = text
+		}
+	}
+	filter.AcceptRules(st.IgnoreAccepted)
 
 	// 1. Scan the working folder and journal any local changes.
 	localOps, err := s.scan(cache, &st, int64(len(myOps)), filter)
@@ -338,6 +349,14 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 				return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
 			}
 			filter.nested = nested
+			// Remember the pulled text as pulled, NOT as accepted: these rules
+			// came from a peer, so they may narrow what this device uploads but
+			// never widen it until somebody here authors a change. The accepted
+			// floor carries over unchanged.
+			if cur, err := os.ReadFile(filepath.Join(s.Folder, IgnoreFile)); err == nil {
+				st.IgnorePulled = string(cur)
+			}
+			filter.AcceptRules(st.IgnoreAccepted)
 		}
 		// If the blob isn't fetched yet materializeFile skips it and the old
 		// rules stand: the usual retry-next-cycle posture, and the guard in

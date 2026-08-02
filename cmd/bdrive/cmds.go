@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -348,13 +349,20 @@ func safeField(s string, max int) string {
 		// NEL. The whole escape vocabulary, with no ESC byte anywhere.
 		case r >= 0x80 && r <= 0x9f:
 			return -1
-		// The bidirectional format controls (Trojan Source, CVE-2021-42574).
-		// Not control characters by Unicode's own definition, so they survive
-		// every C0/C1 filter, and one U+202E draws the rest of the row
-		// right-to-left — the columns naming the actor and the device come
-		// after the path on the same line.
-		case r == 0x061c, r == 0x200e, r == 0x200f,
-			r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		// Every format character (category Cf) plus the tag block, as a
+		// CLASS. The bidirectional controls this used to enumerate (Trojan
+		// Source, CVE-2021-42574) are Cf: not control characters by Unicode's
+		// own definition, so they survive every C0/C1 filter, and one U+202E
+		// draws the rest of the row right-to-left — the columns naming the
+		// actor and the device come after the path on the same line.
+		//
+		// The class, not the list, for the reason journal.SafeText and
+		// webapp.trimText arrived at the same rule in round 13: an enumeration
+		// grows by neighbours and misses the rest. U+E0020..U+E007F encodes all
+		// of printable ASCII with no glyph at all, and this output is read by
+		// agents as often as by people — `bdrive status` and `bdrive log` land
+		// in a session's context verbatim.
+		case unicode.Is(unicode.Cf, r), r >= 0xe0000 && r <= 0xe01ef:
 			return -1
 		}
 		return r

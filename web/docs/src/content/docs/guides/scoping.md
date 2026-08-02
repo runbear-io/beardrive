@@ -67,9 +67,31 @@ move it into `.bdriveignore`.
 
 Because the rules live in `.bdriveignore`, and that file syncs, a narrow scope
 is the whole team's scope: every device that syncs the project picks it up.
-Widening or narrowing it is a change everyone sees, not a local preference.
+Narrowing it is a change everyone sees immediately, not a local preference.
 (Legacy include lists are the exception — they sit in the never-synced
 `.bdrive/config.json` and apply to one device only.)
+
+### Widening is a local decision
+
+One direction is deliberately not automatic. A rule a teammate pushes that
+**widens** what syncs — a `!` re-include — takes effect on your machine for what
+comes *down* from the hub, but it does not start uploading files off your disk
+that your own rules held back. Uploading something that was never shared is a
+decision your machine makes, not one a teammate makes for it.
+
+You accept the current rules the moment you author them yourself: `bdrive init
+--only`, `bdrive scope add` / `scope rm`, or editing `.bdriveignore` by hand.
+Any of those makes the file as it stands your device's rules, widenings
+included.
+
+This matters most in the shape this guide recommends for a repository — `bdrive
+init . --only docs,notes` puts the *whole* repository under the mount, with only
+`.bdriveignore` holding the rest of it back. Without the rule above, one
+teammate adding `!.env` to the shared file would upload every other member's
+local `.env` on their next sync.
+
+A device joining a project has authored nothing yet, so the project's rules
+stand on their own — team-wide scope still works for a new member on day one.
 
 ## Change the scope later
 

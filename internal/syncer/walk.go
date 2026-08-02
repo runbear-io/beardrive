@@ -41,7 +41,10 @@ func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.Dir
 			// include a whole-path rule (agent hook config) that a base name
 			// cannot express, and the outbound half has to match the inbound
 			// one or a file lands on the hub that no peer will ever materialize.
-			if !d.Type().IsRegular() || config.ReservedPath(rel) || filter.Skip(rel) {
+			// SkipUp, not Skip: this walk is the upload door, and a negation a
+			// TEAMMATE pushed must not widen what leaves this machine. See
+			// Filter.SkipUp.
+			if !d.Type().IsRegular() || config.ReservedPath(rel) || filter.SkipUp(rel) {
 				v = vSkipFile
 			} else {
 				v = vSync
