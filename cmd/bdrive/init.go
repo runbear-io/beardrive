@@ -341,6 +341,15 @@ next steps:
   see who changed what:                bdrive log
   share a file by public URL:          bdrive share <file>
 `, server, p.ID, p.ID)
+			// The one and only place the CLI asks for a star. A folder was just
+			// set up successfully — about once per project per machine — which
+			// is the single moment that earns the ask. Never from a command that
+			// repeats (sync, status, the daemon), and never without a TTY: a
+			// star plea in a CI log or in output a script parses is exactly what
+			// got postinstall ads banned from npm.
+			if stdinIsTTY() {
+				fmt.Printf("\nif this is useful, a star helps other teams find it: %s\n", repoURL)
+			}
 			return nil
 		},
 	}

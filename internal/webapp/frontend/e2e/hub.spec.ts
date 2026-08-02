@@ -46,6 +46,16 @@ test("account menu: admin gets hub admin entry; member does not", async ({ page,
   await ctx.close();
 });
 
+test("the star ask is a plain link in the sidebar, not a prompt", async ({ page }) => {
+  await login(page);
+  const star = page.locator("#accountbar .gh-star");
+  await expect(star).toBeVisible();
+  await expect(star).toHaveAttribute("href", "https://github.com/runbear-io/beardrive");
+  await expect(star).toHaveAttribute("target", "_blank");
+  // Nothing may interrupt: no dialog, no toast, no dismissible banner.
+  await expect(page.locator('[role="dialog"], [role="alertdialog"]')).toHaveCount(0);
+});
+
 test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await login(page); // admin mints the invite
   const orgs = await (await page.request.get("/api/orgs")).json();

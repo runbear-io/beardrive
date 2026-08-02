@@ -120,6 +120,15 @@ func TestCLIOnboardingE2E(t *testing.T) {
 	// Nothing agent-shaped may be created inside the project: it would sync.
 	assertNoProjectHookFiles(t, work)
 
+	// init's star ask is for humans at a terminal only. `run` pipes stdout,
+	// which is exactly the shape of a CI job or a script parsing the output —
+	// asking there is the mistake that got postinstall ads banned from npm.
+	// (Matched on the repo URL, not the word "star" — `autostart registered`
+	// is a legitimate line that contains it.)
+	if strings.Contains(out, "github.com/runbear-io/beardrive") {
+		t.Fatalf("init asked for a GitHub star without a TTY:\n%s", out)
+	}
+
 	// A reboot kills the daemon, so init registers the login agent that
 	// brings it back. It must land in the user's own LaunchAgents dir (this
 	// test's isolated HOME) and point at `bdrive resume`, which covers every
