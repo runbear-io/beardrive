@@ -42,7 +42,7 @@ func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.Dir
 			} else {
 				v = vSync
 			}
-		case ignoreDirs[d.Name()] || filter.PruneDir(rel):
+		case ignoredDir(d.Name()) || filter.PruneDir(rel):
 			v = vPruneDir
 		case config.IsMount(p):
 			// A mount of its own: it syncs through its own project.

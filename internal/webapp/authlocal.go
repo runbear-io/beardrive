@@ -880,14 +880,24 @@ func (a *BuiltinAuth) pageReset(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 		if u != nil {
 			tok := a.newGrant("reset", u.ID, time.Hour)
+			addr := u.Email
 			link := requestBaseURL(r) + "/auth/reset/confirm?token=" + tok
 			subject := "Reset your BearDrive password"
-			body := "Someone (hopefully you) asked to reset the BearDrive password for " + u.Email +
+			body := "Someone (hopefully you) asked to reset the BearDrive password for " + addr +
 				".\n\nReset it here (valid for 1 hour):\n\n  " + link + "\n\nIf this wasn't you, ignore this email."
-			if err := a.Mail.Send(u.Email, subject, body); err != nil {
-				// Never break reset: the admin can hand over the logged link.
-				fmt.Printf("password reset for %s (email not sent: %v):\n  %s\n", u.Email, err, link)
-			}
+			// Sent off the request path. Mail is the one step whose cost
+			// depends on whether the address exists, so a handler that waits
+			// for it answers a known address in SMTP-round-trip time and an
+			// unknown one instantly — an account-enumeration oracle that needs
+			// no statistics, just one slow mail server. Nothing is lost by not
+			// waiting: a delivery failure was never surfaced to the caller
+			// anyway, only logged.
+			go func() {
+				if err := a.Mail.Send(addr, subject, body); err != nil {
+					// Never break reset: the admin can hand over the logged link.
+					fmt.Printf("password reset for %s (email not sent: %v):\n  %s\n", addr, err, link)
+				}
+			}()
 		}
 		authPage(w, "Check your email", `<p class="msg">If that account exists, a reset link is on its way.</p>
 <p class="alt">No email configured on this server? The link is in the server log.</p>`)

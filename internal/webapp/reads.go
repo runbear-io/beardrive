@@ -32,8 +32,11 @@ import (
 // project member through History's device join; nothing else in the column —
 // no email, no share token, no unowned device id — ever leaves the server.
 // The exception is only sound because the ingest path validates the id
-// (handleReadReport → ownsDevice): an actor recorded as an agent is a device
-// the reporting account owns, never a string it chose.
+// (handleReadReport → ownsDevice): an actor recorded as an agent is shaped
+// like a device id and is not one another account is syncing — never an
+// arbitrary string, and never someone else's machine. This route also never
+// registers a device: registering the id it is about to judge is what turned
+// the round-2 check into a one-request speed bump.
 
 // Read kinds.
 const (
@@ -346,11 +349,47 @@ func (l *ReadLedger) persistLocked() error {
 	for key := range l.dirty {
 		batch = append(batch, l.byKey[key])
 	}
-	if err := l.repo.PutBatch(batch); err != nil {
+	err := l.repo.PutBatch(batch)
+	if err == nil {
+		l.dirty = map[ReadStatKey]bool{}
+		return nil
+	}
+	if len(batch) == 1 {
 		return err
 	}
-	l.dirty = map[ReadStatKey]bool{}
+	// One transaction, so one bucket the store refuses takes every other
+	// bucket down with it — and, because they stay dirty, every bucket the hub
+	// counts from then on. That is a hub-wide telemetry kill from the lowest
+	// privilege there is (Postgres rejects a NUL byte in a path; sqlite and
+	// the file backend store it happily). Retry one at a time: if some land,
+	// the ones that did not are content this store will never accept, so drop
+	// them rather than wedge the queue. If none land the store itself is
+	// down — transient — and everything stays dirty for the next flush.
+	var stuck []ReadStatKey
+	landed := 0
+	for key := range l.dirty {
+		if l.repo.PutBatch([]ReadStat{l.byKey[key]}) == nil {
+			delete(l.dirty, key)
+			landed++
+		} else {
+			stuck = append(stuck, key)
+		}
+	}
+	if landed == 0 {
+		return err
+	}
+	for _, key := range stuck {
+		log.Printf("beardrive: read telemetry dropped an unstorable bucket (project %s, path %q): %v",
+			key.Project, key.Path, err)
+		delete(l.dirty, key)
+	}
 	return nil
+}
+
+// hasControlChars reports whether s carries a C0/C7F control character —
+// never legitimate in a path, and fatal to a Postgres text column.
+func hasControlChars(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
 // ---- server integration ----
@@ -438,10 +477,14 @@ type deviceHeat struct {
 
 func (s *Server) heatByDevice(w http.ResponseWriter, project string, since time.Time) {
 	byDevice := s.Reads.AgentHeat(project, since)
+	visible := s.deviceVisibleIn(project)
 	devices := make([]deviceHeat, 0, len(byDevice))
 	for id, folders := range byDevice {
 		d := deviceHeat{ID: id, Folders: folders}
-		if info, ok := s.Devices.Get(id); ok {
+		// Scoped join: a device owned by an account outside this project's org
+		// contributes no name or OS, so heat cannot become a window onto
+		// another org's machines.
+		if info, ok := s.Devices.LookupIn(id, visible); ok {
 			d.Name, d.OS = info.Name, info.OS
 		}
 		for _, n := range folders {
@@ -496,14 +539,19 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 	// The device id becomes the actor these buckets are keyed by, and /heat
 	// reports agent actors — so an unvalidated header would let any member
 	// plant any string (an id from another org, or an account email) and have
-	// the hub serve it back to the whole project as a reader. Checked before
-	// observeDevice, which would otherwise register the forged id itself.
+	// the hub serve it back to the whole project as a reader. This route
+	// deliberately does NOT observe the device: registering the id it is about
+	// to judge is what made the round-2 check a one-request speed bump. Only
+	// /store/* traffic registers a device.
 	mine := s.ownsDevice(r, device)
-	s.observeDevice(r)
 	project := projectID(r)
 	n := 0
 	for _, e := range req.Reads {
-		if e.Path == "" || strings.Contains(e.Path, "..") {
+		// A path is a bucket key that reaches the metadata store: a control
+		// character (a NUL above all) is rejected outright by Postgres, and a
+		// row the store will never accept has to be refused here rather than
+		// discovered at flush time.
+		if e.Path == "" || strings.Contains(e.Path, "..") || hasControlChars(e.Path) {
 			continue
 		}
 		if !mine {

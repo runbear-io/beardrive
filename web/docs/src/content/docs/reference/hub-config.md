@@ -72,15 +72,16 @@ See [Authentication](/self-hosting/authentication/) for the `auth` block and
 
 `trust_proxy` (default `false`) decides where the hub reads a caller's IP
 address from. It keys two rate limiters: the one on public share links
-(`share_rpm`) and the one on `POST /auth/login` and `/auth/signup` that blunts
-password brute-force.
+(`share_rpm`) and the one on `POST /auth/login`, `/auth/signup` and
+`/auth/reset` that blunts password brute-force and account enumeration.
 
 - **Default (`false`)** — the address is the connection's own. Correct for a
   hub clients reach directly.
-- **`true`** — the first `X-Forwarded-For` hop is used instead. Set this only
-  when a proxy you control (nginx, Caddy, a cloud load balancer) sits in front
-  of the hub and overwrites that header. **Make sure it overwrites rather than
-  appends**, or a client can prepend a hop of its own.
+- **`true`** — the **last** `X-Forwarded-For` entry is used instead: the header
+  grows left to right, each proxy appending what it saw, so the last entry is
+  the one your proxy added and everything before it is whatever the client
+  chose to send. Set this only when a proxy you control (nginx, Caddy, a cloud
+  load balancer) sits in front of the hub.
 
 Leaving it `false` behind a proxy costs you accuracy: every request looks like
 it comes from the proxy, so the limiters throttle all your users as one. Turning

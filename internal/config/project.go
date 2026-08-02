@@ -25,11 +25,29 @@ const ProjectDir = ".bdrive"
 // teammate's next commit. The rule lives here beside ProjectDir because two
 // packages enforce it — the sync engine on scan and on materialize, the hub
 // on every destination path a client names — and two copies would drift.
+//
+// Match through ReservedDir, never by indexing this map: the comparison is
+// case-insensitive because BearDrive's primary filesystems (APFS, NTFS) are.
+// An exact-match guard lets ".GIT/hooks/pre-commit" through, and the
+// filesystem then resolves it into the real .git/hooks.
 var ReservedDirs = map[string]bool{".git": true, ProjectDir: true}
 
-// ReservedName reports whether a bare file name never syncs.
+// ReservedDir reports whether a path segment names a reserved directory,
+// case-insensitively.
+func ReservedDir(name string) bool {
+	for reserved := range ReservedDirs {
+		if strings.EqualFold(name, reserved) {
+			return true
+		}
+	}
+	return false
+}
+
+// ReservedName reports whether a bare file name never syncs. Case-insensitive
+// for the same reason as ReservedDir.
 func ReservedName(name string) bool {
-	return name == ".DS_Store" || strings.HasPrefix(name, ".bdrive-tmp-")
+	lower := strings.ToLower(name)
+	return lower == ".ds_store" || strings.HasPrefix(lower, ".bdrive-tmp-")
 }
 
 // ReservedPath reports whether a slash-separated path is one BearDrive never
@@ -37,7 +55,7 @@ func ReservedName(name string) bool {
 // name.
 func ReservedPath(p string) bool {
 	for _, part := range strings.Split(p, "/") {
-		if ReservedDirs[part] {
+		if ReservedDir(part) {
 			return true
 		}
 	}

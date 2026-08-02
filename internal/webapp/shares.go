@@ -339,9 +339,14 @@ func (s *Server) shareCreatorStillBelongs(sh Share) bool {
 	if s.Dir == nil || sh.Creator == "" {
 		return true // no membership model (single-volume), or a pre-accounts link
 	}
+	// No org on the project — cleared, never set, or the project is gone —
+	// means membership cannot be established, and on a public route that is a
+	// refusal, not a pass. Failing open here resurrected every link an
+	// offboarded member ever minted, one layer below the same fix projectPerm
+	// got in round 1.
 	org := s.orgOf(sh.Project)
 	if org == "" {
-		return true
+		return false
 	}
 	return s.Dir.Role(org, sh.Creator) != ""
 }
@@ -423,7 +428,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		io.Copy(w, rc)
 	default:
 		w.Header().Set("Content-Type", contentType(sh.Path))
-		w.Header().Set("Content-Length", fmt.Sprint(fi.Size))
+		setContentLength(w, rc) // measured, never the journal's Size field
 		io.Copy(w, rc)
 	}
 }

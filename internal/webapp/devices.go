@@ -1,8 +1,10 @@
 package webapp
 
 import (
+	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,24 +25,61 @@ type DeviceInfo struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
+// deviceIDRe is the shape of a device identity. `bdrive` mints 12 hex chars,
+// but the id is also a storage key component — journal/<id>.jsonl, the same
+// set store.go's journalKeyRe accepts — so anything outside it cannot be a
+// real syncing device. Enforcing it here matters because the id doubles as
+// the read-heat actor column: free text would let a member hand /heat an
+// account email (or any sentence they like) and have the hub serve it back to
+// the whole project as a reader.
+var deviceIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+func validDeviceID(id string) bool { return deviceIDRe.MatchString(id) }
+
+// printableOnly drops C0/C7F control characters from a client-supplied label.
+func printableOnly(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// devKey is the registry's identity: a device id is client-asserted, so it is
+// only meaningful inside the account that presented it. Two accounts naming
+// the same id hold two separate rows and cannot overwrite or lock out each
+// other — which is what makes "first caller owns it" unnecessary.
+type devKey struct{ User, ID string }
+
 // DeviceRegistry is the in-memory device table over a MetaStore DeviceRepo.
 type DeviceRegistry struct {
 	repo DeviceRepo
 
-	mu      sync.Mutex
-	byID    map[string]DeviceInfo
-	lastSav map[string]time.Time // throttle writes per device
+	mu     sync.Mutex
+	byKey  map[devKey]DeviceInfo
+	latest map[string]devKey // id → most recently observed row, for display joins
+	// lastSav throttles disk writes per row.
+	lastSav map[devKey]time.Time
+	warned  bool // repo write failure logged once
 }
 
 // NewDeviceRegistry builds the registry over a repo, loading its contents.
 func NewDeviceRegistry(repo DeviceRepo) (*DeviceRegistry, error) {
-	r := &DeviceRegistry{repo: repo, byID: make(map[string]DeviceInfo), lastSav: make(map[string]time.Time)}
+	r := &DeviceRegistry{
+		repo:    repo,
+		byKey:   make(map[devKey]DeviceInfo),
+		latest:  make(map[string]devKey),
+		lastSav: make(map[devKey]time.Time),
+	}
 	list, err := repo.Load()
 	if err != nil {
 		return nil, err
 	}
 	for _, d := range list {
-		r.byID[d.ID] = d
+		k := devKey{d.User, d.ID}
+		r.byKey[k] = d
+		r.latest[d.ID] = k
 	}
 	return r, nil
 }
@@ -50,28 +89,31 @@ func OpenDeviceRegistry(path string) (*DeviceRegistry, error) {
 	return NewDeviceRegistry(newFileDeviceRepo(path))
 }
 
-// Observe merges what a request revealed about a device. Disk writes are
-// throttled: identity changes persist immediately, bare last-seen bumps at
-// most once a minute.
+// Observe merges what a request revealed about a device, into the row owned by
+// the account that made it. Disk writes are throttled: identity changes
+// persist immediately, bare last-seen bumps at most once a minute.
+//
+// The repo keeps one row per id (its primary key), so what survives a restart
+// is the most recent observation. That is a display cache, not the authority:
+// MayActAs reads the in-memory rows, and a device re-registers on its very
+// next sync cycle.
 func (r *DeviceRegistry) Observe(d DeviceInfo) {
 	if r == nil || d.ID == "" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	cur := r.byID[d.ID]
-	// The registry is hub-wide but device ids are client-asserted, so the
-	// first account to be seen using a device owns the row: anyone else
-	// naming that id (any project, any org) is claiming a device they do not
-	// own, and History joins this table — a forged name would surface in the
-	// victim org's change feed. Refuse silently: the caller's request is
-	// about something else, and telemetry never fails it. A caller claiming
-	// no account at all (auth-less hub) asserts no identity, so it merges as
-	// before — it can only refresh what it observed, never re-own the row.
-	if cur.User != "" && d.User != "" && d.User != cur.User {
-		return
+	k := devKey{d.User, d.ID}
+	if d.User == "" {
+		// A caller claiming no account asserts no identity (auth-less hub, or
+		// a partial refresh): it merges into whatever row already exists for
+		// this id rather than opening a competing, ownerless one.
+		if prev, ok := r.latest[d.ID]; ok {
+			k = prev
+		}
 	}
-	changed := cur.ID == "" || cur.Name != d.Name || cur.OS != d.OS || cur.User != d.User || cur.IP != d.IP
+	cur := r.byKey[k]
+	changed := cur.ID == "" || cur.Name != d.Name || cur.OS != d.OS || cur.IP != d.IP
 	cur.ID = d.ID
 	if d.Name != "" {
 		cur.Name = d.Name
@@ -86,22 +128,86 @@ func (r *DeviceRegistry) Observe(d DeviceInfo) {
 		cur.IP = d.IP
 	}
 	cur.LastSeen = time.Now().UTC()
-	r.byID[d.ID] = cur
-	if changed || time.Since(r.lastSav[d.ID]) > time.Minute {
-		if r.repo.Put(cur) == nil {
-			r.lastSav[d.ID] = time.Now()
+	r.byKey[k] = cur
+	r.latest[d.ID] = k
+	if changed || time.Since(r.lastSav[k]) > time.Minute {
+		if err := r.repo.Put(cur); err == nil {
+			r.lastSav[k] = time.Now()
+		} else if !r.warned {
+			// Silently discarded, this made a registry that reports a device
+			// as observed while nothing about it ever reaches disk. Telemetry
+			// still must not fail the request, so it logs once and the next
+			// observation retries.
+			r.warned = true
+			log.Printf("beardrive: device registry write failed (will retry): %v", err)
 		}
 	}
 }
 
+// Get returns the most recently observed row for an id, whoever owns it. It is
+// an unscoped display lookup: anything that serves the result to a project
+// must use LookupIn instead, or it hands one org's device metadata to another.
 func (r *DeviceRegistry) Get(id string) (DeviceInfo, bool) {
 	if r == nil {
 		return DeviceInfo{}, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	d, ok := r.byID[id]
+	k, ok := r.latest[id]
+	if !ok {
+		return DeviceInfo{}, false
+	}
+	d, ok := r.byKey[k]
 	return d, ok
+}
+
+// LookupIn returns the most recently observed row for an id whose owner passes
+// allowed — the join every per-project surface uses, so a device belonging to
+// an account outside the project's org resolves to nothing instead of leaking
+// its machine name and OS (and confirming that the id exists at all).
+func (r *DeviceRegistry) LookupIn(id string, allowed func(user string) bool) (DeviceInfo, bool) {
+	if r == nil {
+		return DeviceInfo{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var best DeviceInfo
+	found := false
+	for k, d := range r.byKey {
+		if k.ID != id || !allowed(k.User) {
+			continue
+		}
+		if !found || d.LastSeen.After(best.LastSeen) {
+			best, found = d, true
+		}
+	}
+	return best, found
+}
+
+// MayActAs reports whether an account may name a device id as itself: yes if
+// this account has been seen syncing under it, and yes if nobody else has —
+// an id nobody has claimed is the ordinary case of a device whose telemetry
+// arrives before its first push, and refusing it would mean read heat never
+// starts. What it refuses is naming a device another account is syncing.
+//
+// Registry rows come only from /store/* traffic (observeDevice), so "seen
+// syncing" is a fact the hub observed, not a claim the caller made in this
+// request.
+func (r *DeviceRegistry) MayActAs(user, id string) bool {
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, mine := r.byKey[devKey{user, id}]; mine {
+		return true
+	}
+	for k := range r.byKey {
+		if k.ID == id && k.User != "" && k.User != user {
+			return false
+		}
+	}
+	return true
 }
 
 // requestIP extracts the client address the server actually saw.
@@ -117,39 +223,70 @@ func requestIP(r *http.Request) string {
 }
 
 // ownsDevice reports whether the caller may act AS the device id it named.
-// The id is a request header, so anyone can name any device: it is only
-// theirs if the registry already knows it (from this device's own sync
-// traffic, which is what registers a device) and the row is unowned or owned
-// by this account. Call it BEFORE observeDevice — observing an unknown id
-// creates the row, which would make every id "known".
+//
+// Two things have to hold. The id must be a device id at all (validDeviceID):
+// it ends up in /heat as an actor, and free text there is an identity the
+// caller invented. And no other account may already be syncing under it — the
+// registry is populated by /store/* traffic, which is the only thing that
+// proves a device exists, and this route never registers anything itself.
+// Observing here is what made the round-2 check a one-request speed bump: the
+// request it refused registered the refused id to the caller, so the second
+// one passed.
 //
 // A hub with no registry cannot judge, and has no accounts to impersonate
 // either (single-volume / auth-less), so it allows.
 func (s *Server) ownsDevice(r *http.Request, id string) bool {
+	if !validDeviceID(id) {
+		return false
+	}
 	if s.Devices == nil {
 		return true
 	}
-	d, ok := s.Devices.Get(id)
-	if !ok {
-		return false
-	}
-	return d.User == "" || d.User == s.requestUser(r).Email
+	return s.Devices.MayActAs(s.requestUser(r).Email, id)
 }
 
-// observeDevice records the device behind a store-API request.
+// observeDevice records the device behind a store-API request. Only sync
+// traffic calls it: a device is something that syncs, and any other route
+// registering an id would let a caller mint a device identity out of a header.
 func (s *Server) observeDevice(r *http.Request) {
 	if s.Devices == nil {
 		return
 	}
+	// The shape check lives here, at the trust boundary, not inside the
+	// registry: what a client may assert about itself is a server decision,
+	// while the registry (and the repos under it) must store whatever it is
+	// handed faithfully.
 	id := r.Header.Get("X-Bdrive-Device")
-	if id == "" {
+	if !validDeviceID(id) {
 		return
 	}
+	// Name and OS are free text, and they end up in a metadata store where a
+	// control character is a divergence between backends (Postgres refuses a
+	// NUL in a text column; sqlite and the file backend keep it, so the same
+	// device reads back differently depending on the hub's database).
 	s.Devices.Observe(DeviceInfo{
 		ID:   id,
-		Name: r.Header.Get("X-Bdrive-Device-Name"),
-		OS:   r.Header.Get("X-Bdrive-Os"),
+		Name: printableOnly(r.Header.Get("X-Bdrive-Device-Name")),
+		OS:   printableOnly(r.Header.Get("X-Bdrive-Os")),
 		User: s.requestUser(r).Email,
 		IP:   requestIP(r),
 	})
+}
+
+// deviceVisibleIn is the predicate LookupIn takes for one project: a device
+// row may be joined into this project's surfaces only when the account that
+// owns it belongs to the project's org. An unowned row (auth-less hub, or a
+// pre-accounts observation) asserts no identity and stays visible; a hub with
+// no directory has no orgs to cross in the first place.
+func (s *Server) deviceVisibleIn(projectID string) func(string) bool {
+	if s.Dir == nil {
+		return func(string) bool { return true }
+	}
+	org := s.orgOf(projectID)
+	return func(user string) bool {
+		if user == "" {
+			return true
+		}
+		return org != "" && s.Dir.Role(org, user) != ""
+	}
 }

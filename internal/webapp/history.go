@@ -129,19 +129,20 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	all, err := rs.loadOps(r.Context())
+	all, err := rs.loadSourcedOps(r.Context())
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
-	journal.Sort(all)
+	sort.SliceStable(all, func(i, j int) bool { return journal.Less(all[i].Op, all[j].Op) })
 	// A put is an "add" when the path didn't exist just before it (first
 	// version, or first after a delete), an "edit" otherwise. Existence is
 	// replayed over ALL ops in journal order, before any path/prefix filter,
 	// so a filtered view classifies the same as the full feed.
 	kinds := make([]string, len(all))
 	exists := make(map[string]bool, len(all))
-	for i, op := range all {
+	for i, so := range all {
+		op := so.Op
 		switch {
 		case op.Kind == journal.KindDelete:
 			kinds[i] = "delete"
@@ -157,18 +158,27 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		entry HistoryEntry
 		op    journal.Op
 	}
+	visible := s.deviceVisibleIn(projectID(r))
 	matched := make([]timed, 0, len(all))
-	for i, op := range all {
+	for i, sop := range all {
+		op := sop.Op
 		switch {
 		case path != "" && op.Path != path:
 			continue
 		case path == "" && prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/"):
 			continue
 		}
-		// Unregistered device (or volume mode, where Devices is nil): fall back
-		// to the op's own id + self-reported name.
-		dev := historyDevice{ID: op.Device, Name: op.DeviceName}
-		if info, ok := s.Devices.Get(op.Device); ok && info.ID != "" {
+		// Attribution comes from the journal the op was READ from, never from
+		// its own Device field: that field is arbitrary JSON any member with
+		// write access can put in their own journal, so trusting it printed
+		// another org's machine name into this feed and answered "does this
+		// device id exist on the hub?" for anyone who asked. The registry join
+		// is scoped the same way heat's is.
+		dev := historyDevice{ID: sop.From}
+		if op.Device == sop.From {
+			dev.Name = op.DeviceName // the journal's owner describing itself
+		}
+		if info, ok := s.Devices.LookupIn(sop.From, visible); ok && info.ID != "" {
 			dev = historyDevice{ID: info.ID, Name: info.Name, OS: info.OS}
 		}
 		matched = append(matched, timed{HistoryEntry{

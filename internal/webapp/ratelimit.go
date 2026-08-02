@@ -72,19 +72,26 @@ func (l *rateLimiter) allow(key string) bool {
 	return true
 }
 
-// clientIP is the rate-limit key: the connection's address, or the first
-// X-Forwarded-For hop when the operator has said a proxy fronts this hub.
+// clientIP is the rate-limit key: the connection's address, or the hop the
+// operator's own proxy added when TrustProxy says one fronts this hub.
 //
 // The header is attacker-controlled on a directly-reachable hub, and this key
 // is what throttles both /s/* and the login endpoint — so trusting it by
 // default hands anyone an unlimited-rate bucket per request and turns off the
 // password brute-force limiter. TrustProxy is therefore opt-in: a hub behind a
 // load balancer sets it, a hub on the open internet must not.
+//
+// The LAST element is the trusted one. X-Forwarded-For grows left to right —
+// each proxy APPENDS what it saw — so a client that sends its own header keeps
+// its forged value at the head, and the entry our proxy added is at the tail.
+// Reading the first entry meant turning TrustProxy on disabled the limiter it
+// was added to fix: every request got a fresh bucket of the client's choosing.
 func (s *Server) clientIP(r *http.Request) string {
 	if s.TrustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
-				return strings.TrimSpace(first)
+			parts := strings.Split(xff, ",")
+			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
+				return last
 			}
 		}
 	}
@@ -112,12 +119,14 @@ func (s *Server) authLimiter() *rateLimiter {
 	return s.authLim
 }
 
-// rateLimitAuth wraps the auth mux so POSTs to /auth/login and /auth/signup
-// are throttled per IP; GETs (rendering the forms) pass freely.
+// rateLimitAuth wraps the auth mux so POSTs to the credential endpoints are
+// throttled per IP; GETs (rendering the forms) pass freely. /auth/reset is in
+// the set because it both sends mail and answers differently for a known
+// address — unmetered, it is an account-enumeration and mail-flood endpoint.
 func (s *Server) rateLimitAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
-		if r.Method == http.MethodPost && (p == "/auth/login" || p == "/auth/signup") {
+		if r.Method == http.MethodPost && (p == "/auth/login" || p == "/auth/signup" || p == "/auth/reset") {
 			if !s.authLimiter().allow(s.clientIP(r)) {
 				http.Error(w, "too many attempts — wait a minute and try again", http.StatusTooManyRequests)
 				return

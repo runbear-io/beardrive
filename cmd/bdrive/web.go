@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -248,7 +246,12 @@ credentials); otherwise it is relayed through this server.`,
 				srv.Root = be
 				srv.Projects = db
 				srv.Device = webapp.Identity{ID: dev.ID, Name: dev.Name, Author: dev.Author}
-				srv.Volume = volumeName(remoteURL)
+				// Display name only — and it goes out in /api/config, which is
+				// readable anonymously, so it must not be derived from the
+				// storage URL: on s3://acme-prod-drive that named the bucket
+				// to the whole internet. `--volume` / `volume:` stays the one
+				// way an operator puts a storage-flavoured string on the wire.
+				srv.Volume = "BearDrive"
 				if meta != nil {
 					display = remoteURL
 				} else {
@@ -406,16 +409,4 @@ credentials); otherwise it is relayed through this server.`,
 	c.Flags().StringVarP(&configPath, "config", "c", "", "JSON config file; explicit flags override its values")
 	c.Flags().StringVar(&projectsDB, "projects-db", "", "hub project registry file (default: $BDRIVE_HOME/projects.json)")
 	return c
-}
-
-func volumeName(remoteURL string) string {
-	if u, err := url.Parse(remoteURL); err == nil {
-		if base := path.Base(strings.Trim(u.Path, "/")); base != "" && base != "." {
-			return base
-		}
-		if u.Host != "" {
-			return u.Host
-		}
-	}
-	return "beardrive"
 }

@@ -117,9 +117,35 @@ func (r *Result) Activity() bool {
 // would let one device silently repoint another — and .git) are defined once
 // in config, because the hub enforces the same set on the paths clients
 // upload. Local aliases so the walk and the path checks below read plainly.
-var ignoreDirs = config.ReservedDirs
-
+func ignoredDir(name string) bool  { return config.ReservedDir(name) }
 func ignoredFile(name string) bool { return config.ReservedName(name) }
+
+// maxLamport caps what this device's clock will absorb from a peer. Cycle
+// raises st.Lamport to any value it pulls and scan increments it per local op,
+// so one op carrying math.MaxInt64 wraps the clock negative and every op this
+// device ever writes again sorts before everything it has already seen — a
+// silent, permanent write lock installed by one line of JSON. A value this
+// large is not a clock reading, so it is ignored rather than absorbed. Pulled
+// ops are never rewritten: replay must agree between a device and its remote
+// copy.
+const maxLamport = int64(1) << 62
+
+// absorbLamport advances the local clock to a peer's reading, ignoring absurd
+// ones. tickLamport is the local increment, which stops at the ceiling rather
+// than wrapping.
+func absorbLamport(cur, peer int64) int64 {
+	if peer > cur && peer <= maxLamport {
+		return peer
+	}
+	return cur
+}
+
+func tickLamport(cur int64) int64 {
+	if cur >= maxLamport {
+		return cur
+	}
+	return cur + 1
+}
 
 // Cycle runs one full scan/sync/materialize pass under the volume lock.
 func (s *Session) Cycle(ctx context.Context) (*Result, error) {
@@ -184,9 +210,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		}
 		res.PulledOps = len(pulled)
 		for _, op := range pulled {
-			if op.Lamport > st.Lamport {
-				st.Lamport = op.Lamport
-			}
+			st.Lamport = absorbLamport(st.Lamport, op.Lamport)
 		}
 	}
 
@@ -321,7 +345,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		note = s.Store.LoadNote()
 	}
 	nextOp := func(kind, rel string) journal.Op {
-		st.Lamport++
+		st.Lamport = tickLamport(st.Lamport)
 		seqBase++
 		return journal.Op{
 			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
@@ -504,7 +528,7 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 		if !s.Store.HasBlob(loser.Blob) {
 			continue // content unavailable (partial pull); skip rather than fail
 		}
-		st.Lamport++
+		st.Lamport = tickLamport(st.Lamport)
 		seqBase++
 		out = append(out, journal.Op{
 			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
@@ -591,6 +615,7 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 // since the scan earlier in this cycle. Split out of materialize so the cycle
 // can land .bdriveignore on its own, before the rules are needed.
 func (s *Session) materializeFile(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
+	want.Mode = safeMode(want.Mode) // before the cache compare, or every cycle rewrites
 	c, ok := cache[rel]
 	if ok && c.Blob == want.Blob && c.Mode == want.Mode {
 		return false, nil
@@ -653,7 +678,7 @@ func (s *Session) pruneOps(target map[string]journal.FileState, st *store.SyncSt
 	sort.Strings(paths) // map order is random; keep the journal reproducible
 	ops := make([]journal.Op, 0, len(paths))
 	for _, rel := range paths {
-		st.Lamport++
+		st.Lamport = tickLamport(st.Lamport)
 		seqBase++
 		ops = append(ops, journal.Op{
 			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
@@ -668,16 +693,40 @@ func (s *Session) pruneOps(target map[string]journal.FileState, st *store.SyncSt
 }
 
 // neverSync reports whether a path is one the scan walk never uploads at all
-// — the builtin exclusions, which prune treats exactly like ignore rules.
+// — the builtin exclusions, which prune treats exactly like ignore rules — or
+// one no journal may name at all (see unsafeRel). Every path that reaches the
+// working folder routes through here.
 func neverSync(rel string) bool {
+	if unsafeRel(rel) {
+		return true
+	}
 	parts := strings.Split(rel, "/")
 	for _, dir := range parts[:len(parts)-1] {
-		if ignoreDirs[dir] {
+		if ignoredDir(dir) {
 			return true
 		}
 	}
 	return ignoredFile(parts[len(parts)-1])
 }
+
+// unsafeRel reports whether an op's Path escapes the mount root. scan only
+// ever produces clean relative paths, but Op.Path is arbitrary JSON off a
+// peer's journal and materialize resolves it with filepath.Join(s.Folder, …),
+// which walks above the root without complaint — one pushed line would reach
+// ~/.ssh/authorized_keys on every teammate's machine. Anything that is not
+// already a clean relative slash path is refused rather than normalized:
+// normalizing would land two different journal paths on one file.
+func unsafeRel(rel string) bool {
+	return rel == "" || rel == ".." || strings.HasPrefix(rel, "../") ||
+		path.IsAbs(rel) || filepath.IsAbs(rel) || path.Clean(rel) != rel
+}
+
+// safeMode is the only mode materialize will apply. scan records
+// info.Mode().Perm(), but Op.Mode is a raw uint32 off the wire and
+// fs.ModeSetuid/ModeSetgid live in that same word — os.Chmod would turn a
+// peer's op into a setuid binary in every teammate's folder. Group/other write
+// goes too: a synced file is never a drop box for other users on the machine.
+func safeMode(m uint32) uint32 { return m & 0o777 &^ 0o022 }
 
 func (s *Session) writeFile(abs string, want journal.FileState) error {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {

@@ -199,14 +199,20 @@ const emptyBlob = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b
 // local edit.
 func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, _ User) error {
 	dst := filepath.Join(d.Root, filepath.FromSlash(p))
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
 	// cleanUploadPath rules out "..", but a path with no ".." in it still
 	// leaves the folder by walking through a symlinked directory that was
 	// already there. The viewer promises "this folder": resolve where the
 	// write would actually land and refuse anything outside Root.
-	if err := underRoot(d.Root, filepath.Dir(dst)); err != nil {
+	//
+	// Judged BEFORE anything is created. underRoot needs a directory that
+	// exists (EvalSymlinks), so asking after MkdirAll meant a refused upload
+	// had already built the whole parent chain on the other side of the
+	// symlink. The deepest existing ancestor answers the same question: every
+	// directory MkdirAll then creates is a real directory beneath it.
+	if err := underRoot(d.Root, existingDir(filepath.Dir(dst))); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bdrive-tmp-")
@@ -222,6 +228,20 @@ func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, 
 		return err
 	}
 	return os.Rename(tmp.Name(), dst)
+}
+
+// existingDir walks up from dir to the deepest ancestor that exists on disk.
+func existingDir(dir string) string {
+	for {
+		if _, err := os.Lstat(dir); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		dir = parent
+	}
 }
 
 // underRoot reports whether dir, with every symlink resolved, is root or

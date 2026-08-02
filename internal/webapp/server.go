@@ -285,11 +285,32 @@ type Identity struct {
 
 // loadOps fetches and parses every journal on the remote.
 func (r *RemoteSource) loadOps(ctx context.Context) ([]journal.Op, error) {
+	sourced, err := r.loadSourcedOps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]journal.Op, len(sourced))
+	for i, s := range sourced {
+		all[i] = s.Op
+	}
+	return all, nil
+}
+
+// sourcedOp is an op plus the device whose journal it was actually read from.
+// Everything inside an op — including its Device field — is JSON the pusher
+// chose; the journal KEY is the one part the hub binds to the pushing device
+// (store.go's ownJournal), so From is the only trustworthy attribution.
+type sourcedOp struct {
+	Op   journal.Op
+	From string
+}
+
+func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) {
 	objs, err := r.Backend.List(ctx, "journal/")
 	if err != nil {
 		return nil, fmt.Errorf("list journals: %w", err)
 	}
-	var all []journal.Op
+	var all []sourcedOp
 	for _, o := range objs {
 		if !strings.HasSuffix(o.Key, ".jsonl") {
 			continue
@@ -307,7 +328,10 @@ func (r *RemoteSource) loadOps(ctx context.Context) ([]journal.Op, error) {
 		if err != nil {
 			continue // corrupt journal; ignore rather than break the view
 		}
-		all = append(all, ops...)
+		from := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
+		for _, op := range ops {
+			all = append(all, sourcedOp{Op: op, From: from})
+		}
 	}
 	return all, nil
 }
@@ -472,15 +496,21 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 	index, _ := fs.ReadFile(static, "index.html")
 	return func(w http.ResponseWriter, r *http.Request) {
 		upath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		// This document carries the session cookie and drives share creation,
+		// permission edits and project deletion, so it must not be framed by
+		// another origin or MIME-sniffed. /s/* sets its own sandbox CSP and
+		// never reaches here.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 		// Vite emits content-hashed filenames under assets/, safe to cache
 		// forever. Everything else (index.html above all) must revalidate:
 		// embedded files carry no modtime, so without no-cache browsers
 		// cache heuristically and users see a stale frontend after upgrades.
-		if strings.HasPrefix(upath, "assets/") {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			w.Header().Set("Cache-Control", "no-cache")
-		}
+		// Set on the real asset only, below: deciding on the URL prefix meant
+		// a MISS under assets/ answered the app shell marked immutable for a
+		// year, so a shared cache pinned index.html at an asset URL forever.
+		w.Header().Set("Cache-Control", "no-cache")
 		// Reserved prefixes that fell through to the catch-all are genuine
 		// 404s — don't mask a mistyped API/auth/share URL with the app shell.
 		if strings.HasPrefix(upath, "api/") || strings.HasPrefix(upath, "auth/") || strings.HasPrefix(upath, "s/") {
@@ -503,6 +533,9 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 				fi, statErr := f.Stat()
 				f.Close()
 				if statErr == nil && !fi.IsDir() {
+					if strings.HasPrefix(upath, "assets/") {
+						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					}
 					files.ServeHTTP(w, r) // a real asset
 					return
 				}
@@ -860,13 +893,31 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	w.Header().Set("ETag", etag)
 	ct := contentType(p)
 	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Content-Length", fmt.Sprint(fi.Size))
+	setContentLength(w, rc)
 	if attach {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(p)))
 	} else {
 		sandboxInline(w, ct)
 	}
 	io.Copy(w, rc)
+}
+
+// setContentLength promises a body length only when the thing about to be
+// streamed can be measured. FileInfo.Size comes off a journal op — JSON a
+// client pushed — so echoing it made the hub promise a length it had no way
+// to keep: a padded or truncated response for every download of that file,
+// declared by anyone who can push a journal. When the source cannot measure
+// (an object store's response body), no header goes out and net/http streams
+// chunked, which is a slightly worse progress bar and a true one.
+func setContentLength(w http.ResponseWriter, rc io.Reader) {
+	switch v := rc.(type) {
+	case interface{ Stat() (fs.FileInfo, error) }: // *os.File: file:// backend, DirSource
+		if fi, err := v.Stat(); err == nil && fi.Mode().IsRegular() {
+			w.Header().Set("Content-Length", fmt.Sprint(fi.Size()))
+		}
+	case interface{ Size() int64 }: // GCS *storage.Reader, bytes.Reader
+		w.Header().Set("Content-Length", fmt.Sprint(v.Size()))
+	}
 }
 
 func (s *Server) handleFile(v *volume, w http.ResponseWriter, r *http.Request) {
