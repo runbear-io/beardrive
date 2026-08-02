@@ -578,6 +578,11 @@ func TestSec_Device_AReadCannotClaimADeviceIdForTheCaller(t *testing.T) {
 	}
 
 	const victim = "m-carolbox" // carol's device, which has not synced yet
+	// It signed in, which is where a device identity is bound to its account.
+	// It has still never pushed anything, which is the state this test is about.
+	if rec := secRegisterDevice(t, h, p.ID, c["carol"], victim, "carol-box", "darwin"); rec.Code != 200 {
+		t.Fatalf("setup: carol's device could not sign in: %d %s", rec.Code, rec.Body)
+	}
 
 	// One read, naming carol's device.
 	req := httptest.NewRequest("GET", "/api/p/"+p.ID+"/store/exists?key=blobs/"+strings.Repeat("a", 64), nil)
@@ -619,4 +624,3 @@ func secfx7OpLine2(t *testing.T, dev, p string) string {
 	}
 	return string(b) + "\n"
 }
-

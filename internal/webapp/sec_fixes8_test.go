@@ -145,7 +145,10 @@ func TestSec_PKCE_ACodeMintedForAnotherFlowIsNotRedeemable(t *testing.T) {
 	issued := 0
 	c := NewCLIAuth(
 		func(*http.Request) (User, bool) { return User{ID: "u-victim", Email: "victim@x.io"}, true },
-		func(w http.ResponseWriter, userID, device string) { issued++; writeJSON(w, map[string]any{"token": "t"}) },
+		func(w http.ResponseWriter, _ *http.Request, userID, device string) {
+			issued++
+			writeJSON(w, map[string]any{"token": "t"})
+		},
 	)
 	mux := http.NewServeMux()
 	c.Register(mux)
@@ -286,7 +289,7 @@ func TestSec_Logout_ATokenCannotEndAnotherDevicesCredential(t *testing.T) {
 			"credential killer. GET /api/p/%s/tree with alice's token = %d", p.ID, live(victimTok))
 	}
 	if live(attackerTok) == 200 {
-		t.Errorf("bob's own token survived his own logout: DELETE /api/auth/token did not revoke "+
+		t.Errorf("bob's own token survived his own logout: DELETE /api/auth/token did not revoke " +
 			"the credential it was presented with")
 	}
 }

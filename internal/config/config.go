@@ -169,6 +169,14 @@ func LoadMounts() (map[string]MountInfo, error) {
 	return out, nil
 }
 
+// SaveMounts writes the registry, stamping an identity on any row that has
+// none. Every row written before Dev/Ino existed carries zeros, and the
+// move-vs-copy discriminator is only consulted when a row HAS one — so without
+// this backfill the guard is inert on every mount already enrolled on every
+// machine, which is to say on all of them. The stamp is taken while the
+// recorded path still holds this mount, which is the only moment the answer is
+// unambiguous; a row whose path has already stopped answering is left alone
+// rather than given the identity of whatever is sitting there now.
 func SaveMounts(m map[string]MountInfo) error {
 	p, err := mountsPath()
 	if err != nil {
@@ -176,6 +184,15 @@ func SaveMounts(m map[string]MountInfo) error {
 	}
 	if _, err := ensureHome(); err != nil {
 		return err
+	}
+	for id, mi := range m {
+		if mi.Dev != 0 || mi.Ino != 0 || mi.Path == "" || !mountLivesAt(mi.Path, id) {
+			continue
+		}
+		if dev, ino := dirID(mi.Path); dev != 0 {
+			mi.Dev, mi.Ino = dev, ino
+			m[id] = mi
+		}
 	}
 	return writeJSON(p, m)
 }

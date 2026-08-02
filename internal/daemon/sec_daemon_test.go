@@ -329,7 +329,7 @@ func secdmnMount(t *testing.T) secdmnFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 	vdir, err := config.VolumeDir(p.ID)

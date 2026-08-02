@@ -63,8 +63,22 @@ func TestCLIBrowserLoginPKCERoundTrip(t *testing.T) {
 	if got := exchange(approve(""), verifier); got.Code != http.StatusUnauthorized {
 		t.Fatalf("a challenge-less code was redeemed by a PKCE client: %d %s", got.Code, got.Body)
 	}
-	// A pre-PKCE CLI on a new hub still signs in.
-	if got := exchange(approve(""), ""); got.Code != 200 {
-		t.Fatalf("an older CLI can no longer sign in: %d %s", got.Code, got.Body)
+	// And a code minted for a flow that bound nothing is not redeemable AT
+	// ALL, by anybody. The compat arm that used to accept it (challenge-less
+	// grant + challenge-less exchange = ok) could not tell a pre-PKCE binary
+	// from a caller that simply omitted the parameter, so it was a documented
+	// way to ask for no proof of possession and be given none. See pkceOK.
+	if got := exchange(approve(""), ""); got.Code != http.StatusUnauthorized {
+		t.Fatalf("a grant that bound nothing was redeemed by an exchange that proved nothing: %d %s",
+			got.Code, got.Body)
 	}
+}
+
+// pkceParams is the challenge query fragment and matching verifier the real
+// CLI sends. Every fixture that drives the loopback flow needs it, because the
+// hub now refuses to START that flow without proof of possession (pageCLI).
+func pkceParams() (query, verifier string) {
+	verifier = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+	sum := sha256.Sum256([]byte(verifier))
+	return "&code_challenge=" + base64.RawURLEncoding.EncodeToString(sum[:]) + "&code_challenge_method=S256", verifier
 }

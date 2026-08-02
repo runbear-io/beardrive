@@ -29,6 +29,9 @@ import (
 // through the public store API, as an ordinary member's syncing device does.
 func sec6PushJournal(t *testing.T, h http.Handler, id, dev string, ops []map[string]any, c *http.Cookie) {
 	t.Helper()
+	// A device syncs under an identity the hub bound when it signed in.
+	// Idempotent: re-registering an id this account already owns is a no-op.
+	secRegisterDevice(t, h, id, c, dev, dev, "linux")
 	var b strings.Builder
 	for _, op := range ops {
 		line, err := json.Marshal(op)

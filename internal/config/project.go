@@ -188,6 +188,17 @@ func SaveProject(folder string, p Project) (Project, error) {
 // ResolveMount loads a folder's project settings and self-heals the
 // registry: if the folder was renamed or moved, the registry entry is
 // updated to the new path so `bdrive status` and the daemon find it again.
+//
+// It never CREATES a row. Enrolling this device in a project is `bdrive init`
+// (EnrollMount) and nothing else: .bdrive/config.json travels with a folder —
+// a clone, an unpacked archive, a colleague's copy — so its presence is not
+// consent to sync, and syncBlocked's "init" arm is the gate that says so.
+// Creating the row here made that gate unreachable for every command that
+// resolves a folder before consulting it (`bdrive restore`, `bdrive forget`):
+// one run inside an attacker-supplied folder put an attacker-chosen remote in
+// the registry, and the login autostart runs `bdrive resume`, which starts a
+// daemon for every enrolled row. A function every folder-taking command calls
+// must not be a write with a read-shaped name.
 func ResolveMount(folder string) (Project, bool, error) {
 	p, ok, err := LoadProject(folder)
 	if err != nil || !ok {
@@ -198,6 +209,9 @@ func ResolveMount(folder string) (Project, bool, error) {
 		return p, true, err
 	}
 	mi, registered := mounts[p.ID]
+	if !registered {
+		return p, true, nil
+	}
 	// The self-heal follows a mount that MOVED, and .bdrive/config.json
 	// travels with the folder — a clone, an unpacked archive, a colleague's
 	// copy — so "some folder carries this id" is not "this mount is now
@@ -225,12 +239,26 @@ func ResolveMount(folder string) (Project, bool, error) {
 	// that has none) keep the conservative answer.
 	dev, ino := dirID(folder)
 	moved := dev != 0 && dev == mi.Dev && ino == mi.Ino
-	if registered && !samePath(mi.Path, folder) && !moved && mountLivesAt(mi.Path, p.ID) {
-		return p, false, fmt.Errorf("%s carries the settings of project %s, which this device already "+
-			"syncs at %s — a copy of a project folder is not that project; run `bdrive init` here to "+
-			"connect this folder to a project", folder, p.ID, mi.Path)
+	if !samePath(mi.Path, folder) && !moved {
+		if mountLivesAt(mi.Path, p.ID) {
+			return p, false, fmt.Errorf("%s carries the settings of project %s, which this device already "+
+				"syncs at %s — a copy of a project folder is not that project; run `bdrive init` here to "+
+				"connect this folder to a project", folder, p.ID, mi.Path)
+		}
+		if mi.Dev != 0 && dev != 0 {
+			// The recorded path did not answer. That is every ordinary reason
+			// a path stops answering for a moment — an external volume not
+			// mounted yet at login, a rename in flight, a restore — and it is
+			// NOT evidence that this folder is the mount. This folder provably
+			// is not the directory the row was written for, so it uses the
+			// settings and leaves the row alone; taking it would overwrite the
+			// identity that is the whole point of the field, and the real
+			// folder would come back as the one that cannot prove itself.
+			// Re-pointing a mount is `bdrive init` (EnrollMount).
+			return p, true, nil
+		}
 	}
-	if !registered || mi.Path != folder || mi.Volume != p.Volume || mi.Remote != p.Remote ||
+	if mi.Path != folder || mi.Volume != p.Volume || mi.Remote != p.Remote ||
 		mi.Dev != dev || mi.Ino != ino {
 		mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote, Dev: dev, Ino: ino}
 		if err := SaveMounts(mounts); err != nil {
@@ -238,4 +266,27 @@ func ResolveMount(folder string) (Project, bool, error) {
 		}
 	}
 	return p, true, nil
+}
+
+// EnrollMount is ResolveMount plus the one thing ResolveMount refuses to do:
+// create this device's registry row for a project. It is the enrollment
+// gesture, so exactly one caller has any business using it — `bdrive init`
+// (startSync).
+func EnrollMount(folder string) (Project, bool, error) {
+	p, ok, err := ResolveMount(folder)
+	if err != nil || !ok {
+		return p, ok, err
+	}
+	mounts, err := LoadMounts()
+	if err != nil {
+		return p, true, err
+	}
+	// init is also the repair gesture: it re-points a row unconditionally, which
+	// is the documented remedy every "run `bdrive init` here" message names —
+	// including for the one case ResolveMount deliberately will not decide (a
+	// move whose old path is gone and whose new directory has a new identity,
+	// e.g. across filesystems).
+	dev, ino := dirID(folder)
+	mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote, Dev: dev, Ino: ino}
+	return p, true, SaveMounts(mounts)
 }

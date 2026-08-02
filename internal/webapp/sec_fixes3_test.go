@@ -298,6 +298,7 @@ func TestSec_Store_MemberCannotWriteAPeersJournalByRenamingItself(t *testing.T) 
 	}
 
 	// Control: bob writing HIS OWN journal is legitimate and must keep working.
+	secRegisterDevice(t, h, p.ID, c["bob"], "bob-laptop-0001", "bob-laptop", "linux")
 	bobOK := secfx3Do(t, h, "PUT", "/api/p/"+p.ID+"/store/object?key=journal/bob-laptop-0001.jsonl",
 		nil, c["bob"], map[string]string{"X-Bdrive-Device": "bob-laptop-0001"})
 	if bobOK.Code != 200 {

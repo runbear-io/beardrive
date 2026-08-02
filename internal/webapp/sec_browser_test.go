@@ -470,6 +470,7 @@ func TestSec_Browser_JournalKeyMustNameARegistrableDevice(t *testing.T) {
 		"0000000000000000000000000000000000000000000000000000000000000000" +
 		`","size":1,"device":"%s","seq":1,"lamport":1}` + "\n"
 
+	secRegisterDevice(t, h, p.ID, c["bob"], "dev-bob12345678", "bob-box", "linux")
 	if rec := push("bob", "dev-bob12345678", fmt.Sprintf(line, "dev-bob12345678")); rec.Code != 200 {
 		t.Fatalf("bob push: %d %s", rec.Code, rec.Body)
 	}

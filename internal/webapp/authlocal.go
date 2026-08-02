@@ -52,6 +52,12 @@ type BuiltinAuth struct {
 	// outlive the account. Wired to Server.offboard by the server.
 	Offboard func(email string)
 
+	// BindDevice, when set, records that a device id belongs to an account, at
+	// the moment a token is minted for it. It is the ONLY way an ownership row
+	// is created for an id that has never synced — see DeviceRegistry.Bind for
+	// why first-claim-on-write could not be. Wired to Server.bindDevice.
+	BindDevice func(email string, r *http.Request) error
+
 	store AccountRepo
 
 	// cli serves `bdrive login` — the browser and device flows, shared with
@@ -745,6 +751,18 @@ func (a *BuiltinAuth) invitedVia(next string) string {
 
 func authPage(w http.ResponseWriter, title, body string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Every page this renders is part of the credential surface: the reset
+	// form echoes a single-use grant into its own body, and the two approval
+	// pages name the signed-in account and hand a machine a token acting as
+	// it. Nothing here may be stored by a browser disk cache or a shared
+	// forward proxy, and nothing here may be framed — the app shell next door
+	// has answered both questions since round 3 (server.go), and these
+	// handlers were simply never asked.
+	w.Header().Set("Cache-Control", "no-store, private")
+	w.Header().Set("Vary", "Cookie")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>%s — BearDrive</title>
 <style>
@@ -1138,20 +1156,35 @@ func (a *BuiltinAuth) mailBaseURL() string {
 
 // ---- CLI API ----
 
-func (a *BuiltinAuth) finishLogin(w http.ResponseWriter, userID, device string) {
+func (a *BuiltinAuth) finishLogin(w http.ResponseWriter, r *http.Request, userID, device string) {
 	if device == "" {
 		device = "cli"
-	}
-	tok, err := a.issueToken(userID, device)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
 	}
 	a.mu.Lock()
 	u := a.users[userID]
 	a.mu.Unlock()
 	if u == nil {
 		http.Error(w, "unknown user", http.StatusUnauthorized)
+		return
+	}
+	// Minting the token is where a device identity is BOUND to an account, and
+	// it is the only place a binding is created. Every mint point routes
+	// through here — the loopback browser flow, the device-code flow, and the
+	// login `bdrive init` runs inside itself — so binding here covers all three
+	// rather than the one a fix would otherwise name.
+	//
+	// Before the token, not after: a login that cannot bind must not hand back
+	// a credential that then cannot push. 409 is the honest status — the id is
+	// taken, and the message says what to do about it.
+	if a.BindDevice != nil {
+		if err := a.BindDevice(u.Email, r); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+	}
+	tok, err := a.issueToken(userID, device)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{

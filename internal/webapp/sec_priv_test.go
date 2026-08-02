@@ -309,6 +309,7 @@ func TestSec_Leak_ErrorBodiesRevealServerFilesystemPaths(t *testing.T) {
 	// bob writes his own journal through the documented sync route.
 	line := `{"seq":1,"lamport":1,"time":"2026-01-01T00:00:00Z","device":"devx",` +
 		`"kind":"put","path":"secret.md","blob":"` + missing + `","size":5}` + "\n"
+	secRegisterDevice(t, h, p.ID, c["bob"], "devx", "bob-box", "linux")
 	rec = secprivDo(t, h, "PUT", base+"store/object?key=journal/devx.jsonl", []byte(line),
 		c["bob"], map[string]string{"X-Bdrive-Device": "devx"})
 	if rec.Code != 200 {

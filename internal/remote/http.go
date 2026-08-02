@@ -9,17 +9,31 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"regexp"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 // maxListBytes caps the JSON listing a hub can make a device allocate.
 const maxListBytes = 8 << 20
+
+// maxJSONBytes caps every other JSON body a hub answers with. Round 7 bounded
+// List and round 8 the journal/blob bodies, but `sign` — the call every blob
+// push starts with — and `Exists` still decoded straight off the wire, so the
+// hub chose the allocation on the device's hottest path. One constant, applied
+// wherever this file decodes the hub.
+const maxJSONBytes = 1 << 20
+
+// maxKeySegment bounds one path component of a key the hub names. Listed keys
+// become local file paths (syncer.pull → store.JournalPath) and tar member
+// names (`bdrive export`); NAME_MAX is 255 everywhere beardrive runs, so a
+// longer segment is not a filename, it is an error the OS reports as something
+// other than "does not exist" — which is how one listed key hid every peer.
+const maxKeySegment = 255
 
 // httpBackend syncs one project through a bdrive web server instead of
 // talking to an object store. The client device is storage-blind: it only
@@ -236,15 +250,40 @@ func (b *httpBackend) List(ctx context.Context, prefix string) ([]Object, error)
 	// or compromised hub would be choosing paths on the victim's disk. Keys
 	// that are not keys are dropped rather than fatal — one bad listing must
 	// not stop the rest of the project syncing.
+	//
+	// The rule is journal.SafePath, the repo's single spelling of "a path a
+	// stranger named" — already applied at both hub ingest doors and to every
+	// peer op path. Spelling it a second time here is exactly how round 7's
+	// journal-path finding happened, so this calls it.
 	kept := out.Objects[:0]
 	for _, o := range out.Objects {
-		if o.Key == "" || strings.HasPrefix(o.Key, "/") || o.Key != path.Clean(o.Key) ||
-			o.Key == ".." || strings.HasPrefix(o.Key, "../") {
+		if !safeListedKey(o.Key) {
 			continue
+		}
+		if o.Size < 0 {
+			// Not a size. It is read as a memory bound (syncer.sizeBound) and
+			// written straight into a tar header by `bdrive export`.
+			o.Size = 0
 		}
 		kept = append(kept, o)
 	}
 	return kept, nil
+}
+
+// safeListedKey is journal.SafePath plus a length bound per component. SafePath
+// refuses control bytes, absolute and non-Clean spellings and `..`; it says
+// nothing about length, and length is what turns a key into an open() the OS
+// refuses with something that is not IsNotExist.
+func safeListedKey(key string) bool {
+	if !journal.SafePath(key) {
+		return false
+	}
+	for _, seg := range strings.Split(key, "/") {
+		if len(seg) > maxKeySegment {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *httpBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
@@ -281,7 +320,7 @@ func (b *httpBackend) Exists(ctx context.Context, key string) (bool, error) {
 	var out struct {
 		Exists bool `json:"exists"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBytes)).Decode(&out); err != nil {
 		return false, err
 	}
 	return out.Exists, nil
@@ -296,12 +335,52 @@ func (b *httpBackend) Put(ctx context.Context, key string, r io.Reader, size int
 		return err
 	}
 	if plan.Mode == "direct" {
+		// "Already stored" is the one boolean that lets push advance its
+		// cursor without sending a byte, and the hub writes it. Believed on
+		// its own it publishes an op naming content nothing holds — the
+		// device never retries, because the op is behind the cursor forever,
+		// which breaks "blobs are pushed before the journal". A lying hub
+		// cannot be fully caught, but it now has to lie on a SECOND endpoint,
+		// and the honest failure (a storage race, a half-deleted object) is
+		// caught outright. Unconfirmed means upload, never skip.
 		if plan.Exists {
-			return nil // content-addressed and already there
+			if ok, err := b.Exists(ctx, key); err == nil && ok {
+				return nil
+			}
 		}
-		return b.putDirect(ctx, plan, r, size)
+		if plan.URL != "" && directTargetOK(b.base, plan.URL) {
+			return b.putDirect(ctx, plan, r, size)
+		}
+		// No usable destination: relay through the hub, which already holds
+		// this device's credential and is the party it chose to trust.
 	}
 	return b.putViaServer(ctx, key, r, size)
+}
+
+// directTargetOK decides whether this device will hand a file's bytes to the
+// host a hub named. Round 4 read this as "not a new capability, the hub
+// already holds the data" — but at the moment the hub names the destination it
+// does NOT hold the data; that is what the upload is for, so one injected sign
+// response was an exfiltration channel the hub itself never sees.
+//
+// The device has nothing local to check a bucket hostname against, so the rule
+// it can enforce is transport: a presigned upload goes over TLS, or it does not
+// leave this device. S3 and GCS presign https; a plaintext object store must
+// relay through the hub instead. The hub's own origin is allowed as-is, since
+// that is the party the user already pointed this folder at.
+//
+// ponytail: transport only. Closing "an https host the hub named" needs a
+// device-side storage-host allowlist — a config surface and a product
+// decision, not a defense this file can invent.
+func directTargetOK(base, raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if u.User != nil {
+		return false // credentials in the URL are not part of any presign
+	}
+	return strings.EqualFold(u.Scheme, "https") || SameOrigin(base, raw)
 }
 
 type putPlan struct {
@@ -332,7 +411,7 @@ func (b *httpBackend) sign(ctx context.Context, key string, size int64) (putPlan
 	if resp.StatusCode != http.StatusOK {
 		return plan, httpError(resp)
 	}
-	err = json.NewDecoder(resp.Body).Decode(&plan)
+	err = json.NewDecoder(io.LimitReader(resp.Body, maxJSONBytes)).Decode(&plan)
 	return plan, err
 }
 

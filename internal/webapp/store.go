@@ -66,10 +66,10 @@ func (s *Server) storeKey(w http.ResponseWriter, r *http.Request) (string, bool)
 // rather than a refused one. Only a caller claiming to be a device it is not
 // gets the 403.
 //
-// ops is what the body actually carries (empty when the body is not known
-// yet, e.g. at signing time). What needs an owner is AUTHORSHIP: ops replay on
-// every device and History attributes them to this journal's device.
-func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string, ops []journal.Op) bool {
+// The body's ops are deliberately NOT read here any more. They used to admit
+// a first claim when every op named the device, which is a field the writer
+// writes — see the default arm below.
+func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string) bool {
 	if !strings.HasPrefix(key, "journal/") {
 		return true
 	}
@@ -106,38 +106,30 @@ func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string, 
 	// answers admin for exactly those configurations.
 	if s.Devices != nil {
 		me := normEmail(s.requestUser(r).Email)
-		owner, known := s.Devices.OwnerOf(dev)
+		owner, _ := s.Devices.OwnerOf(dev)
 		switch {
 		case normEmail(owner) != "" && normEmail(owner) == me:
 			// My device, my journal.
-		case !known && journalNames(dev, ops):
-			// An id nothing on this hub has ever synced under: this write is
-			// its first claim. It has to at least BE that device's journal —
-			// every op naming it — which is not proof (the field is the
-			// writer's too), but it is the difference between a device
-			// starting to sync and a member pasting ops under a name they
-			// invented. The claim is recorded by observeDevice below, only
-			// after this returns, so the request cannot answer its own
-			// ownership question.
 		case atLeast(s.projectPerm(r, r.PathValue("project")), PermAdmin):
 			// Project admin is the recovery path — the answer to "a squatted id
 			// is a permanent lockout". The device's own remedy is in the body.
 		default:
-			http.Error(w, "this device id belongs to another account on this hub; "+
-				"delete device.json in your BearDrive home to mint a new one, "+
-				"or ask a project admin", http.StatusForbidden)
-			return false
-		}
-	}
-	return true
-}
-
-// journalNames reports whether every op in a journal write declares the device
-// the key names. A journal that attributes its own ops to somebody else is not
-// this device's log; readers that trust Op.Device would credit them there.
-func journalNames(dev string, ops []journal.Op) bool {
-	for _, op := range ops {
-		if op.Device != dev {
+			// There is no "first writer claims an unowned id" arm any more.
+			// It used to admit `!known && journalNames(dev, ops)` — every op in
+			// the body naming the device — which reads a field the WRITER
+			// writes, so it cost one request to take any id that had not yet
+			// pushed a journal. That included every device of every read-only
+			// member, permanently, because a device that syncs with READ can
+			// never reach this door to claim its own id in the first place.
+			//
+			// A device id is now bound to its account when the hub mints that
+			// machine's token (DeviceRegistry.Bind), which is a moment the hub
+			// authenticates and the machine cannot forge. So an unowned id is
+			// simply not anybody's to write, and the remedy is to sign in.
+			http.Error(w, "this device is not registered to your account on this hub; "+
+				"run `bdrive login` on this machine (if the id belongs to someone else, "+
+				"delete device.json in your BearDrive home first, or ask a project admin)",
+				http.StatusForbidden)
 			return false
 		}
 	}
@@ -365,21 +357,21 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		http.Error(w, "content does not hash to its key", http.StatusBadRequest)
 		return
 	}
-	ops, err := journalOps(key, tmp)
-	if err != nil {
+	if _, err := journalOps(key, tmp); err != nil {
 		// The body is the client's, so everything journalOps can object to is
 		// the client's fault: an undecodable journal or an op naming a path
 		// this hub will not carry. 400, not 502 — and nothing is stored.
 		http.Error(w, "invalid journal body", http.StatusBadRequest)
 		return
 	}
-	if !s.ownJournal(w, r, key, ops) {
+	if !s.ownJournal(w, r, key) {
 		return
 	}
 	// Observed only after the write is authorized: a request that registers
-	// the device it claims to be answers its own ownership question. A journal
-	// write is the only thing that may CLAIM an id — a blob put says nothing
-	// about who a device is, so it refreshes like the read doors.
+	// the device it claims to be answers its own ownership question. Nothing
+	// here CLAIMS any more — that happens once, when the hub mints this
+	// machine's token (DeviceRegistry.Bind) — so both arms are a refresh of
+	// name/OS/IP into a row the account already owns.
 	if strings.HasPrefix(key, "journal/") {
 		s.observeDevice(r)
 	} else {

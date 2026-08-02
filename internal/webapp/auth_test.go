@@ -227,7 +227,8 @@ func TestCLICallbackFlow(t *testing.T) {
 
 	// with a session, a GET asks first — it names the account the terminal
 	// would act as and offers to switch, and grants nothing on its own.
-	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"
+	pkceQ, pkceV := pkceParams()
+	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1" + pkceQ
 	req = httptest.NewRequest("GET", cliURL, nil)
 	req.AddCookie(cookie)
 	rec = httptest.NewRecorder()
@@ -256,7 +257,7 @@ func TestCLICallbackFlow(t *testing.T) {
 	code := loc.Query().Get("code")
 
 	// exchange the code for a token
-	rec = do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "laptop"})
+	rec = do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "laptop", "code_verifier": pkceV})
 	if rec.Code != 200 {
 		t.Fatalf("exchange: %d %s", rec.Code, rec.Body)
 	}
@@ -601,7 +602,8 @@ func TestCLILoginSwitchAccount(t *testing.T) {
 	h := srv.Handler()
 	personal := signupAndSession(t, h, "me@personal.io", "Me", "password1")
 
-	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"
+	pkceQ2, pkceV2 := pkceParams()
+	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1" + pkceQ2
 
 	// the page offers a way out, carrying this sign-in along
 	req := httptest.NewRequest("GET", cliURL, nil)
@@ -649,7 +651,7 @@ func TestCLILoginSwitchAccount(t *testing.T) {
 		t.Fatalf("approve after switch: %d", rec.Code)
 	}
 	cb, _ := url.Parse(rec.Header().Get("Location"))
-	out := do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": cb.Query().Get("code"), "device": "laptop"})
+	out := do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": cb.Query().Get("code"), "device": "laptop", "code_verifier": pkceV2})
 	if !strings.Contains(out.Body.String(), "me@work.io") {
 		t.Fatalf("token issued to the wrong account: %s", out.Body)
 	}

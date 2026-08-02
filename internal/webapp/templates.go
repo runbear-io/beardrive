@@ -31,7 +31,11 @@ func (s *Server) seedTemplate(ctx context.Context, projectID string, t templates
 		total += int64(len(f.Content))
 	}
 	org := s.orgOf(projectID)
-	if err := s.quota().CheckWrite(org, total); err != nil {
+	// + reservedBytes(org): every other write door counts the presigned grants
+	// that are outstanding but not yet stored (see reserve.go). Passing the bare
+	// total let a template-seeded project push an org past its cap while a grant
+	// was in flight.
+	if err := s.quota().CheckWrite(org, total+s.reservedBytes(org)); err != nil {
 		return err
 	}
 

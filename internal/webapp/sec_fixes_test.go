@@ -201,7 +201,10 @@ func TestSec_Devices_ConcurrentRegistrationLeavesOneConsistentOwner(t *testing.T
 	var wg sync.WaitGroup
 	for i := 0; i < 24; i++ {
 		wg.Add(2)
-		go func() { defer wg.Done(); secRegisterDevice(t, h, p.ID, c["alice"], id, "alice-macbook", "darwin/arm64") }()
+		go func() {
+			defer wg.Done()
+			secRegisterDevice(t, h, p.ID, c["alice"], id, "alice-macbook", "darwin/arm64")
+		}()
 		go func() { defer wg.Done(); secRegisterDevice(t, h, dp.ID, c["dave"], id, "daves-squat", "evil/os") }()
 	}
 	wg.Wait()
@@ -424,12 +427,12 @@ func TestSec_Path_NextCannotLeaveTheHubOnAnyAuthRoute(t *testing.T) {
 		`/%5cevil.example/`,
 		`/%09/%2fevil.example/`,
 		`/%0d%0aSet-Cookie:pwn=1`,
-		"/⁄⁄evil.example/", // FRACTION SLASH
-		"/／／evil.example/", // FULLWIDTH SOLIDUS
-		"///evil.example/",     // NEL
-		"/ //evil.example/",     // LINE SEPARATOR
-		"///evil.example/",     // vertical tab
-		"///evil.example/",     // form feed
+		"/⁄⁄evil.example/",  // FRACTION SLASH
+		"/／／evil.example/",  // FULLWIDTH SOLIDUS
+		"///evil.example/", // NEL
+		"/ //evil.example/", // LINE SEPARATOR
+		"///evil.example/", // vertical tab
+		"///evil.example/",// form feed
 		"https://evil.example/",
 		"javascript:alert(1)",
 		`/\t\\evil.example/`,
@@ -439,7 +442,10 @@ func TestSec_Path_NextCannotLeaveTheHubOnAnyAuthRoute(t *testing.T) {
 	redirects := 0
 	for _, next := range hostile {
 		q := "next=" + urlQuery(next)
-		for _, tc := range []struct{ method, url string; body string }{
+		for _, tc := range []struct {
+			method, url string
+			body        string
+		}{
 			{"POST", "/auth/login?" + q, "email=alice%40x.io&password=password1"},
 			{"POST", "/auth/signup?" + q, "email=eve%40x.io&name=Eve&password=password1"},
 			{"GET", "/auth/logout?" + q, ""},
@@ -553,8 +559,8 @@ func TestSec_Leak_NewLogLinesCarryNoCredential(t *testing.T) {
 
 	logged := buf.String()
 	for _, secret := range []string{
-		c["alice"].Value,             // the session cookie the request carried
-		"secret-device-token-value",  // the bearer token the request carried
+		c["alice"].Value,            // the session cookie the request carried
+		"secret-device-token-value", // the bearer token the request carried
 		"X-Amz-Signature", "Signature=", "AWS4-HMAC",
 		"password", "Cookie:", "Authorization",
 	} {
@@ -598,6 +604,7 @@ func TestSec_Path_ValidBlobHashStaysInsideItsProject(t *testing.T) {
 		"device": "bobdev",
 	}
 	line, _ := json.Marshal(op)
+	secRegisterDevice(t, h, p.ID, c["bob"], "bobdev", "bob-box", "linux")
 	if rec := secfixDo(t, h, "PUT", "/api/p/"+p.ID+"/store/object?key=journal/bobdev.jsonl",
 		append(line, '\n'), c["bob"], map[string]string{"X-Bdrive-Device": "bobdev"}); rec.Code != 200 {
 		t.Fatalf("bob pushes his own journal: %d %s", rec.Code, rec.Body)
@@ -653,6 +660,7 @@ func TestSec_Path_HostileBlobCannotRepointALiveShare(t *testing.T) {
 		"device": "bobdev",
 	}
 	line, _ := json.Marshal(op)
+	secRegisterDevice(t, h, p.ID, c["bob"], "bobdev", "bob-box", "linux")
 	if rec := secfixDo(t, h, "PUT", "/api/p/"+p.ID+"/store/object?key=journal/bobdev.jsonl",
 		append(line, '\n'), c["bob"], map[string]string{"X-Bdrive-Device": "bobdev"}); rec.Code != 200 {
 		t.Fatalf("bob pushes: %d %s", rec.Code, rec.Body)
@@ -797,8 +805,19 @@ func TestSec_DB_RollbackHoldsUnderConcurrentMutators(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(3)
-		go func() { defer wg.Done(); for j := 0; j < 40; j++ { db.Role(o.ID, "bob@x.io") } }()
-		go func() { defer wg.Done(); for j := 0; j < 40; j++ { db.Get(o.ID); db.OrgsFor("bob@x.io") } }()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 40; j++ {
+				db.Role(o.ID, "bob@x.io")
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 40; j++ {
+				db.Get(o.ID)
+				db.OrgsFor("bob@x.io")
+			}
+		}()
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 40; j++ {

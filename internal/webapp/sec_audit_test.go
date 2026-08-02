@@ -178,6 +178,8 @@ func TestSec_Audit_OwnerlessLegacyRowStillClaimsTheDeviceId(t *testing.T) {
 	// Control: the request shape is valid and reaches the handler — bob may
 	// write a journal for an id that is unambiguously his own.
 	const bobDev = "bob-desktop-11cc"
+	// A device is registered when its machine signs in, so bob's does.
+	secRegisterDevice(t, h, p.ID, c["bob"], bobDev, "bob-desktop", "linux")
 	mine := secaudOpLine(1, bobDev, "put", "bobs-notes.md", strings.Repeat("b", 64))
 	if rec := secfx4Store(t, h, "PUT",
 		"/api/p/"+p.ID+"/store/object?key=journal/"+bobDev+".jsonl", mine, c["bob"], bobDev); rec.Code != 200 {

@@ -441,6 +441,12 @@ func (s *Server) Handler() http.Handler {
 	if a, ok := s.Auth.(*BuiltinAuth); ok && a.Offboard == nil {
 		a.Offboard = s.offboard
 	}
+	// A device identity is bound to an account when its token is minted, and
+	// nowhere else. Wired here rather than at startup because the fixtures (and
+	// a hub rebuilt from its repos) assemble Auth and Devices independently.
+	if a, ok := s.Auth.(*BuiltinAuth); ok && a.BindDevice == nil {
+		a.BindDevice = s.bindDevice
+	}
 
 	// Volume resolution per route family: fixed single volume, or by
 	// project id in hub mode. One handler implementation serves both.

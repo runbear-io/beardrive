@@ -190,9 +190,14 @@ func printCycle(res *syncer.Result) {
 		fmt.Printf("  remote:         no access — sync paused (ask a project admin for access)\n")
 	case res.ReadOnly:
 		fmt.Printf("  remote:         read-only (pull only) — local changes stay on this device\n")
-	case res.Offline:
-		fmt.Printf("  remote:         offline (%v)\n", res.OfflineErr)
+	case res.Pushed && res.OfflineErr != nil:
+		// Offline is a report, not a gate (see syncer.Result): a content-level
+		// problem with one object no longer withholds this device's push, so
+		// "pushed" and a remote warning are both true.
+		fmt.Printf("  remote:         pushed, with a warning: %v\n", res.OfflineErr)
 	case res.Pushed:
 		fmt.Printf("  remote:         pushed\n")
+	case res.Offline:
+		fmt.Printf("  remote:         offline (%v)\n", res.OfflineErr)
 	}
 }

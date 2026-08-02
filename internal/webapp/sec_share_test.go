@@ -470,7 +470,8 @@ func TestSec_Invite_CLIOneTimeCodesAreNotReplayable(t *testing.T) {
 	session := signupAndSession(t, h, "alice@x.io", "Alice", "password1")
 
 	// --- browser flow: /auth/cli -> code -> /api/auth/exchange ---
-	rec := doAs(t, h, "POST", "/auth/cli?redirect="+url.QueryEscape("http://127.0.0.1:9999/callback")+"&state=s1", nil, session)
+	pkceQ, pkceV := pkceParams()
+	rec := doAs(t, h, "POST", "/auth/cli?redirect="+url.QueryEscape("http://127.0.0.1:9999/callback")+"&state=s1"+pkceQ, nil, session)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("approve cli login: %d %s", rec.Code, rec.Body)
 	}
@@ -482,10 +483,10 @@ func TestSec_Invite_CLIOneTimeCodesAreNotReplayable(t *testing.T) {
 	if code == "" {
 		t.Fatalf("no code in %q", rec.Header().Get("Location"))
 	}
-	if got := do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "d1"}); got.Code != 200 {
+	if got := do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "d1", "code_verifier": pkceV}); got.Code != 200 {
 		t.Fatalf("first exchange: %d %s", got.Code, got.Body)
 	}
-	if got := do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "d1"}); got.Code != http.StatusUnauthorized {
+	if got := do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "d1", "code_verifier": pkceV}); got.Code != http.StatusUnauthorized {
 		t.Fatalf("replayed exchange: %d %s, want 401", got.Code, got.Body)
 	}
 	// A code that was never issued buys nothing.

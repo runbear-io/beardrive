@@ -48,7 +48,7 @@ func secoutMount(t *testing.T) string {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 	return folder

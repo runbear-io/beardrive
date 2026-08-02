@@ -75,6 +75,22 @@ type OrgDB struct {
 	mu      sync.Mutex
 	byID    map[string]Org
 	invites map[string]OrgInvite
+	// seniority, when set, lists accounts oldest first. It resolves the ONE
+	// decision the org rows themselves cannot: which member inherits an org
+	// when every Joined time ties, which is the state of every member row
+	// written before Joined existed — i.e. of the hubs that have been running
+	// longest. See heir.
+	seniority func() []string
+}
+
+// SetSeniority installs the oldest-first account order (AuthProvider.Accounts).
+// It is set per call rather than at construction because a directory can be
+// rebuilt from its repo at any time, and a tie-break that silently reverts to
+// the address a member typed is round 8's escalation back.
+func (db *OrgDB) SetSeniority(f func() []string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.seniority = f
 }
 
 // NewOrgDB builds the registry over a repo, loading orgs and invites.
@@ -266,27 +282,57 @@ func (db *OrgDB) EvictMember(orgID, email string) error {
 	delete(next.Members, e)
 	delete(next.Joined, e)
 	if o.Members[e] == RoleOwner && db.ownerCount(next) == 0 {
-		if heir := earliestMember(next); heir != "" {
+		if heir := db.heir(next); heir != "" {
 			next.Members[heir] = RoleOwner
 		}
 	}
 	return db.putOrg(o, next)
 }
 
-// earliestMember is the heir: the member who has been in the org longest, by
-// the join time recorded on the row. Ties (only reachable between rows written
-// before Joined existed, which all carry the zero time) fall back to the lowest
-// address purely so every replica makes the same choice — never as the primary
-// rule, which is what let a newcomer pick an address and inherit the org.
-func earliestMember(o Org) string {
+// heir is the member who inherits an org whose last owner is gone: the one who
+// has been in it longest, by the join time on the row.
+//
+// The tie is the whole finding. Every member row written before Joined existed
+// carries the zero time, so on an upgraded hub — file, sqlite and postgres
+// alike — EVERY member ties and the old fallback ("lowest address") was the
+// rule again, unchanged from round 8: a newcomer who picked an address
+// inherited the org and project-admin on everything in it, triggered by the
+// most routine operator action there is.
+//
+// Ties resolve on account seniority (AuthProvider.Accounts, oldest first —
+// already the org migration's rule for picking the default org's owner). With
+// no seniority available there is NO evidence at all, and the answer is nobody:
+// an ownerless org is a repair a hub admin makes deliberately, while an
+// arbitrary heir is a privilege grant nobody asked for.
+//
+// Callers hold db.mu.
+func (db *OrgDB) heir(o Org) string {
 	heir, when := "", time.Time{}
+	tied := false
 	for m := range o.Members {
 		t := o.Joined[m]
-		if heir == "" || t.Before(when) || (t.Equal(when) && m < heir) {
-			heir, when = m, t
+		switch {
+		case heir == "":
+			heir, when, tied = m, t, false
+		case t.Before(when):
+			heir, when, tied = m, t, false
+		case t.Equal(when):
+			tied = true
 		}
 	}
-	return heir
+	if !tied || db.seniority == nil {
+		if tied {
+			return ""
+		}
+		return heir
+	}
+	for _, m := range db.seniority() {
+		e := normEmail(m)
+		if o.Members[e] != "" && o.Joined[e].Equal(when) {
+			return e
+		}
+	}
+	return ""
 }
 
 // removeLocked deletes a member row. Callers hold mu.
@@ -508,6 +554,20 @@ func (s *Server) offboard(email string) {
 		// drop the last owner, and logging that refusal left the hub's most
 		// privileged row attached to an address anyone could then sign up on.
 		// Evict instead, where the directory owns its orgs.
+		// Hand the directory the hub's account order before it has to pick an
+		// heir: the org rows alone cannot break a Joined tie, and every row
+		// written before Joined existed is one. Set here rather than at
+		// startup because a directory can be rebuilt from its repo.
+		if ld, ok := s.Dir.(LocalDirectory); ok && ld.OrgDB != nil && s.Auth != nil {
+			ld.OrgDB.SetSeniority(func() []string {
+				accts := s.Auth.Accounts()
+				out := make([]string, 0, len(accts))
+				for _, a := range accts {
+					out = append(out, a.Email)
+				}
+				return out
+			})
+		}
 		drop := s.Dir.RemoveMember
 		if ev, ok := s.Dir.(orgEvictor); ok {
 			drop = ev.EvictMember

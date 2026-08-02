@@ -838,6 +838,8 @@ func TestSec_DB_NULThroughEveryStoredRecordIsRefusedNotLost(t *testing.T) {
 				{
 					name: "device name (X-Bdrive-Device-Name on PUT /store/object)",
 					do: func() int {
+						// A device syncs under an identity bound at sign-in.
+						secRegisterDevice(t, h, p.ID, bob, "d-secdefnul01", "bob-box", "linux")
 						req := httptest.NewRequest("PUT",
 							"/api/p/"+p.ID+"/store/object?key=journal/d-secdefnul01.jsonl",
 							bytes.NewReader([]byte("{}\n")))

@@ -380,7 +380,8 @@ func TestSec_Password_ResetKillsCLIIssuedToken(t *testing.T) {
 
 	// the real browser-callback flow: approve at /auth/cli, then exchange the
 	// one-time code for a device token
-	rec := secauthzDo(h, "POST", "/auth/cli?redirect="+url.QueryEscape("http://127.0.0.1:53123/callback")+"&state=xyz", nil, "", c["bob"])
+	pkceQ, pkceV := pkceParams()
+	rec := secauthzDo(h, "POST", "/auth/cli?redirect="+url.QueryEscape("http://127.0.0.1:53123/callback")+"&state=xyz"+pkceQ, nil, "", c["bob"])
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("cli approval: %d %s", rec.Code, rec.Body)
 	}
@@ -392,7 +393,7 @@ func TestSec_Password_ResetKillsCLIIssuedToken(t *testing.T) {
 	if code == "" {
 		t.Fatalf("no one-time code in %s", rec.Header().Get("Location"))
 	}
-	rec = secauthzDo(h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "bob-cli"}, "", nil)
+	rec = secauthzDo(h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "bob-cli", "code_verifier": pkceV}, "", nil)
 	var out struct {
 		Token string `json:"token"`
 	}

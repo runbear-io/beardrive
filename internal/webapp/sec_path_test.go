@@ -178,6 +178,7 @@ func TestSec_Path_MemberReadsAnotherOrgsBlob(t *testing.T) {
 		t.Fatalf("control: bob reading dave's project directly = %d, want 403", rec.Code)
 	}
 
+	secRegisterDevice(t, h, p.ID, c["bob"], "bobdev", "bob-box", "linux")
 	if rec := secpathPushOp(t, h, p.ID, "bobdev", secpathPutOp("loot.md", "../../"+daves.ID+"/blobs/"+sha, len(secret)), c["bob"]); rec.Code != 200 {
 		t.Fatalf("bob's journal push: %d %s", rec.Code, rec.Body)
 	}

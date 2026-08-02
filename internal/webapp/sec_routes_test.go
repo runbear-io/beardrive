@@ -124,9 +124,10 @@ func TestSec_Row5_AReadOnlyMemberCannotLockADeviceOutOfItsOwnJournal(t *testing.
 		return "/api/p/" + p.ID + "/store/object?key=journal/" + victimDev + ".jsonl"
 	}
 
-	// Control: nobody squatted, carol's first claim lands.
+	// Control: nobody squatted, carol's device pushes its own journal.
 	{
 		h, _, c, p := permHub(t)
+		secRegisterDevice(t, h, p.ID, c["carol"], victimDev, "carol-laptop", "darwin")
 		rec := sec8Do(t, h, "PUT", url(p), body, c["carol"], map[string]string{"X-Bdrive-Device": victimDev})
 		if rec.Code != 200 {
 			t.Fatalf("control: carol's own first journal claim was refused: %d %s", rec.Code, rec.Body)
@@ -135,6 +136,7 @@ func TestSec_Row5_AReadOnlyMemberCannotLockADeviceOutOfItsOwnJournal(t *testing.
 
 	// Attack: bob, read-only, names carol's device on a read route first.
 	h, _, c, p := permHub(t)
+	secRegisterDevice(t, h, p.ID, c["carol"], victimDev, "carol-laptop", "darwin")
 	sec8SetPerm(t, h, p, c["alice"], "bob@x.io", PermRead)
 	if rec := sec8Do(t, h, "GET", "/api/p/"+p.ID+"/store/exists?key=blobs/"+sec8Sha, nil, c["bob"],
 		map[string]string{"X-Bdrive-Device": victimDev}); rec.Code != 200 {

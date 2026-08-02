@@ -60,8 +60,19 @@ type Result struct {
 // `bdrive init` to call on every run, while still correcting a stale binary
 // path (a Homebrew prefix change, a moved binary) instead of skipping it.
 func writeIfDifferent(path, content string) (bool, error) {
+	// Content AND mode. This file is a command a service manager runs as this
+	// user at every login, so its permissions are part of the registration:
+	// short-circuiting on bytes alone meant a world-writable plist stayed
+	// world-writable forever and the documented self-heal (re-run `bdrive
+	// init`) never noticed.
 	if have, err := os.ReadFile(path); err == nil && string(have) == content {
-		return false, nil
+		if fi, err := os.Stat(path); err == nil && fi.Mode().Perm() == 0o644 {
+			return false, nil
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return false, err

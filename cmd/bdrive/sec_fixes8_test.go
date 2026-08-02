@@ -30,7 +30,7 @@ func secfx8Enroll(t *testing.T, folder, volume string) config.Project {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 	return p

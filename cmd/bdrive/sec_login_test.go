@@ -206,10 +206,15 @@ func secloginNewHub(t *testing.T, opts secloginOpts) *secloginHub {
 		inner.ServeHTTP(w, r)
 	})
 
-	ts := httptest.NewServer(outer)
-	t.Cleanup(ts.Close)
-	h.url = ts.URL
+	// Both fields are read by `outer` on the server's own goroutines (approve
+	// uses h.cookie), so both are written BEFORE anything can serve a request.
+	// Assigning them after httptest.NewServer returned was a data race the
+	// suite reported on every -race run of this file.
 	h.cookie = secloginSession(t, inner, "alice@example.com", "Alice", "password1")
+	ts := httptest.NewUnstartedServer(outer)
+	t.Cleanup(ts.Close)
+	h.url = "http://" + ts.Listener.Addr().String()
+	ts.Start()
 	return h
 }
 

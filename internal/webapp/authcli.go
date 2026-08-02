@@ -31,7 +31,7 @@ import (
 // provider, nothing to keep in sync.
 type CLIAuth struct {
 	session func(*http.Request) (User, bool)
-	issue   func(w http.ResponseWriter, userID, device string)
+	issue   func(w http.ResponseWriter, r *http.Request, userID, device string)
 
 	// Ephemeral single-use state; a server restart just cancels pending
 	// logins.
@@ -58,7 +58,7 @@ type cliGrant struct {
 // browser session — cookie only, never a Bearer token, or a device token
 // could approve the next device. issue writes the CLI's {token, user}
 // response for an approved grant.
-func NewCLIAuth(session func(*http.Request) (User, bool), issue func(w http.ResponseWriter, userID, device string)) *CLIAuth {
+func NewCLIAuth(session func(*http.Request) (User, bool), issue func(w http.ResponseWriter, r *http.Request, userID, device string)) *CLIAuth {
 	return &CLIAuth{session: session, issue: issue, pending: make(map[string]cliGrant)}
 }
 
@@ -476,7 +476,7 @@ func (c *CLIAuth) apiExchange(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired code", http.StatusUnauthorized)
 		return
 	}
-	c.issue(w, g.user, req.Device)
+	c.issue(w, r, g.user, req.Device)
 }
 
 // pkceOK checks RFC 7636 S256 proof-of-possession for the loopback flow.
@@ -487,13 +487,20 @@ func (c *CLIAuth) apiExchange(w http.ResponseWriter, r *http.Request) {
 // could complete a sign-in of ITS OWN account into somebody else's CLI, and
 // that CLI's folders then sync into the attacker's project.
 //
-// A challenge-less grant is still redeemable by a challenge-less exchange, so
-// a pre-PKCE CLI on a newer hub keeps working. What is refused is the MIX: a
-// CLI that bound its flow will not accept a code minted for a flow that did
-// not, which is exactly the code another party could have arranged.
+// There is no compat arm. A challenge-less grant used to be redeemable by a
+// challenge-less exchange so a pre-PKCE CLI kept working — but the hub cannot
+// tell a pre-PKCE binary from a caller that simply left the parameter out, so
+// the arm was a documented way to ask for no proof of possession and be given
+// none: no forged grant needed, just an omitted parameter.
+//
+// It applies to the loopback flow only — apiExchange is the sole caller and it
+// only ever takes a "code" grant. The device and invite flows prove possession
+// with a one-time code delivered to the machine itself and are untouched. A
+// binary too old to send a challenge must be upgraded, which is one `bdrive
+// login` away; the in-repo CLI has always sent one.
 func pkceOK(challenge, verifier string) bool {
 	if challenge == "" || verifier == "" {
-		return challenge == "" && verifier == ""
+		return false
 	}
 	sum := sha256.Sum256([]byte(verifier))
 	return subtle.ConstantTimeCompare(
@@ -561,5 +568,5 @@ func (c *CLIAuth) apiDevicePoll(w http.ResponseWriter, r *http.Request) {
 	// consent surface and it disclosed the name recorded at start time. A
 	// device name chosen at poll time — after the human has clicked — is what
 	// the token row, the device list and any later revocation would name.
-	c.issue(w, g.user, g.device)
+	c.issue(w, r, g.user, g.device)
 }

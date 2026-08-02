@@ -281,6 +281,26 @@ func whoAmIOnServer(server, token string) (serverUser, error) {
 	return u, err
 }
 
+// postAsDevice posts a login-flow request carrying this machine's device
+// identity. The hub binds that id to the account when it mints the token
+// (webapp.DeviceRegistry.Bind), and that binding is the ONLY thing that makes
+// the id this account's — so every mint point has to send it, not just the one
+// a fix happens to name: the loopback browser flow, the device-code flow, and
+// the login `bdrive init` runs inside itself all route through here.
+func postAsDevice(url string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if dev, err := config.LoadDevice(); err == nil && dev.ID != "" {
+		req.Header.Set("X-Bdrive-Device", dev.ID)
+		req.Header.Set("X-Bdrive-Device-Name", dev.Name)
+		req.Header.Set("X-Bdrive-Os", runtime.GOOS+"/"+runtime.GOARCH)
+	}
+	return initClient.Do(req)
+}
+
 func deviceName() string {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
@@ -362,7 +382,7 @@ func exchangeCode(server, code, verifier string) (string, serverUser, error) {
 	body, _ := json.Marshal(map[string]string{
 		"code": code, "device": deviceName(), "code_verifier": verifier,
 	})
-	resp, err := initClient.Post(server+"/api/auth/exchange", "application/json", bytes.NewReader(body))
+	resp, err := postAsDevice(server+"/api/auth/exchange", body)
 	if err != nil {
 		return "", serverUser{}, err
 	}
@@ -387,7 +407,7 @@ func exchangeCode(server, code, verifier string) (string, serverUser, error) {
 // approving.
 func deviceCodeLogin(server string) (string, serverUser, error) {
 	body, _ := json.Marshal(map[string]string{"device": deviceName(), "os": runtime.GOOS})
-	resp, err := initClient.Post(server+"/api/auth/device/start", "application/json", bytes.NewReader(body))
+	resp, err := postAsDevice(server+"/api/auth/device/start", body)
 	if err != nil {
 		return "", serverUser{}, err
 	}
@@ -417,7 +437,7 @@ func deviceCodeLogin(server string) (string, serverUser, error) {
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Duration(start.Interval) * time.Second)
 		body, _ := json.Marshal(map[string]string{"code": start.Code, "device": deviceName()})
-		resp, err := initClient.Post(server+"/api/auth/device/poll", "application/json", bytes.NewReader(body))
+		resp, err := postAsDevice(server+"/api/auth/device/poll", body)
 		if err != nil {
 			continue // transient; keep polling
 		}

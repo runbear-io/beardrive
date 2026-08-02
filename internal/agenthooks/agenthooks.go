@@ -53,6 +53,26 @@ const (
 	readMarker = "bdrive read-log"
 )
 
+// ourEvents is every event name any platform above registers under. Removal is
+// scoped to it, because `bdrive hooks uninstall` promises to leave other hooks
+// untouched and the marker alone cannot keep that promise: it is a substring
+// hunt for "bdrive sync", so a user's own `cd ~/wiki && bdrive sync .` — under
+// SessionStart, an event this package has never written to — was deleted from
+// their machine-wide agent config.
+//
+// Scoping by event, not by exact command, because previous versions wrote
+// different command shapes and those still have to be removable (see
+// removeProjectHooks). Add an event here whenever a platform above gains one,
+// or uninstall silently stops removing it.
+var ourEvents = map[string]bool{
+	// claude, codex
+	"UserPromptSubmit": true, "PostToolUse": true,
+	// gemini
+	"BeforeAgent": true, "AfterTool": true,
+	// hermes
+	"pre_llm_call": true, "post_tool_call": true,
+}
+
 // Agent names, in the order they are reported.
 var Agents = []string{"claude", "codex", "gemini", "hermes"}
 
@@ -272,7 +292,17 @@ func Uninstall(agents []string) ([]Result, error) {
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", name, err)
 		}
-		out = append(out, Result{Agent: name, Path: path, Changed: changed})
+		// The same residual Install migrates away. Uninstall used to touch only
+		// the user config, so a user who upgraded and then asked for the hooks
+		// to be removed was told "removed" while a `bdrive sync` kept firing on
+		// every turn from a project-level registration this package knows how
+		// to find.
+		cwd, _ := os.Getwd()
+		migrated, err := removeProjectHooks(cwd, name)
+		if err != nil {
+			return out, fmt.Errorf("%s: %w", name, err)
+		}
+		out = append(out, Result{Agent: name, Path: path, Changed: changed || migrated != "", Migrated: migrated})
 	}
 	return out, nil
 }
@@ -379,14 +409,17 @@ func removeHooks(path string, isYAML bool) (bool, error) {
 	}
 	changed := false
 	for event, v := range hooks {
+		if !ourEvents[event] {
+			continue
+		}
 		arr, _ := v.([]any)
 		var kept []any
 		for _, it := range arr {
-			if containsMarker(it, marker) || containsMarker(it, readMarker) {
-				changed = true
-				continue
+			left, dropped := stripOwnHooks(it)
+			changed = changed || dropped
+			if left != nil {
+				kept = append(kept, left)
 			}
-			kept = append(kept, it)
 		}
 		if len(kept) == 0 {
 			delete(hooks, event)
@@ -401,6 +434,57 @@ func removeHooks(path string, isYAML bool) (bool, error) {
 		delete(root, "hooks")
 	}
 	return true, writeConfig(path, marshal)
+}
+
+// stripOwnHooks removes this package's own hooks from one hook group and
+// returns what is left (nil when the whole group was ours), plus whether
+// anything was dropped.
+//
+// Removal is per HOOK, not per group. The old rule judged the whole
+// serialized group, so a group holding beardrive's command next to the user's
+// — which is what anyone gets after tidying settings.json by hand — lost both,
+// and the user's hook was collateral for a removal it was never part of.
+//
+// Hermes' YAML shape has no inner array (a group IS a command), so it is
+// judged as a leaf.
+func stripOwnHooks(group any) (any, bool) {
+	m, ok := group.(map[string]any)
+	if !ok {
+		return group, false
+	}
+	inner, ok := m["hooks"].([]any)
+	if !ok {
+		if ownHook(m) {
+			return nil, true
+		}
+		return group, false
+	}
+	var kept []any
+	dropped := false
+	for _, h := range inner {
+		hm, ok := h.(map[string]any)
+		if ok && ownHook(hm) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, h)
+	}
+	if !dropped {
+		return group, false
+	}
+	if len(kept) == 0 {
+		return nil, true
+	}
+	m["hooks"] = kept
+	return m, true
+}
+
+// ownHook reports whether one hook entry is one this package wrote. Only the
+// command is read (never the whole serialized group), and only inside an event
+// this package registers under — see ourEvents.
+func ownHook(h map[string]any) bool {
+	cmd, _ := h["command"].(string)
+	return strings.Contains(cmd, marker) || strings.Contains(cmd, readMarker)
 }
 
 // mergeJSONHooks adds the pull + push + read hook trio to a Claude-style
@@ -556,6 +640,16 @@ func writeConfig(path string, marshal func() ([]byte, error)) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
+	}
+	// Write THROUGH a symlink, never over it. ~/.claude/settings.json pointing
+	// into a dotfiles repo is the normal shape for anyone who versions their
+	// machine config, and WriteFileAtomic's rename replaced the link with a
+	// regular file: the change landed somewhere the user does not deploy from,
+	// every other machine sharing the repo kept the old config, and both
+	// install and uninstall reported success. Reads already follow the link
+	// (os.ReadFile), so only the write disagreed.
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
 	}
 	return store.WriteFileAtomic(path, append(data, '\n'), 0o644)
 }

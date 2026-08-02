@@ -105,11 +105,18 @@ type Result struct {
 	Pruned       int  // paths removed from the hub by --prune (kept on disk)
 	Materialized int  // files written/removed in the working folder
 	Pushed       bool // own journal/blobs uploaded
-	Offline      bool // remote configured but unreachable this cycle
-	OfflineErr   error
-	ReadOnly     bool // the hub refused our push: pull-only from here
-	NoAccess     bool // the hub refused our pull: sync paused, nothing touched
-	AccessErr    error
+	// Offline reports that the remote leg of this cycle had a problem worth
+	// telling the user about — usually "unreachable", but also "the hub served
+	// bytes that are not their content address", which is the only signal that
+	// case ever produces. It is a REPORT, not a gate: a content-level problem
+	// with one object still lets this device push its own work (Pushed may be
+	// true alongside it), because otherwise one peer's journal line decides
+	// whether anyone else's edits ever leave their machine.
+	Offline    bool
+	OfflineErr error
+	ReadOnly   bool // the hub refused our push: pull-only from here
+	NoAccess   bool // the hub refused our pull: sync paused, nothing touched
+	AccessErr  error
 }
 
 func (r *Result) Activity() bool {
@@ -202,6 +209,13 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	}
 
 	// 2. Pull journals + blobs from other devices.
+	//
+	// blocked is "the remote leg cannot continue this cycle" and is separate
+	// from res.Offline, which is what the user is TOLD. They used to be one
+	// flag, so any pull error withheld this device's own push — and one of
+	// those errors is "a blob's bytes are not its content address", which one
+	// peer produces at will by understating Op.Size on one journal line.
+	blocked := false
 	var pulled, gone []journal.Op
 	if s.Backend != nil {
 		pulled, gone, err = s.pull(ctx)
@@ -215,9 +229,19 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 			res.NoAccess, res.AccessErr = true, err
 			st.Access = store.AccessNone
 			return res, s.finish(cache, st)
+		case errors.Is(err, errBlobContent):
+			// Reported — it is the only signal a device ever gets that its hub
+			// is serving bytes that are not what they are addressed as — but
+			// NOT blocking: one object's content says nothing about whether the
+			// hub is reachable, and treating it as such withheld this device's
+			// own journal and blobs for one integer in one peer's journal line.
+			// The path itself stays unwritten until real content shows up.
+			res.Offline = true
+			res.OfflineErr = err
 		default:
 			res.Offline = true
 			res.OfflineErr = err
+			blocked = true
 		}
 		res.PulledOps = len(pulled)
 		for _, op := range pulled {
@@ -271,7 +295,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 			}
 			op.Device, op.DeviceName, op.Author = s.Device.ID, s.Device.Name, s.Device.Author
 			op.Seq = int64(len(myOps)) + int64(len(readopt)) + 1
-			op.Note = "re-asserted: the device that published it withdrew it"
+			op.Note = reassertNote
 			readopt = append(readopt, op)
 		}
 		if len(readopt) > 0 {
@@ -343,7 +367,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	res.Materialized += n
 
 	// 5. Push our blobs and journal.
-	if s.Backend != nil && !res.Offline && int64(len(myOps)) > st.PushedOps {
+	if s.Backend != nil && !blocked && int64(len(myOps)) > st.PushedOps {
 		switch err := s.push(ctx, myOps, &st); {
 		case err == nil:
 			res.Pushed = true
@@ -357,13 +381,14 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		default:
 			res.Offline = true
 			res.OfflineErr = err
+			blocked = true
 		}
 	}
 
 	// 6. Drain the agent read spool to the hub (read heatmap telemetry).
 	// Strictly best-effort: a failed report keeps the batch queued for the
 	// next cycle and never fails — or even marks offline — this one.
-	if rr, ok := s.Backend.(remote.ReadReporter); ok && !res.Offline {
+	if rr, ok := s.Backend.(remote.ReadReporter); ok && !blocked {
 		if evs, err := s.Store.PendingReads(); err == nil && len(evs) > 0 {
 			reads := make([]remote.ReadEvent, len(evs))
 			for i, e := range evs {
@@ -533,6 +558,69 @@ func sizeBound(size int64) int64 {
 	return size + sizeGrowth
 }
 
+// maxPullBytes is the absolute ceiling under sizeBound. sizeBound alone met its
+// stated property only while the party serving the bytes was a PEER, whose
+// numbers a separate hub had at least stored; when the peer IS the hub there is
+// no second party at all, and one listing entry or one journal line sized the
+// device's allocation and its disk. A journal is JSONL text (32 MiB is ~500k
+// ops) and a blob this size is already far past what a synced project of notes
+// and documents holds.
+//
+// It is a read CEILING, never an up-front refusal on the declared size: op.Size
+// is a peer's integer with no relation to the object it names, so refusing on it
+// let one peer line stop honest content from ever landing — the round-4 wedge
+// class. An over-declared honest blob still reads to its real length and
+// verifies; only bytes past the ceiling are refused.
+//
+// ponytail: an absolute constant, mirroring `bdrive import`'s maxImportBlob
+// (256 << 20, raisable with --max-blob). A file larger than this does not
+// materialize on receiving devices — if that becomes a real workload, this
+// wants the same kind of knob, not a bigger constant.
+const maxPullBytes = 32 << 20
+
+func pullBound(size int64) int64 { return min(sizeBound(size), maxPullBytes) }
+
+// maxPeerJournals caps how many peer journal files one project's listing may
+// mint on this disk. See pull.
+const maxPeerJournals = 512
+
+// reassertNote marks an op this device restated on a peer's behalf (step 3b).
+// It is the only thing that distinguishes such an op from a local edit once it
+// is in this device's journal, and conflictCopies depends on that distinction.
+const reassertNote = "re-asserted: the device that published it withdrew it"
+
+// errBlobContent marks "a blob's bytes are not its content address" — a
+// statement about ONE object, never about whether the hub is reachable.
+// Conflating the two let one peer integer (an understated Op.Size truncates an
+// honest read and fails the sha) put the cycle in Offline, which is the flag
+// step 5 checks before pushing anything: the victim's own journal and blobs
+// stayed on the victim's disk, for one journal PUT per cycle.
+var errBlobContent = errors.New("blob content mismatch")
+
+// safeDevice reports whether a device id off a remote listing may become a
+// path in this volume's journal dir. journal.SafePath is the repo's rule for a
+// path a stranger named; a device id is one segment of one, so it also may not
+// contain a separator and is bounded by NAME_MAX.
+func safeDevice(dev string) bool {
+	return dev != "" && len(dev) <= 200 && !strings.ContainsAny(dev, `/\`) && journal.SafePath(dev)
+}
+
+// sameJournalFile reports whether two journal paths name one file. os.SameFile
+// is the only answer that survives a filesystem's own normalization (case on
+// APFS/NTFS, unicode NFD on APFS) — string comparison is the check that let a
+// hub address this device's own journal under another spelling.
+func sameJournalFile(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
+}
+
 // stillHold reports whether this folder's own materialization currently stands
 // behind op — the premise step 2b rests on ("an op this device already applied
 // is a file on this disk"). The mount's state cache is the record of what THIS
@@ -595,6 +683,21 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) 
 	if err != nil {
 		return nil, nil, err
 	}
+	// The listing is the remote's answer, and the remote may be a hostile hub:
+	// every key in it becomes a path in this volume's journal dir, and every
+	// journal file there is re-read by AllOps on every later cycle. Round 7
+	// capped the listing BODY; nothing capped the object COUNT, so one in-bounds
+	// listing minted ~200k local files. New journals are admitted up to a
+	// ceiling; existing ones always keep updating, so a real project's peers are
+	// never starved by a flood.
+	//
+	// ponytail: 512 peer journals per project. A project with more devices than
+	// that needs a paginated/authenticated peer list, not a bigger number.
+	newJournals := maxPeerJournals
+	if ents, err := os.ReadDir(filepath.Join(s.Store.Dir(), "journal")); err == nil {
+		newJournals -= len(ents)
+	}
+	own := s.Store.JournalPath(s.Device.ID)
 	var newOps, gone []journal.Op
 	for _, o := range objs {
 		name := strings.TrimPrefix(o.Key, "journal/")
@@ -602,22 +705,42 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) 
 			continue
 		}
 		dev := strings.TrimSuffix(name, ".jsonl")
-		if dev == s.Device.ID {
+		if !safeDevice(dev) {
+			// The hub picks these names and store.JournalPath validates
+			// nothing. A name the OS cannot open (a NUL, a control byte, 300
+			// bytes) is not a peer; it used to be a path this loop then failed
+			// on, hiding every peer listed behind it.
 			continue
 		}
 		lp := s.Store.JournalPath(dev)
+		// Never this device's own journal — the one object it is the sole
+		// writer of. An exact string compare is not the test: on a
+		// case-insensitive filesystem (APFS and NTFS by default) "DEVA.jsonl"
+		// is a different key and the SAME FILE, so the hub got to replace this
+		// device's log and push it back as its own. The skip is on the FILE,
+		// which is what the invariant is about.
+		if strings.EqualFold(dev, s.Device.ID) || sameJournalFile(lp, own) {
+			continue
+		}
 		var localSize int64
+		isNew := true
 		if fi, err := os.Stat(lp); err == nil {
-			localSize = fi.Size()
+			localSize, isNew = fi.Size(), false
 		}
 		if o.Size <= localSize && localSize > 0 {
 			continue
+		}
+		if isNew {
+			if newJournals <= 0 {
+				continue
+			}
+			newJournals--
 		}
 		rc, err := s.Backend.Get(ctx, o.Key)
 		if err != nil {
 			return newOps, gone, err
 		}
-		data, err := io.ReadAll(io.LimitReader(rc, sizeBound(o.Size)))
+		data, err := io.ReadAll(io.LimitReader(rc, pullBound(o.Size)))
 		rc.Close()
 		if err != nil {
 			return newOps, gone, err
@@ -637,7 +760,12 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) 
 		// the rewritten case is only ever slow, never divergent.
 		local, err := os.ReadFile(lp)
 		if err != nil && !os.IsNotExist(err) {
-			return newOps, gone, err
+			// One unreadable local copy is one peer's problem, not every
+			// peer's: returning here abandoned every journal this loop had not
+			// reached yet, in an order the hub chooses, and reported it to the
+			// user as "offline".
+			log.Printf("beardrive: skipping journal %s this cycle: %v", dev, err)
+			continue
 		}
 		if bytes.Equal(local, data) {
 			continue
@@ -715,7 +843,7 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) 
 		if err != nil {
 			continue
 		}
-		sum, _, err := s.Store.PutBlobReader(io.LimitReader(rc, sizeBound(op.Size)))
+		sum, _, err := s.Store.PutBlobReader(io.LimitReader(rc, pullBound(op.Size)))
 		rc.Close()
 		if err != nil {
 			return newOps, gone, err
@@ -740,7 +868,7 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) 
 			// remembered and returned once the rest of the batch has been
 			// fetched, so it still lands in res.Offline/OfflineErr.
 			if bad == nil {
-				bad = fmt.Errorf("blob %s corrupt on remote (got %s)", shortSha(op.Blob), shortSha(sum))
+				bad = fmt.Errorf("%w: blob %s corrupt on remote (got %s)", errBlobContent, shortSha(op.Blob), shortSha(sum))
 			}
 			continue
 		}
@@ -775,6 +903,20 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 	}
 	unpushed := map[string]journal.Op{}
 	for _, op := range myOps[pushed:] {
+		if op.Note == reassertNote {
+			// A re-asserted op is not an edit this device made — it restates a
+			// peer's op that the peer withdrew, carrying that op's original
+			// (and therefore usually losing) clock. Round 9 kept it out of the
+			// unpushed set by ORDERING (re-assert after this step), which holds
+			// for exactly one cycle: `pushed` only advances on a successful
+			// push, and a read-only member is the documented steady state where
+			// local ops stay journaled and unpushed forever. So it came back
+			// into this set on every later cycle, and two withdrawals made the
+			// victim author and journal peer-chosen content at a new path.
+			// Marked, not ordered.
+			delete(unpushed, op.Path)
+			continue
+		}
 		unpushed[op.Path] = op // latest local op per path
 	}
 	pulledLatest := map[string]journal.Op{}

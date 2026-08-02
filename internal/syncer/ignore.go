@@ -130,6 +130,31 @@ func loadFilter(folder string, include []string) (*Filter, error) {
 	return f, nil
 }
 
+// EscapeIgnore turns a literal project-relative path into a rule line that
+// matches that path and nothing else. It is compile's inverse and lives beside
+// it on purpose: a caller that spells the escaping itself is a second
+// definition of the dialect, which is how `bdrive forget <name>` came to write
+// a glob, a negation or a comment depending on what a teammate had named a
+// file.
+func EscapeIgnore(rel string) string {
+	var b strings.Builder
+	for i := 0; i < len(rel); i++ {
+		switch c := rel[i]; c {
+		case '\\', '*', '?':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case '!', '#':
+			// Only meaningful at the start of a line, but escaping them
+			// everywhere costs nothing and needs no positional reasoning.
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
 // compile turns one pattern line into a regexp over slash-separated paths.
 // The regexp also matches everything under a matched directory. Returns
 // ok=false for blanks, comments, and invalid patterns.
@@ -159,6 +184,18 @@ func compile(line string) (pattern, bool) {
 	}
 	for i := 0; i < len(line); i++ {
 		switch line[i] {
+		case '\\':
+			// gitignore's escape, and the only way a path can be written as a
+			// rule that means itself. Without it every metacharacter a
+			// filename may legally contain (`*`, `?`, a leading `!` or `#`) is
+			// a wildcard, a negation or a comment — and `bdrive forget` turns
+			// a filename into a rule and then prunes the hub in the same
+			// command. Filenames in a synced project are chosen by any
+			// teammate. A trailing backslash is a literal one.
+			if i+1 < len(line) {
+				i++
+			}
+			b.WriteString(regexp.QuoteMeta(line[i : i+1]))
 		case '*':
 			if i+1 < len(line) && line[i+1] == '*' {
 				b.WriteString(".*")

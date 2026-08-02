@@ -51,6 +51,7 @@ func secledReads(t *testing.T, srv *Server) {
 // belong to an account with write on the project.
 func secledSeedFile(t *testing.T, h http.Handler, c *http.Cookie, project, device, path, content string, seq int) string {
 	t.Helper()
+	secRegisterDevice(t, h, project, c, device, device, "linux")
 	sum := sha256.Sum256([]byte(content))
 	sha := hex.EncodeToString(sum[:])
 	base := "/api/p/" + project + "/store/object?key="

@@ -177,6 +177,18 @@ credentials); otherwise it is relayed through this server.`,
 			if remoteURL == "" && dir == "" {
 				dir = "."
 			}
+			// A config that asks for gating this mode cannot provide is
+			// refused, not silently honoured in part. The whole auth block —
+			// allowed_domains, require_approval, allow_signup, admins — is
+			// built only in the hub branch, so with a `dir` the operator got a
+			// server anyone can read and a config file that said otherwise.
+			// Same posture as ValidateSignupPolicy, which exists for exactly
+			// this and lives inside the branch that never runs here.
+			if dir != "" && cfg.Auth != nil {
+				return fmt.Errorf("the `auth` block configures a hub's sign-in and a `dir` selects " +
+					"the single-volume viewer, which is auth-free by design: remove one of them " +
+					"(use `remote:` to run a hub)")
+			}
 
 			srv := &webapp.Server{
 				Refresh:    refresh,

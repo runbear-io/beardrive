@@ -361,7 +361,7 @@ func sec7Session(t *testing.T, server, name string) {
 	if _, err := config.SaveProject(folder, config.Project{Volume: "wiki"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -577,7 +577,7 @@ func sec7FolderFor(t *testing.T, remoteServer, loginServer, token string) string
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(folder, "notes.md"), []byte("hi\n"), 0o644); err != nil {

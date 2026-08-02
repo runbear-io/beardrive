@@ -471,7 +471,7 @@ func TestSec_Stop_AClonedFolderCannotPauseAProjectItOnlyNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(real); err != nil {
+	if _, _, err := config.EnrollMount(real); err != nil {
 		t.Fatal(err)
 	}
 	vdir, err := config.VolumeDir(proj.ID)
@@ -540,7 +540,7 @@ func TestSec_Stop_AnArrivingFolderCannotStealAnEnrolledMountsRegistryRow(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(real); err != nil {
+	if _, _, err := config.EnrollMount(real); err != nil {
 		t.Fatal(err)
 	}
 
@@ -590,7 +590,7 @@ func sec8ReadMount(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 	vdir, err := config.VolumeDir(proj.ID)

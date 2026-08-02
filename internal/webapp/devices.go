@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -116,6 +117,12 @@ func (r *DeviceRegistry) Observe(d DeviceInfo) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.observeLocked(d)
+}
+
+// observeLocked is Observe's body. Callers hold r.mu — Bind needs the claim
+// check and the write to be one critical section.
+func (r *DeviceRegistry) observeLocked(d DeviceInfo) {
 	k := devKey{d.User, d.ID}
 	if d.User == "" {
 		// A caller claiming no account asserts no identity (auth-less hub, or
@@ -257,6 +264,43 @@ func (r *DeviceRegistry) OwnerOf(id string) (owner string, known bool) {
 	return best.User, known
 }
 
+// Bind records that a device id belongs to an account, and is the ONLY way an
+// ownership row comes into existence for an id that has never synced. It is
+// called at token issuance (`bdrive login`, the device-code flow, and the login
+// `bdrive init` runs inside itself), where the hub has just authenticated the
+// account and the machine is the one asking.
+//
+// This exists because the alternative was a race nobody could win. Ownership
+// used to be minted by the first authorized journal PUT, admitted through
+// `!known && journalNames(dev, ops)` — a check that reads a field the writer
+// itself writes. A device that syncs with READ permission can never reach that
+// door, so its id stayed unclaimed hub-wide forever and the first member with
+// write on any project took it: permanently, with the victim's ops attributed
+// to her device in History, and no remedy but abandoning device.json. Two
+// hacker rounds found it from opposite sides and their tests were mutually
+// unsatisfiable while first-claim-on-write was the only way a binding existed.
+//
+// Claim-or-refuse is one critical section on purpose: two logins racing for one
+// id must not both believe they won.
+func (r *DeviceRegistry) Bind(user string, d DeviceInfo) error {
+	if r == nil || user == "" || d.ID == "" {
+		return nil // no registry, or nothing asserted: nothing to bind
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	me := normEmail(user)
+	for k := range r.byKey {
+		if k.ID != d.ID || k.User == "" || normEmail(k.User) == me {
+			continue
+		}
+		return fmt.Errorf("device id %s is already registered to another account on this hub; "+
+			"delete device.json in your BearDrive home and sign in again to mint a new one", d.ID)
+	}
+	d.User = user
+	r.observeLocked(d)
+	return nil
+}
+
 // MayActAs reports whether an account may name a device id as itself: yes if
 // this account has been seen syncing under it, and yes if nobody else has —
 // an id nobody has claimed is the ordinary case of a device whose telemetry
@@ -338,24 +382,32 @@ func (s *Server) observeDevice(r *http.Request) {
 	// registry: what a client may assert about itself is a server decision,
 	// while the registry (and the repos under it) must store whatever it is
 	// handed faithfully.
-	id := r.Header.Get("X-Bdrive-Device")
-	if !validDeviceID(id) {
+	if !validDeviceID(r.Header.Get("X-Bdrive-Device")) {
 		return
 	}
-	// Name and OS are free text, and they end up in a metadata store where a
-	// control character is a divergence between backends (Postgres refuses a
-	// NUL in a text column; sqlite and the file backend keep it, so the same
-	// device reads back differently depending on the hub's database).
-	s.Devices.Observe(DeviceInfo{
-		ID:   id,
+	s.Devices.Observe(s.deviceFromRequest(r, s.requestUser(r).Email))
+}
+
+// deviceFromRequest turns the identity headers into a row. Name and OS are free
+// text, and they end up in a metadata store where a control character is a
+// divergence between backends (Postgres refuses a NUL in a text column; sqlite
+// and the file backend keep it, so the same device reads back differently
+// depending on the hub's database) — hence printableOnly.
+//
+// One spelling, two callers: the sync doors' refresh and the login-time bind.
+// They used to be one, and when binding moved to login the second copy would
+// have been the third place this repo learned not to spell a rule twice.
+func (s *Server) deviceFromRequest(r *http.Request, email string) DeviceInfo {
+	return DeviceInfo{
+		ID:   r.Header.Get("X-Bdrive-Device"),
 		Name: printableOnly(r.Header.Get("X-Bdrive-Device-Name")),
 		OS:   printableOnly(r.Header.Get("X-Bdrive-Os")),
-		User: s.requestUser(r).Email,
+		User: email,
 		// clientIP, not the raw X-Forwarded-For: the recorded address is the
 		// one the server actually saw unless the operator says a proxy fronts
 		// this hub, so a client cannot choose what the registry says about it.
 		IP: s.clientIP(r),
-	})
+	}
 }
 
 // requestIP is the address the server actually saw on the connection. It
@@ -387,4 +439,23 @@ func (s *Server) deviceVisibleIn(projectID string) func(string) bool {
 		}
 		return org != "" && s.Dir.Role(org, user) != ""
 	}
+}
+
+// bindDevice is the server side of BuiltinAuth.BindDevice: the device id a
+// signing-in machine names becomes that account's, hub-wide, before the token
+// is handed over.
+//
+// A caller that names no device (a browser, an older CLI) binds nothing and is
+// not refused — the binding is the machine's assertion about itself, and a
+// login is still a login without one. What it cannot do is name an id that is
+// already somebody else's.
+func (s *Server) bindDevice(email string, r *http.Request) error {
+	id := r.Header.Get("X-Bdrive-Device")
+	if s.Devices == nil || id == "" {
+		return nil
+	}
+	if !validDeviceID(id) {
+		return fmt.Errorf("invalid device id")
+	}
+	return s.Devices.Bind(email, s.deviceFromRequest(r, email))
 }

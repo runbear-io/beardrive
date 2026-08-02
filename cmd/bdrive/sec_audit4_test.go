@@ -38,7 +38,7 @@ func secaud4Mount(t *testing.T, volume, remote string) string {
 	if _, err := config.SaveProject(folder, config.Project{Volume: volume, Remote: remote}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 	return folder
