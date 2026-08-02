@@ -638,6 +638,30 @@ func (r *sqlOrgRepo) PutOrg(o Org) error {
 	return tx.Commit()
 }
 
+// PutOrgMeta writes the org's own columns and does not touch org_members —
+// see rowScopedOrgRepo for why a rename must not carry a member set.
+func (r *sqlOrgRepo) PutOrgMeta(o Org) error {
+	if err := checkOrg(o); err != nil {
+		return err
+	}
+	return r.s.exec(`INSERT INTO orgs (id,name,created) VALUES (?,?,?)
+		ON CONFLICT(id) DO UPDATE SET name=excluded.name, created=excluded.created`,
+		o.ID, o.Name, tenc(o.Created))
+}
+
+// PutMember writes one membership row. An empty role removes it.
+func (r *sqlOrgRepo) PutMember(org, email, role string, joined time.Time) error {
+	if err := storable(org, email, role); err != nil {
+		return err
+	}
+	if role == "" {
+		return r.s.exec(`DELETE FROM org_members WHERE org = ? AND email = ?`, org, email)
+	}
+	return r.s.exec(`INSERT INTO org_members (org,email,role,joined) VALUES (?,?,?,?)
+		ON CONFLICT(org,email) DO UPDATE SET role=excluded.role, joined=excluded.joined`,
+		org, email, role, tenc(joined))
+}
+
 func (r *sqlOrgRepo) DeleteOrg(id string) error {
 	tx, err := r.s.db.Begin()
 	if err != nil {

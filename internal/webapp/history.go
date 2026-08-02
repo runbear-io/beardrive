@@ -261,7 +261,12 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(name)))
 		}
 	} else {
+		// Same door, same stored bytes, two lines down — and it did not get the
+		// header the arm above did. The rule is "nosniff on every door that
+		// streams stored bytes", so it goes on unconditionally: a declared
+		// octet-stream a browser is free to sniff is not a wall.
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
 	io.Copy(w, rc)
 }

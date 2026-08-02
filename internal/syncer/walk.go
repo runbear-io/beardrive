@@ -37,7 +37,11 @@ func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.Dir
 		var v verdict
 		switch {
 		case !d.IsDir():
-			if !d.Type().IsRegular() || ignoredFile(d.Name()) || filter.Skip(rel) {
+			// ReservedPath, not ignoredFile(name): the builtin exclusions
+			// include a whole-path rule (agent hook config) that a base name
+			// cannot express, and the outbound half has to match the inbound
+			// one or a file lands on the hub that no peer will ever materialize.
+			if !d.Type().IsRegular() || config.ReservedPath(rel) || filter.Skip(rel) {
 				v = vSkipFile
 			} else {
 				v = vSync

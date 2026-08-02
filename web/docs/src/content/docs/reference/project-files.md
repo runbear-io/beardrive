@@ -36,6 +36,23 @@ A gitignore-style opt-out list at the mount root. It syncs like a normal file,
 so every device shares the same rules. See
 [Scoping the folder](/guides/scoping/).
 
+## Paths BearDrive never carries
+
+Some paths are excluded in **both** directions — never scanned, never uploaded,
+never written onto a teammate's disk — regardless of `.bdriveignore`:
+
+| Path | Why |
+|---|---|
+| `.bdrive/` | The mount's own identity. Syncing it would let one device repoint another. |
+| `.git/` | Carries hook scripts that would run on a teammate's next commit. |
+| `.claude/settings.json`, `.claude/settings.local.json`, `.codex/hooks.json`, `.codex/config.toml`, `.gemini/settings.json`, `.hermes/config.yaml` | Agent **hook** configuration is a shell command a teammate would be installing on your machine. BearDrive's own hooks go in each machine's user config instead. |
+| `.DS_Store`, `.bdrive-tmp-*` | Noise and in-flight temp files. |
+
+Everything else under an agent-config directory — `.claude/skills`,
+`.claude/commands`, `.claude/agents`, `AGENTS.md`, `CLAUDE.md` — syncs
+normally. Sharing what an agent *reads* is the product; sharing what it *runs*
+is not. See [What agents read](/guides/what-agents-read/).
+
 ## And nothing else
 
 Those two are all BearDrive puts in a project: `.bdrive/config.json`,

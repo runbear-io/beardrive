@@ -171,6 +171,11 @@ func TestSec_Devices_SquattedIdStillCountsItsOwnersReads(t *testing.T) {
 	if rec := secRegisterDevice(t, h, p.ID, c["alice"], id, "alice-macbook", "darwin/arm64"); rec.Code != 200 {
 		t.Fatalf("alice's sync: %d %s", rec.Code, rec.Body)
 	}
+	// Round 12 fixture update: handleReadReport now drops a report for a path
+	// that is not in the project's replayed state, so the read has to be a read
+	// of a real file. The subject — a squatted row must not silence its real
+	// owner's telemetry — is unchanged.
+	secauthzUpload(t, h, p.ID, "notes/plan.md", "the plan", c["alice"])
 	rec := secfixDo(t, h, "POST", "/api/p/"+p.ID+"/reads",
 		map[string]any{"reads": []map[string]string{{"path": "notes/plan.md"}}},
 		c["alice"], map[string]string{"X-Bdrive-Device": id})

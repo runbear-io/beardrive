@@ -2,11 +2,13 @@ package webapp
 
 import (
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -71,8 +73,9 @@ const (
 type ProjectDB struct {
 	repo ProjectRepo
 
-	mu   sync.Mutex
-	byID map[string]Project
+	mu     sync.Mutex
+	byID   map[string]Project
+	warned bool // re-read failure logged once
 }
 
 // NewProjectDB builds the registry over a repo, loading its current contents.
@@ -169,6 +172,43 @@ func (db *ProjectDB) putPerm(prev, next Project, email, level string) error {
 	return nil
 }
 
+// refresh re-reads the registry from the store before an authorization read.
+// Callers hold mu.
+//
+// Round 11 made the WRITE side row-scoped so a second hub process could no
+// longer undo a revocation on disk. Nothing made that process HONOUR one: byID
+// was loaded once at open and projectPerm answers straight out of it
+// (perms.go), so in the deployment round 11's own comment names — two hub
+// processes in front of one database — an admin's revocation took effect on
+// whichever process served the request and on no other, for the life of those
+// processes. The grant was gone from the store and still authorized.
+//
+// A read that decides access has to read the store, not a copy taken at boot.
+// A store that cannot answer leaves the current map in place: the previous
+// answer is the last one the store agreed to, and dropping the whole registry
+// on a transient read error would 404 every project on the hub.
+//
+// ponytail: one full Load per authorization read. The registries are small
+// (projects, not files) and this is a correctness floor, not a cache; if it
+// ever shows up in a profile the fix is a version/mtime check inside the repo,
+// not a TTL up here — a TTL is exactly the staleness window this removes.
+func (db *ProjectDB) refresh() {
+	list, err := db.repo.Load()
+	if err != nil {
+		if !db.warned {
+			db.warned = true
+			log.Printf("beardrive: project registry re-read failed, serving the last known grants: %v", err)
+		}
+		return
+	}
+	db.warned = false
+	next := make(map[string]Project, len(list))
+	for _, p := range list {
+		next[p.ID] = p
+	}
+	db.byID = next
+}
+
 // list returns projects sorted by name. Callers hold mu.
 func (db *ProjectDB) list() []Project {
 	out := make([]Project, 0, len(db.byID))
@@ -182,12 +222,14 @@ func (db *ProjectDB) list() []Project {
 func (db *ProjectDB) List() []Project {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	return db.list()
 }
 
 func (db *ProjectDB) Get(id string) (Project, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	p, ok := db.byID[id]
 	if !ok {
 		return Project{}, false
@@ -430,6 +472,13 @@ func (db *ProjectDB) SetOrg(id, org string) error {
 func trimName(s string) string { return trimText(s, 128) }
 
 // trimText strips line breaks and outer spaces, then truncates to max runes.
+//
+// The furthest this text travels is not a terminal. A project NAME is inlined
+// verbatim into the paste prompt the hub's Connect guide renders — the prompt
+// whose entire purpose is to be pasted into a tool-enabled coding agent — and
+// any org member can create a project. So this is a prompt-assembly rule as
+// much as a rendering one: what it must guarantee is that a name stays ONE
+// unstructured line inside `(the project is named "<NAME>")`.
 func trimText(s string, max int) string {
 	out := make([]rune, 0, len(s))
 	for _, r := range s {
@@ -438,12 +487,28 @@ func trimText(s string, max int) string {
 		// travels: `bdrive init` writes it into each teammate's
 		// .bdrive/config.json, from where `bdrive status` prints it to a
 		// terminal and `bdrive export` used to build a filename out of it. C1
-		// goes too — U+009B is CSI to any xterm-lineage terminal — as do the
-		// bidi overrides that reorder a rendered row.
-		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+		// goes too — U+009B is CSI to any xterm-lineage terminal, U+0085 is NEL
+		// — as do the bidi overrides that reorder a rendered row.
+		case unicode.IsControl(r):
+			continue
+		// The Unicode line breaks a C0 filter misses. CSS Text treats U+2028 as
+		// a forced break, and the prompt renders inside a <pre>: this is the
+		// "strips line breaks" promise in the doc comment above, kept.
+		case r == 0x2028, r == 0x2029:
+			continue
+		// Zero-width formats, for the reason journal.SafeText refuses them in a
+		// path: two names that render identically are two rows a reader cannot
+		// tell apart, and a project list is exactly such a set of rows.
+		case r >= 0x200b && r <= 0x200d, r == 0xfeff:
 			continue
 		case r == 0x061c, r == 0x200e, r == 0x200f,
 			r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+			continue
+		// The paste prompt quotes the name, and a quote is the only structure
+		// that clause has: a name carrying one closes it, and everything after
+		// reads to the agent as fresh instruction from the hub rather than as
+		// somebody's label.
+		case r == '"':
 			continue
 		// Path separators and the two dot-only names: a name is a label, and
 		// these are the shapes that make it look like a path to something that

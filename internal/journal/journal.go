@@ -188,6 +188,16 @@ func SafeText(s string) bool {
 			return false
 		case r == 0x061c: // ALM
 			return false
+		// The zero-width formats, refused on exactly the ground stated above
+		// for the C0s: they render as nothing, so "READ<ZWSP>ME.md" and
+		// "README.md" are two indistinguishable entries in one tree — and one
+		// tree row, one history row and one share link is all a reader gets to
+		// tell them apart. U+200E/U+200F are their neighbours in the same block
+		// and were already refused for the same reason; these four were not.
+		case r >= 0x200b && r <= 0x200d: // ZWSP ZWNJ ZWJ
+			return false
+		case r == 0xfeff: // ZWNBSP / BOM
+			return false
 		}
 	}
 	return true

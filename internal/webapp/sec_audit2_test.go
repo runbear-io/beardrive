@@ -174,6 +174,15 @@ func TestSec_Row10_MemberCannotReportReadsUnderAPeersDeviceId(t *testing.T) {
 	// Alice's device becomes known the only way one does: her own sync.
 	secaud2Sync(t, h, p.ID, c["alice"], aliceDev, "Alice's MacBook")
 
+	// Round 12 fixture update: handleReadReport now drops a report for a path
+	// that is not in the project's replayed state. Every path this test reports
+	// has to be a real file, INCLUDING the ones bob names — otherwise the
+	// existence check would be what refuses the attack and MayActAs, the thing
+	// under test, would never be reached.
+	for _, f := range []string{"notes/own.md", "payroll/salaries.md", "payroll/offers.md"} {
+		secauthzUpload(t, h, p.ID, f, "x", c["alice"])
+	}
+
 	// Control 1: alice reporting under her OWN device id is counted. Without
 	// this the test could pass because reporting never works at all.
 	if rec := secaud2Report(t, h, p.ID, c["alice"], aliceDev, "notes/own.md"); rec.Code != 200 {
@@ -226,6 +235,10 @@ func TestSec_Row10_ReadReportRefusesAControlCharacterPath(t *testing.T) {
 	h, _, c, p := secaud2ReadsHub(t)
 	const dev = "alice-laptop-5b73"
 	secaud2Sync(t, h, p.ID, c["alice"], dev, "Alice's MacBook")
+	// Round 12 fixture update, as above: the control read has to name a file
+	// the project actually has. The hostile paths below are refused by
+	// journal.SafePath before anything else looks at them.
+	secauthzUpload(t, h, p.ID, "notes/ok.md", "x", c["alice"])
 
 	// Control: an ordinary path from the same device, same request shape, is
 	// recorded — so a missing bucket below means refusal, not a broken route.

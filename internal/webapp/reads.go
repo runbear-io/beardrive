@@ -540,7 +540,6 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		http.Error(w, "read tracking is not enabled on this server", http.StatusNotFound)
 		return
 	}
-	_ = v
 	device := deviceID(r)
 	if device == "" {
 		http.Error(w, "agent read reports need a device identity", http.StatusBadRequest)
@@ -571,6 +570,20 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 	// to judge is what made the round-2 check a one-request speed bump. Only
 	// /store/* traffic registers a device.
 	mine := s.ownsDevice(r, device)
+	// A reported path is a claim about a file, and the heat map is what the
+	// Dashboard's reads-x-staleness quadrant is built from — the view an
+	// operator reads to decide what is stale. Any member with PermRead could
+	// report any string, so the quadrant was member-writable fiction: a
+	// "compliance/soc2-evidence-2026.md" nobody ever wrote showed up as read.
+	// The project's own replayed state is the only thing that can say a path is
+	// real, and it is right here. A snapshot the store cannot produce records
+	// nothing this cycle: the client's spool is drained best-effort and retried,
+	// and telemetry must never fail a request (nor invent one).
+	snap, err := v.snapshot(r.Context())
+	if err != nil {
+		writeJSON(w, map[string]any{"accepted": 0})
+		return
+	}
 	project := projectID(r)
 	n := 0
 	for _, e := range req.Reads {
@@ -586,6 +599,9 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		}
 		if !mine {
 			continue // not this account's device: counted for nobody
+		}
+		if _, real := snap.files[e.Path]; !real {
+			continue // no such file in this project: a read of nothing is not a read
 		}
 		s.Reads.Record(project, e.Path, ReadKindAgent, device)
 		n++

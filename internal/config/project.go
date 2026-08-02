@@ -57,16 +57,79 @@ func ReservedName(name string) bool {
 	return lower == ".ds_store" || strings.HasPrefix(lower, ".bdrive-tmp-")
 }
 
+// agentHookConfigs are the per-project files a coding agent reads as
+// EXECUTABLE configuration when a session starts in the folder: hook
+// definitions, which are shell commands the agent runs on its own turns. Keyed
+// agent-config-dir → file name, both matched through ReservedDir/ReservedName's
+// folding rules.
+//
+// Why these are reserved rather than merely warned about, and why only these:
+//
+// This is the one shape in a synced folder that is not "content an agent reads"
+// — the product's whole premise — but "code the agent runs, chosen by whoever
+// wrote the file". internal/agenthooks already refuses to write hook config
+// into a project, in its own words because a per-project file "living in a
+// mount, would sync to the team". BearDrive knew the shape was dangerous when
+// IT was the writer and said nothing about a teammate being one, so a peer's
+// .claude/settings.json materialized silently into every member's folder.
+//
+// Reserving is symmetric — never scanned, never journaled, never materialized,
+// the same treatment .git/hooks gets for the identical reason — which is what
+// keeps it comprehensible: there is no half-synced file and no one-way drop.
+// The cost is that a team cannot share project-level hook config through
+// BearDrive, and that cost is one this product already declared it wanted: the
+// documented place for hooks is each machine's USER config, installed once by
+// `bdrive init`.
+//
+// Deliberately NOT reserved: CLAUDE.md, .claude/skills, .claude/commands,
+// .claude/agents, and every other instruction a teammate writes for an agent to
+// READ. Sharing those is the product. That they are trusted input the moment
+// they land is a real and unstated design consequence, and the answer to it is
+// documentation (INSTALL_FOR_AGENTS.md, the docs' Start-here path), not a
+// filter that would break the feature.
+//
+// Tracks the platform table in internal/agenthooks (ConfigPath /
+// projectConfigPath). A platform added there needs its project-level config
+// file added here.
+var agentHookConfigs = map[string][]string{
+	".claude": {"settings.json", "settings.local.json"},
+	".codex":  {"hooks.json", "config.toml"},
+	".gemini": {"settings.json"},
+	".hermes": {"config.yaml"},
+}
+
+// AgentHookConfig reports whether a slash-separated path is an agent's
+// project-level hook configuration. See agentHookConfigs.
+func AgentHookConfig(p string) bool {
+	dir, file := path.Split(p)
+	dir = strings.TrimSuffix(dir, "/")
+	if i := strings.LastIndexByte(dir, '/'); i >= 0 {
+		dir = dir[i+1:]
+	}
+	dir = strings.TrimRight(dir, ". ")
+	for agentDir, files := range agentHookConfigs {
+		if !strings.EqualFold(dir, agentDir) {
+			continue
+		}
+		for _, f := range files {
+			if strings.EqualFold(strings.TrimRight(file, ". "), f) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ReservedPath reports whether a slash-separated path is one BearDrive never
-// carries: under a reserved directory, named like one, or a reserved file
-// name.
+// carries: under a reserved directory, named like one, a reserved file name, or
+// an agent's project-level hook config.
 func ReservedPath(p string) bool {
 	for _, part := range strings.Split(p, "/") {
 		if ReservedDir(part) {
 			return true
 		}
 	}
-	return ReservedName(path.Base(p))
+	return ReservedName(path.Base(p)) || AgentHookConfig(p)
 }
 
 // Project holds the settings stored in <folder>/.bdrive/config.json.

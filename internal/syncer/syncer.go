@@ -127,8 +127,7 @@ func (r *Result) Activity() bool {
 // would let one device silently repoint another — and .git) are defined once
 // in config, because the hub enforces the same set on the paths clients
 // upload. Local aliases so the walk and the path checks below read plainly.
-func ignoredDir(name string) bool  { return config.ReservedDir(name) }
-func ignoredFile(name string) bool { return config.ReservedName(name) }
+func ignoredDir(name string) bool { return config.ReservedDir(name) }
 
 // maxLamport caps what this device's clock will absorb from a peer. Cycle
 // raises st.Lamport to any value it pulls and scan increments it per local op,
@@ -1181,17 +1180,14 @@ func (s *Session) pruneOps(target map[string]journal.FileState, st *store.SyncSt
 // — the builtin exclusions, which prune treats exactly like ignore rules — or
 // one no journal may name at all (see unsafeRel). Every path that reaches the
 // working folder routes through here.
+//
+// One spelling, config.ReservedPath, rather than a per-segment loop of its
+// parts: the builtin exclusions grew a whole-PATH rule (an agent's
+// project-level hook config, config.AgentHookConfig) that "a reserved dir plus
+// a reserved base name" cannot express, and a second copy of the rule is a copy
+// that will miss the next one.
 func neverSync(rel string) bool {
-	if unsafeRel(rel) {
-		return true
-	}
-	parts := strings.Split(rel, "/")
-	for _, dir := range parts[:len(parts)-1] {
-		if ignoredDir(dir) {
-			return true
-		}
-	}
-	return ignoredFile(parts[len(parts)-1])
+	return unsafeRel(rel) || config.ReservedPath(rel)
 }
 
 // unsafeRel reports whether an op's Path escapes the mount root. scan only

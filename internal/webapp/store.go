@@ -191,6 +191,10 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	}
 	defer rc.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
+	// The sync proxy is a stored-bytes door like the other two: a
+	// cookie-authenticated GET whose URL one member can hand another, answering
+	// with content the attacker wrote under a Content-Type the hub chose.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	io.Copy(w, rc)
 }
 
@@ -334,8 +338,16 @@ func journalOps(key string, tmp *os.File) ([]journal.Op, error) {
 		// to a terminal, on the stated grounds that "the audit tool an operator
 		// uses to catch a peer must not be renderable BY that peer". The web
 		// History view is the audit tool everybody actually uses.
-		if !journal.SafeText(op.Note) {
-			return nil, fmt.Errorf("journal carries an invalid note")
+		// The note is not the OTHER peer-written free text History renders, it
+		// is one of three: Op.Author and Op.UserName are rendered in the same
+		// row by the same helper (the frontend's whoChanged), and were checked
+		// by nothing. A right-to-left override in user_name reorders the whole
+		// rendered row — the Trojan Source shape SafeText exists to refuse —
+		// and a C0 run in author is the "renders as nothing" shape its own doc
+		// comment names. DeviceName is absent on purpose: History serves the
+		// device REGISTRY's name, not the op's.
+		if !journal.SafeText(op.Note) || !journal.SafeText(op.Author) || !journal.SafeText(op.UserName) {
+			return nil, fmt.Errorf("journal carries invalid text")
 		}
 	}
 	return ops, nil
@@ -356,9 +368,17 @@ func journalOps(key string, tmp *os.File) ([]journal.Op, error) {
 // mid-push would make the hub a second author of a log the design says has
 // exactly one.
 //
-// An op that names nobody is fine — journals from before accounts existed have
-// no User and History falls back to Author. A NAME with no account is not: it
-// is an attribution with nothing behind it, rendered the same way.
+// An op that names nobody at all is fine — journals from before accounts
+// existed have no User and History falls back to Author. A NAME with no account
+// is not: it is an attribution with nothing behind it, rendered the same way.
+//
+// "Names nobody" has to include Author, and that was the bypass: this checked
+// User alone and explicitly waved through an op with neither User nor UserName,
+// while whoChanged() falls back to Author — unchecked peer text — as THE answer
+// to "who changed this file?". So bob pushed an op naming nobody, put
+// "Alice <alice@x.io>" in author, and the audit surface credited Alice again,
+// one field over from the fix. A device the hub has bound got its token from a
+// login, so it has an account to name; if it names anything, it names that one.
 func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops []journal.Op) bool {
 	if s.Devices == nil || len(ops) == 0 {
 		return true // nobody to impersonate (single-volume, auth-less, fixture)
@@ -368,7 +388,7 @@ func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops 
 		return true // no binding to check against; ownJournal already ruled on the write
 	}
 	for _, op := range ops {
-		if op.User == "" && op.UserName == "" {
+		if op.User == "" && op.UserName == "" && op.Author == "" {
 			continue
 		}
 		if normEmail(op.User) != normEmail(owner) {

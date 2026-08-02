@@ -204,7 +204,14 @@ func (a *BuiltinAuth) signupInvited(email, name, password string) (*authUser, er
 
 func (a *BuiltinAuth) createAccount(email, name, password string, viaInvite bool) (*authUser, error) {
 	email = strings.TrimSpace(strings.ToLower(email))
-	name = strings.TrimSpace(name)
+	// trimText, not TrimSpace: a display name is peer-written text that travels
+	// as far as a project name does. RemoteSource.Commit stamps it as
+	// Op.UserName on every browser write, so it lands in the journal every
+	// device replays and in the History row whoChanged() renders — carrying the
+	// bidi overrides and C0/C1 runs a NOTE on the same row is refused for, with
+	// no device and no journal access needed. Route it through the choke point
+	// that already normalizes project names rather than growing a second rule.
+	name = trimText(name, 128)
 	if email == "" || !strings.Contains(email, "@") {
 		return nil, fmt.Errorf("a valid email is required")
 	}
@@ -417,6 +424,30 @@ func (a *BuiltinAuth) revokeTokensForLocked(userID string) {
 		if t.User == userID {
 			delete(a.tokens, hash)
 			a.killToken(t)
+		}
+	}
+	a.revokeGrantsForLocked(userID)
+}
+
+// revokeGrantsForLocked drops every outstanding one-time mail grant an account
+// holds. Callers hold mu.
+//
+// a.pending is a credential table, not a scratchpad: a "reset" grant sets the
+// password without knowing the old one, and a "verify" grant signs its holder
+// straight in (pageVerify's last arm calls startSession) with no password at
+// all, on a 24-hour TTL minted at signup. Revoking the token table and stopping
+// there left both alive across the ONE action a user is told to take when they
+// suspect compromise — so a thief who requested a reset link before the victim
+// recovered still held a password-setting capability afterwards, and a stale
+// verification mail was still a passwordless sign-in.
+//
+// It lives inside revokeTokensForLocked rather than beside its two call sites
+// because "end every credential this account holds" is one operation with one
+// meaning; the reset page and Deny already both ask for it.
+func (a *BuiltinAuth) revokeGrantsForLocked(userID string) {
+	for id, g := range a.pending {
+		if g.user == userID {
+			delete(a.pending, id)
 		}
 	}
 }
@@ -763,16 +794,26 @@ func safeNext(next string) string {
 
 // inviteTokenFromNext pulls an org-invite token out of a post-login target
 // like "/join/<token>". Tokens are lowercase hex.
+//
+// `next` must BE the join route, not merely contain it. This used to be
+// strings.Index anywhere in the string, and what it unlocks is not a redirect:
+// a live token found here makes pageSignup offer account creation on a hub with
+// self-signup CLOSED, and signupInvited then skips the domain allowlist,
+// verification and approval and activates the account outright. So
+// "/wiki/note.md?x=/join/<tok>" bought the whole invite-only bypass while
+// routing somewhere that never redeems anything — the account landed active, in
+// no member roster, with the invite still reading unused. "The invite is the
+// vetting" only holds if the invite is also spent, and it can only be spent by
+// arriving at /join/.
 func inviteTokenFromNext(next string) string {
 	const marker = "/join/"
-	i := strings.Index(next, marker)
-	if i < 0 {
+	if !strings.HasPrefix(next, marker) {
 		return ""
 	}
-	tok := next[i+len(marker):]
-	if j := strings.IndexAny(tok, "/?&#"); j >= 0 {
-		tok = tok[:j]
-	}
+	// The whole remainder, with nothing after it: "/join/<tok>/../.." is a
+	// target a browser resolves to "/", so it unlocks the signup and redeems
+	// nothing, exactly like burying the token in a query.
+	tok := next[len(marker):]
 	if tok == "" {
 		return ""
 	}

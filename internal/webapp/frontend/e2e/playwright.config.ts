@@ -16,7 +16,12 @@ export default defineConfig({
     command:
       "cd ../../../.. && BDRIVE_E2E_SERVE=1 go test -count=1 -timeout 3h -run TestE2EServe ./internal/webapp",
     url: "http://localhost:8993/",
-    reuseExistingServer: true,
+    // Never reuse. The hub serves the assets it was BUILT with, so a server
+    // left over from a previous run answers with the previous frontend — every
+    // spec then measures code that is not on disk any more. That cost round 11
+    // hours of false positives and round 12 re-derived the same rule; a 5s
+    // start beats a result nobody can trust.
+    reuseExistingServer: false,
     timeout: 60_000,
   },
 });

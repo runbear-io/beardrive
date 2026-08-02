@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The file backend: each repository is one JSON file, cached in memory and
@@ -327,6 +328,17 @@ func newFileOrgRepo(path string) *fileOrgRepo {
 func (r *fileOrgRepo) Load() ([]Org, []OrgInvite, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.reload()
+}
+
+// reload re-reads the file. Every write goes through it first, for the reason
+// fileProjectRepo.reload states: this map is one process's copy of a file
+// another hub process may also be writing, and rewriting the whole file from a
+// stale copy is how one hub's unrelated edit resurrected another hub's
+// revocation. On orgs the resurrected row is the OUTER wall — every per-project
+// route 403s for a non-member — so it undoes more than a project grant does.
+// Callers hold mu.
+func (r *fileOrgRepo) reload() ([]Org, []OrgInvite, error) {
 	var f struct {
 		Orgs    []Org       `json:"orgs"`
 		Invites []OrgInvite `json:"invites"`
@@ -373,13 +385,62 @@ func (r *fileOrgRepo) PutOrg(o Org) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, _, err := r.reload(); err != nil {
+		return err
+	}
 	r.byID[o.ID] = o
+	return r.write()
+}
+
+// PutOrgMeta writes the org's own fields and keeps whatever members are on
+// disk — see rowScopedOrgRepo.
+func (r *fileOrgRepo) PutOrgMeta(o Org) error {
+	if err := checkOrg(o); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, _, err := r.reload(); err != nil {
+		return err
+	}
+	prev := r.byID[o.ID]
+	o.Members, o.Joined = prev.Members, prev.Joined
+	r.byID[o.ID] = o
+	return r.write()
+}
+
+// PutMember writes one membership row. An empty role removes it.
+func (r *fileOrgRepo) PutMember(org, email, role string, joined time.Time) error {
+	if err := storable(org, email, role); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, _, err := r.reload(); err != nil {
+		return err
+	}
+	o, ok := r.byID[org]
+	if !ok {
+		return fmt.Errorf("no such organization %q", org)
+	}
+	o = o.clone()
+	if role == "" {
+		delete(o.Members, email)
+		delete(o.Joined, email)
+	} else {
+		o.Members[email] = role
+		o.Joined[email] = joined
+	}
+	r.byID[org] = o
 	return r.write()
 }
 
 func (r *fileOrgRepo) DeleteOrg(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, _, err := r.reload(); err != nil {
+		return err
+	}
 	delete(r.byID, id)
 	return r.write()
 }
@@ -390,6 +451,9 @@ func (r *fileOrgRepo) PutInvite(i OrgInvite) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, _, err := r.reload(); err != nil {
+		return err
+	}
 	r.invites[i.Token] = i
 	return r.write()
 }
@@ -397,6 +461,9 @@ func (r *fileOrgRepo) PutInvite(i OrgInvite) error {
 func (r *fileOrgRepo) DeleteInvite(token string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, _, err := r.reload(); err != nil {
+		return err
+	}
 	delete(r.invites, token)
 	return r.write()
 }
@@ -416,6 +483,14 @@ func newFileShareRepo(path string) *fileShareRepo {
 func (r *fileShareRepo) Load() ([]Share, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.reload()
+}
+
+// reload re-reads the file before every write, for the reason
+// fileProjectRepo.reload states. Here the row a stale rewrite brings back is an
+// UNAUTHENTICATED public URL: a /s/<token> revoked on one hub process returned
+// the moment any second process minted any unrelated share. Callers hold mu.
+func (r *fileShareRepo) reload() ([]Share, error) {
 	var f struct {
 		Shares []Share `json:"shares"`
 	}
@@ -449,6 +524,9 @@ func (r *fileShareRepo) Put(s Share) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
 	r.byToken[s.Token] = s
 	return r.write()
 }
@@ -456,6 +534,9 @@ func (r *fileShareRepo) Put(s Share) error {
 func (r *fileShareRepo) Delete(token string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
 	delete(r.byToken, token)
 	return r.write()
 }
@@ -480,6 +561,16 @@ func newFileDeviceRepo(path string) *fileDeviceRepo {
 func (r *fileDeviceRepo) Load() ([]DeviceInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.reload()
+}
+
+// reload re-reads the file before every write, for the reason
+// fileProjectRepo.reload states. The row a stale rewrite ERASES here is the one
+// ownership fact ownJournal consults, and an id with no owning row is an id
+// DeviceRegistry.Bind hands to the next account that asks for it — the
+// one-writer invariant lost to a second process's routine Observe. Callers hold
+// mu.
+func (r *fileDeviceRepo) reload() ([]DeviceInfo, error) {
 	var f struct {
 		Devices []DeviceInfo `json:"devices"`
 	}
@@ -513,6 +604,9 @@ func (r *fileDeviceRepo) Put(d DeviceInfo) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
 	r.rows[devKey{d.User, d.ID}] = d
 	return r.write()
 }

@@ -133,14 +133,58 @@ func (o Org) clone() Org {
 	return c
 }
 
-// putOrg persists a mutated org, restoring the previous value if the store
-// refuses. Callers hold mu. Without the rollback a refused write still reads
-// as applied until the hub restarts, when it silently reverts — a demotion
+// rowScopedOrgRepo is the part of an OrgRepo that can write an org's own
+// metadata and its individual MEMBERSHIP rows as separate records.
+//
+// Same seam, same reason, same shape as rowScopedProjectRepo (see its comment):
+// a whole-record write replaces the entire member set from the writer's
+// in-memory copy — fileOrgRepo rewrote orgs.json from a map loaded at open, and
+// sqlOrgRepo DELETEd every org_members row for the org and re-inserted from the
+// same stale map — so on a hub running two processes in front of one database
+// (the entire reason to configure Postgres) any unrelated write by the second
+// one resurrected every membership it had not seen. On orgs that is the outer
+// authorization wall, not a per-project grant.
+//
+// Optional rather than part of OrgRepo so a repo that cannot do it — or a test
+// wrapper that intercepts PutOrg — keeps the old whole-record path.
+type rowScopedOrgRepo interface {
+	// PutOrgMeta writes an org's own fields and leaves its members alone.
+	PutOrgMeta(o Org) error
+	// PutMember writes one membership row. An empty role deletes it.
+	PutMember(org, email, role string, joined time.Time) error
+}
+
+// putOrg persists a mutated org's own METADATA, restoring the previous value if
+// the store refuses. Callers hold mu. Without the rollback a refused write still
+// reads as applied until the hub restarts, when it silently reverts — a demotion
 // that un-demotes itself.
 func (db *OrgDB) putOrg(prev, o Org) error {
 	db.byID[o.ID] = o
-	if err := db.repo.PutOrg(o); err != nil {
+	var err error
+	if rs, ok := db.repo.(rowScopedOrgRepo); ok {
+		err = rs.PutOrgMeta(o)
+	} else {
+		err = db.repo.PutOrg(o)
+	}
+	if err != nil {
 		db.byID[o.ID] = prev
+		return err
+	}
+	return nil
+}
+
+// putMember persists ONE membership change, with the same rollback. role == ""
+// means the row is being removed.
+func (db *OrgDB) putMember(prev, next Org, email, role string) error {
+	db.byID[next.ID] = next
+	var err error
+	if rs, ok := db.repo.(rowScopedOrgRepo); ok {
+		err = rs.PutMember(next.ID, email, role, next.Joined[email])
+	} else {
+		err = db.repo.PutOrg(next)
+	}
+	if err != nil {
+		db.byID[next.ID] = prev
 		return err
 	}
 	return nil
@@ -231,7 +275,7 @@ func (db *OrgDB) AddMember(orgID, email, role string) error {
 	if _, dated := next.Joined[e]; !dated {
 		next.Joined[e] = time.Now().UTC()
 	}
-	return db.putOrg(o, next)
+	return db.putMember(o, next, e, role)
 }
 
 // RemoveMember drops an account from the org. The last owner cannot be
@@ -281,12 +325,28 @@ func (db *OrgDB) EvictMember(orgID, email string) error {
 	next := o.clone()
 	delete(next.Members, e)
 	delete(next.Joined, e)
+	if err := db.putMember(o, next, e, ""); err != nil {
+		return err
+	}
 	if o.Members[e] == RoleOwner && db.ownerCount(next) == 0 {
 		if heir := db.heir(next); heir != "" {
-			next.Members[heir] = RoleOwner
+			promoted := next.clone()
+			promoted.Members[heir] = RoleOwner
+			// The heir's ownership starts NOW. Any invite they minted under an
+			// earlier ownership was retired when they lost it (liveLocked), and
+			// this promotion must not resurrect it: read-time role resolution
+			// alone would, since the creator reads as an owner again. This is
+			// the one place a role is granted by the hub rather than by an
+			// owner's deliberate act, so it is the one place that has to say so.
+			for tok, inv := range db.invites {
+				if inv.Org == orgID && inv.Creator == heir {
+					db.retireLocked(tok)
+				}
+			}
+			return db.putMember(next, promoted, heir, RoleOwner)
 		}
 	}
-	return db.putOrg(o, next)
+	return nil
 }
 
 // heir is the member who inherits an org whose last owner is gone: the one who
@@ -343,7 +403,7 @@ func (db *OrgDB) removeLocked(o Org, e string) error {
 	next := o.clone()
 	delete(next.Members, e)
 	delete(next.Joined, e)
-	return db.putOrg(o, next)
+	return db.putMember(o, next, e, "")
 }
 
 // SetRole changes an account's role. Demoting the last owner is refused.
@@ -366,7 +426,7 @@ func (db *OrgDB) SetRole(orgID, email, role string) error {
 	}
 	next := o.clone()
 	next.Members[e] = role
-	return db.putOrg(o, next)
+	return db.putMember(o, next, e, role)
 }
 
 // Rename changes the org's display name.
@@ -403,7 +463,7 @@ func (db *OrgDB) ListInvites(orgID string) []OrgInvite {
 	defer db.mu.Unlock()
 	var out []OrgInvite
 	for _, inv := range db.invites {
-		if inv.Org == orgID && !inv.expired() {
+		if inv.Org == orgID && db.liveLocked(inv) {
 			out = append(out, inv)
 		}
 	}
@@ -459,7 +519,7 @@ func (db *OrgDB) Redeem(token string) (OrgInvite, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	inv, ok := db.invites[token]
-	if !ok || inv.expired() {
+	if !ok || !db.liveLocked(inv) {
 		return OrgInvite{}, false
 	}
 	return inv, true
@@ -472,7 +532,59 @@ func (db *OrgDB) ValidInvite(token string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	inv, ok := db.invites[token]
-	return ok && !inv.expired()
+	return ok && db.liveLocked(inv)
+}
+
+// liveLocked reports whether an invite is still redeemable, and RETIRES it when
+// it is not. Callers hold mu.
+//
+// An invite is the strongest grant this hub hands out: redeeming one is org
+// membership, which is read access to every project in the org, and on the
+// default invite-only posture it also bootstraps the ACCOUNT that will hold it.
+// Four rounds each found a different grant outliving the revocation that should
+// have killed it; this one outlived all three at once — the membership, the
+// ownership, and the account of the owner who minted it.
+//
+// The rule is the one shares.go already applies to a share link
+// (shareCreatorStillBelongs): resolve the MINTER's standing at read time, not
+// at mint time. Only an org owner may mint an invite (handleInviteCreate), so
+// an invite whose creator is no longer an owner of that org is a capability its
+// holder can no longer exercise, and neither can the link they left behind.
+// Read-time, not a sweep in RemoveMember and SetRole and offboard: one rule and
+// no path to forget, where a sweep is three places that each have to remember.
+//
+// Retiring rather than merely refusing is the latch, and it is load-bearing:
+// EvictMember promotes an heir when the last owner's ACCOUNT is deleted, so a
+// creator who was demoted and later inherits the org would otherwise see every
+// invite they minted come back to life. Death is recorded, not recomputed. (The
+// promotion itself drops the heir's invites for the same reason — see
+// EvictMember.)
+//
+// A creator-less invite (minted before the field existed) has no standing to
+// resolve and keeps its expiry as its only bound, the same "pre-accounts link"
+// pass shareCreatorStillBelongs gives.
+func (db *OrgDB) liveLocked(inv OrgInvite) bool {
+	if inv.expired() {
+		return false
+	}
+	if inv.Creator == "" {
+		return true
+	}
+	if db.byID[inv.Org].Members[inv.Creator] == RoleOwner {
+		return true
+	}
+	db.retireLocked(inv.Token)
+	return false
+}
+
+// retireLocked deletes an invite whose creator lost the ownership behind it.
+// A store that refuses the delete leaves the row on disk; the in-memory drop
+// still stands, and the next process to read the token retires it again.
+func (db *OrgDB) retireLocked(token string) {
+	delete(db.invites, token)
+	if err := db.repo.DeleteInvite(token); err != nil {
+		log.Printf("beardrive: invite %s retired in memory but left on disk: %v", token, err)
+	}
 }
 
 // ---- migration ----

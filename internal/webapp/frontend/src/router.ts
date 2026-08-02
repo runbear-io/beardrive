@@ -11,8 +11,24 @@
 export function encodePath(p: string): string {
   return p.split("/").map(encodeURIComponent).join("/");
 }
+// A segment a browser will hand us but decodeURIComponent refuses. "%80" is a
+// syntactically valid escape (Go's URL parser accepts it and the hub serves the
+// SPA shell for it) that is not valid UTF-8, so decodeURIComponent throws
+// URIError. parseRoute runs in HubApp's useMemo DURING RENDER, so the throw
+// unmounted the whole app — and the address bar kept the URL, so a reload
+// reproduced it. Delivery is a plain [x](/<pid>/%80) in a teammate's markdown.
+//
+// An undecodable segment is just a path that names no file. Keep the raw bytes
+// and let the file lookup 404 in the app that is still on screen.
+function decodeSegment(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
 export function decodePath(p: string): string {
-  return p.split("/").map(decodeURIComponent).join("/");
+  return p.split("/").map(decodeSegment).join("/");
 }
 
 // Special views are RESTful routes under the project — the first segment
@@ -29,6 +45,17 @@ export const VIEW_ROUTES = new Set(["dashboard", "history", "install", "settings
 // Shipped URLs that were renamed. Parsed into the new view and normalized
 // away on arrival, so bookmarks resolve without a second live name.
 const LEGACY_VIEWS: Record<string, ViewName> = { insights: "dashboard" };
+
+// `head` is a file or folder name any member can create, and indexing a plain
+// object with it reaches Object.prototype: LEGACY_VIEWS["constructor"] is the
+// Object constructor — truthy — so a folder named "constructor" was parsed as a
+// renamed view, `view` became a FUNCTION, and the legacy-view redirect rewrote
+// the address bar to "/<pid>/function Object() { [native code] }". The folder
+// was then unreachable by URL for the whole org, permanently. Same shape round
+// 11 fixed in ProjectIcon; the router kept it.
+function legacyView(head: string): ViewName | undefined {
+  return Object.hasOwn(LEGACY_VIEWS, head) ? LEGACY_VIEWS[head] : undefined;
+}
 
 export type ViewName = "dashboard" | "history" | "install" | "settings";
 
@@ -102,9 +129,10 @@ function parsePath(pathname: string, mode: "volume" | "hub"): Route {
   const r = withPath({ project: raw.slice(0, slash), path: "" }, raw.slice(slash + 1));
   const seg = r.path.indexOf("/");
   const head = seg === -1 ? r.path : r.path.slice(0, seg);
-  if (VIEW_ROUTES.has(head) || LEGACY_VIEWS[head]) {
-    r.view = LEGACY_VIEWS[head] || (head as ViewName);
-    if (LEGACY_VIEWS[head]) r.legacyView = true;
+  const legacy = legacyView(head);
+  if (VIEW_ROUTES.has(head) || legacy) {
+    r.view = legacy || (head as ViewName);
+    if (legacy) r.legacyView = true;
     r.viewTarget = seg === -1 ? "" : r.path.slice(seg + 1).replace(/\/+$/, "");
     r.path = "";
   }

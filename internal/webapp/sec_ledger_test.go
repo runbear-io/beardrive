@@ -784,6 +784,17 @@ func TestSec_Reads_OneUnstorableBucketCannotWedgeTheLedger(t *testing.T) {
 			base := "/api/p/" + p.ID + "/reads"
 			hdr := map[string]string{"X-Bdrive-Device": "dev-bob"}
 
+			// Round 12 fixture update, not a change of subject: handleReadReport
+			// now drops a reported path that is not in the project's replayed
+			// state (TestSec_Heat_AgentReadsAreNotForgeableForUnreadPaths), so
+			// the control reads have to be reads of real files or nothing is
+			// recorded and this test measures the wrong absence. The assertion
+			// below — one unstorable bucket must not take its neighbours with it
+			// — is untouched.
+			for _, f := range []string{"warmup.md", "before.md", "after.md"} {
+				secauthzUpload(t, h, p.ID, f, "x", c["alice"])
+			}
+
 			report := func(path string) {
 				t.Helper()
 				rec := secledDo(t, h, "POST", base,
