@@ -14,9 +14,12 @@ package webapp
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,11 +36,43 @@ const (
 	e2ePassword = "e2e-pass-1"
 )
 
+// e2eState is the fixed state dir TestE2EServe wipes and reseeds on every
+// start. Fixed on purpose (the determinism contract above) — which is why
+// listenHub has to run before anything touches it.
+func e2eState() string { return filepath.Join(os.TempDir(), "bdrive-e2e-hub") }
+
+// listenHub binds the port both harnesses share. Called BEFORE any state is
+// touched: a second run must not wipe a live hub's storage on its way to
+// failing to bind.
+func listenHub(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", e2eAddr)
+	if err != nil {
+		t.Fatalf("cannot bind %s (is an e2e or demo hub already running?): %v", e2eAddr, err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	return ln
+}
+
+// serveHub serves until d elapses or the server errors — an error after a
+// successful bind fails the test instead of vanishing into a goroutine.
+func serveHub(t *testing.T, ln net.Listener, h http.Handler, d time.Duration) {
+	t.Helper()
+	errc := make(chan error, 1)
+	go func() { errc <- http.Serve(ln, h) }()
+	select {
+	case err := <-errc:
+		t.Fatalf("serve: %v", err)
+	case <-time.After(d):
+	}
+}
+
 func TestE2EServe(t *testing.T) {
 	if os.Getenv("BDRIVE_E2E_SERVE") == "" {
 		t.Skip("frontend e2e harness; set BDRIVE_E2E_SERVE=1 to run")
 	}
-	state := filepath.Join(os.TempDir(), "bdrive-e2e-hub")
+	ln := listenHub(t) // before the wipe below: a busy port must cost nothing
+	state := e2eState()
 	if err := os.RemoveAll(state); err != nil {
 		t.Fatal(err)
 	}
@@ -122,8 +157,44 @@ func TestE2EServe(t *testing.T) {
 	srv.Shares = shares
 
 	t.Logf("e2e hub on http://%s (state: %s) — %s / %s", e2eAddr, state, e2eAdmin, e2ePassword)
-	go http.ListenAndServe(e2eAddr, srv.Handler())
-	time.Sleep(2 * time.Hour) // Playwright kills the process when the run ends
+	serveHub(t, ln, srv.Handler(), 2*time.Hour) // Playwright kills the process when the run ends
+}
+
+// TestHarnessFailsFastOnBoundPort is the regression test for the bug that
+// bit: a second TestE2EServe used to wipe a live hub's state dir on its way
+// to silently failing to bind. Ungated, so it runs in the normal suite.
+func TestHarnessFailsFastOnBoundPort(t *testing.T) {
+	if testing.Short() {
+		t.Skip("shells out to go test")
+	}
+	ln, err := net.Listen("tcp", e2eAddr)
+	if err != nil {
+		t.Skipf("%s already in use — nothing safe to prove: %v", e2eAddr, err)
+	}
+	defer ln.Close()
+
+	canary := filepath.Join(e2eState(), "canary.txt")
+	if err := os.MkdirAll(e2eState(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(canary, []byte("survive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(canary)
+
+	cmd := exec.Command("go", "test", "-count=1", "-run", "TestE2EServe", "./internal/webapp")
+	cmd.Dir = "../.."
+	cmd.Env = append(os.Environ(), "BDRIVE_E2E_SERVE=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("harness started with %s already bound:\n%s", e2eAddr, out)
+	}
+	if !strings.Contains(string(out), "8993") {
+		t.Errorf("failure does not name the port:\n%s", out)
+	}
+	if b, err := os.ReadFile(canary); err != nil || string(b) != "survive" {
+		t.Errorf("state dir was wiped by a run that could not bind: %v %q", err, b)
+	}
 }
 
 // seedE2E journals a small fixed file tree (with history on one path and one

@@ -26,7 +26,7 @@ export async function login(page: Page, email: string = ADMIN) {
   await page.waitForURL(/auth\/login/);
   await page.fill('input[name="email"]', email);
   await page.fill('input[name="password"]', PASSWORD);
-  await page.click("form button");
+  await page.click("button[type=submit]");
   await page.waitForSelector("#sidebar");
   sessions.set(email, await page.context().cookies());
 }

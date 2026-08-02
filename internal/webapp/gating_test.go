@@ -52,7 +52,7 @@ func TestSignupVerificationGate(t *testing.T) {
 		t.Fatal("unverified account authenticated")
 	}
 	// verifying activates it
-	grant := a.newGrant("verify", u.ID, "", true, 0)
+	grant := a.newGrant("verify", u.ID, 0)
 	_ = grant
 	a.mu.Lock()
 	a.users[u.ID].Status = statusActive

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HistoryEntry } from "../api/types";
 import { HistoryRow, NoteText, type RemoveAction, type RestoreAction } from "./HistoryRow";
@@ -39,9 +39,23 @@ export function HistoryView(props: {
     "path" in q && q.path !== undefined
       ? "path=" + encodeURIComponent(q.path)
       : "prefix=" + encodeURIComponent(q.prefix ?? "");
-  const { data, error } = useQuery({
-    queryKey: ["history", apiBase, qs, 200],
-    queryFn: () => getJSON<{ entries: HistoryEntry[] }>(apiBase + "history?" + qs + "&n=200"),
+  // Paged: the server hands back a cursor while entries remain, so a project
+  // with thousands of changes is reachable to its first one. Pages accumulate
+  // into one array — groupRuns and prevBlob both work over the whole window,
+  // so a run straddling a page boundary becomes one card when its second page
+  // lands, and the oldest loaded row shows no diff base rather than a wrong one.
+  const { data, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+    queryKey: ["history", apiBase, qs],
+    queryFn: ({ pageParam }) =>
+      getJSON<{ entries: HistoryEntry[]; next_cursor?: string }>(
+        apiBase +
+          "history?" +
+          qs +
+          "&n=100" +
+          (pageParam ? "&cursor=" + encodeURIComponent(pageParam) : ""),
+      ),
+    initialPageParam: "",
+    getNextPageParam: (last) => last.next_cursor,
     staleTime: 15_000,
   });
 
@@ -53,7 +67,7 @@ export function HistoryView(props: {
   }, [data, onRendered]);
 
   if (!data) return null;
-  const entries = data.entries || [];
+  const entries = data.pages.flatMap((p) => p.entries || []);
   // Diffs are a per-file affair: the subtree feed mixes paths, and each row
   // there would need its own predecessor lookup for no review benefit.
   const perFile = !!target && !isFolder(target);
@@ -100,6 +114,19 @@ export function HistoryView(props: {
                run, so the undo has nothing to claim (follow-up issue). */
           />
         ),
+      )}
+      {/* A button, not an IntersectionObserver: keyboard-reachable, and it
+          says out loud that there is more rather than hiding it behind a
+          scroll gesture. */}
+      {hasNextPage && (
+        <button
+          type="button"
+          className="btn hmore"
+          onClick={() => fetchNextPage()}
+          disabled={isFetchingNextPage}
+        >
+          {isFetchingNextPage ? "Loading…" : "Load more"}
+        </button>
       )}
     </div>
   );

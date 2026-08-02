@@ -2,6 +2,11 @@
    Design language: Linear-grade restraint; the one accent (honey) is spent
    only on active state, the live/brand mark, and the palette selection. */
 :root {
+  /* The app is dark-only. Without this, anything the UA paints itself —
+     scrollbars, autofill, select/date popups, and any control that loses its
+     author `color` — resolves in the light scheme. That trapdoor is how
+     BEA-54 turned one dead selector into black-on-black text. */
+  color-scheme: dark;
   --bg: #0a0b0d;              /* main ground */
   --bg-side: #0c0e10;         /* sidebar / panels */
   --bg-raise: #15171b;        /* palette, modals, elevated cards */
@@ -82,7 +87,7 @@ body {
 [role="dialog"] input[aria-invalid="true"] { border-color: var(--del); }
 [role="dialog"] input[aria-invalid="true"]:focus-visible { outline-color: var(--del); }
 button:disabled, .btn:disabled { cursor: default; }
-input[type="checkbox"] { accent-color: var(--accent); width: 20px; height: 20px; color-scheme: dark; }
+input[type="checkbox"] { accent-color: var(--accent); width: 20px; height: 20px; }
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
@@ -283,6 +288,14 @@ button, input, a.btn { font-family: inherit; }
 
 /* ---- account bar ---- */
 #accountbar { position: relative; border-top: 1px solid var(--border); padding: 7px 10px; }
+.gh-star {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px; margin-bottom: 2px; border-radius: 7px;
+  color: var(--text-faint); font-size: 11px; text-decoration: none;
+}
+.gh-star:hover { background: var(--hover); color: var(--text); }
+.gh-star .gh-mark { width: 12px; height: 12px; flex: none; }
+.gh-star .ext { margin-left: auto; font-size: 9px; }
 #account-btn {
   width: 100%; display: flex; align-items: center; gap: 9px; text-align: left;
   padding: 6px 8px; border: none; border-radius: 7px;
@@ -394,12 +407,16 @@ button, input, a.btn { font-family: inherit; }
 .ob-card { background: var(--bg-side); border: 1px solid var(--border); border-radius: var(--r-card); padding: 20px 22px; margin-bottom: 14px; }
 .ob-card h3 { margin: 0 0 6px; font-size: 14.5px; font-weight: 600; }
 .ob-card p { margin: 0 0 14px; font-size: 13px; color: var(--text-dim); }
+/* The create-here card leads; the agent-paste card follows it. Accent edge
+   marks which one is the primary path without a second button competing. */
+.ob-card.ob-start { border-color: var(--border-2); box-shadow: inset 2px 0 0 var(--accent); }
+.ob-card.ob-start .pbtn { margin-top: 2px; }
 .ob-alt { margin: 12px 0 0; }
 .ob-alt a { color: var(--text-faint); font-size: 12.5px; font-weight: 600; text-decoration: none; }
 .ob-alt a:hover { color: var(--text); }
 
 /* primary + secondary buttons */
-.pbtn { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: var(--accent); color: #241704; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.pbtn { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: var(--accent); color: #241704; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; text-decoration: none; }
 .pbtn:hover { background: var(--accent-bright); }
 .pbtn .ico { width: 15px; height: 15px; }
 .danger-btn { display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: #b3382e; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
@@ -588,6 +605,12 @@ a.ai-main:hover { color: var(--accent); }
 .gd-head .proj-mark { width: 22px; height: 22px; border-radius: 6px; }
 .gd-head .proj-mark svg { width: 13px; height: 13px; }
 .in-desc { color: var(--text-dim); font-size: 13.5px; line-height: 1.55; margin: 0 0 10px; max-width: 62ch; }
+/* Zero files: one empty state in place of the lens switcher and all three
+   panels, so nothing draws a frame around no data. */
+.in-blank { display: grid; justify-items: center; gap: 10px; padding: 40px 18px; margin-top: 14px; max-width: 760px; }
+.in-blank p { margin: 0; max-width: 52ch; line-height: 1.55; }
+.in-blank p:first-child { color: var(--text); font-size: 14.5px; font-weight: 600; }
+.in-blank .pbtn { margin-top: 6px; }
 .in-lens { display: flex; gap: 6px; margin: 0 0 14px; }
 .in-lens-btn { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--text-faint); cursor: pointer; }
 .in-lens-btn:hover { color: var(--text); }
@@ -651,6 +674,10 @@ a.ai-main:hover { color: var(--accent); }
 .hpath { font-weight: 500; cursor: pointer; color: var(--text); font-size: 13px; }
 .hpath:hover { color: var(--accent-bright); }
 .htime { margin-left: auto; color: var(--text-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Foot of a paged feed: says out loud that older changes exist, which is
+   the whole point — the list used to just stop. */
+.hmore { display: flex; margin: 14px auto; }
+.hmore:disabled { opacity: .6; cursor: default; }
 .hmeta { display: flex; align-items: center; gap: 14px; margin-top: 4px; padding-left: var(--hindent); font-size: 12px; color: var(--text-dim); }
 .hdev, .hsize { color: var(--text-faint); }
 .hsize { font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
@@ -719,27 +746,27 @@ a.ai-main:hover { color: var(--accent); }
 #palette-inputwrap { display: flex; align-items: center; gap: 11px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 #palette-inputwrap [data-slot="command-input-wrapper"] { flex: 1; display: flex; border-bottom: 0; padding: 0; height: auto; }
 #palette-inputwrap [data-slot="command-input-wrapper"] > svg:not(.ico) { display: none; }
-#palette input, #palette input:focus { border: none; background: transparent; box-shadow: none; outline: none; padding: 0; }
+/* Never anchor palette rules on an id handed to a cmdk primitive: cmdk
+   spreads caller props and then writes its own generated `id`, so
+   `#palette-input` / `#palette-results` silently stopped matching at the
+   cmdk migration (b7ce76b) and the input fell back to the UA's black
+   `fieldtext`. `#palette` / `#palette-inputwrap` are our own elements and
+   survive; `[cmdk-*]` are cmdk's documented styling hooks. (BEA-54) */
+#palette input, #palette input:focus { flex: 1; width: 100%; border: none; background: transparent; box-shadow: none; color: var(--text); font: inherit; font-size: 15px; letter-spacing: -.01em; outline: none; padding: 0; }
+#palette input::placeholder { color: var(--text-ghost); }
 #palette-inputwrap .ico { width: 17px; height: 17px; color: var(--text-faint); }
-#palette-input { flex: 1; width: 100%; border: none; background: transparent; color: var(--text); font: inherit; font-size: 15px; letter-spacing: -.01em; outline: none; padding: 0; }
-#palette-input::placeholder { color: var(--text-ghost); }
-#palette-results { list-style: none; margin: 0; padding: 8px; max-height: 46vh; overflow-y: auto; }
-#palette-results [cmdk-item] { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--text-dim); font-size: 13.5px; }
-#palette-results [cmdk-item][data-selected="true"] { background: var(--glow); }
-#palette-results [cmdk-item][data-selected="true"] .picon { color: var(--accent); }
-#palette-results [cmdk-item][data-selected="true"] .plabel { color: var(--accent-bright); }
-#palette-results [cmdk-item][data-selected="true"] .plabel b { color: var(--accent-bright); }
-#palette-results li { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--text-dim); font-size: 13.5px; }
-#palette-results li.selected { background: var(--glow); }
-#palette-results li.selected .picon { color: var(--accent); }
-#palette-results li.selected .plabel { color: var(--accent-bright); }
-#palette-results li.selected .plabel b { color: var(--accent-bright); }
-#palette-results li .picon { width: 18px; flex: none; display: flex; justify-content: center; color: var(--text-faint); }
-#palette-results li .picon .ico { width: 15px; height: 15px; }
-#palette-results li .plabel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
-#palette-results li .plabel b { color: var(--accent-bright); font-weight: 600; }
-#palette-results li .pkind { flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-ghost); }
-#palette-results .pempty { color: var(--text-faint); cursor: default; justify-content: center; height: auto; padding: 14px; }
+#palette [cmdk-list] { list-style: none; margin: 0; padding: 8px; max-height: 46vh; overflow-y: auto; }
+#palette [cmdk-item] { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--text-dim); font-size: 13.5px; }
+#palette [cmdk-item][data-selected="true"] { background: var(--glow); }
+#palette [cmdk-item][data-selected="true"] .picon { color: var(--accent); }
+#palette [cmdk-item][data-selected="true"] .plabel { color: var(--accent-bright); }
+#palette [cmdk-item][data-selected="true"] .plabel b { color: var(--accent-bright); }
+#palette [cmdk-item] .picon { width: 18px; flex: none; display: flex; justify-content: center; color: var(--text-faint); }
+#palette [cmdk-item] .picon .ico { width: 15px; height: 15px; }
+#palette [cmdk-item] .plabel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+#palette [cmdk-item] .plabel b { color: var(--accent-bright); font-weight: 600; }
+#palette [cmdk-item] .pkind { flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-ghost); }
+#palette [cmdk-list] .pempty { color: var(--text-faint); cursor: default; justify-content: center; height: auto; padding: 14px; }
 #palette-hint { padding: 9px 16px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-ghost); }
 
 /* ---- modal ---- */
@@ -758,6 +785,31 @@ a.ai-main:hover { color: var(--accent); }
 .modal-msg { margin: 0 0 16px; font-size: 13.5px; color: var(--text-dim); line-height: 1.55; }
 .modal-input { width: 100%; height: 36px; padding: 0 12px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 14px; margin-bottom: 16px; outline: none; }
 .modal-input:focus { border-color: var(--accent); background: var(--hover); }
+
+/* starting-point picker (new-project dialog) — native radios, styled with
+   the accent token; no extra ui/* component for three options. */
+.start-points { border: 0; margin: 0 0 18px; padding: 0; }
+.start-points legend { padding: 0; }
+.start-point { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--surface); cursor: pointer; margin-bottom: 6px; }
+.start-point:hover { background: var(--hover); }
+.start-point.on { border-color: var(--accent); background: var(--hover); }
+.start-point input { accent-color: var(--accent); margin: 2px 0 0; flex: none; }
+.sp-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sp-title { font-size: 13.5px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.sp-rec { font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px; line-height: 15px; }
+.sp-blurb { font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
+/* Extra space separates "seed something" from "seed nothing" — the two rows
+   below it produce the same empty project and differ only in intent. A
+   hairline was tried here first and dropped: --border is 7% white, which at
+   1px in a gap renders as nothing. The gap is the cue that actually reads,
+   and both rows say "nothing is seeded" in their own words anyway. */
+.start-point.sp-rule { margin-top: 16px; }
+/* Five rows can outgrow a short viewport; the dialog scrolls rather than
+   pushing Create off-screen. */
+.modal { max-height: calc(100vh - 32px); overflow-y: auto; }
+/* The reassurance on the connect guide — the question people actually have
+   when they point BearDrive at notes they already care about. */
+.gd-note { margin: -4px 0 16px; font-size: 13px; color: var(--text-dim); border-left: 2px solid var(--accent); padding-left: 11px; line-height: 1.55; }
 
 /* ---- toast ---- */
 [data-sonner-toast] { background: var(--bg-raise) !important; color: var(--text) !important; border: 1px solid var(--border-2) !important; border-radius: 10px !important; font-size: 13.5px !important; box-shadow: 0 18px 44px -12px rgba(0,0,0,.7) !important; }
@@ -851,7 +903,7 @@ a.ai-main:hover { color: var(--accent); }
   .modal-actions button { height: auto; min-height: 44px; }
   .modal-expiry select { height: 44px; }
   .pbtn { height: auto; min-height: 44px; }
-  #palette-results li { height: auto; min-height: 44px; }
+  #palette [cmdk-item] { height: auto; min-height: 44px; }
   .more-item { min-height: 44px; }
 }
 

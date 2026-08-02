@@ -177,6 +177,7 @@ func (s *sqlMetaStore) migrate() error {
 		"icon":          `TEXT NOT NULL DEFAULT ''`,
 		"creator":       `TEXT NOT NULL DEFAULT ''`,
 		"default_level": `TEXT NOT NULL DEFAULT ''`,
+		"template":      `TEXT NOT NULL DEFAULT ''`,
 	})
 }
 
@@ -299,7 +300,7 @@ type sqlProjectRepo struct{ s *sqlMetaStore }
 
 func (r *sqlProjectRepo) Load() ([]Project, error) {
 	rows, err := r.s.db.Query(
-		`SELECT id, name, org, created, description, icon, creator, default_level FROM projects`)
+		`SELECT id, name, org, created, description, icon, creator, default_level, template FROM projects`)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +310,7 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 		var p Project
 		var created string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Org, &created,
-			&p.Description, &p.Icon, &p.Creator, &p.Default); err != nil {
+			&p.Description, &p.Icon, &p.Creator, &p.Default, &p.Template); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -360,12 +361,12 @@ func (r *sqlProjectRepo) Put(p Project) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(r.s.q(
-		`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level)
-		VALUES (?,?,?,?,?,?,?,?)
+		`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
+		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
 		description=excluded.description, icon=excluded.icon,
-		creator=excluded.creator, default_level=excluded.default_level`),
-		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default); err != nil {
+		creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`),
+		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), p.ID); err != nil {

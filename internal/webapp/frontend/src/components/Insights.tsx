@@ -4,6 +4,7 @@ import { getJSON } from "../api/http";
 import type { HeatMap, Node } from "../api/types";
 import { heatTotal, hotPathSplit } from "../hooks/useBrowse";
 import { ageRange, ageSpanLabel, isFlatRange, orphanPaths } from "../lib/heat";
+import { linkProps } from "../nav";
 
 /* ---- the project Dashboard: the read×write matrix ----
    Every file plotted by how much it is read (30 days, from the heat API)
@@ -58,6 +59,8 @@ export function Insights(props: {
   heatMap: HeatMap | null;
   devices: DeviceHeat[] | null;
   scope?: string; // "" = whole project; a folder scopes to its subtree, a file to itself
+  loading?: boolean; // tree not in yet — "this project has no files" would be a lie for a frame
+  installHref?: string; // omitted on the project home, which already leads with ConnectGuide
   onOpenFile: (path: string) => void;
   onOpenFolder: (path: string) => void;
   onOpenHistory: (path: string) => void;
@@ -68,6 +71,36 @@ export function Insights(props: {
 
   const inScope = (p: string) => !scope || p === scope || p.startsWith(scope + "/");
   const scoped = scope ? flatFiles.filter((f) => inScope(f.path)) : flatFiles;
+
+  /* Two zero states, only one of them broken. No files at all draws ~840px of
+     empty bordered frames with the quadrant labels — which come from the
+     HOT_READS/STALE_DAYS constants, not from data — floating over nothing.
+     Files-but-no-reads is already right: Treemap pads every file to reads + 1
+     so unread files keep a sliver, and HotPath says so itself. So gate on
+     "no files", never on "no reads". BEA-49 adds orphaned heat rows to the
+     tree; when it lands they join this condition. */
+  if (!props.loading && !scoped.length)
+    return (
+      <div className="insights">
+        <h1 className="in-title">
+          Knowledge insights{scope ? <span className="in-scope"> · {scope}</span> : null}
+        </h1>
+        <div className="dl-empty in-blank">
+          <p>{scope ? `Nothing in ${scope} to chart yet.` : "Nothing to chart yet."}</p>
+          <p>
+            {scope
+              ? `No files under ${scope} are syncing here yet.`
+              : "This project has no files. Once a device syncs files here, the map, the reads × freshness plot and the hot path fill in on their own."}
+          </p>
+          {props.installHref && (
+            <a className="pbtn" {...linkProps(props.installHref)}>
+              Set up a device →
+            </a>
+          )}
+        </div>
+      </div>
+    );
+
   const scopedDevices =
     devices && scope
       ? devices

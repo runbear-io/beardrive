@@ -2,8 +2,10 @@ package webapp
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -300,6 +302,161 @@ func TestHistoryOrderedByTimeNotLamport(t *testing.T) {
 	if got := paths(base + "history?prefix=notes/"); !slices.Equal(got, want) {
 		t.Fatalf("prefix order = %v, want %v", got, want)
 	}
+}
+
+// Paging walks the same order the feed displays: each entry exactly once, in
+// time order, across boundaries that fall between ops whose Lamport order and
+// wall-clock order disagree — and between two ops sharing one timestamp,
+// which the whole-second `time` field could not have expressed, so only a
+// server-minted cursor can resume there.
+func TestHistoryPagingAcrossLamportAndTime(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	early := time.Date(2026, 7, 26, 0, 9, 17, 0, time.UTC)
+	late := time.Date(2026, 7, 26, 22, 9, 17, 0, time.UTC)
+	f.putAt("offline", "notes/late.md", "written offline", late) // lamport 1, newest by the clock
+	f.putAt("online", "notes/a.md", "a", early)                  // lamport 2..4, one shared timestamp
+	f.putAt("online", "notes/b.md", "b", early)
+	f.putAt("online", "notes/c.md", "c", early)
+
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/"
+	// page returns one response's paths (path@time) and its next cursor.
+	page := func(u string) ([]string, string) {
+		t.Helper()
+		rec := do(t, h, "GET", u, nil)
+		if rec.Code != 200 {
+			t.Fatalf("history: %d %s", rec.Code, rec.Body)
+		}
+		var out struct {
+			Entries []HistoryEntry `json:"entries"`
+			Next    string         `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, e := range out.Entries {
+			got = append(got, e.Path+"@"+e.Time)
+		}
+		return got, out.Next
+	}
+
+	want := []string{
+		"notes/late.md@2026-07-26T22:09:17Z",
+		"notes/c.md@2026-07-26T00:09:17Z",
+		"notes/b.md@2026-07-26T00:09:17Z",
+		"notes/a.md@2026-07-26T00:09:17Z",
+	}
+	// one entry at a time, following the cursor to the end
+	var got []string
+	cursor, pages := "", 0
+	for {
+		entries, next := page(base + "history?n=1" + cursorArg(cursor))
+		if len(entries) != 1 {
+			t.Fatalf("page %d = %v, want exactly 1 entry", pages, entries)
+		}
+		got = append(got, entries...)
+		pages++
+		if pages > len(want)+2 {
+			t.Fatalf("paging did not terminate: %v", got)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("paged = %v, want %v (each entry once, in time order)", got, want)
+	}
+	if pages != len(want) {
+		t.Fatalf("pages = %d, want %d", pages, len(want))
+	}
+
+	// mid-list cursors: page 2 of 2 picks up exactly where page 1 stopped
+	first, next := page(base + "history?n=2")
+	if !slices.Equal(first, want[:2]) || next == "" {
+		t.Fatalf("page 1 = %v (next %q)", first, next)
+	}
+	second, next := page(base + "history?n=2&cursor=" + url.QueryEscape(next))
+	if !slices.Equal(second, want[2:]) {
+		t.Fatalf("page 2 = %v, want %v", second, want[2:])
+	}
+	if next != "" {
+		t.Fatalf("last page carries next_cursor %q", next)
+	}
+
+	// a request that fits in one page never claims there is more
+	if all, next := page(base + "history?n=100"); !slices.Equal(all, want) || next != "" {
+		t.Fatalf("single page = %v (next %q)", all, next)
+	}
+	// the prefix feed pages the same way
+	if got, _ := page(base + "history?prefix=notes/&n=2"); !slices.Equal(got, want[:2]) {
+		t.Fatalf("prefix page 1 = %v", got)
+	}
+	// a garbage cursor is an error, not a silent full page
+	if rec := do(t, h, "GET", base+"history?cursor=not-a-cursor", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad cursor: %d, want 400", rec.Code)
+	}
+}
+
+// BenchmarkHistoryPage measures what a deep page costs: every request
+// re-lists and re-parses every journal (loadOps), so page 20 should cost
+// about what page 1 costs — the ceiling is gone, the per-page work is not.
+func BenchmarkHistoryPage(b *testing.B) {
+	srv, p, root := newHub(b, false, nil)
+	dir := filepath.Join(root, p.ID)
+	os.MkdirAll(filepath.Join(dir, "journal"), 0o755)
+	os.MkdirAll(filepath.Join(dir, "blobs"), 0o755)
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	ops := make([]journal.Op, 0, 5000)
+	for i := range 5000 {
+		ops = append(ops, journal.Op{
+			Seq: int64(i + 1), Lamport: int64(i + 1),
+			Time: now.Add(-time.Duration(i) * time.Minute), Device: "bench",
+			Kind: journal.KindPut, Path: fmt.Sprintf("docs/%03d.md", i%50),
+			Blob: strings.Repeat("a", 64), Size: 12, Mode: 0o644,
+		})
+	}
+	if err := journal.Append(filepath.Join(dir, "journal", "bench.jsonl"), ops); err != nil {
+		b.Fatal(err)
+	}
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/history?n=100"
+	get := func(u string) string {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", u, nil))
+		if rec.Code != 200 {
+			b.Fatalf("history: %d %s", rec.Code, rec.Body)
+		}
+		var out struct {
+			Next string `json:"next_cursor"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &out)
+		return out.Next
+	}
+	// the cursor that opens page 20, paid for once outside the timed loop
+	deep := ""
+	for range 19 {
+		deep = get(base + cursorArg(deep))
+	}
+	b.Run("page1", func(b *testing.B) {
+		for b.Loop() {
+			get(base)
+		}
+	})
+	b.Run("page20", func(b *testing.B) {
+		for b.Loop() {
+			get(base + cursorArg(deep))
+		}
+	})
+}
+
+func cursorArg(c string) string {
+	if c == "" {
+		return ""
+	}
+	return "&cursor=" + url.QueryEscape(c)
 }
 
 func TestDeviceRegistryObserve(t *testing.T) {

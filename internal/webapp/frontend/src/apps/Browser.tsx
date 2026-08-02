@@ -330,6 +330,8 @@ export default function Browser(props: {
         heatMap={heatMap}
         devices={devices}
         scope={route.viewTarget || ""}
+        loading={!loaded}
+        installHref={project ? urlForView("install", project.id) : undefined}
         onOpenFile={openPath}
         onOpenFolder={openPath}
         onOpenHistory={openHistory}
@@ -419,12 +421,16 @@ export default function Browser(props: {
     // dashboard below it.
     view = (
       <>
-        <ConnectGuide project={project!} />
+        <ConnectGuide project={project!} existing={route.connect === "existing"} />
         <div className="home-insights">
+          {/* No install CTA here: ConnectGuide directly above IS the set-up-a-
+              device guide, and a second button six inches under the first
+              reads as two different steps. */}
           <Insights
             flatFiles={flatFiles}
             heatMap={heatMap}
             devices={devices}
+            loading={!loaded}
             onOpenFile={openPath}
             onOpenFolder={openPath}
             onOpenHistory={openHistory}

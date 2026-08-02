@@ -1,6 +1,8 @@
 package webapp
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,9 +46,70 @@ type HistoryEntry struct {
 	Note     string        `json:"note,omitempty"`
 }
 
+// histLess is the display order of the history feed: newest wall-clock time
+// first, ties in reverse journal order. Journal order is causal, not
+// chronological (see journal.Less) — this is the one place that reconciles
+// the two, and the cursor skips with the same function the feed sorts with,
+// so paging can never disagree with what a reader sees. journal.Less is a
+// total order and (device, seq) is unique per op, so histLess is total too:
+// no stable sort needed, and equal timestamps come back in the same order
+// on every request.
+func histLess(a, b journal.Op) bool {
+	if !a.Time.Equal(b.Time) {
+		return a.Time.After(b.Time)
+	}
+	return journal.Less(b, a)
+}
+
+// histCursor is the ordering tuple of the last entry of a page — everything
+// histLess reads, and nothing else. It rides the wire base64'd so a client
+// treats it as opaque: HistoryEntry.time is formatted to whole seconds and
+// carries no lamport/seq, so a client-computed cursor would be lossy across
+// same-second ops.
+type histCursor struct {
+	T int64  `json:"t"` // op time, unix nanoseconds
+	L int64  `json:"l"` // lamport
+	S int64  `json:"s"` // per-device seq
+	D string `json:"d"` // device
+}
+
+func encodeCursor(op journal.Op) string {
+	b, err := json.Marshal(histCursor{T: op.Time.UnixNano(), L: op.Lamport, S: op.Seq, D: op.Device})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// decodeCursor rebuilds the four ordering fields into a bare Op — JSON
+// rather than a delimited string, so a device id can never collide with a
+// separator.
+func decodeCursor(s string) (journal.Op, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return journal.Op{}, err
+	}
+	var c histCursor
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return journal.Op{}, err
+	}
+	return journal.Op{Time: time.Unix(0, c.T).UTC(), Lamport: c.L, Seq: c.S, Device: c.D}, nil
+}
+
 // handleHistory serves ?path=<file> (one file's versions) or
 // ?prefix=<folder/> (everything underneath, "" = the whole project),
 // newest first by wall-clock time, at most ?n= entries (default 100).
+//
+// Paging: the response carries next_cursor when more entries exist, and
+// ?cursor= resumes just past the entry it was minted from — so history older
+// than one page is reachable, and the UI can tell whether it is hiding
+// anything. ?n= alone returns exactly the entries it always did.
+//
+// A cursor is a position in an ordering, not a snapshot: an offline device
+// that pushes mid-scroll lands ops in the middle of the feed by timestamp,
+// and the reader sees them on refresh rather than mid-page. Deliberate —
+// pinning the feed to a read time means server-side state for the life of a
+// scroll.
 func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request) {
 	rs := storeSource(v, w)
 	if rs == nil {
@@ -92,11 +155,10 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	type timed struct {
 		entry HistoryEntry
-		at    time.Time
+		op    journal.Op
 	}
 	matched := make([]timed, 0, len(all))
-	for i := len(all) - 1; i >= 0; i-- { // descending journal (Lamport) order
-		op := all[i]
+	for i, op := range all {
 		switch {
 		case path != "" && op.Path != path:
 			continue
@@ -114,23 +176,39 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			Path: op.Path, Size: op.Size, Blob: op.Blob,
 			User: op.User, UserName: op.UserName, Author: op.Author,
 			Device: dev, Note: op.Note,
-		}, op.Time})
+		}, op})
 	}
-	// Journal order is causal, not chronological: a device that was offline can
-	// write at a later wall-clock time yet carry a lower Lamport clock, so
-	// reverse-journal order is not "newest first". Sort the response by time,
-	// and truncate to ?n= AFTER that — truncating during the walk above would
+	// Truncation happens AFTER the sort: cutting during the walk above would
 	// pick the n highest-Lamport entries and merely display them in time order.
-	// Stable + strict After keeps equal timestamps in descending-Lamport order.
-	sort.SliceStable(matched, func(a, b int) bool { return matched[a].at.After(matched[b].at) })
+	sort.Slice(matched, func(a, b int) bool { return histLess(matched[a].op, matched[b].op) })
+	if raw := q.Get("cursor"); raw != "" {
+		cur, err := decodeCursor(raw)
+		if err != nil {
+			http.Error(w, "invalid cursor", http.StatusBadRequest)
+			return
+		}
+		i := 0
+		for i < len(matched) && !histLess(cur, matched[i].op) { // skip to just past it
+			i++
+		}
+		matched = matched[i:]
+	}
+	// Exact, with no over-fetch probe: every op is already in memory, so
+	// "there is more" is a length check and the last page simply omits the key.
+	var next string
 	if len(matched) > n {
+		next = encodeCursor(matched[n-1].op)
 		matched = matched[:n]
 	}
 	entries := make([]HistoryEntry, len(matched))
 	for i, m := range matched {
 		entries[i] = m.entry
 	}
-	writeJSON(w, map[string]any{"entries": entries})
+	out := map[string]any{"entries": entries}
+	if next != "" {
+		out["next_cursor"] = next
+	}
+	writeJSON(w, out)
 }
 
 // handleBlob streams one exact version by content hash — view or download

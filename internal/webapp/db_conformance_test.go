@@ -147,6 +147,9 @@ func TestMetaStoreConformance(t *testing.T) {
 			if err := projects.SetDefault(p1.ID, PermNone); err != nil {
 				t.Fatal(err)
 			}
+			if err := projects.SetTemplate(p1.ID, "para"); err != nil {
+				t.Fatal(err)
+			}
 			for email, level := range map[string]string{
 				"boss@x.io": PermAdmin, "reader@x.io": PermRead, "cutoff@x.io": PermNone,
 			} {
@@ -255,6 +258,9 @@ func TestMetaStoreConformance(t *testing.T) {
 			}
 			if hb.Creator != "boss@x.io" || hb.Default != PermNone {
 				t.Fatalf("creator/default lost across reload: %+v", hb)
+			}
+			if hb.Template != "para" {
+				t.Fatalf("template lost across reload: %+v", hb)
 			}
 			if hb.Perms["boss@x.io"] != PermAdmin || hb.Perms["reader@x.io"] != PermRead ||
 				hb.Perms["cutoff@x.io"] != PermNone || len(hb.Perms) != 3 {

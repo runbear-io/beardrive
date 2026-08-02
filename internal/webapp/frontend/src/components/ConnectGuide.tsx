@@ -14,8 +14,16 @@ import { projColor } from "./ProjectNav";
 
 export const INSTALL_DOC = "https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md";
 
-export function ConnectGuide({ project }: { project: Project }) {
+export function ConnectGuide({ project, existing }: { project: Project; existing?: boolean }) {
   const origin = window.location.origin;
+  // When the creator said they already have a folder, say so in the prompt.
+  // Without it an agent reads an empty project and proposes creating a new
+  // subfolder — the one recommendation that is wrong for this person. It
+  // still asks which folder: that question is the runbook's hard gate and
+  // nothing here may weaken it.
+  const ask = existing
+    ? '. I already have a folder of notes — ask me which one to sync (the project is named "'
+    : '. Ask me which folder to sync (the project is named "';
   const prompt =
     "Follow " +
     INSTALL_DOC +
@@ -23,7 +31,7 @@ export function ConnectGuide({ project }: { project: Project }) {
     project.id +
     " on " +
     origin +
-    '. Ask me which folder to sync (the project is named "' +
+    ask +
     project.name +
     '").';
   const manual =
@@ -48,9 +56,16 @@ export function ConnectGuide({ project }: { project: Project }) {
       {project.description && <p className="in-desc">{project.description}</p>}
       <div className="gd-body">
         <p className="gd-desc">
-          Paste into your coding agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the
-          folder where you want the files:
+          {existing
+            ? "Paste into your coding agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the folder you already have:"
+            : "Paste into your coding agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the folder where you want the files:"}
         </p>
+        {existing && (
+          <p className="gd-note">
+            Your files stay exactly where they are. Connecting a folder never moves, renames or
+            overwrites anything in it — it uploads what is there and keeps it in sync.
+          </p>
+        )}
         <GuideCode code={prompt} />
         <p className="gd-desc">
           The agent installs the CLI, signs this machine in, and registers the sync hooks — asking
