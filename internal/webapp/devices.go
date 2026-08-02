@@ -70,16 +70,6 @@ func canonDeviceID(id string) string { return strings.ToLower(id) }
 // reads X-Bdrive-Device.
 func deviceID(r *http.Request) string { return canonDeviceID(r.Header.Get("X-Bdrive-Device")) }
 
-// printableOnly drops C0/C7F control characters from a client-supplied label.
-func printableOnly(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, s)
-}
-
 // devKey is the registry's identity: a device id is client-asserted, so it is
 // only meaningful inside the account that presented it. Two accounts naming
 // the same id hold two separate rows and cannot overwrite or lock out each
@@ -347,6 +337,60 @@ func (r *DeviceRegistry) Bind(user string, d DeviceInfo, visible func(owner stri
 	return nil
 }
 
+// Release drops every device row an account owns, in memory and on disk. It is
+// the device half of offboarding, and it is not bookkeeping: OwnerOf is the
+// WRITE gate (store.go ownJournal) and Bind refuses an id another account
+// claims, so a claim that outlives its account is a claim nobody can ever
+// dislodge.
+//
+// The offboarding scenario IS "the laptop goes to the next hire", and without
+// this that hire is permanently locked out in the least debuggable way: the
+// departed account no longer shares an org with anybody, so Bind's
+// invisible-conflict arm binds NOTHING and lets the login SUCCEED — every later
+// push then 403s telling the user to run `bdrive login`, which is what she just
+// did. The mirror case is worse: re-create the address and the new account
+// silently inherits the departed employee's device row and write access to that
+// device's journal.
+//
+// A row the store refuses to delete stays in memory. Reporting a release that
+// isn't one is the widening direction — the claim comes back at the next
+// restart while the hub has already handed the id to somebody else.
+func (r *DeviceRegistry) Release(user string) {
+	if r == nil {
+		return
+	}
+	e := normEmail(user)
+	if e == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k := range r.byKey {
+		if normEmail(k.User) != e {
+			continue
+		}
+		if err := r.repo.Delete(k.User, k.ID); err != nil {
+			log.Printf("beardrive: offboard %s: device %s NOT released, the id keeps its claim: %v", e, k.ID, err)
+			continue
+		}
+		delete(r.byKey, k)
+		delete(r.lastSav, k)
+		if r.latest[k.ID] == k {
+			// The display join has to point at a row that still exists. Pick the
+			// most recently observed survivor for the id, if any.
+			delete(r.latest, k.ID)
+			for k2, d2 := range r.byKey {
+				if k2.ID != k.ID {
+					continue
+				}
+				if best, ok := r.latest[k.ID]; !ok || r.byKey[best].LastSeen.Before(d2.LastSeen) {
+					r.latest[k.ID] = k2
+				}
+			}
+		}
+	}
+}
+
 // MayActAs reports whether an account may name a device id as itself: yes if
 // this account has been seen syncing under it, and yes if nobody else has —
 // an id nobody has claimed is the ordinary case of a device whose telemetry
@@ -451,7 +495,15 @@ func (s *Server) observeDevice(r *http.Request) {
 // text, and they end up in a metadata store where a control character is a
 // divergence between backends (Postgres refuses a NUL in a text column; sqlite
 // and the file backend keep it, so the same device reads back differently
-// depending on the hub's database) — hence printableOnly.
+// depending on the hub's database).
+//
+// trimText, not a local rule. The old printableOnly was `r < 0x20 || r == 0x7f`
+// and nothing else, while trimText — the rule project names and account display
+// names already go through — refuses the C1s, the bidi controls and the
+// invisible formats and caps the length. X-Bdrive-Device-Name reaches further
+// than either: it is joined into every History row the whole project reads, so
+// a device that sends an RLO relabels its own rows and reorders somebody else's
+// line. Same door, same rule, and the cap comes with it.
 //
 // One spelling, two callers: the sync doors' refresh and the login-time bind.
 // They used to be one, and when binding moved to login the second copy would
@@ -459,8 +511,8 @@ func (s *Server) observeDevice(r *http.Request) {
 func (s *Server) deviceFromRequest(r *http.Request, email string) DeviceInfo {
 	return DeviceInfo{
 		ID:   deviceID(r),
-		Name: printableOnly(r.Header.Get("X-Bdrive-Device-Name")),
-		OS:   printableOnly(r.Header.Get("X-Bdrive-Os")),
+		Name: trimText(r.Header.Get("X-Bdrive-Device-Name"), 128),
+		OS:   trimText(r.Header.Get("X-Bdrive-Os"), 128),
 		User: email,
 		// clientIP, not the raw X-Forwarded-For: the recorded address is the
 		// one the server actually saw unless the operator says a proxy fronts

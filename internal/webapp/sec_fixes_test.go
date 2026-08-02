@@ -752,7 +752,24 @@ type secfixFailingOrgRepo struct {
 func (r *secfixFailingOrgRepo) arm(v bool) { r.mu.Lock(); r.armed = v; r.mu.Unlock() }
 func (r *secfixFailingOrgRepo) fail() bool { r.mu.Lock(); defer r.mu.Unlock(); return r.armed }
 
-func (r *secfixFailingOrgRepo) Load() ([]Org, []OrgInvite, error) { return nil, nil, nil }
+// Load returns what this repo actually holds. It used to return nothing, which
+// was harmless while OrgDB read only its in-memory map — and became a fixture
+// bug the moment round 13 made every OrgDB read and mutator re-read the store
+// (OrgDB.refresh), since a repo that forgets everything it was given is not a
+// repo. Assertions below are untouched.
+func (r *secfixFailingOrgRepo) Load() ([]Org, []OrgInvite, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var orgs []Org
+	for _, o := range r.orgs {
+		orgs = append(orgs, o.clone())
+	}
+	var invites []OrgInvite
+	for _, i := range r.invite {
+		invites = append(invites, i)
+	}
+	return orgs, invites, nil
+}
 func (r *secfixFailingOrgRepo) PutOrg(o Org) error {
 	if r.fail() {
 		return fmt.Errorf("store is down")

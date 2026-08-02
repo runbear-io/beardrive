@@ -88,9 +88,13 @@ func ReservedName(name string) bool {
 // documentation (INSTALL_FOR_AGENTS.md, the docs' Start-here path), not a
 // filter that would break the feature.
 //
-// Tracks the platform table in internal/agenthooks (ConfigPath /
-// projectConfigPath). A platform added there needs its project-level config
-// file added here.
+// Derived from what each supported platform actually LOADS from a project
+// folder, not from internal/agenthooks' table of what BearDrive itself writes.
+// That mismatch is how `.mcp.json` — Claude Code's project-scoped MCP server
+// list, whose {"command", "args"} pairs are processes the agent launches on
+// session start — synced for a round while `.claude/settings.json` did not.
+// The question this list answers is "what does the agent execute because the
+// file is in the folder", and agenthooks only ever writes a subset of that.
 var agentHookConfigs = map[string][]string{
 	".claude": {"settings.json", "settings.local.json"},
 	".codex":  {"hooks.json", "config.toml"},
@@ -98,10 +102,25 @@ var agentHookConfigs = map[string][]string{
 	".hermes": {"config.yaml"},
 }
 
+// agentHookFiles are the same thing at the folder ROOT, with no agent config
+// directory to key on: `.mcp.json` is Claude Code's project-scoped MCP server
+// definition. Reserved at any depth rather than at the root only, for the
+// reason ReservedName is: the name is the whole signal, and a rule that holds
+// in one directory and not another is one nobody can check.
+var agentHookFiles = []string{".mcp.json"}
+
 // AgentHookConfig reports whether a slash-separated path is an agent's
 // project-level hook configuration. See agentHookConfigs.
 func AgentHookConfig(p string) bool {
 	dir, file := path.Split(p)
+	// Same trailing-dot/space folding ReservedDir explains: NTFS and SMB open
+	// ".mcp.json." as .mcp.json.
+	bare := strings.TrimRight(file, ". ")
+	for _, f := range agentHookFiles {
+		if strings.EqualFold(bare, f) {
+			return true
+		}
+	}
 	dir = strings.TrimSuffix(dir, "/")
 	if i := strings.LastIndexByte(dir, '/'); i >= 0 {
 		dir = dir[i+1:]

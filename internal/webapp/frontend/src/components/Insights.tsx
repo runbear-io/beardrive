@@ -101,7 +101,12 @@ export function Insights(props: {
     devices && scope
       ? devices
           .map((d) => {
-            const folders: Record<string, number> = {};
+            // Object.create(null), not {}: the keys are FOLDER NAMES off a peer's
+            // journal. `folders["__proto__"] = 3` on a plain object hits the
+            // prototype setter, stores nothing, and Object.keys() then comes back
+            // empty — so a folder named __proto__ erased the whole device from
+            // this matrix. A null-prototype bag has no such keys to collide with.
+            const folders: Record<string, number> = Object.create(null);
             for (const [f, n] of Object.entries(d.folders || {})) if (inScope(f)) folders[f] = n;
             return { ...d, folders };
           })

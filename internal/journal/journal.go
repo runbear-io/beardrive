@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -180,23 +181,22 @@ func SafeText(s string) bool {
 		switch {
 		case r >= 0x80 && r <= 0x9f: // C1
 			return false
-		case r >= 0x202a && r <= 0x202e: // LRE RLE PDF LRO RLO
-			return false
-		case r >= 0x2066 && r <= 0x2069: // LRI RLI FSI PDI
-			return false
-		case r == 0x200e || r == 0x200f: // LRM RLM
-			return false
-		case r == 0x061c: // ALM
-			return false
-		// The zero-width formats, refused on exactly the ground stated above
-		// for the C0s: they render as nothing, so "READ<ZWSP>ME.md" and
-		// "README.md" are two indistinguishable entries in one tree — and one
-		// tree row, one history row and one share link is all a reader gets to
-		// tell them apart. U+200E/U+200F are their neighbours in the same block
-		// and were already refused for the same reason; these four were not.
-		case r >= 0x200b && r <= 0x200d: // ZWSP ZWNJ ZWJ
-			return false
-		case r == 0xfeff: // ZWNBSP / BOM
+		// Every format character (category Cf), plus the tag block, as a CLASS.
+		//
+		// The bidi controls (LRE/RLE/PDF/LRO/RLO, the isolates, LRM/RLM/ALM),
+		// the zero-widths (ZWSP/ZWNJ/ZWJ) and the BOM this used to enumerate are
+		// all Cf — and the enumeration was the bug. Round 12 stated the rule
+		// ("they render as nothing, so two paths a reader cannot tell apart")
+		// and then added the NEIGHBOURS of what was already listed: U+2060 WORD
+		// JOINER, the character Unicode introduced to REPLACE U+FEFF, stayed
+		// legal while U+FEFF was refused. So did U+00AD, U+2061, U+180E,
+		// U+FFF9..U+FFFB — and U+E0020..U+E007F, which encodes all of printable
+		// ASCII with no glyph, so a path can carry an arbitrary instruction to
+		// whatever agent is told to read it.
+		//
+		// One rule instead of a list to keep extending: text that renders as
+		// nothing cannot be part of a name a reader is expected to check.
+		case unicode.Is(unicode.Cf, r), r >= 0xe0000 && r <= 0xe01ef:
 			return false
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net/http"
 	"path"
 	"sort"
@@ -43,7 +44,39 @@ type ShareDB struct {
 	repo ShareRepo
 
 	mu      sync.Mutex
+	warned  bool // "re-read failed" logged once (see refresh)
 	byToken map[string]Share
+}
+
+// refresh re-reads the share registry from the store. Callers hold mu.
+//
+// fileShareRepo.reload closed the WRITE side of this in round 12 and its own
+// comment names the row it did not close: a revoked link is gone from the file
+// and still served by any hub process that did not handle the revocation, to
+// anonymous strangers, for the life of that process. Revocation is the whole
+// emergency stop for a leaked public URL, so the read that decides whether a
+// /s/<token> is live has to read the store.
+//
+// A store that cannot answer leaves the map in place — see ProjectDB.refresh
+// for the trade.
+//
+// ponytail: one full Load per share resolution; see OrgDB.refresh for the
+// upgrade path if it ever shows up in a profile.
+func (db *ShareDB) refresh() {
+	list, err := db.repo.Load()
+	if err != nil {
+		if !db.warned {
+			db.warned = true
+			log.Printf("beardrive: share registry re-read failed, serving the last known links: %v", err)
+		}
+		return
+	}
+	db.warned = false
+	next := make(map[string]Share, len(list))
+	for _, s := range list {
+		next[s.Token] = s
+	}
+	db.byToken = next
 }
 
 // NewShareDB builds the registry over a repo, loading its contents.
@@ -69,6 +102,7 @@ func OpenShareDB(path string) (*ShareDB, error) {
 func (db *ShareDB) Create(project, p, creator string, ttl time.Duration) (Share, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	for _, s := range db.byToken {
 		if s.Project == project && s.Path == p && !s.expired() && s.Expires.IsZero() && ttl == 0 {
 			return s, nil
@@ -96,6 +130,7 @@ func (db *ShareDB) Get(token string) (Share, bool) {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	s, ok := db.byToken[token]
 	if !ok || s.expired() {
 		return Share{}, false
@@ -113,6 +148,7 @@ func (db *ShareDB) lookup(token string) (Share, bool) {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	s, ok := db.byToken[token]
 	return s, ok
 }
@@ -120,6 +156,7 @@ func (db *ShareDB) lookup(token string) (Share, bool) {
 func (db *ShareDB) Revoke(token string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	sh, ok := db.byToken[token]
 	if !ok {
 		return false
@@ -143,6 +180,7 @@ func (db *ShareDB) Revoke(token string) bool {
 func (db *ShareDB) SetExpiry(token string, ttl time.Duration) (Share, bool, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	prev, ok := db.byToken[token]
 	if !ok || prev.expired() {
 		return Share{}, false, nil
@@ -170,6 +208,7 @@ func (db *ShareDB) SetExpiry(token string, ttl time.Duration) (Share, bool, erro
 func (db *ShareDB) List(project string) []Share {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	var out []Share
 	for _, s := range db.byToken {
 		if s.Project == project && !s.expired() {

@@ -527,8 +527,19 @@ func (c *CLIAuth) apiDeviceStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	link := randHex(16)
+	// trimText, at the door, because the approval page is the hub's ONLY consent
+	// surface before a device credential is minted and every word on it except
+	// the address is chosen by an unauthenticated stranger. html.EscapeString
+	// stops markup, not text that renders as something other than itself: an RLO
+	// reorders the row, the isolates and zero-widths hide the rest of it, and NEL
+	// and the C1s are CSI to the terminal a copy-paste lands in. And the 128-rune
+	// cap is half the fix — 32 KiB of "A" pushed the System row, the Address row
+	// and the Approve button off the screen, so the reader approves a page whose
+	// evidence they never saw.
 	code := c.newGrant(cliGrant{
-		kind: "device", link: link, device: req.Device, os: req.OS, ip: requestIP(r),
+		kind: "device", link: link,
+		device: trimText(req.Device, 128), os: trimText(req.OS, 128),
+		ip: requestIP(r),
 	}, 10*time.Minute)
 	if code == "" {
 		// This route is unauthenticated, so the map is the one thing a

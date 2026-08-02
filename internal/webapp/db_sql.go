@@ -761,6 +761,10 @@ func (r *sqlDeviceRepo) Put(d DeviceInfo) error {
 		d.User, d.ID, d.Name, d.OS, d.IP, tenc(d.FirstSeen), tenc(d.LastSeen))
 }
 
+func (r *sqlDeviceRepo) Delete(user, id string) error {
+	return r.s.exec(`DELETE FROM device_rows WHERE user_email = ? AND id = ?`, user, id)
+}
+
 // ---- reads ----
 
 type sqlReadRepo struct{ s *sqlMetaStore }

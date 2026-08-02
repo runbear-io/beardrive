@@ -62,6 +62,10 @@ type ShareRepo interface {
 type DeviceRepo interface {
 	Load() ([]DeviceInfo, error)
 	Put(d DeviceInfo) error
+	// Delete removes one account's row for one device id. Rows are keyed by
+	// (account, id), and this is how an offboarded account's hub-wide claim on
+	// a machine is released — see DeviceRegistry.Release.
+	Delete(user, id string) error
 }
 
 // ReadRepo persists read-telemetry buckets (see ReadStat). Unlike the other

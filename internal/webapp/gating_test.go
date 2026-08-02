@@ -56,6 +56,11 @@ func TestSignupVerificationGate(t *testing.T) {
 	_ = grant
 	a.mu.Lock()
 	a.users[u.ID].Status = statusActive
+	// Persist it: activation in the product goes through pageVerify/Approve,
+	// which write. Since round 13 the account maps are re-read from the store on
+	// every read (BuiltinAuth.refresh), so an in-memory-only poke is no longer a
+	// state the hub can be in.
+	_ = a.store.PutAccount(a.users[u.ID])
 	a.mu.Unlock()
 	if _, ok := a.userForToken(tok); !ok {
 		t.Fatal("activated account still cannot authenticate")
@@ -111,7 +116,12 @@ func TestSignupPageVerificationFlow(t *testing.T) {
 // and admin list are reported but not mutated by the policy API.
 func TestPolicyPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth.json")
-	a, _ := OpenBuiltinAuth(path, true, nil)
+	// A mailer, because since round 13 SetPolicy runs the same validator startup
+	// does and require_verification without SMTP is a posture this binary
+	// refuses to boot in — it was already refused at the HTTP door. The
+	// assertions below are unchanged.
+	mail := &Mailer{Host: "smtp.example", Port: 587, From: "hub@x.io"}
+	a, _ := OpenBuiltinAuth(path, true, mail)
 	a.AllowedDomains = []string{"x.io"}
 	a.Admins = map[string]bool{"admin@x.io": true}
 	if err := a.SetPolicy(true, true); err != nil {

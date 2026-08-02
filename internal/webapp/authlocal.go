@@ -67,6 +67,7 @@ type BuiltinAuth struct {
 
 	mu         sync.Mutex
 	warnedBase bool                 // "no auth.base_url" logged once (see mailBaseURL)
+	warnedLoad bool                 // "re-read failed" logged once (see refresh)
 	users      map[string]*authUser // by id
 	tokens     map[string]authToken // by sha256(token)
 
@@ -152,7 +153,19 @@ type authPolicy struct {
 }
 
 // SetPolicy updates the tunable gating toggles and persists them.
+//
+// The prospective policy goes through the startup validator FIRST. The hub
+// starts legally as {allow_signup:true, require_approval:true}; one admin POST
+// used to remove the only gate, and because SetPolicy persists, the hub then
+// survived a restart the same binary refuses to perform — CLAUDE.md states the
+// guarantee as "refuses an ungated open hub rather than silently leaving the
+// door open". Here rather than in handleAdminPolicy because the handler is one
+// caller of this and a second caller would arrive without the check; the
+// handler only had the mailer half of the rule anyway.
 func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error {
+	if err := a.signupPolicyError(requireVerification, requireApproval); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	// Persist first: a gating change the store refused must not un-gate the
@@ -164,6 +177,46 @@ func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error
 	a.RequireVerification = requireVerification
 	a.RequireApproval = requireApproval
 	return nil
+}
+
+// refresh re-reads accounts and device tokens from the store. Callers hold mu.
+//
+// Same defect ProjectDB.refresh closed in round 12, one wall further out: these
+// maps are the CREDENTIAL, not a grant on top of one. Loaded at open and never
+// re-read, a hub running two processes served `bdrive logout` (or an admin's
+// "revoke this device") on whichever process handled it and on no other — the
+// lost laptop's token kept authenticating everywhere else for the life of those
+// processes — and a deleted account could sign in again with its old password
+// as soon as any second-process write rewrote auth.json.
+//
+// Policy is deliberately NOT re-read: the config file overrides it at startup
+// (web.go), and reloading would let the persisted value quietly win back over
+// the value the sysadmin pinned.
+//
+// A store that cannot answer leaves the maps in place — see ProjectDB.refresh
+// for the trade.
+//
+// ponytail: one full Load per authenticated request; see OrgDB.refresh for the
+// upgrade path if it ever shows up in a profile.
+func (a *BuiltinAuth) refresh() {
+	users, tokens, _, err := a.store.Load()
+	if err != nil {
+		if !a.warnedLoad {
+			a.warnedLoad = true
+			log.Printf("beardrive: account store re-read failed, serving the last known accounts: %v", err)
+		}
+		return
+	}
+	a.warnedLoad = false
+	nextUsers := make(map[string]*authUser, len(users))
+	for _, u := range users {
+		nextUsers[u.ID] = u
+	}
+	nextTokens := make(map[string]authToken, len(tokens))
+	for _, t := range tokens {
+		nextTokens[t.Hash] = t
+	}
+	a.users, a.tokens = nextUsers, nextTokens
 }
 
 func randHex(n int) string {
@@ -237,6 +290,7 @@ func (a *BuiltinAuth) createAccount(email, name, password string, viaInvite bool
 		status = statusActive
 	}
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	if a.findByEmail(email) != nil {
 		return nil, fmt.Errorf("an account with this email already exists")
@@ -288,14 +342,27 @@ func (a *BuiltinAuth) initialStatus() string {
 //   - Email verification needs a mailer: without SMTP the link only reaches
 //     the server log, so it can't actually gate real users.
 func (a *BuiltinAuth) ValidateSignupPolicy() error {
-	if a.RequireVerification && a.Mail == nil {
-		return fmt.Errorf("auth: require_verification needs an smtp mailer — without one the verification link only reaches the server log; configure auth.smtp or turn verification off")
+	if err := a.signupPolicyError(a.RequireVerification, a.RequireApproval); err != nil {
+		return err
 	}
-	if a.AllowSignup && len(a.AllowedDomains) == 0 && !a.RequireApproval && !a.RequireVerification {
-		return fmt.Errorf("auth: open self-signup has no gate, so anyone could register any email — set allow_signup:false (invite-only, the default), or add allowed_domains, require_approval, or require_verification")
-	}
+	// Startup only: SetPolicy cannot change either side of this, so refusing a
+	// live toggle over it would be refusing an unrelated misconfiguration.
 	if a.Mail != nil && a.BaseURL == "" {
 		return fmt.Errorf("auth: smtp is configured but auth.base_url is not — the only other origin a mailed link could carry is the Host header of the request that triggered it, which an anonymous stranger chooses; set auth.base_url to this hub's public origin")
+	}
+	return nil
+}
+
+// signupPolicyError is the gating rule applied to a PROSPECTIVE pair of
+// toggles, so the startup check and the live change (SetPolicy) are literally
+// the same predicate rather than two that drift — which is how a browser POST
+// reached a posture the same binary refuses to boot in.
+func (a *BuiltinAuth) signupPolicyError(requireVerification, requireApproval bool) error {
+	if requireVerification && a.Mail == nil {
+		return fmt.Errorf("auth: require_verification needs an smtp mailer — without one the verification link only reaches the server log; configure auth.smtp or turn verification off")
+	}
+	if a.AllowSignup && len(a.AllowedDomains) == 0 && !requireApproval && !requireVerification {
+		return fmt.Errorf("auth: open self-signup has no gate, so anyone could register any email — set allow_signup:false (invite-only, the default), or add allowed_domains, require_approval, or require_verification")
 	}
 	return nil
 }
@@ -342,12 +409,14 @@ func (a *BuiltinAuth) isAdmin(email string) bool {
 
 func (a *BuiltinAuth) accountCount() int {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	return len(a.users)
 }
 
 func (a *BuiltinAuth) verifyPassword(email, password string) *authUser {
 	a.mu.Lock()
+	a.refresh()
 	u := a.findByEmail(email)
 	a.mu.Unlock()
 	if u == nil {
@@ -366,6 +435,7 @@ func (a *BuiltinAuth) verifyPassword(email, password string) *authUser {
 func (a *BuiltinAuth) issueToken(userID, device string) (string, error) {
 	tok := "bdt_" + randHex(20)
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	t := authToken{Hash: hashToken(tok), User: userID, Device: device, Created: time.Now().UTC()}
 	a.tokens[t.Hash] = t
@@ -378,6 +448,7 @@ func (a *BuiltinAuth) issueToken(userID, device string) (string, error) {
 
 func (a *BuiltinAuth) revokeToken(tok string) error {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	t, ok := a.tokens[hashToken(tok)]
 	if !ok {
@@ -412,6 +483,7 @@ func (a *BuiltinAuth) killToken(t authToken) error {
 // recover nothing.
 func (a *BuiltinAuth) revokeTokensFor(userID string) {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	a.revokeTokensForLocked(userID)
 }
@@ -454,6 +526,7 @@ func (a *BuiltinAuth) revokeGrantsForLocked(userID string) {
 
 func (a *BuiltinAuth) userForToken(tok string) (User, bool) {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	t, ok := a.tokens[hashToken(tok)]
 	if !ok || t.User == "" {
@@ -530,6 +603,7 @@ func (a *BuiltinAuth) Policy() SignupPolicy {
 // PendingUsers lists accounts awaiting admin approval, oldest first.
 func (a *BuiltinAuth) PendingUsers() []User {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	var us []*authUser
 	for _, u := range a.users {
@@ -548,6 +622,7 @@ func (a *BuiltinAuth) PendingUsers() []User {
 // Approve activates a pending account.
 func (a *BuiltinAuth) Approve(id string) error {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	u, ok := a.users[id]
 	if !ok {
@@ -568,6 +643,7 @@ func (a *BuiltinAuth) Approve(id string) error {
 // Deny removes a pending account.
 func (a *BuiltinAuth) Deny(id string) error {
 	a.mu.Lock()
+	a.refresh()
 	u, ok := a.users[id]
 	if !ok {
 		a.mu.Unlock()
@@ -601,6 +677,7 @@ func (a *BuiltinAuth) Deny(id string) error {
 // to pick the default org's owner).
 func (a *BuiltinAuth) Accounts() []User {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	users := make([]*authUser, 0, len(a.users))
 	for _, u := range a.users {
@@ -649,6 +726,7 @@ func sortByAge(users []*authUser) {
 // an upgraded hub that recorded nothing says nothing.
 func (a *BuiltinAuth) Seniority() []string {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	dated := make([]*authUser, 0, len(a.users))
 	for _, u := range a.users {
@@ -1080,6 +1158,7 @@ func (a *BuiltinAuth) pageVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
+	a.refresh()
 	u := a.users[g.user]
 	next := a.afterVerify()
 	var perr error
@@ -1115,6 +1194,7 @@ func (a *BuiltinAuth) pageReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		email := strings.TrimSpace(strings.ToLower(r.FormValue("email")))
 		a.mu.Lock()
+		a.refresh()
 		u := a.findByEmail(email)
 		a.mu.Unlock()
 		if u != nil {
@@ -1170,6 +1250,7 @@ func (a *BuiltinAuth) pageResetConfirm(w http.ResponseWriter, r *http.Request) {
 		// store's error, so the page said "Password updated" while the hub
 		// came back at the next restart with the password the thief chose.
 		a.mu.Lock()
+		a.refresh()
 		u := a.users[g.user]
 		var perr error
 		if u != nil {
@@ -1250,6 +1331,7 @@ func (a *BuiltinAuth) finishLogin(w http.ResponseWriter, r *http.Request, userID
 		device = "cli"
 	}
 	a.mu.Lock()
+	a.refresh()
 	u := a.users[userID]
 	a.mu.Unlock()
 	if u == nil {

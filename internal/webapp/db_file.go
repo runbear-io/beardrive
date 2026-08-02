@@ -114,6 +114,14 @@ func newFileAccountRepo(path string) *fileAccountRepo {
 func (r *fileAccountRepo) Load() ([]*authUser, []authToken, *authPolicy, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.reload()
+}
+
+// reload re-reads the file. Every write goes through it first, for the reason
+// fileProjectRepo.reload states. The rows a stale rewrite brings back here are
+// a deleted ACCOUNT and a revoked device TOKEN — the credential itself, not a
+// grant on top of one. Callers hold mu.
+func (r *fileAccountRepo) reload() ([]*authUser, []authToken, *authPolicy, error) {
 	var f authFileShape
 	if _, err := readJSONFile(r.path, &f); err != nil {
 		return nil, nil, nil, err
@@ -153,6 +161,9 @@ func (r *fileAccountRepo) PutAccount(u *authUser) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, _, _, err := r.reload(); err != nil {
+		return err
+	}
 	// An id identifies one account for the life of the hub. Overwriting a row
 	// with a DIFFERENT account's is never an update — it is one account's
 	// identity, org memberships and live device tokens transferring onto
@@ -167,6 +178,9 @@ func (r *fileAccountRepo) PutAccount(u *authUser) error {
 func (r *fileAccountRepo) DeleteAccount(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, _, _, err := r.reload(); err != nil {
+		return err
+	}
 	delete(r.users, id)
 	return r.write()
 }
@@ -177,6 +191,9 @@ func (r *fileAccountRepo) PutToken(t authToken) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, _, _, err := r.reload(); err != nil {
+		return err
+	}
 	r.tokens[t.Hash] = t
 	return r.write()
 }
@@ -184,6 +201,9 @@ func (r *fileAccountRepo) PutToken(t authToken) error {
 func (r *fileAccountRepo) DeleteToken(hash string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, _, _, err := r.reload(); err != nil {
+		return err
+	}
 	delete(r.tokens, hash)
 	return r.write()
 }
@@ -191,6 +211,9 @@ func (r *fileAccountRepo) DeleteToken(hash string) error {
 func (r *fileAccountRepo) PutPolicy(p authPolicy) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, _, _, err := r.reload(); err != nil {
+		return err
+	}
 	r.policy = &p
 	return r.write()
 }
@@ -611,6 +634,16 @@ func (r *fileDeviceRepo) Put(d DeviceInfo) error {
 	return r.write()
 }
 
+func (r *fileDeviceRepo) Delete(user, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	delete(r.rows, devKey{user, id})
+	return r.write()
+}
+
 // ---- reads (reads.json) ----
 
 type fileReadRepo struct {
@@ -626,6 +659,16 @@ func newFileReadRepo(path string) *fileReadRepo {
 func (r *fileReadRepo) Load() ([]ReadStat, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.reload()
+}
+
+// reload re-reads the file before every write, for the reason
+// fileProjectRepo.reload states. Not authorization — integrity: a stale rewrite
+// ERASES every bucket another hub process recorded since boot (the operator's
+// staleness view silently loses reads), and a stale DeleteBatch resurrects the
+// daily buckets a fold already rolled into an all-time row, double-counting
+// them. Callers hold mu.
+func (r *fileReadRepo) reload() ([]ReadStat, error) {
 	var f struct {
 		Reads []ReadStat `json:"reads"`
 	}
@@ -670,6 +713,9 @@ func (r *fileReadRepo) PutBatch(stats []ReadStat) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
 	for _, st := range stats {
 		r.byKey[st.key()] = st
 	}
@@ -679,6 +725,9 @@ func (r *fileReadRepo) PutBatch(stats []ReadStat) error {
 func (r *fileReadRepo) DeleteBatch(keys []ReadStatKey) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
 	for _, k := range keys {
 		delete(r.byKey, k)
 	}

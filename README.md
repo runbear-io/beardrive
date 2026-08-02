@@ -582,7 +582,8 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
 `.git` directories (per-file LWW would corrupt repositories), `.DS_Store`,
 the `.bdrive` settings file, agent **hook** configuration
 (`.claude/settings.json` and `settings.local.json`, `.codex/hooks.json` and
-`config.toml`, `.gemini/settings.json`, `.hermes/config.yaml` — a hook is a
+`config.toml`, `.gemini/settings.json`, `.hermes/config.yaml`, and `.mcp.json`
+— a hook is a
 shell command, and syncing one would let a teammate install it on your
 machine; BearDrive's own hooks live in each machine's user config. Everything
 else under those directories — skills, commands, agents — syncs normally),

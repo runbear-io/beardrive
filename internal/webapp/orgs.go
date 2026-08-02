@@ -56,6 +56,7 @@ type OrgInvite struct {
 func (db *OrgDB) RecordInviteUse(token string) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	if inv, ok := db.invites[token]; ok {
 		inv.Uses++
 		db.invites[token] = inv
@@ -73,6 +74,7 @@ type OrgDB struct {
 	repo OrgRepo
 
 	mu      sync.Mutex
+	warned  bool // "re-read failed" logged once (see refresh)
 	byID    map[string]Org
 	invites map[string]OrgInvite
 	// seniority, when set, lists accounts oldest first. It resolves the ONE
@@ -190,6 +192,53 @@ func (db *OrgDB) putMember(prev, next Org, email, role string) error {
 	return nil
 }
 
+// refresh re-reads orgs and invites from the store. Callers hold mu.
+//
+// Round 12 gave ProjectDB this on its read path and stopped there. The org
+// registry is the wall IN FRONT of project permissions — projectPerm resolves
+// s.Projects.Get() (refreshed) and then s.Dir.Role(p.Org, email) out of a map
+// loaded at boot — so on a hub running two processes an owner's "remove this
+// person from the org" took effect on whichever process served it and on no
+// other, and the removed member kept reading every project in the org. Same for
+// a revoked invite, which on the default invite-only posture also bootstraps an
+// account.
+//
+// It runs at the top of the MUTATORS too, not only the reads: the last-owner
+// guard counts owners out of this map, so a stale copy lets two processes each
+// demote "the other" owner and leave an org nobody can administer. The
+// write-side reload in the repo cannot close that — the decision is made up
+// here, before the repo is ever called.
+//
+// A store that cannot answer leaves the current maps in place: the previous
+// answer is the last one the store agreed to, and dropping every org on a
+// transient read error would 403 the whole hub. Same trade, same reasons as
+// ProjectDB.refresh.
+//
+// ponytail: one full Load per authorization read, and with BuiltinAuth.refresh
+// and ProjectDB.refresh that is now three per request. Correctness floor, not a
+// cache. If it shows up in a profile the fix is a version/mtime check inside the
+// repo, never a TTL up here — a TTL is exactly the staleness window this removes.
+func (db *OrgDB) refresh() {
+	orgs, invites, err := db.repo.Load()
+	if err != nil {
+		if !db.warned {
+			db.warned = true
+			log.Printf("beardrive: org registry re-read failed, serving the last known memberships: %v", err)
+		}
+		return
+	}
+	db.warned = false
+	nextOrgs := make(map[string]Org, len(orgs))
+	for _, o := range orgs {
+		nextOrgs[o.ID] = o
+	}
+	nextInvites := make(map[string]OrgInvite, len(invites))
+	for _, i := range invites {
+		nextInvites[i.Token] = i
+	}
+	db.byID, db.invites = nextOrgs, nextInvites
+}
+
 // Create makes a new org owned by ownerEmail.
 func (db *OrgDB) Create(name, ownerEmail string) (Org, error) {
 	name = trimName(name)
@@ -207,6 +256,7 @@ func (db *OrgDB) Create(name, ownerEmail string) (Org, error) {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	db.byID[o.ID] = o
 	if err := db.repo.PutOrg(o); err != nil {
 		delete(db.byID, o.ID)
@@ -218,6 +268,7 @@ func (db *OrgDB) Create(name, ownerEmail string) (Org, error) {
 func (db *OrgDB) Get(id string) (Org, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	o, ok := db.byID[id]
 	if !ok {
 		return Org{}, false
@@ -229,6 +280,7 @@ func (db *OrgDB) Get(id string) (Org, bool) {
 func (db *OrgDB) Role(orgID, email string) string {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	o, ok := db.byID[orgID]
 	if !ok {
 		return ""
@@ -241,6 +293,7 @@ func (db *OrgDB) OrgsFor(email string) []Org {
 	e := normEmail(email)
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	var out []Org
 	for _, o := range db.byID {
 		if o.Members[e] != "" {
@@ -263,6 +316,7 @@ func (db *OrgDB) AddMember(orgID, email, role string) error {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	o, ok := db.byID[orgID]
 	if !ok {
 		return fmt.Errorf("no such organization")
@@ -284,6 +338,7 @@ func (db *OrgDB) RemoveMember(orgID, email string) error {
 	e := normEmail(email)
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	o, ok := db.byID[orgID]
 	if !ok {
 		return fmt.Errorf("no such organization")
@@ -315,6 +370,7 @@ func (db *OrgDB) EvictMember(orgID, email string) error {
 	e := normEmail(email)
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	o, ok := db.byID[orgID]
 	if !ok {
 		return fmt.Errorf("no such organization")
@@ -414,6 +470,7 @@ func (db *OrgDB) SetRole(orgID, email, role string) error {
 	e := normEmail(email)
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	o, ok := db.byID[orgID]
 	if !ok {
 		return fmt.Errorf("no such organization")
@@ -437,6 +494,7 @@ func (db *OrgDB) Rename(orgID, name string) error {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	o, ok := db.byID[orgID]
 	if !ok {
 		return fmt.Errorf("no such organization")
@@ -461,6 +519,7 @@ func (db *OrgDB) ownerCount(o Org) int {
 func (db *OrgDB) ListInvites(orgID string) []OrgInvite {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	var out []OrgInvite
 	for _, inv := range db.invites {
 		if inv.Org == orgID && db.liveLocked(inv) {
@@ -475,6 +534,7 @@ func (db *OrgDB) ListInvites(orgID string) []OrgInvite {
 func (db *OrgDB) RevokeInvite(token string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	inv, ok := db.invites[token]
 	if !ok {
 		return false
@@ -498,6 +558,7 @@ func (db *OrgDB) CreateInvite(orgID, creator string, ttl time.Duration) (OrgInvi
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	if _, ok := db.byID[orgID]; !ok {
 		return OrgInvite{}, fmt.Errorf("no such organization")
 	}
@@ -518,6 +579,7 @@ func (db *OrgDB) CreateInvite(orgID, creator string, ttl time.Duration) (OrgInvi
 func (db *OrgDB) Redeem(token string) (OrgInvite, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	inv, ok := db.invites[token]
 	if !ok || !db.liveLocked(inv) {
 		return OrgInvite{}, false
@@ -531,6 +593,7 @@ func (db *OrgDB) Redeem(token string) (OrgInvite, bool) {
 func (db *OrgDB) ValidInvite(token string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	inv, ok := db.invites[token]
 	return ok && db.liveLocked(inv)
 }
@@ -657,6 +720,9 @@ func (s *Server) offboard(email string) {
 			}
 		}
 	}
+	// The device claim is hub-wide and is the WRITE gate's resolver, so it
+	// outlives every org and project grant above unless it is dropped here.
+	s.Devices.Release(e)
 	if s.Dir != nil {
 		// Last, because membership is what share liveness resolves through:
 		// clearing it is what makes a removed account's public links stop
