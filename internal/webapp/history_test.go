@@ -400,6 +400,88 @@ func TestHistoryPagingAcrossLamportAndTime(t *testing.T) {
 	}
 }
 
+// ?since= is the anchor the "What's new" view is built on: the same feed,
+// cut to what landed after a timestamp. It composes with the path/prefix
+// filter and with cursor paging, because it is applied in the same switch
+// and before the same sort.
+func TestHistorySince(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	t1 := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 7, 26, 15, 0, 0, 0, time.UTC)
+	f.putAt("dev", "notes/old.md", "old", t1)
+	f.putAt("dev", "notes/mid.md", "mid", t2)
+	f.putAt("dev", "docs/new.md", "new", t3)
+
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/"
+	page := func(u string) ([]string, string) {
+		t.Helper()
+		rec := do(t, h, "GET", u, nil)
+		if rec.Code != 200 {
+			t.Fatalf("history: %d %s", rec.Code, rec.Body)
+		}
+		var out struct {
+			Entries []HistoryEntry `json:"entries"`
+			Next    string         `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, e := range out.Entries {
+			got = append(got, e.Path)
+		}
+		return got, out.Next
+	}
+	arg := func(at time.Time) string { return "since=" + url.QueryEscape(at.Format(time.RFC3339)) }
+
+	// only what landed after the marker, newest first
+	if got, _ := page(base + "history?" + arg(t1.Add(time.Minute))); !slices.Equal(got, []string{"docs/new.md", "notes/mid.md"}) {
+		t.Fatalf("since=t1+1m = %v", got)
+	}
+	// strictly after: an op at exactly the marker is already seen
+	if got, _ := page(base + "history?" + arg(t2)); !slices.Equal(got, []string{"docs/new.md"}) {
+		t.Fatalf("since=t2 = %v, want the t2 op excluded", got)
+	}
+	// composes with prefix=: both filters apply
+	if got, _ := page(base + "history?prefix=notes/&" + arg(t1)); !slices.Equal(got, []string{"notes/mid.md"}) {
+		t.Fatalf("since+prefix = %v", got)
+	}
+	// composes with path=
+	if got, _ := page(base + "history?path=notes/old.md&" + arg(t1)); len(got) != 0 {
+		t.Fatalf("since+path = %v, want empty", got)
+	}
+	// a marker older than everything is the unfiltered feed, byte for byte
+	full := do(t, h, "GET", base+"history", nil).Body.String()
+	old := do(t, h, "GET", base+"history?"+arg(t1.Add(-24*time.Hour)), nil).Body.String()
+	if full != old {
+		t.Fatalf("since=<very old> differs from no since:\n%s\n%s", old, full)
+	}
+	// paging a since-feed reaches its oldest match and then stops
+	var got []string
+	cursor, pages := "", 0
+	for {
+		entries, next := page(base + "history?n=1&" + arg(t1) + cursorArg(cursor))
+		got = append(got, entries...)
+		if pages++; pages > 5 {
+			t.Fatalf("paging did not terminate: %v", got)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if !slices.Equal(got, []string{"docs/new.md", "notes/mid.md"}) {
+		t.Fatalf("paged since-feed = %v", got)
+	}
+	// unparseable is an error, not a silently unfiltered feed
+	if rec := do(t, h, "GET", base+"history?since=yesterday", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad since: %d, want 400", rec.Code)
+	}
+}
+
 // BenchmarkHistoryPage measures what a deep page costs: every request
 // re-lists and re-parses every journal (loadOps), so page 20 should cost
 // about what page 1 costs — the ceiling is gone, the per-page work is not.

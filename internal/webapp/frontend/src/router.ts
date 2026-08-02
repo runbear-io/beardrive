@@ -19,18 +19,19 @@ export function decodePath(p: string): string {
 // after the project id is reserved when it names a view:
 //   /<project-id>/dashboard[/<path>]  the read×staleness dashboard (optionally scoped)
 //   /<project-id>/history[/<path>]    change feed (project / subtree / file)
+//   /<project-id>/since               the change feed since your last visit
 //   /<project-id>/install             connect-a-device guide
 //   /<project-id>/settings            project settings
 // Rule: every page gets its own URL path (see CLAUDE.md) — new surfaces are
 // view routes here, not ephemeral panel state. (Root-level files literally
 // named like a view lose the URL shortcut and remain reachable via the tree.)
-export const VIEW_ROUTES = new Set(["dashboard", "history", "install", "settings"]);
+export const VIEW_ROUTES = new Set(["dashboard", "history", "since", "install", "settings"]);
 
 // Shipped URLs that were renamed. Parsed into the new view and normalized
 // away on arrival, so bookmarks resolve without a second live name.
 const LEGACY_VIEWS: Record<string, ViewName> = { insights: "dashboard" };
 
-export type ViewName = "dashboard" | "history" | "install" | "settings";
+export type ViewName = "dashboard" | "history" | "since" | "install" | "settings";
 
 export interface Route {
   // Org administration is not project-scoped, so it is a top-level route

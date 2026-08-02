@@ -27,7 +27,7 @@ classDiagram
     }
 
     class router {
-        +VIEW_ROUTES dashboard history install settings
+        +VIEW_ROUTES dashboard history since install settings
         +LEGACY_VIEWS insights to dashboard
         +top-level routes orgs billing
         +parseRoute(url, mode) Route
@@ -69,6 +69,7 @@ classDiagram
     class components {
         FileView FolderListing FileTree
         HistoryView HistoryRow DiffView VersionBanner
+        SinceView
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
@@ -80,12 +81,13 @@ classDiagram
     class lib {
         +diff.ts splitLines lcsDiff diffText
         +runs.ts groupRuns runFileCount
+        +lastVisit.ts lastVisit stampVisit (localStorage)
         +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
         +heat.ts ageRange isFlatRange ageSpanLabel (treemap scale)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +utils.ts
     }
-    note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it"
+    note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it. lastVisit.ts is the exception to the purity: the only localStorage in the frontend (the What's-new marker), every access try/caught so private mode degrades to the 7-day fallback rather than a white screen"
 
     App --> HubApp
     App --> VolumeApp

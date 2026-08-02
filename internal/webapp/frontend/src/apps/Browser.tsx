@@ -30,6 +30,7 @@ import { Palette, type PaletteItem } from "../components/Palette";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
+import { SinceView } from "../components/SinceView";
 import { VersionBanner } from "../components/VersionBanner";
 
 // The browsing surface shared by hub projects and single-volume mode: the
@@ -337,6 +338,22 @@ export default function Browser(props: {
         isFolder={isFolderFn}
       />
     );
+  } else if (route.view === "since" && project) {
+    // Whole project only — no viewTarget in v1, so a subtree link falls
+    // through to History.
+    view = (
+      <SinceView
+        apiBase={apiBase}
+        projectId={project.id}
+        account={config.me?.email}
+        isFolder={isFolderFn}
+        onOpen={openPath}
+        onMeta={setMeta}
+        onRendered={onRendered}
+        restore={canRestore ? { onRestore, busy: restoring } : undefined}
+        remove={canRestore ? { onRemove, busy: removing } : undefined}
+      />
+    );
   } else if (route.view === "history") {
     // structured view — default app column, like the folder listing it shares rows with
     view = (
@@ -447,6 +464,8 @@ export default function Browser(props: {
     <Breadcrumbs path={path} onOpenFolder={openPath} />
   ) : route.view === "dashboard" ? (
     "Dashboard — " + (route.viewTarget || project?.name || "")
+  ) : route.view === "since" ? (
+    "What's new — " + (project?.name || "")
   ) : route.view === "history" ? (
     "History — " + historyTitle(route.viewTarget || "", isFolderFn)
   ) : isHome ? (
