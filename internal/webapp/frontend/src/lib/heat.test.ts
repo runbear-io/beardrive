@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { heatFor, heatLevel, heatText, heatTotal, hotPathSplit } from "./heat.ts";
-import { ageRange, ageSpanLabel, isFlatRange, FLAT_AGE_SPREAD } from "./heat.ts";
+import { ageRange, ageSpanLabel, isFlatRange, FLAT_AGE_SPREAD, orphanPaths } from "./heat.ts";
 import type { HeatMap } from "../api/types.ts";
 
 // One fixture, read by both surfaces: the file header (heatText/heatTotal) and
@@ -117,4 +117,13 @@ test("ageSpanLabel: rounds, and collapses when both ends round alike", () => {
   assert.equal(ageSpanLabel(0.2, 2.8), "0–3d");
   assert.equal(ageSpanLabel(1.9, 2.1), "2d");
   assert.equal(ageSpanLabel(0, 0), "0d");
+});
+
+test("orphanPaths: heat rows whose file left the tree, sorted", () => {
+  const known = new Set(["guide.md", "notes/read-by-people.md", "notes/untouched.md"]);
+  // "notes/shared-only.md" was deleted; its reads must not vanish with it.
+  assert.deepEqual(orphanPaths(FIXTURE, known), ["notes/shared-only.md"]);
+  assert.deepEqual(orphanPaths(FIXTURE, new Set(Object.keys(FIXTURE))), []);
+  assert.deepEqual(orphanPaths({}, known), []);
+  assert.deepEqual(orphanPaths(null, known), []);
 });

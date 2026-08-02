@@ -69,11 +69,12 @@ classDiagram
     class components {
         FileView FolderListing FileTree
         HistoryView HistoryRow DiffView VersionBanner
-        Insights ShareDialog
+        Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
         Palette shell AccountBar ...
     }
+    note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; \"Empty project\" (value \"\") stays preselected so an unpicked create behaves exactly as it did before templates. modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
     note for components "components/ui — shadcn/ui primitives (Radix, copied in), themed from BearDrive tokens in tw.css; rendered markdown is transformed as a string before mounting, link clicks delegated on the container — never patch the dangerouslySetInnerHTML subtree"
 
     class lib {
@@ -81,6 +82,7 @@ classDiagram
         +runs.ts groupRuns runFileCount
         +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
         +heat.ts ageRange isFlatRange ageSpanLabel (treemap scale)
+        +heat.ts orphanPaths (reads whose file left the tree)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +utils.ts
     }

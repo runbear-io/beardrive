@@ -177,6 +177,24 @@ test("palette on a dead route still offers the way back", async ({ page }) => {
   await expect(page.locator(".in-treemap")).toBeVisible();
 });
 
+// BEA-54: cmdk overwrites the `id` we pass its primitives, so every palette
+// rule anchored on one was dead — the input lost its only author `color` and
+// fell back to the UA's black. Anchors here are ours (#palette) or cmdk's own
+// attributes, which is exactly what the fix relies on.
+test("palette renders in the dark palette, not UA black (BEA-54)", async ({ page }) => {
+  await login(page);
+  await wikiId(page);
+  await page.keyboard.press("ControlOrMeta+k");
+  const input = page.locator("#palette input");
+  await input.fill("topic");
+  await expect(input).toHaveCSS("color", "rgb(238, 240, 243)"); // --text, was rgb(0, 0, 0)
+  const sel = page.locator("#palette [cmdk-item][data-selected='true']");
+  await expect(sel.locator(".plabel")).toHaveCSS("color", "rgb(255, 207, 133)"); // --accent-bright
+  await expect(sel.locator(".pkind")).toHaveCSS("text-transform", "uppercase");
+  await expect(sel).toHaveCSS("background-color", "rgba(245, 166, 35, 0.13)"); // --glow
+  await page.keyboard.press("Escape");
+});
+
 test("share mints a public link that serves the file, revoke kills it", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);

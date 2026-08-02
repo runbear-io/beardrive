@@ -16,6 +16,10 @@ export interface ServerConfig {
     admin?: boolean;
   };
   reads: { enabled: boolean };
+  // Starting structures a new project can be created from (internal/templates,
+  // go:embed'ed into the server). Served rather than hardcoded here so a hub
+  // shipping another one needs no frontend change.
+  templates?: StartTemplate[];
   me?: { email: string; name: string };
   // Managed deployments only: where billing lives + the user's current plan.
   billing?: { plan: string; url: string };
@@ -40,6 +44,13 @@ export interface BillingInfo {
   portal_url: string;
 }
 
+// One entry of /api/config's `templates` (templates.Template).
+export interface StartTemplate {
+  name: string; // the API/flag value, e.g. "docs"
+  title: string; // menu label, e.g. "Docs + decision records"
+  blurb: string; // the one-line shape, e.g. "docs/, decisions/"
+}
+
 // Per-project permission levels (perms.go). Ordered: each includes the ones
 // before it.
 export type PermLevel = "none" | "read" | "write" | "admin";
@@ -60,6 +71,8 @@ export interface Project {
   /** lucide icon name (kebab-case); unknown or absent → the folder placeholder */
   icon?: string;
   creator?: string;
+  /** the starting structure it was created from ("" / absent for an empty project) */
+  template?: string;
   // The signed-in account's effective level on this project, resolved
   // server-side. A project you cannot read never appears in the list at all,
   // so this is always read or better here.

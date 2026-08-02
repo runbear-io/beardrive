@@ -120,6 +120,15 @@ func TestCLIOnboardingE2E(t *testing.T) {
 	// Nothing agent-shaped may be created inside the project: it would sync.
 	assertNoProjectHookFiles(t, work)
 
+	// init's star ask is for humans at a terminal only. `run` pipes stdout,
+	// which is exactly the shape of a CI job or a script parsing the output —
+	// asking there is the mistake that got postinstall ads banned from npm.
+	// (Matched on the repo URL, not the word "star" — `autostart registered`
+	// is a legitimate line that contains it.)
+	if strings.Contains(out, "github.com/runbear-io/beardrive") {
+		t.Fatalf("init asked for a GitHub star without a TTY:\n%s", out)
+	}
+
 	// A reboot kills the daemon, so init registers the login agent that
 	// brings it back. It must land in the user's own LaunchAgents dir (this
 	// test's isolated HOME) and point at `bdrive resume`, which covers every
@@ -580,4 +589,127 @@ func mustParse(t *testing.T, raw string) *url.URL {
 		t.Fatal(err)
 	}
 	return u
+}
+
+// `bdrive init --template` is the CLI-first path to a structured project: the
+// hub seeds it at creation (the CLI creates through the same endpoint the
+// browser does), init's blocking first cycle pulls it, and re-running the
+// same command is a no-op rather than a second copy.
+func TestCLITemplateSeeding(t *testing.T) {
+	e := newCLIEnv(t)
+	run, hub, browser := e.run, e.hub, e.browser
+
+	work := filepath.Join(t.TempDir(), "brain")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer run(work, "stop", work)
+	out, err := run(work, "init", "--name", "seeded", "--template", "docs", "--yes")
+	if err != nil {
+		t.Fatalf("init --template: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "docs template") {
+		t.Fatalf("init said nothing about the template:\n%s", out)
+	}
+
+	want := []string{"AGENTS.md", filepath.Join("decisions", "0001-record-decisions.md"), filepath.Join("docs", "README.md")}
+	for _, rel := range want {
+		if !fileExists(filepath.Join(work, rel)) {
+			t.Fatalf("%s is not on disk after init --template docs:\n%s", rel, out)
+		}
+	}
+	id := projectIDByName(t, browser, hub.URL, "seeded")
+	paths := hubPaths(t, browser, hub.URL, id)
+	for _, rel := range []string{"AGENTS.md", "decisions/0001-record-decisions.md", "docs/README.md"} {
+		if !paths[rel] {
+			t.Fatalf("%s never reached the hub: %v", rel, paths)
+		}
+	}
+	// Every directory of the template has a file in it — an empty directory
+	// would never sync, so the structure would silently not exist for a
+	// teammate.
+	if !paths["docs/README.md"] || !paths["decisions/0001-record-decisions.md"] {
+		t.Fatalf("a template directory reached the hub empty: %v", paths)
+	}
+
+	// Re-running is safe: the runbook promises it, and agents pass --yes.
+	before, err := os.ReadFile(filepath.Join(work, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "init", "--template", "docs", "--yes"); err != nil {
+		t.Fatalf("re-init --template: %v\n%s", err, out)
+	}
+	after, err := os.ReadFile(filepath.Join(work, "AGENTS.md"))
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("re-running init --template rewrote AGENTS.md (err %v)", err)
+	}
+}
+
+// The two refusals that must cost nothing: a scope that would hide the
+// template from the whole team, and a name that does not exist.
+func TestCLITemplateRefusals(t *testing.T) {
+	e := newCLIEnv(t)
+	run := e.run
+
+	scoped := filepath.Join(t.TempDir(), "scoped")
+	if err := os.MkdirAll(scoped, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(scoped, "init", "--name", "scoped", "--template", "para", "--only", "docs", "--yes")
+	if err == nil {
+		t.Fatalf("--template with --only should be refused:\n%s", out)
+	}
+	if !strings.Contains(out, ".bdriveignore") {
+		t.Fatalf("the refusal should say why (scope lives in .bdriveignore):\n%s", out)
+	}
+	if fileExists(filepath.Join(scoped, ".bdrive", "config.json")) {
+		t.Fatal("a refused init still initialized the folder")
+	}
+	if fileExists(filepath.Join(scoped, "AGENTS.md")) {
+		t.Fatal("a refused init still seeded files")
+	}
+
+	// Joining a project that already exists never restructures it: the
+	// refusal has to name what it was actually created from.
+	first := filepath.Join(t.TempDir(), "first")
+	if err := os.MkdirAll(first, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(first, "init", "--name", "taken", "--template", "docs", "--yes"); err != nil {
+		t.Fatalf("init first: %v\n%s", err, out)
+	}
+	defer run(first, "stop", first)
+	second := filepath.Join(t.TempDir(), "second")
+	if err := os.MkdirAll(second, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(second, "init", "--name", "taken", "--template", "para", "--yes")
+	defer run(second, "stop", second)
+	if err == nil {
+		t.Fatalf("a template on an existing project should be refused:\n%s", out)
+	}
+	if !strings.Contains(out, "docs") {
+		t.Fatalf("the refusal should name the project's existing template:\n%s", out)
+	}
+	if fileExists(filepath.Join(second, "projects", "README.md")) {
+		t.Fatal("a refused init still wrote the para skeleton")
+	}
+
+	bad := filepath.Join(t.TempDir(), "bad")
+	if err := os.MkdirAll(bad, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(bad, "init", "--name", "bad", "--template", "karpathy-wiki", "--yes")
+	if err == nil {
+		t.Fatalf("an unknown template should be refused:\n%s", out)
+	}
+	for _, name := range []string{"docs", "para"} {
+		if !strings.Contains(out, name) {
+			t.Fatalf("the refusal should name the valid set (%s missing):\n%s", name, out)
+		}
+	}
+	if fileExists(filepath.Join(bad, ".bdrive", "config.json")) {
+		t.Fatal("a refused init still initialized the folder")
+	}
 }

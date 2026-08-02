@@ -46,6 +46,16 @@ test("account menu: admin gets hub admin entry; member does not", async ({ page,
   await ctx.close();
 });
 
+test("the star ask is a plain link in the sidebar, not a prompt", async ({ page }) => {
+  await login(page);
+  const star = page.locator("#accountbar .gh-star");
+  await expect(star).toBeVisible();
+  await expect(star).toHaveAttribute("href", "https://github.com/runbear-io/beardrive");
+  await expect(star).toHaveAttribute("target", "_blank");
+  // Nothing may interrupt: no dialog, no toast, no dismissible banner.
+  await expect(page.locator('[role="dialog"], [role="alertdialog"]')).toHaveCount(0);
+});
+
 test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await login(page); // admin mints the invite
   const orgs = await (await page.request.get("/api/orgs")).json();
@@ -63,20 +73,33 @@ test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await p2.waitForURL(/auth\/login/);
   await p2.fill('input[name="email"]', MEMBER);
   await p2.fill('input[name="password"]', PASSWORD);
-  await p2.click("form button");
+  await p2.click("button[type=submit]");
   await expectToast(p2, "you joined");
   await p2.waitForURL(/\/[0-9a-f-]{36}$/); // lands on the org's project
   await ctx.close();
 });
 
-test("no-org account gets the onboarding empty state with the agent prompt", async ({
+test("no projects: the create dialog opens itself, and the page behind is no dead end", async ({
   page,
 }) => {
   await login(page, "solo@example.com");
+  // With nothing to browse, the one useful action opens on arrival.
+  await expect(page.locator(".modal .start-points")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".modal-input")).toHaveCount(0);
+
+  // Closing it leaves a page that says what to do — and a way back in.
   await expect(page.locator(".onboard h1")).toHaveText("Welcome to BearDrive");
-  await expect(page.locator(".ob-card h3")).toHaveText("Connect a new drive to your project");
-  // The agent paste-prompt is the one path, with this hub's real origin
-  // filled in; the by-hand route is a docs link.
+  await expect(page.locator(".ob-start h3")).toHaveText("Start a project");
+  await page.click("#ob-new");
+  await expect(page.locator(".modal-input")).toBeVisible();
+  await page.keyboard.press("Escape");
+  // Dismissed once, it stays dismissed until asked for again.
+  await expect(page.locator(".modal-input")).toHaveCount(0);
+
+  // The agent paste-prompt is still the other path, with this hub's real
+  // origin filled in; the by-hand route is a docs link.
+  await expect(page.locator(".ob-agent h3")).toHaveText("Or let your agent do it");
   await expect(page.locator(".onboard .gd-code code")).toContainText(
     "to set up a new BearDrive project on http://localhost:8993. Ask me which folder to sync.",
   );
@@ -86,10 +109,21 @@ test("no-org account gets the onboarding empty state with the agent prompt", asy
   );
 });
 
+// An account that already has projects must not get the dialog thrown at it.
+test("the create dialog does not open itself when projects exist", async ({ page }) => {
+  await login(page);
+  await expect(page.locator("#project-select")).toBeVisible();
+  await expect(page.locator(".modal-input")).toHaveCount(0);
+});
+
 test("new project via the sidebar + modal", async ({ page }) => {
   await login(page);
   await page.click("#projects .nav-add");
   await page.fill(".modal-input", "scratch");
+  // The starting point defaults to an empty project, so this path still
+  // describes exactly what it did before templates existed.
+  await expect(page.locator(".start-points")).toBeVisible();
+  await expect(page.locator(".start-point.on")).toContainText("Empty project");
   await page.click(".modal .pbtn");
   await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("scratch");
@@ -100,6 +134,49 @@ test("new project via the sidebar + modal", async ({ page }) => {
   await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("wiki");
   await expectToast(page, "Created");
+});
+
+// Picking a template seeds the project on the hub, so the folder listing
+// shows the structure before any device has ever connected.
+test("new project from a template", async ({ page }) => {
+  await login(page);
+  await page.click("#projects .nav-add");
+  await page.fill(".modal-input", "from-template");
+  await page.click('.start-point:has-text("Docs + decision records")');
+  await expect(page.locator(".start-point.on")).toContainText("Docs + decision records");
+  await page.click(".modal .pbtn");
+  await page.waitForURL(/\/[0-9a-f-]{36}$/);
+  await expect(page.locator("#project-select")).toContainText("from-template");
+  // Asserted on the file tree, not #content: a brand-new project's dashboard
+  // deliberately paints no treemap cells (#93), so #content is not where a
+  // seeded file reliably shows up.
+  for (const name of ["docs", "decisions", "AGENTS.md"]) {
+    await expect(page.locator("#sidebar").getByText(name, { exact: true }).first()).toBeVisible();
+  }
+});
+
+// "I already have a folder" creates the same empty project as "Empty
+// project" — the browser cannot touch your disk — so what it must change is
+// the next screen: the paste prompt stops telling the agent to make a new
+// folder, and the reassurance appears. The intent rides in the URL, so it
+// survives a reload.
+test("new project from an existing folder", async ({ page }) => {
+  await login(page);
+  await page.click("#projects .nav-add");
+  await page.fill(".modal-input", "brought-my-own");
+  await page.click('.start-point:has-text("I already have a folder")');
+  await page.click(".modal .pbtn");
+  await page.waitForURL(/connect=existing/);
+  await expect(page.locator(".gd-note")).toContainText("never moves, renames or overwrites");
+  await expect(page.locator(".gd-code code").first()).toContainText(
+    "I already have a folder of notes — ask me which one to sync",
+  );
+  // Nothing was seeded: same artifact as an empty project. Checked on the
+  // file tree, not #content — the paste prompt names INSTALL_FOR_AGENTS.md,
+  // which a substring match on "AGENTS.md" happily finds.
+  await expect(page.locator("#sidebar").getByText("AGENTS.md", { exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator(".gd-note")).toBeVisible();
 });
 
 test("account menu closes on Escape and outside click", async ({ page }) => {

@@ -20,6 +20,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/agenthooks"
 	"github.com/runbear-io/beardrive/internal/autostart"
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/templates"
 )
 
 // starterIgnore is seeded into new projects so build artifacts and
@@ -50,7 +51,7 @@ venv/
 // folder just resumes syncing (which is also how a moved/renamed folder
 // picks up where it left off).
 func initCmd() *cobra.Command {
-	var projectID, projectName, serverURL string
+	var projectID, projectName, serverURL, template string
 	var only []string
 	var yes, foreground, noHooks, noAutostart bool
 	c := &cobra.Command{
@@ -92,6 +93,21 @@ the folder was renamed or moved.`,
 			if projectID != "" && projectName != "" {
 				return fmt.Errorf("--project and --name are mutually exclusive")
 			}
+			// Both refusals land before any network call or file write: a
+			// scope that excludes a template's top level would hide it from
+			// the whole team (scope rules live in the synced .bdriveignore),
+			// and an unknown name should cost nothing.
+			var tpl templates.Template
+			if template != "" {
+				if len(only) > 0 {
+					return fmt.Errorf("--template and --only are mutually exclusive: " +
+						"scope rules live in the synced .bdriveignore, so a scope that leaves out " +
+						"the template's folders would hide them for everyone")
+				}
+				if tpl, err = templates.Get(template); err != nil {
+					return err
+				}
+			}
 
 			// Already initialized → resume (also self-heals after a move).
 			if proj, ok, err := config.ResolveMount(folder); err != nil {
@@ -120,6 +136,16 @@ the folder was renamed or moved.`,
 						fmt.Printf("  syncing: ./%s only (rules written to .bdriveignore)\n", strings.Join(scope, ", ./"))
 					}
 				}
+				// --template in an already-initialized folder is the agent's
+				// path: init pulled the project, the folder turned out to be
+				// empty, so the structure is written here and the usual cycle
+				// pushes it. Existing paths are never overwritten, which is
+				// what makes re-running this safe.
+				if tpl.Name != "" {
+					if err := seedLocally(folder, tpl); err != nil {
+						return err
+					}
+				}
 				if !noHooks {
 					installAgentHooks(folder)
 				}
@@ -138,20 +164,31 @@ the folder was renamed or moved.`,
 
 			interactive := stdinIsTTY() && !yes
 
-			// Which project?
+			// Which project — and, when creating one, what does it start from?
 			var p serverProject
+			var created bool
 			switch {
 			case projectID != "":
 				p, err = getProject(server, settings.Token, projectID)
 			case projectName != "":
-				p, _, err = createProject(server, settings.Token, projectName)
+				p, created, err = createProject(server, settings.Token, projectName, template)
 			case interactive:
-				p, err = chooseProject(server, settings.Token, filepath.Base(folder))
+				p, created, err = chooseProject(server, settings.Token, filepath.Base(folder), &template, &tpl)
 			default:
-				p, _, err = createProject(server, settings.Token, filepath.Base(folder))
+				p, created, err = createProject(server, settings.Token, filepath.Base(folder), template)
 			}
 			if err != nil {
 				return fmt.Errorf("cannot set up project on %s: %w", server, err)
+			}
+			// A template is applied when a project is created, and only then:
+			// joining one that already exists must never restructure it.
+			if tpl.Name != "" && !created && p.Template != tpl.Name {
+				from := "an empty project"
+				if p.Template != "" {
+					from = "the " + p.Template + " template"
+				}
+				return fmt.Errorf("project %q already exists and was created from %s\n"+
+					"a template only applies to a new project; connect to this one without --template", p.Name, from)
 			}
 			if err := checkNotAlreadyMounted(server+"/p/"+p.ID, folder, p.Name); err != nil {
 				return err
@@ -197,6 +234,22 @@ the folder was renamed or moved.`,
 				}
 			}
 			fmt.Printf("initialized %s\n  server:  %s\n  project: %s (%s)\n", folder, server, p.Name, p.ID)
+			if tpl.Name != "" {
+				switch {
+				case p.Template == tpl.Name:
+					// The hub seeded it at creation; the initial cycle below
+					// is blocking and pulls, so the files land on disk before
+					// this command returns.
+					fmt.Printf("  start:   %s template (seeded on the hub)\n", tpl.Name)
+				default:
+					// An older hub silently ignored the template field, which
+					// would make --template a quiet no-op. Seed from here and
+					// let the first cycle push it.
+					if err := seedLocally(folder, tpl); err != nil {
+						return err
+					}
+				}
+			}
 			if !noHooks {
 				installAgentHooks(folder)
 			}
@@ -226,18 +279,45 @@ next steps:
   see who changed what:                bdrive log
   share a file by public URL:          bdrive share <file>
 `, server, p.ID, p.ID)
+			// The one and only place the CLI asks for a star. A folder was just
+			// set up successfully — about once per project per machine — which
+			// is the single moment that earns the ask. Never from a command that
+			// repeats (sync, status, the daemon), and never without a TTY: a
+			// star plea in a CI log or in output a script parses is exactly what
+			// got postinstall ads banned from npm.
+			if stdinIsTTY() {
+				fmt.Printf("\nif this is useful, a star helps other teams find it: %s\n", repoURL)
+			}
 			return nil
 		},
 	}
 	c.Flags().StringVar(&serverURL, "server", "", "hub to connect to (default: the remembered one); signs in there if this device has no session")
 	c.Flags().StringVar(&projectID, "project", "", "connect an existing project by id (p-xxxxxxxx)")
 	c.Flags().StringVar(&projectName, "name", "", "project name to create or join (default: folder name)")
+	c.Flags().StringVar(&template, "template", "", "start from a structure ("+strings.Join(templates.Names(), ", ")+"); default: an empty project")
 	c.Flags().StringSliceVar(&only, "only", nil, "sync only these subfolders of the mount (comma-separated, e.g. wiki,docs) — written as .bdriveignore rules")
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "accept defaults, never prompt")
 	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run the sync daemon in the foreground")
 	c.Flags().BoolVar(&noHooks, "no-hooks", false, "skip registering agent sync hooks")
 	c.Flags().BoolVar(&noAutostart, "no-autostart", false, "skip registering sync to restart at login")
 	return c
+}
+
+// seedLocally writes a template into the folder and says what it wrote.
+// Paths that already exist are never touched, so seeding twice — an agent
+// re-running init, a hub that already seeded — is a no-op rather than a
+// conflict.
+func seedLocally(folder string, tpl templates.Template) error {
+	wrote, err := tpl.WriteTo(folder)
+	if err != nil {
+		return fmt.Errorf("seed the %s template: %w", tpl.Name, err)
+	}
+	if len(wrote) == 0 {
+		fmt.Printf("  start:   %s template (already present)\n", tpl.Name)
+		return nil
+	}
+	fmt.Printf("  start:   %s template (%d files — read AGENTS.md)\n", tpl.Name, len(wrote))
+	return nil
 }
 
 // installAgentHooks registers turn-boundary sync hooks as part of init, so
@@ -398,31 +478,48 @@ func normalizeServer(raw string) string {
 	return "https://" + raw
 }
 
-func chooseProject(server, token, defaultName string) (serverProject, error) {
+// chooseProject asks what to do and does it. The starting point is asked
+// only on the create-a-new-project branch — connecting to an existing
+// project never restructures it — and the picked template is handed back
+// through name/tpl so the caller's refusals and summary see it too.
+func chooseProject(server, token, defaultName string, name *string, tpl *templates.Template) (serverProject, bool, error) {
 	var mode string
 	if err := survey.AskOne(&survey.Select{
 		Message: "What would you like to do?",
 		Options: []string{"Create a new project", "Connect an existing project"},
 	}, &mode); err != nil {
-		return serverProject{}, err
+		return serverProject{}, false, err
 	}
 	if mode == "Create a new project" {
-		name := defaultName
-		if err := survey.AskOne(&survey.Input{Message: "Project name:", Default: defaultName}, &name); err != nil {
-			return serverProject{}, err
+		projName := defaultName
+		if err := survey.AskOne(&survey.Input{Message: "Project name:", Default: defaultName}, &projName); err != nil {
+			return serverProject{}, false, err
 		}
-		p, created, err := createProject(server, token, name)
+		if *name == "" {
+			picked, err := chooseTemplate()
+			if err != nil {
+				return serverProject{}, false, err
+			}
+			if picked != "" {
+				t, err := templates.Get(picked)
+				if err != nil {
+					return serverProject{}, false, err
+				}
+				*name, *tpl = picked, t
+			}
+		}
+		p, created, err := createProject(server, token, projName, *name)
 		if err == nil && !created {
 			fmt.Printf("project %q already exists — connecting to it\n", p.Name)
 		}
-		return p, err
+		return p, created, err
 	}
 	projects, err := listProjects(server, token)
 	if err != nil {
-		return serverProject{}, err
+		return serverProject{}, false, err
 	}
 	if len(projects) == 0 {
-		return serverProject{}, fmt.Errorf("the server has no projects yet; create one instead")
+		return serverProject{}, false, fmt.Errorf("the server has no projects yet; create one instead")
 	}
 	labels := make([]string, len(projects))
 	for i, p := range projects {
@@ -430,9 +527,38 @@ func chooseProject(server, token, defaultName string) (serverProject, error) {
 	}
 	var idx int
 	if err := survey.AskOne(&survey.Select{Message: "Connect to which project?", Options: labels}, &idx); err != nil {
-		return serverProject{}, err
+		return serverProject{}, false, err
 	}
-	return projects[idx], nil
+	return projects[idx], false, nil
+}
+
+// chooseTemplate offers the three starting points in the same words the web
+// dialog uses, recommended first and "empty" as a real option rather than a
+// footnote. Returns "" for an empty project.
+func chooseTemplate() (string, error) {
+	list := templates.List()
+	options := make([]string, 0, len(list)+1)
+	for i, t := range list {
+		label := fmt.Sprintf("%s — %s", t.Title, t.Blurb)
+		if i == 0 {
+			label += "  (recommended)"
+		}
+		options = append(options, label)
+	}
+	options = append(options, "Empty project — just the folder")
+
+	var idx int
+	if err := survey.AskOne(&survey.Select{
+		Message: "Start from a structure?",
+		Options: options,
+		Default: options[len(options)-1],
+	}, &idx); err != nil {
+		return "", err
+	}
+	if idx == len(list) {
+		return "", nil
+	}
+	return list[idx].Name, nil
 }
 
 // chooseScope returns nil for whole-folder sync, or the subfolders to narrow
@@ -458,6 +584,10 @@ func chooseScope() ([]string, error) {
 type serverProject struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Template is the structure the hub seeded the project from, "" for an
+	// empty project — and also for a hub too old to know the field, which is
+	// why init falls back to seeding locally rather than trusting it blindly.
+	Template string `json:"template"`
 }
 
 var initClient = &http.Client{Timeout: 10 * time.Second}
@@ -527,8 +657,8 @@ func listProjects(server, token string) ([]serverProject, error) {
 	return out.Projects, nil
 }
 
-func createProject(server, token, name string) (serverProject, bool, error) {
-	body, err := json.Marshal(map[string]string{"name": name})
+func createProject(server, token, name, template string) (serverProject, bool, error) {
+	body, err := json.Marshal(map[string]string{"name": name, "template": template})
 	if err != nil {
 		return serverProject{}, false, err
 	}
