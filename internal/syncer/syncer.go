@@ -415,6 +415,15 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		if seen[rel] {
 			continue
 		}
+		// The walk only ever produces clean in-mount paths, but this pass
+		// mints an op from every cache key the walk did NOT see — and the
+		// cache is a JSON file in $BDRIVE_HOME, not something the walk wrote.
+		// Same rule the peer-op side applies, so this device never signs and
+		// pushes a path it would refuse from anyone else.
+		if unsafeRel(rel) || neverSync(rel) {
+			delete(cache, rel)
+			continue
+		}
 		if filter.Skip(rel) {
 			delete(cache, rel) // newly filtered, not deleted: stop tracking silently
 			continue
@@ -479,9 +488,35 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 		if bytes.Equal(local, data) {
 			continue
 		}
+		// Resume only at a COMPLETE LINE. "Append-only" is the peer's claim
+		// about its own object: publish a stage cut mid-line and both the size
+		// gate and HasPrefix still pass, but the offset lands inside an op's
+		// JSON, Parse drops the fragment, and the local copy is then
+		// overwritten with the full object — so the next resume starts past an
+		// op this device never applied, while every other device applies it.
+		// The peer picks the split by choosing where to cut.
+		accepted := local
+		if i := bytes.LastIndexByte(accepted, '\n'); i >= 0 {
+			accepted = accepted[:i+1]
+		} else {
+			accepted = nil
+		}
 		tail := data
-		if len(local) > 0 && bytes.HasPrefix(data, local) {
-			tail = data[len(local):]
+		switch {
+		case len(accepted) > 0 && bytes.HasPrefix(data, accepted):
+			tail = data[len(accepted):]
+		case len(accepted) > 0:
+			// The peer rewrote its log instead of appending to it. Re-reading
+			// it whole is fine for ordering (Replay is a fold) but it must not
+			// UNDO: replacing an already-applied op's line with a longer
+			// undecodable one grows the object, defeats HasPrefix, and drops
+			// the op — the file vanishes from every teammate's folder with no
+			// delete op, nothing in the journal and nothing in History.
+			prev, perr := journal.Parse(accepted)
+			all, aerr := journal.Parse(data)
+			if perr != nil || aerr != nil || len(all) < len(prev) {
+				continue
+			}
 		}
 		fresh, err := journal.Parse(tail)
 		if err != nil {
@@ -674,6 +709,12 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 		if _, ok := target[rel]; ok {
 			continue
 		}
+		// The write loop above got unsafeRel, neverSync and UnderRoot in round
+		// 4; this loop got none of them, and it ends in os.Remove.
+		if unsafeRel(rel) || neverSync(rel) {
+			delete(cache, rel)
+			continue
+		}
 		if filter.Skip(rel) {
 			// The path left sync scope rather than being deleted — someone
 			// ignored it, or `--prune` removed it from the hub. Stop tracking
@@ -684,6 +725,10 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 			continue
 		}
 		abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
+		if !store.UnderRoot(s.Folder, abs) {
+			delete(cache, rel)
+			continue
+		}
 		if fi, err := os.Stat(abs); err == nil {
 			if fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS {
 				continue // dirty; do not delete fresh local edits
@@ -817,7 +862,11 @@ func neverSync(rel string) bool {
 // already a clean relative slash path is refused rather than normalized:
 // normalizing would land two different journal paths on one file.
 func unsafeRel(rel string) bool {
-	return rel == "" || rel == ".." || strings.HasPrefix(rel, "../") ||
+	// "." is Clean-stable and relative, so every other clause lets it through:
+	// it names the mount root itself, which is a directory, not a file any op
+	// may address. It is contained today only because hashFile happens to fail
+	// on a directory first.
+	return rel == "" || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") ||
 		path.IsAbs(rel) || filepath.IsAbs(rel) || path.Clean(rel) != rel
 }
 
@@ -995,8 +1044,19 @@ func DisplayTime(op journal.Op) time.Time {
 	// pushes the genuine history off a screen that prints 50 rows. Lagging
 	// Time is legitimate (an old file, journaled today); leading it is not a
 	// write time, it is a sort key someone picked.
-	if !op.Mtime.IsZero() && !op.Mtime.After(op.Time) {
+	//
+	// Op.Time is no more verified than Op.Mtime — same JSON line, same peer —
+	// so bounding one by the other only moves the value a field to the left.
+	// The one clock a peer does not own is this machine's: a stamp later than
+	// now is not a write time at all, and an op we cannot date does not get to
+	// outrank the changes we can. It sorts last rather than first, which is
+	// the direction that cannot be aimed.
+	now := time.Now()
+	if !op.Mtime.IsZero() && !op.Mtime.After(op.Time) && !op.Mtime.After(now) {
 		return op.Mtime
+	}
+	if op.Time.After(now) {
+		return time.Time{}
 	}
 	return op.Time
 }

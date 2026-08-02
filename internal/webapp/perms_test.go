@@ -44,6 +44,16 @@ func permHub(t *testing.T) (h http.Handler, srv *Server, cookies map[string]*htt
 		t.Fatal(err)
 	}
 	srv.Shares = shares
+	// A served hub always has one (cmd/bdrive/web.go), and without it every
+	// device-ownership decision in store.go returns before it can decide
+	// anything — so a journal push through this fixture would measure
+	// org/project permission only. See TestSec_Audit_PermHubRefusesAForeign
+	// JournalOutOfTheBox.
+	devices, err := OpenDeviceRegistry(filepath.Join(t.TempDir(), "devices.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Devices = devices
 	h = srv.Handler()
 
 	cookies = map[string]*http.Cookie{}

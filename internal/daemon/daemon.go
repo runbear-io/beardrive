@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -106,19 +107,46 @@ func openLock(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 }
 
-// unopenableLockIsRunning answers the liveness question when the lock file
-// cannot be opened at all. It fails CLOSED — an unanswerable "is it running"
-// must not read as "it is gone", or `bdrive status` says not running while
-// sync runs and `bdrive stop` reports success having stopped nothing. hold()
-// fails on the same file, so the permissive answer bought nothing anyway.
-//
-// The one exception is a symlink at the lock path: that is not a daemon, it is
-// a tampered path, and reporting a daemon there is the wedge above.
-func unopenableLockIsRunning(path string) bool {
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return false
+// held is the set of lock paths THIS process holds. It is the only evidence
+// of a daemon available when the lock file cannot be opened.
+var held struct {
+	sync.Mutex
+	paths map[string]bool
+}
+
+func markHeld(path string, on bool) {
+	held.Lock()
+	defer held.Unlock()
+	if held.paths == nil {
+		held.paths = map[string]bool{}
 	}
-	return true
+	if on {
+		held.paths[path] = true
+	} else {
+		delete(held.paths, path)
+	}
+}
+
+// unopenableLockIsRunning answers the liveness question when the lock file
+// cannot be opened at all.
+//
+// Round 5 made this fail CLOSED with one carve-out for a symlink, and the
+// carve-out was on the wrong axis: a directory at the lock path, a lock file
+// nobody can open, and a volume directory that does not exist at all all fail
+// to open too, and every one of them then read as a live daemon forever —
+// Start a permanent no-op, Stop refusing, `bdrive status` reporting a healthy
+// mount that has not synced since. The ENOENT case needs no attacker.
+//
+// The answer is the reason, not the shape: none of those states is a daemon,
+// and reporting one wedges the mount. What makes reporting "no daemon" safe
+// here is that holdLock opens the SAME path the same way — a second daemon
+// cannot start on a lock it cannot open either, so the "two writers of one
+// journal" this guard exists for cannot materialize. The one real daemon that
+// can exist while the file is unopenable is this process, and it knows.
+func unopenableLockIsRunning(path string) bool {
+	held.Lock()
+	defer held.Unlock()
+	return held.paths[path]
 }
 
 // locked reports whether another process holds the lock file.
@@ -147,12 +175,14 @@ func holdLock(path string) (*os.File, error) {
 		f.Close()
 		return nil, fmt.Errorf("another daemon is already running for this mount: %w", err)
 	}
+	markHeld(path, true)
 	return f, nil
 }
 
 // release drops the lock and clears the announced pid with it, so no number
 // outlives the process that owned it.
 func release(f *os.File) {
+	markHeld(f.Name(), false)
 	f.Truncate(0)
 	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	f.Close()

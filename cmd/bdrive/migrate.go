@@ -71,7 +71,14 @@ bdrive import.`,
 				}
 			}
 			if out == "" {
-				out = fmt.Sprintf("%s-export-%s.tar.gz", proj.Volume, time.Now().Format("20060102"))
+				// proj.Volume is read verbatim from .bdrive/config.json, and
+				// init writes it from the hub's project name — any org
+				// member's string. It reaches os.Create, so a name like
+				// "../../pwned" chose where every teammate's export landed and
+				// truncated whatever was there. A default destination is a
+				// FILE NAME in the working directory; -o is how a human asks
+				// for anywhere else.
+				out = exportFileName(proj.Volume, time.Now())
 			}
 			f, err := os.Create(out)
 			if err != nil {
@@ -321,4 +328,26 @@ func writeTarFile(tw *tar.Writer, name string, b []byte) error {
 	}
 	_, err := tw.Write(b)
 	return err
+}
+
+// exportFileName builds the default archive name from an untrusted project
+// name: one path element, no separators, no control characters, bounded.
+func exportFileName(project string, now time.Time) string {
+	name := strings.Map(func(r rune) rune {
+		switch {
+		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+			return -1
+		case r == '/', r == '\\', r == ':':
+			return '-'
+		}
+		return r
+	}, project)
+	name = strings.Trim(name, ". ")
+	if name == "" {
+		name = "project"
+	}
+	if len(name) > 64 {
+		name = strings.ToValidUTF8(name[:64], "")
+	}
+	return fmt.Sprintf("%s-export-%s.tar.gz", name, now.Format("20060102"))
 }

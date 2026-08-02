@@ -435,6 +435,13 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux := http.NewServeMux()
 
+	// One account-removal path, one cleanup. Everything downstream of it is
+	// keyed by email, so removal has to take the org role, the project grants
+	// and (through membership) the share links with it.
+	if a, ok := s.Auth.(*BuiltinAuth); ok && a.Offboard == nil {
+		a.Offboard = s.offboard
+	}
+
 	// Volume resolution per route family: fixed single volume, or by
 	// project id in hub mode. One handler implementation serves both.
 	// Single-volume mode has no per-project permissions, so it ignores the

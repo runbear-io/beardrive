@@ -34,11 +34,22 @@ type BuiltinAuth struct {
 	Admins              map[string]bool // hub admins (lowercase emails): approve users, govern shares
 	Brand               string          // optional name shown on the sign-in page
 
+	// BaseURL is the hub's public origin ("https://drive.acme.com"). Links the
+	// hub MAILS are built from it. Empty → the first host the hub is reached
+	// on is pinned for the process's lifetime; see mailBaseURL.
+	BaseURL string
+
 	// InviteValid, when set, reports whether a token is a live org invite.
 	// It lets an invite link bootstrap an account on an invite-only hub
 	// (AllowSignup false) — the one path in without self-signup. Wired to
 	// OrgDB.ValidInvite by the server. Nil → no invite-based signup.
 	InviteValid func(token string) bool
+
+	// Offboard, when set, is called with the address of an account that has
+	// just been removed. Everything downstream of removal is keyed by email
+	// (org role, project grant, share liveness), so without it the grants
+	// outlive the account. Wired to Server.offboard by the server.
+	Offboard func(email string)
 
 	store AccountRepo
 
@@ -47,9 +58,10 @@ type BuiltinAuth struct {
 	// lives in this file.
 	cli *CLIAuth
 
-	mu     sync.Mutex
-	users  map[string]*authUser // by id
-	tokens map[string]authToken // by sha256(token)
+	mu         sync.Mutex
+	pinnedBase string               // first observed origin, when BaseURL is unset
+	users      map[string]*authUser // by id
+	tokens     map[string]authToken // by sha256(token)
 
 	// Ephemeral single-use state; a server restart just cancels pending
 	// verifications and resets.
@@ -136,9 +148,15 @@ type authPolicy struct {
 func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// Persist first: a gating change the store refused must not un-gate the
+	// hub in memory, which is the widening direction — new signups become
+	// active across a restart the store never agreed to.
+	if err := a.store.PutPolicy(authPolicy{RequireVerification: requireVerification, RequireApproval: requireApproval}); err != nil {
+		return err
+	}
 	a.RequireVerification = requireVerification
 	a.RequireApproval = requireApproval
-	return a.store.PutPolicy(authPolicy{RequireVerification: requireVerification, RequireApproval: requireApproval})
+	return nil
 }
 
 func randHex(n int) string {
@@ -209,8 +227,19 @@ func (a *BuiltinAuth) createAccount(email, name, password string, viaInvite bool
 	if a.findByEmail(email) != nil {
 		return nil, fmt.Errorf("an account with this email already exists")
 	}
+	// 128 bits, and never one already in use. randHex(4) was 32 bits with no
+	// uniqueness check: no attacker is needed, the birthday bound alone gives
+	// ~1% at 9,300 accounts and even odds at 77,000 — and a collision put a new
+	// account on a live one's id, so the victim's device tokens authenticated
+	// as the newcomer and PutAccount overwrote the victim's row, password hash
+	// included, with no way back. The repos refuse the overwrite too; this is
+	// the half that makes a legitimate signup never ask for it.
+	id := "u-" + randHex(16)
+	for a.users[id] != nil {
+		id = "u-" + randHex(16)
+	}
 	u := &authUser{
-		ID: "u-" + randHex(4), Email: email, Name: name,
+		ID: id, Email: email, Name: name,
 		Pass: string(hash), Status: status, Created: time.Now().UTC(),
 	}
 	a.users[u.ID] = u
@@ -397,7 +426,7 @@ func (a *BuiltinAuth) userForToken(tok string) (User, bool) {
 // sendVerification emails (or logs) a verification link for the account.
 func (a *BuiltinAuth) sendVerification(r *http.Request, u *authUser) {
 	tok := a.newGrant("verify", u.ID, 24*time.Hour)
-	link := requestBaseURL(r) + "/auth/verify?token=" + tok
+	link := a.mailBaseURL(r) + "/auth/verify?token=" + tok
 	subject := "Verify your BearDrive account"
 	body := "Confirm your email to activate your BearDrive account:\n\n  " + link +
 		"\n\nThis link is valid for 24 hours. If you didn't sign up, ignore this email."
@@ -481,16 +510,32 @@ func (a *BuiltinAuth) Approve(id string) error {
 	if !ok {
 		return fmt.Errorf("no such account")
 	}
+	// Persist first, apply after: an approval the store refused must not
+	// activate the account in memory — the admin is told it failed while the
+	// account authenticates until the next restart.
+	next := *u
+	next.Status = statusActive
+	if err := a.store.PutAccount(&next); err != nil {
+		return err
+	}
 	u.Status = statusActive
-	return a.store.PutAccount(u)
+	return nil
 }
 
 // Deny removes a pending account.
 func (a *BuiltinAuth) Deny(id string) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if _, ok := a.users[id]; !ok {
+	u, ok := a.users[id]
+	if !ok {
+		a.mu.Unlock()
 		return fmt.Errorf("no such account")
+	}
+	// Persist first: a removal the store refused must not empty the registry
+	// anyway, or the account is gone until the next restart and then signs in
+	// again with its old password.
+	if err := a.store.DeleteAccount(id); err != nil {
+		a.mu.Unlock()
+		return err
 	}
 	// Removing the account is not enough on its own: its device tokens and
 	// session cookies stay rows in the token table, dead today only because
@@ -498,8 +543,15 @@ func (a *BuiltinAuth) Deny(id string) error {
 	// back (a restore, a re-created account, a repo that reuses ids) would
 	// resurrect every credential with it.
 	a.revokeTokensForLocked(id)
+	email := u.Email
 	delete(a.users, id)
-	return a.store.DeleteAccount(id)
+	a.mu.Unlock()
+	// Outside the lock, and outside this provider: org roles, project grants
+	// and share liveness all key on the address, not on the account id.
+	if a.Offboard != nil {
+		a.Offboard(email)
+	}
+	return nil
 }
 
 // Accounts returns every account, oldest first (used by the org migration
@@ -887,11 +939,22 @@ func (a *BuiltinAuth) pageVerify(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	u := a.users[g.user]
 	next := a.afterVerify()
+	var perr error
 	if u != nil && u.Status == statusUnverified {
-		u.Status = next
-		a.store.PutAccount(u)
+		// Persist first: a verification the store refused must not activate
+		// the account in memory. Same shape as Approve.
+		row := *u
+		row.Status = next
+		if perr = a.store.PutAccount(&row); perr == nil {
+			u.Status = next
+		}
 	}
 	a.mu.Unlock()
+	if perr != nil {
+		authPage(w, "Not verified yet", `<p class="err">Your account could not be updated, so it is not verified yet.</p>
+<p class="alt"><a href="/auth/login">Back to sign in</a></p>`)
+		return
+	}
 	if u != nil && u.Status == statusPending {
 		authPage(w, "Email verified", `<p class="msg">Your email is verified. Your account is now waiting for an administrator to approve it.</p>`)
 		return
@@ -914,7 +977,7 @@ func (a *BuiltinAuth) pageReset(w http.ResponseWriter, r *http.Request) {
 		if u != nil {
 			tok := a.newGrant("reset", u.ID, time.Hour)
 			addr := u.Email
-			link := requestBaseURL(r) + "/auth/reset/confirm?token=" + tok
+			link := a.mailBaseURL(r) + "/auth/reset/confirm?token=" + tok
 			subject := "Reset your BearDrive password"
 			body := "Someone (hopefully you) asked to reset the BearDrive password for " + addr +
 				".\n\nReset it here (valid for 1 hour):\n\n  " + link + "\n\nIf this wasn't you, ignore this email."
@@ -959,12 +1022,26 @@ func (a *BuiltinAuth) pageResetConfirm(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Persist first, apply after, and surface a refusal: round 5 made the
+		// TOKEN half of a reset durable and left this half discarding the
+		// store's error, so the page said "Password updated" while the hub
+		// came back at the next restart with the password the thief chose.
 		a.mu.Lock()
-		if u := a.users[g.user]; u != nil {
-			u.Pass = string(hash)
-			a.store.PutAccount(u)
+		u := a.users[g.user]
+		var perr error
+		if u != nil {
+			next := *u
+			next.Pass = string(hash)
+			if perr = a.store.PutAccount(&next); perr == nil {
+				u.Pass = string(hash)
+			}
 		}
 		a.mu.Unlock()
+		if perr != nil {
+			authPage(w, "Password not changed", `<p class="err">Your password could not be saved, so nothing was changed.</p>
+<p class="alt"><a href="/auth/reset">Request a new reset link</a></p>`)
+			return
+		}
 		// A reset is the documented recovery for a stolen account, so it has
 		// to end the thief's access too: every session cookie and device token
 		// minted under the old password dies with it.
@@ -987,6 +1064,30 @@ func requestBaseURL(r *http.Request) string {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host
+}
+
+// mailBaseURL is where a link the hub SENDS SOMEWHERE ELSE points. It is
+// deliberately not requestBaseURL: the Host header (and X-Forwarded-Proto) are
+// chosen by whoever made the request, and /auth/reset is unauthenticated — so
+// a stranger posting a victim's address with a Host of their choosing had the
+// hub mail the victim a genuine link that hands the single-use grant to the
+// attacker's server. Classic reset poisoning. The three other requestBaseURL
+// callers hand the URL back to the caller who chose the host, which is
+// self-inflicted; these two do not.
+//
+// BaseURL is the answer and should be configured (auth.base_url). When it is
+// not, the hub pins the first host it was reached on and never moves: a later
+// request cannot redirect mail that is already addressed to someone else.
+func (a *BuiltinAuth) mailBaseURL(r *http.Request) string {
+	if a.BaseURL != "" {
+		return strings.TrimRight(a.BaseURL, "/")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pinnedBase == "" {
+		a.pinnedBase = requestBaseURL(r)
+	}
+	return a.pinnedBase
 }
 
 // ---- CLI API ----

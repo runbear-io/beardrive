@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -213,7 +214,7 @@ func (db *OrgDB) RemoveMember(orgID, email string) error {
 		return fmt.Errorf("no such organization")
 	}
 	if o.Members[e] == "" {
-		return fmt.Errorf("%s is not a member", email)
+		return nil // already not a member: the postcondition already holds
 	}
 	if o.Members[e] == RoleOwner && db.ownerCount(o) <= 1 {
 		return fmt.Errorf("cannot remove the last owner")
@@ -396,6 +397,42 @@ func MigrateOrgs(projects *ProjectDB, orgs orgWriter, accounts []User) error {
 		}
 	}
 	return nil
+}
+
+// offboard drops every grant an address holds, at the moment its ACCOUNT goes
+// away. Every authorization decision on the hub keys on the email — OrgDB.Role,
+// Project.Perms, and share liveness through shareCreatorStillBelongs — and
+// account removal touched none of them, so the grants outlived the account and
+// the next account on that address (a re-signup, a redeemed invite, an admin
+// re-adding someone) inherited them, project admin included. Round 1 ruled a
+// grant must not outlive org membership; this is the same rule one level up.
+//
+// One choke point rather than N sweeps: it is wired into the hub's only
+// account-removal path (BuiltinAuth.Deny) in Handler.
+func (s *Server) offboard(email string) {
+	e := normEmail(email)
+	if e == "" {
+		return
+	}
+	if s.Projects != nil {
+		for _, p := range s.Projects.List() {
+			if _, has := p.Perms[e]; has {
+				if err := s.Projects.dropPerm(p.ID, e); err != nil {
+					log.Printf("beardrive: offboard %s: project %s: %v", e, p.ID, err)
+				}
+			}
+		}
+	}
+	if s.Dir != nil {
+		// Last, because membership is what share liveness resolves through:
+		// clearing it is what makes a removed account's public links stop
+		// serving.
+		for _, o := range s.Dir.OrgsFor(e) {
+			if err := s.Dir.RemoveMember(o.ID, e); err != nil {
+				log.Printf("beardrive: offboard %s: org %s: %v", e, o.ID, err)
+			}
+		}
+	}
 }
 
 // ---- HTTP ----

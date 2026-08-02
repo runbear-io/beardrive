@@ -333,6 +333,26 @@ func (db *ProjectDB) ClearPerm(id, email string) error {
 	return db.put(p, next)
 }
 
+// dropPerm removes a grant with no last-admin guard. That guard stops a
+// project being left unadministrable by an operator's edit; it must not keep a
+// grant alive for an account that no longer exists, which is how an address
+// walked back into a project as its admin (Server.offboard).
+func (db *ProjectDB) dropPerm(id, email string) error {
+	e := normEmail(email)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	if _, has := p.Perms[e]; !has {
+		return nil
+	}
+	next := p.clone()
+	delete(next.Perms, e)
+	return db.put(p, next)
+}
+
 // adminCount counts explicit admin grants on a project.
 func adminCount(p Project) int {
 	n := 0
@@ -366,10 +386,28 @@ func trimName(s string) string { return trimText(s, 128) }
 func trimText(s string, max int) string {
 	out := make([]rune, 0, len(s))
 	for _, r := range s {
-		if r == '\n' || r == '\r' || r == '\t' {
+		switch {
+		// Every C0 and DEL, not just the three line breaks. A project name
+		// travels: `bdrive init` writes it into each teammate's
+		// .bdrive/config.json, from where `bdrive status` prints it to a
+		// terminal and `bdrive export` used to build a filename out of it. C1
+		// goes too — U+009B is CSI to any xterm-lineage terminal — as do the
+		// bidi overrides that reorder a rendered row.
+		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+			continue
+		case r == 0x061c, r == 0x200e, r == 0x200f,
+			r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+			continue
+		// Path separators and the two dot-only names: a name is a label, and
+		// these are the shapes that make it look like a path to something that
+		// joins it onto one.
+		case r == '/', r == '\\':
 			continue
 		}
 		out = append(out, r)
+	}
+	if s := strings.Trim(string(out), ". "); s == "" {
+		out = out[:0]
 	}
 	for len(out) > 0 && out[0] == ' ' {
 		out = out[1:]

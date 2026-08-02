@@ -206,9 +206,13 @@ func statusCmd() *cobra.Command {
 					continue
 				}
 				fmt.Printf("%s\n", folder)
-				fmt.Printf("  project:  %s (%s)\n", mi.Volume, id)
+				// Volume and Remote come out of .bdrive/config.json, and
+				// Volume comes originally from the hub's project name — any
+				// org member's string, reaching a terminal. Same treatment as
+				// `bdrive log`'s rows.
+				fmt.Printf("  project:  %s (%s)\n", safeField(mi.Volume, 120), id)
 				if mi.Remote != "" {
-					fmt.Printf("  remote:   %s\n", mi.Remote)
+					fmt.Printf("  remote:   %s\n", safeField(mi.Remote, 200))
 				} else {
 					fmt.Printf("  remote:   (none — local only)\n")
 				}
@@ -334,7 +338,22 @@ func logCmd() *cobra.Command {
 // of log is also owned by one 40 KB entry that scrolls the rest away.
 func safeField(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		switch {
+		case r < 0x20, r == 0x7f:
+			return -1
+		// C1, U+0080..U+009F. In a UTF-8 terminal these arrive as two bytes
+		// and xterm and its descendants decode them straight back to 8-bit
+		// controls: U+009B IS CSI, U+009D IS OSC, U+0090 IS DCS, U+0085 IS
+		// NEL. The whole escape vocabulary, with no ESC byte anywhere.
+		case r >= 0x80 && r <= 0x9f:
+			return -1
+		// The bidirectional format controls (Trojan Source, CVE-2021-42574).
+		// Not control characters by Unicode's own definition, so they survive
+		// every C0/C1 filter, and one U+202E draws the rest of the row
+		// right-to-left — the columns naming the actor and the device come
+		// after the path on the same line.
+		case r == 0x061c, r == 0x200e, r == 0x200f,
+			r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
 			return -1
 		}
 		return r

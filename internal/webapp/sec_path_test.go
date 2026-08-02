@@ -49,6 +49,13 @@ func secpathWrite(t *testing.T, abs, content string) {
 // every sync. cookie may be nil on an auth-less hub.
 func secpathPushOp(t *testing.T, h http.Handler, id, dev string, op map[string]any, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
+	// The real client stamps every op with its own device (syncer.go), and
+	// since permHub gained a device registry the first push of an unclaimed id
+	// is only a claim when the ops name it. This is setup, not the subject:
+	// the assertions below are about Op.Blob.
+	if _, ok := op["device"]; !ok {
+		op["device"] = dev
+	}
 	line, err := json.Marshal(op)
 	if err != nil {
 		t.Fatal(err)

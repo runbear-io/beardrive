@@ -285,10 +285,24 @@ func (r *sqlAccountRepo) Load() ([]*authUser, []authToken, *authPolicy, error) {
 }
 
 func (r *sqlAccountRepo) PutAccount(u *authUser) error {
-	return r.s.exec(`INSERT INTO accounts (id,email,name,pass,status,created) VALUES (?,?,?,?,?,?)
+	// The update arm is scoped to the SAME account: an id belongs to one
+	// address for the life of the hub, so a row arriving under a live id with
+	// a different email is a collision, not an update, and applying it hands
+	// the victim's device tokens and memberships to the newcomer while their
+	// password hash disappears. WHERE makes it a no-op; the rowcount check
+	// turns that into an error the caller sees.
+	res, err := r.s.db.Exec(r.s.q(`INSERT INTO accounts (id,email,name,pass,status,created) VALUES (?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET email=excluded.email, name=excluded.name, pass=excluded.pass,
-		status=excluded.status, created=excluded.created`,
+		status=excluded.status, created=excluded.created
+		WHERE lower(accounts.email) = lower(excluded.email)`),
 		u.ID, u.Email, u.Name, u.Pass, u.Status, tenc(u.Created))
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("account id %s already belongs to another account", u.ID)
+	}
+	return nil
 }
 
 func (r *sqlAccountRepo) DeleteAccount(id string) error {

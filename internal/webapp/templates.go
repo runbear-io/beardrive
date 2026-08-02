@@ -42,11 +42,20 @@ func (s *Server) seedTemplate(ctx context.Context, projectID string, t templates
 		}
 	}
 	for _, f := range t.Files {
-		if existing[f.Path] {
+		// The same guard every other write door on the hub applies before
+		// anything is journaled. This one called up.Upload directly, so a
+		// template path was the one destination nothing checked — and a hub
+		// that journals `../../etc/cron.d/pwned` or `.git/hooks/pre-commit`
+		// has already handed it to every device that syncs.
+		clean, err := cleanUploadPath(f.Path)
+		if err != nil {
+			return fmt.Errorf("template %s: %w", t.Name, err)
+		}
+		if existing[clean] {
 			continue
 		}
-		if err := up.Upload(ctx, f.Path, strings.NewReader(f.Content), int64(len(f.Content)), who); err != nil {
-			return fmt.Errorf("%s: %w", f.Path, err)
+		if err := up.Upload(ctx, clean, strings.NewReader(f.Content), int64(len(f.Content)), who); err != nil {
+			return fmt.Errorf("%s: %w", clean, err)
 		}
 	}
 	s.quota().RecordUsage(org, total)

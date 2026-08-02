@@ -36,22 +36,48 @@ type grant struct {
 	expires time.Time
 }
 
-// reserve records a presigned grant.
+// reserve records a presigned grant unconditionally. Every request path goes
+// through reserveIfFits instead, which is the same thing plus the cap check in
+// the same critical section.
 func (s *Server) reserve(project, org, key string, size int64, ttl time.Duration) {
 	s.resMu.Lock()
 	defer s.resMu.Unlock()
-	s.dropExpiredLocked()
+	s.dropStaleLocked()
 	s.grants = append(s.grants, grant{project, org, key, size, time.Now().Add(ttl)})
 }
 
-// reservedBytes is what this org has outstanding but unconfirmed.
+// reserveIfFits checks the cap and records the grant in ONE critical section,
+// then reports whether the grant may be made. Two separate acquisitions with
+// CheckWrite, Exists and SignPut in between let every concurrent caller read
+// the same zero reservation, so N grants that each fit the allowance were all
+// signed against an allowance that fits one — round 2's seat-check race, on
+// the new ledger.
+func (s *Server) reserveIfFits(project, org, key string, size int64, ttl time.Duration) error {
+	s.resMu.Lock()
+	defer s.resMu.Unlock()
+	s.dropStaleLocked()
+	if err := s.quota().CheckWrite(org, size+s.outstandingLocked(org)); err != nil {
+		return err
+	}
+	s.grants = append(s.grants, grant{project, org, key, size, time.Now().Add(ttl)})
+	return nil
+}
+
+// reservedBytes is what this org has outstanding but unconfirmed. An expired
+// grant no longer holds capacity (its URL cannot be used) even though the
+// ledger still remembers it until storage has been asked.
 func (s *Server) reservedBytes(org string) int64 {
 	s.resMu.Lock()
 	defer s.resMu.Unlock()
-	s.dropExpiredLocked()
+	s.dropStaleLocked()
+	return s.outstandingLocked(org)
+}
+
+func (s *Server) outstandingLocked(org string) int64 {
+	now := time.Now()
 	var n int64
 	for _, g := range s.grants {
-		if g.org == org {
+		if g.org == org && !now.After(g.expires) {
 			n += g.size
 		}
 	}
@@ -61,7 +87,8 @@ func (s *Server) reservedBytes(org string) int64 {
 // claimGrant takes over a grant's accounting, reporting whether there was one
 // left to take. The caller charges those bytes itself (a commit that read the
 // stored size) or has already charged them (a relayed put) — either way the
-// reconciler must not charge them a second time.
+// reconciler must not charge them a second time. It is also how a grant that
+// was reserved but never actually handed out is given back.
 func (s *Server) claimGrant(project, key string) bool {
 	s.resMu.Lock()
 	defer s.resMu.Unlock()
@@ -71,12 +98,12 @@ func (s *Server) claimGrant(project, key string) bool {
 }
 
 // reconcileGrants charges the grants of one project whose bytes have arrived
-// and releases the ones that expired without arriving. It is called wherever
+// and retires the ones that expired without arriving. It is called wherever
 // the hub already has this project's storage in hand; with nothing
 // outstanding — the ordinary case — it costs nothing at all.
 func (s *Server) reconcileGrants(ctx context.Context, project string, be remote.Backend) {
 	s.resMu.Lock()
-	s.dropExpiredLocked()
+	s.dropStaleLocked()
 	var mine []grant
 	for _, g := range s.grants {
 		if g.project == project {
@@ -86,25 +113,41 @@ func (s *Server) reconcileGrants(ctx context.Context, project string, be remote.
 	s.resMu.Unlock()
 	for _, g := range mine {
 		exists, err := be.Exists(ctx, g.key)
-		if err != nil || !exists {
-			continue // still in flight, or storage is unhappy: ask again later
+		if err != nil {
+			continue // storage is unhappy: ask again later
 		}
+		if !exists && !time.Now().After(g.expires) {
+			continue // still in flight
+		}
+		// Either the bytes are there (charge them) or the URL is dead and
+		// nothing arrived (release for free). Both retire the grant, and the
+		// decision is read under the same lock that made it: comparing the
+		// length after unlocking was a data race on the billing ledger, and a
+		// concurrent reserve that restored the length silently dropped the
+		// charge.
 		s.resMu.Lock()
 		before := len(s.grants)
 		s.dropLocked(func(o grant) bool { return o.project == g.project && o.key == g.key })
+		retired := before != len(s.grants)
 		s.resMu.Unlock()
-		if before != len(s.grants) {
+		if retired && exists {
 			// Charged once, by whichever request got here first.
 			s.quota().RecordUsage(g.org, g.size)
 		}
 	}
 }
 
-// dropExpiredLocked releases grants whose URL is no longer usable. Nothing was
-// ever charged for them, so releasing is just forgetting.
-func (s *Server) dropExpiredLocked() {
-	now := time.Now()
-	s.dropLocked(func(g grant) bool { return now.After(g.expires) })
+// dropStaleLocked forgets grants nothing will ever reconcile. Expiry alone is
+// NOT the trigger: an uploader that pushes through its presigned URL and then
+// goes quiet leaves bytes in storage that only the grant remembers, so
+// dropping on expiry made them free forever. A grant is retired by
+// reconcileGrants, which asks storage first; this is only the backstop for a
+// project nothing touches again, so the ledger cannot grow without bound.
+const grantReconcileGrace = 24 * time.Hour
+
+func (s *Server) dropStaleLocked() {
+	cutoff := time.Now().Add(-grantReconcileGrace)
+	s.dropLocked(func(g grant) bool { return g.expires.Before(cutoff) })
 }
 
 func (s *Server) dropLocked(match func(grant) bool) {

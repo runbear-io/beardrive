@@ -106,6 +106,18 @@ func cleanScopeDirs(dirs []string) ([]string, error) {
 		if d == "." || d == ".." || strings.HasPrefix(d, "../") {
 			return nil, fmt.Errorf("%q is not a subfolder of this project", d)
 		}
+		// One name, one rendered line. A newline is a legal byte in a unix
+		// directory name and scopeLines assumes it is not: a name carrying the
+		// block's own end marker terminates the managed block early, so the
+		// rules after it land OUTSIDE it and `bdrive scope rm` — which removes
+		// the block by its markers — can never take them out again. The
+		// .bdriveignore syncs, so `*/` there ignores every directory for the
+		// whole team, permanently.
+		for _, r := range d {
+			if r < 0x20 || r == 0x7f {
+				return nil, fmt.Errorf("folder name contains a control character: %q", d)
+			}
+		}
 		if seen[d] {
 			continue
 		}

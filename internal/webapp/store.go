@@ -238,14 +238,14 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 		http.Error(w, fmt.Sprintf("invalid store key %q", req.Key), http.StatusBadRequest)
 		return
 	}
-	// Signing grants nothing for a journal (journals are never presigned; the
-	// answer is always "come through the server"), so an unidentified caller
-	// is fine here — the write itself is where ownership is enforced. A
-	// caller that does name a device is held to it, so a forged sync fails at
-	// the first step instead of after uploading.
-	if r.Header.Get("X-Bdrive-Device") != "" && !s.ownJournal(w, r, req.Key, nil) {
-		return
-	}
+	// Ownership is deliberately NOT consulted here. Signing grants nothing for
+	// a journal — journals are never presigned, the answer is always "come
+	// through the server" — so the only thing asking could do is turn
+	// OwnerOf's hub-wide answer into a status code on a route any org member
+	// may call: a plain member of one org probed a device id belonging to a
+	// separate tenant and the response told him whether it existed. The write
+	// itself is where ownership is enforced, and that is the only place it
+	// needs to be.
 	s.observeDevice(r)
 	project := r.PathValue("project")
 	s.reconcileGrants(r.Context(), project, rs.Backend)
@@ -270,19 +270,25 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 			return
 		}
 		if signer, ok := rs.Backend.(remote.PutSigner); ok {
+			// Reserved, not charged: the bytes go straight to storage, so this
+			// grant counts against the cap immediately and is billed when the
+			// object is confirmed there (reconcileGrants), or released for
+			// free when the URL expires unused. Booking it here outright
+			// charged 20 GiB for 20 JSON posts. The check and the reservation
+			// are one critical section, so concurrent callers cannot all read
+			// the same zero and oversubscribe.
+			if err := s.reserveIfFits(project, org, req.Key, req.Size, s.Upload.ttl()); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
 			if signed, err := signer.SignPut(r.Context(), req.Key, req.Size, s.Upload.ttl()); err == nil {
-				// Reserved, not charged: the bytes go straight to storage, so
-				// this grant counts against the cap immediately and is billed
-				// when the object is confirmed there (reconcileGrants), or
-				// released for free when the URL expires unused. Booking it
-				// here outright charged 20 GiB for 20 JSON posts.
-				s.reserve(project, org, req.Key, req.Size, s.Upload.ttl())
 				writeJSON(w, map[string]any{
 					"mode": "direct", "url": signed.URL, "method": signed.Method,
 					"headers": signed.Headers, "expires": signed.Expires.UTC(),
 				})
 				return
 			}
+			s.claimGrant(project, req.Key) // nothing was granted: give it back
 		}
 	}
 	writeJSON(w, map[string]any{"mode": "server"})

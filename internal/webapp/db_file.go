@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -148,6 +149,13 @@ func (r *fileAccountRepo) write() error {
 func (r *fileAccountRepo) PutAccount(u *authUser) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// An id identifies one account for the life of the hub. Overwriting a row
+	// with a DIFFERENT account's is never an update — it is one account's
+	// identity, org memberships and live device tokens transferring onto
+	// another, and the original's password hash gone from disk.
+	if prev, ok := r.users[u.ID]; ok && !strings.EqualFold(prev.Email, u.Email) {
+		return fmt.Errorf("account id %s already belongs to another account", u.ID)
+	}
 	r.users[u.ID] = u
 	return r.write()
 }

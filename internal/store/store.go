@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -199,7 +200,26 @@ func (s *Store) LoadCache(mountID string) (map[string]CachedFile, error) {
 	if err := readJSON(p, &out); err != nil {
 		return nil, err
 	}
+	// The keys are joined onto the working folder by the scan's delete pass
+	// and by materialize's, and turned into journal ops this device signs.
+	// The file is plain JSON in $BDRIVE_HOME, so anything running as the user
+	// (an agent session, an install script, an older bdrive) chooses them —
+	// validated where they are read, exactly like Project.ID.
+	for rel := range out {
+		if !cleanRel(rel) {
+			delete(out, rel)
+		}
+	}
 	return out, nil
+}
+
+// cleanRel reports whether rel is a clean, relative, in-volume path — the only
+// shape a cache key, and therefore an op minted from one, may have.
+func cleanRel(rel string) bool {
+	if rel == "" || rel == "." || rel == ".." || path.IsAbs(rel) || filepath.IsAbs(rel) {
+		return false
+	}
+	return path.Clean(rel) == rel && !strings.HasPrefix(rel, "../")
 }
 
 func (s *Store) SaveCache(mountID string, c map[string]CachedFile) error {

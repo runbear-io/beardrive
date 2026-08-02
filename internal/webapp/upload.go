@@ -398,13 +398,17 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 			writeJSON(w, map[string]any{"mode": "direct", "exists": true})
 			return
 		}
+		// Reserved, exactly like the device door: counted against the cap now,
+		// charged when the object is confirmed in storage, released for free
+		// if the caller never uploads. A browser upload that never comes back
+		// to commit is therefore still billed. Check and reservation are one
+		// critical section (see reserveIfFits).
+		if err := s.reserveIfFits(project, org, "blobs/"+req.SHA256, req.Size, s.Upload.ttl()); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		signed, err := direct.SignBlobPut(r.Context(), req.SHA256, req.Size, s.Upload.ttl())
 		if err == nil {
-			// Reserved, exactly like the device door: counted against the cap
-			// now, charged when the object is confirmed in storage, released
-			// for free if the caller never uploads. A browser upload that
-			// never comes back to commit is therefore still billed.
-			s.reserve(project, org, "blobs/"+req.SHA256, req.Size, s.Upload.ttl())
 			writeJSON(w, map[string]any{
 				"mode":    "direct",
 				"url":     signed.URL,
@@ -416,6 +420,7 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 		}
 		// Backend can't presign right now (e.g. credentials that can't
 		// sign): degrade to uploading through the server.
+		s.claimGrant(project, "blobs/"+req.SHA256) // nothing was granted
 	}
 	writeJSON(w, map[string]any{"mode": "server"})
 }

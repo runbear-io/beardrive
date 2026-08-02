@@ -120,11 +120,19 @@ func (db *ShareDB) lookup(token string) (Share, bool) {
 func (db *ShareDB) Revoke(token string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	if _, ok := db.byToken[token]; !ok {
+	sh, ok := db.byToken[token]
+	if !ok {
 		return false
 	}
 	delete(db.byToken, token)
-	db.repo.Delete(token)
+	if err := db.repo.Delete(token); err != nil {
+		// Revocation is the emergency stop for a leaked public URL: a delete
+		// the store refused comes back at the next restart, so put the row
+		// back and report the failure rather than reporting a revocation that
+		// isn't one. Same shape as OrgDB.RevokeInvite.
+		db.byToken[token] = sh
+		return false
+	}
 	return true
 }
 

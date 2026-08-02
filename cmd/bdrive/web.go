@@ -46,6 +46,7 @@ type webConfig struct {
 		RequireApproval     *bool    `json:"require_approval,omitempty"`     // new accounts await admin approval
 		Admins              []string `json:"admins,omitempty"`               // hub admin emails (approve users, govern shares)
 		Brand               string   `json:"brand,omitempty"`                // name shown on the sign-in page
+		BaseURL             string   `json:"base_url,omitempty"`             // public origin used for MAILED links (never the request's Host)
 		SMTP                *struct {
 			Host string `json:"host"`
 			Port int    `json:"port"`
@@ -313,6 +314,7 @@ credentials); otherwise it is relayed through this server.`,
 						auth.RequireApproval = *cfg.Auth.RequireApproval
 					}
 					auth.Brand = cfg.Auth.Brand
+					auth.BaseURL = cfg.Auth.BaseURL
 					if len(cfg.Auth.Admins) > 0 {
 						auth.Admins = make(map[string]bool, len(cfg.Auth.Admins))
 						for _, e := range cfg.Auth.Admins {

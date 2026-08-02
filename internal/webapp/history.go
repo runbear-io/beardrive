@@ -67,14 +67,19 @@ func histLess(a, b journal.Op) bool {
 // carries no lamport/seq, so a client-computed cursor would be lossy across
 // same-second ops.
 type histCursor struct {
-	T int64  `json:"t"` // op time, unix nanoseconds
+	// RFC3339Nano, not UnixNano: Op.Time is unvalidated peer JSON and
+	// UnixNano is undefined outside [1678, 2262], so a date of 2300 read back
+	// as 1715 — the skip loop then walked past every entry and returned a
+	// clean end of feed. One journal push hid the whole audit trail past page
+	// one from every other member.
+	T string `json:"t"` // op time, RFC3339Nano
 	L int64  `json:"l"` // lamport
 	S int64  `json:"s"` // per-device seq
 	D string `json:"d"` // device
 }
 
 func encodeCursor(op journal.Op) string {
-	b, err := json.Marshal(histCursor{T: op.Time.UnixNano(), L: op.Lamport, S: op.Seq, D: op.Device})
+	b, err := json.Marshal(histCursor{T: op.Time.UTC().Format(time.RFC3339Nano), L: op.Lamport, S: op.Seq, D: op.Device})
 	if err != nil {
 		return ""
 	}
@@ -93,7 +98,11 @@ func decodeCursor(s string) (journal.Op, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return journal.Op{}, err
 	}
-	return journal.Op{Time: time.Unix(0, c.T).UTC(), Lamport: c.L, Seq: c.S, Device: c.D}, nil
+	ts, err := time.Parse(time.RFC3339Nano, c.T)
+	if err != nil {
+		return journal.Op{}, err
+	}
+	return journal.Op{Time: ts.UTC(), Lamport: c.L, Seq: c.S, Device: c.D}, nil
 }
 
 // handleHistory serves ?path=<file> (one file's versions) or

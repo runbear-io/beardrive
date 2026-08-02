@@ -593,6 +593,9 @@ func TestSec_Path_ValidBlobHashStaysInsideItsProject(t *testing.T) {
 	op := map[string]any{
 		"seq": 1, "lamport": 1, "time": time.Now().UTC().Format(time.RFC3339Nano),
 		"kind": "put", "path": "stolen.md", "blob": sha, "size": len(secret),
+		// setup only: permHub now has a device registry, so a first push of an
+		// unclaimed id must name that device the way the real client does.
+		"device": "bobdev",
 	}
 	line, _ := json.Marshal(op)
 	if rec := secfixDo(t, h, "PUT", "/api/p/"+p.ID+"/store/object?key=journal/bobdev.jsonl",
@@ -646,6 +649,8 @@ func TestSec_Path_HostileBlobCannotRepointALiveShare(t *testing.T) {
 		"seq": 9, "lamport": 99, "time": time.Now().UTC().Format(time.RFC3339Nano),
 		"kind": "put", "path": "notes.md",
 		"blob": "../../" + dp.ID + "/blobs/" + daveSha, "size": len(secretText),
+		// setup only: see the note in the test above.
+		"device": "bobdev",
 	}
 	line, _ := json.Marshal(op)
 	if rec := secfixDo(t, h, "PUT", "/api/p/"+p.ID+"/store/object?key=journal/bobdev.jsonl",
