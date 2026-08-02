@@ -82,9 +82,17 @@ func TestSec_ProjectName_RenameBypassesTheCreateNameRule(t *testing.T) {
 
 	// The authorized shape of the request. Creation is the rule's home: it
 	// normalizes the separators away.
-	made, code := sec14feCreate(t, h, payload, p.Org, c["alice"])
+	//
+	// The control deliberately uses a DIFFERENT payload from the rename below.
+	// Both normalize (`ctl....etc` and `notes....etc`), and names are unique
+	// per org — so a control sharing the rename's payload would occupy the
+	// normalized name first and the rename would 400 on the collision before
+	// reaching this test's actual assertion. That is how this test failed when
+	// it was written: against the FIXED code, which is the worst way for a
+	// test to be wrong.
+	made, code := sec14feCreate(t, h, `ctl/../../etc`, p.Org, c["alice"])
 	if code != 200 {
-		t.Fatalf("control: create with %q: %d", payload, code)
+		t.Fatalf("control: create with %q: %d", `ctl/../../etc`, code)
 	}
 	if strings.ContainsAny(made.Name, `/\`) {
 		t.Fatalf("control is broken: create stored %q with a separator in it", made.Name)
