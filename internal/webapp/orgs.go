@@ -213,11 +213,34 @@ func (db *OrgDB) RemoveMember(orgID, email string) error {
 	if !ok {
 		return fmt.Errorf("no such organization")
 	}
-	if o.Members[e] == "" {
-		return nil // already not a member: the postcondition already holds
-	}
 	if o.Members[e] == RoleOwner && db.ownerCount(o) <= 1 {
 		return fmt.Errorf("cannot remove the last owner")
+	}
+	return db.removeLocked(o, e)
+}
+
+// EvictMember drops an account from the org unconditionally — the form
+// offboard needs when the ACCOUNT itself is gone. The last-owner rule keeps a
+// LIVE org administrable; it must never preserve an ownership row for an
+// address nobody can sign in as, because the next signup on that address
+// inherits it — org ownership, and through it admin on every project in the
+// org. An org left with no owner is a recovery problem, not an authorization
+// one.
+func (db *OrgDB) EvictMember(orgID, email string) error {
+	e := normEmail(email)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	o, ok := db.byID[orgID]
+	if !ok {
+		return fmt.Errorf("no such organization")
+	}
+	return db.removeLocked(o, e)
+}
+
+// removeLocked deletes a member row. Callers hold mu.
+func (db *OrgDB) removeLocked(o Org, e string) error {
+	if o.Members[e] == "" {
+		return nil // already not a member: the postcondition already holds
 	}
 	next := o.clone()
 	delete(next.Members, e)
@@ -427,12 +450,30 @@ func (s *Server) offboard(email string) {
 		// Last, because membership is what share liveness resolves through:
 		// clearing it is what makes a removed account's public links stop
 		// serving.
+		//
+		// "The account is gone" is authoritative here: RemoveMember refuses to
+		// drop the last owner, and logging that refusal left the hub's most
+		// privileged row attached to an address anyone could then sign up on.
+		// Evict instead, where the directory owns its orgs.
+		drop := s.Dir.RemoveMember
+		if ev, ok := s.Dir.(orgEvictor); ok {
+			drop = ev.EvictMember
+		}
 		for _, o := range s.Dir.OrgsFor(e) {
-			if err := s.Dir.RemoveMember(o.ID, e); err != nil {
-				log.Printf("beardrive: offboard %s: org %s: %v", e, o.ID, err)
+			if err := drop(o.ID, e); err != nil {
+				log.Printf("beardrive: offboard %s: org %s NOT removed, the address keeps its grants: %v",
+					e, o.ID, err)
 			}
 		}
 	}
+}
+
+// orgEvictor is the part of a directory that can drop a row for an account
+// that no longer exists. LocalDirectory (OrgDB) implements it; a directory
+// managing its orgs elsewhere does not, and offboard reports the failure
+// rather than hiding it.
+type orgEvictor interface {
+	EvictMember(orgID, email string) error
 }
 
 // ---- HTTP ----
@@ -626,8 +667,14 @@ func (s *Server) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "organizations are not enabled on this server", http.StatusNotFound)
 		return
 	}
+	// Normalized, because every decision downstream is: AddMember, Role and
+	// the grant maps all key on normEmail. Guarding on the raw string left the
+	// values in between — "   ", "\t" — running Redeem and the seat check
+	// before AddMember refused, which is an invite-token validity oracle for a
+	// principal the hub cannot name (an invite bootstraps an account on the
+	// default, invite-only posture).
 	me := s.requestUser(r)
-	if me.Email == "" {
+	if normEmail(me.Email) == "" {
 		http.Error(w, "sign in to accept an invite", http.StatusUnauthorized)
 		return
 	}

@@ -62,7 +62,8 @@ With no argument the remembered server is used, or ` + config.DefaultServer + `.
 				fmt.Println(settings.Server)
 				if settings.Token != "" {
 					if u, err := whoAmIOnServer(settings.Server, settings.Token); err == nil {
-						fmt.Printf("signed in as %s <%s>\n", u.Name, u.Email)
+						// The hub chose both of these; they reach a terminal.
+						fmt.Printf("signed in as %s <%s>\n", safeField(u.Name, 64), safeField(u.Email, 64))
 					} else {
 						fmt.Println("token no longer valid — run `bdrive login` again")
 					}
@@ -195,7 +196,7 @@ func runLogin(server string, cfg serverConfig, useDevice bool) error {
 	if err := config.SaveSettings(settings); err != nil {
 		return err
 	}
-	fmt.Printf("logged in to %s as %s <%s>\n", server, user.Name, user.Email)
+	fmt.Printf("logged in to %s as %s <%s>\n", server, safeField(user.Name, 64), safeField(user.Email, 64))
 	return nil
 }
 
@@ -231,12 +232,9 @@ func fetchServerConfig(server string) (serverConfig, error) {
 
 func whoAmIOnServer(server, token string) (serverUser, error) {
 	var u serverUser
-	req, err := http.NewRequest(http.MethodGet, server+"/api/auth/me", nil)
-	if err != nil {
-		return u, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := initClient.Do(req)
+	// Through serverDo like every other token-carrying CLI call, so the origin
+	// binding lives in exactly one place.
+	resp, err := serverDo(http.MethodGet, server+"/api/auth/me", token, nil)
 	if err != nil {
 		return u, err
 	}
@@ -356,10 +354,11 @@ func deviceCodeLogin(server string) (string, serverUser, error) {
 	}
 	// Older hubs (pre-0.13) hand back a short code and expect it typed into
 	// /auth/device; keep that instruction for them.
+	// The code and the link are the hub's strings, printed to a terminal.
 	if start.VerifyURL == "" {
-		fmt.Printf("on any signed-in browser, open:\n  %s/auth/device\nand approve code: %s\n", server, start.Code)
+		fmt.Printf("on any signed-in browser, open:\n  %s/auth/device\nand approve code: %s\n", server, safeField(start.Code, 64))
 	} else {
-		fmt.Printf("to finish signing in, open this link in any browser:\n  %s\n", start.VerifyURL)
+		fmt.Printf("to finish signing in, open this link in any browser:\n  %s\n", safeField(start.VerifyURL, 300))
 	}
 
 	deadline := time.Now().Add(10 * time.Minute)

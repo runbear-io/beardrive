@@ -72,12 +72,70 @@ func (c *CLIAuth) Register(mux *http.ServeMux) {
 
 // ---- grants ----
 
+// maxPendingGrants bounds the map. POST /api/auth/device/start needs no
+// credential, so every unpolled start is hub memory an anonymous stranger
+// allocated; without a ceiling a loop of them is unbounded growth. Far above
+// any real hub's concurrent sign-ins.
+//
+// maxPendingPerIP is the half that matters for availability. A hub-wide cap
+// alone turns "one stranger exhausts memory" into "one stranger denies every
+// `bdrive login --device` on the hub", which is the same outage bought more
+// cheaply. Bounding per origin keeps a flood inside the address that sent it;
+// the hub-wide cap then only ever binds on a genuine distributed flood.
+const (
+	maxPendingGrants = 512
+	maxPendingPerIP  = 256
+)
+
+// atGrantCap reports whether another grant from ip would exceed either bound.
+// Callers hold mu and have swept.
+func (c *CLIAuth) atGrantCap(ip string) bool {
+	if len(c.pending) >= maxPendingGrants {
+		return true
+	}
+	if ip == "" {
+		return false
+	}
+	n := 0
+	for _, g := range c.pending {
+		if g.ip == ip {
+			if n++; n >= maxPendingPerIP {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sweepLocked drops grants that have expired. A grant the hub already reports
+// dead to every caller must not still be held, and only consumption used to
+// remove anything — so an id nobody polls was retained for the life of the
+// process. Every path that touches the map sweeps it, so reclaiming needs no
+// reaper goroutine. Callers hold mu.
+//
+// ponytail: O(n) per operation with n capped at maxPendingGrants; a heap keyed
+// by expiry only pays off at a far larger ceiling.
+func (c *CLIAuth) sweepLocked() {
+	now := time.Now()
+	for id, g := range c.pending {
+		if now.After(g.expires) {
+			delete(c.pending, id)
+		}
+	}
+}
+
+// newGrant records a pending sign-in, or returns "" when too many are already
+// outstanding.
 func (c *CLIAuth) newGrant(g cliGrant, ttl time.Duration) string {
 	id := randHex(16)
 	g.expires = time.Now().Add(ttl)
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sweepLocked()
+	if c.atGrantCap(g.ip) {
+		return ""
+	}
 	c.pending[id] = g
-	c.mu.Unlock()
 	return id
 }
 
@@ -85,8 +143,9 @@ func (c *CLIAuth) newGrant(g cliGrant, ttl time.Duration) string {
 func (c *CLIAuth) take(kind, id string) (cliGrant, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepLocked()
 	g, ok := c.pending[id]
-	if !ok || g.kind != kind || time.Now().After(g.expires) {
+	if !ok || g.kind != kind {
 		delete(c.pending, id)
 		return cliGrant{}, false
 	}
@@ -97,8 +156,9 @@ func (c *CLIAuth) take(kind, id string) (cliGrant, bool) {
 func (c *CLIAuth) peek(kind, id string) (cliGrant, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepLocked()
 	g, ok := c.pending[id]
-	if !ok || g.kind != kind || time.Now().After(g.expires) {
+	if !ok || g.kind != kind {
 		return cliGrant{}, false
 	}
 	return g, true
@@ -107,8 +167,9 @@ func (c *CLIAuth) peek(kind, id string) (cliGrant, bool) {
 func (c *CLIAuth) approveDevice(id, userID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepLocked()
 	g, ok := c.pending[id]
-	if !ok || g.kind != "device" || time.Now().After(g.expires) {
+	if !ok || g.kind != "device" {
 		return false
 	}
 	g.user, g.granted = userID, true
@@ -196,6 +257,11 @@ func (c *CLIAuth) pageCLI(w http.ResponseWriter, r *http.Request) {
 			`<code style="white-space:nowrap">bdrive login</code> yourself.`,
 		approve: func(user User) {
 			code := c.newGrant(cliGrant{kind: "code", user: user.ID, granted: true}, time.Minute)
+			if code == "" {
+				authPage(w, "Try again", `<p class="err">Too many sign-ins are pending on this server right now.</p>
+<p class="alt">Run <code style="white-space:nowrap">bdrive login</code> again in a few minutes.</p>`)
+				return
+			}
 			q := u.Query()
 			q.Set("code", code)
 			q.Set("state", r.URL.Query().Get("state"))
@@ -340,6 +406,13 @@ func (c *CLIAuth) apiDeviceStart(w http.ResponseWriter, r *http.Request) {
 	code := c.newGrant(cliGrant{
 		kind: "device", device: req.Device, os: req.OS, ip: requestIP(r),
 	}, 10*time.Minute)
+	if code == "" {
+		// This route is unauthenticated, so the map is the one thing a
+		// stranger can grow: refuse rather than retain.
+		http.Error(w, "too many pending sign-ins — try again in a few minutes",
+			http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, map[string]any{
 		// "code" keeps its wire name: it is what the CLI polls with, and
 		// older clients still print it.

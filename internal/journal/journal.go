@@ -13,6 +13,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -110,6 +112,45 @@ func lossy(s string) string {
 		i += size
 	}
 	return b.String()
+}
+
+// SafePath reports whether p is a path an Op may name. It is THE rule, in one
+// place: an op's path is arbitrary JSON off a peer's journal, and it is joined
+// onto a working folder on every device, stored as a metadata row on the hub
+// and rendered as a tree entry in the browser.
+//
+// It used to be spelled three times — syncer.unsafeRel (device), the core of
+// webapp.cleanUploadPath (browser door) and templates.SafePath (seeding) — and
+// they disagreed: unsafeRel, the rule the /store/* journal door relies on, had
+// no control-character clause, so a NUL-bearing path the browser door answered
+// 400 to was journaled and handed to every device. Three spellings of one rule
+// is how these holes happen; callers add their OWN extra rules (reserved dirs,
+// on-disk boundary) on top of this one, never a second copy of it.
+//
+// Refused, never normalized: normalizing would land two different journal
+// paths on one file.
+func SafePath(p string) bool {
+	if p == "" || p == "." || p == ".." || strings.HasPrefix(p, "../") ||
+		path.IsAbs(p) || filepath.IsAbs(p) || path.Clean(p) != p {
+		return false
+	}
+	// C0 and DEL. Byte-wise on purpose: a path is bytes (see lossy — two
+	// distinct legal unix filenames must not collapse), and in UTF-8 no
+	// continuation byte is < 0x80, so a byte in this range is always a real
+	// control character and never part of a multi-byte rune.
+	//
+	// They are not filenames anybody types, and NUL is a value the metadata
+	// backends disagree about: Postgres refuses it in a text column (a share
+	// on such a path 500s) while sqlite and the file backend keep it. DEL and
+	// the C0s render as nothing, so "notes\x7f.md" and "notes.md" are two
+	// indistinguishable entries in one tree. Refusing at every ingest is what
+	// keeps that divergence unreachable.
+	for i := 0; i < len(p); i++ {
+		if p[i] < 0x20 || p[i] == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // Less defines the total order used to replay ops from many devices.

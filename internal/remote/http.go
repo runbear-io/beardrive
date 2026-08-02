@@ -18,6 +18,9 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 )
 
+// maxListBytes caps the JSON listing a hub can make a device allocate.
+const maxListBytes = 8 << 20
+
 // httpBackend syncs one project through a bdrive web server instead of
 // talking to an object store. The client device is storage-blind: it only
 // knows the server URL and a project id (https://host:4173/p/<project-id>,
@@ -88,7 +91,14 @@ func deviceToken(base string) string {
 // 401'd forever — and `bdrive login` could not fix it, because it writes the
 // same string back. Fail-closed is still the direction: anything that does not
 // parse, or has no host, matches nothing.
-func sameOrigin(a, b string) bool {
+func sameOrigin(a, b string) bool { return SameOrigin(a, b) }
+
+// SameOrigin is the exported form, for the CLI. It is the one rule that
+// decides who may receive this device's bearer token, and it is needed at two
+// doors: the sync backend's (here) and `bdrive share`/`init`'s HTTP client
+// (cmd/bdrive). It used to be spelled twice — which is exactly how round 7's
+// journal-path finding happened — so there is one copy and cmd/bdrive calls it.
+func SameOrigin(a, b string) bool {
 	x, y := originOf(a), originOf(b)
 	return x != "" && x == y
 }
@@ -208,8 +218,17 @@ func (b *httpBackend) List(ctx context.Context, prefix string) ([]Object, error)
 	var out struct {
 		Objects []Object `json:"objects"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+	// Bounded like every other body this package reads (httpError caps at 512
+	// bytes): List is the first call of every sync cycle on every device, and
+	// the hub alone chooses how much JSON it answers with — including a hub the
+	// user was merely handed the URL of. Unbounded, one listing is one
+	// allocation of whatever size it likes, again on the next tick.
+	//
+	// ponytail: 8 MiB is ~95k blob entries. Only `bdrive export` ever lists
+	// blobs; a project past that needs a paginated list endpoint, not a bigger
+	// cap. Truncation surfaces as a decode error, which is the retry posture.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxListBytes)).Decode(&out); err != nil {
+		return nil, fmt.Errorf("read listing: %w", err)
 	}
 	// The hub names its own objects, and the device believes it: these keys
 	// become local journal file names (syncer.pull) and tar member names

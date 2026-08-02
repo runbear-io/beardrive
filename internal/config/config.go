@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
@@ -142,7 +143,16 @@ func SaveMounts(m map[string]MountInfo) error {
 
 // VolumeDir returns the local store dir of a mount, keyed by its stable
 // mount ID (never the folder path — that's what makes renames/moves free).
+//
+// The id is validated here, where it becomes a path: LoadProject checks the
+// one it reads out of a folder's config, but mounts.json is unmarshalled into
+// a map whose KEYS nothing looks at, and `bdrive resume` — what the login
+// agent runs at every boot — builds this path out of the key. A registry entry
+// is plain JSON in $BDRIVE_HOME that anything running as the user can write.
 func VolumeDir(mountID string) (string, error) {
+	if !ValidMountID(mountID) {
+		return "", fmt.Errorf("invalid mount id %q", mountID)
+	}
 	home, err := Home()
 	if err != nil {
 		return "", err

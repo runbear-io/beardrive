@@ -188,7 +188,8 @@ func statusCmd() *cobra.Command {
 				if settings.Name != "" {
 					who = settings.Name + " <" + settings.Email + ">"
 				}
-				fmt.Printf("device: %s (%s) signed in as %s\n\n", dev.Name, dev.ID, who)
+				// The account name/email come from the hub, like the rows below.
+				fmt.Printf("device: %s (%s) signed in as %s\n\n", dev.Name, dev.ID, safeField(who, 160))
 			} else {
 				fmt.Printf("device: %s (%s) as %s\n\n", dev.Name, dev.ID, dev.Author)
 			}

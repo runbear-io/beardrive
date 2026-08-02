@@ -106,17 +106,8 @@ func cleanScopeDirs(dirs []string) ([]string, error) {
 		if d == "." || d == ".." || strings.HasPrefix(d, "../") {
 			return nil, fmt.Errorf("%q is not a subfolder of this project", d)
 		}
-		// One name, one rendered line. A newline is a legal byte in a unix
-		// directory name and scopeLines assumes it is not: a name carrying the
-		// block's own end marker terminates the managed block early, so the
-		// rules after it land OUTSIDE it and `bdrive scope rm` — which removes
-		// the block by its markers — can never take them out again. The
-		// .bdriveignore syncs, so `*/` there ignores every directory for the
-		// whole team, permanently.
-		for _, r := range d {
-			if r < 0x20 || r == 0x7f {
-				return nil, fmt.Errorf("folder name contains a control character: %q", d)
-			}
+		if hasControlRune(d) {
+			return nil, fmt.Errorf("folder name contains a control character: %q", d)
 		}
 		if seen[d] {
 			continue
@@ -125,4 +116,20 @@ func cleanScopeDirs(dirs []string) ([]string, error) {
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// hasControlRune reports whether s carries a character that must never end up
+// in a .bdriveignore line. One argument is one rule: a newline is a legal byte
+// in a unix path, and the file syncs — so an argument carrying one writes
+// extra rules on every teammate's device (`*` there ignores the whole
+// project), and `bdrive forget` appends outside the managed block, where
+// nothing can ever take them out again. Same rule for a scope folder name,
+// whose extra lines would land after the block's end marker.
+func hasControlRune(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }

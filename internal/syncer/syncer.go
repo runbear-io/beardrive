@@ -434,6 +434,44 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 	return ops, nil
 }
 
+// redefinesApplied reports whether have re-uses the (device, seq) of an op in
+// applied for a DIFFERENT op. That slot is an op's identity within a journal —
+// the one thing a peer cannot restate without contradicting itself — and
+// contradicting it is how an already-applied op gets withdrawn while the op
+// count, which is all the guard in pull can otherwise check, stays put.
+//
+// Sameness is exactly what journal.Less compares (the fields Replay reads), so
+// two ops this calls equal fold to the same state; everything else on an Op is
+// display only.
+//
+// A slot that is simply GONE is not a redefinition: a torn or corrupt line is
+// the honest version of that, and pull's op-count guard is what covers it.
+func redefinesApplied(have, applied []journal.Op) bool {
+	if len(applied) == 0 {
+		return false
+	}
+	ids := make(map[string]bool, len(have))
+	slots := make(map[string]bool, len(have))
+	for _, op := range have {
+		ids[opID(op)] = true
+		slots[opSlot(op)] = true
+	}
+	for _, op := range applied {
+		if slots[opSlot(op)] && !ids[opID(op)] {
+			return true
+		}
+	}
+	return false
+}
+
+func opSlot(op journal.Op) string { return fmt.Sprintf("%s\x00%d", op.Device, op.Seq) }
+
+func opID(op journal.Op) string {
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d",
+		opSlot(op), op.Lamport, op.Time.UTC().Format(time.RFC3339Nano),
+		op.Kind, op.Path, op.Blob, op.Size, op.Mode)
+}
+
 // pull fetches journals that grew on the remote and any blobs we are missing
 // for the new ops. Returns only the ops we had not seen before.
 func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
@@ -501,6 +539,24 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 		} else {
 			accepted = nil
 		}
+		// An op we already applied must not be REDEFINED: if the object still
+		// carries the (device, seq) slot we applied, it has to still be the
+		// same op. This is an IDENTITY check, and it is what the op-count
+		// guard below cannot do — a peer replaces an applied op's line with a
+		// decodable but inert one (a delete of a path that never existed), the
+		// count is preserved, and a file leaves every teammate's folder with no
+		// delete op, nothing in the journal and nothing in History.
+		//
+		// It runs BEFORE the resume switch because it is needed on both arms:
+		// `accepted` is trimmed to the last newline, but Parse does not require
+		// a trailing newline, so an op published unterminated is APPLIED while
+		// sitting outside the prefix HasPrefix protects — and a rewrite of that
+		// op then looks like an ordinary append.
+		applied, _ := journal.Parse(local)
+		all, aerr := journal.Parse(data)
+		if aerr != nil || redefinesApplied(all, applied) {
+			continue
+		}
 		tail := data
 		switch {
 		case len(accepted) > 0 && bytes.HasPrefix(data, accepted):
@@ -509,12 +565,9 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 			// The peer rewrote its log instead of appending to it. Re-reading
 			// it whole is fine for ordering (Replay is a fold) but it must not
 			// UNDO: replacing an already-applied op's line with a longer
-			// undecodable one grows the object, defeats HasPrefix, and drops
-			// the op — the file vanishes from every teammate's folder with no
-			// delete op, nothing in the journal and nothing in History.
+			// undecodable one grows the object and drops the op.
 			prev, perr := journal.Parse(accepted)
-			all, aerr := journal.Parse(data)
-			if perr != nil || aerr != nil || len(all) < len(prev) {
+			if perr != nil || len(all) < len(prev) {
 				continue
 			}
 		}
@@ -858,17 +911,13 @@ func neverSync(rel string) bool {
 // ever produces clean relative paths, but Op.Path is arbitrary JSON off a
 // peer's journal and materialize resolves it with filepath.Join(s.Folder, …),
 // which walks above the root without complaint — one pushed line would reach
-// ~/.ssh/authorized_keys on every teammate's machine. Anything that is not
-// already a clean relative slash path is refused rather than normalized:
-// normalizing would land two different journal paths on one file.
-func unsafeRel(rel string) bool {
-	// "." is Clean-stable and relative, so every other clause lets it through:
-	// it names the mount root itself, which is a directory, not a file any op
-	// may address. It is contained today only because hashFile happens to fail
-	// on a directory first.
-	return rel == "" || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") ||
-		path.IsAbs(rel) || filepath.IsAbs(rel) || path.Clean(rel) != rel
-}
+// ~/.ssh/authorized_keys on every teammate's machine.
+//
+// The rule itself is journal.SafePath, shared with the hub's two ingest doors:
+// this spelling used to be its own copy and was the one MISSING the
+// control-character clause, so the /store/* journal door accepted paths
+// /upload/commit answers 400 to.
+func unsafeRel(rel string) bool { return !journal.SafePath(rel) }
 
 // safeMode is the only mode materialize will apply. scan records
 // info.Mode().Perm(), but Op.Mode is a raw uint32 off the wire and

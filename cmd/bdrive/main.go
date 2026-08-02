@@ -107,7 +107,8 @@ func whoamiCmd() *cobra.Command {
 				if settings.Name != "" {
 					who = settings.Name + " <" + settings.Email + ">"
 				}
-				fmt.Printf("account:     %s (from `bdrive login`; changes are attributed to this)\n", who)
+				// Name and email are whatever the hub answered at sign-in.
+				fmt.Printf("account:     %s (from `bdrive login`; changes are attributed to this)\n", safeField(who, 160))
 				fmt.Printf("author:      %s (git/OS fallback, used only when signed out)\n", dev.Author)
 			} else {
 				fmt.Printf("account:     not signed in — changes are attributed to the author below (run `bdrive login`)\n")

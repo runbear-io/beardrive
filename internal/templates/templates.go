@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -161,18 +162,10 @@ func (t Template) WriteTo(dir string) ([]string, error) {
 // control-character-free path inside the project. It is the one rule both
 // seeding doors apply — WriteTo on disk, and the hub's seedTemplate, which
 // hands it to cleanUploadPath as well.
-func SafePath(p string) bool {
-	if p == "" || p == "." || p == ".." || strings.HasPrefix(p, "../") ||
-		strings.HasPrefix(p, "/") || filepath.IsAbs(p) || path.Clean(p) != p {
-		return false
-	}
-	for _, r := range p {
-		if r < 0x20 || r == 0x7f {
-			return false
-		}
-	}
-	return true
-}
+//
+// The rule is journal.SafePath: a template file becomes an Op.Path on every
+// device, so this door may not be more permissive than the journal is.
+func SafePath(p string) bool { return journal.SafePath(p) }
 
 // Dirs lists every directory a template's paths imply, for the
 // every-directory-holds-a-file check.

@@ -104,6 +104,12 @@ func ignoreRule(root, arg string) (string, error) {
 		return "", fmt.Errorf("%s is outside the project at %s", abs, root)
 	}
 	rel = filepath.ToSlash(rel)
+	// One path, one rule: see hasControlRune. forget appends outside the
+	// managed scope block and then prunes the hub in the same command, so an
+	// injected rule is both permanent and immediately destructive.
+	if hasControlRune(rel) {
+		return "", fmt.Errorf("%q contains a control character, which would write more than one %s rule", arg, syncer.IgnoreFile)
+	}
 	if rel == syncer.IgnoreFile {
 		return "", fmt.Errorf("%s carries the rules themselves and always syncs", syncer.IgnoreFile)
 	}

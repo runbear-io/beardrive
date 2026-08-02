@@ -338,7 +338,32 @@ func (l *ReadLedger) compactLocked() {
 func (l *ReadLedger) persistLocked() error {
 	if len(l.pendingDel) > 0 {
 		if err := l.repo.DeleteBatch(l.pendingDel); err != nil {
-			return err
+			// Same one-transaction problem as the put path below, worse for
+			// being first: a key the store will never accept parks here
+			// forever and PutBatch is then never reached at all, so the whole
+			// hub's telemetry stops persisting. Retry one at a time; if some
+			// land, the ones that did not are keys this store will never
+			// accept, so drop them. If none land the store is down —
+			// transient — and the queue stands for the next flush.
+			if len(l.pendingDel) == 1 {
+				return err
+			}
+			var stuck []ReadStatKey
+			landed := 0
+			for _, key := range l.pendingDel {
+				if l.repo.DeleteBatch([]ReadStatKey{key}) == nil {
+					landed++
+				} else {
+					stuck = append(stuck, key)
+				}
+			}
+			if landed == 0 {
+				return err
+			}
+			for _, key := range stuck {
+				log.Printf("beardrive: read telemetry dropped an undeletable bucket (project %s, path %q): %v",
+					key.Project, key.Path, err)
+			}
 		}
 		l.pendingDel = nil
 	}

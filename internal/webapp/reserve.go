@@ -46,21 +46,40 @@ func (s *Server) reserve(project, org, key string, size int64, ttl time.Duration
 	s.grants = append(s.grants, grant{project, org, key, size, time.Now().Add(ttl)})
 }
 
-// reserveIfFits checks the cap and records the grant in ONE critical section,
-// then reports whether the grant may be made. Two separate acquisitions with
-// CheckWrite, Exists and SignPut in between let every concurrent caller read
-// the same zero reservation, so N grants that each fit the allowance were all
-// signed against an allowance that fits one — round 2's seat-check race, on
-// the new ledger.
+// reserveIfFits asks the quota provider about this write plus everything this
+// org already has outstanding, and books the grant only if the outstanding
+// total has not grown in the meantime. Read-check-act with the ledger unlocked
+// in between let every concurrent caller see the same zero reservation, so N
+// grants that each fit the allowance were all signed against an allowance that
+// fits one — round 2's seat-check race, on the new ledger. Compare-and-set
+// closes that without holding the lock across CheckWrite: the provider is a
+// third-party seam (a network hop to a billing service), and resMu is hub-wide,
+// so waiting on it there stalls every other project's sync cycle.
 func (s *Server) reserveIfFits(project, org, key string, size int64, ttl time.Duration) error {
-	s.resMu.Lock()
-	defer s.resMu.Unlock()
-	s.dropStaleLocked()
-	if err := s.quota().CheckWrite(org, size+s.outstandingLocked(org)); err != nil {
-		return err
+	for {
+		s.resMu.Lock()
+		s.dropStaleLocked()
+		outstanding := s.outstandingLocked(org)
+		s.resMu.Unlock()
+
+		if err := s.quota().CheckWrite(org, size+outstanding); err != nil {
+			return err
+		}
+
+		s.resMu.Lock()
+		s.dropStaleLocked()
+		if s.outstandingLocked(org) > outstanding {
+			// Someone booked while we were asking, so the answer we hold was
+			// about a smaller total: ask again. This terminates — the retry
+			// happens only because another caller made progress, and a growing
+			// total is what makes CheckWrite refuse.
+			s.resMu.Unlock()
+			continue
+		}
+		s.grants = append(s.grants, grant{project, org, key, size, time.Now().Add(ttl)})
+		s.resMu.Unlock()
+		return nil
 	}
-	s.grants = append(s.grants, grant{project, org, key, size, time.Now().Add(ttl)})
-	return nil
 }
 
 // reservedBytes is what this org has outstanding but unconfirmed. An expired

@@ -10,7 +10,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -294,23 +293,14 @@ var blobRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // cleanUploadPath validates a client-supplied destination path and returns
 // its normalized form.
 func cleanUploadPath(p string) (string, error) {
-	if p == "" || strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") {
+	// journal.SafePath is the rule — the same one the /store/* journal door
+	// and the device's unsafeRel apply. This door used to carry its own copy
+	// of it; the copies disagreed, which is how a control character that this
+	// door answered 400 to got journaled through the other one.
+	if !journal.SafePath(p) {
 		return "", fmt.Errorf("invalid path %q", p)
 	}
-	cl := path.Clean(p)
-	if cl != p || cl == "." || cl == ".." || strings.HasPrefix(cl, "../") {
-		return "", fmt.Errorf("invalid path %q", p)
-	}
-	// No control characters. They are not filenames anybody types, and a NUL
-	// is a value the metadata backends disagree about: Postgres refuses it in
-	// a text column (a share on such a path 500s) while sqlite and the file
-	// backend keep it, so the same hub reads back differently depending on its
-	// database. Refusing at ingest is what keeps that divergence unreachable.
-	for _, r := range cl {
-		if r < 0x20 || r == 0x7f {
-			return "", fmt.Errorf("invalid path %q", p)
-		}
-	}
+	cl := p
 	// The same set the scan walk would never have uploaded, at any depth:
 	// .bdrive/ is the mount's own identity (an upload of it repoints every
 	// device that pulls) and .git/ materializes hook scripts that run on a

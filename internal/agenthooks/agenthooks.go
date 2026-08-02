@@ -289,7 +289,7 @@ func removeProjectHooks(folder, agent string) (string, error) {
 		// in: when $HOME is a git repo (dotfiles) or init runs from $HOME, it
 		// lands in legacyHookDirs and the "migration" would delete the hooks
 		// this same Install call just wrote — silently, machine-wide.
-		if path == "" || path == user {
+		if path == "" || samePath(path, user) {
 			continue
 		}
 		changed, err := removeHooks(path, false)
@@ -327,10 +327,31 @@ func gitRootOf(folder string) string {
 		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
 			return cur
 		}
-		if cur == home || filepath.Dir(cur) == cur {
+		if samePath(cur, home) || filepath.Dir(cur) == cur {
 			return ""
 		}
 	}
+}
+
+// samePath reports whether two paths name the same file or directory even when
+// they spell it differently. $HOME comes from the environment and spells
+// /var/... on macOS while a folder resolved with filepath.Abs (or os.Getwd)
+// spells the same place /private/var/... — a string compare misses that, and
+// the two guards above then let the user config through as a "legacy project
+// config" and delete the hooks Install just wrote.
+func samePath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
 }
 
 // removeHooks deletes every hook group carrying one of our markers, and

@@ -35,8 +35,9 @@ type BuiltinAuth struct {
 	Brand               string          // optional name shown on the sign-in page
 
 	// BaseURL is the hub's public origin ("https://drive.acme.com"). Links the
-	// hub MAILS are built from it. Empty → the first host the hub is reached
-	// on is pinned for the process's lifetime; see mailBaseURL.
+	// hub MAILS are built from it. Empty → the hub has no origin it can trust
+	// and mailed links stop being absolute as soon as two requests disagree
+	// about the host; see mailBaseURL.
 	BaseURL string
 
 	// InviteValid, when set, reports whether a token is a live org invite.
@@ -59,7 +60,7 @@ type BuiltinAuth struct {
 	cli *CLIAuth
 
 	mu         sync.Mutex
-	pinnedBase string               // first observed origin, when BaseURL is unset
+	pinnedBase string               // first observed origin, when BaseURL is unset (see mailBaseURL)
 	users      map[string]*authUser // by id
 	tokens     map[string]authToken // by sha256(token)
 
@@ -1075,19 +1076,35 @@ func requestBaseURL(r *http.Request) string {
 // callers hand the URL back to the caller who chose the host, which is
 // self-inflicted; these two do not.
 //
-// BaseURL is the answer and should be configured (auth.base_url). When it is
-// not, the hub pins the first host it was reached on and never moves: a later
-// request cannot redirect mail that is already addressed to someone else.
+// BaseURL is the answer and should be configured (auth.base_url).
+//
+// Pinning the first host and reusing it was NOT: whoever mails first chooses
+// the origin of every later mail, so an attacker with an account of her own
+// only has to ask for a reset of her own password, on her own host, before
+// anyone else does — and every reset link the hub mails afterwards, including
+// the owner's, points at her server. With no configured origin the hub has
+// nothing it can trust, so a request's host is used only for the mail that
+// same request triggers, and only while every request agrees on one host. The
+// moment two disagree, someone is choosing: the link goes out root-relative
+// (and the admin is told to configure auth.base_url) rather than aimed
+// somewhere a stranger picked.
 func (a *BuiltinAuth) mailBaseURL(r *http.Request) string {
 	if a.BaseURL != "" {
 		return strings.TrimRight(a.BaseURL, "/")
 	}
+	base := requestBaseURL(r)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.pinnedBase == "" {
-		a.pinnedBase = requestBaseURL(r)
+		a.pinnedBase = base
 	}
-	return a.pinnedBase
+	if a.pinnedBase != base {
+		log.Printf("beardrive: mailed link left relative — this hub has been reached on both %s and %s "+
+			"and auth.base_url is not set; configure it so mailed links have a trustworthy origin",
+			a.pinnedBase, base)
+		return ""
+	}
+	return base
 }
 
 // ---- CLI API ----

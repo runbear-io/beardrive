@@ -298,6 +298,14 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 // way every device reads it (journal.Parse: a line that decodes to no
 // operation is no operation). It leaves the file rewound for the store.
 // A non-journal key carries no ops by definition.
+//
+// It is also the hub's ONLY path check on this door. /store/* is the second
+// ingest into a project's tree and it used to validate nothing: the browser
+// door (cleanUploadPath) refused control characters and this one journaled
+// them, so "notes\x00.md" reached the tree, the metadata store and the Share
+// button through the door round 6 said refusing at ingest had closed. The
+// rule is journal.SafePath — the same one the device applies in unsafeRel and
+// the same one cleanUploadPath is built on.
 func journalOps(key string, tmp *os.File) ([]journal.Op, error) {
 	if !strings.HasPrefix(key, "journal/") {
 		return nil, nil
@@ -309,7 +317,16 @@ func journalOps(key string, tmp *os.File) ([]journal.Op, error) {
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	return journal.Parse(data)
+	ops, err := journal.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	for _, op := range ops {
+		if !journal.SafePath(op.Path) {
+			return nil, fmt.Errorf("journal names an invalid path %q", op.Path)
+		}
+	}
+	return ops, nil
 }
 
 func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -344,7 +361,10 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	}
 	ops, err := journalOps(key, tmp)
 	if err != nil {
-		storageErr(w, http.StatusBadGateway, "could not store the object", err)
+		// The body is the client's, so everything journalOps can object to is
+		// the client's fault: an undecodable journal or an op naming a path
+		// this hub will not carry. 400, not 502 — and nothing is stored.
+		http.Error(w, "invalid journal body", http.StatusBadRequest)
 		return
 	}
 	if !s.ownJournal(w, r, key, ops) {

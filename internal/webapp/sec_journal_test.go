@@ -213,7 +213,7 @@ func TestSec_Journal_HistoryDeviceFieldIsNotAnExistenceOracle(t *testing.T) {
 // this pins that a path that only exists because it arrived through a journal
 // cannot be laundered back out through restore or remove.
 func TestSec_Journal_HostilePathCannotBeLaunderedThroughRestoreOrRemove(t *testing.T) {
-	h, _, c, alice := secjrnHub(t)
+	h, srv, c, alice := secjrnHub(t)
 	const body = "hostile body"
 	blob := secpathStoreBlob(t, h, alice.ID, body, c["alice"])
 
@@ -229,8 +229,35 @@ func TestSec_Journal_HostilePathCannotBeLaunderedThroughRestoreOrRemove(t *testi
 		op := secjrnOp(int64(i+1), p, blob, len(body))
 		ops = append(ops, op)
 	}
-	if rec := secjrnPushJournal(t, h, alice.ID, "alice-desk", ops, c["alice"]); rec.Code != 200 {
-		t.Fatalf("push: %d %s", rec.Code, rec.Body)
+
+	// SETUP CHANGED IN ROUND 7, ASSERTIONS UNTOUCHED. The hub's /store/* door
+	// used to accept these paths (its comment above said "the hub never
+	// validates it"), and round 7 gave that door the same journal.SafePath
+	// rule /upload/commit and the device already apply — so the push below is
+	// now refused, which is strictly stronger and is asserted as a control.
+	// The subject of this test is the way OUT, not the way in, so the hostile
+	// journal is planted directly in storage, behind the door, exactly as
+	// several other tests plant objects. Everything below this block is
+	// unchanged and still fails if restore or remove stop refusing.
+	if rec := secjrnPushJournal(t, h, alice.ID, "alice-desk", ops, c["alice"]); rec.Code == 200 {
+		t.Errorf("the /store/* journal door accepted hostile paths %v — round 7's one-rule parity is gone", hostile)
+	}
+	var planted strings.Builder
+	for _, op := range ops {
+		line, err := json.Marshal(op)
+		if err != nil {
+			t.Fatal(err)
+		}
+		planted.Write(line)
+		planted.WriteByte('\n')
+	}
+	v, err := srv.projectVolume(alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.source.(*RemoteSource).Backend.Put(t.Context(), "journal/alice-desk.jsonl",
+		strings.NewReader(planted.String()), int64(planted.Len())); err != nil {
+		t.Fatal(err)
 	}
 
 	for _, p := range hostile {
