@@ -16,6 +16,10 @@ import (
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
+// repoURL is the project's public home — the one place the CLI points at
+// GitHub, from `init`'s success block.
+const repoURL = "https://github.com/runbear-io/beardrive"
+
 // stdinIsTTY is the one answer to "is this an interactive shell?" — used both
 // to decide whether init may prompt and whether login can drive a browser.
 func stdinIsTTY() bool {
