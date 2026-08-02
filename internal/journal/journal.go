@@ -198,6 +198,16 @@ func SafeText(s string) bool {
 		// nothing cannot be part of a name a reader is expected to check.
 		case unicode.Is(unicode.Cf, r), r >= 0xe0000 && r <= 0xe01ef:
 			return false
+		// The two Unicode line breaks the class test above cannot reach: U+2028
+		// is category Zl and U+2029 is Zp, not Cf. The webapp's trimText — the
+		// project-NAME rule in the same repo — already deletes both by number
+		// ("CSS Text treats U+2028 as a forced break"), and a path travels
+		// strictly further than a name. Measured in a browser, the folder row for
+		// `line<U+2028>sep.md` paints to exactly the same glyph run as
+		// `line sep.md`: one line box, identical width — so the org's public-link
+		// audit shows one name for two different files, tooltip included.
+		case r == 0x2028, r == 0x2029:
+			return false
 		}
 	}
 	return true

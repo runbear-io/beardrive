@@ -86,6 +86,7 @@ type DeviceRegistry struct {
 	// lastSav throttles disk writes per row.
 	lastSav map[devKey]time.Time
 	warned  bool // repo write failure logged once
+	warnedR bool // repo re-read failure logged once (see refresh)
 }
 
 // NewDeviceRegistry builds the registry over a repo, loading its contents.
@@ -114,6 +115,46 @@ func NewDeviceRegistry(repo DeviceRepo) (*DeviceRegistry, error) {
 // OpenDeviceRegistry loads the file-backed registry at path.
 func OpenDeviceRegistry(path string) (*DeviceRegistry, error) {
 	return NewDeviceRegistry(newFileDeviceRepo(path))
+}
+
+// refresh re-reads the registry from the store before a decision is made out of
+// it. Callers hold r.mu.
+//
+// Round 13 recorded DeviceRegistry as not-applicable to the second-process class
+// on the strength of the BIND-AWAY direction alone; the RELEASE direction was
+// never driven. byKey was loaded at open, so offboarding released a device claim
+// on whichever process served the deletion and on no other: the next hire's
+// login binds nothing and every push she makes 403s, and — the authorization
+// direction — a re-created address inherits the departed account's row and with
+// it write access to that device's journal on every project on the hub.
+//
+// A store that cannot answer leaves the current map in place: the previous
+// answer is the last one the store agreed to, and dropping the whole registry on
+// a transient read error would unclaim every device at once.
+//
+// ponytail: Observe deliberately does NOT refresh — it is the per-request hot
+// path, it only merges the caller's own row, and every gate above it (OwnerOf,
+// MayActAs) refreshes before deciding. If that ever needs to change, the fix is
+// a version check inside the repo, not a TTL up here.
+func (r *DeviceRegistry) refresh() {
+	list, err := r.repo.Load()
+	if err != nil {
+		if !r.warnedR {
+			r.warnedR = true
+			log.Printf("beardrive: device registry re-read failed, serving the last known claims: %v", err)
+		}
+		return
+	}
+	r.warnedR = false
+	byKey := make(map[devKey]DeviceInfo, len(list))
+	latest := make(map[string]devKey, len(list))
+	for _, d := range list {
+		d.ID = canonDeviceID(d.ID)
+		k := devKey{d.User, d.ID}
+		byKey[k] = d
+		latest[d.ID] = k
+	}
+	r.byKey, r.latest = byKey, latest
 }
 
 // Observe merges what a request revealed about a device, into the row owned by
@@ -190,6 +231,7 @@ func (r *DeviceRegistry) Get(id string) (DeviceInfo, bool) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refresh()
 	k, ok := r.latest[canonDeviceID(id)]
 	if !ok {
 		return DeviceInfo{}, false
@@ -214,6 +256,7 @@ func (r *DeviceRegistry) LookupIn(id string, allowed func(user string) bool) (De
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refresh()
 	id = canonDeviceID(id)
 	var best DeviceInfo
 	found := false
@@ -262,6 +305,7 @@ func (r *DeviceRegistry) OwnerOf(id string) (owner string, known bool) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refresh()
 	id = canonDeviceID(id)
 	var best DeviceInfo
 	found := false
@@ -320,6 +364,7 @@ func (r *DeviceRegistry) Bind(user string, d DeviceInfo, visible func(owner stri
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refresh()
 	d.ID = canonDeviceID(d.ID)
 	me := normEmail(user)
 	for k := range r.byKey {
@@ -365,6 +410,7 @@ func (r *DeviceRegistry) Release(user string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refresh()
 	for k := range r.byKey {
 		if normEmail(k.User) != e {
 			continue
@@ -406,6 +452,7 @@ func (r *DeviceRegistry) MayActAs(user, id string) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refresh()
 	id = canonDeviceID(id)
 	if _, mine := r.byKey[devKey{user, id}]; mine {
 		return true

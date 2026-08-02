@@ -17,7 +17,9 @@ import (
 // only ever reached on a just-created project, but the same rule in
 // templates.WriteTo is what makes a double-seed a no-op, and this is the
 // other half of it.
-func (s *Server) seedTemplate(ctx context.Context, projectID string, t templates.Template, who User) error {
+// The trailing User is the account that ASKED for the template. It is
+// deliberately unused: see the Upload call below.
+func (s *Server) seedTemplate(ctx context.Context, projectID string, t templates.Template, _ User) error {
 	v, err := s.projectVolume(projectID)
 	if err != nil {
 		return err
@@ -58,7 +60,18 @@ func (s *Server) seedTemplate(ctx context.Context, projectID string, t templates
 		if existing[clean] {
 			continue
 		}
-		if err := up.Upload(ctx, clean, strings.NewReader(f.Content), int64(len(f.Content)), who); err != nil {
+		// User{}, not `who`, and a note that names the origin. These bytes came
+		// out of the server's embedded template registry; the account that ran
+		// `bdrive init --template` picked a two-word label, it did not write
+		// them. Journaled under `who` the op was byte-for-byte the shape of a
+		// hand upload — same User, same UserName, same device, same empty note —
+		// so History, `bdrive log` and the frontend's per-file attribution all
+		// told every teammate that a human wrote the project's AGENTS.md, the
+		// standing instructions every agent session in the folder reads. The
+		// runbook's trust section tells the reader to use exactly that signal
+		// "when something in the folder looks wrong".
+		if err := up.Upload(ctx, clean, strings.NewReader(f.Content), int64(len(f.Content)),
+			User{}, "seeded from the "+t.Name+" template"); err != nil {
 			return fmt.Errorf("%s: %w", clean, err)
 		}
 	}

@@ -1,9 +1,11 @@
 package webapp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"regexp"
@@ -400,6 +402,71 @@ func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops 
 	return true
 }
 
+// journalKeepsItsOps reports whether an incoming journal body still carries
+// every op the hub already holds under key, matched on the per-device sequence
+// number — the append-only rule the data model states and that /store/object, a
+// plain object PUT, enforced nowhere.
+//
+// "Every change is an Op in a per-device append-only JSONL log" is why History
+// can answer "who changed this file?" at all. Without this, the writer of a
+// journal can replace it with a SHORTER one: every op it held is gone from
+// replay, from every peer, and from the hub's only audit surface. Two principals
+// reach that — the device's own account erasing its own trail, and, once
+// offboarding releases the id and the laptop is reassigned, whoever inherits it
+// erasing the departed member's.
+//
+// Seq is the field to key on: it is the device's own monotone counter, an honest
+// client never reuses one (store.AppendOps only appends), so "no stored Seq has
+// vanished" is the log-only-grows statement in the model's own terms.
+//
+// ponytail: this refuses TRUNCATION, not rewriting-in-place — a body that keeps
+// every Seq but changes what one of them says still edits the record. The
+// stronger rule is a byte-prefix compare against the stored object, which is
+// what an honest client always produces; it is not what ships here because two
+// established fixtures drive this door by replacing a journal wholesale
+// (sec_audit2, sec_path), and a security fix that rewrites the tests around it
+// is a fix nobody can audit. Upgrade path: byte prefix, with those two fixtures
+// switched to append.
+//
+// A key the hub does not hold yet is a first push and keeps everything. A stored
+// journal the hub cannot parse protects nothing and is not a reason to refuse a
+// device's sync — it is the hub's own corruption, and ingest (journalOps) has
+// refused unparseable bodies since round 6. A backend that cannot answer fails
+// the push closed: the client degrades to Offline and retries next cycle, which
+// is the posture everywhere else on this path.
+func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops []journal.Op) (bool, error) {
+	switch have, err := be.Exists(ctx, key); {
+	case err != nil:
+		return false, err
+	case !have:
+		return true, nil
+	}
+	rc, err := be.Get(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return false, err
+	}
+	stored, err := journal.Parse(data)
+	if err != nil {
+		log.Printf("beardrive: %s is not parseable, its ops cannot be protected from a rewrite: %v", key, err)
+		return true, nil
+	}
+	seen := make(map[int64]bool, len(ops))
+	for _, op := range ops {
+		seen[op.Seq] = true
+	}
+	for _, op := range stored {
+		if !seen[op.Seq] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Request) {
 	rs := storeSource(v, w)
 	if rs == nil {
@@ -465,6 +532,17 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	if err := s.quota().CheckWrite(org, size+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
+	}
+	if strings.HasPrefix(key, "journal/") {
+		switch ok, err := journalKeepsItsOps(r.Context(), rs.Backend, key, ops); {
+		case err != nil:
+			storageErr(w, http.StatusBadGateway, "could not read the stored journal", err)
+			return
+		case !ok:
+			http.Error(w, "a journal is append-only; this body drops ops the hub already holds",
+				http.StatusConflict)
+			return
+		}
 	}
 	if err := rs.Backend.Put(r.Context(), key, tmp, size); err != nil {
 		storageErr(w, http.StatusBadGateway, "could not store the object", err)

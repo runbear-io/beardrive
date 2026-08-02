@@ -35,9 +35,13 @@ import (
 
 // Uploader is implemented by sources that accept writes through the server.
 // who is the signed-in account the write should be attributed to (zero when
-// auth is off).
+// auth is off), and note rides along on the journaled op — "" for an ordinary
+// browser upload, a stated origin when the HUB itself authored the bytes
+// (seedTemplate). Both are on the interface because the journal is the hub's
+// only audit surface: a write with no human behind it must not be able to
+// present as one by omission.
 type Uploader interface {
-	Upload(ctx context.Context, path string, r io.Reader, size int64, who User) error
+	Upload(ctx context.Context, path string, r io.Reader, size int64, who User, note string) error
 }
 
 // DirectUploader is additionally implemented by sources whose storage can
@@ -104,7 +108,7 @@ func spool(src io.Reader) (f *os.File, size int64, sum string, err error) {
 
 // Upload stores content through the server: spool to disk while hashing,
 // push the blob, then journal the op.
-func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ int64, who User) error {
+func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ int64, who User, note string) error {
 	tmp, size, blob, err := spool(src)
 	if err != nil {
 		return err
@@ -115,7 +119,7 @@ func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ in
 	if err := r.Backend.Put(ctx, "blobs/"+blob, tmp, size); err != nil {
 		return fmt.Errorf("push blob: %w", err)
 	}
-	return r.Commit(ctx, p, blob, size, who, "")
+	return r.Commit(ctx, p, blob, size, who, note)
 }
 
 // Commit appends a put op for path→blob to this server's own journal. It
@@ -222,7 +226,7 @@ func sizeFitsContentAddress(sha string, size int64) bool {
 // Upload writes the file atomically under Root. There is no journal here;
 // on a mounted folder the daemon scans, journals, and syncs it like any
 // local edit.
-func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, _ User) error {
+func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, _ User, _ string) error {
 	dst := filepath.Join(d.Root, filepath.FromSlash(p))
 	// cleanUploadPath rules out "..", but a path with no ".." in it still
 	// leaves the folder by walking through a symlinked directory that was
@@ -446,7 +450,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := up.Upload(r.Context(), p, tmp, size, s.requestUser(r)); err != nil {
+	if err := up.Upload(r.Context(), p, tmp, size, s.requestUser(r), ""); err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
 	}

@@ -228,7 +228,12 @@ the folder was renamed or moved.`,
 			if tpl.Name != "" && !created && p.Template != tpl.Name {
 				from := "an empty project"
 				if p.Template != "" {
-					from = "the " + p.Template + " template"
+					// safeField, like p.Name one screen down. p.Template is the
+					// same JSON object from the same hub and it was concatenated
+					// raw into an error the terminal prints — OSC 52 (a clipboard
+					// write), CSI (a repaint), C1 and bidi all rendered intact,
+					// on the surface an onboarding agent reads verbatim.
+					from = "the " + safeField(p.Template, 120) + " template"
 				}
 				return fmt.Errorf("project %q already exists and was created from %s\n"+
 					"a template only applies to a new project; connect to this one without --template", p.Name, from)
@@ -288,19 +293,23 @@ the folder was renamed or moved.`,
 			}
 			fmt.Printf("initialized %s\n  server:  %s\n  project: %s (%s)\n", folder, server, safeField(p.Name, 120), p.ID)
 			if tpl.Name != "" {
-				switch {
-				case p.Template == tpl.Name:
-					// The hub seeded it at creation; the initial cycle below
-					// is blocking and pulls, so the files land on disk before
-					// this command returns.
-					fmt.Printf("  start:   %s template (seeded on the hub)\n", tpl.Name)
-				default:
-					// An older hub silently ignored the template field, which
-					// would make --template a quiet no-op. Seed from here and
-					// let the first cycle push it.
-					if err := seedLocally(folder, tpl); err != nil {
-						return err
-					}
+				// Seed from the client's OWN registry whatever the hub answered.
+				// `p.Template` is a string the hub chose, and it used to be the
+				// only evidence this branch had: a hub that answers "docs" and
+				// stores nothing left the folder empty under a success message
+				// that named the structure, and an older hub that ignored the
+				// field made --template a quiet no-op. seedLocally skips every
+				// path that already exists, so this is the repair in both cases.
+				//
+				// ponytail: when the hub really did seed, the same bytes are
+				// journaled twice — once by this device, once by the hub — so
+				// History shows two entries per template file. Both come from the
+				// same embedded registry, so they are the same blob and nothing
+				// diverges. Deduplicating would mean waiting for the first cycle
+				// to finish before deciding, which the foreground path never
+				// returns from.
+				if err := seedLocally(folder, tpl); err != nil {
+					return err
 				}
 			}
 			if !noHooks {

@@ -148,6 +148,49 @@ func compileRules(text string) []pattern {
 	return out
 }
 
+// vouchedFloor is the accepted-rules floor for a device whose store.SyncState
+// predates the IgnoreAccepted/IgnorePulled pair — an upgrade, where the
+// provenance of the rules on disk is genuinely unknown and the pair cannot say.
+//
+// It keeps every exclusion (an exclusion can only narrow, which is always safe)
+// and judges each widening — each `!` line — against what this mount is ALREADY
+// syncing:
+//
+//   - a negation that re-includes a path already in the materialization cache is
+//     kept. This device is demonstrably syncing that path already, so the rule
+//     exposes nothing that has not left this machine before. That is the
+//     `bdrive init --only` / `bdrive scope add` case: the managed block is `/*`
+//     plus one `!dir/` per synced folder, and dropping those would have stopped
+//     an upgraded device uploading anything at all.
+//   - a negation that re-includes a path this device has never synced is
+//     dropped. That is round 13's attack exactly — a teammate's `!.env` reaching
+//     a file that has never been shared — and it is the one shape an upgraded
+//     device would otherwise adopt as its own.
+//
+// A `!` line the local user wrote themselves for a path they have not yet synced
+// comes back the next time they save the file (that save is the authorship
+// gesture the whole design rests on).
+func vouchedFloor(text string, synced []string) string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		p, ok := compile(line)
+		if ok && p.negate && !matchesAny(p, synced) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+func matchesAny(p pattern, paths []string) bool {
+	for _, rel := range paths {
+		if p.re.MatchString(rel) {
+			return true
+		}
+	}
+	return false
+}
+
 // EscapeIgnore turns a literal project-relative path into a rule line that
 // matches that path and nothing else. It is compile's inverse and lives beside
 // it on purpose: a caller that spells the escaping itself is a second

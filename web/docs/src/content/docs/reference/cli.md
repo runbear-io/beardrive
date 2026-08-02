@@ -59,9 +59,13 @@ menu (recommended first, "empty project" last, and preselected); `--yes` and
 non-TTY never prompt and stay empty.
 
 The hub seeds the template when the project is created, so it is there in the
-browser and arrives on every device that connects afterwards. Joining a project
-that already exists never restructures it, seeding never overwrites a file that
-already exists, and `--template` together with `--only` is refused before
+browser and arrives on every device that connects afterwards; `init` also
+writes the same structure locally from the binary's own copy, so the folder has
+what the command said it would even if the hub stored nothing. Files the hub
+seeds are journaled with no account and a `seeded from the <name> template`
+note, so change history tells them from a file a teammate wrote. Joining a
+project that already exists never restructures it, seeding never overwrites a
+file that already exists, and `--template` together with `--only` is refused before
 anything is written — scope rules live in the synced `.bdriveignore`, so a
 scope that left out the template's folders would hide them for the whole team.
 

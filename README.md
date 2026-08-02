@@ -418,7 +418,11 @@ structure rather than an empty folder: a small directory skeleton plus the
 `AGENTS.md` that tells an agent where a new note goes, when something is
 archived, and what a good filename looks like — which is the part that keeps
 a shared folder from rotting into a pile. The hub seeds it at creation, so it
-is already there for the browser and for every device that connects later;
+is already there for the browser and for every device that connects later —
+and `init` writes the same structure locally from its own copy, so the folder
+has what the command said it would whatever the hub stored. Seeded files carry
+no account and a "seeded from the … template" note, so change history tells
+them from a file a teammate wrote;
 joining a project that already exists never restructures it, and
 `--template` is refused together with `--only` (scope rules live in the
 synced `.bdriveignore`, so a scope that left out the template's folders would

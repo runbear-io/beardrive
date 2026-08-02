@@ -199,7 +199,22 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	// Runs before the scan and before the pull, so the floor the scan applies
 	// is always the last rules this device agreed to. See Filter.SkipUp.
 	if cur, err := os.ReadFile(filepath.Join(s.Folder, IgnoreFile)); err == nil || os.IsNotExist(err) {
-		if text := string(cur); text != st.IgnorePulled {
+		text := string(cur)
+		// Both fields are omitempty, so a SyncState written before they existed
+		// carries neither — and the accept test below then reads whatever is on
+		// disk as locally authored, including a peer's widening that landed one
+		// cycle earlier (scan runs before pull, so it always does). A device that
+		// has already synced is an upgrade, not a new joiner: seed the pair from
+		// what this mount is demonstrably syncing already (vouchedFloor) instead
+		// of taking the file's word for it.
+		if st.IgnoreAccepted == "" && st.IgnorePulled == "" && text != "" &&
+			(st.Lamport > 0 || st.PushedOps > 0) {
+			synced := make([]string, 0, len(cache))
+			for rel := range cache {
+				synced = append(synced, rel)
+			}
+			st.IgnoreAccepted, st.IgnorePulled = vouchedFloor(text, synced), text
+		} else if text != st.IgnorePulled {
 			st.IgnoreAccepted = text
 		}
 	}
@@ -330,7 +345,17 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	// rules first and reload from them — otherwise materialize's delete loop
 	// runs against stale rules, its filter guard never fires, and it unlinks
 	// files that merely left sync scope.
-	if want, ok := target[IgnoreFile]; ok && len(pulled) > 0 {
+	if want, ok := target[IgnoreFile]; !ok {
+		// A peer DELETED the shared rules — the maximal widening there is, and
+		// the one shape the bookkeeping below cannot see, since it is written in
+		// terms of a file that still exists. materialize's delete loop unlinks
+		// the local copy either way; recording the deletion as PULLED is what
+		// stops the next cycle reading the now-absent file as locally authored
+		// and dropping the accepted floor with it.
+		if len(pulled) > 0 {
+			st.IgnorePulled = ""
+		}
+	} else if len(pulled) > 0 {
 		wrote, err := s.materializeFile(IgnoreFile, want, cache)
 		if err != nil {
 			log.Printf("beardrive: could not write %s this cycle: %v", IgnoreFile, err)

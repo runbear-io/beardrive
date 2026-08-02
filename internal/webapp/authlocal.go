@@ -974,7 +974,15 @@ padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius-ctl);b
 .who-swap:hover{text-decoration:underline}
 .rows{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:14px 0 0;font-size:13px}
 .rows dt{color:var(--faint)}
-.rows dd{margin:0;font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere}
+/* Every value in this list is chosen by the unauthenticated stranger asking
+   to be approved, and this is the one page a human reads before a device
+   credential is minted. trimText + html.EscapeString stop markup and the
+   invisible classes; neither stops a strong-RTL LETTER (category Lo) from
+   repainting the row out of order — "laptop-7א (unverified)" reads as
+   "laptop-7 )unverified(א". isolate-override, not isolate: measured in
+   Chromium, isolate leaves the reordering intact. Same rule as the SPA's
+   peer-written names (frontend/src/style.css). */
+.rows dd{margin:0;font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere;unicode-bidi:isolate-override;direction:ltr}
 @media (max-width:900px){input{height:44px}button{height:44px}}
 code{background:var(--hovered);border:1px solid var(--line);padding:2px 6px;border-radius:5px;
 font-family:var(--mono)}

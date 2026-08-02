@@ -55,7 +55,7 @@ classDiagram
     }
     class Uploader {
         <<interface>>
-        +Upload(ctx, path, r, size, who)
+        +Upload(ctx, path, r, size, who, note)
     }
     class DirectUploader {
         <<interface>>
@@ -137,6 +137,7 @@ classDiagram
         +Get +Create +Update +Rename +List
         +SetCreator +SetDefault +SetTemplate
         +SetPerm +ClearPerm
+        -refresh re-reads the store on reads AND mutators
     }
     class Project {
         +ID +Name +Org +Created
@@ -178,6 +179,7 @@ classDiagram
         -repo DeviceRepo
         -byID
         +Observe(DeviceInfo)
+        -refresh re-reads the store before every decision
     }
     class DeviceInfo {
         +ID +Name +OS +User +IP +LastSeen

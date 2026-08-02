@@ -175,6 +175,16 @@ func (db *ProjectDB) putPerm(prev, next Project, email, level string) error {
 // refresh re-reads the registry from the store before an authorization read.
 // Callers hold mu.
 //
+// It runs at the top of the MUTATORS too, not only the reads — the same
+// correction round 13 made to OrgDB, ShareDB and BuiltinAuth and did not make
+// here, on the struct the class is named after. `put` → `PutMeta` is an
+// unconditional upsert on both backends, so the row-scoped write side cannot
+// refuse a stale row: a second process's next ordinary metadata write puts a
+// deleted project back, complete with the org the public-link rule reads. And
+// the last-ADMIN guards count admins out of this map, so two stale processes
+// each demote "the other" admin and leave a project nobody can administer —
+// a decision made up here, before the repo is ever called.
+//
 // Round 11 made the WRITE side row-scoped so a second hub process could no
 // longer undo a revocation on disk. Nothing made that process HONOUR one: byID
 // was loaded once at open and projectPerm answers straight out of it
@@ -241,12 +251,13 @@ func (db *ProjectDB) Get(id string) (Project, bool) {
 // it (with a fresh id) if none exists. Names are matched exactly, scoped to
 // the org: two organizations can each have a "wiki".
 func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
-	name = trimName(name)
+	name = trimProjectName(name)
 	if name == "" {
 		return Project{}, false, fmt.Errorf("project name must not be empty")
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	for _, p := range db.byID {
 		if p.Name == name && p.Org == org {
 			return p.clone(), false, nil
@@ -268,7 +279,7 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 func (db *ProjectDB) Update(id string, name, description, icon *string) error {
 	var newName, newDesc, newIcon string
 	if name != nil {
-		newName = trimText(*name, maxNameLen+1)
+		newName = trimText(projectLabel(*name), maxNameLen+1)
 		if newName == "" {
 			return fmt.Errorf("project name must not be empty")
 		}
@@ -291,6 +302,7 @@ func (db *ProjectDB) Update(id string, name, description, icon *string) error {
 
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	p, ok := db.byID[id]
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
@@ -324,6 +336,7 @@ func (db *ProjectDB) Rename(id, name string) error {
 func (db *ProjectDB) Delete(id string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	if _, ok := db.byID[id]; !ok {
 		return fmt.Errorf("no such project %q", id)
 	}
@@ -335,6 +348,7 @@ func (db *ProjectDB) Delete(id string) error {
 func (db *ProjectDB) SetCreator(id, email string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	p, ok := db.byID[id]
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
@@ -348,6 +362,7 @@ func (db *ProjectDB) SetCreator(id, email string) error {
 func (db *ProjectDB) SetTemplate(id, name string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	p, ok := db.byID[id]
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
@@ -364,6 +379,7 @@ func (db *ProjectDB) SetDefault(id, level string) error {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	p, ok := db.byID[id]
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
@@ -387,6 +403,7 @@ func (db *ProjectDB) SetPerm(id, email, level string) error {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	p, ok := db.byID[id]
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
@@ -407,6 +424,7 @@ func (db *ProjectDB) ClearPerm(id, email string) error {
 	e := normEmail(email)
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	p, ok := db.byID[id]
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
@@ -430,6 +448,7 @@ func (db *ProjectDB) dropPerm(id, email string) error {
 	e := normEmail(email)
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	p, ok := db.byID[id]
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
@@ -457,6 +476,7 @@ func adminCount(p Project) int {
 func (db *ProjectDB) SetOrg(id, org string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	p, ok := db.byID[id]
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
@@ -465,6 +485,10 @@ func (db *ProjectDB) SetOrg(id, org string) error {
 	next.Org = org
 	return db.put(p, next)
 }
+
+// trimProjectName is trimName for a PROJECT name, which travels one place an
+// org name does not: the paste prompt. See projectLabel.
+func trimProjectName(s string) string { return trimText(projectLabel(s), 128) }
 
 // trimName normalizes a name on the *creation* path, where an over-long name
 // is silently truncated rather than rejected (bdrive init must not fail on a
@@ -475,12 +499,43 @@ func trimName(s string) string {
 	// one. It lives here rather than in trimText because trimText is also the
 	// rule for a device's self-reported name and OS, and "darwin/arm64" is an
 	// OS, not an escape attempt.
-	return trimText(strings.Map(func(r rune) rune {
+	return trimText(nameLabel(s), 128)
+}
+
+// nameLabel drops the shapes that stop a name being a plain label. It is
+// trimName's and Update's shared half so the CREATE door and the RENAME door
+// cannot answer differently for the same string: Update called trimText
+// directly, which has no separator rule, so `notes/../../etc` was normalized on
+// creation and stored intact on rename — and through rename it reached the
+// paste prompt fully armed.
+func nameLabel(s string) string {
+	return strings.Map(func(r rune) rune {
 		if r == '/' || r == '\\' {
 			return -1
 		}
 		return r
-	}, s), 128)
+	}, s)
+}
+
+// projectLabel is nameLabel plus the paste prompt's SECOND delimiter.
+//
+// The clause is `(the project is named "<NAME>")`, so it has two, and only the
+// quote was defended (trimText). A name carrying ')' closes the parenthetical
+// exactly the way a quote closes the string, and everything after it reads to
+// the agent as a top-level sentence from the hub. '(' goes too — a lone opener
+// re-opens the clause a sentence later and swallows what follows.
+//
+// PROJECT names only, which is why it is not in trimName: an org name, a
+// device's self-reported name and an account's display name all go through
+// that, and none of them is inlined into the prompt.
+// (Cost: "Docs (draft)" stores as "Docs draft".)
+func projectLabel(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '(' || r == ')' {
+			return -1
+		}
+		return r
+	}, nameLabel(s))
 }
 
 // trimText strips line breaks and outer spaces, then truncates to max runes.
