@@ -5,6 +5,7 @@ package autostart
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Unit is the systemd user unit's name, and the file it lives in.
@@ -57,11 +58,24 @@ Documentation=https://docs.beardrive.ai/manual/hooks/
 
 [Service]
 Type=oneshot
-ExecStart=` + exe + ` resume --quiet
+ExecStart=` + unitArg(exe) + ` resume --quiet
 
 [Install]
 WantedBy=default.target
 `
+}
+
+// unitArg renders a path as one systemd command argument. systemd splits
+// ExecStart= on whitespace and understands double quotes with backslash
+// escapes, so a path with a space (or a quote) has to be quoted or it becomes
+// two arguments. Control characters never get here — loginPath refuses them,
+// because a newline would start a new unit directive that runs at login.
+func unitArg(exe string) string {
+	if !strings.ContainsAny(exe, " \t\"'\\") {
+		return exe
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return `"` + r.Replace(exe) + `"`
 }
 
 // Install writes the unit and enables it by linking it into
@@ -75,7 +89,7 @@ func Install() (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	exe, err := selfPath()
+	exe, err := loginPath()
 	if err != nil {
 		return Result{}, err
 	}

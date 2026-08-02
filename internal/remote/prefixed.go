@@ -42,7 +42,11 @@ func safeKey(key string) bool {
 		return false
 	}
 	trimmed := strings.TrimSuffix(key, "/")
-	if trimmed == "" || trimmed == ".." || strings.HasPrefix(trimmed, "../") {
+	// "." is Clean-stable, so the check below accepts it — and it is not a
+	// key: filepath.Join collapses "<project>/." to the project DIRECTORY on
+	// file://, while S3 and GCS store a literal object by that name. One key,
+	// three meanings.
+	if trimmed == "" || trimmed == "." || trimmed == ".." || strings.HasPrefix(trimmed, "../") {
 		return false
 	}
 	return path.Clean(trimmed) == trimmed

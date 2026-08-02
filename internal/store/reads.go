@@ -40,7 +40,8 @@ func (s *Store) LogRead(rel string) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(s.readSpoolPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// 0600: the spool is a list of the files this project's agent opened.
+	f, err := os.OpenFile(s.readSpoolPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}

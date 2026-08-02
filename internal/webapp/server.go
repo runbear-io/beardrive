@@ -122,6 +122,9 @@ type Server struct {
 	volsMu sync.Mutex
 	vols   map[string]*volume // hub mode: per-project, keyed by project id
 
+	resMu  sync.Mutex
+	grants []grant // outstanding presigned upload reservations (reserve.go)
+
 	// joinMu serializes invite redemption: the seat check reads the member
 	// count and the join adds to it, and two clicks on the same link at the
 	// same moment would otherwise both see the last seat free.
@@ -278,9 +281,6 @@ type RemoteSource struct {
 	Device Identity
 
 	upmu sync.Mutex // serializes read-modify-write of our own journal
-
-	vmu      sync.Mutex // guards verified
-	verified map[string]bool
 }
 
 // OpenBlob is the one way a blob's bytes leave the hub, and on a hub whose
@@ -291,11 +291,17 @@ type RemoteSource struct {
 // content under a sha256 it chose, and the viewer, share links, history and
 // every peer would then serve it.
 //
-// Verified once per blob per process (blobs are immutable), and skipped
-// entirely on a backend that cannot presign, where the write path already
-// checked. ponytail: costs one extra storage read per blob per hub process on
-// S3/GCS; a persisted verified-set is the upgrade if that ever shows up in a
-// profile.
+// Verified on EVERY read, and skipped entirely on a backend that cannot
+// presign, where the write path already checked. It used to be once per blob
+// per process, on the premise that blobs are immutable — which is false on the
+// hub that needs the check: SignPut hands out a URL that stays valid for its
+// whole TTL and an object store accepts every PUT to it, not the first. So
+// uploading the honest bytes, letting one reader populate the cache, and then
+// replaying the same URL with hostile bytes served them under the reviewed
+// sha to the viewer, history, share links and every syncing device.
+// ponytail: costs one extra storage read per blob read on S3/GCS. A cache can
+// come back when it can be keyed on the stored object's identity (ETag /
+// generation), which the Backend interface does not carry today.
 func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser, error) {
 	if !blobRe.MatchString(sha) {
 		return nil, fmt.Errorf("invalid content reference")
@@ -308,12 +314,6 @@ func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser,
 
 func (r *RemoteSource) verify(ctx context.Context, sha string) error {
 	if _, canSign := r.Backend.(remote.PutSigner); !canSign {
-		return nil
-	}
-	r.vmu.Lock()
-	done := r.verified[sha]
-	r.vmu.Unlock()
-	if done {
 		return nil
 	}
 	rc, err := r.Backend.Get(ctx, "blobs/"+sha)
@@ -329,12 +329,6 @@ func (r *RemoteSource) verify(ctx context.Context, sha string) error {
 	if hex.EncodeToString(h.Sum(nil)) != sha {
 		return fmt.Errorf("stored content does not hash to its key")
 	}
-	r.vmu.Lock()
-	if r.verified == nil {
-		r.verified = map[string]bool{}
-	}
-	r.verified[sha] = true
-	r.vmu.Unlock()
 	return nil
 }
 

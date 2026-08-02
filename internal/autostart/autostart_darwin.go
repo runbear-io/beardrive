@@ -3,6 +3,8 @@
 package autostart
 
 import (
+	"bytes"
+	"encoding/xml"
 	"os"
 	"path/filepath"
 )
@@ -25,6 +27,14 @@ func Path() (string, error) {
 // `bdrive resume` starts the daemons and exits, so KeepAlive would read that
 // exit as a crash and respawn it forever.
 func plist(exe string) string {
+	// The path is XML character data, and "&" and "<" are ordinary in macOS
+	// folder names ("Music & Video"). Pasted in raw they made the plist
+	// unparseable, so launchd never loaded the job — Install reported success
+	// and sync silently never resumed after a reboot, the exact failure this
+	// package exists to prevent.
+	var esc bytes.Buffer
+	xml.EscapeText(&esc, []byte(exe))
+	exe = esc.String()
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -53,7 +63,7 @@ func Install() (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	exe, err := selfPath()
+	exe, err := loginPath()
 	if err != nil {
 		return Result{}, err
 	}

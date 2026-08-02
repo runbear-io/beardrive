@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -332,10 +333,29 @@ func (a *BuiltinAuth) issueToken(userID, device string) (string, error) {
 func (a *BuiltinAuth) revokeToken(tok string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, ok := a.tokens[hashToken(tok)]; ok {
+	if t, ok := a.tokens[hashToken(tok)]; ok {
 		delete(a.tokens, hashToken(tok))
-		a.store.DeleteToken(hashToken(tok))
+		a.killToken(t)
 	}
+}
+
+// killToken ends one credential durably. The delete alone was not durable: its
+// error was discarded, so a logout or a password reset reported success while
+// the row survived on disk and came back live at the next restart. Voiding the
+// row first is a write that has to succeed for the revocation to be reported
+// as done — a row naming no account resolves to no user in userForToken, so
+// even if the delete then fails the credential is dead. Caller holds a.mu.
+func (a *BuiltinAuth) killToken(t authToken) error {
+	void := t
+	void.User = ""
+	if err := a.store.PutToken(void); err != nil {
+		log.Printf("beardrive: could not revoke a token durably: %v", err)
+		return err
+	}
+	if err := a.store.DeleteToken(t.Hash); err != nil {
+		log.Printf("beardrive: revoked token row left void on disk (delete failed): %v", err)
+	}
+	return nil
 }
 
 // revokeTokensFor kills every credential a user holds — browser sessions and
@@ -345,10 +365,17 @@ func (a *BuiltinAuth) revokeToken(tok string) {
 func (a *BuiltinAuth) revokeTokensFor(userID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.revokeTokensForLocked(userID)
+}
+
+func (a *BuiltinAuth) revokeTokensForLocked(userID string) {
+	if userID == "" {
+		return
+	}
 	for hash, t := range a.tokens {
 		if t.User == userID {
 			delete(a.tokens, hash)
-			a.store.DeleteToken(hash)
+			a.killToken(t)
 		}
 	}
 }
@@ -357,7 +384,7 @@ func (a *BuiltinAuth) userForToken(tok string) (User, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	t, ok := a.tokens[hashToken(tok)]
-	if !ok {
+	if !ok || t.User == "" {
 		return User{}, false
 	}
 	u, ok := a.users[t.User]
@@ -465,6 +492,12 @@ func (a *BuiltinAuth) Deny(id string) error {
 	if _, ok := a.users[id]; !ok {
 		return fmt.Errorf("no such account")
 	}
+	// Removing the account is not enough on its own: its device tokens and
+	// session cookies stay rows in the token table, dead today only because
+	// userForToken also has to resolve the account — so an id that ever came
+	// back (a restore, a re-created account, a repo that reuses ids) would
+	// resurrect every credential with it.
+	a.revokeTokensForLocked(id)
 	delete(a.users, id)
 	return a.store.DeleteAccount(id)
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path"
@@ -140,6 +141,14 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, w
 	})
 }
 
+// nextLamport is maxLamport+1 without the wrap.
+func nextLamport(cur int64) int64 {
+	if cur == math.MaxInt64 {
+		return cur
+	}
+	return cur + 1
+}
+
 // appendOp stamps op with this server's identity and ordering and appends it
 // to this server's own journal. Callers fill in Kind/Path and the content
 // fields; Seq, Lamport, Time and the device fields belong to us.
@@ -158,7 +167,13 @@ func (r *RemoteSource) appendOp(ctx context.Context, op journal.Op) error {
 			mySeq = max(mySeq, prev.Seq)
 		}
 	}
-	op.Seq, op.Lamport, op.Time = mySeq+1, maxLamport+1, time.Now().UTC()
+	// Saturating, like the client's tickLamport. maxLamport is taken over
+	// every journal the hub can see, members' included, and int64 addition
+	// wraps: one pushed op carrying MaxInt64 made the hub's next lamport
+	// MinInt64 — recomputed on every commit, so every later browser upload in
+	// the project silently lost last-writer-wins while commit still answered
+	// 200.
+	op.Seq, op.Lamport, op.Time = mySeq+1, nextLamport(maxLamport), time.Now().UTC()
 	op.Device, op.DeviceName, op.Author = r.Device.ID, r.Device.Name, r.Device.Author
 
 	// Read-modify-write of our own journal. A transient read error must fail
@@ -286,6 +301,16 @@ func cleanUploadPath(p string) (string, error) {
 	if cl != p || cl == "." || cl == ".." || strings.HasPrefix(cl, "../") {
 		return "", fmt.Errorf("invalid path %q", p)
 	}
+	// No control characters. They are not filenames anybody types, and a NUL
+	// is a value the metadata backends disagree about: Postgres refuses it in
+	// a text column (a share on such a path 500s) while sqlite and the file
+	// backend keep it, so the same hub reads back differently depending on its
+	// database. Refusing at ingest is what keeps that divergence unreachable.
+	for _, r := range cl {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("invalid path %q", p)
+		}
+	}
 	// The same set the scan walk would never have uploaded, at any depth:
 	// .bdrive/ is the mount's own identity (an upload of it repoints every
 	// device that pulls) and .git/ materializes hook scripts that run on a
@@ -357,7 +382,12 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 		http.Error(w, "declared size does not match the content address", http.StatusForbidden)
 		return
 	}
-	if err := s.quota().CheckWrite(s.orgOf(r.PathValue("project")), req.Size); err != nil {
+	project := r.PathValue("project")
+	if rs, ok := v.source.(*RemoteSource); ok {
+		s.reconcileGrants(r.Context(), project, rs.Backend)
+	}
+	org := s.orgOf(project)
+	if err := s.quota().CheckWrite(org, req.Size+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -370,6 +400,11 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 		}
 		signed, err := direct.SignBlobPut(r.Context(), req.SHA256, req.Size, s.Upload.ttl())
 		if err == nil {
+			// Reserved, exactly like the device door: counted against the cap
+			// now, charged when the object is confirmed in storage, released
+			// for free if the caller never uploads. A browser upload that
+			// never comes back to commit is therefore still billed.
+			s.reserve(project, org, "blobs/"+req.SHA256, req.Size, s.Upload.ttl())
 			writeJSON(w, map[string]any{
 				"mode":    "direct",
 				"url":     signed.URL,
@@ -396,12 +431,27 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	org, size := s.orgOf(r.PathValue("project")), max(r.ContentLength, 0)
-	if err := s.quota().CheckWrite(org, size); err != nil {
+	// Spool first, then charge what actually arrived. Content-Length is -1 on
+	// any chunked request, so max(r.ContentLength, 0) admitted an upload of any
+	// size against a quota of zero bytes and billed it at zero — the hole round
+	// 1 closed on the device door, still open on this one.
+	tmp, size, _, err := spool(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	project := r.PathValue("project")
+	if rs, ok := v.source.(*RemoteSource); ok {
+		s.reconcileGrants(r.Context(), project, rs.Backend)
+	}
+	org := s.orgOf(project)
+	if err := s.quota().CheckWrite(org, size+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := up.Upload(r.Context(), p, r.Body, r.ContentLength, s.requestUser(r)); err != nil {
+	if err := up.Upload(r.Context(), p, tmp, size, s.requestUser(r)); err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -430,6 +480,12 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 	// only one in direct mode. Size comes from storage: req.Size is the
 	// caller's claim, and it would otherwise be both the quota charge and the
 	// journaled Op.Size.
+	// Bytes are charged once, where they land. If this commit finalizes a
+	// grant nothing has confirmed yet, it is the one charging them, from the
+	// size storage reports; if the reconciler (or a relayed put) already did,
+	// there is nothing left to claim and commit charges nothing — committing
+	// a path is not a second copy of the content.
+	claimed := s.claimGrant(r.PathValue("project"), "blobs/"+req.SHA256)
 	size, exists, err := direct.BlobSize(r.Context(), req.SHA256)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("commit: %v", err), http.StatusBadGateway)
@@ -452,7 +508,9 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 		http.Error(w, fmt.Sprintf("commit: %v", err), code)
 		return
 	}
-	s.quota().RecordUsage(org, size)
+	if claimed {
+		s.quota().RecordUsage(org, size)
+	}
 	v.invalidate()
 	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
 }

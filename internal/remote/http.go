@@ -53,7 +53,7 @@ func newHTTPBackend(raw string) (*httpBackend, error) {
 	}
 	base := (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
 	dev, _ := config.LoadDevice()
-	hc := &http.Client{Timeout: 5 * time.Minute, CheckRedirect: dropCredentialOffOrigin}
+	hc := &http.Client{Timeout: 5 * time.Minute, CheckRedirect: refuseOffOriginRedirect}
 	return &httpBackend{base: base, project: m[1], token: deviceToken(base), device: dev, hc: hc}, nil
 }
 
@@ -80,33 +80,60 @@ func deviceToken(base string) string {
 // sameOrigin compares scheme+host, the only thing that decides who receives a
 // bearer token. A bare host in settings is read as https, which is what
 // `bdrive login` writes it as.
+//
+// The comparison is on the ORIGIN, not on the URL's spelling: the scheme's
+// default port, the case of the host and an FQDN's trailing dot all name the
+// same server. Comparing url.Host verbatim made "https://hub:443" a different
+// server from "https://hub", so the token was silently dropped and every sync
+// 401'd forever — and `bdrive login` could not fix it, because it writes the
+// same string back. Fail-closed is still the direction: anything that does not
+// parse, or has no host, matches nothing.
 func sameOrigin(a, b string) bool {
-	norm := func(raw string) string {
-		if raw != "" && !strings.Contains(raw, "://") {
-			raw = "https://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" {
-			return ""
-		}
-		return strings.ToLower(u.Scheme + "://" + u.Host)
-	}
-	x, y := norm(a), norm(b)
+	x, y := originOf(a), originOf(b)
 	return x != "" && x == y
 }
 
-// dropCredentialOffOrigin strips the device token when a hub redirects the
-// request somewhere else. net/http only removes Authorization when the
-// HOSTNAME changes, ignoring scheme and port — so a hub's 302 hands the
-// credential to another port on the same box, an https→http downgrade, or a
-// sibling subdomain. Every endpoint this backend calls is the hub's own API,
-// where a 3xx is not part of the contract anyway.
-func dropCredentialOffOrigin(req *http.Request, via []*http.Request) error {
+func originOf(raw string) string {
+	if raw != "" && !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return ""
+	}
+	if strings.Contains(host, ":") { // IPv6 literal
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host
+}
+
+// refuseOffOriginRedirect stops a hub's 3xx from taking this device
+// anywhere but the hub itself.
+func refuseOffOriginRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return fmt.Errorf("stopped after 10 redirects")
 	}
 	if len(via) > 0 && !sameOrigin(req.URL.String(), via[0].URL.String()) {
-		req.Header.Del("Authorization")
+		// Refused, not followed with a smaller payload. Every endpoint this
+		// backend calls is the hub's own store API, where a 3xx is not part of
+		// the contract — and following one handed a third-party host this
+		// device's id, machine name and OS (and, before round 4, its token:
+		// net/http only strips Authorization when the HOSTNAME changes, so a
+		// port change, an https->http downgrade or a sibling subdomain kept
+		// it).
+		return fmt.Errorf("refusing a redirect off %s to %s", via[0].URL.Host, req.URL.Host)
 	}
 	return nil
 }

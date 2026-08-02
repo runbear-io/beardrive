@@ -194,7 +194,9 @@ func printVersions(w io.Writer, versions []journal.Op, current string) {
 		if op.Blob == current {
 			mark = "* "
 		}
+		// Same treatment as `bdrive log`: these strings are a peer's.
 		fmt.Fprintf(w, "%s%s  %s  %8s  %s on %s\n", mark, shortSHA(op.Blob),
-			op.Time.Local().Format("2006-01-02 15:04:05"), humanBytes(op.Size), who, op.DeviceName)
+			op.Time.Local().Format("2006-01-02 15:04:05"), humanBytes(op.Size),
+			safeField(who, 64), safeField(op.DeviceName, 64))
 	}
 }

@@ -11,6 +11,7 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -458,21 +459,38 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 		if err != nil {
 			return newOps, err
 		}
-		fresh, err := journal.Parse(data)
-		if err != nil {
-			continue // corrupt remote journal; ignore rather than break sync
-		}
-		prev, err := s.Store.DeviceOps(dev)
-		if err != nil {
+		// Resume from a BYTE offset, never from an op count. A peer owns its
+		// journal object and can rewrite it, and Parse drops a line it cannot
+		// decode — so "skip the first len(prev) ops" let the peer choose how
+		// far each device's cursor jumped: replace one already-counted line
+		// with junk and every appended op shifts down by one, so a device that
+		// synced earlier silently never sees it while a first-time device
+		// does. Two devices, one journal, permanently different states.
+		//
+		// What we hold locally is the exact bytes we last accepted. If the
+		// object still extends them, the new ops are what the extension parses
+		// to; if it does not, the peer rewrote its log and every op in it is
+		// treated as new. Re-applying ops is idempotent (Replay is a fold), so
+		// the rewritten case is only ever slow, never divergent.
+		local, err := os.ReadFile(lp)
+		if err != nil && !os.IsNotExist(err) {
 			return newOps, err
 		}
-		if len(fresh) <= len(prev) {
+		if bytes.Equal(local, data) {
 			continue
+		}
+		tail := data
+		if len(local) > 0 && bytes.HasPrefix(data, local) {
+			tail = data[len(local):]
+		}
+		fresh, err := journal.Parse(tail)
+		if err != nil {
+			continue // corrupt remote journal; ignore rather than break sync
 		}
 		if err := store.WriteFileAtomic(lp, data, 0o644); err != nil {
 			return newOps, err
 		}
-		newOps = append(newOps, fresh[len(prev):]...)
+		newOps = append(newOps, fresh...)
 	}
 
 	// Fetch content for new ops. Blobs are uploaded before journals on push,
@@ -971,7 +989,13 @@ func pruneEmptyDirs(root, dir string) {
 // written if we know it, otherwise when the op was committed. Ops written
 // before Op.Mtime existed, and deletes (no file left to stat), fall back.
 func DisplayTime(op journal.Op) time.Time {
-	if !op.Mtime.IsZero() {
+	// Clamped to the moment the op was journaled. Mtime comes off the
+	// filesystem, so a peer chooses it: an op stamped in the year 9999 sits
+	// above every real entry in `bdrive log` forever, and a handful of them
+	// pushes the genuine history off a screen that prints 50 rows. Lagging
+	// Time is legitimate (an old file, journaled today); leading it is not a
+	// write time, it is a sort key someone picked.
+	if !op.Mtime.IsZero() && !op.Mtime.After(op.Time) {
 		return op.Mtime
 	}
 	return op.Time

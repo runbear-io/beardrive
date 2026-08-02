@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -301,12 +302,13 @@ func logCmd() *cobra.Command {
 				if who == "" {
 					who = op.Author
 				}
-				line := fmt.Sprintf("%s  %s  %-40s  %s on %s", when, kind, op.Path, who, op.DeviceName)
+				line := fmt.Sprintf("%s  %s  %-40s  %s on %s", when, kind,
+					safeField(op.Path, 160), safeField(who, 64), safeField(op.DeviceName, 64))
 				if op.Kind == journal.KindPut {
 					line += fmt.Sprintf("  (%s)", humanBytes(op.Size))
 				}
-				if op.Note != "" {
-					line += "  [" + op.Note + "]"
+				if note := safeField(op.Note, 200); note != "" {
+					line += "  [" + note + "]"
 				}
 				fmt.Fprintln(out, line)
 			}
@@ -316,6 +318,31 @@ func logCmd() *cobra.Command {
 	c.Flags().IntVarP(&limit, "limit", "n", 50, "max entries to show (0 = all)")
 	c.Flags().StringVarP(&pathFilter, "path", "p", "", "only show history for this file or directory")
 	return c
+}
+
+// safeField prepares a string that came out of a peer's journal for a terminal
+// row. Every string `bdrive log` and `bdrive restore --list` print — Path,
+// Note, User, UserName, Author, DeviceName — is arbitrary JSON someone else
+// wrote, and a terminal executes what it is handed: ESC sequences repaint
+// rows, clear the scrollback, set the window title, write the system clipboard
+// (OSC 52) and, through DECRQSS/CPR, make some emulators type a reply onto the
+// shell; a lone CR redraws the row that was just printed as something else; a
+// newline forges a whole entry. The audit tool an operator uses to catch a
+// peer must not be renderable BY that peer.
+//
+// So: no C0 or DEL, one entry is one line, and each part is bounded — 50 rows
+// of log is also owned by one 40 KB entry that scrolls the rest away.
+func safeField(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > max {
+		s = strings.ToValidUTF8(s[:max], "") + "…"
+	}
+	return s
 }
 
 func daemonCmd() *cobra.Command {

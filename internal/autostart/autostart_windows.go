@@ -44,7 +44,7 @@ func command(exe string) string {
 // run, while a stale path (an upgrade that moved bdrive.exe) is rewritten.
 func Install() (Result, error) {
 	path, _ := Path()
-	exe, err := selfPath()
+	exe, err := loginPath()
 	if err != nil {
 		return Result{}, err
 	}

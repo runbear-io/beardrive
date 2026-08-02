@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 )
 
@@ -24,7 +25,7 @@ import (
 
 var (
 	blobKeyRe    = regexp.MustCompile(`^blobs/[0-9a-f]{64}$`)
-	journalKeyRe = regexp.MustCompile(`^journal/[A-Za-z0-9._-]+\.jsonl$`)
+	journalKeyRe = regexp.MustCompile(`^journal/` + deviceIDPattern + `\.jsonl$`)
 )
 
 func validStoreKey(key string) bool {
@@ -63,7 +64,11 @@ func (s *Server) storeKey(w http.ResponseWriter, r *http.Request) (string, bool)
 // the request never said who is writing, which is a malformed sync request
 // rather than a refused one. Only a caller claiming to be a device it is not
 // gets the 403.
-func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string) bool {
+//
+// ops is what the body actually carries (empty when the body is not known
+// yet, e.g. at signing time). What needs an owner is AUTHORSHIP: ops replay on
+// every device and History attributes them to this journal's device.
+func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string, ops []journal.Op) bool {
 	if !strings.HasPrefix(key, "journal/") {
 		return true
 	}
@@ -82,15 +87,58 @@ func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string) 
 	// their ops gone, every peer replaying the forged ones, History crediting
 	// them to the victim. The device has to belong to the ACCOUNT as well.
 	//
-	// LookupIn is the resolver, for the two properties it already has: it
-	// returns the FIRST account seen syncing under an id (a later caller
-	// cannot manufacture that — its own request registers a row on the way
-	// in), and it is scoped to the project's org, so a device registered in
-	// some unrelated org does not reserve that journal key here.
-	if info, ok := s.Devices.LookupIn(dev, s.deviceVisibleIn(r.PathValue("project"))); ok &&
-		info.User != "" && info.User != s.requestUser(r).Email {
-		http.Error(w, "a device may only write its own journal", http.StatusForbidden)
-		return false
+	// Ownership is DeviceRegistry.OwnerOf: hub-wide, first claim, ownerless
+	// rows claiming nothing. Three things this deliberately does not do, each
+	// because doing it was a hole:
+	//
+	//   - it does not consult the row this request would create. Every /store
+	//     handler used to register the caller's header before asking who owns
+	//     it, so an unclaimed id authorized whoever named it first. The
+	//     callers observe AFTER this returns.
+	//   - it does not treat "unclaimed" as permission. An id nothing has ever
+	//     synced under is not this caller's to write.
+	//   - it does not scope the claim to the project's org, so offboarding a
+	//     teammate does not release her journal to the org she left.
+	//
+	// A hub with no registry cannot resolve ownership at all (single-volume,
+	// auth-less, or a fixture): there is nobody to impersonate, and projectPerm
+	// answers admin for exactly those configurations.
+	if s.Devices != nil {
+		me := normEmail(s.requestUser(r).Email)
+		owner, known := s.Devices.OwnerOf(dev)
+		switch {
+		case normEmail(owner) != "" && normEmail(owner) == me:
+			// My device, my journal.
+		case !known && journalNames(dev, ops):
+			// An id nothing on this hub has ever synced under: this write is
+			// its first claim. It has to at least BE that device's journal —
+			// every op naming it — which is not proof (the field is the
+			// writer's too), but it is the difference between a device
+			// starting to sync and a member pasting ops under a name they
+			// invented. The claim is recorded by observeDevice below, only
+			// after this returns, so the request cannot answer its own
+			// ownership question.
+		case atLeast(s.projectPerm(r, r.PathValue("project")), PermAdmin):
+			// Project admin is the recovery path — the answer to "a squatted id
+			// is a permanent lockout". The device's own remedy is in the body.
+		default:
+			http.Error(w, "this device id belongs to another account on this hub; "+
+				"delete device.json in your BearDrive home to mint a new one, "+
+				"or ask a project admin", http.StatusForbidden)
+			return false
+		}
+	}
+	return true
+}
+
+// journalNames reports whether every op in a journal write declares the device
+// the key names. A journal that attributes its own ops to somebody else is not
+// this device's log; readers that trust Op.Device would credit them there.
+func journalNames(dev string, ops []journal.Op) bool {
+	for _, op := range ops {
+		if op.Device != dev {
+			return false
+		}
 	}
 	return true
 }
@@ -107,6 +155,9 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 		http.Error(w, fmt.Sprintf("invalid prefix %q", prefix), http.StatusBadRequest)
 		return
 	}
+	// A sync cycle starts here, which makes it the hub's regular opportunity to
+	// confirm what its presigned grants actually delivered.
+	s.reconcileGrants(r.Context(), r.PathValue("project"), rs.Backend)
 	objs, err := rs.Backend.List(r.Context(), prefix)
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
@@ -171,7 +222,6 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 	if rs == nil {
 		return
 	}
-	s.observeDevice(r)
 	if !s.Upload.Enabled {
 		http.Error(w, "uploads are disabled on this server", http.StatusForbidden)
 		return
@@ -193,11 +243,17 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 	// is fine here — the write itself is where ownership is enforced. A
 	// caller that does name a device is held to it, so a forged sync fails at
 	// the first step instead of after uploading.
-	if r.Header.Get("X-Bdrive-Device") != "" && !s.ownJournal(w, r, req.Key) {
+	if r.Header.Get("X-Bdrive-Device") != "" && !s.ownJournal(w, r, req.Key, nil) {
 		return
 	}
-	org := s.orgOf(r.PathValue("project"))
-	if err := s.quota().CheckWrite(org, req.Size); err != nil {
+	s.observeDevice(r)
+	project := r.PathValue("project")
+	s.reconcileGrants(r.Context(), project, rs.Backend)
+	org := s.orgOf(project)
+	// The cap is checked against this write PLUS everything already granted
+	// and not yet accounted for, so concurrent grants cannot oversubscribe an
+	// allowance that no single one of them exceeds.
+	if err := s.quota().CheckWrite(org, req.Size+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -215,12 +271,12 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 		}
 		if signer, ok := rs.Backend.(remote.PutSigner); ok {
 			if signed, err := signer.SignPut(r.Context(), req.Key, req.Size, s.Upload.ttl()); err == nil {
-				// Book it here or never: the bytes go straight to storage, and
-				// unlike the browser flow /store/* has no commit step to book
-				// them afterwards — so on any presigning hub every blob a
-				// device pushed was free. The size is the declared one, which
-				// is why the zero-size lie above has to be refused first.
-				s.quota().RecordUsage(org, req.Size)
+				// Reserved, not charged: the bytes go straight to storage, so
+				// this grant counts against the cap immediately and is billed
+				// when the object is confirmed there (reconcileGrants), or
+				// released for free when the URL expires unused. Booking it
+				// here outright charged 20 GiB for 20 JSON posts.
+				s.reserve(project, org, req.Key, req.Size, s.Upload.ttl())
 				writeJSON(w, map[string]any{
 					"mode": "direct", "url": signed.URL, "method": signed.Method,
 					"headers": signed.Headers, "expires": signed.Expires.UTC(),
@@ -232,12 +288,29 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 	writeJSON(w, map[string]any{"mode": "server"})
 }
 
+// journalOps reads the operations a spooled journal body carries, exactly the
+// way every device reads it (journal.Parse: a line that decodes to no
+// operation is no operation). It leaves the file rewound for the store.
+// A non-journal key carries no ops by definition.
+func journalOps(key string, tmp *os.File) ([]journal.Op, error) {
+	if !strings.HasPrefix(key, "journal/") {
+		return nil, nil
+	}
+	data, err := io.ReadAll(tmp)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return journal.Parse(data)
+}
+
 func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Request) {
 	rs := storeSource(v, w)
 	if rs == nil {
 		return
 	}
-	s.observeDevice(r)
 	if !s.Upload.Enabled {
 		http.Error(w, "uploads are disabled on this server", http.StatusForbidden)
 		return
@@ -246,14 +319,12 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if !s.ownJournal(w, r, key) {
-		return
-	}
-	// Spool the body before storing any of it. Both things this handler has to
-	// be sure of are properties of the bytes, not of the headers the client
-	// sent: what a blob key promises (its sha256) and what the write costs
+	// Spool the body before storing any of it. Everything this handler has to
+	// be sure of is a property of the bytes, not of the headers the client
+	// sent: what a blob key promises (its sha256), what the write costs
 	// (Content-Length is -1 on any chunked request, which made every unsized
-	// put free). Cost: one temp file per put on the hub's busiest write path.
+	// put free), and how many ops a journal write actually authors.
+	// Cost: one temp file per put on the hub's busiest write path.
 	tmp, size, sum, err := spool(r.Body)
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "could not store the object", err)
@@ -265,8 +336,21 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		http.Error(w, "content does not hash to its key", http.StatusBadRequest)
 		return
 	}
-	org := s.orgOf(r.PathValue("project"))
-	if err := s.quota().CheckWrite(org, size); err != nil {
+	ops, err := journalOps(key, tmp)
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "could not store the object", err)
+		return
+	}
+	if !s.ownJournal(w, r, key, ops) {
+		return
+	}
+	// Observed only after the write is authorized: a request that registers
+	// the device it claims to be answers its own ownership question.
+	s.observeDevice(r)
+	project := r.PathValue("project")
+	s.reconcileGrants(r.Context(), project, rs.Backend)
+	org := s.orgOf(project)
+	if err := s.quota().CheckWrite(org, size+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -274,6 +358,9 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		storageErr(w, http.StatusBadGateway, "could not store the object", err)
 		return
 	}
+	// These bytes came through the hub, so they are charged here — drop any
+	// reservation for the same key rather than charging it twice.
+	s.claimGrant(project, key)
 	s.quota().RecordUsage(org, size)
 	if strings.HasPrefix(key, "journal/") {
 		v.invalidate() // new ops should show in the viewer immediately

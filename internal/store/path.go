@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -27,6 +28,13 @@ func UnderRoot(root, p string) bool {
 		if real, err := filepath.EvalSymlinks(dir); err == nil {
 			rel, err := filepath.Rel(rootReal, real)
 			return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+		}
+		// A component that EXISTS but does not resolve is a dangling symlink,
+		// and stepping past it answered "inside the root" for a path that
+		// lands wherever the link points the moment anything creates the
+		// target. The guard must answer about where the bytes would go.
+		if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return false
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {

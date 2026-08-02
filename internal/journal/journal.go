@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"os"
 	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -75,11 +76,40 @@ func (o *Op) UnmarshalJSON(data []byte) error {
 	}
 	*o = Op(w.opWire)
 	if w.PathRaw != "" {
-		if raw, err := base64.StdEncoding.DecodeString(w.PathRaw); err == nil {
+		// path_raw is only ever the byte-exact SOURCE of the path field, so it
+		// is applied only when it re-encodes to the path the line already
+		// carries. Applied unconditionally, one line named two different files
+		// — this reader materialized path_raw, a reader without this field
+		// materialized `path`, and the writer picked which devices in a mixed
+		// fleet saw which.
+		if raw, err := base64.StdEncoding.DecodeString(w.PathRaw); err == nil &&
+			lossy(string(raw)) == o.Path {
 			o.Path = string(raw)
 		}
 	}
 	return nil
+}
+
+// lossy is what encoding/json does to a string that is not valid UTF-8: each
+// invalid BYTE becomes U+FFFD (not each run — strings.ToValidUTF8 collapses a
+// run, which would reject a legitimate path with two bad bytes in a row). It
+// is the round trip path_raw exists to undo.
+func lossy(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteRune(utf8.RuneError)
+			i++
+			continue
+		}
+		b.WriteString(s[i : i+size])
+		i += size
+	}
+	return b.String()
 }
 
 // Less defines the total order used to replay ops from many devices.
@@ -165,6 +195,14 @@ func Parse(data []byte) ([]Op, error) {
 		}
 		var op Op
 		if err := json.Unmarshal(line, &op); err != nil {
+			continue
+		}
+		// `null`, `{}` and any object with no kind decode without error and
+		// are not operations. They must produce no op: op COUNTS are the sync
+		// engine's cursors (pull's fresh[len(prev):], commit's seqBase), so a
+		// line that yields a phantom op shifts every op after it for one
+		// reader and not another — a divergence the writer chooses.
+		if op.Kind != KindPut && op.Kind != KindDelete {
 			continue
 		}
 		ops = append(ops, op)

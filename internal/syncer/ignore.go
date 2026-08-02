@@ -2,9 +2,12 @@ package syncer
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/runbear-io/beardrive/internal/config"
 )
 
 // IgnoreFile is the per-folder opt-out list at the mount root. It uses a
@@ -31,6 +34,17 @@ type Filter struct {
 	// into it, never materializes over it, and drops cached paths under it
 	// without a delete op (same posture as newly ignored paths).
 	nested []string
+	// root is the mount folder, so the boundary can be resolved ON DISK
+	// rather than only from what the scan walk happened to discover. The
+	// walk stops at a pruned directory, so a nested mount inside one was
+	// never discovered — and one pulled .bdriveignore that un-ignores that
+	// directory then let this project write into another project's folder,
+	// whose own daemon pushes the file on to ITS members. A project boundary
+	// cannot depend on the ignore rules that were in force during the scan.
+	root string
+	// nestedMiss memoizes directories already checked and found not to be
+	// mounts, so the disk check costs one stat per directory per cycle.
+	nestedMiss map[string]bool
 }
 
 // addNestedMount records a nested mount root (slash-relative to the parent
@@ -44,6 +58,32 @@ func (f *Filter) underNestedMount(rel string) bool {
 		if strings.HasPrefix(rel, root) {
 			return true
 		}
+	}
+	return f.underMountOnDisk(rel)
+}
+
+// underMountOnDisk asks the filesystem whether any ancestor directory of rel
+// is a mount of its own. This is the authoritative form of the question: the
+// nested list is only what a walk under one particular set of rules found.
+func (f *Filter) underMountOnDisk(rel string) bool {
+	if f.root == "" {
+		return false
+	}
+	dir := path.Dir(rel)
+	for dir != "." && dir != "/" && dir != "" {
+		if f.nestedMiss[dir] {
+			dir = path.Dir(dir)
+			continue
+		}
+		if config.IsMount(filepath.Join(f.root, filepath.FromSlash(dir))) {
+			f.addNestedMount(dir) // remembered for the rest of the cycle
+			return true
+		}
+		if f.nestedMiss == nil {
+			f.nestedMiss = map[string]bool{}
+		}
+		f.nestedMiss[dir] = true
+		dir = path.Dir(dir)
 	}
 	return false
 }
@@ -64,7 +104,7 @@ func LoadFilter(folder string, include []string) (*Filter, error) {
 // loadFilter builds the filter for a folder from its .bdriveignore (if any)
 // plus the include list from the .bdrive settings file.
 func loadFilter(folder string, include []string) (*Filter, error) {
-	f := &Filter{}
+	f := &Filter{root: folder}
 	for _, line := range include {
 		if p, ok := compile(line); ok {
 			f.include = append(f.include, p)

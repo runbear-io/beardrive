@@ -50,31 +50,82 @@ func LockPath(volDir string) string {
 	return filepath.Join(volDir, "daemon.lock")
 }
 
-// Running reports the daemon pid for a mount if one is alive. The pid is
-// informational (for display and for Stop's signal); aliveness comes from
-// LockPath — see the comment there.
+// Running reports the daemon pid for a mount if one is alive. Aliveness is the
+// flock on LockPath. The pid comes out of that same locked file — written by
+// the holder itself (see announce) — and falls back to daemon.pid only for
+// display: nothing binds THAT file's contents to the process holding the lock,
+// and a daemon killed with -9 leaves it behind for the next process to inherit
+// the number. Stop signals the announced pid only (see lockPid).
 func Running(volDir string) (int, bool) {
-	if !locked(LockPath(volDir)) {
+	pid, ok := lockPid(volDir)
+	if !ok {
 		return 0, false
+	}
+	if pid > 0 {
+		return pid, true
 	}
 	data, err := os.ReadFile(PidPath(volDir))
 	if err != nil {
-		return 0, true // held by a daemon whose pidfile we can't read
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
 		return 0, true
+	}
+	if p, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && p > 0 {
+		return p, true
+	}
+	return 0, true
+}
+
+// lockPid reports whether a daemon holds the mount's lock and, if it announced
+// one, its pid. This is the only pid anything ever signals: it is written
+// inside the lock and truncated when the lock is released, so it cannot name a
+// process that has exited.
+func lockPid(volDir string) (int, bool) {
+	f, err := openLock(LockPath(volDir))
+	if err != nil {
+		return 0, unopenableLockIsRunning(LockPath(volDir))
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return 0, false // nobody holds it: no daemon
+	}
+	buf := make([]byte, 32)
+	n, _ := f.ReadAt(buf, 0)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	if err != nil || pid <= 0 {
+		return 0, true // alive, but it announced no pid we can signal
 	}
 	return pid, true
 }
 
-// locked reports whether another process holds the lock file. Taking it
-// non-blocking and immediately releasing is the probe: success means nobody
-// held it (so: no daemon), failure means someone does.
+// openLock opens the lock file without following a symlink. Following one put
+// the flock on whatever the link named, so a single symlink inside
+// $BDRIVE_HOME made an unrelated long-lived process's lock read as this
+// mount's daemon — Start() a no-op and sync silently never restarting, the
+// exact failure the flock design exists to eliminate.
+func openLock(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+}
+
+// unopenableLockIsRunning answers the liveness question when the lock file
+// cannot be opened at all. It fails CLOSED — an unanswerable "is it running"
+// must not read as "it is gone", or `bdrive status` says not running while
+// sync runs and `bdrive stop` reports success having stopped nothing. hold()
+// fails on the same file, so the permissive answer bought nothing anyway.
+//
+// The one exception is a symlink at the lock path: that is not a daemon, it is
+// a tampered path, and reporting a daemon there is the wedge above.
+func unopenableLockIsRunning(path string) bool {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	return true
+}
+
+// locked reports whether another process holds the lock file.
 func locked(path string) bool {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := openLock(path)
 	if err != nil {
-		return false // can't tell; treat as not running so Start can try
+		return unopenableLockIsRunning(path)
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
@@ -84,10 +135,11 @@ func locked(path string) bool {
 	return false
 }
 
-// hold takes the daemon's lifetime lock. The returned closer releases it;
-// process death releases it too, which is the point.
-func hold(path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+// holdLock takes the daemon's lifetime lock, returning the open file so the
+// holder can announce its pid INSIDE it. Process death releases the flock,
+// which is the point.
+func holdLock(path string) (*os.File, error) {
+	f, err := openLock(path)
 	if err != nil {
 		return nil, err
 	}
@@ -95,10 +147,37 @@ func hold(path string) (func(), error) {
 		f.Close()
 		return nil, fmt.Errorf("another daemon is already running for this mount: %w", err)
 	}
-	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, nil
+	return f, nil
+}
+
+// release drops the lock and clears the announced pid with it, so no number
+// outlives the process that owned it.
+func release(f *os.File) {
+	f.Truncate(0)
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	f.Close()
+}
+
+// hold takes the lock and returns its releaser.
+func hold(path string) (func(), error) {
+	f, err := holdLock(path)
+	if err != nil {
+		return nil, err
+	}
+	return func() { release(f) }, nil
+}
+
+// announce writes the holder's pid into the locked file — the only pid Stop
+// ever signals. It lives and dies with the lock, so it cannot name a process
+// that has exited (and been recycled), which daemon.pid routinely did: a
+// daemon killed with -9 leaves that file behind for the next process to
+// inherit the number.
+func announce(f *os.File) error {
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	_, err := f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	return err
 }
 
 // Start launches a detached daemon for the folder (no-op if already running).
@@ -110,7 +189,9 @@ func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (i
 	if err != nil {
 		return 0, err
 	}
-	logf, err := os.OpenFile(LogPath(volDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// 0600: daemon.log names the mount id, the folder's absolute path, the
+	// remote URL and the device name+id.
+	logf, err := os.OpenFile(LogPath(volDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return 0, err
 	}
@@ -161,15 +242,18 @@ const startTimeout = 10 * time.Second
 // observed by the lock being released, not by the pid disappearing: the pid
 // could be recycled while we wait, and the lock cannot.
 func Stop(volDir string) (bool, error) {
-	pid, ok := Running(volDir)
+	// The pid to signal comes from inside the lock, never from daemon.pid: a
+	// number in a file the daemon does not own is a SIGKILL primitive against
+	// any same-user process, and a -9'd daemon leaves exactly such a number
+	// behind with no attacker involved.
+	pid, ok := lockPid(volDir)
 	if !ok {
 		os.Remove(PidPath(volDir))
 		return false, nil
 	}
 	if pid <= 0 {
-		// Alive (lock held) but no readable pid — nothing to signal.
-		return false, fmt.Errorf("a daemon holds %s but %s is unreadable; kill it by hand",
-			LockPath(volDir), PidPath(volDir))
+		return false, fmt.Errorf("a daemon holds %s but it announced no pid; kill it by hand",
+			LockPath(volDir))
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		return false, err
@@ -215,13 +299,18 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	// Hold the lifetime lock before announcing the pid: it is what makes
 	// "is a daemon running" answerable, and it also makes a double start
 	// impossible (two daemons on one mount would write one journal twice).
-	release, err := hold(LockPath(volDir))
+	lockf, err := holdLock(LockPath(volDir))
 	if err != nil {
 		return err
 	}
-	defer release()
+	defer release(lockf)
+	if err := announce(lockf); err != nil {
+		return err
+	}
 
-	if err := os.WriteFile(PidPath(volDir), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+	// daemon.pid is the human-readable copy (status output, `kill` by hand).
+	// 0600: this directory is 0755 and the file decides what gets signalled.
+	if err := os.WriteFile(PidPath(volDir), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		return err
 	}
 	defer os.Remove(PidPath(volDir))
@@ -264,12 +353,20 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 		}
 		if cur.Remote != proj.Remote {
-			log.Printf("remote changed: %q -> %q", proj.Remote, cur.Remote)
-			if be != nil {
-				be.Close()
-				be = nil
-			}
-			lastRemote = time.Time{}
+			// A running daemon never follows a folder config to a new remote.
+			// .bdrive/config.json is untrusted input (anything with write
+			// access inside the mount writes it: an agent session, a
+			// dependency's install script), and following it moved the whole
+			// project — every path, device name and signed-in email in the
+			// journal — to a host the user never chose, on the next 3s tick,
+			// with no credential needed for a file:// target. The daemon then
+			// PULLED from there too, which is an arbitrary write into the
+			// mount. Standing down is the same self-heal as a moved folder:
+			// the next bdrive command in this folder starts a daemon for
+			// whatever it then says, which is a user action.
+			log.Printf("remote changed in .bdrive/config.json (%q -> %q); exiting — run bdrive in this folder to resume",
+				proj.Remote, cur.Remote)
+			return nil
 		}
 		proj = cur
 

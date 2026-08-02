@@ -312,9 +312,16 @@ func TestSec_HTTP_ListedKeysFromTheHubStayInTheKeySpace(t *testing.T) {
 // this backend calls is the hub's own API, so a 3xx is never part of the
 // contract — and net/http's redirect rules only strip Authorization when the
 // HOSTNAME changes, ignoring scheme and port. A hub that answers with a
-// redirect therefore hands the credential to whatever else listens on that
+// redirect therefore handed the credential to whatever else listens on that
 // name: another port on the same box, an https->http downgrade, a sibling
-// subdomain. Nothing configures CheckRedirect here.
+// subdomain.
+//
+// Round 4 asserted "if we follow it, the token does not go along". Round 5
+// showed the identity headers went along too (X-Bdrive-Device{,-Name,-Os}),
+// and that the same reasoning argues for not following at all — so the client
+// now REFUSES a cross-origin redirect. This test asserts that stronger
+// property, which subsumes the original one: nothing at all reaches the other
+// origin, and the caller sees an error rather than a silent hop.
 func TestSec_HTTP_BearerTokenIsNeverSentToAnotherOrigin(t *testing.T) {
 	var got http.Header
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -331,13 +338,16 @@ func TestSec_HTTP_BearerTokenIsNeverSentToAnotherOrigin(t *testing.T) {
 	rc, err := be.Get(context.Background(), "blobs/aa")
 	if err == nil {
 		rc.Close()
+		t.Errorf("configured hub %s redirected to %s and the client followed it silently",
+			hubURL, elsewhere.URL)
 	}
-	if got == nil {
-		t.Fatal("redirect target was never reached; the test proves nothing")
-	}
-	if v := got.Get("Authorization"); v != "" {
-		t.Errorf("configured hub %s redirected to %s and the device token went along: %q",
-			hubURL, elsewhere.URL, v)
+	if got != nil {
+		t.Errorf("configured hub %s redirected to %s and the client went there carrying %v; "+
+			"a 3xx is not part of the store API's contract and must be refused",
+			hubURL, elsewhere.URL, got)
+		if v := got.Get("Authorization"); v != "" {
+			t.Errorf("...and the device token went along: %q", v)
+		}
 	}
 }
 

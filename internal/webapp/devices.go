@@ -38,7 +38,14 @@ type DeviceInfo struct {
 // the read-heat actor column: free text would let a member hand /heat an
 // account email (or any sentence they like) and have the hub serve it back to
 // the whole project as a reader.
-var deviceIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+// One definition, two uses: store.go's journalKeyRe builds the journal key
+// shape from it. They drifted — the key had no length cap while an id capped
+// at 64 — so a journal key existed that no device row could ever own, the
+// ownership gate could never engage on it, and History echoed the 200-char
+// string to every member as the device that made each change.
+const deviceIDPattern = `[A-Za-z0-9._-]{1,64}`
+
+var deviceIDRe = regexp.MustCompile(`^` + deviceIDPattern + `$`)
 
 func validDeviceID(id string) bool { return deviceIDRe.MatchString(id) }
 
@@ -208,6 +215,46 @@ func claimedBefore(a, b DeviceInfo) bool {
 		return a.FirstSeen.IsZero()
 	}
 	return a.FirstSeen.Before(b.FirstSeen)
+}
+
+// OwnerOf resolves who a device id belongs to, hub-wide: the account whose row
+// for it was created first. It is the WRITE gate's resolver (ownJournal), and
+// it differs from LookupIn — the display join — in the two ways that made
+// round 4's binding fail:
+//
+//   - it is not scoped to an org. A claim that disappears when its owner is
+//     offboarded hands her journal to whoever is left in the org, and History
+//     keeps crediting her.
+//   - a row with no owner (a pre-accounts devices.json, or an auth-less
+//     observation) claims nothing. Round 4 read "no owner" as "no objection",
+//     so on every upgraded hub the binding was off for exactly the established
+//     devices.
+//
+// It returns the owning account and whether the hub has ever seen the id at
+// all. The two differ, and the difference is a hole round 4 fell into: a row
+// with no owner means a device exists whose account is unknown (known=true,
+// owner=""), which is a reason to refuse, not to wave through.
+func (r *DeviceRegistry) OwnerOf(id string) (owner string, known bool) {
+	if r == nil {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var best DeviceInfo
+	found := false
+	for k, d := range r.byKey {
+		if k.ID != id {
+			continue
+		}
+		known = true
+		if k.User == "" {
+			continue
+		}
+		if !found || claimedBefore(d, best) {
+			best, found = d, true
+		}
+	}
+	return best.User, known
 }
 
 // MayActAs reports whether an account may name a device id as itself: yes if
