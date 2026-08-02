@@ -334,6 +334,7 @@ export default function Browser(props: {
         installHref={project ? urlForView("install", project.id) : undefined}
         onOpenFile={openPath}
         onOpenFolder={openPath}
+        onOpenHistory={openHistory}
         isFolder={isFolderFn}
       />
     );
@@ -432,6 +433,7 @@ export default function Browser(props: {
             loading={!loaded}
             onOpenFile={openPath}
             onOpenFolder={openPath}
+            onOpenHistory={openHistory}
             isFolder={isFolderFn}
           />
         </div>

@@ -645,6 +645,8 @@ a.ai-main:hover { color: var(--accent); }
 .in-hp-human { background: #5b8def; }
 /* share-link reads: a third hue, never the danger red (that means hot+stale) */
 .in-hp-share { background: #b478e8; }
+/* a read row whose file left the project — labelled, never silently dropped */
+.in-hp-gone { flex: none; font-size: 11.5px; color: var(--text-ghost); white-space: nowrap; }
 .in-hp-count { flex: none; width: 40px; text-align: right; font-size: 11.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .in-legend { margin: 8px 2px 0; font-size: 11.5px; color: var(--text-faint); }
 .in-sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; }
