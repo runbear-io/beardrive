@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +34,7 @@ func TestManualServe(t *testing.T) {
 	if os.Getenv("BDRIVE_MANUAL_SERVE") == "" {
 		t.Skip("manual demo harness; set BDRIVE_MANUAL_SERVE=1 to run")
 	}
+	ln := listenHub(t) // before any state is touched — same port as the e2e harness
 	state := os.Getenv("BDRIVE_MANUAL_STATE")
 	if state == "" {
 		state = filepath.Join(os.TempDir(), "bdrive-demo-hub")
@@ -84,9 +84,8 @@ func TestManualServe(t *testing.T) {
 	auth.Admins = map[string]bool{"snow@runbear.io": true}
 	srv.Auth = auth
 
-	t.Logf("serving on http://0.0.0.0:8993 (state: %s) — snow@runbear.io / password1", state)
-	go http.ListenAndServe("0.0.0.0:8993", srv.Handler())
-	time.Sleep(8 * time.Hour)
+	t.Logf("serving on http://%s (state: %s) — snow@runbear.io / password1", e2eAddr, state)
+	serveHub(t, ln, srv.Handler(), 8*time.Hour)
 }
 
 // demoDevices is the agent fleet: one per teammate plus shared CI. Each has a
