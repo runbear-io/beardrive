@@ -1238,8 +1238,18 @@ So, round 11's decision:
 - the test **skips**, with a message that says `SKIPPED, NOT PASSED` and names
   exactly what went unmeasured (18 rows, 6 write surfaces × 3 payloads);
 - `TestSec_Suite_RunModeIsVisible` is the **single** place the run reports the
-  gap — on **stderr**, on **every** run, listing the skipped tests by name from
-  `dsnGatedTests`;
+  gap, listing the skipped tests by name from `dsnGatedTests`;
+- **and that reporter had to be fixed to work at all.** Round 10 moved this note
+  from `t.Log` to `os.Stderr` precisely because `t.Log` is invisible without
+  `-v`. Round 11 measured it: `go test` BUFFERS a package's output and discards
+  it on success without `-v`, **stderr included**. So the note appeared only when
+  the suite was already red — the mechanism built to make a silent gap loud was
+  itself audible only during a failure, which is the same shape as the hole it
+  exists to prevent. `secrunNotify` now also writes to `/dev/tty`, which survives
+  that buffering, so an interactive run always sees it (verified under a pty on a
+  fully passing run with no `-v`). On CI there is no tty and the stderr copy is
+  the fallback, visible again under `-v` or the JSON stream; if a CI setup ever
+  runs neither, that needs a real reporting channel rather than a louder print;
 - `TestSec_Suite_DSNGatedTestsStillSkipLoudly` checks the reporter's own claim
   against the source: every name it prints must still exist and must still refuse
   to run without the DSN (following one level of helper indirection, since

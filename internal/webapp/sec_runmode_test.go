@@ -30,16 +30,35 @@ func TestSec_Suite_RunModeIsVisible(t *testing.T) {
 			"TestSec_Password_LoginTimingDoesNotEnumerateAccounts and the whole cli_e2e suite. " +
 			"Run `go test ./...` with no -short")
 	}
-	// Stderr, not t.Log: t.Log is invisible without -v, which is exactly how
-	// "postgres UNTESTED" went unnoticed for two rounds. This is the SINGLE
-	// place the run reports the gap — dsnGatedTests names what goes unmeasured.
+	// This is the SINGLE place the run reports the gap; dsnGatedTests names what
+	// goes unmeasured.
 	if os.Getenv("BDRIVE_TEST_POSTGRES") == "" {
-		fmt.Fprintln(os.Stderr,
-			"NOTE: BDRIVE_TEST_POSTGRES is unset — row 14 ran on file+sqlite only; "+
-				"the Postgres backend is UNTESTED in this run, and these tests SKIPPED "+
-				"rather than passed: "+strings.Join(dsnGatedTests, ", ")+
-				" (e.g. docker run -e POSTGRES_PASSWORD=x -p 5432:5432 postgres:16, then "+
-				"BDRIVE_TEST_POSTGRES='postgres://postgres:x@localhost:5432/postgres?sslmode=disable')")
+		secrunNotify("NOTE: BDRIVE_TEST_POSTGRES is unset — row 14 ran on file+sqlite only; " +
+			"the Postgres backend is UNTESTED in this run, and these tests SKIPPED " +
+			"rather than passed: " + strings.Join(dsnGatedTests, ", ") +
+			" (e.g. docker run -e POSTGRES_PASSWORD=x -p 5432:5432 postgres:16, then " +
+			"BDRIVE_TEST_POSTGRES='postgres://postgres:x@localhost:5432/postgres?sslmode=disable')")
+	}
+}
+
+// secrunNotify writes a run-mode note where `go test` cannot swallow it.
+//
+// Round 10 moved this note from t.Log to os.Stderr precisely because t.Log is
+// invisible without -v. That was not enough, and round 11 measured it: `go test`
+// BUFFERS a package's output and discards it on success without -v, stderr
+// included. So the note appeared only when the suite was already red — the
+// mechanism designed to make a silent gap loud was itself only audible during a
+// failure, which is the same shape as the hole it exists to prevent.
+//
+// The controlling terminal survives that buffering, so an interactive run always
+// sees it. ponytail: on CI there is no tty and the stderr copy is the fallback —
+// CI runs -v or reads the JSON stream, where it is visible again. If a CI setup
+// ever runs neither, this needs a real reporting channel, not a louder print.
+func secrunNotify(msg string) {
+	fmt.Fprintln(os.Stderr, msg)
+	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+		fmt.Fprintln(tty, msg)
+		tty.Close()
 	}
 }
 
