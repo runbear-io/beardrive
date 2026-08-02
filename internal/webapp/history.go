@@ -251,9 +251,13 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name != "" {
 		ct := contentType(name)
-		w.Header().Set("Content-Type", ct)
+		// Same wall and the same inert declaration as the live-file door: a
+		// past version is the same bytes, so the two must never differ.
+		w.Header().Set("Content-Type", inlineType(ct))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		sandboxInline(w, ct)
 		if r.URL.Query().Get("download") == "1" {
+			w.Header().Set("Content-Type", ct)
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(name)))
 		}
 	} else {

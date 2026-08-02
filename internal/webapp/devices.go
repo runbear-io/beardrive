@@ -50,6 +50,26 @@ var deviceIDRe = regexp.MustCompile(`^` + deviceIDPattern + `$`)
 
 func validDeviceID(id string) bool { return deviceIDRe.MatchString(id) }
 
+// canonDeviceID folds a client-asserted device id to the one spelling the hub
+// reasons about. Every ownership decision here used to be a byte compare
+// (Bind, OwnerOf, ownJournal), so "DEVA9F21" was an id nobody owned while
+// "deva9f21" belonged to somebody — and the object store underneath disagreed:
+// a `file://` store on APFS or NTFS (macOS and Windows defaults, and what the
+// quickstart self-hoster gets) writes journal/DEVA9F21.jsonl and
+// journal/deva9f21.jsonl to ONE file. One login and one PUT and a plain member
+// had replaced a peer's journal — the one-writer invariant the whole
+// concurrency design rests on, broken with ordinary permissions.
+//
+// Folding here rather than at each comparison is the point: a comparison that
+// has to remember to be case-insensitive is a comparison that will be written
+// exact-case next time. `bdrive` mints lowercase hex (config.NewDeviceID), so
+// the canonical spelling is what every real device already sends.
+func canonDeviceID(id string) string { return strings.ToLower(id) }
+
+// deviceID is the single door a device id enters the hub through. Nothing else
+// reads X-Bdrive-Device.
+func deviceID(r *http.Request) string { return canonDeviceID(r.Header.Get("X-Bdrive-Device")) }
+
 // printableOnly drops C0/C7F control characters from a client-supplied label.
 func printableOnly(s string) string {
 	return strings.Map(func(r rune) rune {
@@ -91,6 +111,9 @@ func NewDeviceRegistry(repo DeviceRepo) (*DeviceRegistry, error) {
 		return nil, err
 	}
 	for _, d := range list {
+		// Rows written before ids were canonical fold on the way in, so an
+		// established device keeps its claim under the one spelling.
+		d.ID = canonDeviceID(d.ID)
 		k := devKey{d.User, d.ID}
 		r.byKey[k] = d
 		r.latest[d.ID] = k
@@ -115,6 +138,7 @@ func (r *DeviceRegistry) Observe(d DeviceInfo) {
 	if r == nil || d.ID == "" {
 		return
 	}
+	d.ID = canonDeviceID(d.ID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.observeLocked(d)
@@ -176,7 +200,7 @@ func (r *DeviceRegistry) Get(id string) (DeviceInfo, bool) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	k, ok := r.latest[id]
+	k, ok := r.latest[canonDeviceID(id)]
 	if !ok {
 		return DeviceInfo{}, false
 	}
@@ -200,6 +224,7 @@ func (r *DeviceRegistry) LookupIn(id string, allowed func(user string) bool) (De
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	id = canonDeviceID(id)
 	var best DeviceInfo
 	found := false
 	for k, d := range r.byKey {
@@ -247,6 +272,7 @@ func (r *DeviceRegistry) OwnerOf(id string) (owner string, known bool) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	id = canonDeviceID(id)
 	var best DeviceInfo
 	found := false
 	for k, d := range r.byKey {
@@ -282,16 +308,36 @@ func (r *DeviceRegistry) OwnerOf(id string) (owner string, known bool) {
 //
 // Claim-or-refuse is one critical section on purpose: two logins racing for one
 // id must not both believe they won.
-func (r *DeviceRegistry) Bind(user string, d DeviceInfo) error {
+//
+// visible reports whether the conflicting owner is somebody the caller can
+// already see on this hub, and it decides which of THREE outcomes a conflict
+// gets. OwnerOf is deliberately hub-wide, so turning its answer into a status
+// code makes the login a hub-wide device-existence oracle — the class round 3
+// closed for History, round 4 for the registry join and round 5 for
+// /store/sign, arriving at a fourth door. So:
+//
+//   - no conflicting row: bind.
+//   - conflict with an owner the caller can already see (same org): refuse, in
+//     words. Nothing is disclosed that the org's own surfaces do not disclose,
+//     and the machine learns why its sign-in did not take.
+//   - conflict with an owner the caller cannot see: bind NOTHING and succeed.
+//     The token is real, no ownership row is created either way, and the push
+//     door already answers "owned by someone else" and "owned by nobody" with
+//     the same 403 — so this loses no defence and answers no question.
+func (r *DeviceRegistry) Bind(user string, d DeviceInfo, visible func(owner string) bool) error {
 	if r == nil || user == "" || d.ID == "" {
 		return nil // no registry, or nothing asserted: nothing to bind
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	d.ID = canonDeviceID(d.ID)
 	me := normEmail(user)
 	for k := range r.byKey {
 		if k.ID != d.ID || k.User == "" || normEmail(k.User) == me {
 			continue
+		}
+		if visible != nil && !visible(k.User) {
+			return nil // binds nothing, tells the caller nothing
 		}
 		return fmt.Errorf("device id %s is already registered to another account on this hub; "+
 			"delete device.json in your BearDrive home and sign in again to mint a new one", d.ID)
@@ -316,6 +362,7 @@ func (r *DeviceRegistry) MayActAs(user, id string) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	id = canonDeviceID(id)
 	if _, mine := r.byKey[devKey{user, id}]; mine {
 		return true
 	}
@@ -363,8 +410,20 @@ func (s *Server) refreshDevice(r *http.Request) {
 	if s.Devices == nil {
 		return
 	}
-	owner, known := s.Devices.OwnerOf(r.Header.Get("X-Bdrive-Device"))
-	if !known || normEmail(owner) == "" || normEmail(owner) != normEmail(s.requestUser(r).Email) {
+	me := normEmail(s.requestUser(r).Email)
+	owner, _ := s.Devices.OwnerOf(deviceID(r))
+	switch {
+	case me == "":
+		// The caller asserts no account at all — an auth-less hub, which is the
+		// only configuration that reaches a write door without one. The row
+		// this creates carries no account, and an ownerless row claims nothing
+		// (OwnerOf skips it), so there is nothing here to impersonate.
+	case normEmail(owner) == me:
+		// My device, refreshing its own row.
+	default:
+		// Somebody else's device id, or nobody's. Creating the row here is what
+		// let ownJournal's admin RECOVERY arm write a competing ownership row
+		// and lock the real owner out of `bdrive login` forever.
 		return
 	}
 	s.observeDevice(r)
@@ -382,7 +441,7 @@ func (s *Server) observeDevice(r *http.Request) {
 	// registry: what a client may assert about itself is a server decision,
 	// while the registry (and the repos under it) must store whatever it is
 	// handed faithfully.
-	if !validDeviceID(r.Header.Get("X-Bdrive-Device")) {
+	if !validDeviceID(deviceID(r)) {
 		return
 	}
 	s.Devices.Observe(s.deviceFromRequest(r, s.requestUser(r).Email))
@@ -399,7 +458,7 @@ func (s *Server) observeDevice(r *http.Request) {
 // have been the third place this repo learned not to spell a rule twice.
 func (s *Server) deviceFromRequest(r *http.Request, email string) DeviceInfo {
 	return DeviceInfo{
-		ID:   r.Header.Get("X-Bdrive-Device"),
+		ID:   deviceID(r),
 		Name: printableOnly(r.Header.Get("X-Bdrive-Device-Name")),
 		OS:   printableOnly(r.Header.Get("X-Bdrive-Os")),
 		User: email,
@@ -450,12 +509,39 @@ func (s *Server) deviceVisibleIn(projectID string) func(string) bool {
 // login is still a login without one. What it cannot do is name an id that is
 // already somebody else's.
 func (s *Server) bindDevice(email string, r *http.Request) error {
-	id := r.Header.Get("X-Bdrive-Device")
+	id := deviceID(r)
 	if s.Devices == nil || id == "" {
 		return nil
 	}
 	if !validDeviceID(id) {
 		return fmt.Errorf("invalid device id")
 	}
-	return s.Devices.Bind(email, s.deviceFromRequest(r, email))
+	return s.Devices.Bind(email, s.deviceFromRequest(r, email), s.sharesOrgWith(email))
+}
+
+// sharesOrgWith reports, for one account, whether another account is somebody
+// it can already see on this hub. It is the visibility predicate Bind's
+// conflict arm takes: a refusal that names a tenant the caller cannot reach
+// through any other surface is a cross-org oracle, and this is the one fact
+// that decides whether the refusal discloses anything new.
+//
+// A hub with no directory has no org wall to cross (single-volume, auth-less,
+// or a fixture) and everybody is visible to everybody, which keeps the plain
+// refusal for exactly the configurations where it leaks nothing.
+func (s *Server) sharesOrgWith(me string) func(string) bool {
+	if s.Dir == nil {
+		return func(string) bool { return true }
+	}
+	mine := map[string]bool{}
+	for _, o := range s.Dir.OrgsFor(me) {
+		mine[o.ID] = true
+	}
+	return func(other string) bool {
+		for _, o := range s.Dir.OrgsFor(other) {
+			if mine[o.ID] {
+				return true
+			}
+		}
+		return false
+	}
 }

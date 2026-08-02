@@ -558,15 +558,18 @@ func (s *Server) offboard(email string) {
 		// heir: the org rows alone cannot break a Joined tie, and every row
 		// written before Joined existed is one. Set here rather than at
 		// startup because a directory can be rebuilt from its repo.
+		//
+		// Accounts() is NOT the source here. It is documented "oldest first"
+		// and is now a total order, but a total order over rows that all carry
+		// the zero Created stamp is deterministic noise, not evidence — and
+		// heir's contract is that no evidence means no heir. seniorityLister
+		// is the provider's own answer to "which accounts can I actually date",
+		// and a provider that cannot answer supplies nothing, which is the
+		// fail-closed direction.
 		if ld, ok := s.Dir.(LocalDirectory); ok && ld.OrgDB != nil && s.Auth != nil {
-			ld.OrgDB.SetSeniority(func() []string {
-				accts := s.Auth.Accounts()
-				out := make([]string, 0, len(accts))
-				for _, a := range accts {
-					out = append(out, a.Email)
-				}
-				return out
-			})
+			if sl, ok := s.Auth.(seniorityLister); ok {
+				ld.OrgDB.SetSeniority(sl.Seniority)
+			}
 		}
 		drop := s.Dir.RemoveMember
 		if ev, ok := s.Dir.(orgEvictor); ok {
@@ -587,6 +590,14 @@ func (s *Server) offboard(email string) {
 // rather than hiding it.
 type orgEvictor interface {
 	EvictMember(orgID, email string) error
+}
+
+// seniorityLister is the part of an auth provider that can order accounts by
+// AGE — and, crucially, say when it cannot. BuiltinAuth implements it; a
+// provider that does not supplies no seniority at all, and heir then declines
+// to invent one. See BuiltinAuth.Seniority.
+type seniorityLister interface {
+	Seniority() []string
 }
 
 // ---- HTTP ----

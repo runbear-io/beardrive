@@ -958,9 +958,14 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	ct := contentType(p)
 	w.Header().Set("Content-Type", ct)
 	setContentLength(w, rc)
+	// nosniff on both branches, the sandbox CSP only on the inline one: an
+	// attachment is not rendered, and TestInlineHTMLIsSandboxed pins that
+	// /download answers with a disposition INSTEAD of a CSP.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if attach {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(p)))
 	} else {
+		w.Header().Set("Content-Type", inlineType(ct))
 		sandboxInline(w, ct)
 	}
 	io.Copy(w, rc)
@@ -1069,15 +1074,62 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 	})
 }
 
+// inlineMarkup reports whether a Content-Type names something the browser
+// parses as a DOCUMENT in a top-level navigation, which is what makes it a
+// script-execution vehicle on whatever origin served it.
+//
+// It is deliberately a property and not a list of extensions. The list was the
+// bug: it named text/html, image/svg and *xhtml*, and the whole XML family sat
+// outside it while having exactly the property — an XML document carries its
+// own `<?xml-stylesheet type="text/xsl"?>`, the browser applies the XSLT (the
+// stylesheet is same-origin, the attacker uploads it to the same project) and
+// renders the result, which is HTML, in the hub's origin with the reader's
+// session. Anything that parses as markup belongs here; when in doubt, add it.
+func inlineMarkup(ct string) bool {
+	ct = strings.ToLower(ct)
+	for _, m := range []string{"text/html", "xhtml", "svg", "/xml", "+xml"} {
+		if strings.Contains(ct, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// inlineType is the Content-Type the hub is willing to have a browser PARSE
+// when it serves stored bytes inline.
+//
+// The XML family is declared inert. The sandbox CSP below already removes its
+// capability — but it removes it by making the document render as nothing at
+// all (the stylesheet an XML document names is sandboxed too, so the XSLT
+// never runs and there is no document), and "you see nothing" is a poor answer
+// for a reader who clicked a .xml. Declaring it text is both the stronger
+// answer — it needs no CSP support in the browser, and nothing parses a
+// document — and the more useful one: the reader sees the source.
+//
+// HTML, XHTML and SVG keep their real type. The app has always served them,
+// and for them the sandbox is a complete wall rather than a blank page.
+func inlineType(ct string) string {
+	l := strings.ToLower(ct)
+	if inlineMarkup(l) && !strings.Contains(l, "html") && !strings.Contains(l, "svg") {
+		return "text/plain; charset=utf-8"
+	}
+	return ct
+}
+
 // sandboxInline walls off markup the hub serves from its own origin: synced
-// HTML (any flavour) and scriptable SVG run in an opaque sandboxed origin —
-// same posture as /s/* share pages — so they can never touch the API or the
-// reader's session cookie. Every route that streams stored bytes inline calls
-// this: the live file (serveBlob) and any past version (history's handleBlob),
-// which serve identical content and must not differ in their wall.
+// HTML (any flavour), scriptable SVG and the XML family run in an opaque
+// sandboxed origin — same posture as /s/* share pages — so they can never
+// touch the API or the reader's session cookie. Every route that streams
+// stored bytes inline calls this: the live file (serveBlob) and any past
+// version (history's handleBlob), which serve identical content and must not
+// differ in their wall.
+// It also stamps nosniff on every response it sees. The wall above keys off
+// the Content-Type the hub declared; without nosniff a browser is free to
+// sniff attacker-written bytes into a document type the hub never named, which
+// is the same capability arriving through a door the CSP never opened.
 func sandboxInline(w http.ResponseWriter, ct string) {
-	if strings.HasPrefix(ct, "text/html") || strings.HasPrefix(ct, "image/svg") ||
-		strings.Contains(ct, "xhtml") {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if inlineMarkup(ct) {
 		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
 	}
 }

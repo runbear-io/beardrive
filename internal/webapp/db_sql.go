@@ -3,6 +3,7 @@ package webapp
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ type sqlMetaStore struct {
 	d  dialect
 
 	accounts *sqlAccountRepo
+	ver      int // schema version the store recorded before this process migrated
 	projects *sqlProjectRepo
 	orgs     *sqlOrgRepo
 	shares   *sqlShareRepo
@@ -182,36 +184,81 @@ func (s *sqlMetaStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS project_perms (
 			project TEXT NOT NULL, email TEXT NOT NULL, level TEXT NOT NULL,
 			PRIMARY KEY (project, email))`,
+		`CREATE TABLE IF NOT EXISTS schema_meta (
+			key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	// The schema version this store last recorded, read before any ALTER: it is
+	// what tells a first-ever migration apart from a rollback. See addColumns.
+	var err error
+	if s.ver, err = s.readSchemaVersion(); err != nil {
+		return err
+	}
 	// Columns added after the tables shipped. CREATE TABLE IF NOT EXISTS does
 	// nothing for an existing table, so these need a real (idempotent) ALTER.
+	//
+	// `default_level` is GUARDED. It defaults to '' when added, and '' is READ
+	// AS `write` (Project.level — a deliberate no-migration choice, safe
+	// forward and fail-OPEN backward). So re-adding it to a table that already
+	// holds projects re-opens every `none` and `read` project to its whole
+	// organization, silently, and a rollback, an older dump or a half-applied
+	// migration is exactly how the column goes missing again.
 	if err := s.addColumns("projects", map[string]string{
 		"description":   `TEXT NOT NULL DEFAULT ''`,
 		"icon":          `TEXT NOT NULL DEFAULT ''`,
 		"creator":       `TEXT NOT NULL DEFAULT ''`,
 		"default_level": `TEXT NOT NULL DEFAULT ''`,
 		"template":      `TEXT NOT NULL DEFAULT ''`,
+	}, map[string]string{
+		"default_level": "it silently re-opens every restricted project to its whole organization",
 	}); err != nil {
 		return err
 	}
 	// A member row's join time. Rows written before it carry '' — the zero
 	// time — which is what makes them the longest-standing members there are,
 	// and that is the right answer for rows that predate the column.
-	return s.addColumns("org_members", map[string]string{
+	if err := s.addColumns("org_members", map[string]string{
 		"joined": `TEXT NOT NULL DEFAULT ''`,
-	})
+	}, map[string]string{}); err != nil {
+		return err
+	}
+	return s.exec(`INSERT INTO schema_meta (key,value) VALUES (?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, "version", strconv.Itoa(schemaVersion))
+}
+
+// schemaVersion is what THIS binary's migration produces. Bump it when adding
+// a column whose DEFAULT cannot be told apart from a real value — see the
+// guarded set in migrate.
+const schemaVersion = 1
+
+// readSchemaVersion reads the version the store last recorded. 0 means a store
+// written before versioning existed, which is the ordinary upgrade path and the
+// one case where adding a guarded column is correct.
+func (s *sqlMetaStore) readSchemaVersion() (int, error) {
+	var v string
+	err := s.db.QueryRow(s.q(`SELECT value FROM schema_meta WHERE key = ?`), "version").Scan(&v)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("migrate: read schema version: %w", err)
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("migrate: schema version %q is not a number", v)
+	}
+	return n, nil
 }
 
 // addColumns adds any of cols that the table doesn't already have. The live
 // column set comes from an empty result set's metadata, which both drivers
 // (modernc/sqlite and pgx) report the same way — no engine-specific catalog
 // query, and safe to run on every start.
-func (s *sqlMetaStore) addColumns(table string, cols map[string]string) error {
+func (s *sqlMetaStore) addColumns(table string, cols, guarded map[string]string) error {
 	rows, err := s.db.Query(`SELECT * FROM ` + table + ` LIMIT 0`)
 	if err != nil {
 		return fmt.Errorf("migrate %s: %w", table, err)
@@ -228,6 +275,26 @@ func (s *sqlMetaStore) addColumns(table string, cols map[string]string) error {
 	for col, spec := range cols {
 		if have[col] {
 			continue
+		}
+		// A guarded column's DEFAULT is indistinguishable from a real value, so
+		// adding it rewrites the meaning of every row already in the table.
+		// That is correct exactly once — the first migration, before this store
+		// ever recorded a version — and on an empty table, where there is no
+		// meaning to rewrite. Anywhere else it is a rollback or an older dump,
+		// and it fails closed and loudly instead of widening access in silence.
+		if why := guarded[col]; why != "" && s.ver > 0 {
+			var rows int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&rows); err != nil {
+				return fmt.Errorf("migrate %s: %w", table, err)
+			}
+			if rows > 0 {
+				return fmt.Errorf("this database records schema version %d but %s.%s is missing "+
+					"while the table holds %d row(s): that is a rollback, an older dump, or a "+
+					"half-applied migration, and re-adding the column would hand every row its "+
+					"DEFAULT — %s. Restore a dump taken at schema version %d or later, or add "+
+					"the column back by hand with the values it should hold",
+					s.ver, table, col, rows, why, s.ver)
+			}
 		}
 		if _, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + spec); err != nil {
 			return fmt.Errorf("migrate %s.%s: %w", table, col, err)
@@ -293,6 +360,9 @@ func (r *sqlAccountRepo) Load() ([]*authUser, []authToken, *authPolicy, error) {
 }
 
 func (r *sqlAccountRepo) PutAccount(u *authUser) error {
+	if err := checkAccount(u); err != nil {
+		return err
+	}
 	// The update arm is scoped to the SAME account: an id belongs to one
 	// address for the life of the hub, so a row arriving under a live id with
 	// a different email is a collision, not an update, and applying it hands
@@ -318,6 +388,9 @@ func (r *sqlAccountRepo) DeleteAccount(id string) error {
 }
 
 func (r *sqlAccountRepo) PutToken(t authToken) error {
+	if err := checkToken(t); err != nil {
+		return err
+	}
 	return r.s.exec(`INSERT INTO tokens (hash,user_id,device,created) VALUES (?,?,?,?)
 		ON CONFLICT(hash) DO UPDATE SET user_id=excluded.user_id, device=excluded.device, created=excluded.created`,
 		t.Hash, t.User, t.Device, tenc(t.Created))
@@ -395,6 +468,9 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 // Put writes the project and replaces its grants in one transaction — same
 // shape as PutOrg over orgs/org_members.
 func (r *sqlProjectRepo) Put(p Project) error {
+	if err := checkProject(p); err != nil {
+		return err
+	}
 	tx, err := r.s.db.Begin()
 	if err != nil {
 		return err
@@ -419,6 +495,33 @@ func (r *sqlProjectRepo) Put(p Project) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// PutMeta writes the project's own columns and does not touch project_perms —
+// see rowScopedProjectRepo for why a metadata write must not carry a grant set.
+func (r *sqlProjectRepo) PutMeta(p Project) error {
+	if err := checkProject(p); err != nil {
+		return err
+	}
+	return r.s.exec(
+		`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
+		VALUES (?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
+		description=excluded.description, icon=excluded.icon,
+		creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`,
+		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template)
+}
+
+// PutPerm writes one grant row. An empty level removes it.
+func (r *sqlProjectRepo) PutPerm(project, email, level string) error {
+	if err := storable(project, email, level); err != nil {
+		return err
+	}
+	if level == "" {
+		return r.s.exec(`DELETE FROM project_perms WHERE project = ? AND email = ?`, project, email)
+	}
+	return r.s.exec(`INSERT INTO project_perms (project,email,level) VALUES (?,?,?)
+		ON CONFLICT(project,email) DO UPDATE SET level=excluded.level`, project, email, level)
 }
 
 func (r *sqlProjectRepo) Delete(id string) error {
@@ -510,6 +613,9 @@ func (r *sqlOrgRepo) Load() ([]Org, []OrgInvite, error) {
 }
 
 func (r *sqlOrgRepo) PutOrg(o Org) error {
+	if err := checkOrg(o); err != nil {
+		return err
+	}
 	tx, err := r.s.db.Begin()
 	if err != nil {
 		return err
@@ -548,6 +654,9 @@ func (r *sqlOrgRepo) DeleteOrg(id string) error {
 }
 
 func (r *sqlOrgRepo) PutInvite(i OrgInvite) error {
+	if err := checkInvite(i); err != nil {
+		return err
+	}
 	return r.s.exec(`INSERT INTO invites (token,org,creator,created,expires,uses) VALUES (?,?,?,?,?,?)
 		ON CONFLICT(token) DO UPDATE SET org=excluded.org, creator=excluded.creator,
 		created=excluded.created, expires=excluded.expires, uses=excluded.uses`,
@@ -582,6 +691,9 @@ func (r *sqlShareRepo) Load() ([]Share, error) {
 }
 
 func (r *sqlShareRepo) Put(s Share) error {
+	if err := checkShare(s); err != nil {
+		return err
+	}
 	return r.s.exec(`INSERT INTO shares (token,project,path,creator,created,expires) VALUES (?,?,?,?,?,?)
 		ON CONFLICT(token) DO UPDATE SET project=excluded.project, path=excluded.path,
 		creator=excluded.creator, created=excluded.created, expires=excluded.expires`,
@@ -616,6 +728,9 @@ func (r *sqlDeviceRepo) Load() ([]DeviceInfo, error) {
 }
 
 func (r *sqlDeviceRepo) Put(d DeviceInfo) error {
+	if err := checkDevice(d); err != nil {
+		return err
+	}
 	return r.s.exec(`INSERT INTO device_rows (user_email,id,name,os,ip,first_seen,last_seen) VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(user_email,id) DO UPDATE SET name=excluded.name, os=excluded.os,
 		ip=excluded.ip, last_seen=excluded.last_seen`,
@@ -646,6 +761,11 @@ func (r *sqlReadRepo) Load() ([]ReadStat, error) {
 }
 
 func (r *sqlReadRepo) PutBatch(stats []ReadStat) error {
+	for _, s := range stats {
+		if err := checkReadStat(s); err != nil {
+			return err
+		}
+	}
 	tx, err := r.s.db.Begin()
 	if err != nil {
 		return err

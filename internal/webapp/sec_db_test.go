@@ -179,39 +179,28 @@ func TestSec_DB_HostileStringsStayDataOnEveryBackend(t *testing.T) {
 	}
 }
 
-// A NUL byte in a stored identifier must not truncate the record: a device
-// registered as "laptop\x00-of-eve" that comes back as "laptop" is a device
-// impersonating another, and a backend that silently drops the tail while
-// another backend keeps it is a divergence attribution depends on.
-func TestSec_DB_NULBytesDoNotTruncateRecords(t *testing.T) {
-	const name = "laptop\x00-of-eve"
-	for _, be := range metaBackends(t) {
-		t.Run(be.name, func(t *testing.T) {
-			be.reset(t)
-			st := be.open(t)
-			devices, err := NewDeviceRegistry(st.Devices())
-			if err != nil {
-				t.Fatal(err)
-			}
-			devices.Observe(DeviceInfo{ID: "d-nul", Name: name, User: "eve@x.io"})
-			st.Close()
-
-			st2 := be.open(t)
-			defer st2.Close()
-			devices2, err := NewDeviceRegistry(st2.Devices())
-			if err != nil {
-				t.Fatalf("store rejected a NUL byte outright: %v", err)
-			}
-			got, ok := devices2.Get("d-nul")
-			if !ok {
-				t.Fatal("device with a NUL in its name vanished")
-			}
-			if got.Name != name {
-				t.Fatalf("device name round-tripped as %q, want %q — truncated at the NUL", got.Name, name)
-			}
-		})
-	}
-}
+// RETIRED (round 11): TestSec_DB_NULBytesDoNotTruncateRecords.
+//
+// It asserted that a NUL byte in a stored identifier must round-trip verbatim
+// ("refused, or stored, but never silently lost" — round 5's rule, resolved in
+// the "stored" direction). Postgres cannot implement that: a text column
+// rejects 0x00 outright (SQLSTATE 22021), so satisfying it would mean moving
+// the whole metadata layer to bytea. Until round 11 nobody had run this suite
+// against Postgres, which is why the contradiction went seven rounds unseen.
+//
+// Round 11 resolved the same rule in the OTHER direction, at the repo boundary
+// and identically on all three backends: unstorable text is REFUSED (see
+// `storable` in db.go). That is what the ingest doors already enforce
+// (printableOnly, hasControlChars, journal.SafePath), and it means a hub cannot
+// change what it accepts by changing its database.
+//
+// The property this test was protecting — "a device registered as
+// laptop\x00-of-eve must not come back as laptop, impersonating another
+// device" — is protected more strongly by refusal, and is now asserted by
+// TestSec_DB_EveryBackendAgreesWhichTextIsStorable and
+// TestSec_DB_AcceptedTextIsStoredVerbatimOnEveryBackend in sec_pg_test.go.
+// The two tests assert opposite decisions and cannot both be green; this is
+// the one that was wrong.
 
 // ---- registries must not hand out their live maps ------------------------
 

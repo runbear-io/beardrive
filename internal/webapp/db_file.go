@@ -147,6 +147,9 @@ func (r *fileAccountRepo) write() error {
 }
 
 func (r *fileAccountRepo) PutAccount(u *authUser) error {
+	if err := checkAccount(u); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// An id identifies one account for the life of the hub. Overwriting a row
@@ -168,6 +171,9 @@ func (r *fileAccountRepo) DeleteAccount(id string) error {
 }
 
 func (r *fileAccountRepo) PutToken(t authToken) error {
+	if err := checkToken(t); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tokens[t.Hash] = t
@@ -203,6 +209,14 @@ func newFileProjectRepo(path string) *fileProjectRepo {
 func (r *fileProjectRepo) Load() ([]Project, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.reload()
+}
+
+// reload re-reads the file into byID. Every write goes through it first: byID
+// is this process's copy of a file another hub process may also be writing, and
+// a rewrite from a stale copy is how one hub's unrelated edit resurrected
+// another hub's revoked grant. Callers hold mu.
+func (r *fileProjectRepo) reload() ([]Project, error) {
 	var f struct {
 		Projects []Project `json:"projects"`
 	}
@@ -232,15 +246,67 @@ func (r *fileProjectRepo) write() error {
 }
 
 func (r *fileProjectRepo) Put(p Project) error {
+	if err := checkProject(p); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
 	r.byID[p.ID] = p
+	return r.write()
+}
+
+// PutMeta writes the project's own fields and keeps whatever grants are on
+// disk — see rowScopedProjectRepo.
+func (r *fileProjectRepo) PutMeta(p Project) error {
+	if err := checkProject(p); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	p.Perms = r.byID[p.ID].Perms
+	r.byID[p.ID] = p
+	return r.write()
+}
+
+// PutPerm writes one grant. An empty level removes it.
+func (r *fileProjectRepo) PutPerm(project, email, level string) error {
+	if err := storable(project, email, level); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	p, ok := r.byID[project]
+	if !ok {
+		return fmt.Errorf("no such project %q", project)
+	}
+	p = p.clone()
+	switch {
+	case level == "":
+		delete(p.Perms, email)
+	case p.Perms == nil:
+		p.Perms = map[string]string{email: level}
+	default:
+		p.Perms[email] = level
+	}
+	r.byID[project] = p
 	return r.write()
 }
 
 func (r *fileProjectRepo) Delete(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
 	delete(r.byID, id)
 	return r.write()
 }
@@ -302,6 +368,9 @@ func (r *fileOrgRepo) write() error {
 }
 
 func (r *fileOrgRepo) PutOrg(o Org) error {
+	if err := checkOrg(o); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.byID[o.ID] = o
@@ -316,6 +385,9 @@ func (r *fileOrgRepo) DeleteOrg(id string) error {
 }
 
 func (r *fileOrgRepo) PutInvite(i OrgInvite) error {
+	if err := checkInvite(i); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.invites[i.Token] = i
@@ -372,6 +444,9 @@ func (r *fileShareRepo) write() error {
 }
 
 func (r *fileShareRepo) Put(s Share) error {
+	if err := checkShare(s); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.byToken[s.Token] = s
@@ -433,6 +508,9 @@ func (r *fileDeviceRepo) write() error {
 }
 
 func (r *fileDeviceRepo) Put(d DeviceInfo) error {
+	if err := checkDevice(d); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rows[devKey{d.User, d.ID}] = d
@@ -491,6 +569,11 @@ func (r *fileReadRepo) write() error {
 }
 
 func (r *fileReadRepo) PutBatch(stats []ReadStat) error {
+	for _, s := range stats {
+		if err := checkReadStat(s); err != nil {
+			return err
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, st := range stats {

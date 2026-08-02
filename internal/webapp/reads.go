@@ -541,7 +541,7 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		return
 	}
 	_ = v
-	device := r.Header.Get("X-Bdrive-Device")
+	device := deviceID(r)
 	if device == "" {
 		http.Error(w, "agent read reports need a device identity", http.StatusBadRequest)
 		return

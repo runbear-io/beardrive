@@ -73,7 +73,12 @@ func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string) 
 	if !strings.HasPrefix(key, "journal/") {
 		return true
 	}
-	dev := r.Header.Get("X-Bdrive-Device")
+	// The canonical spelling on both sides. A journal key IS a storage key, and
+	// the stores underneath disagree about case (APFS and NTFS fold, S3 does
+	// not), so a device that may spell its id two ways is a device that owns two
+	// keys and one file — see canonDeviceID. Requiring the canonical key means
+	// one device is one object everywhere.
+	dev := deviceID(r)
 	if dev == "" {
 		http.Error(w, "a journal write must identify its device (X-Bdrive-Device)", http.StatusBadRequest)
 		return false
@@ -323,8 +328,56 @@ func journalOps(key string, tmp *os.File) ([]journal.Op, error) {
 		if !journal.SafePath(op.Path) || config.ReservedPath(op.Path) {
 			return nil, fmt.Errorf("journal names an invalid path %q", op.Path)
 		}
+		// The note is the other peer-written free text History renders, right
+		// next to the path (HistoryRow's NoteText, the run-card header) — and
+		// `bdrive log` already scrubs the same characters out of it on the way
+		// to a terminal, on the stated grounds that "the audit tool an operator
+		// uses to catch a peer must not be renderable BY that peer". The web
+		// History view is the audit tool everybody actually uses.
+		if !journal.SafeText(op.Note) {
+			return nil, fmt.Errorf("journal carries an invalid note")
+		}
 	}
 	return ops, nil
+}
+
+// opsNameTheirAuthor refuses a journal whose ops credit an account other than
+// the one that owns the device writing them.
+//
+// Op.User/Op.UserName are what History serves and what the frontend's
+// whoChanged() renders as THE answer to "who changed this file?" — the hub's
+// only audit surface. They arrived as fields the pushing client typed, so bob
+// pushed an op declaring alice and the audit log named Alice. The hub already
+// holds the truth on this very request: ownJournal has just resolved the
+// account the device id in the key belongs to.
+//
+// It refuses rather than overwrites: a journal object is the device's own log
+// byte for byte, every peer replays exactly these bytes, and rewriting a body
+// mid-push would make the hub a second author of a log the design says has
+// exactly one.
+//
+// An op that names nobody is fine — journals from before accounts existed have
+// no User and History falls back to Author. A NAME with no account is not: it
+// is an attribution with nothing behind it, rendered the same way.
+func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops []journal.Op) bool {
+	if s.Devices == nil || len(ops) == 0 {
+		return true // nobody to impersonate (single-volume, auth-less, fixture)
+	}
+	owner, _ := s.Devices.OwnerOf(deviceID(r))
+	if normEmail(owner) == "" {
+		return true // no binding to check against; ownJournal already ruled on the write
+	}
+	for _, op := range ops {
+		if op.User == "" && op.UserName == "" {
+			continue
+		}
+		if normEmail(op.User) != normEmail(owner) {
+			http.Error(w, "an op must name the account this device is registered to as its author",
+				http.StatusForbidden)
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -357,7 +410,8 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		http.Error(w, "content does not hash to its key", http.StatusBadRequest)
 		return
 	}
-	if _, err := journalOps(key, tmp); err != nil {
+	ops, err := journalOps(key, tmp)
+	if err != nil {
 		// The body is the client's, so everything journalOps can object to is
 		// the client's fault: an undecodable journal or an op naming a path
 		// this hub will not carry. 400, not 502 — and nothing is stored.
@@ -367,16 +421,24 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	if !s.ownJournal(w, r, key) {
 		return
 	}
-	// Observed only after the write is authorized: a request that registers
-	// the device it claims to be answers its own ownership question. Nothing
-	// here CLAIMS any more — that happens once, when the hub mints this
-	// machine's token (DeviceRegistry.Bind) — so both arms are a refresh of
-	// name/OS/IP into a row the account already owns.
-	if strings.HasPrefix(key, "journal/") {
-		s.observeDevice(r)
-	} else {
-		s.refreshDevice(r)
+	if !s.opsNameTheirAuthor(w, r, ops) {
+		return
 	}
+	// Observed only after the write is authorized, and only into a row the
+	// account ALREADY owns (refreshDevice checks OwnerOf first). Nothing here
+	// claims: that happens once, when the hub mints this machine's token
+	// (DeviceRegistry.Bind).
+	//
+	// The journal branch used to call observeDevice, which creates the row it
+	// does not find — and ownJournal's admin arm lets a project admin write
+	// somebody else's journal as the RECOVERY path. Anyone who can create a
+	// project is admin of it, so one PUT into a project of the attacker's own
+	// wrote a competing row {attacker, victim's device id}, and Bind refuses
+	// any id another account holds a row for: the victim's `bdrive login` was
+	// then 409 forever, across the org wall, and `bdrive login` is the
+	// documented remedy for every other device problem. A recovery path may
+	// not brick the recovery path.
+	s.refreshDevice(r)
 	project := r.PathValue("project")
 	s.reconcileGrants(r.Context(), project, rs.Backend)
 	org := s.orgOf(project)

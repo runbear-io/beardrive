@@ -3,6 +3,8 @@ package webapp
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -29,12 +31,102 @@ func TestSec_Suite_RunModeIsVisible(t *testing.T) {
 			"Run `go test ./...` with no -short")
 	}
 	// Stderr, not t.Log: t.Log is invisible without -v, which is exactly how
-	// "postgres UNTESTED" went unnoticed for two rounds.
+	// "postgres UNTESTED" went unnoticed for two rounds. This is the SINGLE
+	// place the run reports the gap — dsnGatedTests names what goes unmeasured.
 	if os.Getenv("BDRIVE_TEST_POSTGRES") == "" {
 		fmt.Fprintln(os.Stderr,
 			"NOTE: BDRIVE_TEST_POSTGRES is unset — row 14 ran on file+sqlite only; "+
-				"the Postgres backend is UNTESTED in this run "+
-				"(e.g. docker run -e POSTGRES_PASSWORD=x -p 5432:5432 postgres:16, then "+
+				"the Postgres backend is UNTESTED in this run, and these tests SKIPPED "+
+				"rather than passed: "+strings.Join(dsnGatedTests, ", ")+
+				" (e.g. docker run -e POSTGRES_PASSWORD=x -p 5432:5432 postgres:16, then "+
 				"BDRIVE_TEST_POSTGRES='postgres://postgres:x@localhost:5432/postgres?sslmode=disable')")
 	}
+}
+
+// dsnGatedTests are the tests that measure NOTHING without a Postgres DSN and
+// say so by skipping. Round 11 chose skip-plus-a-loud-note over a permanently
+// red default suite: a red nobody can fix without Docker is a red everybody
+// learns to scroll past, and the next real regression hides behind it. The
+// choice only holds while the note is true, which is what the check below is.
+var dsnGatedTests = []string{
+	"TestSec_DB_EveryBackendAgreesWhichTextIsStorable",
+	"TestSec_DB_ASchemaRoundTripDoesNotWidenAProjectDefault",
+}
+
+// TestSec_Suite_DSNGatedTestsStillSkipLoudly is the other half of the bargain.
+// The danger of a skip is that it becomes invisible: someone deletes the guard
+// (and the test then passes with two arms, measuring nothing about agreement),
+// or deletes the test, and the note above keeps promising coverage that is no
+// longer merely unmeasured but gone. So the reporter checks its own claim
+// against the source: every name it prints must exist and must still refuse to
+// run without the DSN.
+func TestSec_Suite_DSNGatedTestsStillSkipLoudly(t *testing.T) {
+	src, err := os.ReadFile("sec_pg_test.go")
+	if err != nil {
+		t.Fatalf("the DSN-gated tests live in sec_pg_test.go: %v", err)
+	}
+	for _, name := range dsnGatedTests {
+		body, ok := secrunBody(string(src), name)
+		if !ok {
+			t.Errorf("%s is named in the run-mode note but no longer exists in sec_pg_test.go — "+
+				"the note promises a gap is merely unmeasured while the measurement is gone", name)
+			continue
+		}
+		if !secrunSkips(string(src), body) {
+			t.Errorf("%s no longer skips when the DSN is absent: without a skip it either fails "+
+				"for everyone without Docker, or — worse — passes having measured nothing. "+
+				"Round 11's choice was skip PLUS the loud note; keep both or change both", name)
+		}
+	}
+}
+
+// secrunSkips reports whether a test body refuses to run without the DSN —
+// directly, or through a same-file helper that does the skipping for it
+// (secpgSQL is one; the fixture builders are where the guard naturally lives).
+// One level of indirection is enough: a helper that itself delegates would be
+// a fixture chain deep enough to be its own smell.
+func secrunSkips(src, body string) bool {
+	if strings.Contains(body, "t.Skip") {
+		return true
+	}
+	for _, m := range regexp.MustCompile(`func (secpg\w+)\(`).FindAllStringSubmatch(src, -1) {
+		if !strings.Contains(body, m[1]+"(") {
+			continue
+		}
+		if h, ok := secrunFuncBody(src, m[1]); ok && strings.Contains(h, "t.Skip") {
+			return true
+		}
+	}
+	return false
+}
+
+// secrunBody returns one top-level test function's body by brace matching.
+func secrunBody(src, name string) (string, bool) {
+	return secrunSpan(src, strings.Index(src, "func "+name+"(t *testing.T) {"))
+}
+
+// secrunFuncBody is the same, for a helper of any signature.
+func secrunFuncBody(src, name string) (string, bool) {
+	return secrunSpan(src, strings.Index(src, "func "+name+"("))
+}
+
+// secrunSpan returns the braced body starting at a func declaration at i.
+func secrunSpan(src string, i int) (string, bool) {
+	if i < 0 {
+		return "", false
+	}
+	i = strings.Index(src[i:], "{") + i + 1
+	depth := 1
+	for j := i; j < len(src); j++ {
+		switch src[j] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[i:j], true
+			}
+		}
+	}
+	return "", false
 }

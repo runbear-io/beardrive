@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -55,7 +56,13 @@ func (s *Session) fetchBlob(ctx context.Context, sha string) error {
 		return fmt.Errorf("fetch version: %w", err)
 	}
 	defer rc.Close()
-	got, _, err := s.Store.PutBlobReader(rc)
+	// PutBlobReader spools to the volume's tmp dir before anything checks the
+	// hash, so this read gets the same ceiling pull's two blob reads carry: the
+	// hub serves the bytes AND named the sha (it answered the history listing),
+	// and must not also choose how much of this disk that costs. pullBound's
+	// declared size has no meaning here — no op reaches restore — so the bound
+	// is the absolute one, which is what pullBound would clamp to anyway.
+	got, _, err := s.Store.PutBlobReader(io.LimitReader(rc, maxPullBytes))
 	if err != nil {
 		return err
 	}

@@ -148,6 +148,16 @@ func EscapeIgnore(rel string) string {
 			// everywhere costs nothing and needs no positional reasoning.
 			b.WriteByte('\\')
 			b.WriteByte(c)
+		case ' ', '\t', '\r', '\n', '\v', '\f':
+			// Whitespace is a metacharacter here too: compile trims it off
+			// both ends, so "notes/a " unescaped is the rule for "notes/a" —
+			// a DIFFERENT file, a sibling, which `bdrive forget` then prunes
+			// from the hub. A trailing space is a legal filename everywhere
+			// beardrive runs, and filenames in a synced project are chosen by
+			// whoever syncs into it. Escaping it everywhere keeps the same
+			// no-positional-reasoning rule as `!` and `#`.
+			b.WriteByte('\\')
+			b.WriteByte(c)
 		default:
 			b.WriteByte(c)
 		}
@@ -155,18 +165,38 @@ func EscapeIgnore(rel string) string {
 	return b.String()
 }
 
+// trimRuleSpace strips the padding around a rule line, EXCEPT whitespace a
+// backslash protects — the dialect's own escape, and the only way EscapeIgnore
+// can write a filename that legally ends in a space. Trimming it anyway made
+// the rule name the sibling one character shorter.
+func trimRuleSpace(line string) string {
+	line = strings.TrimLeft(line, " \t\r\n\v\f")
+	for len(line) > 0 && strings.ContainsRune(" \t\r\n\v\f", rune(line[len(line)-1])) {
+		// An odd run of backslashes before the byte escapes it.
+		n := 0
+		for n < len(line)-1 && line[len(line)-2-n] == '\\' {
+			n++
+		}
+		if n%2 == 1 {
+			break
+		}
+		line = line[:len(line)-1]
+	}
+	return line
+}
+
 // compile turns one pattern line into a regexp over slash-separated paths.
 // The regexp also matches everything under a matched directory. Returns
 // ok=false for blanks, comments, and invalid patterns.
 func compile(line string) (pattern, bool) {
-	line = strings.TrimSpace(line)
+	line = trimRuleSpace(line)
 	if line == "" || strings.HasPrefix(line, "#") {
 		return pattern{}, false
 	}
 	var p pattern
 	if strings.HasPrefix(line, "!") {
 		p.negate = true
-		line = strings.TrimSpace(line[1:])
+		line = trimRuleSpace(line[1:])
 	}
 	anchored := strings.HasPrefix(line, "/")
 	dirOnly := strings.HasSuffix(line, "/")

@@ -109,14 +109,61 @@ func (p Project) clone() Project {
 	return c
 }
 
-// put persists a mutated project, restoring the previous value if the store
-// refuses. Callers hold mu. Without the rollback a refused write reads as
-// applied until the hub restarts and then reverts — a demotion that quietly
-// un-demotes itself. (GetOrCreate has always rolled back; this is the rest.)
+// rowScopedProjectRepo is the part of a ProjectRepo that can write a project's
+// own metadata and its individual grants as SEPARATE records.
+//
+// Whole-record writes are why a revocation could be undone by a rename. Every
+// registry here loads its rows once at construction and never re-reads them,
+// and ProjectRepo.Put replaces the entire grant set from the writer's
+// in-memory copy (sqlProjectRepo.Put deletes project_perms for the project and
+// re-inserts them). Two hub processes in front of one database — which is the
+// entire reason to configure Postgres — means the second one is not racing,
+// it is a minute behind and authoritative anyway: any unrelated write it makes
+// resurrects every grant it has not seen. Scoping the write to the row that
+// actually changed removes the collision instead of trying to win it.
+//
+// It is optional rather than part of ProjectRepo so a repo that cannot do it
+// (or a test wrapper that intercepts Put) keeps the old whole-record path.
+type rowScopedProjectRepo interface {
+	// PutMeta writes a project's own fields and leaves its grants alone.
+	PutMeta(p Project) error
+	// PutPerm writes one grant. An empty level deletes the row (which is
+	// ClearPerm — distinct from PermNone, an explicit "hidden" grant).
+	PutPerm(project, email, level string) error
+}
+
+// put persists a mutated project's own METADATA, restoring the previous value
+// if the store refuses. Callers hold mu. Without the rollback a refused write
+// reads as applied until the hub restarts and then reverts — a demotion that
+// quietly un-demotes itself. (GetOrCreate has always rolled back; this is the
+// rest.)
 func (db *ProjectDB) put(prev, p Project) error {
 	db.byID[p.ID] = p
-	if err := db.repo.Put(p); err != nil {
+	var err error
+	if rs, ok := db.repo.(rowScopedProjectRepo); ok {
+		err = rs.PutMeta(p)
+	} else {
+		err = db.repo.Put(p)
+	}
+	if err != nil {
 		db.byID[p.ID] = prev
+		return err
+	}
+	return nil
+}
+
+// putPerm persists ONE grant change, with the same rollback. level == "" means
+// the grant is being removed entirely.
+func (db *ProjectDB) putPerm(prev, next Project, email, level string) error {
+	db.byID[next.ID] = next
+	var err error
+	if rs, ok := db.repo.(rowScopedProjectRepo); ok {
+		err = rs.PutPerm(next.ID, email, level)
+	} else {
+		err = db.repo.Put(next)
+	}
+	if err != nil {
+		db.byID[next.ID] = prev
 		return err
 	}
 	return nil
@@ -310,7 +357,7 @@ func (db *ProjectDB) SetPerm(id, email, level string) error {
 		next.Perms = map[string]string{}
 	}
 	next.Perms[e] = level
-	return db.put(p, next)
+	return db.putPerm(p, next, e, level)
 }
 
 // ClearPerm drops an explicit grant, reverting the account to the default.
@@ -330,7 +377,7 @@ func (db *ProjectDB) ClearPerm(id, email string) error {
 	}
 	next := p.clone()
 	delete(next.Perms, e)
-	return db.put(p, next)
+	return db.putPerm(p, next, e, "")
 }
 
 // dropPerm removes a grant with no last-admin guard. That guard stops a
@@ -350,7 +397,7 @@ func (db *ProjectDB) dropPerm(id, email string) error {
 	}
 	next := p.clone()
 	delete(next.Perms, e)
-	return db.put(p, next)
+	return db.putPerm(p, next, e, "")
 }
 
 // adminCount counts explicit admin grants on a project.

@@ -145,8 +145,48 @@ func SafePath(p string) bool {
 	// the C0s render as nothing, so "notes\x7f.md" and "notes.md" are two
 	// indistinguishable entries in one tree. Refusing at every ingest is what
 	// keeps that divergence unreachable.
-	for i := 0; i < len(p); i++ {
-		if p[i] < 0x20 || p[i] == 0x7f {
+	return SafeText(p)
+}
+
+// SafeText reports whether s is free of the characters that make one rendered
+// row lie about what it says. It is SafePath's character rule, split out
+// because the path is not the only peer-written string the hub serves to a
+// browser and a terminal — an op's Note is rendered next to it in every
+// history row and in `bdrive log`.
+//
+// Three families, all of which render as nothing or as something else:
+//
+//   - C0 and DEL. Byte-wise on purpose (see lossy): in UTF-8 no continuation
+//     byte is < 0x80, so a byte in this range is always a real control
+//     character. NUL is also a value the metadata backends disagree about.
+//   - C1 (U+0080..U+009F), which every C0 filter misses and which is CSI and
+//     friends to any terminal.
+//   - the bidi format controls (Trojan Source, CVE-2021-42574).
+//     "invoice‮gnp.exe" renders as "invoiceexe.png" in every file
+//     listing, tree node, breadcrumb and history row — and downloads as an
+//     .exe.
+//
+// This repo already refuses all three in a project NAME (webapp trimName, "the
+// bidi overrides that reorder a rendered row") and strips them on the way to a
+// terminal (cmd/bdrive safeField). The path and the note, which reach further
+// than either, checked none of them.
+func SafeText(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return false
+		}
+	}
+	for _, r := range s {
+		switch {
+		case r >= 0x80 && r <= 0x9f: // C1
+			return false
+		case r >= 0x202a && r <= 0x202e: // LRE RLE PDF LRO RLO
+			return false
+		case r >= 0x2066 && r <= 0x2069: // LRI RLI FSI PDI
+			return false
+		case r == 0x200e || r == 0x200f: // LRM RLM
+			return false
+		case r == 0x061c: // ALM
 			return false
 		}
 	}

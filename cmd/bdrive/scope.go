@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -137,7 +135,7 @@ func scopeAddCmd() *cobra.Command {
 				if seen[d] {
 					continue
 				}
-				if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(d)), 0o755); err != nil {
+				if err := mkdirScopeDirs(folder, []string{d}); err != nil {
 					return err
 				}
 				dirs = append(dirs, d)
@@ -234,12 +232,22 @@ func printScope(folder string, proj config.Project) error {
 	}
 	// Mounts created before the scope moved into .bdriveignore still carry an
 	// include list in .bdrive/config.json; it is still honored, so report it.
+	// Both mechanisms can be in force at once and LoadFilter applies both, so
+	// this reports every one of them — an audit surface that names one set of
+	// rules and stays silent about the other is worse than none.
 	if len(proj.Include) > 0 {
 		fmt.Println("syncing only (legacy include list in .bdrive/config.json):")
 		for _, i := range proj.Include {
 			fmt.Println("  ./" + strings.Trim(i, "/"))
 		}
 		fmt.Println("re-run `bdrive init . --only <dirs>` to move these into .bdriveignore")
+		if !scoped {
+			return nil
+		}
+		fmt.Println("\nand a managed .bdriveignore block, also in force:")
+		for _, d := range dirs {
+			fmt.Println("  ./" + d)
+		}
 		return nil
 	}
 	if !scoped {

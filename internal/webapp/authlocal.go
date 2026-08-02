@@ -506,7 +506,7 @@ func (a *BuiltinAuth) PendingUsers() []User {
 			us = append(us, u)
 		}
 	}
-	sort.Slice(us, func(i, j int) bool { return us[i].Created.Before(us[j].Created) })
+	sortByAge(us)
 	out := make([]User, len(us))
 	for i, u := range us {
 		out[i] = User{ID: u.ID, Email: u.Email, Name: u.Name}
@@ -577,10 +577,58 @@ func (a *BuiltinAuth) Accounts() []User {
 			users = append(users, u)
 		}
 	}
-	sort.Slice(users, func(i, j int) bool { return users[i].Created.Before(users[j].Created) })
+	sortByAge(users)
 	out := make([]User, len(users))
 	for i, u := range users {
 		out[i] = User{ID: u.ID, Email: u.Email, Name: u.Name}
+	}
+	return out
+}
+
+// sortByAge is the one "oldest first" order, and it is a TOTAL order.
+//
+// It used to be `sort.Slice` on Created alone, over a slice built by ranging a
+// map. Created arrived as a column after the fact, so on every upgraded hub
+// every row ties at the zero time, an unstable sort over a random permutation
+// is a random permutation, and the org heir — which reads this list — was
+// therefore drawn by Go map iteration. The ID tiebreak makes the answer a fact
+// about the store instead of a fact about this process.
+//
+// A deterministic order is not the same as evidence of age. Anything that
+// needs the latter asks Seniority.
+func sortByAge(users []*authUser) {
+	sort.SliceStable(users, func(i, j int) bool {
+		if !users[i].Created.Equal(users[j].Created) {
+			return users[i].Created.Before(users[j].Created)
+		}
+		return users[i].ID < users[j].ID
+	})
+}
+
+// Seniority is the oldest-first account order, and it is EMPTY when this hub
+// holds no evidence of age at all.
+//
+// OrgDB.heir breaks a Joined tie on it, and its own doc comment says "with no
+// seniority available there is NO evidence, and the answer is nobody: an
+// ownerless org is a repair a hub admin makes deliberately, while an arbitrary
+// heir is a privilege grant nobody asked for". Handing back a merely
+// deterministic order would satisfy the letter and not the sentence — it would
+// promote the same arbitrary member every time, which is round 8's finding
+// with a different arbitrary key. Rows with no Created stamp are dropped, so
+// an upgraded hub that recorded nothing says nothing.
+func (a *BuiltinAuth) Seniority() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	dated := make([]*authUser, 0, len(a.users))
+	for _, u := range a.users {
+		if u.active() && !u.Created.IsZero() {
+			dated = append(dated, u)
+		}
+	}
+	sortByAge(dated)
+	out := make([]string, len(dated))
+	for i, u := range dated {
+		out[i] = u.Email
 	}
 	return out
 }

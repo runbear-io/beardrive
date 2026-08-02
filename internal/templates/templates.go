@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/store"
 )
@@ -131,6 +132,13 @@ func (t Template) WriteTo(dir string) ([]string, error) {
 	for _, f := range t.Files {
 		if !SafePath(f.Path) {
 			return wrote, fmt.Errorf("template path %q is not a path inside the project", f.Path)
+		}
+		// SafePath and UnderRoot both pass `.bdrive/config.json` — clean,
+		// relative and squarely inside the root — and that file names the hub
+		// this folder pushes to. Reserved paths belong to beardrive and to
+		// git, never to a template, whoever built it.
+		if config.ReservedPath(f.Path) {
+			return wrote, fmt.Errorf("template path %q is reserved", f.Path)
 		}
 		abs := filepath.Join(dir, filepath.FromSlash(f.Path))
 		// Lexical containment answers about the STRING. Stat, MkdirAll and

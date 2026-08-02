@@ -144,10 +144,8 @@ the folder was renamed or moved.`,
 					if err != nil {
 						return err
 					}
-					for _, dir := range scope {
-						if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(dir)), 0o755); err != nil {
-							return err
-						}
+					if err := mkdirScopeDirs(folder, scope); err != nil {
+						return err
 					}
 					if err := writeScopeDirs(folder, scope); err != nil {
 						return err
@@ -248,10 +246,8 @@ the folder was renamed or moved.`,
 			if err != nil {
 				return err
 			}
-			for _, dir := range scope {
-				if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(dir)), 0o755); err != nil {
-					return err
-				}
+			if err := mkdirScopeDirs(folder, scope); err != nil {
+				return err
 			}
 
 			if err := os.MkdirAll(folder, 0o755); err != nil {
