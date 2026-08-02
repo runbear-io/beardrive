@@ -120,6 +120,9 @@ func seccfgRealHub(t *testing.T) (base string, serverOutput func() string) {
 			"allowed_domains": []string{"example.com"},
 			"admins":          []string{seccfgAdminEmail},
 			"brand":           "Sec Round 3",
+			// A hub with smtp must name its public origin: a mailed link may
+			// not be built from a requester's Host header.
+			"base_url": "https://hub.example",
 			"smtp": map[string]any{
 				// Port 1 refuses instantly, so nothing here ever blocks.
 				"host": "127.0.0.1", "port": 1,

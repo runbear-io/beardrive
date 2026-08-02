@@ -76,11 +76,8 @@ func secaud2ReadsHub(t *testing.T) (http.Handler, *Server, map[string]*http.Cook
 // known: its own /store/* traffic (observeDevice).
 func secaud2Sync(t *testing.T, h http.Handler, projectID string, c *http.Cookie, dev, name string) {
 	t.Helper()
-	rec := secaud2Do(t, h, "GET", "/api/p/"+projectID+"/store/list", nil, c, map[string]string{
-		"X-Bdrive-Device":      dev,
-		"X-Bdrive-Device-Name": name,
-		"X-Bdrive-Os":          "darwin 26.1",
-	})
+	// Its own journal push: a read grants nothing and so claims nothing.
+	rec := secRegisterDevice(t, h, projectID, c, dev, name, "darwin 26.1")
 	if rec.Code != 200 {
 		t.Fatalf("%s syncing as %s: %d %s", name, dev, rec.Code, rec.Body)
 	}

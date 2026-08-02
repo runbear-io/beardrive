@@ -300,15 +300,20 @@ func TestDeviceCodeFlow(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil || start.Code == "" {
 		t.Fatalf("start = %s (%v)", rec.Body, err)
 	}
-	// The link is the secret, so it must be a real token, and it must carry
-	// the code in the path — nobody types this in.
+	// Both values are real tokens (nobody types these in), and the one in the
+	// link is NOT the one the client polls with: the link is displayed,
+	// forwarded and logged, and must not by itself buy a device token.
 	if len(start.Code) < 32 {
 		t.Fatalf("device code %q is too short to be a URL secret", start.Code)
 	}
-	if !strings.HasSuffix(start.VerifyURL, "/auth/device/"+start.Code) {
-		t.Fatalf("verify_url = %q, want .../auth/device/<code>", start.VerifyURL)
+	link, ok := strings.CutPrefix(start.VerifyURL, "http://example.com/auth/device/")
+	if !ok || len(link) < 32 {
+		t.Fatalf("verify_url = %q, want .../auth/device/<link secret>", start.VerifyURL)
 	}
-	approve := "/auth/device/" + start.Code
+	if link == start.Code {
+		t.Fatalf("the link the human opens is also the poll credential (%q)", link)
+	}
+	approve := "/auth/device/" + link
 
 	// pending until approved
 	rec = do(t, h, "POST", "/api/auth/device/poll", map[string]string{"code": start.Code})

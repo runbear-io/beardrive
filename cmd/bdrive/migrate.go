@@ -139,6 +139,16 @@ bdrive init --project <id>.`,
 			if err != nil {
 				return fmt.Errorf("cannot create project on %s: %w", settings.Server, err)
 			}
+			// The name may come from inside the archive, and POST /api/projects
+			// is create-or-JOIN-by-name — so a hostile archive could pick which
+			// of the importer's existing projects it landed in, and the "must be
+			// empty" check below happily passed for a project created in the UI
+			// and never synced. A manifest may PROPOSE a name; only the user may
+			// select an existing project.
+			if !created {
+				return fmt.Errorf("a project named %q already exists on %s — import only ever creates a new "+
+					"project; pass --name <fresh name> (the archive proposed this one)", name, settings.Server)
+			}
 			be, err := remote.Open(cmd.Context(), settings.Server+"/p/"+p.ID)
 			if err != nil {
 				return err
@@ -164,6 +174,7 @@ bdrive init --project <id>.`,
 		},
 	}
 	c.Flags().StringVar(&name, "name", "", "project name on the target hub (default: name from the archive)")
+	c.Flags().Int64Var(&maxImportBlob, "max-blob", maxImportBlob, "largest single file (bytes) an archive member may spool to disk")
 	return c
 }
 
@@ -301,6 +312,12 @@ func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *
 	return blobs, journals, size, nil
 }
 
+// maxImportBlob bounds what a single archive member may write to local disk.
+// Generous for real projects and far below what a compression bomb wants;
+// --max-blob raises it, so an honest export of a very large file is never
+// unimportable (this archive is the product's anti-lock-in path).
+var maxImportBlob int64 = 256 << 20
+
 // spoolBlob copies one archive member to a temp file, returning it rewound
 // with its size and sha256 — so the caller can decide whether the bytes belong
 // under their key BEFORE anything is stored. The caller closes and removes it.
@@ -310,7 +327,16 @@ func spoolBlob(r io.Reader) (*os.File, int64, string, error) {
 		return nil, 0, "", err
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), r)
+	// Bounded: the member's declared size is the archive author's number too,
+	// and the archive is a gzip stream, so a small file that looks exactly
+	// like a bdrive export can spool a thousand times its own size to the
+	// importer's disk before the sha check — which by construction runs after
+	// the copy — can reject a byte of it.
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(r, maxImportBlob+1))
+	if err == nil && n > maxImportBlob {
+		err = fmt.Errorf("archive member is larger than %s; re-run with --max-blob if the export really holds a file that big",
+			humanBytes(maxImportBlob))
+	}
 	if err == nil {
 		_, err = tmp.Seek(0, io.SeekStart)
 	}

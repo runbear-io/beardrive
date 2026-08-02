@@ -164,7 +164,7 @@ func TestSec_Journal_AnOffboardedMembersJournalIsNotUpForGrabs(t *testing.T) {
 
 	// carol syncs normally: her row is created, first-claimed, and she owns
 	// her journal.
-	if rec := secfx4Store(t, h, "GET", "/api/p/"+p.ID+"/store/list?prefix=blobs/", "", c["carol"], carolDev); rec.Code != 200 {
+	if rec := secRegisterDevice(t, h, p.ID, c["carol"], carolDev, "carol-desktop", "linux"); rec.Code != 200 {
 		t.Fatalf("carol's sync: %d %s", rec.Code, rec.Body)
 	}
 	real := secfx4OpLine(1, "put", "carols-report.md", secfx4Sha("carol's report"))

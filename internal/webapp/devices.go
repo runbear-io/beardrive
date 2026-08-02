@@ -306,9 +306,30 @@ func (s *Server) ownsDevice(r *http.Request, id string) bool {
 	return s.Devices.MayActAs(s.requestUser(r).Email, id)
 }
 
-// observeDevice records the device behind a store-API request. Only sync
-// traffic calls it: a device is something that syncs, and any other route
-// registering an id would let a caller mint a device identity out of a header.
+// refreshDevice records traffic from a device the caller's account ALREADY
+// owns, and records nothing at all otherwise.
+//
+// Creating the first row for an id is a CLAIM: OwnerOf is hub-wide and
+// first-claim-wins, and it is what ownJournal consults. So a door that grants
+// nothing must claim nothing — otherwise one GET naming an id nobody has
+// synced under yet locks that device out of its own journal on every project
+// on the hub, which ownJournal's own refusal calls a permanent lockout. Only
+// an authorized journal write may claim (handleStorePut, after ownJournal).
+func (s *Server) refreshDevice(r *http.Request) {
+	if s.Devices == nil {
+		return
+	}
+	owner, known := s.Devices.OwnerOf(r.Header.Get("X-Bdrive-Device"))
+	if !known || normEmail(owner) == "" || normEmail(owner) != normEmail(s.requestUser(r).Email) {
+		return
+	}
+	s.observeDevice(r)
+}
+
+// observeDevice records the device behind a store-API request, creating the
+// row if it is new. Only an authorized journal write calls it: a device is
+// something that syncs its own journal, and any other route registering an id
+// would let a caller mint — or squat — a device identity out of a header.
 func (s *Server) observeDevice(r *http.Request) {
 	if s.Devices == nil {
 		return

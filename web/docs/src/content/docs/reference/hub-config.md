@@ -53,6 +53,8 @@ cloud credentials on the serving machine.
     "allowed_domains": ["example.com"],  // only these domains may sign up
     "require_approval": true,            // …and an admin must approve each one
     "base_url": "https://drive.example.com",  // public origin for MAILED links (reset, verification)
+    //   Required whenever smtp is set (the hub refuses to start without it):
+    //   a mailed link must never be built from a requester's Host header.
     "users_db": "/var/lib/bdrive/auth.json",
     "admins": ["admin@example.com"],
     "smtp": { "host": "smtp.example.com", "port": 587,

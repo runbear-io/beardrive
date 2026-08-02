@@ -148,8 +148,11 @@ func TestSec_Mail_AMemberCannotPinTheHostEveryResetLinkPointsAt(t *testing.T) {
 	// address — and asks for a reset of HER OWN password on a host she owns.
 	// /auth/reset takes this request from anyone at all.
 	secapiForm(h, "evil.example", "/auth/reset", url.Values{"email": {"mallory@x.io"}})
-	if got := box.next(t, 0); !strings.Contains(got, "evil.example") {
-		t.Fatalf("control: mallory's own reset mail did not carry her host, so nothing was pinned:\n%s", got)
+	if got := box.next(t, 0); strings.Contains(got, "evil.example") {
+		// Round 7 expected this mail to carry her host (that was the pin being
+		// taken). With no auth.base_url the hub now trusts no request host at
+		// all, so her own mail must not carry it either.
+		t.Errorf("mallory's own reset mail carries the host she chose:\n%s", got)
 	}
 
 	// Now the honest flow, on the hub's real origin, for a different account.

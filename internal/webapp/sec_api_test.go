@@ -587,6 +587,9 @@ func TestSec_Auth_AProviderIdentityTheHubCannotResolveReachesNothing(t *testing.
 func TestSec_Mail_ResetLinkCannotBeAimedAtAnAttackerChosenHost(t *testing.T) {
 	box := secapiSMTP(t)
 	a, _, h := secapiAuth(t, box.mailer())
+	// The hub's public origin, which is what a mailed link is built from (and
+	// which a hub with smtp configured must now set: ValidateSignupPolicy).
+	a.BaseURL = "http://hub.example"
 	if _, err := a.signup("victim@x.io", "Victim", "password1"); err != nil {
 		t.Fatal(err)
 	}
@@ -612,6 +615,7 @@ func TestSec_Mail_ResetLinkCannotBeAimedAtAnAttackerChosenHost(t *testing.T) {
 func TestSec_Mail_VerificationLinkCannotBeAimedAtAnAttackerChosenHost(t *testing.T) {
 	box := secapiSMTP(t)
 	a, _, h := secapiAuth(t, box.mailer())
+	a.BaseURL = "http://hub.example"
 	a.RequireVerification = true
 	if _, err := a.signup("newbie@x.io", "Newbie", "password1"); err != nil {
 		t.Fatal(err)

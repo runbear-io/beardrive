@@ -79,7 +79,7 @@ func TestSec_Journal_OwnershipIsNotAHubWideDeviceExistenceOracle(t *testing.T) {
 		t.Fatalf("fixture wrong: dave's project is in alice's org")
 	}
 	const daveDev = "dave-laptop-9f21"
-	if rec := secfx4Store(t, h, "GET", "/api/p/"+out.Project.ID+"/store/list", "", c["dave"], daveDev); rec.Code != 200 {
+	if rec := secRegisterDevice(t, h, out.Project.ID, c["dave"], daveDev, "daves-box", "linux"); rec.Code != 200 {
 		t.Fatalf("dave's device sync: %d %s", rec.Code, rec.Body)
 	}
 	if owner, known := srv.Devices.OwnerOf(daveDev); !known || owner != "dave@x.io" {

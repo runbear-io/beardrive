@@ -60,7 +60,7 @@ type BuiltinAuth struct {
 	cli *CLIAuth
 
 	mu         sync.Mutex
-	pinnedBase string               // first observed origin, when BaseURL is unset (see mailBaseURL)
+	warnedBase bool                 // "no auth.base_url" logged once (see mailBaseURL)
 	users      map[string]*authUser // by id
 	tokens     map[string]authToken // by sha256(token)
 
@@ -281,6 +281,9 @@ func (a *BuiltinAuth) ValidateSignupPolicy() error {
 	if a.AllowSignup && len(a.AllowedDomains) == 0 && !a.RequireApproval && !a.RequireVerification {
 		return fmt.Errorf("auth: open self-signup has no gate, so anyone could register any email — set allow_signup:false (invite-only, the default), or add allowed_domains, require_approval, or require_verification")
 	}
+	if a.Mail != nil && a.BaseURL == "" {
+		return fmt.Errorf("auth: smtp is configured but auth.base_url is not — the only other origin a mailed link could carry is the Host header of the request that triggered it, which an anonymous stranger chooses; set auth.base_url to this hub's public origin")
+	}
 	return nil
 }
 
@@ -360,13 +363,15 @@ func (a *BuiltinAuth) issueToken(userID, device string) (string, error) {
 	return tok, nil
 }
 
-func (a *BuiltinAuth) revokeToken(tok string) {
+func (a *BuiltinAuth) revokeToken(tok string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if t, ok := a.tokens[hashToken(tok)]; ok {
-		delete(a.tokens, hashToken(tok))
-		a.killToken(t)
+	t, ok := a.tokens[hashToken(tok)]
+	if !ok {
+		return nil // already gone: the postcondition holds
 	}
+	delete(a.tokens, hashToken(tok))
+	return a.killToken(t)
 }
 
 // killToken ends one credential durably. The delete alone was not durable: its
@@ -425,9 +430,9 @@ func (a *BuiltinAuth) userForToken(tok string) (User, bool) {
 }
 
 // sendVerification emails (or logs) a verification link for the account.
-func (a *BuiltinAuth) sendVerification(r *http.Request, u *authUser) {
+func (a *BuiltinAuth) sendVerification(u *authUser) {
 	tok := a.newGrant("verify", u.ID, 24*time.Hour)
-	link := a.mailBaseURL(r) + "/auth/verify?token=" + tok
+	link := a.mailBaseURL() + "/auth/verify?token=" + tok
 	subject := "Verify your BearDrive account"
 	body := "Confirm your email to activate your BearDrive account:\n\n  " + link +
 		"\n\nThis link is valid for 24 hours. If you didn't sign up, ignore this email."
@@ -602,7 +607,37 @@ func (a *BuiltinAuth) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/reset/confirm", a.pageResetConfirm)
 	mux.HandleFunc("POST /auth/reset/confirm", a.pageResetConfirm)
 	mux.HandleFunc("GET /api/auth/me", a.apiMe)
+	mux.HandleFunc("DELETE /api/auth/token", a.apiRevokeToken)
 	a.cli.Register(mux)
+}
+
+// apiRevokeToken ends the credential the request presents — `bdrive logout` on
+// the wire. The token authenticates its own revocation, so no other permission
+// is involved and nothing else can be revoked with it.
+//
+// Device tokens have no expiry, so without this the documented way to sign a
+// device out ("no longer authenticated to the bdrive server") only rewrote a
+// local file: a lost laptop or a leaked token could be answered only by
+// resetting the account's password hub-wide. The browser half already ended
+// its session server-side.
+func (a *BuiltinAuth) apiRevokeToken(w http.ResponseWriter, r *http.Request) {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		http.Error(w, "a device token is required", http.StatusUnauthorized)
+		return
+	}
+	tok := strings.TrimPrefix(h, "Bearer ")
+	if _, ok := a.userForToken(tok); !ok {
+		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+	if err := a.revokeToken(tok); err != nil {
+		// Reported, never swallowed: a revocation that only happened in
+		// memory is a credential that comes back at the next restart.
+		http.Error(w, "could not revoke the token", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // sessionUser resolves the browser session (cookie only, not Bearer).
@@ -802,7 +837,7 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 		if u := a.verifyPassword(r.FormValue("email"), r.FormValue("password")); u != nil {
 			switch u.Status {
 			case statusUnverified:
-				a.sendVerification(r, u)
+				a.sendVerification(u)
 				errMsg = `<p class="err">Please verify your email first — we've re-sent the link.</p>`
 			case statusPending:
 				errMsg = `<p class="err">Your account is still awaiting administrator approval.</p>`
@@ -874,7 +909,7 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			switch u.Status {
 			case statusUnverified:
-				a.sendVerification(r, u)
+				a.sendVerification(u)
 				authPage(w, "Verify your email", `<p class="msg">Almost there — we sent a verification link to <b>`+
 					html.EscapeString(u.Email)+`</b>.</p><p class="alt">Click it to activate your account. No email on this server? The link is in the server log.</p>`)
 				return
@@ -978,7 +1013,7 @@ func (a *BuiltinAuth) pageReset(w http.ResponseWriter, r *http.Request) {
 		if u != nil {
 			tok := a.newGrant("reset", u.ID, time.Hour)
 			addr := u.Email
-			link := a.mailBaseURL(r) + "/auth/reset/confirm?token=" + tok
+			link := a.mailBaseURL() + "/auth/reset/confirm?token=" + tok
 			subject := "Reset your BearDrive password"
 			body := "Someone (hopefully you) asked to reset the BearDrive password for " + addr +
 				".\n\nReset it here (valid for 1 hour):\n\n  " + link + "\n\nIf this wasn't you, ignore this email."
@@ -1076,35 +1111,29 @@ func requestBaseURL(r *http.Request) string {
 // callers hand the URL back to the caller who chose the host, which is
 // self-inflicted; these two do not.
 //
-// BaseURL is the answer and should be configured (auth.base_url).
+// A configured origin (auth.base_url) is the only trustworthy answer, and it
+// is now required whenever smtp is configured (ValidateSignupPolicy). Two
+// weaker rules were tried and both were the same hole in a different shape:
+// using the request's own host aims the victim's link wherever the requester
+// says, and pinning the first host seen only moves the choice to whoever mails
+// first — on a fresh process that is one anonymous POST, which both picks the
+// origin and picks who receives it.
 //
-// Pinning the first host and reusing it was NOT: whoever mails first chooses
-// the origin of every later mail, so an attacker with an account of her own
-// only has to ask for a reset of her own password, on her own host, before
-// anyone else does — and every reset link the hub mails afterwards, including
-// the owner's, points at her server. With no configured origin the hub has
-// nothing it can trust, so a request's host is used only for the mail that
-// same request triggers, and only while every request agrees on one host. The
-// moment two disagree, someone is choosing: the link goes out root-relative
-// (and the admin is told to configure auth.base_url) rather than aimed
-// somewhere a stranger picked.
-func (a *BuiltinAuth) mailBaseURL(r *http.Request) string {
+// So with no configured origin the hub has nothing it can trust and says so:
+// the link goes out root-relative (usable by hand, and the log names the
+// config that fixes it) rather than aimed somewhere a stranger picked.
+func (a *BuiltinAuth) mailBaseURL() string {
 	if a.BaseURL != "" {
 		return strings.TrimRight(a.BaseURL, "/")
 	}
-	base := requestBaseURL(r)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.pinnedBase == "" {
-		a.pinnedBase = base
+	if !a.warnedBase {
+		a.warnedBase = true
+		log.Print("beardrive: mailed links are root-relative because auth.base_url is not set; " +
+			"configure it with this hub's public origin so reset and verification links are usable")
 	}
-	if a.pinnedBase != base {
-		log.Printf("beardrive: mailed link left relative — this hub has been reached on both %s and %s "+
-			"and auth.base_url is not set; configure it so mailed links have a trustworthy origin",
-			a.pinnedBase, base)
-		return ""
-	}
-	return base
+	return ""
 }
 
 // ---- CLI API ----

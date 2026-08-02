@@ -98,9 +98,17 @@ the folder was renamed or moved.`,
 			// root, so a mount that IS the home makes settings.json an ordinary
 			// top-level file and the first cycle pushes the token to the hub —
 			// and to every teammate's disk.
-			if home, herr := config.Home(); herr == nil && store.UnderRoot(home, folder) {
-				return fmt.Errorf("%s is inside the beardrive home %s, which holds this device's "+
-					"credentials and every project's local data — it is not a project folder", folder, home)
+			//
+			// Both directions: a folder inside the home, and a folder that
+			// CONTAINS it. The second is the same push one level down —
+			// settings.json is then just a file some directories deep, and the
+			// reserved-name rule only knows ".bdrive" while $BDRIVE_HOME is
+			// whatever the operator called it.
+			if home, herr := config.Home(); herr == nil &&
+				(store.UnderRoot(home, folder) || store.UnderRoot(folder, home)) {
+				return fmt.Errorf("%s and the beardrive home %s contain one another; the home holds "+
+					"this device's credentials and every project's local data, so this is not a "+
+					"project folder", folder, home)
 			}
 			if projectID != "" && projectName != "" {
 				return fmt.Errorf("--project and --name are mutually exclusive")
@@ -655,7 +663,6 @@ func tokenGoesTo(rawURL string) bool {
 	}
 	return remote.SameOrigin(rawURL, s.Server)
 }
-
 
 // serverDo sends an API request with this device's token attached, and
 // turns a 401 into a run-bdrive-login hint.

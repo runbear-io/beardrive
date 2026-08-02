@@ -167,7 +167,12 @@ func TestValidateSignupPolicy(t *testing.T) {
 	ok("invite-only", func(a *BuiltinAuth) { a.AllowSignup = false })
 	ok("open+domain", func(a *BuiltinAuth) { a.AllowedDomains = []string{"x.io"} })
 	ok("open+approval", func(a *BuiltinAuth) { a.RequireApproval = true })
-	ok("open+verify+mailer", func(a *BuiltinAuth) { a.RequireVerification = true; a.Mail = &Mailer{Host: "smtp"} })
+	ok("open+verify+mailer", func(a *BuiltinAuth) {
+		a.RequireVerification = true
+		a.Mail = &Mailer{Host: "smtp"}
+		a.BaseURL = "https://hub.example" // a mailer needs a trustworthy origin for its links
+	})
+	bad("mailer-without-base-url", func(a *BuiltinAuth) { a.Mail = &Mailer{Host: "smtp"} })
 	bad("open+no-gate", func(a *BuiltinAuth) { a.AllowSignup = true })
 	bad("verify-without-mailer", func(a *BuiltinAuth) { a.RequireVerification = true })
 }

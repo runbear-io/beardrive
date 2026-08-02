@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 )
@@ -148,7 +149,7 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 	if rs == nil {
 		return
 	}
-	s.observeDevice(r)
+	s.refreshDevice(r)
 	prefix := r.URL.Query().Get("prefix")
 	if prefix != "" && prefix != "journal/" && prefix != "blobs/" &&
 		!strings.HasPrefix(prefix, "journal/") && !strings.HasPrefix(prefix, "blobs/") {
@@ -171,7 +172,7 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	if rs == nil {
 		return
 	}
-	s.observeDevice(r)
+	s.refreshDevice(r)
 	key, ok := s.storeKey(w, r)
 	if !ok {
 		return
@@ -201,7 +202,7 @@ func (s *Server) handleStoreExists(v *volume, w http.ResponseWriter, r *http.Req
 	if rs == nil {
 		return
 	}
-	s.observeDevice(r)
+	s.refreshDevice(r)
 	key, ok := s.storeKey(w, r)
 	if !ok {
 		return
@@ -246,7 +247,7 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 	// separate tenant and the response told him whether it existed. The write
 	// itself is where ownership is enforced, and that is the only place it
 	// needs to be.
-	s.observeDevice(r)
+	s.refreshDevice(r)
 	project := r.PathValue("project")
 	s.reconcileGrants(r.Context(), project, rs.Backend)
 	org := s.orgOf(project)
@@ -322,7 +323,12 @@ func journalOps(key string, tmp *os.File) ([]journal.Op, error) {
 		return nil, err
 	}
 	for _, op := range ops {
-		if !journal.SafePath(op.Path) {
+		// The same two clauses the browser door applies (cleanUploadPath):
+		// SafePath, plus the reserved dirs. Applying only the first here left
+		// /store/* journaling ".git/hooks/pre-commit" with a 200 while /remove
+		// and /shares answered 400 for the same path — so the entry was in the
+		// tree, served to every device, and no request could take it back out.
+		if !journal.SafePath(op.Path) || config.ReservedPath(op.Path) {
 			return nil, fmt.Errorf("journal names an invalid path %q", op.Path)
 		}
 	}
@@ -371,8 +377,14 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// Observed only after the write is authorized: a request that registers
-	// the device it claims to be answers its own ownership question.
-	s.observeDevice(r)
+	// the device it claims to be answers its own ownership question. A journal
+	// write is the only thing that may CLAIM an id — a blob put says nothing
+	// about who a device is, so it refreshes like the read doors.
+	if strings.HasPrefix(key, "journal/") {
+		s.observeDevice(r)
+	} else {
+		s.refreshDevice(r)
+	}
 	project := r.PathValue("project")
 	s.reconcileGrants(r.Context(), project, rs.Backend)
 	org := s.orgOf(project)

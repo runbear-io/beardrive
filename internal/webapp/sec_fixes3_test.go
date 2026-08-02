@@ -138,7 +138,7 @@ func TestSec_Devices_MemberCannotRelabelAnotherMembersDeviceInHistory(t *testing
 		aliceName = "Alice's MacBook"
 		aliceOS   = "darwin 26.1"
 	)
-	if rec := secfx3Sync(t, h, p.ID, c["alice"], aliceDev, aliceName, aliceOS); rec.Code != 200 {
+	if rec := secRegisterDevice(t, h, p.ID, c["alice"], aliceDev, aliceName, aliceOS); rec.Code != 200 {
 		t.Fatalf("alice's own sync: %d %s", rec.Code, rec.Body)
 	}
 	blob := secfx3PutBlob(t, h, p.ID, "alice's notes", c["alice"])
@@ -181,7 +181,7 @@ func TestSec_Devices_MemberCannotRelabelAnotherMembersDeviceInHeat(t *testing.T)
 		aliceDev  = "alice-laptop-4d10"
 		aliceName = "Alice's MacBook"
 	)
-	if rec := secfx3Sync(t, h, p.ID, c["alice"], aliceDev, aliceName, "darwin 26.1"); rec.Code != 200 {
+	if rec := secRegisterDevice(t, h, p.ID, c["alice"], aliceDev, aliceName, "darwin 26.1"); rec.Code != 200 {
 		t.Fatalf("alice's sync: %d %s", rec.Code, rec.Body)
 	}
 	// alice's agent reports a read, so the id becomes an actor in the ledger.
@@ -285,7 +285,7 @@ func TestSec_Store_MemberCannotWriteAPeersJournalByRenamingItself(t *testing.T) 
 	)
 	// Alice's device is known to the hub the only way a device becomes known:
 	// its own sync traffic.
-	if rec := secfx3Sync(t, h, p.ID, c["alice"], aliceDev, aliceName, "darwin 26.1"); rec.Code != 200 {
+	if rec := secRegisterDevice(t, h, p.ID, c["alice"], aliceDev, aliceName, "darwin 26.1"); rec.Code != 200 {
 		t.Fatalf("alice's sync: %d %s", rec.Code, rec.Body)
 	}
 	blob := secfx3PutBlob(t, h, p.ID, "alice's notes", c["alice"])
@@ -500,7 +500,7 @@ func TestSec_Devices_LookupScopeIsTheProjectsOrgNotTheCallers(t *testing.T) {
 		t.Fatal(err)
 	}
 	const daveDev = "dave-box-77aa"
-	if rec := secfx3Sync(t, h, dp.Project.ID, c["dave"], daveDev, "Dave's ThinkPad", "openbsd"); rec.Code != 200 {
+	if rec := secRegisterDevice(t, h, dp.Project.ID, c["dave"], daveDev, "Dave's ThinkPad", "openbsd"); rec.Code != 200 {
 		t.Fatalf("dave's sync: %d %s", rec.Code, rec.Body)
 	}
 

@@ -155,6 +155,24 @@ func normalizeInclude(include []string) []string {
 	return include
 }
 
+// mountLivesAt reports whether path still holds the config of mount id.
+func mountLivesAt(path, id string) bool {
+	p, ok, err := LoadProject(path)
+	return err == nil && ok && p.ID == id
+}
+
+// samePath reports whether two spellings name the same directory (macOS
+// /var vs /private/var, a symlinked home): a spelling difference is not a
+// move, and must not read as one in either direction.
+func samePath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	return err1 == nil && err2 == nil && ra == rb
+}
+
 // SaveProject writes <folder>/.bdrive/config.json, assigning a mount ID on
 // first save.
 func SaveProject(folder string, p Project) (Project, error) {
@@ -180,6 +198,19 @@ func ResolveMount(folder string) (Project, bool, error) {
 		return p, true, err
 	}
 	mi, registered := mounts[p.ID]
+	// The self-heal follows a mount that MOVED, and .bdrive/config.json
+	// travels with the folder — a clone, an unpacked archive, a colleague's
+	// copy — so "some folder carries this id" is not "this mount is now
+	// there". If the recorded path still holds this mount's own config, the
+	// mount did not move and the arriving folder is a copy: re-pointing the
+	// row would hand the real project's Path, Volume and Remote to it, and
+	// `bdrive resume` (and the login autostart) start the daemon from that
+	// row. Enrolling a folder is what `bdrive init` is for.
+	if registered && !samePath(mi.Path, folder) && mountLivesAt(mi.Path, p.ID) {
+		return p, false, fmt.Errorf("%s carries the settings of project %s, which this device already "+
+			"syncs at %s — a copy of a project folder is not that project; run `bdrive init` here to "+
+			"connect this folder to a project", folder, p.ID, mi.Path)
+	}
 	if !registered || mi.Path != folder || mi.Volume != p.Volume || mi.Remote != p.Remote {
 		mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote}
 		if err := SaveMounts(mounts); err != nil {

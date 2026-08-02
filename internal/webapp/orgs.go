@@ -226,6 +226,15 @@ func (db *OrgDB) RemoveMember(orgID, email string) error {
 // inherits it — org ownership, and through it admin on every project in the
 // org. An org left with no owner is a recovery problem, not an authorization
 // one.
+// Dropping the sole owner is where this differs from RemoveMember in the other
+// direction too: every org route is gated on RoleOwner and nothing adopts an
+// ownerless org, so an org left with members and no owner can never again gain
+// one, lose one, or change a role. The longest-standing remaining member is
+// promoted instead.
+//
+// ponytail: no join time is recorded per member, so "longest-standing" is the
+// lowest address — deterministic, and the same choice on every replica. Store a
+// joined-at per member if that ever needs to be the real thing.
 func (db *OrgDB) EvictMember(orgID, email string) error {
 	e := normEmail(email)
 	db.mu.Lock()
@@ -234,7 +243,28 @@ func (db *OrgDB) EvictMember(orgID, email string) error {
 	if !ok {
 		return fmt.Errorf("no such organization")
 	}
-	return db.removeLocked(o, e)
+	if o.Members[e] == "" {
+		return nil // already not a member: the postcondition already holds
+	}
+	next := o.clone()
+	delete(next.Members, e)
+	if o.Members[e] == RoleOwner && db.ownerCount(next) == 0 {
+		if heir := lowestMember(next); heir != "" {
+			next.Members[heir] = RoleOwner
+		}
+	}
+	return db.putOrg(o, next)
+}
+
+// lowestMember is the deterministic heir: the lowest address in the org.
+func lowestMember(o Org) string {
+	heir := ""
+	for m := range o.Members {
+		if heir == "" || m < heir {
+			heir = m
+		}
+	}
+	return heir
 }
 
 // removeLocked deletes a member row. Callers hold mu.

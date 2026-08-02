@@ -202,9 +202,9 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	}
 
 	// 2. Pull journals + blobs from other devices.
-	var pulled []journal.Op
+	var pulled, gone []journal.Op
 	if s.Backend != nil {
-		pulled, err = s.pull(ctx)
+		pulled, gone, err = s.pull(ctx)
 		switch {
 		case err == nil:
 		case errors.Is(err, remote.ErrForbidden):
@@ -222,6 +222,34 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		res.PulledOps = len(pulled)
 		for _, op := range pulled {
 			st.Lamport = absorbLamport(st.Lamport, op.Lamport)
+		}
+	}
+
+	// 2b. Re-assert what a peer withdrew. An op this device already applied is
+	// a file on this disk, and a file only leaves a disk because somebody
+	// deleted it — so when a peer republishes its journal without an op we
+	// already put on disk, we restate that op in OUR journal, keeping its
+	// original clock so a genuinely later change still wins replay. The
+	// alternative (refusing the peer's update) leaves this device holding a
+	// state a first-time device can never reach, which is the divergence the
+	// byte-offset resume exists to prevent.
+	if len(gone) > 0 {
+		readopt := make([]journal.Op, 0, len(gone))
+		for _, op := range gone {
+			if op.Kind == journal.KindPut && (op.Blob == "" || !s.Store.HasBlob(op.Blob)) {
+				continue // we cannot stand behind content we do not hold
+			}
+			op.Device, op.DeviceName, op.Author = s.Device.ID, s.Device.Name, s.Device.Author
+			op.Seq = int64(len(myOps)) + int64(len(readopt)) + 1
+			op.Note = "re-asserted: the device that published it withdrew it"
+			readopt = append(readopt, op)
+		}
+		if len(readopt) > 0 {
+			if err := s.Store.AppendOps(s.Device.ID, readopt); err != nil {
+				return nil, fmt.Errorf("append re-asserted ops: %w", err)
+			}
+			myOps = append(myOps, readopt...)
+			res.LocalOps += len(readopt)
 		}
 	}
 
@@ -472,14 +500,64 @@ func opID(op journal.Op) string {
 		op.Kind, op.Path, op.Blob, op.Size, op.Mode)
 }
 
+// sizeGrowth is the headroom a bound gets over the size an object was
+// declared at. Both bodies a device reads off the wire are bounded by what it
+// was TOLD they were: the party serving the bytes must not also choose how
+// many of them the daemon buffers (a journal body went straight into
+// io.ReadAll, and a blob into an unbounded io.Copy in the volume's temp dir,
+// with the hash check that would notice running after the copy — on a 3-second
+// retry loop, forever). The slack is what makes the bound safe for the honest
+// case: a journal legitimately grows between the LIST and the GET, and the
+// next cycle picks up whatever did not fit.
+const sizeGrowth = 1 << 20
+
+func sizeBound(size int64) int64 {
+	if size <= 0 || size > math.MaxInt64-sizeGrowth {
+		return sizeGrowth
+	}
+	return size + sizeGrowth
+}
+
+// withdrawn reports the ops in applied whose (device, seq) slot is no longer
+// present in have at all — an op this device already put on disk that the
+// peer's republished journal simply does not carry any more.
+//
+// It is not a redefinition (redefinesApplied) and not a shrink (the op count
+// can grow at the same time), so neither guard sees it; a peer replaces one
+// applied line with bytes Parse drops, appends two, and a file leaves every
+// teammate's folder with no delete op and nothing in History. Refusing the
+// update instead is not available: a device that synced before the rewrite
+// would then hold a state a device syncing for the first time can never reach
+// (TestSec_Pull_APeerCannotChooseWhichOpsEachDeviceSees), and the peer would
+// be choosing the split again. So the receiver RE-ASSERTS what it applied, as
+// its own op — the one journal it is allowed to write — which both keeps the
+// file and republishes the fact to every other device.
+func withdrawn(have, applied []journal.Op) []journal.Op {
+	if len(applied) == 0 {
+		return nil
+	}
+	slots := make(map[string]bool, len(have))
+	for _, op := range have {
+		slots[opSlot(op)] = true
+	}
+	var out []journal.Op
+	for _, op := range applied {
+		if !slots[opSlot(op)] {
+			out = append(out, op)
+		}
+	}
+	return out
+}
+
 // pull fetches journals that grew on the remote and any blobs we are missing
-// for the new ops. Returns only the ops we had not seen before.
-func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
+// for the new ops. It returns the ops we had not seen before, and any op a
+// peer withdrew from a journal we had already applied (see withdrawn).
+func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) {
 	objs, err := s.Backend.List(ctx, "journal/")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var newOps []journal.Op
+	var newOps, gone []journal.Op
 	for _, o := range objs {
 		name := strings.TrimPrefix(o.Key, "journal/")
 		if !strings.HasSuffix(name, ".jsonl") || strings.Contains(name, "/") {
@@ -499,12 +577,12 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 		}
 		rc, err := s.Backend.Get(ctx, o.Key)
 		if err != nil {
-			return newOps, err
+			return newOps, gone, err
 		}
-		data, err := io.ReadAll(rc)
+		data, err := io.ReadAll(io.LimitReader(rc, sizeBound(o.Size)))
 		rc.Close()
 		if err != nil {
-			return newOps, err
+			return newOps, gone, err
 		}
 		// Resume from a BYTE offset, never from an op count. A peer owns its
 		// journal object and can rewrite it, and Parse drops a line it cannot
@@ -521,7 +599,7 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 		// the rewritten case is only ever slow, never divergent.
 		local, err := os.ReadFile(lp)
 		if err != nil && !os.IsNotExist(err) {
-			return newOps, err
+			return newOps, gone, err
 		}
 		if bytes.Equal(local, data) {
 			continue
@@ -576,8 +654,9 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 			continue // corrupt remote journal; ignore rather than break sync
 		}
 		if err := store.WriteFileAtomic(lp, data, 0o644); err != nil {
-			return newOps, err
+			return newOps, gone, err
 		}
+		gone = append(gone, withdrawn(all, applied)...)
 		newOps = append(newOps, fresh...)
 	}
 
@@ -597,16 +676,16 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, error) {
 		if err != nil {
 			continue
 		}
-		sum, _, err := s.Store.PutBlobReader(rc)
+		sum, _, err := s.Store.PutBlobReader(io.LimitReader(rc, sizeBound(op.Size)))
 		rc.Close()
 		if err != nil {
-			return newOps, err
+			return newOps, gone, err
 		}
 		if sum != op.Blob {
-			return newOps, fmt.Errorf("blob %s corrupt on remote (got %s)", shortSha(op.Blob), shortSha(sum))
+			return newOps, gone, fmt.Errorf("blob %s corrupt on remote (got %s)", shortSha(op.Blob), shortSha(sum))
 		}
 	}
-	return newOps, nil
+	return newOps, gone, nil
 }
 
 // shortSha trims a blob string for a message. Op.Blob is arbitrary JSON off a

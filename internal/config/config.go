@@ -18,7 +18,12 @@ import (
 // Home returns the beardrive home directory ($BDRIVE_HOME or ~/.bdrive).
 func Home() (string, error) {
 	if h := os.Getenv("BDRIVE_HOME"); h != "" {
-		return h, nil
+		// Absolute, always: every caller joins paths onto this or compares
+		// paths against it, and a relative value silently resolves against
+		// whatever working directory the process happens to have — which made
+		// the guard that refuses to mount the home fail open (filepath.Rel of
+		// an absolute path against a relative root is an error).
+		return filepath.Abs(h)
 	}
 	uh, err := os.UserHomeDir()
 	if err != nil {

@@ -124,7 +124,7 @@ func TestSec_Devices_IdCannotBeSquattedBeforeItsOwnerRegisters(t *testing.T) {
 	}
 
 	// Control: an unsquatted id registers to its owner on first sync.
-	if rec := secfixSync(t, h, p.ID, c["alice"], "dev-clean", "alice-mini", "darwin/arm64"); rec.Code != 200 {
+	if rec := secRegisterDevice(t, h, p.ID, c["alice"], "dev-clean", "alice-mini", "darwin/arm64"); rec.Code != 200 {
 		t.Fatalf("control sync: %d %s", rec.Code, rec.Body)
 	}
 	if got, _ := srv.Devices.Get("dev-clean"); got.User != "alice@x.io" || got.Name != "alice-mini" {
@@ -137,7 +137,7 @@ func TestSec_Devices_IdCannotBeSquattedBeforeItsOwnerRegisters(t *testing.T) {
 		t.Fatalf("dave's sync: %d %s", rec.Code, rec.Body)
 	}
 	// Alice's real laptop syncs her own project for the first time.
-	if rec := secfixSync(t, h, p.ID, c["alice"], id, "alice-macbook", "darwin/arm64"); rec.Code != 200 {
+	if rec := secRegisterDevice(t, h, p.ID, c["alice"], id, "alice-macbook", "darwin/arm64"); rec.Code != 200 {
 		t.Fatalf("alice's sync: %d %s", rec.Code, rec.Body)
 	}
 
@@ -168,7 +168,7 @@ func TestSec_Devices_SquattedIdStillCountsItsOwnersReads(t *testing.T) {
 		t.Fatalf("dave's sync: %d %s", rec.Code, rec.Body)
 	}
 	// Alice's laptop syncs her project, then reports what her agent read.
-	if rec := secfixSync(t, h, p.ID, c["alice"], id, "alice-macbook", "darwin/arm64"); rec.Code != 200 {
+	if rec := secRegisterDevice(t, h, p.ID, c["alice"], id, "alice-macbook", "darwin/arm64"); rec.Code != 200 {
 		t.Fatalf("alice's sync: %d %s", rec.Code, rec.Body)
 	}
 	rec := secfixDo(t, h, "POST", "/api/p/"+p.ID+"/reads",
@@ -201,8 +201,8 @@ func TestSec_Devices_ConcurrentRegistrationLeavesOneConsistentOwner(t *testing.T
 	var wg sync.WaitGroup
 	for i := 0; i < 24; i++ {
 		wg.Add(2)
-		go func() { defer wg.Done(); secfixSync(t, h, p.ID, c["alice"], id, "alice-macbook", "darwin/arm64") }()
-		go func() { defer wg.Done(); secfixSync(t, h, dp.ID, c["dave"], id, "daves-squat", "evil/os") }()
+		go func() { defer wg.Done(); secRegisterDevice(t, h, p.ID, c["alice"], id, "alice-macbook", "darwin/arm64") }()
+		go func() { defer wg.Done(); secRegisterDevice(t, h, dp.ID, c["dave"], id, "daves-squat", "evil/os") }()
 	}
 	wg.Wait()
 

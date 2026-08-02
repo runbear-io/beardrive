@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -107,11 +109,33 @@ With no argument the remembered server is used, or ` + config.DefaultServer + `.
 	return c
 }
 
-// logoutNote is printed after every logout. It must stay honest: there is no
-// device-list page and no revoke route on the hub, and device tokens carry no
-// expiry (see internal/webapp/authlocal.go authToken) — logout only rewrites
-// the local settings file. login_test.go guards the wording.
-const logoutNote = "note: the token is only cleared locally — the server still accepts it, and there is no way to revoke it yet"
+// logoutNote is printed after every logout. It must stay honest: there is
+// still no device-list page and device tokens carry no expiry (see
+// internal/webapp/authlocal.go authToken), and a daemon already running keeps
+// the copy it started with until it exits. login_test.go guards the wording.
+const logoutNote = "note: a sync daemon already running keeps its own copy of the token until it exits (`bdrive stop`)"
+
+// revokeOnServer ends this device's token on the hub. The token authenticates
+// its own revocation, so signing out needs nothing else.
+func revokeOnServer(server, token string) error {
+	req, err := http.NewRequest(http.MethodDelete, server+"/api/auth/token", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := initClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil // the hub does not know this credential: already ended
+	}
+	if resp.StatusCode != http.StatusOK {
+		return httpBodyError(resp)
+	}
+	return nil
+}
 
 func logoutCmd() *cobra.Command {
 	var forget bool
@@ -137,6 +161,17 @@ Your synced folders are untouched; this only affects this device's session.`,
 				return nil
 			}
 			who, server := settings.Email, settings.Server
+			// End it on the hub FIRST, and say so when that fails: a token
+			// cleared only locally is a live credential with nobody watching
+			// it — the case an operator reaches for this command in (a lost
+			// laptop, a token in a log) is exactly the one where the local
+			// file no longer matters.
+			if settings.Token != "" && server != "" {
+				if err := revokeOnServer(server, settings.Token); err != nil {
+					fmt.Printf("warning: could not end this token on %s: %v\n", server, err)
+					fmt.Println("         it is cleared locally but the server may still accept it; run `bdrive logout` again when the server is reachable")
+				}
+			}
 			settings.Token, settings.Email, settings.Name = "", "", ""
 			if forget {
 				settings.Server = ""
@@ -268,8 +303,21 @@ func browserLogin(server, loginPath string) (string, serverUser, error) {
 	var stateBuf [16]byte
 	rand.Read(stateBuf[:])
 	state := hex.EncodeToString(stateBuf[:])
+	// PKCE (RFC 7636, and RFC 8252 for exactly this loopback flow). `state`
+	// binds nothing: it is printed to stdout and handed to `open`/`xdg-open`
+	// as argv[1], so every local account can read it with `ps` — and with it
+	// and the listener port, any local process can walk a sign-in of ITS OWN
+	// account into this CLI's callback, after which the user's folders sync
+	// into somebody else's project. The verifier never leaves this process,
+	// so a code minted for any other flow cannot be redeemed here.
+	var verifierBuf [32]byte
+	rand.Read(verifierBuf[:])
+	verifier := hex.EncodeToString(verifierBuf[:])
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 	redirect := fmt.Sprintf("http://%s/callback", ln.Addr().String())
-	loginURL := fmt.Sprintf("%s%s?redirect=%s&state=%s", server, loginPath, redirect, state)
+	loginURL := fmt.Sprintf("%s%s?redirect=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
+		server, loginPath, redirect, state, challenge)
 
 	codeCh := make(chan string, 1)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +337,9 @@ func browserLogin(server, loginPath string) (string, serverUser, error) {
 	defer srv.Shutdown(context.Background())
 
 	fmt.Println("opening your browser to sign in (sign up there if you don't have an account):")
-	fmt.Println("  " + loginURL)
+	// The path came from the hub's /api/config — the first thing a server we
+	// have never talked to gets to print on this machine.
+	fmt.Println("  " + safeField(loginURL, 512))
 	if err := openBrowser(loginURL); err != nil {
 		// The loopback callback only works from a browser on this machine, so
 		// a URL the user pastes elsewhere would dead-end — use the code flow.
@@ -302,14 +352,16 @@ func browserLogin(server, loginPath string) (string, serverUser, error) {
 		if code == "" {
 			return "", serverUser{}, fmt.Errorf("sign-in was rejected")
 		}
-		return exchangeCode(server, code)
+		return exchangeCode(server, code, verifier)
 	case <-time.After(5 * time.Minute):
 		return "", serverUser{}, errors.New("timed out waiting for the browser sign-in (try `bdrive login --device`)")
 	}
 }
 
-func exchangeCode(server, code string) (string, serverUser, error) {
-	body, _ := json.Marshal(map[string]string{"code": code, "device": deviceName()})
+func exchangeCode(server, code, verifier string) (string, serverUser, error) {
+	body, _ := json.Marshal(map[string]string{
+		"code": code, "device": deviceName(), "code_verifier": verifier,
+	})
 	resp, err := initClient.Post(server+"/api/auth/exchange", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", serverUser{}, err

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 // Read telemetry: who consumes what, aggregated. Together with the write
@@ -576,7 +578,10 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		// character (a NUL above all) is rejected outright by Postgres, and a
 		// row the store will never accept has to be refused here rather than
 		// discovered at flush time.
-		if e.Path == "" || strings.Contains(e.Path, "..") || hasControlChars(e.Path) {
+		// journal.SafePath is the rule, in the one place it is defined. This
+		// was a fourth copy of it, and it disagreed in both directions: it
+		// accepted "/etc/passwd", "a//b" and "./a", and refused "my..file".
+		if !journal.SafePath(e.Path) {
 			continue
 		}
 		if !mine {

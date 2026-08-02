@@ -37,10 +37,10 @@ func secjrnHub(t *testing.T) (http.Handler, *Server, map[string]*http.Cookie, Pr
 // X-Bdrive-Device headers that populate the hub's device registry.
 func secjrnSync(t *testing.T, h http.Handler, project, dev, name, os string, c *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
-	sha := shaOf("hello " + dev)
+	// A device becomes known by pushing its own journal — a blob put says
+	// nothing about who a device is and no longer claims an id.
 	req := httptest.NewRequest("PUT",
-		"/api/p/"+project+"/store/object?key=blobs/"+sha,
-		strings.NewReader("hello "+dev))
+		"/api/p/"+project+"/store/object?key=journal/"+dev+".jsonl", nil)
 	req.Header.Set("X-Bdrive-Device", dev)
 	req.Header.Set("X-Bdrive-Device-Name", name)
 	req.Header.Set("X-Bdrive-Os", os)
