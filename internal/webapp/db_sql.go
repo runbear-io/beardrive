@@ -190,12 +190,20 @@ func (s *sqlMetaStore) migrate() error {
 	}
 	// Columns added after the tables shipped. CREATE TABLE IF NOT EXISTS does
 	// nothing for an existing table, so these need a real (idempotent) ALTER.
-	return s.addColumns("projects", map[string]string{
+	if err := s.addColumns("projects", map[string]string{
 		"description":   `TEXT NOT NULL DEFAULT ''`,
 		"icon":          `TEXT NOT NULL DEFAULT ''`,
 		"creator":       `TEXT NOT NULL DEFAULT ''`,
 		"default_level": `TEXT NOT NULL DEFAULT ''`,
 		"template":      `TEXT NOT NULL DEFAULT ''`,
+	}); err != nil {
+		return err
+	}
+	// A member row's join time. Rows written before it carry '' — the zero
+	// time — which is what makes them the longest-standing members there are,
+	// and that is the right answer for rows that predate the column.
+	return s.addColumns("org_members", map[string]string{
+		"joined": `TEXT NOT NULL DEFAULT ''`,
 	})
 }
 
@@ -448,6 +456,7 @@ func (r *sqlOrgRepo) Load() ([]Org, []OrgInvite, error) {
 		}
 		o.Created = tdec(created)
 		o.Members = map[string]string{}
+		o.Joined = map[string]time.Time{}
 		orgs[o.ID] = &o
 		order = append(order, o.ID)
 	}
@@ -456,18 +465,19 @@ func (r *sqlOrgRepo) Load() ([]Org, []OrgInvite, error) {
 		return nil, nil, err
 	}
 
-	rows, err = r.s.db.Query(`SELECT org, email, role FROM org_members`)
+	rows, err = r.s.db.Query(`SELECT org, email, role, joined FROM org_members`)
 	if err != nil {
 		return nil, nil, err
 	}
 	for rows.Next() {
-		var org, email, role string
-		if err := rows.Scan(&org, &email, &role); err != nil {
+		var org, email, role, joined string
+		if err := rows.Scan(&org, &email, &role, &joined); err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
 		if o := orgs[org]; o != nil {
 			o.Members[email] = role
+			o.Joined[email] = tdec(joined)
 		}
 	}
 	rows.Close()
@@ -514,8 +524,8 @@ func (r *sqlOrgRepo) PutOrg(o Org) error {
 		return err
 	}
 	for email, role := range o.Members {
-		if _, err := tx.Exec(r.s.q(`INSERT INTO org_members (org,email,role) VALUES (?,?,?)`),
-			o.ID, email, role); err != nil {
+		if _, err := tx.Exec(r.s.q(`INSERT INTO org_members (org,email,role,joined) VALUES (?,?,?,?)`),
+			o.ID, email, role, tenc(o.Joined[email])); err != nil {
 			return err
 		}
 	}

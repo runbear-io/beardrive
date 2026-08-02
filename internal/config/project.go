@@ -206,13 +206,33 @@ func ResolveMount(folder string) (Project, bool, error) {
 	// row would hand the real project's Path, Volume and Remote to it, and
 	// `bdrive resume` (and the login autostart) start the daemon from that
 	// row. Enrolling a folder is what `bdrive init` is for.
-	if registered && !samePath(mi.Path, folder) && mountLivesAt(mi.Path, p.ID) {
+	//
+	// "Still holds a config" alone was too strong in the other direction: it
+	// made the guard a denial primitive with no attacker in it. Anything that
+	// RE-CREATES the recorded path holding this mount's config — a backup
+	// restore, an interrupted `cp -r`, a file-sync client putting a deleted
+	// directory back — stranded the genuinely moved folder, with no way out,
+	// because `bdrive init` (the remedy the error itself names) resolves the
+	// mount before it does anything else and failed identically.
+	//
+	// Both folders can carry byte-identical settings, so the discriminator
+	// cannot be their contents. It is the filesystem's identity for the
+	// directory (dirID): a rename keeps it, a copy never reproduces it. If the
+	// arriving folder IS the directory this row was written for, the mount
+	// moved and the self-heal is exactly right; if it is not, the recorded path
+	// still holding this mount's config means somebody else is claiming the
+	// row. Rows with no recorded identity (written before this, or a platform
+	// that has none) keep the conservative answer.
+	dev, ino := dirID(folder)
+	moved := dev != 0 && dev == mi.Dev && ino == mi.Ino
+	if registered && !samePath(mi.Path, folder) && !moved && mountLivesAt(mi.Path, p.ID) {
 		return p, false, fmt.Errorf("%s carries the settings of project %s, which this device already "+
 			"syncs at %s — a copy of a project folder is not that project; run `bdrive init` here to "+
 			"connect this folder to a project", folder, p.ID, mi.Path)
 	}
-	if !registered || mi.Path != folder || mi.Volume != p.Volume || mi.Remote != p.Remote {
-		mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote}
+	if !registered || mi.Path != folder || mi.Volume != p.Volume || mi.Remote != p.Remote ||
+		mi.Dev != dev || mi.Ino != ino {
+		mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote, Dev: dev, Ino: ino}
 		if err := SaveMounts(mounts); err != nil {
 			return p, true, err
 		}

@@ -32,6 +32,33 @@ func Home() (string, error) {
 	return filepath.Join(uh, ".bdrive"), nil
 }
 
+// ensureHome creates $BDRIVE_HOME and returns it. It is the ONE creator.
+//
+// Every file under this directory is 0600 so no other local account can read
+// this device's project list, its authorship or the signed-in address — but the
+// LISTING is the same metadata and needs no file opened: volumes/<mount-id>/
+// names every project this device syncs, journal/<device>.jsonl names every
+// device in the fleet, and blobs/<aa>/<sha256> answers "does this machine hold
+// the file whose sha256 is X". The two creators used to disagree (0700 here,
+// 0755 in LoadDevice, which runs on essentially every command path) and
+// MkdirAll does not re-mode a directory that already exists, so whichever ran
+// first on a fresh machine decided.
+func ensureHome() (string, error) {
+	home, err := Home()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return "", err
+	}
+	// MkdirAll leaves an existing directory's mode alone, and every install
+	// made before this one created it 0755.
+	if fi, err := os.Stat(home); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		_ = os.Chmod(home, fi.Mode().Perm()&^0o077)
+	}
+	return home, nil
+}
+
 // Device identifies this machine and its operator in journals.
 type Device struct {
 	ID     string `json:"id"`
@@ -53,7 +80,7 @@ func LoadDevice() (Device, error) {
 		}
 	}
 	d := Device{ID: randID(), Name: hostname(), Author: detectAuthor()}
-	if err := os.MkdirAll(home, 0o755); err != nil {
+	if _, err := ensureHome(); err != nil {
 		return Device{}, err
 	}
 	if err := writeJSON(p, d); err != nil {
@@ -105,6 +132,13 @@ type MountInfo struct {
 	Path   string `json:"path"`
 	Volume string `json:"volume,omitempty"`
 	Remote string `json:"remote,omitempty"`
+	// Dev+Ino are the filesystem's identity for Path at the time this row was
+	// written. They are what tells a MOVED folder (rename: same inode, new
+	// path) from a second folder carrying a copy of the same
+	// .bdrive/config.json (new inode). Zero on rows written before this field
+	// existed, and on platforms with no such identity; see dirID.
+	Dev uint64 `json:"dev,omitempty"`
+	Ino uint64 `json:"ino,omitempty"`
 }
 
 func mountsPath() (string, error) {
@@ -140,7 +174,7 @@ func SaveMounts(m map[string]MountInfo) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if _, err := ensureHome(); err != nil {
 		return err
 	}
 	return writeJSON(p, m)

@@ -33,6 +33,12 @@ type Org struct {
 	Name    string            `json:"name"`
 	Members map[string]string `json:"members"` // lowercase email → role
 	Created time.Time         `json:"created"`
+	// Joined records when each member row was first created. It exists for one
+	// decision — who inherits an org whose sole owner is offboarded — and that
+	// decision must not be readable off the address a member typed at signup.
+	// Rows written before this field existed carry a zero time and lose to any
+	// dated row, which is right: they are the oldest members there are.
+	Joined map[string]time.Time `json:"joined,omitempty"`
 }
 
 // OrgInvite is a mint-once join link. Redeeming it while signed in adds the
@@ -104,6 +110,10 @@ func (o Org) clone() Org {
 	for k, v := range o.Members {
 		c.Members[k] = v
 	}
+	c.Joined = make(map[string]time.Time, len(o.Joined))
+	for k, v := range o.Joined {
+		c.Joined[k] = v
+	}
 	return c
 }
 
@@ -128,10 +138,12 @@ func (db *OrgDB) Create(name, ownerEmail string) (Org, error) {
 	}
 	o := Org{
 		ID: "o-" + randHex(4), Name: name,
-		Members: map[string]string{}, Created: time.Now().UTC(),
+		Members: map[string]string{}, Joined: map[string]time.Time{},
+		Created: time.Now().UTC(),
 	}
 	if e := normEmail(ownerEmail); e != "" {
 		o.Members[e] = RoleOwner
+		o.Joined[e] = o.Created
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -200,6 +212,9 @@ func (db *OrgDB) AddMember(orgID, email, role string) error {
 	}
 	next := o.clone()
 	next.Members[e] = role
+	if _, dated := next.Joined[e]; !dated {
+		next.Joined[e] = time.Now().UTC()
+	}
 	return db.putOrg(o, next)
 }
 
@@ -230,11 +245,12 @@ func (db *OrgDB) RemoveMember(orgID, email string) error {
 // direction too: every org route is gated on RoleOwner and nothing adopts an
 // ownerless org, so an org left with members and no owner can never again gain
 // one, lose one, or change a role. The longest-standing remaining member is
-// promoted instead.
-//
-// ponytail: no join time is recorded per member, so "longest-standing" is the
-// lowest address — deterministic, and the same choice on every replica. Store a
-// joined-at per member if that ever needs to be the real thing.
+// promoted instead — by Org.Joined, never by the address string. Round 8's
+// heir was `lowestMember`, the smallest address, so the successor to every org
+// was decided by what a member typed at signup: someone who joined last through
+// an ordinary invite, holding no grant on anything, inherited org ownership and
+// with it admin on every project in the org — triggered by the most routine
+// operator action there is.
 func (db *OrgDB) EvictMember(orgID, email string) error {
 	e := normEmail(email)
 	db.mu.Lock()
@@ -248,20 +264,26 @@ func (db *OrgDB) EvictMember(orgID, email string) error {
 	}
 	next := o.clone()
 	delete(next.Members, e)
+	delete(next.Joined, e)
 	if o.Members[e] == RoleOwner && db.ownerCount(next) == 0 {
-		if heir := lowestMember(next); heir != "" {
+		if heir := earliestMember(next); heir != "" {
 			next.Members[heir] = RoleOwner
 		}
 	}
 	return db.putOrg(o, next)
 }
 
-// lowestMember is the deterministic heir: the lowest address in the org.
-func lowestMember(o Org) string {
-	heir := ""
+// earliestMember is the heir: the member who has been in the org longest, by
+// the join time recorded on the row. Ties (only reachable between rows written
+// before Joined existed, which all carry the zero time) fall back to the lowest
+// address purely so every replica makes the same choice — never as the primary
+// rule, which is what let a newcomer pick an address and inherit the org.
+func earliestMember(o Org) string {
+	heir, when := "", time.Time{}
 	for m := range o.Members {
-		if heir == "" || m < heir {
-			heir = m
+		t := o.Joined[m]
+		if heir == "" || t.Before(when) || (t.Equal(when) && m < heir) {
+			heir, when = m, t
 		}
 	}
 	return heir
@@ -274,6 +296,7 @@ func (db *OrgDB) removeLocked(o Org, e string) error {
 	}
 	next := o.clone()
 	delete(next.Members, e)
+	delete(next.Joined, e)
 	return db.putOrg(o, next)
 }
 

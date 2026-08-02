@@ -225,34 +225,6 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		}
 	}
 
-	// 2b. Re-assert what a peer withdrew. An op this device already applied is
-	// a file on this disk, and a file only leaves a disk because somebody
-	// deleted it — so when a peer republishes its journal without an op we
-	// already put on disk, we restate that op in OUR journal, keeping its
-	// original clock so a genuinely later change still wins replay. The
-	// alternative (refusing the peer's update) leaves this device holding a
-	// state a first-time device can never reach, which is the divergence the
-	// byte-offset resume exists to prevent.
-	if len(gone) > 0 {
-		readopt := make([]journal.Op, 0, len(gone))
-		for _, op := range gone {
-			if op.Kind == journal.KindPut && (op.Blob == "" || !s.Store.HasBlob(op.Blob)) {
-				continue // we cannot stand behind content we do not hold
-			}
-			op.Device, op.DeviceName, op.Author = s.Device.ID, s.Device.Name, s.Device.Author
-			op.Seq = int64(len(myOps)) + int64(len(readopt)) + 1
-			op.Note = "re-asserted: the device that published it withdrew it"
-			readopt = append(readopt, op)
-		}
-		if len(readopt) > 0 {
-			if err := s.Store.AppendOps(s.Device.ID, readopt); err != nil {
-				return nil, fmt.Errorf("append re-asserted ops: %w", err)
-			}
-			myOps = append(myOps, readopt...)
-			res.LocalOps += len(readopt)
-		}
-	}
-
 	// 3. Preserve losing local edits as conflict copies.
 	if len(pulled) > 0 {
 		conflictOps, err := s.conflictCopies(myOps, st.PushedOps, pulled, &st)
@@ -265,6 +237,49 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 			}
 			myOps = append(myOps, conflictOps...)
 			res.Conflicts = len(conflictOps)
+		}
+	}
+
+	// 3b. Re-assert what a peer withdrew. An op this device already applied is
+	// a file on this disk, and a file only leaves a disk because somebody
+	// deleted it — so when a peer republishes its journal without an op we
+	// already put on disk, we restate that op in OUR journal, keeping its
+	// original clock so a genuinely later change still wins replay. The
+	// alternative (refusing the peer's update) leaves this device holding a
+	// state a first-time device can never reach, which is the divergence the
+	// byte-offset resume exists to prevent.
+	//
+	// It runs AFTER conflictCopies, not before it. A re-asserted op carries the
+	// withdrawn op's original — and therefore usually losing — lamport, so as a
+	// member of the unpushed set it was a losing local edit by construction, and
+	// step 3 did exactly what it exists to do: preserved it as a conflict copy.
+	// Net effect, with no local edit on this side at all: a peer made this
+	// device create, sign and push a file at a path that never existed in the
+	// project, holding content the peer chose.
+	if len(gone) > 0 {
+		readopt := make([]journal.Op, 0, len(gone))
+		for _, op := range gone {
+			if !s.stillHold(op, cache) {
+				continue // we cannot stand behind what this folder does not hold
+			}
+			if filter.Skip(op.Path) || neverSync(op.Path) || unsafeRel(op.Path) {
+				// The filter is applied symmetrically in scan and materialize
+				// precisely so a path this device refuses to write is also one
+				// it never publishes. This is a third publishing site and owes
+				// the same rule.
+				continue
+			}
+			op.Device, op.DeviceName, op.Author = s.Device.ID, s.Device.Name, s.Device.Author
+			op.Seq = int64(len(myOps)) + int64(len(readopt)) + 1
+			op.Note = "re-asserted: the device that published it withdrew it"
+			readopt = append(readopt, op)
+		}
+		if len(readopt) > 0 {
+			if err := s.Store.AppendOps(s.Device.ID, readopt); err != nil {
+				return nil, fmt.Errorf("append re-asserted ops: %w", err)
+			}
+			myOps = append(myOps, readopt...)
+			res.LocalOps += len(readopt)
 		}
 	}
 
@@ -518,6 +533,29 @@ func sizeBound(size int64) int64 {
 	return size + sizeGrowth
 }
 
+// stillHold reports whether this folder's own materialization currently stands
+// behind op — the premise step 2b rests on ("an op this device already applied
+// is a file on this disk"). The mount's state cache is the record of what THIS
+// device wrote into THIS folder, so it is the only evidence that the op was
+// applied here; the replayed state is not, since the withdrawal is exactly what
+// changed it.
+//
+// A withdrawn DELETE is never re-asserted. The cache records what is here, never
+// what left, so "this device applied that delete" and "this path never existed
+// in the project" are the same observation — and re-asserting on it let a peer
+// mint deletes of paths that never existed (round 7's inert-op primitive),
+// withdraw them, and grow every teammate's append-only journal by that many ops
+// for one journal PUT each. Withdrawing a delete instead resurrects the file,
+// which only the op's own author can trigger and which they can reach anyway by
+// re-putting the content.
+func (s *Session) stillHold(op journal.Op, cache map[string]store.CachedFile) bool {
+	if op.Kind != journal.KindPut || op.Blob == "" {
+		return false
+	}
+	c, ok := cache[op.Path]
+	return ok && c.Blob == op.Blob && s.Store.HasBlob(op.Blob)
+}
+
 // withdrawn reports the ops in applied whose (device, seq) slot is no longer
 // present in have at all — an op this device already put on disk that the
 // peer's republished journal simply does not carry any more.
@@ -668,6 +706,7 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) 
 	// the next cycle retries, which is this package's posture for everything
 	// transient. Abandoning the loop instead meant one op naming a blob that
 	// was never pushed stopped every complete op behind it from ever landing.
+	var bad error
 	for _, op := range newOps {
 		if op.Kind != journal.KindPut || op.Blob == "" || s.Store.HasBlob(op.Blob) {
 			continue
@@ -682,10 +721,31 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) 
 			return newOps, gone, err
 		}
 		if sum != op.Blob {
-			return newOps, gone, fmt.Errorf("blob %s corrupt on remote (got %s)", shortSha(op.Blob), shortSha(sum))
+			// Report it, but do NOT abandon the batch. Content addressing
+			// already protects the disk (PutBlobReader files bytes under their
+			// COMPUTED hash, so HasBlob(op.Blob) stays false and materializeFile
+			// keeps skipping the path); the check earns its place as the only
+			// SIGNAL that a hub is serving bytes that are not what they are
+			// addressed as, since otherwise the case is indistinguishable from
+			// "not uploaded yet".
+			//
+			// Returning here made that signal a weapon. op.Size bounds the read,
+			// and op.Size is a field the PEER wrote with no relation to the
+			// object it names — so declaring 1 byte for a real 3 MiB blob
+			// truncated an honest read, failed the sha, and dropped every blob
+			// queued BEHIND it in the same batch. The journal is on local disk
+			// by then, so the next cycle yields no new ops and the loop is never
+			// re-entered: one integer in one journal line decided which of a
+			// peer's files each teammate never received. The mismatch is now
+			// remembered and returned once the rest of the batch has been
+			// fetched, so it still lands in res.Offline/OfflineErr.
+			if bad == nil {
+				bad = fmt.Errorf("blob %s corrupt on remote (got %s)", shortSha(op.Blob), shortSha(sum))
+			}
+			continue
 		}
 	}
-	return newOps, gone, nil
+	return newOps, gone, bad
 }
 
 // shortSha trims a blob string for a message. Op.Blob is arbitrary JSON off a
@@ -703,6 +763,12 @@ func shortSha(s string) string {
 // resolves the path itself deterministically; here the device that observed
 // the concurrency preserves the losing version (ours or the pulled one) as a
 // conflict-copy file so no content is silently dropped.
+// It runs BEFORE the re-assertion step on purpose: a re-asserted op is not this
+// device's edit — it carries the withdrawn op's original (and therefore usually
+// losing) lamport — so having it in myOps here made it a losing local unpushed
+// op by construction, and a peer with no collision at all could make a victim
+// author, sign and push a conflict copy at a path that never existed, holding
+// content the peer chose.
 func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []journal.Op, st *store.SyncState) ([]journal.Op, error) {
 	if pushed > int64(len(myOps)) {
 		pushed = int64(len(myOps))
