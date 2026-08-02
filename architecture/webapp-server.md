@@ -27,9 +27,12 @@ classDiagram
         +Billing func(email) (plan, url, ok)
         +Analytics AnalyticsConfig
         +ShareRPM int
+        +TrustProxy bool
         -vols per-project volume cache
+        -grants reservation ledger
         +Handler() http.Handler
     }
+    note for Server "clientIP is a METHOD now, not a package func: X-Forwarded-For is honored only when TrustProxy is set, and then only its LAST hop. Every caller that gates on an IP — the auth rate limiter, /s/*, device rows, share telemetry — goes through it, so a client-supplied header cannot forge the identity a limiter counts"
 
     class volume {
         -source Source
@@ -51,8 +54,17 @@ classDiagram
         +Backend remote.Backend
         +Device Identity
         +Remove(ctx, path, who, note)
+        +OpenBlob(ctx, sha)
+        -verify(ctx, sha) re-hash on read
+        -loadSourcedOps(ctx) []sourcedOp
         -appendOp(ctx, op)
     }
+    class sourcedOp {
+        +Op journal.Op
+        +From journal key's device
+    }
+    note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
+    note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes on every read whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it"
     class Uploader {
         <<interface>>
         +Upload(ctx, path, r, size, who, note)
@@ -60,11 +72,21 @@ classDiagram
     class DirectUploader {
         <<interface>>
         +SignBlobPut(ctx, blob, size, ttl)
-        +HasBlob(ctx, blob)
+        +BlobSize(ctx, blob) size, exists
         +Commit(ctx, path, blob, size, who, note)
     }
+    note for DirectUploader "BlobSize replaced HasBlob: in direct mode the server never sees the bytes, so the CALLER's declared size was the only number it had to quota-check and journal — and the caller picks it. Size now comes from storage, and the commit journals and charges that"
     note for DirectUploader "Commit's note is &quot;&quot; for an upload and &quot;restore &lt;path&gt;@&lt;sha8&gt;&quot; for POST /api/p/{id}/restore — which is the upload commit minus the upload: find the historical op for (path, sha), journal a NEW put at its blob. Never rewrites a journal."
     note for RemoteSource "Every write ends at appendOp: stamp Seq/Lamport/Time + this server's Identity, append ONE op to journal/&lt;own-device&gt;.jsonl. Commit does that for a put; Remove (POST /api/p/{id}/remove, restore's gates + a snapshot existence check) does it for a delete — the only server path that takes a file away, and itself undone by restoring the DELETED row."
+
+    class journalDoor {
+        <<Server, /api/p/id/store/*>>
+        ownJournal(key) whose journal is this
+        journalOps(key, spooled) parse + validate
+        opsNameTheirAuthor(ops) whose name
+        journalKeepsItsOps(ctx, be, key, ops)
+    }
+    note for journalDoor "store.go — the invariant &quot;each device writes only its own journal&quot; is now ENFORCED here, not assumed. The key must be journal/&lt;canonical device id&gt;.jsonl for the device in the request header, that device must already be owned by the caller (DeviceRegistry.OwnerOf) or the caller must be a project admin (the recovery arm) — the old first-writer-claims arm is gone. Every op must pass journal.SafePath + config.ReservedPath on its Path and journal.SafeText on Note/Author/UserName, must name its own owner's account, and the upload must keep every Seq the stored journal already had: append-only, 409 on truncation. Bodies are spooled first, and a blob PUT must hash to the key it claims"
 
     class Backend {
         <<interface>>
@@ -75,6 +97,7 @@ classDiagram
         +SignPut(ctx, key, size, ttl)
     }
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
+    note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too"
 
     class AuthProvider {
         <<interface>>
@@ -94,17 +117,27 @@ classDiagram
         +RequireApproval bool
         +Admins
         +InviteValid func(token)
+        +BindDevice func(email, r) error
+        +Offboard func(email)
+        +BaseURL string
+        +Seniority() []string
         -store AccountRepo
         -users, tokens, pending
         -cli CLIAuth
+        -refresh re-reads the store before every decision
     }
+    note for BuiltinAuth "Revocation is now a real edge, not a cookie change: revokeTokensFor / revokeGrantsForLocked kill every device token and pending CLI grant an account holds, DELETE /api/auth/token revokes one by name, and the same path runs on offboarding. BaseURL replaces trusting the request's Host when composing a reset or verification link — a mail link built from an attacker's Host header is a credential delivered to the attacker"
     class CLIAuth {
         +Register(mux)
         -session func(r) User
-        -issue func(w, user, device)
+        -issue func(w, r, user, device)
         -pending map~cliGrant~
+        -pkceOK(challenge, verifier)
+        -takeGranted single-use, one lock
+        -atGrantCap per-IP and global caps
     }
     note for CLIAuth "The paths bdrive login POSTs by name, served the same way for every provider: /auth/cli, /auth/device/&lt;token&gt;, /api/auth/exchange, /api/auth/device/start, /api/auth/device/poll."
+    note for CLIAuth "The loopback flow is PKCE (S256) with NO compatibility arm — a grant without a challenge is refused, because the code rides in a URL the browser and anything watching it can see. cliGrant now separates the LINK the human opens from the credential the CLI polls with, takeGranted consumes a grant inside one critical section (peek-then-take let two pollers win the same code), and pending grants are capped globally and per IP with heaviest-first eviction so the map is not a free memory sink"
     class Mailer
     class User {
         +ID +Email +Name +Admin
@@ -123,10 +156,23 @@ classDiagram
     class OrgDB {
         -repo OrgRepo
         -byID, invites
+        -seniority func() []string
+        +EvictMember(org, email)
+        +SetSeniority(f)
+        -heir(o) promotes an owner
+        -refresh re-reads the store before every decision
     }
     class Org {
         +ID +Name +Members email→role +Created
+        +Joined email→when
     }
+    class offboard {
+        <<Server, orgs.go>>
+        drop every project grant
+        Devices.Release(email)
+        evict from every org
+    }
+    note for offboard "Deleting an account used to leave its access behind: project grants keyed by email, device rows that still owned journals, org memberships. offboard is the one gesture that unwinds all three, and the two tiny interfaces it goes through (orgEvictor, seniorityLister) keep BuiltinAuth and OrgDB from importing each other. EvictMember has no last-owner guard — it promotes an heir instead: earliest Org.Joined, ties broken by account seniority, and no orphan org if there is no evidence"
     class OrgInvite {
         +Token +Org +Creator +Expires +Uses
     }
@@ -165,25 +211,50 @@ classDiagram
         otherwise → none
     }
     note for projectPerm "perms.go — the single authorization ladder. proj(level, h) in server.go is the one choke point: every per-project route declares its level at registration."
+    note for projectPerm "Both escape hatches are closed: a project with no org, or naming an org that no longer exists, resolves to none instead of falling through to a default, and org membership is checked BEFORE an explicit grant — so a grant left behind by a removed member is no longer a way back in"
 
     class ShareDB {
         -repo ShareRepo
         -byToken
         +Create +Get +Revoke +SetExpiry
+        -refresh re-reads the store before every decision
     }
+    note for ShareDB "A share is now re-checked at READ time, not only at mint time: shareCreatorStillBelongs refuses /s/&lt;token&gt; once its creator has left the project's org, so a link cannot outlive the access that justified it"
+
+    class sandboxInline {
+        <<Server, every bytes-out route>>
+        inlineMarkup(ct) / inlineType(ct)
+        nosniff always
+        CSP sandbox allow-scripts for markup
+        setContentLength from the stream
+        storageErr logs detail, says little
+    }
+    note for sandboxInline "One helper for every route that returns stored bytes — serveBlob, render, a historical version, the history blob view, and /s/*. Uploaded HTML/SVG/XML is a document a member can author and another member will open on the hub's origin; the sandbox header is what keeps it from acting as the hub. Length is measured from the stream rather than trusting a recorded FileInfo.Size"
     class Share {
         +Token +Project +Path +Creator +Expires
     }
 
     class DeviceRegistry {
         -repo DeviceRepo
-        -byID
+        -byKey devKey → row
+        -latest id → newest key
         +Observe(DeviceInfo)
+        +Bind(user, d, visible) error
+        +Release(user)
+        +OwnerOf(id) owner, known
+        +MayActAs(user, id) bool
+        +LookupIn(id, allowed) DeviceInfo
         -refresh re-reads the store before every decision
     }
-    class DeviceInfo {
-        +ID +Name +OS +User +IP +LastSeen
+    class devKey {
+        +User account email
+        +ID device id
     }
+    class DeviceInfo {
+        +ID +Name +OS +User +IP
+        +FirstSeen +LastSeen
+    }
+    note for DeviceRegistry "A device is keyed by (account, id), not by id alone — two accounts naming the same id hold two independent rows, so nothing a stranger sends can overwrite yours. Hub-wide ownership is FIRST CLAIM WINS, decided by FirstSeen. Bind, at token issuance, is the only thing that creates a row for an id that has never synced: it refuses an id another account already owns when the caller can see that account (same org) and otherwise binds nothing and says nothing, so the error is never a cross-org existence oracle. OwnerOf is the write gate the /store journal door asks; MayActAs is the looser telemetry gate (mine, or unclaimed); Release is offboarding's half. IDs are shape-checked and lower-cased at one door (deviceID), so case alone can't fork an identity"
 
     class ReadLedger {
         -repo ReadRepo
@@ -207,6 +278,20 @@ classDiagram
     }
     class UnlimitedQuota
 
+    class grant {
+        +project +org +key
+        +size +expires
+    }
+    class reservations {
+        <<Server, reserve.go>>
+        reserve / reserveIfFits(org, size, ttl)
+        reservedBytes(org) / outstandingLocked
+        claimGrant(project, key)
+        reconcileGrants(ctx, project, be)
+        dropStaleLocked
+    }
+    note for reservations "The seam between a presigned URL and the plan it spends. CheckWrite alone answered per request, so N concurrent signs each passed against the same free space and the org wrote N times its quota. Every write door now charges size + reservedBytes(org), reserveIfFits is the compare-and-set, and a signed-but-unspent grant expires. reconcileGrants asks the backend whether the blob actually landed and either RecordUsage-s it or gives the space back — the reservation is a hold, never the accounting"
+
     class AnalyticsConfig {
         +Key string
         +Host string
@@ -223,6 +308,19 @@ classDiagram
     Server o-- ShareDB
     Server o-- ReadLedger
     Server o-- QuotaProvider
+    Server *-- reservations : holds before it charges
+    reservations *-- grant
+    reservations ..> QuotaProvider : CheckWrite(size + outstanding), RecordUsage on landing
+    reservations ..> Backend : reconcile — did the blob land
+    Server *-- journalDoor : /store/* is the only way a device writes
+    journalDoor ..> DeviceRegistry : OwnerOf gates the journal key
+    Server *-- sandboxInline : every bytes-out route
+    Server *-- offboard : account deletion
+    offboard ..> OrgDB : orgEvictor
+    offboard ..> ProjectDB : dropPerm
+    offboard ..> DeviceRegistry : Release
+    OrgDB ..> BuiltinAuth : seniorityLister, for the heir
+    BuiltinAuth ..> DeviceRegistry : Bind at token issuance
     Server *-- AnalyticsConfig
     Server *-- volume : per project, cached
     volume o-- Source
@@ -255,6 +353,8 @@ classDiagram
     projectPerm ..> Directory : org role
     ShareDB ..> Share
     DeviceRegistry ..> DeviceInfo
+    DeviceRegistry *-- devKey : (account, id)
+    RemoteSource ..> sourcedOp : attribution comes from the journal key
     ReadLedger ..> ReadStat
     ReadLedger ..> HeatEntry
     QuotaProvider <|.. UnlimitedQuota
@@ -264,6 +364,14 @@ classDiagram
 
 Service structs keep in-memory maps + logic; every change persists as one
 record through a typed repo. Blobs and journals never touch this layer.
+
+Two things changed shape here. Every service now `refresh()`es — re-reads its
+repo before any decision — because a hub is not always one process: with two
+replicas over one Postgres, a revocation or a removal only took effect on the
+replica that served it, and the other kept honoring the old map until restart.
+And a whole-record `Put` is no longer the only write: the row-scoped
+interfaces below let a permission or a membership persist as ONE row, so two
+concurrent grants stop overwriting each other's map.
 
 ```mermaid
 classDiagram
@@ -298,8 +406,29 @@ classDiagram
     }
     class DeviceRepo {
         <<interface>>
-        +Load() +Put
+        +Load() +Put +Delete(user, id)
     }
+
+    class rowScopedProjectRepo {
+        <<optional interface>>
+        +PutMeta(p)
+        +PutPerm(project, email, level)
+    }
+    class rowScopedOrgRepo {
+        <<optional interface>>
+        +PutOrgMeta(o)
+        +PutMember(org, email, role, joined)
+    }
+    note for rowScopedProjectRepo "Type-asserted, not part of ProjectRepo/OrgRepo, so a third-party MetaStore stays valid — the whole-record Put is still the fallback. All four in-tree repos implement them. An empty level or role means delete the row. ProjectDB.put / putPerm and OrgDB.putOrg / putMember write through them and roll the in-memory map back when the write fails, so the map and the store can no longer disagree"
+
+    class storable {
+        <<db.go — one gate>>
+        storable / storableMap
+        checkAccount checkToken checkProject
+        checkOrg checkInvite checkShare
+        checkDevice checkReadStat
+    }
+    note for storable "Called at the top of every repo write in BOTH backends. A NUL byte or invalid UTF-8 in a name is accepted by JSON and rejected by Postgres, so the file backend used to persist rows the SQL backend would refuse — the same hub, migrated, would silently lose them. Refusing at one gate makes the two backends agree on what is storable"
     class ReadRepo {
         <<interface>>
         +Load() +PutBatch +DeleteBatch
@@ -312,9 +441,12 @@ classDiagram
     class sqlMetaStore {
         one database/sql impl
         sqlite (modernc) or postgres (pgx)
-        +addColumns() idempotent ALTER
+        +schema_meta version row
+        +addColumns(cols, guarded) ALTER
+        +device_rows keyed (user, id)
     }
-    note for sqlMetaStore "ProjectRepo.Put is transactional over projects + project_perms (same shape as orgs + org_members); addColumns probes the live column set so a running hub gains projects.creator / default_level on restart."
+    note for sqlMetaStore "ProjectRepo.Put is transactional over projects + project_perms (same shape as orgs + org_members), and is now the FALLBACK path — a single grant goes through PutPerm."
+    note for sqlMetaStore "addColumns takes a second, GUARDED set. Probing the live columns and re-adding a missing one is how a running hub gains a field on restart, but on a security column (projects.default_level) it is also how a downgrade silently re-creates it EMPTY — every project back to its default visibility. A guarded column missing from a non-empty table past schema version 0 is now a hard startup error. device_rows is the new (account, device) primary key, copied once from the old id-keyed devices table, which is left in place"
 
     MetaStore <|.. fileMetaStore
     MetaStore <|.. sqlMetaStore
@@ -338,4 +470,13 @@ classDiagram
     ShareDB o-- ShareRepo
     DeviceRegistry o-- DeviceRepo
     ReadLedger o-- ReadRepo
+
+    fileMetaStore ..> rowScopedProjectRepo : its project and org repos also implement
+    sqlMetaStore ..> rowScopedProjectRepo : its project and org repos also implement
+    fileMetaStore ..> rowScopedOrgRepo
+    sqlMetaStore ..> rowScopedOrgRepo
+    ProjectDB ..> rowScopedProjectRepo : one perm, one row
+    OrgDB ..> rowScopedOrgRepo : one member, one row
+    fileMetaStore ..> storable : before every write
+    sqlMetaStore ..> storable : before every write
 ```

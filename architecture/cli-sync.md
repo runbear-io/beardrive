@@ -26,7 +26,9 @@ classDiagram
     }
     note for Session "syncer also exposes LogEntries (causal order, what bdrive restore walks) plus DisplayTime / SortForDisplay — the newest-first-by-clock order bdrive log prints"
     note for Session "Restore writes a historical blob back into the working folder as an ordinary edit (fetching it from the hub when this device never held it) — the next Cycle journals it like any other change; it takes no lock and appends to no journal itself"
-    note for Session "internal/syncer — scan → commit local ops → pull peer journals → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
+    note for Session "internal/syncer — scan → commit local ops → pull peer journals → re-assert withdrawn ops → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
+    note for Session "pull returns TWO lists: newly seen ops, and `gone` — ops a peer deleted from a journal this device had already applied. A peer cannot un-say what we already hold: stillHold re-signs each still-held put into OUR journal (reassertNote). Pull resumes at a byte offset by prefix-matching the local journal copy, so a peer's growing journal is read once"
+    note for Session "Bounds and hardening applied throughout: sizeBound/pullBound cap a fetch against the op's declared size, maxPeerJournals caps how many peers one cycle reads, absorbLamport/tickLamport refuse an absurd peer clock and saturate instead of wrapping, safeMode masks a materialized file to 0777 &^ 0022 (no setuid/setgid, no group/other write), and safeDevice + os.SameFile keep a peer's device id from naming this device's own journal file"
     note for Session "Prune (bdrive forget / sync --prune, never the daemon) journals a delete for every replayed path the SHARED ignore rules exclude — the include scope is per-device and must never prune it"
 
     class Result {
@@ -39,9 +41,41 @@ classDiagram
 
     class Filter {
         +Skip(rel) bool
+        +SkipUp(rel) bool
         +PruneDir(rel) bool
+        +AcceptRules(text) scope floor
     }
-    note for Filter "ignore.go — .bdriveignore rules (incl. the managed `# bdrive scope` negation block written by init --only / bdrive scope) + a legacy .bdrive include list, applied symmetrically in scan and materialize; Negated() is what makes sync --prune refuse on a scoped project. NOT the whole predicate: walkFolder adds .git/.bdrive pruning, non-regular and .DS_Store/.bdrive-tmp-* skips, and nested-mount handoff"
+    note for Filter "ignore.go — .bdriveignore rules (incl. the managed `# bdrive scope` negation block written by init --only / bdrive scope) + a legacy .bdrive include list; Negated() is what makes sync --prune refuse on a scoped project. NOT the whole predicate: walkFolder adds reserved-dir pruning, non-regular and reserved-name skips, and nested-mount handoff"
+    note for Filter "The rules are NO LONGER symmetric. Skip governs materialize (download); SkipUp governs scan (upload) and adds the accepted-rules floor from AcceptRules: a pulled rule that NARROWS applies in both directions, a pulled `!` that WIDENS applies only downward — so a teammate editing .bdriveignore can never start uploading a file this device had excluded. .bdriveignore itself is always exempt. underMountOnDisk asks config.IsMount about each ancestor, so the project boundary no longer depends on what this walk happened to discover"
+    note for Filter "EscapeIgnore is compile's inverse (escapes the glob metacharacters, the negation and comment markers, and trailing whitespace) so bdrive forget writes a rule matching exactly that path and nothing else"
+
+    class SyncState {
+        +Lamport +PushedOps +Access
+        +IgnoreAccepted +IgnorePulled
+    }
+    note for SyncState "store — IgnoreAccepted is the .bdriveignore scope THIS device consented to; IgnorePulled is the text a peer's version last wrote here. The pair is what tells a locally authored rule change from one that arrived over the wire. vouchedFloor seeds it once on upgrade: keep every exclusion, drop each `!` that no already-materialized path vouches for"
+
+    class SafePath {
+        <<internal/journal — one rule>>
+        +SafePath(p) bool
+        +SafeText(s) bool
+    }
+    note for SafePath "The single text/path rule for the whole repo, replacing three drifting copies. SafePath: relative, clean, no .., not absolute. SafeText: no C0/C1/DEL, no Unicode Cf format chars (bidi overrides, tag block), no U+2028/9 — applied to Note/Author/UserName too, since those are rendered. Both hub ingest doors and the CLI's own terminal output now answer to it"
+
+    class ReservedPath {
+        <<internal/config — one rule>>
+        +ReservedDir(name) .git .bdrive
+        +ReservedName(name) .DS_Store, tmp
+        +AgentHookConfig(p) bool
+        +ReservedPath(p) bool
+    }
+    note for ReservedPath "Case-and-trailing-dot folded, so `.BDRIVE.` is still reserved. AgentHookConfig names the files an agent EXECUTES (.claude/settings.json, .codex/*, .gemini, .hermes, .mcp.json at any depth) — a synced project must never be able to hand a teammate's agent new hooks. Deliberately its own list, not derived from internal/agenthooks: config imports nothing"
+
+    class UnderRoot {
+        <<internal/store — one rule>>
+        +UnderRoot(root, p) bool
+    }
+    note for UnderRoot "path.go — symlink-aware containment: resolves the root and the deepest existing ancestor of p, so a symlinked directory cannot land a materialized write outside the mount. A dangling component is false. Shared by materialize, the file:// backend, templates, scope-file writes and init's BDRIVE_HOME gate"
 
     class walkFolder {
         +walkFolder(folder, filter, fn)
@@ -50,9 +84,10 @@ classDiagram
     note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan and Explain both go through it, so what --explain reports cannot drift from what leaves"
 
     class Explain {
-        +Explain(folder, include) two lists
+        +Explain(folder, include, accepted) two lists
         +NotSyncedFiles(entries) int
     }
+    note for Explain "`accepted` is SyncState.IgnoreAccepted, passed in rather than loaded: Explain opens no volume store, but it must install the same floor SkipUp uses or --explain would describe an upload set that never leaves. bdrive scope reads it best-effort and degrades to no floor"
     class Entry {
         +Path string
         +Files int
@@ -80,6 +115,7 @@ classDiagram
         +Mtime when the file was written
     }
     note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay"
+    note for Op "Op now owns its own JSON: a Path that is not valid UTF-8 rides as a base64 `path_raw` sidecar and is restored only when the lossy form still matches, so one line can never name two different files on two readers. Less falls through to Kind/Path/Blob/Size/Mode, making the order TOTAL — two ops can no longer tie and replay differently per device. Parse skips an undecodable line and drops an unknown Kind instead of failing the whole journal"
 
     class Backend {
         <<interface>>
@@ -96,15 +132,22 @@ classDiagram
 
     Session --> Store : volume state
     Session --> Backend : pull and push
-    Session --> Filter : scan and materialize
+    Session --> Filter : SkipUp on scan, Skip on materialize
     Session --> walkFolder : scan
     Explain --> walkFolder : same predicate
     Explain --> Filter : own fresh instance
     Explain ..> Entry : not-synced lines
-    walkFolder --> Filter : Skip / PruneDir / addNestedMount
+    walkFolder --> Filter : SkipUp / PruneDir / addNestedMount
     Session ..> Op : commits, replays
     Session --> Result
     Store o-- Op : journal files
+    Store *-- SyncState : sync.json
+    Session --> SyncState : reads the floor, records what it accepted
+    SyncState ..> Filter : AcceptRules(IgnoreAccepted)
+    Session ..> SafePath : every path and note, in and out
+    Session ..> UnderRoot : materialize writes and deletes
+    walkFolder ..> ReservedPath : never-sync set
+    Session ..> ReservedPath : neverSync = unsafeRel or reserved
     daemon --> Session : one Cycle per tick
 ```
 
@@ -122,6 +165,7 @@ classDiagram
         resume autostart
     }
     note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"
+    note for Commands "Every peer-authored string status / log / whoami print goes through safeField first — a teammate's file name is attacker-controlled text landing in your terminal, and an escape sequence there rewrites the line above it. login now does PKCE on the loopback callback (no compat arm) and both its client and init's refuse to follow a redirect off the hub's origin with the device token attached"
 
     class Templates {
         <<internal/templates>>
@@ -159,7 +203,12 @@ classDiagram
     class MountRegistry {
         mounts.json
         id → Path Volume Remote
+        + Dev + Ino directory identity
+        +ResolveMount read and self-heal
+        +EnrollMount writes the row
+        +ValidMountID(id) bool
     }
+    note for MountRegistry "ResolveMount and EnrollMount are now two gestures, not one. ResolveMount NEVER creates a row: it self-heals the path only when Dev/Ino prove it is the same directory (a move), so a COPY of a project folder no longer silently enrolls itself as the original and starts writing that project's journal — it errors and points at bdrive init. EnrollMount is ResolveMount plus the write, and startSync is its only caller. ValidMountID keeps a hand-edited id out of a filesystem path (it names a directory under BDRIVE_HOME)"
     class Device {
         device.json
     }
@@ -167,7 +216,7 @@ classDiagram
         settings.json
         server + token + account
     }
-    note for MountRegistry "internal/config — per-device state under BDRIVE_HOME; ResolveMount self-heals the path for enrolled mounts (renames/moves stay free)"
+    note for MountRegistry "internal/config — per-device state under BDRIVE_HOME, which Home() now absolutises and ensureHome() creates 0700 (and tightens if an older version left it 0755): device.json, settings.json and every volume live there"
 
     class AgentHooks {
         Detect / Install / Uninstall / Registered
@@ -177,6 +226,7 @@ classDiagram
         post-read: read-log
     }
     note for AgentHooks "internal/agenthooks — registers per-platform hook commands (claude, codex, gemini, hermes) in each platform's USER config, once per machine; they fire in every folder, every turn, and no-op outside mounts"
+    note for AgentHooks "config.AgentHookConfig is the OTHER half of this story and deliberately NOT this package: it names the files an agent READS hooks from, so sync refuses to carry them. A teammate must never be able to push .claude/settings.json into your mount and have your next turn run their command. The two lists are kept apart on purpose — one is what we write, one is what the agent executes — and internal/config imports nothing to say it"
 
     class PausedMarker {
         volumes/id/paused
@@ -194,7 +244,8 @@ classDiagram
         volumes/id/daemon.lock
         volumes/id/daemon.pid
     }
-    note for DaemonLock "internal/daemon — liveness is the flock, held for the daemon's lifetime; the kernel drops it at death/reboot, so a leftover pid can never read as running (pid is display + signal only). The daemon writes daemon.pid ITSELF, after taking the lock, and removes it on exit: only the lock holder may name itself there, or Stop signals a pid that lost the start race. Start writes no pid — it waits for the lock, so a returned pid always has a daemon behind it"
+    note for DaemonLock "internal/daemon — liveness is the flock, held for the daemon's lifetime; the kernel drops it at death/reboot, so a leftover pid can never read as running. Start writes no pid — it waits for the lock, so a returned pid always has a daemon behind it"
+    note for DaemonLock "The pid Stop SIGNALS now lives INSIDE the flock'd daemon.lock, written by announce after the lock is taken and truncated by release. daemon.pid became display-only and is never signalled: it is an ordinary file in a synced-adjacent tree, so anything that could rewrite it could aim a kill at any process on the machine. The lock is opened O_NOFOLLOW, and an unopenable lock reads as running only when this process is the one holding it"
 
     Commands --> Autostart : autostart install/uninstall (init runs install automatically)
     Autostart ..> Commands : login runs `bdrive resume`
@@ -205,10 +256,10 @@ classDiagram
     syncBlocked --> MountRegistry : reads only, never enrolls
     syncBlocked --> PausedMarker : Paused check
     Commands --> openSession : after the gate
-    openSession --> MountRegistry : path self-heal (enrolled only)
+    openSession --> MountRegistry : ResolveMount — self-heal only, never enrolls
     Commands --> Templates : init --template (seed) / init resume (agent's post-init path)
     Commands --> startSync : init
-    startSync --> MountRegistry : enrolls
+    startSync --> MountRegistry : EnrollMount — the only writer
     startSync --> PausedMarker : clears
     Commands --> PausedMarker : stop sets
     openSession ..> Project : loads
