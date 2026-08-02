@@ -493,7 +493,11 @@ IP), with view/download of any past version (content is
 content-addressed and retained forever; reverting to a version is the next
 phase and the API is already shaped for it). Folder rows have a history
 shortcut for a subtree feed; the topbar button shows the current file's
-versions or the whole project feed.
+versions or the whole project feed. **What's new** is the same feed
+anchored at your last visit — everything that landed while you were away,
+agent runs still folded into one card each. The anchor is a per-browser
+marker written only by that page, so no other view can quietly mark your
+changes as seen.
 
 Hubs also track **read heat**: viewer opens and downloads count as human
 reads, share-link hits as share reads, and agent tool reads (reported by

@@ -98,7 +98,9 @@ func decodeCursor(s string) (journal.Op, error) {
 
 // handleHistory serves ?path=<file> (one file's versions) or
 // ?prefix=<folder/> (everything underneath, "" = the whole project),
-// newest first by wall-clock time, at most ?n= entries (default 100).
+// optionally narrowed to changes strictly newer than ?since=<RFC3339>
+// (what the "What's new" view asks for), newest first by wall-clock time,
+// at most ?n= entries (default 100).
 //
 // Paging: the response carries next_cursor when more entries exist, and
 // ?cursor= resumes just past the entry it was minted from — so history older
@@ -126,6 +128,14 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		var err error
 		if n, err = strconv.Atoi(raw); err != nil || n < 1 {
 			http.Error(w, "invalid n", http.StatusBadRequest)
+			return
+		}
+	}
+	var since time.Time
+	if raw := q.Get("since"); raw != "" {
+		var err error
+		if since, err = time.Parse(time.RFC3339, raw); err != nil {
+			http.Error(w, "invalid since", http.StatusBadRequest)
 			return
 		}
 	}
@@ -163,6 +173,13 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		case path != "" && op.Path != path:
 			continue
 		case path == "" && prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/"):
+			continue
+		// Strictly after, so re-asking with the timestamp of the newest entry
+		// you've already seen doesn't hand it back a second time. Filtering
+		// here — after kinds[], before the sort — means next_cursor is minted
+		// from the filtered list, so paging a since-feed terminates on its own
+		// oldest match.
+		case !since.IsZero() && !op.Time.After(since):
 			continue
 		}
 		// Unregistered device (or volume mode, where Devices is nil): fall back

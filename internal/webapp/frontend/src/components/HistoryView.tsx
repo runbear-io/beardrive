@@ -28,17 +28,25 @@ export function HistoryView(props: {
   onRendered?: () => void;
   restore?: RestoreAction;
   remove?: RemoveAction;
+  /* The three below are what "What's new" (SinceView) needs and /history
+     does not: with all three absent this renders exactly as it always did. */
+  since?: string; // RFC3339; narrows the feed to changes after it
+  emptyText?: string; // "" when a wrapper carries the empty message itself
+  onLoaded?: (n: number, more: boolean) => void; // entries loaded so far, and whether more exist
 }) {
-  const { apiBase, target, isFolder, onMeta, onRendered, restore, remove } = props;
+  const { apiBase, target, isFolder, onMeta, onRendered, restore, remove, since, onLoaded } = props;
   const q = !target
     ? { prefix: "" }
     : isFolder(target)
       ? { prefix: target + "/" }
       : { path: target };
   const qs =
-    "path" in q && q.path !== undefined
+    ("path" in q && q.path !== undefined
       ? "path=" + encodeURIComponent(q.path)
-      : "prefix=" + encodeURIComponent(q.prefix ?? "");
+      : "prefix=" + encodeURIComponent(q.prefix ?? "")) +
+    // Part of qs, so it is also part of the queryKey: a revisit with a fresh
+    // baseline refetches instead of showing the previous visit's cached page.
+    (since ? "&since=" + encodeURIComponent(since) : "");
   // Paged: the server hands back a cursor while entries remain, so a project
   // with thousands of changes is reachable to its first one. Pages accumulate
   // into one array — groupRuns and prevBlob both work over the whole window,
@@ -65,6 +73,9 @@ export function HistoryView(props: {
   useEffect(() => {
     if (data) onRendered?.();
   }, [data, onRendered]);
+  useEffect(() => {
+    if (data) onLoaded?.(data.pages.reduce((n, p) => n + (p.entries || []).length, 0), hasNextPage);
+  }, [data, hasNextPage, onLoaded]);
 
   if (!data) return null;
   const entries = data.pages.flatMap((p) => p.entries || []);
@@ -87,7 +98,9 @@ export function HistoryView(props: {
     entries[i].kind === "delete" ? prevBlob(i) : entries[i].blob;
   return (
     <div className="history">
-      {entries.length === 0 && <div className="empty">No history yet.</div>}
+      {entries.length === 0 && (props.emptyText ?? "No history yet.") !== "" && (
+        <div className="empty">{props.emptyText ?? "No history yet."}</div>
+      )}
       {groupRuns(entries).map((item, n) =>
         item.run ? (
           <RunGroup

@@ -20,9 +20,10 @@ export function projColor(s: string): string {
 }
 
 export interface ProjectMenu {
-  active: "dashboard" | "install" | "history" | "settings" | null;
+  active: "dashboard" | "install" | "since" | "history" | "settings" | null;
   onDashboard: () => void;
   onInstall: () => void;
+  onSince: () => void;
   onHistory: () => void;
   onSettings: () => void;
 }
@@ -113,6 +114,8 @@ export function ProjectNav({
             [
               ["dashboard", "Dashboard", "dashboard", menu.onDashboard],
               ["install", "Installation", "terminal", menu.onInstall],
+              /* the two change-feed views sit together, catch-up first */
+              ["since", "What's new", "clock", menu.onSince],
               ["history", "History", "hist", menu.onHistory],
               ["settings", "Settings", "gear", menu.onSettings],
             ] as const
