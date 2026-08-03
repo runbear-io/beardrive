@@ -378,11 +378,28 @@ func (r *RemoteSource) verify(ctx context.Context, sha string) error {
 	if hex.EncodeToString(h.Sum(nil)) != sha {
 		return fmt.Errorf("stored content does not hash to its key")
 	}
+	// sealAfter, not presignTTL: o.Modified is the STORAGE service's clock and
+	// time.Since is the hub's. A hub whose clock runs ahead of storage would
+	// otherwise overstate the object's age and seal it while a minted URL is
+	// still live — after which a replay is served from cache for the life of
+	// the process. Waiting a multiple of the TTL costs a handful of extra
+	// hashes on a young blob and removes the dependency on the two clocks
+	// agreeing, which nothing here can check.
 	if o, ok, err := r.blobStat(ctx, sha); err == nil && ok &&
-		!o.Modified.IsZero() && time.Since(o.Modified) > r.presignTTL() {
+		!o.Modified.IsZero() && time.Since(o.Modified) > r.sealAfter() {
 		r.sealed.Store(sha, struct{}{})
 	}
 	return nil
+}
+
+// sealAfter is how old a stored blob must be before its verification may be
+// cached: the presign TTL plus a margin for clock skew between the hub and the
+// object store. The margin is the whole point — the correctness argument is
+// "no live URL can exist any more", and that is a claim about time measured on
+// two machines the hub cannot reconcile.
+func (r *RemoteSource) sealAfter() time.Duration {
+	const skewMargin = time.Hour
+	return r.presignTTL() + skewMargin
 }
 
 // Identity is the device identity uploads are journaled under.
