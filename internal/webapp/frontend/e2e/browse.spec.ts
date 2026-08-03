@@ -514,10 +514,14 @@ test("a file the run created can be undone, and comes back", async ({ page }) =>
   // An add has no old bytes to put back — its undo is a removal.
   await expect(created.locator(".hrestore-btn")).toHaveCount(0);
   await expect(created.locator(".hremove-btn")).toBeVisible();
-  // The file it edited still offers a restore.
-  await expect(
-    page.locator('.hrun .hentry.edit:has-text("notes/readme.md") .hrestore-btn'),
-  ).toBeVisible();
+  // The file it EDITED gets no restore either, for the other reason: that
+  // edit is still notes/readme.md's current content, so putting it back could
+  // only write an empty change (BEA-57). The rule reaches inside run cards.
+  // What it does not get is the removal — that is the run-created row's alone.
+  const edited = page.locator('.hrun .hentry.edit:has-text("notes/readme.md")');
+  await expect(edited).toBeVisible();
+  await expect(edited.locator(".hrestore-btn")).toHaveCount(0);
+  await expect(edited.locator(".hremove-btn")).toHaveCount(0);
 
   // It reaches every device, so it always asks first — and Cancel means no.
   await created.locator(".hremove-btn").click();
@@ -560,6 +564,47 @@ test("restoring an old version brings its content back", async ({ page }) => {
   await expect(page.locator(".history .hentry").first()).toContainText("restore restore-me.md@");
   await page.goto(`/${pid}/${path}`);
   await expect(page.locator("#content")).toContainText("The good version");
+});
+
+// BEA-57: the newest row IS the file's current content, so restoring it could
+// only journal a +0 −0 change and sync it to every teammate. The button is
+// gone there, and the server refuses the same call, so no client can write it.
+test("the current version offers no restore", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  // Read-only against the seeded file, so the rest of the suite still finds
+  // guide.md saying "Second version".
+  await page.goto(`/${pid}/history/guide.md`);
+  const rows = page.locator(".history .hentry");
+  await expect(rows.first()).toBeVisible();
+  await expect(rows.first().locator(".hrestore-btn")).toHaveCount(0);
+  await expect(rows.nth(1).locator(".hrestore-btn")).toHaveCount(1);
+  // The API is the real guarantee — the hidden button is just the UI agreeing.
+  const feed = await (await page.request.get(`/api/p/${pid}/history?path=guide.md`)).json();
+  const res = await page.request.post(`/api/p/${pid}/restore`, {
+    data: { path: "guide.md", sha: feed.entries[0].blob },
+  });
+  expect(res.status()).toBe(409);
+  expect(await res.text()).toContain("already the current content");
+  await expect(rows).toHaveCount(2); // nothing was written
+
+  // ...and after a real restore, the row it just created is the new current
+  // version — its own file, since this one writes.
+  const path = "current-version.md";
+  const url = `/api/p/${pid}/upload/content?path=${path}`;
+  await page.request.put(url, { data: "# Current\n\nThe good version.\n" });
+  await page.request.put(url, { data: "# Current\n\nClobbered.\n" });
+  await page.goto(`/${pid}/history/${path}`);
+  const own = page.locator(".history .hentry");
+  await expect(own.first().locator(".hrestore-btn")).toHaveCount(0);
+  await own.last().locator(".hrestore-btn").click(); // the oldest row: the first version
+  await expectToast(page, /Restored current-version\.md/);
+  await expect(own).toHaveCount(3);
+  await expect(own.first().locator(".hrestore-btn")).toHaveCount(0);
+  // The rule is content equality, not row index: the first version now holds
+  // the same bytes as the head, so it stops offering a restore too.
+  await expect(own.nth(1).locator(".hrestore-btn")).toHaveCount(1);
+  await expect(own.nth(2).locator(".hrestore-btn")).toHaveCount(0);
 });
 
 test("a read-only member gets no restore or remove buttons", async ({ page }) => {

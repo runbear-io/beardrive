@@ -382,6 +382,34 @@ func TestSec_Template_SeedingHonoursProjectPermissions(t *testing.T) {
 // and .mcp.json entries rounds 12 and 13 added. Blobs are retained forever and
 // journals are never rewritten, so this residue is what every hub upgraded
 // across those rounds is actually carrying.
+// sec14tPlantNewerJournal lays a LATER op for the same path, under a second
+// device, so the sha returned by sec14tPlantOldJournal is genuinely historical
+// rather than the file's current content.
+func sec14tPlantNewerJournal(t *testing.T, srv *Server, projectID, path, content string) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(content))
+	sha := hex.EncodeToString(sum[:])
+	ctx := context.Background()
+	if err := srv.Root.Put(ctx, projectID+"/blobs/"+sha,
+		strings.NewReader(content), int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+	ops, err := journal.Marshal([]journal.Op{{
+		Seq: 1, Lamport: 2, Time: time.Now().UTC(),
+		Device: "newer-hub", DeviceName: "a later hub",
+		User: "alice@x.io", UserName: "Alice",
+		Kind: journal.KindPut, Path: path, Blob: sha, Size: int64(len(content)),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Root.Put(ctx, projectID+"/journal/newer-hub.jsonl",
+		bytes.NewReader(ops), int64(len(ops))); err != nil {
+		t.Fatal(err)
+	}
+	return sha
+}
+
 func sec14tPlantOldJournal(t *testing.T, srv *Server, projectID, path, content string) string {
 	t.Helper()
 	sum := sha256.Sum256([]byte(content))
@@ -421,8 +449,12 @@ func sec14tPlantOldJournal(t *testing.T, srv *Server, projectID, path, content s
 func TestSec_Restore_CannotRepublishAPathTheHubNowRefusesToCarry(t *testing.T) {
 	h, srv, c, p := permHub(t)
 
-	// Control: an ordinary path, journaled by the same "older hub".
+	// Control: an ordinary path, journaled by the same "older hub". Two
+	// versions, so the restore below is a genuine change — restoring the
+	// CURRENT content is a no-op the hub refuses with 409, which would fail
+	// this test on its control and say nothing about the paths it is about.
 	okSHA := sec14tPlantOldJournal(t, srv, p.ID, "notes/old.md", "# an ordinary old file\n")
+	sec14tPlantNewerJournal(t, srv, p.ID, "notes/old.md", "# the same file, later\n")
 	rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/restore",
 		map[string]string{"path": "notes/old.md", "sha": okSHA}, c["alice"])
 	if rec.Code != 200 {
@@ -449,6 +481,10 @@ func TestSec_Restore_CannotRepublishAPathTheHubNowRefusesToCarry(t *testing.T) {
 func TestSec_Restore_AReadOnlyMemberCannotRepublishHistory(t *testing.T) {
 	h, srv, c, p := permHub(t)
 	sha := sec14tPlantOldJournal(t, srv, p.ID, "notes/old.md", "# v1\n")
+	// A later version, so alice's control restore below is a genuine change.
+	// Restoring the CURRENT content is a no-op the hub refuses with 409, and
+	// this test is about carol's PERMISSION, not about what she restores.
+	sec14tPlantNewerJournal(t, srv, p.ID, "notes/old.md", "# v2\n")
 	if err := srv.Projects.SetPerm(p.ID, "carol@x.io", PermRead); err != nil {
 		t.Fatal(err)
 	}

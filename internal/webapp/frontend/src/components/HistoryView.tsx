@@ -80,11 +80,27 @@ export function HistoryView(props: {
       if (entries[j].path === entries[i].path && entries[j].kind !== "delete") return entries[j].blob;
     }
   };
+  // A path's current content, from the loaded window: entries are strictly
+  // newest-first, so a path's FIRST occurrence decides. A newest-delete leaves
+  // the path out — the file is gone, so putting its content back is a real
+  // change and its rows stay restorable.
+  const headBlob = new Map<string, string>();
+  for (const e of entries) {
+    if (headBlob.has(e.path)) continue;
+    headBlob.set(e.path, e.kind === "delete" ? "" : (e.blob ?? "")); // deleted: nothing is current
+  }
   // What a row restores: its own bytes, or — for a delete — the content it
   // removed, which is how a deleted file comes back. Unlike diffs, this is
   // available in every feed, so the predecessor lookup runs regardless.
-  const restoreSha = (i: number) =>
-    entries[i].kind === "delete" ? prevBlob(i) : entries[i].blob;
+  // Nothing, when those bytes ARE the file's current content: that restore
+  // could only write a +0 −0 change to every device, and the server 409s it
+  // (restore.go), so offering the button would only produce an error. The rule
+  // is content equality, not row index — a hand-reverted older row is just as
+  // much of a no-op — which is exactly what the server checks.
+  const restoreSha = (i: number) => {
+    const sha = entries[i].kind === "delete" ? prevBlob(i) : entries[i].blob;
+    return sha && sha === headBlob.get(entries[i].path) ? undefined : sha;
+  };
   return (
     <div className="history">
       {entries.length === 0 && <div className="empty">No history yet.</div>}
