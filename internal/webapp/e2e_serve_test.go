@@ -233,8 +233,9 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	put("assets/logo.png", png, 24*time.Hour)
 	ops[2].Note = "expanded the guide — https://claude.ai/session/e2e" // the one row with a note expander
 	// One agent run that touched two files — the history feed groups it into
-	// a single card. One file it edited (restorable) and one it created
-	// (which restore cannot undo yet, and says so).
+	// a single card. One file it edited and one it created (whose undo is a
+	// removal, since restore cannot un-create). Both of these ops are the head
+	// of their path, so neither row offers a restore (BEA-57).
 	put("notes/readme.md", "# Notes\n\nRewritten during the agent run.\n", 90*time.Minute)
 	put("runbook.md", "# Runbook\n\nCreated during the agent run.\n", 90*time.Minute)
 	ops[len(ops)-1].Note = "claude-code session 8f21e4"
