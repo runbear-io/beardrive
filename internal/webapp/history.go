@@ -96,9 +96,37 @@ func decodeCursor(s string) (journal.Op, error) {
 	return journal.Op{Time: time.Unix(0, c.T).UTC(), Lamport: c.L, Seq: c.S, Device: c.D}, nil
 }
 
+// parseHistTime accepts RFC3339 or a bare YYYY-MM-DD (UTC). A bare date is
+// the start of that day; `end` bumps it by 24h so ?until=<day> includes the
+// whole day — the bound is then exclusive on both parses, which is what an
+// inclusive "until this date" means once you stop thinking in instants.
+func parseHistTime(s string, end bool) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		if end {
+			t = t.Add(time.Nanosecond) // RFC3339 bound is inclusive to the second
+		}
+		return t.UTC(), true
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if end {
+		t = t.AddDate(0, 0, 1)
+	}
+	return t.UTC(), true
+}
+
 // handleHistory serves ?path=<file> (one file's versions) or
 // ?prefix=<folder/> (everything underneath, "" = the whole project),
 // newest first by wall-clock time, at most ?n= entries (default 100).
+//
+// Reader filters — ?q= (case-insensitive substring of the path), ?user=
+// (exact account), ?since=/?until= (UTC bounds, inclusive at both ends) —
+// compose with each other and with path/prefix. They are applied in the same
+// walk as path/prefix, i.e. BEFORE the sort and the cursor skip, so
+// next_cursor keeps meaning "the next matching entry" and paging under a
+// filter needs no new machinery.
 //
 // Paging: the response carries next_cursor when more entries exist, and
 // ?cursor= resumes just past the entry it was minted from — so history older
@@ -128,6 +156,26 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			http.Error(w, "invalid n", http.StatusBadRequest)
 			return
 		}
+	}
+	needle := strings.ToLower(q.Get("q")) // lowered once, not per op
+	user := q.Get("user")
+	var since, until time.Time
+	// since > until is not an error: it means "nothing", which is what it returns.
+	for _, b := range []struct {
+		name string
+		end  bool
+		into *time.Time
+	}{{"since", false, &since}, {"until", true, &until}} {
+		raw := q.Get(b.name)
+		if raw == "" {
+			continue
+		}
+		t, ok := parseHistTime(raw, b.end)
+		if !ok {
+			http.Error(w, "invalid "+b.name, http.StatusBadRequest)
+			return
+		}
+		*b.into = t
 	}
 	all, err := rs.loadOps(r.Context())
 	if err != nil {
@@ -163,6 +211,14 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		case path != "" && op.Path != path:
 			continue
 		case path == "" && prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/"):
+			continue
+		case needle != "" && !strings.Contains(strings.ToLower(op.Path), needle):
+			continue
+		case user != "" && op.User != user:
+			continue
+		case !since.IsZero() && op.Time.Before(since):
+			continue
+		case !until.IsZero() && !op.Time.Before(until):
 			continue
 		}
 		// Unregistered device (or volume mode, where Devices is nil): fall back

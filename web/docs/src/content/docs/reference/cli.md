@@ -106,6 +106,13 @@ versions in between stay in the history, the restore itself shows up in
 teammate like any other edit — so you can restore away from a restore. The hub
 has the same button on every history row.
 
+The hub's History view narrows the feed by path substring, author and date
+range (dates are UTC days, inclusive at both ends). The filters live in the
+URL — `<project>/history?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31`
+— so a narrowed feed is a link you can send, and it survives reload and Back.
+Filtering happens on the server, so paging through a filtered feed shows every
+match, not just the ones on the first page.
+
 **Restore puts content back; it does not delete.** To un-create a file an agent
 run *created*, open that run in the hub's History view and use the row's
 **undo — remove file** button (it asks first: the file leaves every synced

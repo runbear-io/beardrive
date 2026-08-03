@@ -57,7 +57,7 @@ page.
   any object store suffices.
 - **Change tracking** — `bdrive log` and the web UI's History view show which
   account changed which file, when, from which device. Every version is
-  retained.
+  retained, and the feed narrows by path, author and date range.
 - **Read analytics** — the hub records what humans, share links, and *agents*
   actually read, and surfaces the knowledge nobody maintains.
 - **Cloud-provider agnostic** — a hub stores on Amazon S3, Google Cloud Storage,

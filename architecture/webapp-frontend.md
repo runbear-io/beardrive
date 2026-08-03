@@ -33,8 +33,10 @@ classDiagram
         +parseRoute(url, mode) Route
         +Route.version ?v= sha, one past version
         +Route.trailingSlash notes/ resolves, then replaces to notes
+        +Route.filters q user since until, history feed
+        +historyFilterQuery(filters) / hasHistoryFilters
         +urlForPath(path, projectId, version)
-        +urlForView / encodePath / decodePath
+        +urlForView(view, projectId, target, filters) / encodePath / decodePath
     }
     class nav {
         +navigate(url)
@@ -68,13 +70,14 @@ classDiagram
 
     class components {
         FileView FolderListing FileTree
-        HistoryView HistoryRow DiffView VersionBanner
+        HistoryView HistoryRow HistoryFilters DiffView VersionBanner
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
         Palette shell AccountBar ...
     }
     note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; \"Empty project\" (value \"\") stays preselected so an unpicked create behaves exactly as it did before templates. modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
+    note for components "HistoryFilters drives the SERVER (?q=/?user=/?since=/?until= on the history API), never the loaded page — filtering what is on screen would lie about everything below the fold and break next_cursor. Its state is Route.filters, so a narrowed feed is linkable, survives reload, and Back undoes it; the author list accumulates across fetches, because filtering by one author leaves only their rows loaded"
     note for components "components/ui — shadcn/ui primitives (Radix, copied in), themed from BearDrive tokens in tw.css; rendered markdown is transformed as a string before mounting, link clicks delegated on the container — never patch the dangerouslySetInnerHTML subtree"
 
     class lib {
