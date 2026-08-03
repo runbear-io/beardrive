@@ -110,6 +110,46 @@ func TestRestoreUnknownVersion(t *testing.T) {
 	}
 }
 
+// Restoring the version the file ALREADY has is not a change — it would
+// journal a +0 −0 row and sync it to every device. The guard is narrow: the
+// version below it still restores.
+func TestRestoreNoOpCurrentVersion(t *testing.T) {
+	srv, p, root := newHub(t, true, nil)
+	dir := filepath.Join(root, p.ID)
+	f := newFakeRemoteAt(t, dir)
+	f.put("dev1", "f.md", "v1")
+	f.put("dev1", "f.md", "v2")
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/"
+	before := journalsAt(t, dir)
+
+	rec := do(t, h, "POST", base+"restore", map[string]string{"path": "f.md", "sha": shaOf("v2")})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("restore of the current version: %d %s, want 409", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "already the current content") {
+		t.Fatalf("409 body = %q", rec.Body)
+	}
+	after := journalsAt(t, dir)
+	if len(after) != len(before) {
+		t.Fatalf("a refused restore wrote a journal: %v → %v", before, after)
+	}
+	for name, data := range before {
+		if after[name] != data {
+			t.Fatalf("journal %s changed on a refused restore", name)
+		}
+	}
+
+	// the older version is still restorable — and once it is the current
+	// content, restoring IT becomes the no-op instead.
+	if rec := do(t, h, "POST", base+"restore", map[string]string{"path": "f.md", "sha": shaOf("v1")}); rec.Code != 200 {
+		t.Fatalf("restore of an older version: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", base+"restore", map[string]string{"path": "f.md", "sha": shaOf("v1")}); rec.Code != http.StatusConflict {
+		t.Fatalf("re-restore of what is now current: %d %s, want 409", rec.Code, rec.Body)
+	}
+}
+
 // One writer per journal: the hub appends to its own key and to nothing else.
 func TestRestoreOnlyTouchesOwnJournal(t *testing.T) {
 	srv, p, root := newHub(t, true, nil)
@@ -203,6 +243,12 @@ func TestRestoreAfterDelete(t *testing.T) {
 	}
 	if rec := do(t, h, "GET", base+"file?path=gone.md", nil); rec.Body.String() != "still here" {
 		t.Fatalf("restored content = %q", rec.Body)
+	}
+	// The no-op guard must not fire on a deleted path: replay drops it, so
+	// there is no current content for the blob to equal. Now that the file is
+	// back, though, the same call IS a no-op.
+	if rec := do(t, h, "POST", base+"restore", map[string]string{"path": "gone.md", "sha": shaOf("still here")}); rec.Code != http.StatusConflict {
+		t.Fatalf("restore of the now-current content: %d %s, want 409", rec.Code, rec.Body)
 	}
 }
 

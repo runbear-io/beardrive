@@ -64,6 +64,14 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, "no such version of that file", http.StatusNotFound)
 		return
 	}
+	// A version that is already the file's content is not a change: writing it
+	// would put a +0 −0 row in every teammate's history. journal.Replay sorts
+	// internally, so this works on the unsorted slice loadOps returns — and a
+	// deleted path has no state at all, so restoring it back still goes through.
+	if journal.Replay(all)[p].Blob == req.SHA {
+		http.Error(w, "that version is already the current content of "+p, http.StatusConflict)
+		return
+	}
 	// The blob is already stored, so a restore adds no bytes — but an org
 	// whose plan is blocked must still be blocked from writing.
 	org := s.orgOf(r.PathValue("project"))
