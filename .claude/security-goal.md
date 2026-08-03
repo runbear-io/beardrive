@@ -1437,6 +1437,18 @@ Both conditions are stated in "What counts as done". Neither is met.
 
 ### Known-open, deliberately deferred
 
+**The Postgres backend is tested against ONE shared database.** `metaBackends`
+points every run at whatever `BDRIVE_TEST_POSTGRES` names, and the harness
+DROPs and recreates the schema per test — so two runs against the same DSN
+(two agents, two worktrees, a stray background suite) shred each other's
+tables and produce failures that look exactly like regressions but move from
+run to run. Seen in practice: the same three-test selection went green, green,
+then red on two *different* `TestSec_DB_*` tests while an unrelated
+`go test ./... -run TestSec` shared the DSN. **A red Postgres result is only
+evidence once you have checked `pg_stat_activity` for other clients.** The fix
+is a per-run database or schema; until then, treat the Postgres arm as
+single-writer.
+
 **Round 13 — the runbook URL is pinned to a mutable branch.** The paste prompt's
 target is `raw.githubusercontent.com/…/beardrive/main/INSTALL_FOR_AGENTS.md`,
 referenced from `ConnectGuide.tsx`, `README.md` and the docs. No tag, no SHA, no
