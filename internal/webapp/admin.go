@@ -70,6 +70,13 @@ func (s *Server) handleOrgShares(w http.ResponseWriter, r *http.Request) {
 		if p.Org != orgID {
 			continue
 		}
+		// Org membership is not access to every project in the org: a share
+		// row carries the public /s/ token, so listing one to a member who is
+		// denied that project hands them the file the denial exists to
+		// withhold. Same resolver the per-project /shares route uses.
+		if !atLeast(s.projectPermOf(r, p), PermRead) {
+			continue
+		}
 		for _, sh := range s.Shares.List(p.ID) {
 			j := shareJSON(r, sh)
 			j["project_name"] = p.Name
@@ -129,14 +136,12 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		// Email verification is only a real gate with a mailer; refuse to turn
-		// it on without SMTP rather than silently logging links.
-		if req.RequireVerification && !a.Policy().Mailer {
-			http.Error(w, "email verification needs SMTP configured on the server", http.StatusBadRequest)
-			return
-		}
+		// No gating rule of its own: SetPolicy runs the same validator startup
+		// does, so a browser session cannot reach a posture the binary refuses
+		// to boot in — which is what the mailer check here used to be one third
+		// of. 400, because a refusal here is the policy, not the store.
 		if err := a.SetPolicy(req.RequireVerification, req.RequireApproval); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}

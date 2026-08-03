@@ -195,11 +195,24 @@ function transformHTML(html: string, p: string, apiBase: string): string {
   const parsed = new DOMParser().parseFromString(html, "text/html");
   for (const img of parsed.querySelectorAll("img")) {
     const src = img.getAttribute("src") || "";
-    if (!/^([a-z]+:|\/)/i.test(src)) img.setAttribute("src", fileURL(joinPath(dir, src)));
+    // An inline SVG is a document, not a picture. goldmark's IsDangerousURL
+    // admits any `data:image/…` URL for an image, and svg+xml is the one
+    // member of that family a browser parses as markup — the same property
+    // the server's sandboxInline walls off. Raster data: URLs stay: they are
+    // inert and people do paste them into markdown.
+    if (/^\s*data:image\/svg/i.test(src)) img.removeAttribute("src");
+    else if (!/^([a-z]+:|\/)/i.test(src)) img.setAttribute("src", fileURL(joinPath(dir, src)));
   }
   for (const a of parsed.querySelectorAll("a")) {
     const href = a.getAttribute("href") || "";
-    if (/^https?:/i.test(href)) {
+    // goldmark's data: allowance exists for IMAGES and is applied to <a> as
+    // well, so a rendered document can mount a link whose target is an
+    // attacker-authored document. Browsers refuse a top-level data:
+    // navigation today, which is the only reason this is defence in depth
+    // rather than a live exploit — and it is not a defence this app should be
+    // borrowing. A markdown link is never legitimately a data: URL.
+    if (/^\s*data:/i.test(href)) a.removeAttribute("href");
+    else if (/^https?:/i.test(href)) {
       a.setAttribute("target", "_blank");
       a.setAttribute("rel", "noopener");
     }

@@ -9,6 +9,12 @@ any PR that changes these modules or their relationships.
 classDiagram
     direction LR
 
+    class ErrorBoundary {
+        getDerivedStateFromError
+        renders a page with a way back
+    }
+    note for ErrorBoundary "ErrorBoundary.tsx — the app's floor, mounted in main.tsx ABOVE QueryClientProvider so it covers every route. React unmounts the whole tree when a render throws and nothing catches it, and the address bar keeps the URL, so a reload reproduces the blank page: a permanent client-side DoS that another member's CONTENT can reach (a link in a teammate's markdown reaching decodePath, a folder named `constructor` reaching ProjectIcon). Deliberately the smallest thing that works — no reporting, no retry machine, no per-route boundaries"
+
     class App {
         mode from /api/config
     }
@@ -44,6 +50,7 @@ classDiagram
         +linkProps(href)
         +Redirect
     }
+    note for router "Two lookups on peer-authored path segments are now prototype-safe and one is throw-safe: legacyView() goes through Object.hasOwn, because LEGACY_VIEWS['constructor'] is truthy and turned a folder of that name into a view whose name was a FUNCTION; decodePath falls back to the raw segment instead of letting decodeURIComponent throw URIError out of a useMemo during render. Same shape as ProjectIcon's PROJECT_ICONS lookup in shell.tsx"
     note for nav "nav.ts + router.ts — deliberately NOT a router library (react-router v7 startTransition left stale views); History-API path routing, slashes literal, every user-facing page owns a URL path. A version is not a view route (the first segment after the project id is reserved for view names) — it rides as ?v=, so useLocationPath must snapshot the search too or the URL changes and nothing re-renders"
 
     class api {
@@ -78,6 +85,7 @@ classDiagram
     }
     note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; 'Empty project' (value: the empty string) stays preselected so an unpicked create behaves exactly as it did before templates. modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
     note for components "HistoryFilters drives the SERVER (?q=/?user=/?since=/?until= on the history API), never the loaded page — filtering what is on screen would lie about everything below the fold and break next_cursor. Its state is Route.filters, so a narrowed feed is linkable, survives reload, and Back undoes it; the author list accumulates across fetches, because filtering by one author leaves only their rows loaded"
+    note for components "FileView's transformHTML now drops `data:image/svg` from any rendered img and any `data:` href from any rendered link — goldmark admits them, and an inline SVG is a document rather than a picture (the same property the server's sandboxInline walls off). Insights builds its per-device folder bag with Object.create(null), since folder names come off a peer's journal and one named __proto__ silently emptied the matrix. style.css sets unicode-bidi isolate-override on the peer-authored strings a reader is expected to CHECK (listing rows, breadcrumb, history path/note/device) — journal.SafeText refuses the bidi CONTROLS, but a single strong-RTL LETTER is legal and still reorders a row"
     note for components "components/ui — shadcn/ui primitives (Radix, copied in), themed from BearDrive tokens in tw.css; rendered markdown is transformed as a string before mounting, link clicks delegated on the container — never patch the dangerouslySetInnerHTML subtree"
 
     class lib {
@@ -92,6 +100,7 @@ classDiagram
     }
     note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it"
 
+    ErrorBoundary --> App : wraps the whole tree
     App --> HubApp
     App --> VolumeApp
     HubApp --> Browser

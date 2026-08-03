@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -33,22 +34,43 @@ type BuiltinAuth struct {
 	Admins              map[string]bool // hub admins (lowercase emails): approve users, govern shares
 	Brand               string          // optional name shown on the sign-in page
 
+	// BaseURL is the hub's public origin ("https://drive.acme.com"). Links the
+	// hub MAILS are built from it. Empty → the hub has no origin it can trust
+	// and mailed links stop being absolute as soon as two requests disagree
+	// about the host; see mailBaseURL.
+	BaseURL string
+
 	// InviteValid, when set, reports whether a token is a live org invite.
 	// It lets an invite link bootstrap an account on an invite-only hub
 	// (AllowSignup false) — the one path in without self-signup. Wired to
 	// OrgDB.ValidInvite by the server. Nil → no invite-based signup.
 	InviteValid func(token string) bool
 
+	// Offboard, when set, is called with the address of an account that has
+	// just been removed. Everything downstream of removal is keyed by email
+	// (org role, project grant, share liveness), so without it the grants
+	// outlive the account. Wired to Server.offboard by the server.
+	Offboard func(email string)
+
+	// BindDevice, when set, records that a device id belongs to an account, at
+	// the moment a token is minted for it. It is the ONLY way an ownership row
+	// is created for an id that has never synced — see DeviceRegistry.Bind for
+	// why first-claim-on-write could not be. Wired to Server.bindDevice.
+	BindDevice func(email string, r *http.Request) error
+
 	store AccountRepo
+	ver   versionGate // skips the re-read when the store has not moved
 
 	// cli serves `bdrive login` — the browser and device flows, shared with
 	// every other provider (see CLIAuth), which is why nothing about them
 	// lives in this file.
 	cli *CLIAuth
 
-	mu     sync.Mutex
-	users  map[string]*authUser // by id
-	tokens map[string]authToken // by sha256(token)
+	mu         sync.Mutex
+	warnedBase bool                 // "no auth.base_url" logged once (see mailBaseURL)
+	warnedLoad bool                 // "re-read failed" logged once (see refresh)
+	users      map[string]*authUser // by id
+	tokens     map[string]authToken // by sha256(token)
 
 	// Ephemeral single-use state; a server restart just cancels pending
 	// verifications and resets.
@@ -132,12 +154,75 @@ type authPolicy struct {
 }
 
 // SetPolicy updates the tunable gating toggles and persists them.
+//
+// The prospective policy goes through the startup validator FIRST. The hub
+// starts legally as {allow_signup:true, require_approval:true}; one admin POST
+// used to remove the only gate, and because SetPolicy persists, the hub then
+// survived a restart the same binary refuses to perform — CLAUDE.md states the
+// guarantee as "refuses an ungated open hub rather than silently leaving the
+// door open". Here rather than in handleAdminPolicy because the handler is one
+// caller of this and a second caller would arrive without the check; the
+// handler only had the mailer half of the rule anyway.
 func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error {
+	if err := a.signupPolicyError(requireVerification, requireApproval); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// Persist first: a gating change the store refused must not un-gate the
+	// hub in memory, which is the widening direction — new signups become
+	// active across a restart the store never agreed to.
+	if err := a.store.PutPolicy(authPolicy{RequireVerification: requireVerification, RequireApproval: requireApproval}); err != nil {
+		return err
+	}
 	a.RequireVerification = requireVerification
 	a.RequireApproval = requireApproval
-	return a.store.PutPolicy(authPolicy{RequireVerification: requireVerification, RequireApproval: requireApproval})
+	return nil
+}
+
+// refresh re-reads accounts and device tokens from the store. Callers hold mu.
+//
+// Same defect ProjectDB.refresh closed in round 12, one wall further out: these
+// maps are the CREDENTIAL, not a grant on top of one. Loaded at open and never
+// re-read, a hub running two processes served `bdrive logout` (or an admin's
+// "revoke this device") on whichever process handled it and on no other — the
+// lost laptop's token kept authenticating everywhere else for the life of those
+// processes — and a deleted account could sign in again with its old password
+// as soon as any second-process write rewrote auth.json.
+//
+// Policy is deliberately NOT re-read: the config file overrides it at startup
+// (web.go), and reloading would let the persisted value quietly win back over
+// the value the sysadmin pinned.
+//
+// A store that cannot answer leaves the maps in place — see ProjectDB.refresh
+// for the trade.
+//
+// Gated on the store's change token (Versioned) like ProjectDB.refresh: still
+// a re-read on every authenticated request, but only when something moved.
+func (a *BuiltinAuth) refresh() {
+	token, stale := a.ver.stale(a.store)
+	if !stale {
+		return
+	}
+	users, tokens, _, err := a.store.Load()
+	if err != nil {
+		if !a.warnedLoad {
+			a.warnedLoad = true
+			log.Printf("beardrive: account store re-read failed, serving the last known accounts: %v", err)
+		}
+		return
+	}
+	a.warnedLoad = false
+	a.ver.fresh(token)
+	nextUsers := make(map[string]*authUser, len(users))
+	for _, u := range users {
+		nextUsers[u.ID] = u
+	}
+	nextTokens := make(map[string]authToken, len(tokens))
+	for _, t := range tokens {
+		nextTokens[t.Hash] = t
+	}
+	a.users, a.tokens = nextUsers, nextTokens
 }
 
 func randHex(n int) string {
@@ -178,7 +263,14 @@ func (a *BuiltinAuth) signupInvited(email, name, password string) (*authUser, er
 
 func (a *BuiltinAuth) createAccount(email, name, password string, viaInvite bool) (*authUser, error) {
 	email = strings.TrimSpace(strings.ToLower(email))
-	name = strings.TrimSpace(name)
+	// trimText, not TrimSpace: a display name is peer-written text that travels
+	// as far as a project name does. RemoteSource.Commit stamps it as
+	// Op.UserName on every browser write, so it lands in the journal every
+	// device replays and in the History row whoChanged() renders — carrying the
+	// bidi overrides and C0/C1 runs a NOTE on the same row is refused for, with
+	// no device and no journal access needed. Route it through the choke point
+	// that already normalizes project names rather than growing a second rule.
+	name = trimText(name, 128)
 	if email == "" || !strings.Contains(email, "@") {
 		return nil, fmt.Errorf("a valid email is required")
 	}
@@ -204,12 +296,24 @@ func (a *BuiltinAuth) createAccount(email, name, password string, viaInvite bool
 		status = statusActive
 	}
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	if a.findByEmail(email) != nil {
 		return nil, fmt.Errorf("an account with this email already exists")
 	}
+	// 128 bits, and never one already in use. randHex(4) was 32 bits with no
+	// uniqueness check: no attacker is needed, the birthday bound alone gives
+	// ~1% at 9,300 accounts and even odds at 77,000 — and a collision put a new
+	// account on a live one's id, so the victim's device tokens authenticated
+	// as the newcomer and PutAccount overwrote the victim's row, password hash
+	// included, with no way back. The repos refuse the overwrite too; this is
+	// the half that makes a legitimate signup never ask for it.
+	id := "u-" + randHex(16)
+	for a.users[id] != nil {
+		id = "u-" + randHex(16)
+	}
 	u := &authUser{
-		ID: "u-" + randHex(4), Email: email, Name: name,
+		ID: id, Email: email, Name: name,
 		Pass: string(hash), Status: status, Created: time.Now().UTC(),
 	}
 	a.users[u.ID] = u
@@ -244,10 +348,26 @@ func (a *BuiltinAuth) initialStatus() string {
 //   - Email verification needs a mailer: without SMTP the link only reaches
 //     the server log, so it can't actually gate real users.
 func (a *BuiltinAuth) ValidateSignupPolicy() error {
-	if a.RequireVerification && a.Mail == nil {
+	if err := a.signupPolicyError(a.RequireVerification, a.RequireApproval); err != nil {
+		return err
+	}
+	// Startup only: SetPolicy cannot change either side of this, so refusing a
+	// live toggle over it would be refusing an unrelated misconfiguration.
+	if a.Mail != nil && a.BaseURL == "" {
+		return fmt.Errorf("auth: smtp is configured but auth.base_url is not — the only other origin a mailed link could carry is the Host header of the request that triggered it, which an anonymous stranger chooses; set auth.base_url to this hub's public origin")
+	}
+	return nil
+}
+
+// signupPolicyError is the gating rule applied to a PROSPECTIVE pair of
+// toggles, so the startup check and the live change (SetPolicy) are literally
+// the same predicate rather than two that drift — which is how a browser POST
+// reached a posture the same binary refuses to boot in.
+func (a *BuiltinAuth) signupPolicyError(requireVerification, requireApproval bool) error {
+	if requireVerification && a.Mail == nil {
 		return fmt.Errorf("auth: require_verification needs an smtp mailer — without one the verification link only reaches the server log; configure auth.smtp or turn verification off")
 	}
-	if a.AllowSignup && len(a.AllowedDomains) == 0 && !a.RequireApproval && !a.RequireVerification {
+	if a.AllowSignup && len(a.AllowedDomains) == 0 && !requireApproval && !requireVerification {
 		return fmt.Errorf("auth: open self-signup has no gate, so anyone could register any email — set allow_signup:false (invite-only, the default), or add allowed_domains, require_approval, or require_verification")
 	}
 	return nil
@@ -295,12 +415,14 @@ func (a *BuiltinAuth) isAdmin(email string) bool {
 
 func (a *BuiltinAuth) accountCount() int {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	return len(a.users)
 }
 
 func (a *BuiltinAuth) verifyPassword(email, password string) *authUser {
 	a.mu.Lock()
+	a.refresh()
 	u := a.findByEmail(email)
 	a.mu.Unlock()
 	if u == nil {
@@ -319,6 +441,7 @@ func (a *BuiltinAuth) verifyPassword(email, password string) *authUser {
 func (a *BuiltinAuth) issueToken(userID, device string) (string, error) {
 	tok := "bdt_" + randHex(20)
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	t := authToken{Hash: hashToken(tok), User: userID, Device: device, Created: time.Now().UTC()}
 	a.tokens[t.Hash] = t
@@ -329,20 +452,90 @@ func (a *BuiltinAuth) issueToken(userID, device string) (string, error) {
 	return tok, nil
 }
 
-func (a *BuiltinAuth) revokeToken(tok string) {
+func (a *BuiltinAuth) revokeToken(tok string) error {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
-	if _, ok := a.tokens[hashToken(tok)]; ok {
-		delete(a.tokens, hashToken(tok))
-		a.store.DeleteToken(hashToken(tok))
+	t, ok := a.tokens[hashToken(tok)]
+	if !ok {
+		return nil // already gone: the postcondition holds
+	}
+	delete(a.tokens, hashToken(tok))
+	return a.killToken(t)
+}
+
+// killToken ends one credential durably. The delete alone was not durable: its
+// error was discarded, so a logout or a password reset reported success while
+// the row survived on disk and came back live at the next restart. Voiding the
+// row first is a write that has to succeed for the revocation to be reported
+// as done — a row naming no account resolves to no user in userForToken, so
+// even if the delete then fails the credential is dead. Caller holds a.mu.
+func (a *BuiltinAuth) killToken(t authToken) error {
+	void := t
+	void.User = ""
+	if err := a.store.PutToken(void); err != nil {
+		log.Printf("beardrive: could not revoke a token durably: %v", err)
+		return err
+	}
+	if err := a.store.DeleteToken(t.Hash); err != nil {
+		log.Printf("beardrive: revoked token row left void on disk (delete failed): %v", err)
+	}
+	return nil
+}
+
+// revokeTokensFor kills every credential a user holds — browser sessions and
+// device tokens alike, since both are rows in a.tokens. Used by the password
+// reset: re-keying an account that a thief still has a live token for would
+// recover nothing.
+func (a *BuiltinAuth) revokeTokensFor(userID string) {
+	a.mu.Lock()
+	a.refresh()
+	defer a.mu.Unlock()
+	a.revokeTokensForLocked(userID)
+}
+
+func (a *BuiltinAuth) revokeTokensForLocked(userID string) {
+	if userID == "" {
+		return
+	}
+	for hash, t := range a.tokens {
+		if t.User == userID {
+			delete(a.tokens, hash)
+			a.killToken(t)
+		}
+	}
+	a.revokeGrantsForLocked(userID)
+}
+
+// revokeGrantsForLocked drops every outstanding one-time mail grant an account
+// holds. Callers hold mu.
+//
+// a.pending is a credential table, not a scratchpad: a "reset" grant sets the
+// password without knowing the old one, and a "verify" grant signs its holder
+// straight in (pageVerify's last arm calls startSession) with no password at
+// all, on a 24-hour TTL minted at signup. Revoking the token table and stopping
+// there left both alive across the ONE action a user is told to take when they
+// suspect compromise — so a thief who requested a reset link before the victim
+// recovered still held a password-setting capability afterwards, and a stale
+// verification mail was still a passwordless sign-in.
+//
+// It lives inside revokeTokensForLocked rather than beside its two call sites
+// because "end every credential this account holds" is one operation with one
+// meaning; the reset page and Deny already both ask for it.
+func (a *BuiltinAuth) revokeGrantsForLocked(userID string) {
+	for id, g := range a.pending {
+		if g.user == userID {
+			delete(a.pending, id)
+		}
 	}
 }
 
 func (a *BuiltinAuth) userForToken(tok string) (User, bool) {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	t, ok := a.tokens[hashToken(tok)]
-	if !ok {
+	if !ok || t.User == "" {
 		return User{}, false
 	}
 	u, ok := a.users[t.User]
@@ -353,9 +546,9 @@ func (a *BuiltinAuth) userForToken(tok string) (User, bool) {
 }
 
 // sendVerification emails (or logs) a verification link for the account.
-func (a *BuiltinAuth) sendVerification(r *http.Request, u *authUser) {
+func (a *BuiltinAuth) sendVerification(u *authUser) {
 	tok := a.newGrant("verify", u.ID, 24*time.Hour)
-	link := requestBaseURL(r) + "/auth/verify?token=" + tok
+	link := a.mailBaseURL() + "/auth/verify?token=" + tok
 	subject := "Verify your BearDrive account"
 	body := "Confirm your email to activate your BearDrive account:\n\n  " + link +
 		"\n\nThis link is valid for 24 hours. If you didn't sign up, ignore this email."
@@ -416,6 +609,7 @@ func (a *BuiltinAuth) Policy() SignupPolicy {
 // PendingUsers lists accounts awaiting admin approval, oldest first.
 func (a *BuiltinAuth) PendingUsers() []User {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	var us []*authUser
 	for _, u := range a.users {
@@ -423,7 +617,7 @@ func (a *BuiltinAuth) PendingUsers() []User {
 			us = append(us, u)
 		}
 	}
-	sort.Slice(us, func(i, j int) bool { return us[i].Created.Before(us[j].Created) })
+	sortByAge(us)
 	out := make([]User, len(us))
 	for i, u := range us {
 		out[i] = User{ID: u.ID, Email: u.Email, Name: u.Name}
@@ -434,30 +628,62 @@ func (a *BuiltinAuth) PendingUsers() []User {
 // Approve activates a pending account.
 func (a *BuiltinAuth) Approve(id string) error {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	u, ok := a.users[id]
 	if !ok {
 		return fmt.Errorf("no such account")
 	}
+	// Persist first, apply after: an approval the store refused must not
+	// activate the account in memory — the admin is told it failed while the
+	// account authenticates until the next restart.
+	next := *u
+	next.Status = statusActive
+	if err := a.store.PutAccount(&next); err != nil {
+		return err
+	}
 	u.Status = statusActive
-	return a.store.PutAccount(u)
+	return nil
 }
 
 // Deny removes a pending account.
 func (a *BuiltinAuth) Deny(id string) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if _, ok := a.users[id]; !ok {
+	a.refresh()
+	u, ok := a.users[id]
+	if !ok {
+		a.mu.Unlock()
 		return fmt.Errorf("no such account")
 	}
+	// Persist first: a removal the store refused must not empty the registry
+	// anyway, or the account is gone until the next restart and then signs in
+	// again with its old password.
+	if err := a.store.DeleteAccount(id); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	// Removing the account is not enough on its own: its device tokens and
+	// session cookies stay rows in the token table, dead today only because
+	// userForToken also has to resolve the account — so an id that ever came
+	// back (a restore, a re-created account, a repo that reuses ids) would
+	// resurrect every credential with it.
+	a.revokeTokensForLocked(id)
+	email := u.Email
 	delete(a.users, id)
-	return a.store.DeleteAccount(id)
+	a.mu.Unlock()
+	// Outside the lock, and outside this provider: org roles, project grants
+	// and share liveness all key on the address, not on the account id.
+	if a.Offboard != nil {
+		a.Offboard(email)
+	}
+	return nil
 }
 
 // Accounts returns every account, oldest first (used by the org migration
 // to pick the default org's owner).
 func (a *BuiltinAuth) Accounts() []User {
 	a.mu.Lock()
+	a.refresh()
 	defer a.mu.Unlock()
 	users := make([]*authUser, 0, len(a.users))
 	for _, u := range a.users {
@@ -465,10 +691,59 @@ func (a *BuiltinAuth) Accounts() []User {
 			users = append(users, u)
 		}
 	}
-	sort.Slice(users, func(i, j int) bool { return users[i].Created.Before(users[j].Created) })
+	sortByAge(users)
 	out := make([]User, len(users))
 	for i, u := range users {
 		out[i] = User{ID: u.ID, Email: u.Email, Name: u.Name}
+	}
+	return out
+}
+
+// sortByAge is the one "oldest first" order, and it is a TOTAL order.
+//
+// It used to be `sort.Slice` on Created alone, over a slice built by ranging a
+// map. Created arrived as a column after the fact, so on every upgraded hub
+// every row ties at the zero time, an unstable sort over a random permutation
+// is a random permutation, and the org heir — which reads this list — was
+// therefore drawn by Go map iteration. The ID tiebreak makes the answer a fact
+// about the store instead of a fact about this process.
+//
+// A deterministic order is not the same as evidence of age. Anything that
+// needs the latter asks Seniority.
+func sortByAge(users []*authUser) {
+	sort.SliceStable(users, func(i, j int) bool {
+		if !users[i].Created.Equal(users[j].Created) {
+			return users[i].Created.Before(users[j].Created)
+		}
+		return users[i].ID < users[j].ID
+	})
+}
+
+// Seniority is the oldest-first account order, and it is EMPTY when this hub
+// holds no evidence of age at all.
+//
+// OrgDB.heir breaks a Joined tie on it, and its own doc comment says "with no
+// seniority available there is NO evidence, and the answer is nobody: an
+// ownerless org is a repair a hub admin makes deliberately, while an arbitrary
+// heir is a privilege grant nobody asked for". Handing back a merely
+// deterministic order would satisfy the letter and not the sentence — it would
+// promote the same arbitrary member every time, which is round 8's finding
+// with a different arbitrary key. Rows with no Created stamp are dropped, so
+// an upgraded hub that recorded nothing says nothing.
+func (a *BuiltinAuth) Seniority() []string {
+	a.mu.Lock()
+	a.refresh()
+	defer a.mu.Unlock()
+	dated := make([]*authUser, 0, len(a.users))
+	for _, u := range a.users {
+		if u.active() && !u.Created.IsZero() {
+			dated = append(dated, u)
+		}
+	}
+	sortByAge(dated)
+	out := make([]string, len(dated))
+	for i, u := range dated {
+		out[i] = u.Email
 	}
 	return out
 }
@@ -501,7 +776,37 @@ func (a *BuiltinAuth) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/reset/confirm", a.pageResetConfirm)
 	mux.HandleFunc("POST /auth/reset/confirm", a.pageResetConfirm)
 	mux.HandleFunc("GET /api/auth/me", a.apiMe)
+	mux.HandleFunc("DELETE /api/auth/token", a.apiRevokeToken)
 	a.cli.Register(mux)
+}
+
+// apiRevokeToken ends the credential the request presents — `bdrive logout` on
+// the wire. The token authenticates its own revocation, so no other permission
+// is involved and nothing else can be revoked with it.
+//
+// Device tokens have no expiry, so without this the documented way to sign a
+// device out ("no longer authenticated to the bdrive server") only rewrote a
+// local file: a lost laptop or a leaked token could be answered only by
+// resetting the account's password hub-wide. The browser half already ended
+// its session server-side.
+func (a *BuiltinAuth) apiRevokeToken(w http.ResponseWriter, r *http.Request) {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		http.Error(w, "a device token is required", http.StatusUnauthorized)
+		return
+	}
+	tok := strings.TrimPrefix(h, "Bearer ")
+	if _, ok := a.userForToken(tok); !ok {
+		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+	if err := a.revokeToken(tok); err != nil {
+		// Reported, never swallowed: a revocation that only happened in
+		// memory is a credential that comes back at the next restart.
+		http.Error(w, "could not revoke the token", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // sessionUser resolves the browser session (cookie only, not Bearer).
@@ -548,9 +853,24 @@ func cliBanner(next string) string {
 		`The account you use here is the one it will act as.</p>`
 }
 
-// safeNext keeps post-login redirects on this site.
+// safeNext keeps post-login redirects on this site. A browser fills in the
+// authority slot for anything that looks like "//host", and it does that
+// AFTER stripping tab/CR/LF and after treating a backslash as a separator —
+// so "/\evil.example", "/\t/evil.example" and "//evil.example" are all the
+// same off-site jump, arriving straight from the page where the user just
+// typed their password. Strip what a browser strips, then demand a single
+// leading slash followed by neither.
 func safeNext(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+	next = strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, next)
+	if len(next) < 1 || next[0] != '/' {
+		return "/"
+	}
+	if len(next) > 1 && (next[1] == '/' || next[1] == '\\') {
 		return "/"
 	}
 	return next
@@ -558,16 +878,26 @@ func safeNext(next string) string {
 
 // inviteTokenFromNext pulls an org-invite token out of a post-login target
 // like "/join/<token>". Tokens are lowercase hex.
+//
+// `next` must BE the join route, not merely contain it. This used to be
+// strings.Index anywhere in the string, and what it unlocks is not a redirect:
+// a live token found here makes pageSignup offer account creation on a hub with
+// self-signup CLOSED, and signupInvited then skips the domain allowlist,
+// verification and approval and activates the account outright. So
+// "/wiki/note.md?x=/join/<tok>" bought the whole invite-only bypass while
+// routing somewhere that never redeems anything — the account landed active, in
+// no member roster, with the invite still reading unused. "The invite is the
+// vetting" only holds if the invite is also spent, and it can only be spent by
+// arriving at /join/.
 func inviteTokenFromNext(next string) string {
 	const marker = "/join/"
-	i := strings.Index(next, marker)
-	if i < 0 {
+	if !strings.HasPrefix(next, marker) {
 		return ""
 	}
-	tok := next[i+len(marker):]
-	if j := strings.IndexAny(tok, "/?&#"); j >= 0 {
-		tok = tok[:j]
-	}
+	// The whole remainder, with nothing after it: "/join/<tok>/../.." is a
+	// target a browser resolves to "/", so it unlocks the signup and redeems
+	// nothing, exactly like burying the token in a query.
+	tok := next[len(marker):]
 	if tok == "" {
 		return ""
 	}
@@ -594,6 +924,18 @@ func (a *BuiltinAuth) invitedVia(next string) string {
 
 func authPage(w http.ResponseWriter, title, body string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Every page this renders is part of the credential surface: the reset
+	// form echoes a single-use grant into its own body, and the two approval
+	// pages name the signed-in account and hand a machine a token acting as
+	// it. Nothing here may be stored by a browser disk cache or a shared
+	// forward proxy, and nothing here may be framed — the app shell next door
+	// has answered both questions since round 3 (server.go), and these
+	// handlers were simply never asked.
+	w.Header().Set("Cache-Control", "no-store, private")
+	w.Header().Set("Vary", "Cookie")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>%s — BearDrive</title>
 <style>
@@ -638,7 +980,15 @@ padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius-ctl);b
 .who-swap:hover{text-decoration:underline}
 .rows{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:14px 0 0;font-size:13px}
 .rows dt{color:var(--faint)}
-.rows dd{margin:0;font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere}
+/* Every value in this list is chosen by the unauthenticated stranger asking
+   to be approved, and this is the one page a human reads before a device
+   credential is minted. trimText + html.EscapeString stop markup and the
+   invisible classes; neither stops a strong-RTL LETTER (category Lo) from
+   repainting the row out of order — "laptop-7א (unverified)" reads as
+   "laptop-7 )unverified(א". isolate-override, not isolate: measured in
+   Chromium, isolate leaves the reordering intact. Same rule as the SPA's
+   peer-written names (frontend/src/style.css). */
+.rows dd{margin:0;font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere;unicode-bidi:isolate-override;direction:ltr}
 @media (max-width:900px){input{height:44px}button{height:44px}}
 code{background:var(--hovered);border:1px solid var(--line);padding:2px 6px;border-radius:5px;
 font-family:var(--mono)}
@@ -686,7 +1036,7 @@ func (a *BuiltinAuth) pageLogin(w http.ResponseWriter, r *http.Request) {
 		if u := a.verifyPassword(r.FormValue("email"), r.FormValue("password")); u != nil {
 			switch u.Status {
 			case statusUnverified:
-				a.sendVerification(r, u)
+				a.sendVerification(u)
 				errMsg = `<p class="err">Please verify your email first — we've re-sent the link.</p>`
 			case statusPending:
 				errMsg = `<p class="err">Your account is still awaiting administrator approval.</p>`
@@ -758,7 +1108,7 @@ func (a *BuiltinAuth) pageSignup(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			switch u.Status {
 			case statusUnverified:
-				a.sendVerification(r, u)
+				a.sendVerification(u)
 				authPage(w, "Verify your email", `<p class="msg">Almost there — we sent a verification link to <b>`+
 					html.EscapeString(u.Email)+`</b>.</p><p class="alt">Click it to activate your account. No email on this server? The link is in the server log.</p>`)
 				return
@@ -822,13 +1172,25 @@ func (a *BuiltinAuth) pageVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
+	a.refresh()
 	u := a.users[g.user]
 	next := a.afterVerify()
+	var perr error
 	if u != nil && u.Status == statusUnverified {
-		u.Status = next
-		a.store.PutAccount(u)
+		// Persist first: a verification the store refused must not activate
+		// the account in memory. Same shape as Approve.
+		row := *u
+		row.Status = next
+		if perr = a.store.PutAccount(&row); perr == nil {
+			u.Status = next
+		}
 	}
 	a.mu.Unlock()
+	if perr != nil {
+		authPage(w, "Not verified yet", `<p class="err">Your account could not be updated, so it is not verified yet.</p>
+<p class="alt"><a href="/auth/login">Back to sign in</a></p>`)
+		return
+	}
 	if u != nil && u.Status == statusPending {
 		authPage(w, "Email verified", `<p class="msg">Your email is verified. Your account is now waiting for an administrator to approve it.</p>`)
 		return
@@ -846,18 +1208,29 @@ func (a *BuiltinAuth) pageReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		email := strings.TrimSpace(strings.ToLower(r.FormValue("email")))
 		a.mu.Lock()
+		a.refresh()
 		u := a.findByEmail(email)
 		a.mu.Unlock()
 		if u != nil {
 			tok := a.newGrant("reset", u.ID, time.Hour)
-			link := requestBaseURL(r) + "/auth/reset/confirm?token=" + tok
+			addr := u.Email
+			link := a.mailBaseURL() + "/auth/reset/confirm?token=" + tok
 			subject := "Reset your BearDrive password"
-			body := "Someone (hopefully you) asked to reset the BearDrive password for " + u.Email +
+			body := "Someone (hopefully you) asked to reset the BearDrive password for " + addr +
 				".\n\nReset it here (valid for 1 hour):\n\n  " + link + "\n\nIf this wasn't you, ignore this email."
-			if err := a.Mail.Send(u.Email, subject, body); err != nil {
-				// Never break reset: the admin can hand over the logged link.
-				fmt.Printf("password reset for %s (email not sent: %v):\n  %s\n", u.Email, err, link)
-			}
+			// Sent off the request path. Mail is the one step whose cost
+			// depends on whether the address exists, so a handler that waits
+			// for it answers a known address in SMTP-round-trip time and an
+			// unknown one instantly — an account-enumeration oracle that needs
+			// no statistics, just one slow mail server. Nothing is lost by not
+			// waiting: a delivery failure was never surfaced to the caller
+			// anyway, only logged.
+			go func() {
+				if err := a.Mail.Send(addr, subject, body); err != nil {
+					// Never break reset: the admin can hand over the logged link.
+					fmt.Printf("password reset for %s (email not sent: %v):\n  %s\n", addr, err, link)
+				}
+			}()
 		}
 		authPage(w, "Check your email", `<p class="msg">If that account exists, a reset link is on its way.</p>
 <p class="alt">No email configured on this server? The link is in the server log.</p>`)
@@ -886,12 +1259,31 @@ func (a *BuiltinAuth) pageResetConfirm(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Persist first, apply after, and surface a refusal: round 5 made the
+		// TOKEN half of a reset durable and left this half discarding the
+		// store's error, so the page said "Password updated" while the hub
+		// came back at the next restart with the password the thief chose.
 		a.mu.Lock()
-		if u := a.users[g.user]; u != nil {
-			u.Pass = string(hash)
-			a.store.PutAccount(u)
+		a.refresh()
+		u := a.users[g.user]
+		var perr error
+		if u != nil {
+			next := *u
+			next.Pass = string(hash)
+			if perr = a.store.PutAccount(&next); perr == nil {
+				u.Pass = string(hash)
+			}
 		}
 		a.mu.Unlock()
+		if perr != nil {
+			authPage(w, "Password not changed", `<p class="err">Your password could not be saved, so nothing was changed.</p>
+<p class="alt"><a href="/auth/reset">Request a new reset link</a></p>`)
+			return
+		}
+		// A reset is the documented recovery for a stolen account, so it has
+		// to end the thief's access too: every session cookie and device token
+		// minted under the old password dies with it.
+		a.revokeTokensFor(g.user)
 		authPage(w, "Password updated", `<p class="msg">Your password is updated.</p>
 <p class="alt"><a href="/auth/login">Sign in</a></p>`)
 		return
@@ -912,22 +1304,72 @@ func requestBaseURL(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
+// mailBaseURL is where a link the hub SENDS SOMEWHERE ELSE points. It is
+// deliberately not requestBaseURL: the Host header (and X-Forwarded-Proto) are
+// chosen by whoever made the request, and /auth/reset is unauthenticated — so
+// a stranger posting a victim's address with a Host of their choosing had the
+// hub mail the victim a genuine link that hands the single-use grant to the
+// attacker's server. Classic reset poisoning. The three other requestBaseURL
+// callers hand the URL back to the caller who chose the host, which is
+// self-inflicted; these two do not.
+//
+// A configured origin (auth.base_url) is the only trustworthy answer, and it
+// is now required whenever smtp is configured (ValidateSignupPolicy). Two
+// weaker rules were tried and both were the same hole in a different shape:
+// using the request's own host aims the victim's link wherever the requester
+// says, and pinning the first host seen only moves the choice to whoever mails
+// first — on a fresh process that is one anonymous POST, which both picks the
+// origin and picks who receives it.
+//
+// So with no configured origin the hub has nothing it can trust and says so:
+// the link goes out root-relative (usable by hand, and the log names the
+// config that fixes it) rather than aimed somewhere a stranger picked.
+func (a *BuiltinAuth) mailBaseURL() string {
+	if a.BaseURL != "" {
+		return strings.TrimRight(a.BaseURL, "/")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.warnedBase {
+		a.warnedBase = true
+		log.Print("beardrive: mailed links are root-relative because auth.base_url is not set; " +
+			"configure it with this hub's public origin so reset and verification links are usable")
+	}
+	return ""
+}
+
 // ---- CLI API ----
 
-func (a *BuiltinAuth) finishLogin(w http.ResponseWriter, userID, device string) {
+func (a *BuiltinAuth) finishLogin(w http.ResponseWriter, r *http.Request, userID, device string) {
 	if device == "" {
 		device = "cli"
 	}
-	tok, err := a.issueToken(userID, device)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	a.mu.Lock()
+	a.refresh()
 	u := a.users[userID]
 	a.mu.Unlock()
 	if u == nil {
 		http.Error(w, "unknown user", http.StatusUnauthorized)
+		return
+	}
+	// Minting the token is where a device identity is BOUND to an account, and
+	// it is the only place a binding is created. Every mint point routes
+	// through here — the loopback browser flow, the device-code flow, and the
+	// login `bdrive init` runs inside itself — so binding here covers all three
+	// rather than the one a fix would otherwise name.
+	//
+	// Before the token, not after: a login that cannot bind must not hand back
+	// a credential that then cannot push. 409 is the honest status — the id is
+	// taken, and the message says what to do about it.
+	if a.BindDevice != nil {
+		if err := a.BindDevice(u.Email, r); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+	}
+	tok, err := a.issueToken(userID, device)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{

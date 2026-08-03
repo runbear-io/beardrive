@@ -10,3 +10,4 @@
 /.review-shots/
 .env
 sandbox/bdrive
+cmd/bdrive/bdrive

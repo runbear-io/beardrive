@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 // verdict is what the sync predicate decided about one entry on disk.
@@ -37,12 +38,20 @@ func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.Dir
 		var v verdict
 		switch {
 		case !d.IsDir():
-			if !d.Type().IsRegular() || ignoredFile(d.Name()) || filter.Skip(rel) {
+			// ReservedPath, not ignoredFile(name): the builtin exclusions
+			// include a whole-path rule (agent hook config) that a base name
+			// cannot express, and the outbound half has to match the inbound
+			// one or a file lands on the hub that no peer will ever materialize.
+			// SkipUp, not Skip: this walk is the upload door, and a negation a
+			// TEAMMATE pushed must not widen what leaves this machine. See
+			// Filter.SkipUp.
+			if !d.Type().IsRegular() || !journal.SafePath(rel) ||
+				config.ReservedPath(rel) || filter.SkipUp(rel) {
 				v = vSkipFile
 			} else {
 				v = vSync
 			}
-		case ignoreDirs[d.Name()] || filter.PruneDir(rel):
+		case ignoredDir(d.Name()) || filter.PruneDir(rel):
 			v = vPruneDir
 		case config.IsMount(p):
 			// A mount of its own: it syncs through its own project.

@@ -67,14 +67,19 @@ func histLess(a, b journal.Op) bool {
 // carries no lamport/seq, so a client-computed cursor would be lossy across
 // same-second ops.
 type histCursor struct {
-	T int64  `json:"t"` // op time, unix nanoseconds
+	// RFC3339Nano, not UnixNano: Op.Time is unvalidated peer JSON and
+	// UnixNano is undefined outside [1678, 2262], so a date of 2300 read back
+	// as 1715 — the skip loop then walked past every entry and returned a
+	// clean end of feed. One journal push hid the whole audit trail past page
+	// one from every other member.
+	T string `json:"t"` // op time, RFC3339Nano
 	L int64  `json:"l"` // lamport
 	S int64  `json:"s"` // per-device seq
 	D string `json:"d"` // device
 }
 
 func encodeCursor(op journal.Op) string {
-	b, err := json.Marshal(histCursor{T: op.Time.UnixNano(), L: op.Lamport, S: op.Seq, D: op.Device})
+	b, err := json.Marshal(histCursor{T: op.Time.UTC().Format(time.RFC3339Nano), L: op.Lamport, S: op.Seq, D: op.Device})
 	if err != nil {
 		return ""
 	}
@@ -93,7 +98,11 @@ func decodeCursor(s string) (journal.Op, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return journal.Op{}, err
 	}
-	return journal.Op{Time: time.Unix(0, c.T).UTC(), Lamport: c.L, Seq: c.S, Device: c.D}, nil
+	ts, err := time.Parse(time.RFC3339Nano, c.T)
+	if err != nil {
+		return journal.Op{}, err
+	}
+	return journal.Op{Time: ts.UTC(), Lamport: c.L, Seq: c.S, Device: c.D}, nil
 }
 
 // parseHistTime accepts RFC3339 or a bare YYYY-MM-DD (UTC). A bare date is
@@ -177,19 +186,20 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		}
 		*b.into = t
 	}
-	all, err := rs.loadOps(r.Context())
+	all, err := rs.loadSourcedOps(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
-	journal.Sort(all)
+	sort.SliceStable(all, func(i, j int) bool { return journal.Less(all[i].Op, all[j].Op) })
 	// A put is an "add" when the path didn't exist just before it (first
 	// version, or first after a delete), an "edit" otherwise. Existence is
 	// replayed over ALL ops in journal order, before any path/prefix filter,
 	// so a filtered view classifies the same as the full feed.
 	kinds := make([]string, len(all))
 	exists := make(map[string]bool, len(all))
-	for i, op := range all {
+	for i, so := range all {
+		op := so.Op
 		switch {
 		case op.Kind == journal.KindDelete:
 			kinds[i] = "delete"
@@ -205,8 +215,10 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		entry HistoryEntry
 		op    journal.Op
 	}
+	visible := s.deviceVisibleIn(projectID(r))
 	matched := make([]timed, 0, len(all))
-	for i, op := range all {
+	for i, sop := range all {
+		op := sop.Op
 		switch {
 		case path != "" && op.Path != path:
 			continue
@@ -221,10 +233,17 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		case !until.IsZero() && !op.Time.Before(until):
 			continue
 		}
-		// Unregistered device (or volume mode, where Devices is nil): fall back
-		// to the op's own id + self-reported name.
-		dev := historyDevice{ID: op.Device, Name: op.DeviceName}
-		if info, ok := s.Devices.Get(op.Device); ok && info.ID != "" {
+		// Attribution comes from the journal the op was READ from, never from
+		// its own Device field: that field is arbitrary JSON any member with
+		// write access can put in their own journal, so trusting it printed
+		// another org's machine name into this feed and answered "does this
+		// device id exist on the hub?" for anyone who asked. The registry join
+		// is scoped the same way heat's is.
+		dev := historyDevice{ID: sop.From}
+		if op.Device == sop.From {
+			dev.Name = op.DeviceName // the journal's owner describing itself
+		}
+		if info, ok := s.Devices.LookupIn(sop.From, visible); ok && info.ID != "" {
 			dev = historyDevice{ID: info.ID, Name: info.Name, OS: info.OS}
 		}
 		matched = append(matched, timed{HistoryEntry{
@@ -279,7 +298,7 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid sha", http.StatusBadRequest)
 		return
 	}
-	rc, err := rs.Backend.Get(r.Context(), "blobs/"+sha)
+	rc, err := rs.OpenBlob(r.Context(), sha)
 	if err != nil {
 		http.Error(w, "no such version", http.StatusNotFound)
 		return
@@ -287,12 +306,23 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 	defer rc.Close()
 	name := r.URL.Query().Get("name")
 	if name != "" {
-		w.Header().Set("Content-Type", contentType(name))
+		ct := contentType(name)
+		// Same wall and the same inert declaration as the live-file door: a
+		// past version is the same bytes, so the two must never differ.
+		w.Header().Set("Content-Type", inlineType(ct))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		sandboxInline(w, ct)
 		if r.URL.Query().Get("download") == "1" {
+			w.Header().Set("Content-Type", ct)
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(name)))
 		}
 	} else {
+		// Same door, same stored bytes, two lines down — and it did not get the
+		// header the arm above did. The rule is "nosniff on every door that
+		// streams stored bytes", so it goes on unconditionally: a declared
+		// octet-stream a browser is free to sniff is not a wall.
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
 	io.Copy(w, rc)
 }

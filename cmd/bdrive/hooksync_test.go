@@ -25,7 +25,7 @@ func TestSyncHookMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil { // enroll, as `bdrive init` would
+	if _, _, err := config.EnrollMount(folder); err != nil { // enroll, as `bdrive init` would
 		t.Fatal(err)
 	}
 
@@ -112,7 +112,7 @@ func TestSyncHookModeNoOps(t *testing.T) {
 	}
 
 	// Enrolled but paused by `bdrive stop`: silent no-op too.
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 	vdir, err := config.VolumeDir(proj.ID)
@@ -163,7 +163,7 @@ func mountAt(t *testing.T, parent, name, remote string) config.Project {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(dir); err != nil {
+	if _, _, err := config.EnrollMount(dir); err != nil {
 		t.Fatal(err)
 	}
 	return proj
@@ -288,7 +288,7 @@ func TestSyncRefusesUnenrolledAndPaused(t *testing.T) {
 		t.Fatalf("unenrolled sync error = %v, want a `bdrive init` pointer", err)
 	}
 
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 	vdir, err := config.VolumeDir(proj.ID)

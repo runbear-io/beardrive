@@ -15,7 +15,25 @@ import (
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
 )
+
+// maxListBytes caps the JSON listing a hub can make a device allocate.
+const maxListBytes = 8 << 20
+
+// maxJSONBytes caps every other JSON body a hub answers with. Round 7 bounded
+// List and round 8 the journal/blob bodies, but `sign` — the call every blob
+// push starts with — and `Exists` still decoded straight off the wire, so the
+// hub chose the allocation on the device's hottest path. One constant, applied
+// wherever this file decodes the hub.
+const maxJSONBytes = 1 << 20
+
+// maxKeySegment bounds one path component of a key the hub names. Listed keys
+// become local file paths (syncer.pull → store.JournalPath) and tar member
+// names (`bdrive export`); NAME_MAX is 255 everywhere beardrive runs, so a
+// longer segment is not a filename, it is an error the OS reports as something
+// other than "does not exist" — which is how one listed key hid every peer.
+const maxKeySegment = 255
 
 // httpBackend syncs one project through a bdrive web server instead of
 // talking to an object store. The client device is storage-blind: it only
@@ -52,20 +70,96 @@ func newHTTPBackend(raw string) (*httpBackend, error) {
 	}
 	base := (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
 	dev, _ := config.LoadDevice()
-	return &httpBackend{base: base, project: m[1], token: deviceToken(), device: dev, hc: &http.Client{Timeout: 5 * time.Minute}}, nil
+	hc := &http.Client{Timeout: 5 * time.Minute, CheckRedirect: refuseOffOriginRedirect}
+	return &httpBackend{base: base, project: m[1], token: deviceToken(base), device: dev, hc: hc}, nil
 }
 
-// deviceToken finds this device's credential for the server: BDRIVE_TOKEN
-// wins (tests, CI), otherwise the token `bdrive login` stored in settings.
-func deviceToken() string {
+// deviceToken finds this device's credential for the server at base:
+// BDRIVE_TOKEN wins (tests, CI), otherwise the token `bdrive login` stored in
+// settings — but only for the server it was issued for.
+//
+// The remote URL comes from a folder's .bdrive/config.json, which travels with
+// the folder: without the origin check, a folder someone shares with you
+// chooses where your hub credential is sent, plaintext http included. The same
+// binding covers `bdrive login <other-hub>`, after which every old mount would
+// otherwise ship the new hub's token to the old host.
+func deviceToken(base string) string {
 	if t := os.Getenv("BDRIVE_TOKEN"); t != "" {
 		return t
 	}
 	s, err := config.LoadSettings()
-	if err != nil {
+	if err != nil || s.Token == "" || !sameOrigin(base, s.Server) {
 		return ""
 	}
 	return s.Token
+}
+
+// sameOrigin compares scheme+host, the only thing that decides who receives a
+// bearer token. A bare host in settings is read as https, which is what
+// `bdrive login` writes it as.
+//
+// The comparison is on the ORIGIN, not on the URL's spelling: the scheme's
+// default port, the case of the host and an FQDN's trailing dot all name the
+// same server. Comparing url.Host verbatim made "https://hub:443" a different
+// server from "https://hub", so the token was silently dropped and every sync
+// 401'd forever — and `bdrive login` could not fix it, because it writes the
+// same string back. Fail-closed is still the direction: anything that does not
+// parse, or has no host, matches nothing.
+func sameOrigin(a, b string) bool { return SameOrigin(a, b) }
+
+// SameOrigin is the exported form, for the CLI. It is the one rule that
+// decides who may receive this device's bearer token, and it is needed at two
+// doors: the sync backend's (here) and `bdrive share`/`init`'s HTTP client
+// (cmd/bdrive). It used to be spelled twice — which is exactly how round 7's
+// journal-path finding happened — so there is one copy and cmd/bdrive calls it.
+func SameOrigin(a, b string) bool {
+	x, y := originOf(a), originOf(b)
+	return x != "" && x == y
+}
+
+func originOf(raw string) string {
+	if raw != "" && !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return ""
+	}
+	if strings.Contains(host, ":") { // IPv6 literal
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host
+}
+
+// refuseOffOriginRedirect stops a hub's 3xx from taking this device
+// anywhere but the hub itself.
+func refuseOffOriginRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	if len(via) > 0 && !sameOrigin(req.URL.String(), via[0].URL.String()) {
+		// Refused, not followed with a smaller payload. Every endpoint this
+		// backend calls is the hub's own store API, where a 3xx is not part of
+		// the contract — and following one handed a third-party host this
+		// device's id, machine name and OS (and, before round 4, its token:
+		// net/http only strips Authorization when the HOSTNAME changes, so a
+		// port change, an https->http downgrade or a sibling subdomain kept
+		// it).
+		return fmt.Errorf("refusing a redirect off %s to %s", via[0].URL.Host, req.URL.Host)
+	}
+	return nil
 }
 
 // do sends the request with this device's credential attached, plus the
@@ -76,11 +170,28 @@ func (b *httpBackend) do(req *http.Request) (*http.Response, error) {
 		req.Header.Set("Authorization", "Bearer "+b.token)
 	}
 	if b.device.ID != "" {
-		req.Header.Set("X-Bdrive-Device", b.device.ID)
+		// A journal request already named its device (nameJournalDevice); the
+		// name and OS describe this machine either way.
+		if req.Header.Get("X-Bdrive-Device") == "" {
+			req.Header.Set("X-Bdrive-Device", b.device.ID)
+		}
 		req.Header.Set("X-Bdrive-Device-Name", b.device.Name)
 		req.Header.Set("X-Bdrive-Os", runtime.GOOS+"/"+runtime.GOARCH)
 	}
 	return b.hc.Do(req)
+}
+
+var journalKeyRe = regexp.MustCompile(`^journal/([A-Za-z0-9._-]+)\.jsonl$`)
+
+// nameJournalDevice tells the hub which device a journal request is about.
+// The hub holds one request to one device's journal — the one-writer
+// invariant it can't otherwise check — and a session's device is not
+// necessarily this process's identity file (the sync engine only ever writes
+// its own journal, so the key is the authority here).
+func nameJournalDevice(req *http.Request, key string) {
+	if m := journalKeyRe.FindStringSubmatch(key); m != nil {
+		req.Header.Set("X-Bdrive-Device", m[1])
+	}
 }
 
 func (b *httpBackend) endpoint(name string, q url.Values) string {
@@ -121,10 +232,58 @@ func (b *httpBackend) List(ctx context.Context, prefix string) ([]Object, error)
 	var out struct {
 		Objects []Object `json:"objects"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+	// Bounded like every other body this package reads (httpError caps at 512
+	// bytes): List is the first call of every sync cycle on every device, and
+	// the hub alone chooses how much JSON it answers with — including a hub the
+	// user was merely handed the URL of. Unbounded, one listing is one
+	// allocation of whatever size it likes, again on the next tick.
+	//
+	// ponytail: 8 MiB is ~95k blob entries. Only `bdrive export` ever lists
+	// blobs; a project past that needs a paginated list endpoint, not a bigger
+	// cap. Truncation surfaces as a decode error, which is the retry posture.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxListBytes)).Decode(&out); err != nil {
+		return nil, fmt.Errorf("read listing: %w", err)
 	}
-	return out.Objects, nil
+	// The hub names its own objects, and the device believes it: these keys
+	// become local journal file names (syncer.pull) and tar member names
+	// (`bdrive export`). Nothing downstream re-checks the shape, so a hostile
+	// or compromised hub would be choosing paths on the victim's disk. Keys
+	// that are not keys are dropped rather than fatal — one bad listing must
+	// not stop the rest of the project syncing.
+	//
+	// The rule is journal.SafePath, the repo's single spelling of "a path a
+	// stranger named" — already applied at both hub ingest doors and to every
+	// peer op path. Spelling it a second time here is exactly how round 7's
+	// journal-path finding happened, so this calls it.
+	kept := out.Objects[:0]
+	for _, o := range out.Objects {
+		if !safeListedKey(o.Key) {
+			continue
+		}
+		if o.Size < 0 {
+			// Not a size. It is read as a memory bound (syncer.sizeBound) and
+			// written straight into a tar header by `bdrive export`.
+			o.Size = 0
+		}
+		kept = append(kept, o)
+	}
+	return kept, nil
+}
+
+// safeListedKey is journal.SafePath plus a length bound per component. SafePath
+// refuses control bytes, absolute and non-Clean spellings and `..`; it says
+// nothing about length, and length is what turns a key into an open() the OS
+// refuses with something that is not IsNotExist.
+func safeListedKey(key string) bool {
+	if !journal.SafePath(key) {
+		return false
+	}
+	for _, seg := range strings.Split(key, "/") {
+		if len(seg) > maxKeySegment {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *httpBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
@@ -161,7 +320,7 @@ func (b *httpBackend) Exists(ctx context.Context, key string) (bool, error) {
 	var out struct {
 		Exists bool `json:"exists"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBytes)).Decode(&out); err != nil {
 		return false, err
 	}
 	return out.Exists, nil
@@ -176,12 +335,52 @@ func (b *httpBackend) Put(ctx context.Context, key string, r io.Reader, size int
 		return err
 	}
 	if plan.Mode == "direct" {
+		// "Already stored" is the one boolean that lets push advance its
+		// cursor without sending a byte, and the hub writes it. Believed on
+		// its own it publishes an op naming content nothing holds — the
+		// device never retries, because the op is behind the cursor forever,
+		// which breaks "blobs are pushed before the journal". A lying hub
+		// cannot be fully caught, but it now has to lie on a SECOND endpoint,
+		// and the honest failure (a storage race, a half-deleted object) is
+		// caught outright. Unconfirmed means upload, never skip.
 		if plan.Exists {
-			return nil // content-addressed and already there
+			if ok, err := b.Exists(ctx, key); err == nil && ok {
+				return nil
+			}
 		}
-		return b.putDirect(ctx, plan, r, size)
+		if plan.URL != "" && directTargetOK(b.base, plan.URL) {
+			return b.putDirect(ctx, plan, r, size)
+		}
+		// No usable destination: relay through the hub, which already holds
+		// this device's credential and is the party it chose to trust.
 	}
 	return b.putViaServer(ctx, key, r, size)
+}
+
+// directTargetOK decides whether this device will hand a file's bytes to the
+// host a hub named. Round 4 read this as "not a new capability, the hub
+// already holds the data" — but at the moment the hub names the destination it
+// does NOT hold the data; that is what the upload is for, so one injected sign
+// response was an exfiltration channel the hub itself never sees.
+//
+// The device has nothing local to check a bucket hostname against, so the rule
+// it can enforce is transport: a presigned upload goes over TLS, or it does not
+// leave this device. S3 and GCS presign https; a plaintext object store must
+// relay through the hub instead. The hub's own origin is allowed as-is, since
+// that is the party the user already pointed this folder at.
+//
+// ponytail: transport only. Closing "an https host the hub named" needs a
+// device-side storage-host allowlist — a config surface and a product
+// decision, not a defense this file can invent.
+func directTargetOK(base, raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if u.User != nil {
+		return false // credentials in the URL are not part of any presign
+	}
+	return strings.EqualFold(u.Scheme, "https") || SameOrigin(base, raw)
 }
 
 type putPlan struct {
@@ -203,6 +402,7 @@ func (b *httpBackend) sign(ctx context.Context, key string, size int64) (putPlan
 		return plan, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	nameJournalDevice(req, key)
 	resp, err := b.do(req)
 	if err != nil {
 		return plan, err
@@ -211,7 +411,7 @@ func (b *httpBackend) sign(ctx context.Context, key string, size int64) (putPlan
 	if resp.StatusCode != http.StatusOK {
 		return plan, httpError(resp)
 	}
-	err = json.NewDecoder(resp.Body).Decode(&plan)
+	err = json.NewDecoder(io.LimitReader(resp.Body, maxJSONBytes)).Decode(&plan)
 	return plan, err
 }
 
@@ -250,6 +450,7 @@ func (b *httpBackend) putViaServer(ctx context.Context, key string, r io.Reader,
 	if err != nil {
 		return err
 	}
+	nameJournalDevice(req, key)
 	req.ContentLength = size
 	resp, err := b.do(req)
 	if err != nil {

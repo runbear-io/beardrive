@@ -19,12 +19,15 @@ package webapp
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"maps"
 	"mime"
 	"net/http"
@@ -102,7 +105,13 @@ type Server struct {
 	// ShareRPM is the per-IP request rate on public share links (/s/*);
 	// 0 means DefaultShareRPM.
 	ShareRPM int
+	// TrustProxy honors X-Forwarded-For from ANY peer. Only needed for a
+	// proxy on a public address: a proxy on loopback or a private network is
+	// already trusted without it (see clientIP). Setting it on a directly-
+	// reachable hub lets any client pick its own rate-limit bucket.
+	TrustProxy bool
 
+	xffWarnOnce  sync.Once
 	shareLimOnce sync.Once
 	shareLim     *rateLimiter
 	authLimOnce  sync.Once
@@ -113,6 +122,16 @@ type Server struct {
 
 	volsMu sync.Mutex
 	vols   map[string]*volume // hub mode: per-project, keyed by project id
+
+	resMu  sync.Mutex
+	grants []grant // outstanding presigned upload reservations (reserve.go)
+
+	// joinMu serializes invite redemption: the seat check reads the member
+	// count and the join adds to it, and two clicks on the same link at the
+	// same moment would otherwise both see the last seat free.
+	// ponytail: one hub-wide lock; redemption is a rare, human-paced request —
+	// make it per-org if that ever stops being true.
+	joinMu sync.Mutex
 }
 
 // UploadConfig controls whether and how clients may write.
@@ -224,17 +243,20 @@ func (s *Server) single() *volume {
 	return s.vol
 }
 
-// projectVolume resolves a project id to its volume, creating the (cached)
-// source over the project's storage prefix on first use.
-func (s *Server) projectVolume(id string) (*volume, error) {
+// projectVolume resolves a project id to its record and its volume, creating
+// the (cached) source over the project's storage prefix on first use. It
+// returns the Project so the permission check does not have to resolve the id
+// a second time — see projectPermOf.
+func (s *Server) projectVolume(id string) (Project, *volume, error) {
 	if s.Root == nil || s.Projects == nil {
-		return nil, fmt.Errorf("this server does not host projects")
+		return Project{}, nil, fmt.Errorf("this server does not host projects")
 	}
 	if !projectIDRe.MatchString(id) {
-		return nil, fmt.Errorf("invalid project id %q", id)
+		return Project{}, nil, fmt.Errorf("invalid project id %q", id)
 	}
-	if _, ok := s.Projects.Get(id); !ok {
-		return nil, fmt.Errorf("no such project %q", id)
+	p, ok := s.Projects.Get(id)
+	if !ok {
+		return Project{}, nil, fmt.Errorf("no such project %q", id)
 	}
 	s.volsMu.Lock()
 	defer s.volsMu.Unlock()
@@ -244,12 +266,17 @@ func (s *Server) projectVolume(id string) (*volume, error) {
 	v, ok := s.vols[id]
 	if !ok {
 		v = &volume{
-			source:  &RemoteSource{Backend: remote.Prefixed(s.Root, id), Device: s.Device},
+			source: &RemoteSource{
+				Backend: remote.Prefixed(s.Root, id), Device: s.Device,
+				// The real TTL the presign doors hand out, so verify seals a
+				// blob no earlier than the last URL for it can expire.
+				PresignTTL: s.Upload.ttl(),
+			},
 			refresh: s.Refresh,
 		}
 		s.vols[id] = v
 	}
-	return v, nil
+	return p, v, nil
 }
 
 // RemoteSource reads a beardrive remote: it fetches every journal and folds the
@@ -261,8 +288,125 @@ type RemoteSource struct {
 	// Device identifies this server in ops it journals for uploads. Required
 	// for uploads; irrelevant for reading.
 	Device Identity
+	// PresignTTL is the lifetime the hub gives a presigned upload URL. It is
+	// how long a blob stays writable by anyone but the hub, and therefore when
+	// verify may stop re-hashing it. Zero means DefaultUploadTTL — set it to
+	// the server's real UploadConfig.ttl(), or a longer configured TTL would
+	// seal an object that can still change.
+	PresignTTL time.Duration
 
 	upmu sync.Mutex // serializes read-modify-write of our own journal
+	// sealed holds the blobs this process has verified AND proved immutable.
+	// See verify.
+	sealed sync.Map // sha (string) → struct{}
+}
+
+// OpenBlob is the one way a blob's bytes leave the hub, and on a hub whose
+// storage can presign it is also the only place left that can tell a content
+// address the truth. handleStorePut hashes what it relays — but a presigned
+// PUT writes straight into the object store, so those bytes were never
+// examined by anything: any device with write permission could store arbitrary
+// content under a sha256 it chose, and the viewer, share links, history and
+// every peer would then serve it.
+//
+// Skipped entirely on a backend that cannot presign, where the write path
+// already checked. It used to be once per blob per process, on the premise
+// that blobs are immutable — which is false on the hub that needs the check:
+// SignPut hands out a URL that stays valid for its whole TTL and an object
+// store accepts every PUT to it, not the first. So uploading the honest bytes,
+// letting one reader populate the cache, and then replaying the same URL with
+// hostile bytes served them under the reviewed sha to the viewer, history,
+// share links and every syncing device.
+//
+// Verifying on EVERY read closed that, and cost every S3/GCS hub 2x object-
+// store egress and a serialized full-object hash before the reader's first
+// byte — on every viewer open, render, download and /s/* hit. The cache is
+// back, keyed on the one thing that makes the premise TRUE rather than assumed:
+// see verify.
+func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser, error) {
+	if !blobRe.MatchString(sha) {
+		return nil, fmt.Errorf("invalid content reference")
+	}
+	if err := r.verify(ctx, sha); err != nil {
+		return nil, err
+	}
+	return r.Backend.Get(ctx, "blobs/"+sha)
+}
+
+// verify re-hashes a stored blob, unless this process has already proved that
+// nobody but the hub can write it any more.
+//
+// The proof is the presign TTL and the fact that BOTH presign doors —
+// handleStoreSign and handleUploadInit — refuse to sign a key that already
+// exists. So every presigned URL a blob ever gets was minted BEFORE its first
+// PUT, and expires at mint+TTL, which is earlier than firstPUT+TTL. Once the
+// stored object is older than the TTL, no live URL for it can exist and none
+// will ever be minted again: the hub is the only writer left, and the hub
+// hashes what it relays. That is when the object really is immutable, and only
+// then is the verification cached — for the life of the process, keyed on the
+// sha, no expiry needed.
+//
+// The age is read AFTER the hash on purpose. A replay lands a NEW object with
+// a new modification time, so an object that was rewritten mid-check reads as
+// seconds old and is not sealed.
+//
+// Two premises this rests on, both true today and both worth breaking loudly:
+// blobs are never deleted (remote.Backend has no delete at all — history keeps
+// every version forever), and PresignTTL is the real TTL the doors use. A
+// backend that does not report Modified never seals, which is the safe answer.
+//
+// ponytail: per-process, so the first read of each blob after a restart still
+// pays the full hash. Persisting it needs somewhere to record "the hub has
+// seen these bytes", which is a metadata-store change for a cost paid once.
+func (r *RemoteSource) verify(ctx context.Context, sha string) error {
+	if _, canSign := r.Backend.(remote.PutSigner); !canSign {
+		return nil
+	}
+	if _, ok := r.sealed.Load(sha); ok {
+		return nil
+	}
+	rc, err := r.Backend.Get(ctx, "blobs/"+sha)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	_, err = io.Copy(h, rc)
+	rc.Close()
+	if err != nil {
+		return err
+	}
+	if hex.EncodeToString(h.Sum(nil)) != sha {
+		return fmt.Errorf("stored content does not hash to its key")
+	}
+	// sealAfter, not presignTTL: o.Modified is the STORAGE service's clock and
+	// time.Since is the hub's. A hub whose clock runs ahead of storage would
+	// otherwise overstate the object's age and seal it while a minted URL is
+	// still live — after which a replay is served from cache for the life of
+	// the process.
+	if o, ok, err := r.blobStat(ctx, sha); err == nil && ok &&
+		!o.Modified.IsZero() && time.Since(o.Modified) > r.sealAfter() {
+		r.sealed.Store(sha, struct{}{})
+	}
+	return nil
+}
+
+// sealAfter is how old a stored blob must be before its verification may be
+// cached: the presign TTL plus an allowance for clock skew between the hub and
+// the object store. The allowance is the whole point — the correctness
+// argument is "no live URL can exist any more", and that is a claim about time
+// measured on two machines the hub cannot reconcile.
+//
+// Waiting longer costs only a few extra hashes on a blob younger than this,
+// which is the behavior the check had for every blob anyway.
+//
+// ponytail: a fixed allowance, so it is a bound and not a proof — a hub whose
+// clock runs more than an hour ahead of its object store can still seal early.
+// Closing it properly means measuring the age on ONE clock (record the hub time
+// of the first verification, seal on a later one that finds Modified
+// unchanged), which costs a second map and never seals on a first read.
+func (r *RemoteSource) sealAfter() time.Duration {
+	const skewAllowance = time.Hour
+	return r.presignTTL() + skewAllowance
 }
 
 // Identity is the device identity uploads are journaled under.
@@ -272,11 +416,32 @@ type Identity struct {
 
 // loadOps fetches and parses every journal on the remote.
 func (r *RemoteSource) loadOps(ctx context.Context) ([]journal.Op, error) {
+	sourced, err := r.loadSourcedOps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]journal.Op, len(sourced))
+	for i, s := range sourced {
+		all[i] = s.Op
+	}
+	return all, nil
+}
+
+// sourcedOp is an op plus the device whose journal it was actually read from.
+// Everything inside an op — including its Device field — is JSON the pusher
+// chose; the journal KEY is the one part the hub binds to the pushing device
+// (store.go's ownJournal), so From is the only trustworthy attribution.
+type sourcedOp struct {
+	Op   journal.Op
+	From string
+}
+
+func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) {
 	objs, err := r.Backend.List(ctx, "journal/")
 	if err != nil {
 		return nil, fmt.Errorf("list journals: %w", err)
 	}
-	var all []journal.Op
+	var all []sourcedOp
 	for _, o := range objs {
 		if !strings.HasSuffix(o.Key, ".jsonl") {
 			continue
@@ -294,7 +459,10 @@ func (r *RemoteSource) loadOps(ctx context.Context) ([]journal.Op, error) {
 		if err != nil {
 			continue // corrupt journal; ignore rather than break the view
 		}
-		all = append(all, ops...)
+		from := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
+		for _, op := range ops {
+			all = append(all, sourcedOp{Op: op, From: from})
+		}
 	}
 	return all, nil
 }
@@ -309,6 +477,15 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 	for _, op := range all {
 		switch op.Kind {
 		case journal.KindPut:
+			// A journal is arbitrary JSONL a device pushed: Blob is a storage
+			// key suffix ("blobs/"+Blob), not a checked field, so anything but
+			// a bare sha256 is a path the writer chose — another project's
+			// prefix, or out of the storage root entirely. Same rule as every
+			// ?sha= route. An op that fails it is ignored (the path keeps its
+			// previous version) rather than treated as a delete.
+			if !blobRe.MatchString(op.Blob) {
+				continue
+			}
 			files[op.Path] = FileInfo{
 				Blob: op.Blob, Size: op.Size, Time: op.Time,
 				User: op.User, UserName: op.UserName,
@@ -322,7 +499,9 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 }
 
 func (r *RemoteSource) Open(ctx context.Context, _ string, fi FileInfo) (io.ReadCloser, error) {
-	return r.Backend.Get(ctx, "blobs/"+fi.Blob)
+	// Files already drops ops with a bogus Blob; re-checked in OpenBlob because
+	// that is where the key is built, and a FileInfo can reach it from anywhere.
+	return r.OpenBlob(ctx, fi.Blob)
 }
 
 // Handler returns the HTTP handler: /api/* plus the embedded frontend.
@@ -332,6 +511,19 @@ func (s *Server) Handler() http.Handler {
 		panic(err) // embedded FS; cannot fail at runtime
 	}
 	mux := http.NewServeMux()
+
+	// One account-removal path, one cleanup. Everything downstream of it is
+	// keyed by email, so removal has to take the org role, the project grants
+	// and (through membership) the share links with it.
+	if a, ok := s.Auth.(*BuiltinAuth); ok && a.Offboard == nil {
+		a.Offboard = s.offboard
+	}
+	// A device identity is bound to an account when its token is minted, and
+	// nowhere else. Wired here rather than at startup because the fixtures (and
+	// a hub rebuilt from its repos) assemble Auth and Devices independently.
+	if a, ok := s.Auth.(*BuiltinAuth); ok && a.BindDevice == nil {
+		a.BindDevice = s.bindDevice
+	}
 
 	// Volume resolution per route family: fixed single volume, or by
 	// project id in hub mode. One handler implementation serves both.
@@ -349,12 +541,14 @@ func (s *Server) Handler() http.Handler {
 	proj := func(level string, h func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("project")
-			v, err := s.projectVolume(id)
+			p, v, err := s.projectVolume(id)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			if !s.requirePerm(w, r, id, level) {
+			// p, not id: the resolver has already read the registry once for
+			// this request and re-reading it is the hub's per-request cost.
+			if !s.requirePermOn(w, r, p, level) {
 				return
 			}
 			// Read recording (and anything else downstream) finds the project
@@ -445,15 +639,21 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 	index, _ := fs.ReadFile(static, "index.html")
 	return func(w http.ResponseWriter, r *http.Request) {
 		upath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		// This document carries the session cookie and drives share creation,
+		// permission edits and project deletion, so it must not be framed by
+		// another origin or MIME-sniffed. /s/* sets its own sandbox CSP and
+		// never reaches here.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 		// Vite emits content-hashed filenames under assets/, safe to cache
 		// forever. Everything else (index.html above all) must revalidate:
 		// embedded files carry no modtime, so without no-cache browsers
 		// cache heuristically and users see a stale frontend after upgrades.
-		if strings.HasPrefix(upath, "assets/") {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			w.Header().Set("Cache-Control", "no-cache")
-		}
+		// Set on the real asset only, below: deciding on the URL prefix meant
+		// a MISS under assets/ answered the app shell marked immutable for a
+		// year, so a shared cache pinned index.html at an asset URL forever.
+		w.Header().Set("Cache-Control", "no-cache")
 		// Reserved prefixes that fell through to the catch-all are genuine
 		// 404s — don't mask a mistyped API/auth/share URL with the app shell.
 		if strings.HasPrefix(upath, "api/") || strings.HasPrefix(upath, "auth/") || strings.HasPrefix(upath, "s/") {
@@ -476,6 +676,9 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 				fi, statErr := f.Stat()
 				f.Close()
 				if statErr == nil && !fi.IsDir() {
+					if strings.HasPrefix(upath, "assets/") {
+						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					}
 					files.ServeHTTP(w, r) // a real asset
 					return
 				}
@@ -560,7 +763,7 @@ func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 	// affordances without a second fetch per project on every render.
 	visible := []projectView{}
 	for _, p := range s.Projects.List() {
-		perm := s.projectPerm(r, p.ID)
+		perm := s.projectPermOf(r, p)
 		if !atLeast(perm, PermRead) {
 			continue
 		}
@@ -592,7 +795,7 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, ok := s.Projects.Get(r.PathValue("project"))
-	perm := s.projectPerm(r, p.ID)
+	perm := s.projectPermOf(r, p)
 	if !ok || !atLeast(perm, PermRead) {
 		http.Error(w, "no such project", http.StatusNotFound)
 		return
@@ -686,13 +889,13 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			}
 			p, _ = s.Projects.Get(p.ID)
 		}
-	} else if !atLeast(s.projectPerm(r, p.ID), PermRead) {
+	} else if !atLeast(s.projectPermOf(r, p), PermRead) {
 		// GetOrCreate is create-or-join by name: without this, POSTing the
 		// name of a project you've been cut off from would hand back its id.
 		http.Error(w, permDenied(PermRead), http.StatusForbidden)
 		return
 	}
-	writeJSON(w, map[string]any{"project": projectJSON(p, s.projectPerm(r, p.ID)), "created": created})
+	writeJSON(w, map[string]any{"project": projectJSON(p, s.projectPermOf(r, p)), "created": created})
 }
 
 // orgForCreate resolves which org a new project lands in: the explicitly
@@ -727,10 +930,10 @@ func (s *Server) orgForCreate(r *http.Request, requested string) (string, error)
 
 // Node is one entry of the file tree returned by the tree endpoint.
 type Node struct {
-	Name     string    `json:"name"`
-	Path     string    `json:"path"`
-	Dir      bool      `json:"dir"`
-	Size     int64     `json:"size,omitempty"`
+	Name string    `json:"name"`
+	Path string    `json:"path"`
+	Dir  bool      `json:"dir"`
+	Size int64     `json:"size,omitempty"`
 	Time time.Time `json:"time,omitzero"`
 	// Same three-field "who" shape as HistoryEntry (history.go), so the
 	// frontend has one attribution helper for every surface.
@@ -800,7 +1003,8 @@ func lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
 	}
 	snap, err := v.snapshot(r.Context())
 	if err != nil {
-		return "", FileInfo{}, http.StatusBadGateway, err
+		log.Printf("beardrive: read project snapshot: %v", err)
+		return "", FileInfo{}, http.StatusBadGateway, fmt.Errorf("content temporarily unavailable")
 	}
 	fi, ok := snap.files[p]
 	if !ok {
@@ -825,25 +1029,43 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	}
 	rc, err := v.source.Open(r.Context(), p, fi)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("fetch content: %v", err), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
 		return
 	}
 	defer rc.Close()
 	w.Header().Set("ETag", etag)
 	ct := contentType(p)
 	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Content-Length", fmt.Sprint(fi.Size))
+	setContentLength(w, rc)
+	// nosniff on both branches, the sandbox CSP only on the inline one: an
+	// attachment is not rendered, and TestInlineHTMLIsSandboxed pins that
+	// /download answers with a disposition INSTEAD of a CSP.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if attach {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(p)))
-	} else if strings.HasPrefix(ct, "text/html") || strings.HasPrefix(ct, "image/svg") {
-		// Synced HTML (and scriptable SVG) served inline must never run
-		// with the hub origin's session — same posture as /s/* share
-		// pages: an opaque sandboxed origin that can't touch the API or
-		// cookies. The viewer renders these in a sandboxed iframe; direct
-		// navigation gets the same wall.
-		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
+	} else {
+		w.Header().Set("Content-Type", inlineType(ct))
+		sandboxInline(w, ct)
 	}
 	io.Copy(w, rc)
+}
+
+// setContentLength promises a body length only when the thing about to be
+// streamed can be measured. FileInfo.Size comes off a journal op — JSON a
+// client pushed — so echoing it made the hub promise a length it had no way
+// to keep: a padded or truncated response for every download of that file,
+// declared by anyone who can push a journal. When the source cannot measure
+// (an object store's response body), no header goes out and net/http streams
+// chunked, which is a slightly worse progress bar and a true one.
+func setContentLength(w http.ResponseWriter, rc io.Reader) {
+	switch v := rc.(type) {
+	case interface{ Stat() (fs.FileInfo, error) }: // *os.File: file:// backend, DirSource
+		if fi, err := v.Stat(); err == nil && fi.Mode().IsRegular() {
+			w.Header().Set("Content-Length", fmt.Sprint(fi.Size()))
+		}
+	case interface{ Size() int64 }: // GCS *storage.Reader, bytes.Reader
+		w.Header().Set("Content-Length", fmt.Sprint(v.Size()))
+	}
 }
 
 func (s *Server) handleFile(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -867,7 +1089,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 	s.recordRead(r, p)
 	rc, err := v.source.Open(r.Context(), p, fi)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("fetch content: %v", err), http.StatusBadGateway)
+		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
 		return
 	}
 	src, err := io.ReadAll(rc)
@@ -910,7 +1132,7 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 	if rs == nil {
 		return
 	}
-	rc, err := rs.Backend.Get(r.Context(), "blobs/"+sha)
+	rc, err := rs.OpenBlob(r.Context(), sha)
 	if err != nil {
 		http.Error(w, "no such version", http.StatusNotFound)
 		return
@@ -931,6 +1153,66 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 	})
 }
 
+// inlineMarkup reports whether a Content-Type names something the browser
+// parses as a DOCUMENT in a top-level navigation, which is what makes it a
+// script-execution vehicle on whatever origin served it.
+//
+// It is deliberately a property and not a list of extensions. The list was the
+// bug: it named text/html, image/svg and *xhtml*, and the whole XML family sat
+// outside it while having exactly the property — an XML document carries its
+// own `<?xml-stylesheet type="text/xsl"?>`, the browser applies the XSLT (the
+// stylesheet is same-origin, the attacker uploads it to the same project) and
+// renders the result, which is HTML, in the hub's origin with the reader's
+// session. Anything that parses as markup belongs here; when in doubt, add it.
+func inlineMarkup(ct string) bool {
+	ct = strings.ToLower(ct)
+	for _, m := range []string{"text/html", "xhtml", "svg", "/xml", "+xml"} {
+		if strings.Contains(ct, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// inlineType is the Content-Type the hub is willing to have a browser PARSE
+// when it serves stored bytes inline.
+//
+// The XML family is declared inert. The sandbox CSP below already removes its
+// capability — but it removes it by making the document render as nothing at
+// all (the stylesheet an XML document names is sandboxed too, so the XSLT
+// never runs and there is no document), and "you see nothing" is a poor answer
+// for a reader who clicked a .xml. Declaring it text is both the stronger
+// answer — it needs no CSP support in the browser, and nothing parses a
+// document — and the more useful one: the reader sees the source.
+//
+// HTML, XHTML and SVG keep their real type. The app has always served them,
+// and for them the sandbox is a complete wall rather than a blank page.
+func inlineType(ct string) string {
+	l := strings.ToLower(ct)
+	if inlineMarkup(l) && !strings.Contains(l, "html") && !strings.Contains(l, "svg") {
+		return "text/plain; charset=utf-8"
+	}
+	return ct
+}
+
+// sandboxInline walls off markup the hub serves from its own origin: synced
+// HTML (any flavour), scriptable SVG and the XML family run in an opaque
+// sandboxed origin — same posture as /s/* share pages — so they can never
+// touch the API or the reader's session cookie. Every route that streams
+// stored bytes inline calls this: the live file (serveBlob) and any past
+// version (history's handleBlob), which serve identical content and must not
+// differ in their wall.
+// It also stamps nosniff on every response it sees. The wall above keys off
+// the Content-Type the hub declared; without nosniff a browser is free to
+// sniff attacker-written bytes into a document type the hub never named, which
+// is the same capability arriving through a door the CSP never opened.
+func sandboxInline(w http.ResponseWriter, ct string) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if inlineMarkup(ct) {
+		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
+	}
+}
+
 func contentType(p string) string {
 	switch strings.ToLower(path.Ext(p)) {
 	case ".md", ".markdown":
@@ -944,6 +1226,15 @@ func contentType(p string) string {
 		return t
 	}
 	return "application/octet-stream"
+}
+
+// storageErr answers a failed storage operation. The detail goes to the log,
+// never to the client: an object-store error names the hub's absolute path
+// (or, on S3, its bucket and key), which no project member has any business
+// learning from a missing file.
+func storageErr(w http.ResponseWriter, code int, msg string, err error) {
+	log.Printf("beardrive: %s: %v", msg, err)
+	http.Error(w, msg, code)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

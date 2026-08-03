@@ -20,6 +20,8 @@ import (
 	"github.com/runbear-io/beardrive/internal/agenthooks"
 	"github.com/runbear-io/beardrive/internal/autostart"
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/templates"
 )
 
@@ -90,6 +92,24 @@ the folder was renamed or moved.`,
 			if err != nil {
 				return err
 			}
+			// The beardrive home holds this device's hub credential
+			// (settings.json), every project's journals and its cached blobs.
+			// The reserved-directory rule only covers segments BELOW a mount
+			// root, so a mount that IS the home makes settings.json an ordinary
+			// top-level file and the first cycle pushes the token to the hub —
+			// and to every teammate's disk.
+			//
+			// Both directions: a folder inside the home, and a folder that
+			// CONTAINS it. The second is the same push one level down —
+			// settings.json is then just a file some directories deep, and the
+			// reserved-name rule only knows ".bdrive" while $BDRIVE_HOME is
+			// whatever the operator called it.
+			if home, herr := config.Home(); herr == nil &&
+				(store.UnderRoot(home, folder) || store.UnderRoot(folder, home)) {
+				return fmt.Errorf("%s and the beardrive home %s contain one another; the home holds "+
+					"this device's credentials and every project's local data, so this is not a "+
+					"project folder", folder, home)
+			}
 			if projectID != "" && projectName != "" {
 				return fmt.Errorf("--project and --name are mutually exclusive")
 			}
@@ -113,7 +133,9 @@ the folder was renamed or moved.`,
 			if proj, ok, err := config.ResolveMount(folder); err != nil {
 				return err
 			} else if ok && proj.Remote != "" {
-				fmt.Printf("resuming %s (project %s)\n", folder, proj.Volume)
+				// The project name came from the hub; it reaches a terminal
+				// here and on every later command (see safeField).
+				fmt.Printf("resuming %s (project %s)\n", folder, safeField(proj.Volume, 120))
 				// --only on an existing mount narrows it in place: the scope is
 				// just .bdriveignore rules, so re-running init is a legitimate
 				// way to set them (and is what `bdrive scope` points at).
@@ -122,10 +144,8 @@ the folder was renamed or moved.`,
 					if err != nil {
 						return err
 					}
-					for _, dir := range scope {
-						if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(dir)), 0o755); err != nil {
-							return err
-						}
+					if err := mkdirScopeDirs(folder, scope); err != nil {
+						return err
 					}
 					if err := writeScopeDirs(folder, scope); err != nil {
 						return err
@@ -155,12 +175,35 @@ the folder was renamed or moved.`,
 				return startSync(cmd.Context(), folder, proj, foreground, 3*time.Second, 10*time.Second)
 			}
 
+			// A new mount inside an existing one is two writers over one set of
+			// paths: the parent syncs these files into the parent's project and
+			// this mount into its own. Cheap to refuse here; the syncer's
+			// nested-mount handling exists because it wasn't.
+			if root, nested := findMountRoot(filepath.Dir(folder)); nested {
+				return fmt.Errorf("%s is inside the project at %s\n"+
+					"a project inside a project syncs the same files twice, to two different projects\n"+
+					"sync it as part of that project, or move it outside %s first", folder, root, root)
+			}
+
 			// Sign in first if this device has no (valid) session.
-			settings, err := ensureLogin(serverURL)
+			settings, restoreSession, err := ensureLogin(serverURL)
 			if err != nil {
 				return err
 			}
 			server := settings.Server
+
+			// A new session is not committed until this hub has proved usable:
+			// it answered with a project, and this device can open that
+			// project's remote. Everything between here and hubUsable is that
+			// proof, and anything that fails in it puts the previous session
+			// back — one arm point and one disarm point rather than a restore
+			// call bolted onto each early return. See ensureLogin.
+			hubUsable := false
+			defer func() {
+				if !hubUsable {
+					restoreSession()
+				}
+			}()
 
 			interactive := stdinIsTTY() && !yes
 
@@ -185,14 +228,31 @@ the folder was renamed or moved.`,
 			if tpl.Name != "" && !created && p.Template != tpl.Name {
 				from := "an empty project"
 				if p.Template != "" {
-					from = "the " + p.Template + " template"
+					// safeField, like p.Name one screen down. p.Template is the
+					// same JSON object from the same hub and it was concatenated
+					// raw into an error the terminal prints — OSC 52 (a clipboard
+					// write), CSI (a repaint), C1 and bidi all rendered intact,
+					// on the surface an onboarding agent reads verbatim.
+					from = "the " + safeField(p.Template, 120) + " template"
 				}
 				return fmt.Errorf("project %q already exists and was created from %s\n"+
 					"a template only applies to a new project; connect to this one without --template", p.Name, from)
 			}
-			if err := checkNotAlreadyMounted(server+"/p/"+p.ID, folder, p.Name); err != nil {
+			// The hub chooses the id and every later cycle builds its remote URL
+			// from it — but the only thing that validates it is remote.Open,
+			// inside the first cycle, where a failure degrades to "offline" by
+			// design. An id this device cannot open would leave init reporting
+			// success and every cycle a silent no-op forever, so open it here.
+			remoteURL := server + "/p/" + p.ID
+			be, err := remote.Open(cmd.Context(), remoteURL)
+			if err != nil {
+				return fmt.Errorf("%s answered with a project this device cannot sync: %w", server, err)
+			}
+			be.Close()
+			if err := checkNotAlreadyMounted(remoteURL, folder, p.Name); err != nil {
 				return err
 			}
+			hubUsable = true // the session is this device's default from here on
 
 			// All of this folder, or only some of it?
 			if len(only) == 0 && interactive && !cmd.Flags().Changed("only") {
@@ -205,10 +265,8 @@ the folder was renamed or moved.`,
 			if err != nil {
 				return err
 			}
-			for _, dir := range scope {
-				if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(dir)), 0o755); err != nil {
-					return err
-				}
+			if err := mkdirScopeDirs(folder, scope); err != nil {
+				return err
 			}
 
 			if err := os.MkdirAll(folder, 0o755); err != nil {
@@ -216,7 +274,7 @@ the folder was renamed or moved.`,
 			}
 			proj := config.Project{
 				Volume: p.Name,
-				Remote: server + "/p/" + p.ID,
+				Remote: remoteURL,
 			}
 			proj, err = config.SaveProject(folder, proj)
 			if err != nil {
@@ -233,21 +291,25 @@ the folder was renamed or moved.`,
 					return err
 				}
 			}
-			fmt.Printf("initialized %s\n  server:  %s\n  project: %s (%s)\n", folder, server, p.Name, p.ID)
+			fmt.Printf("initialized %s\n  server:  %s\n  project: %s (%s)\n", folder, server, safeField(p.Name, 120), p.ID)
 			if tpl.Name != "" {
-				switch {
-				case p.Template == tpl.Name:
-					// The hub seeded it at creation; the initial cycle below
-					// is blocking and pulls, so the files land on disk before
-					// this command returns.
-					fmt.Printf("  start:   %s template (seeded on the hub)\n", tpl.Name)
-				default:
-					// An older hub silently ignored the template field, which
-					// would make --template a quiet no-op. Seed from here and
-					// let the first cycle push it.
-					if err := seedLocally(folder, tpl); err != nil {
-						return err
-					}
+				// Seed from the client's OWN registry whatever the hub answered.
+				// `p.Template` is a string the hub chose, and it used to be the
+				// only evidence this branch had: a hub that answers "docs" and
+				// stores nothing left the folder empty under a success message
+				// that named the structure, and an older hub that ignored the
+				// field made --template a quiet no-op. seedLocally skips every
+				// path that already exists, so this is the repair in both cases.
+				//
+				// ponytail: when the hub really did seed, the same bytes are
+				// journaled twice — once by this device, once by the hub — so
+				// History shows two entries per template file. Both come from the
+				// same embedded registry, so they are the same blob and nothing
+				// diverges. Deduplicating would mean waiting for the first cycle
+				// to finish before deciding, which the foreground path never
+				// returns from.
+				if err := seedLocally(folder, tpl); err != nil {
+					return err
 				}
 			}
 			if !noHooks {
@@ -422,10 +484,32 @@ func installHooksIn(folder string) {
 // exists at all: without it, connecting to a hub this device has never seen
 // takes a separate `bdrive login <url>` first, and every extra command is
 // another permission prompt for whoever is driving.
-func ensureLogin(wantServer string) (config.Settings, error) {
+// It also returns a rollback: `--server` is the one value the runbook has an
+// agent take on faith out of a paste prompt, and signing in to it drops the
+// session this device already had (see the comment on the `server != prev`
+// branch below). Nothing put that back, so one mistyped or hostile URL signed
+// the device OUT of its real hub and left it defaulting to the other one — on
+// a run that ended in "Error:" — after which the next bare `bdrive login`,
+// `bdrive init` or `bdrive status` targeted the attacker. The caller commits
+// the new session only once the hub has proved usable.
+//
+// The rollback is a no-op when there was no session to lose: a device signing
+// in for the first time keeps the token it just minted, because there is
+// nothing to strand it away from and re-doing the device flow on the retry
+// helps nobody.
+func ensureLogin(wantServer string) (config.Settings, func(), error) {
 	settings, err := config.LoadSettings()
 	if err != nil {
-		return settings, err
+		return settings, func() {}, err
+	}
+	before := settings
+	rollback := func() {}
+	if before.Token != "" {
+		rollback = func() {
+			if err := config.SaveSettings(before); err != nil {
+				fmt.Printf("warning: could not restore this device's session on %s: %v\n", before.Server, err)
+			}
+		}
 	}
 	server := settings.Server
 	if wantServer != "" {
@@ -436,27 +520,40 @@ func ensureLogin(wantServer string) (config.Settings, error) {
 	}
 	cfg, err := fetchServerConfig(server)
 	if err != nil {
-		return settings, fmt.Errorf("cannot reach bdrive server at %s: %w (set one with `bdrive login <url>`)", server, err)
+		return settings, rollback, fmt.Errorf("cannot reach bdrive server at %s: %w (set one with `bdrive login <url>`)", server, err)
+	}
+	prev := settings.Server
+	// A device token belongs to the hub that issued it, and settings.Server is
+	// the whole of that binding (remote.deviceToken hands the token to any base
+	// with the same origin). Pointing init at a different server therefore has
+	// to drop the old session first — on the no-auth branch too, where nothing
+	// else ever clears it and a server that simply answers "auth: disabled"
+	// would otherwise be handed the previous hub's credential.
+	if server != prev {
+		settings.Token, settings.Email, settings.Name = "", "", ""
 	}
 	if !cfg.Auth.Enabled {
 		settings.Server = server
-		return settings, config.SaveSettings(settings)
+		return settings, rollback, config.SaveSettings(settings)
 	}
-	prev := settings.Server
 	settings.Server = server
 	switch {
 	case settings.Token != "" && prev == server:
 		if _, err := whoAmIOnServer(server, settings.Token); err == nil {
-			return settings, nil
+			// Same hub, same live session: nothing was replaced, so nothing
+			// needs putting back.
+			return settings, func() {}, nil
 		}
 		fmt.Println("session expired — signing in again")
 	case prev != "" && prev != server:
 		fmt.Printf("signing in to %s (this device was signed in to %s)\n", server, prev)
 	}
 	if err := runLogin(server, cfg, false); err != nil {
-		return settings, err
+		rollback()
+		return settings, func() {}, err
 	}
-	return config.LoadSettings()
+	settings, err = config.LoadSettings()
+	return settings, rollback, err
 }
 
 // normalizeServer accepts what people (and agents) actually type: a bare
@@ -590,7 +687,36 @@ type serverProject struct {
 	Template string `json:"template"`
 }
 
-var initClient = &http.Client{Timeout: 10 * time.Second}
+var initClient = &http.Client{Timeout: 10 * time.Second, CheckRedirect: dropTokenOffOrigin}
+
+// dropTokenOffOrigin keeps a hub's 3xx from carrying this device's credential
+// somewhere else: net/http strips Authorization only when the HOSTNAME
+// changes, so another port, an https→http downgrade or a sibling subdomain
+// kept the bearer token. Same rule the sync backend's client applies
+// (remote/http.go refuseOffOriginRedirect).
+func dropTokenOffOrigin(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	if len(via) > 0 && !remote.SameOrigin(req.URL.String(), via[0].URL.String()) {
+		req.Header.Del("Authorization")
+	}
+	return nil
+}
+
+// tokenGoesTo reports whether this device's credential may be attached to a
+// request for rawURL: only when the target is the origin `bdrive login` signed
+// in to. Every CLI destination but the login flow's own comes out of a
+// folder's .bdrive/config.json, which travels with the folder (a zip, a clone,
+// a colleague's copy) — so the folder must not get to choose where the token
+// goes. remote.deviceToken binds the sync backend the same way.
+func tokenGoesTo(rawURL string) bool {
+	s, err := config.LoadSettings()
+	if err != nil {
+		return false
+	}
+	return remote.SameOrigin(rawURL, s.Server)
+}
 
 // serverDo sends an API request with this device's token attached, and
 // turns a 401 into a run-bdrive-login hint.
@@ -606,7 +732,7 @@ func serverDo(method, url, token string, body []byte) (*http.Response, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if token != "" {
+	if token != "" && tokenGoesTo(url) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := initClient.Do(req)

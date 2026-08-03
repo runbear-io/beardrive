@@ -107,7 +107,7 @@ func TestReadLogCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil { // enroll, as `bdrive init` would
+	if _, _, err := config.EnrollMount(folder); err != nil { // enroll, as `bdrive init` would
 		t.Fatal(err)
 	}
 
@@ -177,7 +177,7 @@ func TestReadLogGated(t *testing.T) {
 	}
 
 	// Enrolled but paused by `bdrive stop`: still nothing spooled.
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetPaused(vdir, true); err != nil {

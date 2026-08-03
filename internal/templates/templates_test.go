@@ -52,7 +52,7 @@ func TestShippedTemplates(t *testing.T) {
 		// differs by structure: PARA archives, a wiki supersedes and revises
 		// stale claims. What must not vary is that the question is answered.
 		for question, words := range map[string][]string{
-			"where a new file goes":     {"goes"},
+			"where a new file goes":                        {"goes"},
 			"what happens when something stops being true": {"rchiv", "supersede", "stale"},
 			"what a good filename looks like":              {"ilename"},
 		} {

@@ -2,14 +2,13 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
@@ -56,7 +55,19 @@ too, use ` + "`bdrive forget <path>`" + `.`,
 			if !explain {
 				return nil
 			}
-			synced, notSynced, err := syncer.Explain(folder, proj.Include)
+			// The rules this device has ACCEPTED, so the explanation matches
+			// what the cycle actually uploads (syncer.Filter.SkipUp). A store
+			// that will not open is not worth failing `bdrive scope` over: the
+			// answer degrades to the live rules, which is what it always was.
+			var accepted string
+			if vdir, verr := config.VolumeDir(proj.ID); verr == nil {
+				if st, serr := store.Open(vdir); serr == nil {
+					if sync, serr := st.LoadSync(); serr == nil {
+						accepted = sync.IgnoreAccepted
+					}
+				}
+			}
+			synced, notSynced, err := syncer.Explain(folder, proj.Include, accepted)
 			if err != nil {
 				return err
 			}
@@ -137,7 +148,7 @@ func scopeAddCmd() *cobra.Command {
 				if seen[d] {
 					continue
 				}
-				if err := os.MkdirAll(filepath.Join(folder, filepath.FromSlash(d)), 0o755); err != nil {
+				if err := mkdirScopeDirs(folder, []string{d}); err != nil {
 					return err
 				}
 				dirs = append(dirs, d)
@@ -234,12 +245,22 @@ func printScope(folder string, proj config.Project) error {
 	}
 	// Mounts created before the scope moved into .bdriveignore still carry an
 	// include list in .bdrive/config.json; it is still honored, so report it.
+	// Both mechanisms can be in force at once and LoadFilter applies both, so
+	// this reports every one of them — an audit surface that names one set of
+	// rules and stays silent about the other is worse than none.
 	if len(proj.Include) > 0 {
 		fmt.Println("syncing only (legacy include list in .bdrive/config.json):")
 		for _, i := range proj.Include {
 			fmt.Println("  ./" + strings.Trim(i, "/"))
 		}
 		fmt.Println("re-run `bdrive init . --only <dirs>` to move these into .bdriveignore")
+		if !scoped {
+			return nil
+		}
+		fmt.Println("\nand a managed .bdriveignore block, also in force:")
+		for _, d := range dirs {
+			fmt.Println("  ./" + d)
+		}
 		return nil
 	}
 	if !scoped {

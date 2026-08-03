@@ -203,7 +203,14 @@ export const PROJECT_ICONS: Record<string, LucideIcon> = {
 // no icon set, or a name this build doesn't know (hand-written into storage,
 // or dropped from the list later) → the folder placeholder.
 export function ProjectIcon({ name, className }: { name?: string; className?: string }) {
-  const C = PROJECT_ICONS[name ?? ""] ?? Folder;
+  // Object.hasOwn, not `?? Folder`: the server validates an icon's SHAPE only
+  // (iconRe, deliberately — adding an icon needs no server change), and
+  // "constructor" has that shape while resolving through Object.prototype to a
+  // function. The nullish fallback therefore never fired and React was handed
+  // Object as a component, which white-screens the whole SPA for every member
+  // of the org on every route, with no way back through the UI.
+  const key = name ?? "";
+  const C = Object.hasOwn(PROJECT_ICONS, key) ? PROJECT_ICONS[key] : Folder;
   return <C className={className} aria-hidden="true" />;
 }
 

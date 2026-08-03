@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -187,7 +189,8 @@ func statusCmd() *cobra.Command {
 				if settings.Name != "" {
 					who = settings.Name + " <" + settings.Email + ">"
 				}
-				fmt.Printf("device: %s (%s) signed in as %s\n\n", dev.Name, dev.ID, who)
+				// The account name/email come from the hub, like the rows below.
+				fmt.Printf("device: %s (%s) signed in as %s\n\n", dev.Name, dev.ID, safeField(who, 160))
 			} else {
 				fmt.Printf("device: %s (%s) as %s\n\n", dev.Name, dev.ID, dev.Author)
 			}
@@ -205,9 +208,13 @@ func statusCmd() *cobra.Command {
 					continue
 				}
 				fmt.Printf("%s\n", folder)
-				fmt.Printf("  project:  %s (%s)\n", mi.Volume, id)
+				// Volume and Remote come out of .bdrive/config.json, and
+				// Volume comes originally from the hub's project name — any
+				// org member's string, reaching a terminal. Same treatment as
+				// `bdrive log`'s rows.
+				fmt.Printf("  project:  %s (%s)\n", safeField(mi.Volume, 120), id)
 				if mi.Remote != "" {
-					fmt.Printf("  remote:   %s\n", mi.Remote)
+					fmt.Printf("  remote:   %s\n", safeField(mi.Remote, 200))
 				} else {
 					fmt.Printf("  remote:   (none — local only)\n")
 				}
@@ -301,12 +308,13 @@ func logCmd() *cobra.Command {
 				if who == "" {
 					who = op.Author
 				}
-				line := fmt.Sprintf("%s  %s  %-40s  %s on %s", when, kind, op.Path, who, op.DeviceName)
+				line := fmt.Sprintf("%s  %s  %-40s  %s on %s", when, kind,
+					safeField(op.Path, 160), safeField(who, 64), safeField(op.DeviceName, 64))
 				if op.Kind == journal.KindPut {
 					line += fmt.Sprintf("  (%s)", humanBytes(op.Size))
 				}
-				if op.Note != "" {
-					line += "  [" + op.Note + "]"
+				if note := safeField(op.Note, 200); note != "" {
+					line += "  [" + note + "]"
 				}
 				fmt.Fprintln(out, line)
 			}
@@ -316,6 +324,53 @@ func logCmd() *cobra.Command {
 	c.Flags().IntVarP(&limit, "limit", "n", 50, "max entries to show (0 = all)")
 	c.Flags().StringVarP(&pathFilter, "path", "p", "", "only show history for this file or directory")
 	return c
+}
+
+// safeField prepares a string that came out of a peer's journal for a terminal
+// row. Every string `bdrive log` and `bdrive restore --list` print — Path,
+// Note, User, UserName, Author, DeviceName — is arbitrary JSON someone else
+// wrote, and a terminal executes what it is handed: ESC sequences repaint
+// rows, clear the scrollback, set the window title, write the system clipboard
+// (OSC 52) and, through DECRQSS/CPR, make some emulators type a reply onto the
+// shell; a lone CR redraws the row that was just printed as something else; a
+// newline forges a whole entry. The audit tool an operator uses to catch a
+// peer must not be renderable BY that peer.
+//
+// So: no C0 or DEL, one entry is one line, and each part is bounded — 50 rows
+// of log is also owned by one 40 KB entry that scrolls the rest away.
+func safeField(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r < 0x20, r == 0x7f:
+			return -1
+		// C1, U+0080..U+009F. In a UTF-8 terminal these arrive as two bytes
+		// and xterm and its descendants decode them straight back to 8-bit
+		// controls: U+009B IS CSI, U+009D IS OSC, U+0090 IS DCS, U+0085 IS
+		// NEL. The whole escape vocabulary, with no ESC byte anywhere.
+		case r >= 0x80 && r <= 0x9f:
+			return -1
+		// Every format character (category Cf) plus the tag block, as a
+		// CLASS. The bidirectional controls this used to enumerate (Trojan
+		// Source, CVE-2021-42574) are Cf: not control characters by Unicode's
+		// own definition, so they survive every C0/C1 filter, and one U+202E
+		// draws the rest of the row right-to-left — the columns naming the
+		// actor and the device come after the path on the same line.
+		//
+		// The class, not the list, for the reason journal.SafeText and
+		// webapp.trimText arrived at the same rule in round 13: an enumeration
+		// grows by neighbours and misses the rest. U+E0020..U+E007F encodes all
+		// of printable ASCII with no glyph at all, and this output is read by
+		// agents as often as by people — `bdrive status` and `bdrive log` land
+		// in a session's context verbatim.
+		case unicode.Is(unicode.Cf, r), r >= 0xe0000 && r <= 0xe01ef:
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > max {
+		s = strings.ToValidUTF8(s[:max], "") + "…"
+	}
+	return s
 }
 
 func daemonCmd() *cobra.Command {

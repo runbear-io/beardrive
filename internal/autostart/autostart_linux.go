@@ -5,6 +5,7 @@ package autostart
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Unit is the systemd user unit's name, and the file it lives in.
@@ -57,11 +58,32 @@ Documentation=https://docs.beardrive.ai/manual/hooks/
 
 [Service]
 Type=oneshot
-ExecStart=` + exe + ` resume --quiet
+ExecStart=` + unitArg(exe) + ` resume --quiet
 
 [Install]
 WantedBy=default.target
 `
+}
+
+// unitArg renders a path as one systemd command argument. systemd splits
+// ExecStart= on whitespace and understands double quotes with backslash
+// escapes, so a path with a space (or a quote) has to be quoted or it becomes
+// two arguments. Control characters never get here — loginPath refuses them,
+// because a newline would start a new unit directive that runs at login.
+// '%' is systemd's other metacharacter and the one this missed: every
+// specifier in systemd.unit(5) is expanded when the unit is LOADED, before the
+// line is parsed as a command, and the literal is written '%%'. A bdrive under
+// a directory named "%t" registered a login command systemd resolved to
+// /run/user/<uid>/bdrive — a directory the user's own session can write —
+// while any other '%' made an unknown specifier, which systemd refuses to load
+// (Install says "registered", nothing starts).
+func unitArg(exe string) string {
+	exe = strings.ReplaceAll(exe, "%", "%%")
+	if !strings.ContainsAny(exe, " \t\"'\\") {
+		return exe
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return `"` + r.Replace(exe) + `"`
 }
 
 // Install writes the unit and enables it by linking it into
@@ -75,7 +97,7 @@ func Install() (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	exe, err := selfPath()
+	exe, err := loginPath()
 	if err != nil {
 		return Result{}, err
 	}
@@ -121,8 +143,18 @@ func Installed() bool {
 	if _, err := os.Stat(path); err != nil {
 		return false
 	}
-	_, err = os.Lstat(filepath.Join(filepath.Dir(path), wantsDir, Unit))
-	return err == nil
+	// The wants entry has to RESOLVE to our unit. Lstat only asked whether
+	// something is there, so a dangling symlink, a symlink to another unit and
+	// a plain regular file all read as "registered" — the exact answer this
+	// package's doc says it exists to prevent ("Install reported success and
+	// sync silently never resumed after a reboot").
+	link := filepath.Join(filepath.Dir(path), wantsDir, Unit)
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		return false
+	}
+	want, err := filepath.EvalSymlinks(path)
+	return err == nil && resolved == want
 }
 
 // Uninstall removes the enable symlink and the unit. Missing is success.

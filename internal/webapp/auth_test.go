@@ -227,7 +227,8 @@ func TestCLICallbackFlow(t *testing.T) {
 
 	// with a session, a GET asks first — it names the account the terminal
 	// would act as and offers to switch, and grants nothing on its own.
-	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"
+	pkceQ, pkceV := pkceParams()
+	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1" + pkceQ
 	req = httptest.NewRequest("GET", cliURL, nil)
 	req.AddCookie(cookie)
 	rec = httptest.NewRecorder()
@@ -256,7 +257,7 @@ func TestCLICallbackFlow(t *testing.T) {
 	code := loc.Query().Get("code")
 
 	// exchange the code for a token
-	rec = do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "laptop"})
+	rec = do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": code, "device": "laptop", "code_verifier": pkceV})
 	if rec.Code != 200 {
 		t.Fatalf("exchange: %d %s", rec.Code, rec.Body)
 	}
@@ -300,15 +301,20 @@ func TestDeviceCodeFlow(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil || start.Code == "" {
 		t.Fatalf("start = %s (%v)", rec.Body, err)
 	}
-	// The link is the secret, so it must be a real token, and it must carry
-	// the code in the path — nobody types this in.
+	// Both values are real tokens (nobody types these in), and the one in the
+	// link is NOT the one the client polls with: the link is displayed,
+	// forwarded and logged, and must not by itself buy a device token.
 	if len(start.Code) < 32 {
 		t.Fatalf("device code %q is too short to be a URL secret", start.Code)
 	}
-	if !strings.HasSuffix(start.VerifyURL, "/auth/device/"+start.Code) {
-		t.Fatalf("verify_url = %q, want .../auth/device/<code>", start.VerifyURL)
+	link, ok := strings.CutPrefix(start.VerifyURL, "http://example.com/auth/device/")
+	if !ok || len(link) < 32 {
+		t.Fatalf("verify_url = %q, want .../auth/device/<link secret>", start.VerifyURL)
 	}
-	approve := "/auth/device/" + start.Code
+	if link == start.Code {
+		t.Fatalf("the link the human opens is also the poll credential (%q)", link)
+	}
+	approve := "/auth/device/" + link
 
 	// pending until approved
 	rec = do(t, h, "POST", "/api/auth/device/poll", map[string]string{"code": start.Code})
@@ -596,7 +602,8 @@ func TestCLILoginSwitchAccount(t *testing.T) {
 	h := srv.Handler()
 	personal := signupAndSession(t, h, "me@personal.io", "Me", "password1")
 
-	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1"
+	pkceQ2, pkceV2 := pkceParams()
+	cliURL := "/auth/cli?redirect=" + url.QueryEscape("http://127.0.0.1:9999/callback") + "&state=s1" + pkceQ2
 
 	// the page offers a way out, carrying this sign-in along
 	req := httptest.NewRequest("GET", cliURL, nil)
@@ -644,7 +651,7 @@ func TestCLILoginSwitchAccount(t *testing.T) {
 		t.Fatalf("approve after switch: %d", rec.Code)
 	}
 	cb, _ := url.Parse(rec.Header().Get("Location"))
-	out := do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": cb.Query().Get("code"), "device": "laptop"})
+	out := do(t, h, "POST", "/api/auth/exchange", map[string]string{"code": cb.Query().Get("code"), "device": "laptop", "code_verifier": pkceV2})
 	if !strings.Contains(out.Body.String(), "me@work.io") {
 		t.Fatalf("token issued to the wrong account: %s", out.Body)
 	}

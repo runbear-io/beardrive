@@ -16,7 +16,10 @@ import (
 // volume store, run the initial cycle, start the background daemon. Called
 // by `bdrive init` (and by anything that needs to resume a stopped project).
 func startSync(ctx context.Context, folder string, proj config.Project, foreground bool, scanInterval, remoteInterval time.Duration) error {
-	if _, _, err := config.ResolveMount(folder); err != nil { // registers/updates the registry entry
+	// EnrollMount, not ResolveMount: creating the registry row is the
+	// enrollment gesture and startSync is `bdrive init`'s path, the one place
+	// that may do it. Every other command resolves without enrolling.
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		return err
 	}
 	vdir, err := config.VolumeDir(proj.ID)

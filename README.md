@@ -228,7 +228,7 @@ hub's own storage, never something a syncing client points at directly:
 | Command | Description |
 |---|---|
 | `bdrive login [server-url]` | Sign this device in (browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
-| `bdrive logout` | Sign this device out — clear the saved token/account (`--forget` also drops the remembered server) |
+| `bdrive logout` | Sign this device out — revoke this device's token on the hub and clear it locally (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--template/--yes`) for scripts; `--template docs\|wiki\|para` starts the project from a structure (directories plus the `AGENTS.md` that explains them) instead of an empty folder; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent; this is what the login agent runs |
 | `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot — a launchd user agent on macOS, a systemd user unit on Linux, an HKCU Run entry on Windows. `bdrive init` installs it; `--no-autostart` skips it |
@@ -244,7 +244,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the file was written (ops recorded before this was tracked, and deletes, show their sync time instead) |
 | `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change (`--list` shows the versions; no version = the previous one). Nothing is erased and it syncs everywhere like any edit. To un-create a file a run *created*, use **undo — remove file** on that row in the hub's History view |
 | `bdrive export [folder]` | Export the whole project — every device's journal, all blobs, full history — from its hub to a portable `.tar.gz` (`-o` names the file) |
-| `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (`--name` overrides); history and authorship carry over. Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
+| `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (always a NEW project; `--name` overrides the archive's); history and authorship carry over. Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
 | `bdrive serve [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
 | `bdrive whoami` | Signed-in account and device identity used in change tracking |
 | `bdrive version` | Print the version (also `bdrive --version`) |
@@ -316,12 +316,18 @@ the positional argument), `--upload` (allow client writes, off by default),
   "refresh": "10s",
   "projects_db": "/var/lib/bdrive/projects.json",
   "share_rpm": 120,                  // per-IP rate limit on public /s/* links
+  "trust_proxy": false,              // read X-Forwarded-For from a proxy on a PUBLIC address;
+                                     // a proxy on loopback/private is already trusted
   "auth": {                          // optional knobs; hub auth is always on
     // Signup is invite-only by default. To allow self-service signup,
     // open it WITH a gate (an ungated open hub is refused at startup):
     "allow_signup": true,
     "allowed_domains": ["example.com"],  // only these domains may sign up
     "require_approval": true,            // …and an admin must approve each one
+    "base_url": "https://drive.example.com",  // public origin for MAILED links (reset, verification)
+    //   REQUIRED whenever smtp is set: without it the only other origin a link
+    //   could carry is the Host header of the request that triggered it, which
+    //   an anonymous stranger chooses. Unset = links go out root-relative.
     "users_db": "/var/lib/bdrive/auth.json",
     "admins": ["admin@example.com"],
     "smtp": { "host": "smtp.example.com", "port": 587,
@@ -417,7 +423,11 @@ structure rather than an empty folder: a small directory skeleton plus the
 `AGENTS.md` that tells an agent where a new note goes, when something is
 archived, and what a good filename looks like — which is the part that keeps
 a shared folder from rotting into a pile. The hub seeds it at creation, so it
-is already there for the browser and for every device that connects later;
+is already there for the browser and for every device that connects later —
+and `init` writes the same structure locally from its own copy, so the folder
+has what the command said it would whatever the hub stored. Seeded files carry
+no account and a "seeded from the … template" note, so change history tells
+them from a file a teammate wrote;
 joining a project that already exists never restructures it, and
 `--template` is refused together with `--only` (scope rules live in the
 synced `.bdriveignore`, so a scope that left out the template's folders would
@@ -582,7 +592,14 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
 ### What beardrive does not sync
 
 `.git` directories (per-file LWW would corrupt repositories), `.DS_Store`,
-the `.bdrive` settings file, its own temp files, nested mounts (a
+the `.bdrive` settings file, agent **hook** configuration
+(`.claude/settings.json` and `settings.local.json`, `.codex/hooks.json` and
+`config.toml`, `.gemini/settings.json`, `.hermes/config.yaml`, and `.mcp.json`
+— a hook is a
+shell command, and syncing one would let a teammate install it on your
+machine; BearDrive's own hooks live in each machine's user config. Everything
+else under those directories — skills, commands, agents — syncs normally),
+its own temp files, nested mounts (a
 subdirectory with its own `.bdrive/config.json` syncs only through its own
 project — the parent never scans into it, writes over it, or propagates
 deletes for it), and anything excluded by `.bdriveignore` or omitted from an

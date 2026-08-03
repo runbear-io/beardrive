@@ -63,7 +63,7 @@ func TestExplainMatchesScan(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			synced, notSynced, err := Explain(a.Folder, tc.include)
+			synced, notSynced, err := Explain(a.Folder, tc.include, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -127,7 +127,7 @@ func TestExplainMatchesScan(t *testing.T) {
 			}
 
 			// 5. byte-stable across runs.
-			synced2, notSynced2, err := Explain(a.Folder, tc.include)
+			synced2, notSynced2, err := Explain(a.Folder, tc.include, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -149,7 +149,7 @@ func TestExplainScopedCollapsesUnsharedDirs(t *testing.T) {
 		write(t, a.Folder, filepath.Join("private/deep", "f"+string(rune('a'+i))+".txt"), "no")
 	}
 
-	_, notSynced, err := Explain(a.Folder, []string{"/docs/"})
+	_, notSynced, err := Explain(a.Folder, []string{"/docs/"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

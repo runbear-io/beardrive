@@ -3,6 +3,8 @@ package syncer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -89,7 +91,13 @@ func signupDeviceToken(t *testing.T, ts *httptest.Server, email, name string) st
 
 	// POST, not GET: /auth/cli shows a confirmation page first, and approving
 	// it is what mints the code — the same click a user makes in the browser.
-	req, _ := http.NewRequest("POST", ts.URL+"/auth/cli?redirect="+url.QueryEscape("http://127.0.0.1:1/cb")+"&state=s", nil)
+	// PKCE is mandatory on this flow (webapp.pkceOK): the CLI binds the code
+	// to itself and only it can redeem it.
+	const verifier = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	req, _ := http.NewRequest("POST", ts.URL+"/auth/cli?redirect="+url.QueryEscape("http://127.0.0.1:1/cb")+
+		"&state=s&code_challenge="+challenge+"&code_challenge_method=S256", nil)
 	req.AddCookie(session)
 	resp, err = jarless.Do(req)
 	if err != nil {
@@ -101,7 +109,7 @@ func signupDeviceToken(t *testing.T, ts *httptest.Server, email, name string) st
 		t.Fatalf("cli login redirect = %q", resp.Header.Get("Location"))
 	}
 
-	body, _ := json.Marshal(map[string]string{"code": loc.Query().Get("code"), "device": "test"})
+	body, _ := json.Marshal(map[string]string{"code": loc.Query().Get("code"), "device": "test", "code_verifier": verifier})
 	resp, err = http.Post(ts.URL+"/api/auth/exchange", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)

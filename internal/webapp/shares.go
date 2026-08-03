@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net/http"
 	"path"
 	"sort"
@@ -43,7 +44,45 @@ type ShareDB struct {
 	repo ShareRepo
 
 	mu      sync.Mutex
+	ver     versionGate // skips the re-read when the store has not moved
+	warned  bool        // "re-read failed" logged once (see refresh)
 	byToken map[string]Share
+}
+
+// refresh re-reads the share registry from the store. Callers hold mu.
+//
+// fileShareRepo.reload closed the WRITE side of this in round 12 and its own
+// comment names the row it did not close: a revoked link is gone from the file
+// and still served by any hub process that did not handle the revocation, to
+// anonymous strangers, for the life of that process. Revocation is the whole
+// emergency stop for a leaked public URL, so the read that decides whether a
+// /s/<token> is live has to read the store.
+//
+// A store that cannot answer leaves the map in place — see ProjectDB.refresh
+// for the trade.
+//
+// ponytail: one full Load per share resolution; see OrgDB.refresh for the
+// upgrade path if it ever shows up in a profile.
+func (db *ShareDB) refresh() {
+	token, stale := db.ver.stale(db.repo)
+	if !stale {
+		return
+	}
+	list, err := db.repo.Load()
+	if err != nil {
+		if !db.warned {
+			db.warned = true
+			log.Printf("beardrive: share registry re-read failed, serving the last known links: %v", err)
+		}
+		return
+	}
+	db.warned = false
+	db.ver.fresh(token)
+	next := make(map[string]Share, len(list))
+	for _, s := range list {
+		next[s.Token] = s
+	}
+	db.byToken = next
 }
 
 // NewShareDB builds the registry over a repo, loading its contents.
@@ -69,6 +108,7 @@ func OpenShareDB(path string) (*ShareDB, error) {
 func (db *ShareDB) Create(project, p, creator string, ttl time.Duration) (Share, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	for _, s := range db.byToken {
 		if s.Project == project && s.Path == p && !s.expired() && s.Expires.IsZero() && ttl == 0 {
 			return s, nil
@@ -96,6 +136,7 @@ func (db *ShareDB) Get(token string) (Share, bool) {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	s, ok := db.byToken[token]
 	if !ok || s.expired() {
 		return Share{}, false
@@ -103,14 +144,38 @@ func (db *ShareDB) Get(token string) (Share, bool) {
 	return s, true
 }
 
+// lookup resolves a share regardless of expiry. Authorization must not depend
+// on the clock: Get filters expired rows, so a handler that skips its
+// permission check when the lookup misses lets anyone delete an expired
+// share — and learn from the answer that it existed.
+func (db *ShareDB) lookup(token string) (Share, bool) {
+	if db == nil {
+		return Share{}, false
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	s, ok := db.byToken[token]
+	return s, ok
+}
+
 func (db *ShareDB) Revoke(token string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	if _, ok := db.byToken[token]; !ok {
+	db.refresh()
+	sh, ok := db.byToken[token]
+	if !ok {
 		return false
 	}
 	delete(db.byToken, token)
-	db.repo.Delete(token)
+	if err := db.repo.Delete(token); err != nil {
+		// Revocation is the emergency stop for a leaked public URL: a delete
+		// the store refused comes back at the next restart, so put the row
+		// back and report the failure rather than reporting a revocation that
+		// isn't one. Same shape as OrgDB.RevokeInvite.
+		db.byToken[token] = sh
+		return false
+	}
 	return true
 }
 
@@ -121,6 +186,7 @@ func (db *ShareDB) Revoke(token string) bool {
 func (db *ShareDB) SetExpiry(token string, ttl time.Duration) (Share, bool, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	prev, ok := db.byToken[token]
 	if !ok || prev.expired() {
 		return Share{}, false, nil
@@ -148,6 +214,7 @@ func (db *ShareDB) SetExpiry(token string, ttl time.Duration) (Share, bool, erro
 func (db *ShareDB) List(project string) []Share {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.refresh()
 	var out []Share
 	for _, s := range db.byToken {
 		if s.Project == project && !s.expired() {
@@ -237,8 +304,12 @@ func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 	// This route is /api/shares/{token} — outside the proj() wrapper — so the
 	// level check lives here: minting and killing public links are the same
 	// authority.
-	sh, ok := s.Shares.Get(r.PathValue("token"))
-	if ok && !s.requirePerm(w, r, sh.Project, PermWrite) {
+	sh, ok := s.Shares.lookup(r.PathValue("token"))
+	if !ok {
+		http.Error(w, "no such share", http.StatusNotFound)
+		return
+	}
+	if !s.requirePerm(w, r, sh.Project, PermWrite) {
 		return
 	}
 	if s.Shares.Revoke(r.PathValue("token")) {
@@ -305,10 +376,47 @@ func shareJSON(r *http.Request, sh Share) map[string]any {
 	return out
 }
 
+// shareCreatorStillBelongs reports whether the account that minted a link is
+// still in the project's org. A share is the strongest grant on the hub — the
+// org's live content, to anyone with the URL, forever — so offboarding has to
+// reach it: the day someone leaves, every link they minted stops serving.
+//
+// Resolved at read time rather than by walking shares.json on RemoveMember,
+// for the same reason projectPerm resolves membership instead of walking grant
+// maps: one rule, no sweep to forget, and it self-heals if the account rejoins.
+// Suspended, not deleted — an owner still sees the orphaned link in the
+// project's share list and can revoke it for good. Demotion (write → read) is
+// deliberately NOT covered: "a link lives until revoked" is the contract, and
+// only leaving the org ends it.
+func (s *Server) shareCreatorStillBelongs(sh Share) bool {
+	if s.Dir == nil || sh.Creator == "" {
+		return true // no membership model (single-volume), or a pre-accounts link
+	}
+	// No org on the project — cleared, never set, or the project is gone —
+	// means membership cannot be established, and on a public route that is a
+	// refusal, not a pass. Failing open here resurrected every link an
+	// offboarded member ever minted, one layer below the same fix projectPerm
+	// got in round 1.
+	org := s.orgOf(sh.Project)
+	if org == "" {
+		return false
+	}
+	return s.Dir.Role(org, sh.Creator) != ""
+}
+
 // handleShared serves a share link: public, sandboxed, always the latest
 // synced content.
 func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
-	if !s.shareLimiter().allow(clientIP(r)) {
+	// Sandbox everything under /s/ before anything can answer the request:
+	// shared content executes in an opaque origin (scripts allowed — charts in
+	// reports — but no cookies, no same-origin reach back into the hub), and
+	// an error page is a /s/ response like any other. Set here, not at the
+	// end, so the 429 and the 404s cannot go out bare.
+	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-popups")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+
+	if !s.shareLimiter().allow(s.clientIP(r)) {
 		http.Error(w, "too many requests — slow down", http.StatusTooManyRequests)
 		return
 	}
@@ -317,7 +425,11 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
 		return
 	}
-	v, err := s.projectVolume(sh.Project)
+	if !s.shareCreatorStillBelongs(sh) {
+		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
+		return
+	}
+	_, v, err := s.projectVolume(sh.Project)
 	if err != nil {
 		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
 		return
@@ -334,14 +446,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	}
 	// A share hit is external consumption. Actor is token+IP: one audience
 	// member reloading is debounced to a visit, distinct visitors still count.
-	s.Reads.Record(sh.Project, sh.Path, ReadKindShare, sh.Token+"/"+clientIP(r))
-
-	// Sandbox everything under /s/: shared content executes in an opaque
-	// origin (scripts allowed — charts in reports — but no cookies, no
-	// same-origin reach back into the hub).
-	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-popups")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	s.Reads.Record(sh.Project, sh.Path, ReadKindShare, sh.Token+"/"+s.clientIP(r))
 
 	rc, err := v.source.Open(r.Context(), sh.Path, fi)
 	if err != nil {
@@ -376,7 +481,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		io.Copy(w, rc)
 	default:
 		w.Header().Set("Content-Type", contentType(sh.Path))
-		w.Header().Set("Content-Length", fmt.Sprint(fi.Size))
+		setContentLength(w, rc) // measured, never the journal's Size field
 		io.Copy(w, rc)
 	}
 }

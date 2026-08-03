@@ -53,6 +53,26 @@ const (
 	readMarker = "bdrive read-log"
 )
 
+// ourEvents is every event name any platform above registers under. Removal is
+// scoped to it, because `bdrive hooks uninstall` promises to leave other hooks
+// untouched and the marker alone cannot keep that promise: it is a substring
+// hunt for "bdrive sync", so a user's own `cd ~/wiki && bdrive sync .` — under
+// SessionStart, an event this package has never written to — was deleted from
+// their machine-wide agent config.
+//
+// Scoping by event, not by exact command, because previous versions wrote
+// different command shapes and those still have to be removable (see
+// removeProjectHooks). Add an event here whenever a platform above gains one,
+// or uninstall silently stops removing it.
+var ourEvents = map[string]bool{
+	// claude, codex
+	"UserPromptSubmit": true, "PostToolUse": true,
+	// gemini
+	"BeforeAgent": true, "AfterTool": true,
+	// hermes
+	"pre_llm_call": true, "post_tool_call": true,
+}
+
 // Agent names, in the order they are reported.
 var Agents = []string{"claude", "codex", "gemini", "hermes"}
 
@@ -78,6 +98,12 @@ type Result struct {
 func mountGuard() string {
 	return `cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0; ` +
 		`d=$PWD; while [ ! -f "$d/.bdrive/config.json" ]; do case "$d" in ""|/) d=; break;; esac; d=${d%/*}; done; ` +
+		// $PWD is interpolated into the grep pattern below, and grep -F reads
+		// every LINE of its pattern as a separate alternative — a directory
+		// name containing a newline splits it, and a blank line among the
+		// pieces is the empty pattern, which matches every mount. No mount
+		// path can contain a newline anyway, so such a folder is never one.
+		"[ -n \"$d\" ] || case \"$PWD\" in *\"\n\"*) exit 0;; esac; " +
 		`[ -n "$d" ] || grep -qF "\"$PWD/" "${BDRIVE_HOME:-$HOME/.bdrive}/mounts.json" 2>/dev/null || exit 0; ` +
 		`command -v bdrive >/dev/null || exit 0; `
 }
@@ -266,7 +292,17 @@ func Uninstall(agents []string) ([]Result, error) {
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", name, err)
 		}
-		out = append(out, Result{Agent: name, Path: path, Changed: changed})
+		// The same residual Install migrates away. Uninstall used to touch only
+		// the user config, so a user who upgraded and then asked for the hooks
+		// to be removed was told "removed" while a `bdrive sync` kept firing on
+		// every turn from a project-level registration this package knows how
+		// to find.
+		cwd, _ := os.Getwd()
+		migrated, err := removeProjectHooks(cwd, name)
+		if err != nil {
+			return out, fmt.Errorf("%s: %w", name, err)
+		}
+		out = append(out, Result{Agent: name, Path: path, Changed: changed || migrated != "", Migrated: migrated})
 	}
 	return out, nil
 }
@@ -276,9 +312,14 @@ func Uninstall(agents []string) ([]Result, error) {
 // directory init ran from.
 func removeProjectHooks(folder, agent string) (string, error) {
 	var cleaned []string
+	user := ConfigPath("", agent)
 	for _, dir := range legacyHookDirs(folder) {
 		path := projectConfigPath(dir, agent)
-		if path == "" {
+		// The USER config is the project config of whatever directory it sits
+		// in: when $HOME is a git repo (dotfiles) or init runs from $HOME, it
+		// lands in legacyHookDirs and the "migration" would delete the hooks
+		// this same Install call just wrote — silently, machine-wide.
+		if path == "" || samePath(path, user) {
 			continue
 		}
 		changed, err := removeHooks(path, false)
@@ -306,16 +347,41 @@ func legacyHookDirs(folder string) []string {
 	return dirs
 }
 
-// gitRootOf is the repository containing folder, if any.
+// gitRootOf is the repository containing folder, if any. The walk stops at
+// $HOME: above it nothing is "this project's repo", and a dotfiles repo at
+// $HOME would hand back the home directory itself — whose agent config is the
+// user config, not a legacy project one.
 func gitRootOf(folder string) string {
+	home, _ := os.UserHomeDir()
 	for cur := folder; ; cur = filepath.Dir(cur) {
 		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
 			return cur
 		}
-		if filepath.Dir(cur) == cur {
+		if samePath(cur, home) || filepath.Dir(cur) == cur {
 			return ""
 		}
 	}
+}
+
+// samePath reports whether two paths name the same file or directory even when
+// they spell it differently. $HOME comes from the environment and spells
+// /var/... on macOS while a folder resolved with filepath.Abs (or os.Getwd)
+// spells the same place /private/var/... — a string compare misses that, and
+// the two guards above then let the user config through as a "legacy project
+// config" and delete the hooks Install just wrote.
+func samePath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
 }
 
 // removeHooks deletes every hook group carrying one of our markers, and
@@ -343,14 +409,17 @@ func removeHooks(path string, isYAML bool) (bool, error) {
 	}
 	changed := false
 	for event, v := range hooks {
+		if !ourEvents[event] {
+			continue
+		}
 		arr, _ := v.([]any)
 		var kept []any
 		for _, it := range arr {
-			if containsMarker(it, marker) || containsMarker(it, readMarker) {
-				changed = true
-				continue
+			left, dropped := stripOwnHooks(it)
+			changed = changed || dropped
+			if left != nil {
+				kept = append(kept, left)
 			}
-			kept = append(kept, it)
 		}
 		if len(kept) == 0 {
 			delete(hooks, event)
@@ -365,6 +434,57 @@ func removeHooks(path string, isYAML bool) (bool, error) {
 		delete(root, "hooks")
 	}
 	return true, writeConfig(path, marshal)
+}
+
+// stripOwnHooks removes this package's own hooks from one hook group and
+// returns what is left (nil when the whole group was ours), plus whether
+// anything was dropped.
+//
+// Removal is per HOOK, not per group. The old rule judged the whole
+// serialized group, so a group holding beardrive's command next to the user's
+// — which is what anyone gets after tidying settings.json by hand — lost both,
+// and the user's hook was collateral for a removal it was never part of.
+//
+// Hermes' YAML shape has no inner array (a group IS a command), so it is
+// judged as a leaf.
+func stripOwnHooks(group any) (any, bool) {
+	m, ok := group.(map[string]any)
+	if !ok {
+		return group, false
+	}
+	inner, ok := m["hooks"].([]any)
+	if !ok {
+		if ownHook(m) {
+			return nil, true
+		}
+		return group, false
+	}
+	var kept []any
+	dropped := false
+	for _, h := range inner {
+		hm, ok := h.(map[string]any)
+		if ok && ownHook(hm) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, h)
+	}
+	if !dropped {
+		return group, false
+	}
+	if len(kept) == 0 {
+		return nil, true
+	}
+	m["hooks"] = kept
+	return m, true
+}
+
+// ownHook reports whether one hook entry is one this package wrote. Only the
+// command is read (never the whole serialized group), and only inside an event
+// this package registers under — see ourEvents.
+func ownHook(h map[string]any) bool {
+	cmd, _ := h["command"].(string)
+	return strings.Contains(cmd, marker) || strings.Contains(cmd, readMarker)
 }
 
 // mergeJSONHooks adds the pull + push + read hook trio to a Claude-style
@@ -520,6 +640,16 @@ func writeConfig(path string, marshal func() ([]byte, error)) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
+	}
+	// Write THROUGH a symlink, never over it. ~/.claude/settings.json pointing
+	// into a dotfiles repo is the normal shape for anyone who versions their
+	// machine config, and WriteFileAtomic's rename replaced the link with a
+	// regular file: the change landed somewhere the user does not deploy from,
+	// every other machine sharing the repo kept the old config, and both
+	// install and uninstall reported success. Reads already follow the link
+	// (os.ReadFile), so only the write disagreed.
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
 	}
 	return store.WriteFileAtomic(path, append(data, '\n'), 0o644)
 }

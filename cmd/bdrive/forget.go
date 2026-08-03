@@ -104,13 +104,28 @@ func ignoreRule(root, arg string) (string, error) {
 		return "", fmt.Errorf("%s is outside the project at %s", abs, root)
 	}
 	rel = filepath.ToSlash(rel)
+	// One path, one rule: see hasControlRune. forget appends outside the
+	// managed scope block and then prunes the hub in the same command, so an
+	// injected rule is both permanent and immediately destructive.
+	if hasControlRune(rel) {
+		return "", fmt.Errorf("%q contains a control character, which would write more than one %s rule", arg, syncer.IgnoreFile)
+	}
 	if rel == syncer.IgnoreFile {
 		return "", fmt.Errorf("%s carries the rules themselves and always syncs", syncer.IgnoreFile)
 	}
+	// A PATH, written as a rule that means that path. .bdriveignore is a glob
+	// dialect, so `*`, `?`, a leading `!` and a leading `#` are wildcards, a
+	// negation and a comment — and every one of them is a legal filename
+	// character chosen by whoever synced the file. Emitting rel verbatim made
+	// `forget 'a*'` delete every sibling from the hub (forget prunes in the
+	// same command), `forget '!keep'` disable pruning for the whole team
+	// permanently, and `forget '#draft.md'` report success while the file kept
+	// syncing.
+	rule := syncer.EscapeIgnore(rel)
 	if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
-		rel += "/"
+		rule += "/"
 	}
-	return rel, nil
+	return rule, nil
 }
 
 // appendIgnoreRules adds any rules the file does not already carry, and

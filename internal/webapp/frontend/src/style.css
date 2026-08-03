@@ -560,6 +560,27 @@ a.ai-main:hover { color: var(--accent); }
 .dl-row .ticon .ico { width: 16px; height: 16px; }
 .dl-row:hover .ticon { color: var(--text-faint); }
 .dl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; color: var(--text); }
+
+/* Peer-written names paint in the order they are stored.
+   journal.SafeText refuses the bidi format CONTROLS by name, citing Trojan
+   Source — but a single strong-RTL LETTER is category Lo, passes every ingest
+   check, and reorders the row on its own: `docא(1).exe` paints as
+   `doc)1(א.exe` in a plain span. Measured in Chromium, `unicode-bidi: isolate`,
+   `plaintext` and a `<bdi>` wrapper all leave that reordering intact — they
+   isolate the name from its neighbours, not its characters from each other.
+   `isolate-override` does both, which is why it is the one used here.
+   This is a RENDERING rule, not an ingest one: a Hebrew filename stays legal.
+   It is scoped to the strings a teammate chooses and a reader is expected to
+   CHECK — a listing row, a breadcrumb, a history path/note/device, an audit
+   row in Settings — and never to file content, where RTL prose must render as
+   prose.
+   ponytail: an all-RTL name now reads left-to-right for an RTL reader, which
+   is the cost of one CSS line. Upgrade path if that matters: override only
+   when the string mixes strong directions, decided per name in JS. */
+.dl-name, #crumb, .hpath, .hnote, .hrun-note, .hdev, .ai-main {
+  unicode-bidi: isolate-override;
+  direction: ltr;
+}
 .dl-meta { flex: none; font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 /* read-heat dot: intensity grows with 30-day reads (heatLevel in app.js) */
 .heatdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }

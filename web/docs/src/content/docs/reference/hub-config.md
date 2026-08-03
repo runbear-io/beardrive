@@ -45,12 +45,17 @@ cloud credentials on the serving machine.
   "refresh": "10s",
   "projects_db": "/var/lib/bdrive/projects.json",
   "share_rpm": 120,                  // per-IP rate limit on public /s/* links
+  "trust_proxy": false,              // only for a proxy on a PUBLIC address; a proxy on
+                                     // loopback/private is trusted with no config
   "auth": {                          // optional knobs; hub auth is always on
     // Signup is invite-only by default. To allow self-service signup,
     // open it WITH a gate (an ungated open hub is refused at startup):
     "allow_signup": true,
     "allowed_domains": ["example.com"],  // only these domains may sign up
     "require_approval": true,            // …and an admin must approve each one
+    "base_url": "https://drive.example.com",  // public origin for MAILED links (reset, verification)
+    //   Required whenever smtp is set (the hub refuses to start without it):
+    //   a mailed link must never be built from a requester's Host header.
     "users_db": "/var/lib/bdrive/auth.json",
     "admins": ["admin@example.com"],
     "smtp": { "host": "smtp.example.com", "port": 587,
@@ -66,6 +71,30 @@ cloud credentials on the serving machine.
 
 See [Authentication](/self-hosting/authentication/) for the `auth` block and
 [Database](/self-hosting/database/) for `database`.
+
+## Running behind a reverse proxy
+
+The hub reads a caller's IP address to key two rate limiters: the one on
+public share links (`share_rpm`) and the one on `POST /auth/login`,
+`/auth/signup` and `/auth/reset` that blunts password brute-force and account
+enumeration.
+
+**Most deployments need no configuration.** The hub trusts `X-Forwarded-For`
+when the connection itself comes from loopback or a private address
+(RFC 1918, or IPv6 unique-local `fc00::/7`) — which is where nginx, Caddy, a
+Docker/Compose sidecar, Fly.io and Cloud Run all sit. When the connection comes
+from a public address the header is whatever the client typed, so it is ignored
+and the hub logs a line saying so once.
+
+The trusted entry is always the **last** `X-Forwarded-For` value on the **last**
+field line: the header grows left to right, each proxy appending what it saw, so
+everything before the last entry is whatever the client chose to send.
+
+`trust_proxy` (default `false`) is the override for the one shape the peer
+check cannot see: a proxy that reaches the hub from a **public** address. It
+honors the header from any peer, so never set it on a hub clients can reach
+directly — any caller could then pick a fresh address per request and never be
+throttled.
 
 ## Uploads
 

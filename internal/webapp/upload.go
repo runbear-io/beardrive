@@ -7,14 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 )
@@ -34,9 +35,13 @@ import (
 
 // Uploader is implemented by sources that accept writes through the server.
 // who is the signed-in account the write should be attributed to (zero when
-// auth is off).
+// auth is off), and note rides along on the journaled op — "" for an ordinary
+// browser upload, a stated origin when the HUB itself authored the bytes
+// (seedTemplate). Both are on the interface because the journal is the hub's
+// only audit surface: a write with no human behind it must not be able to
+// present as one by omission.
 type Uploader interface {
-	Upload(ctx context.Context, path string, r io.Reader, size int64, who User) error
+	Upload(ctx context.Context, path string, r io.Reader, size int64, who User, note string) error
 }
 
 // DirectUploader is additionally implemented by sources whose storage can
@@ -44,7 +49,11 @@ type Uploader interface {
 type DirectUploader interface {
 	Uploader
 	SignBlobPut(ctx context.Context, blob string, size int64, ttl time.Duration) (*remote.SignedPut, error)
-	HasBlob(ctx context.Context, blob string) (bool, error)
+	// BlobSize reports the stored size of a blob and whether it is there at
+	// all. Size comes from storage, never from the caller: in direct mode the
+	// server never sees the bytes, so this is the only true byte count it can
+	// quota-check and journal.
+	BlobSize(ctx context.Context, blob string) (int64, bool, error)
 	// note rides along on the journaled op — "" for an ordinary upload,
 	// "restore <path>@<sha8>" when the write is a restore.
 	Commit(ctx context.Context, path, blob string, size int64, who User, note string) error
@@ -61,33 +70,73 @@ func (r *RemoteSource) SignBlobPut(ctx context.Context, blob string, size int64,
 	return signer.SignPut(ctx, "blobs/"+blob, size, ttl)
 }
 
-func (r *RemoteSource) HasBlob(ctx context.Context, blob string) (bool, error) {
-	return r.Backend.Exists(ctx, "blobs/"+blob)
+func (r *RemoteSource) BlobSize(ctx context.Context, blob string) (int64, bool, error) {
+	o, ok, err := r.blobStat(ctx, blob)
+	return o.Size, ok, err
+}
+
+// blobStat is the stored object behind a blob: its size, its last-modified
+// time (zero on a backend that does not report one), and whether it is there.
+// One metadata call, no egress.
+func (r *RemoteSource) blobStat(ctx context.Context, blob string) (remote.Object, bool, error) {
+	key := "blobs/" + blob
+	objs, err := r.Backend.List(ctx, key) // full key as prefix: at most one hit
+	if err != nil {
+		return remote.Object{}, false, err
+	}
+	for _, o := range objs {
+		if o.Key == key {
+			return o, true, nil
+		}
+	}
+	return remote.Object{}, false, nil
+}
+
+// presignTTL is how long a presigned upload URL to this source stays valid —
+// the window in which a blob is writable by someone other than the hub.
+func (r *RemoteSource) presignTTL() time.Duration {
+	if r.PresignTTL > 0 {
+		return r.PresignTTL
+	}
+	return DefaultUploadTTL
+}
+
+// spool reads src to a temp file, rewound and ready to re-read, and reports
+// its real size and sha256. The server needs both before it stores anything:
+// a client's declared size and a content address are claims, not facts. The
+// caller closes and removes the file.
+func spool(src io.Reader) (f *os.File, size int64, sum string, err error) {
+	tmp, err := os.CreateTemp("", ".bdrive-tmp-upload-")
+	if err != nil {
+		return nil, 0, "", err
+	}
+	h := sha256.New()
+	size, err = io.Copy(tmp, io.TeeReader(src, h))
+	if err == nil {
+		_, err = tmp.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, 0, "", err
+	}
+	return tmp, size, hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Upload stores content through the server: spool to disk while hashing,
 // push the blob, then journal the op.
-func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ int64, who User) error {
-	tmp, err := os.CreateTemp("", ".bdrive-tmp-upload-")
+func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ int64, who User, note string) error {
+	tmp, size, blob, err := spool(src)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
-	h := sha256.New()
-	size, err := io.Copy(tmp, io.TeeReader(src, h))
-	if err != nil {
-		return err
-	}
-	blob := hex.EncodeToString(h.Sum(nil))
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
 	// Blob before journal, always.
 	if err := r.Backend.Put(ctx, "blobs/"+blob, tmp, size); err != nil {
 		return fmt.Errorf("push blob: %w", err)
 	}
-	return r.Commit(ctx, p, blob, size, who, "")
+	return r.Commit(ctx, p, blob, size, who, note)
 }
 
 // Commit appends a put op for path→blob to this server's own journal. It
@@ -99,7 +148,7 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, w
 	if r.Device.ID == "" {
 		return fmt.Errorf("no device identity configured for uploads")
 	}
-	ok, err := r.HasBlob(ctx, blob)
+	_, ok, err := r.BlobSize(ctx, blob)
 	if err != nil {
 		return fmt.Errorf("check blob: %w", err)
 	}
@@ -110,6 +159,14 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, w
 		Kind: journal.KindPut, Path: p, Blob: blob, Size: size, Mode: 0o644,
 		User: who.Email, UserName: who.Name, Note: note,
 	})
+}
+
+// nextLamport is maxLamport+1 without the wrap.
+func nextLamport(cur int64) int64 {
+	if cur == math.MaxInt64 {
+		return cur
+	}
+	return cur + 1
 }
 
 // appendOp stamps op with this server's identity and ordering and appends it
@@ -130,7 +187,13 @@ func (r *RemoteSource) appendOp(ctx context.Context, op journal.Op) error {
 			mySeq = max(mySeq, prev.Seq)
 		}
 	}
-	op.Seq, op.Lamport, op.Time = mySeq+1, maxLamport+1, time.Now().UTC()
+	// Saturating, like the client's tickLamport. maxLamport is taken over
+	// every journal the hub can see, members' included, and int64 addition
+	// wraps: one pushed op carrying MaxInt64 made the hub's next lamport
+	// MinInt64 — recomputed on every commit, so every later browser upload in
+	// the project silently lost last-writer-wins while commit still answered
+	// 200.
+	op.Seq, op.Lamport, op.Time = mySeq+1, nextLamport(maxLamport), time.Now().UTC()
 	op.Device, op.DeviceName, op.Author = r.Device.ID, r.Device.Name, r.Device.Author
 
 	// Read-modify-write of our own journal. A transient read error must fail
@@ -161,13 +224,40 @@ func (r *RemoteSource) appendOp(ctx context.Context, op journal.Op) error {
 
 var errBlobMissing = fmt.Errorf("content not uploaded yet")
 
+// emptyBlob is sha256(""), the only content whose size is legitimately zero.
+const emptyBlob = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// sizeFitsContentAddress is the one lie about a declared upload size that is
+// provable before the bytes exist: zero, for content that is not the empty
+// blob. In direct mode the bytes never pass through the hub, so the size is
+// the caller's word — and it is the number the quota is charged against, which
+// makes this exactly the lie that buys an unmetered presigned URL. Shared,
+// because both doors take the number: /upload/init (browsers) and /store/sign
+// (devices), and for a while only one of them checked.
+func sizeFitsContentAddress(sha string, size int64) bool {
+	return size > 0 || sha == emptyBlob
+}
+
 // ---- DirSource: writes land straight in the folder ----
 
 // Upload writes the file atomically under Root. There is no journal here;
 // on a mounted folder the daemon scans, journals, and syncs it like any
 // local edit.
-func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, _ User) error {
+func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, _ User, _ string) error {
 	dst := filepath.Join(d.Root, filepath.FromSlash(p))
+	// cleanUploadPath rules out "..", but a path with no ".." in it still
+	// leaves the folder by walking through a symlinked directory that was
+	// already there. The viewer promises "this folder": resolve where the
+	// write would actually land and refuse anything outside Root.
+	//
+	// Judged BEFORE anything is created. underRoot needs a directory that
+	// exists (EvalSymlinks), so asking after MkdirAll meant a refused upload
+	// had already built the whole parent chain on the other side of the
+	// symlink. The deepest existing ancestor answers the same question: every
+	// directory MkdirAll then creates is a real directory beneath it.
+	if err := underRoot(d.Root, existingDir(filepath.Dir(dst))); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
@@ -186,6 +276,37 @@ func (d *DirSource) Upload(_ context.Context, p string, src io.Reader, _ int64, 
 	return os.Rename(tmp.Name(), dst)
 }
 
+// existingDir walks up from dir to the deepest ancestor that exists on disk.
+func existingDir(dir string) string {
+	for {
+		if _, err := os.Lstat(dir); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		dir = parent
+	}
+}
+
+// underRoot reports whether dir, with every symlink resolved, is root or
+// inside it.
+func underRoot(root, dir string) error {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return err
+	}
+	if realDir != realRoot && !strings.HasPrefix(realDir, realRoot+string(filepath.Separator)) {
+		return fmt.Errorf("path leaves the served folder")
+	}
+	return nil
+}
+
 // ---- HTTP handlers ----
 
 var blobRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -193,16 +314,22 @@ var blobRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // cleanUploadPath validates a client-supplied destination path and returns
 // its normalized form.
 func cleanUploadPath(p string) (string, error) {
-	if p == "" || strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") {
+	// journal.SafePath is the rule — the same one the /store/* journal door
+	// and the device's unsafeRel apply. This door used to carry its own copy
+	// of it; the copies disagreed, which is how a control character that this
+	// door answered 400 to got journaled through the other one.
+	if !journal.SafePath(p) {
 		return "", fmt.Errorf("invalid path %q", p)
 	}
-	cl := path.Clean(p)
-	if cl != p || cl == "." || cl == ".." || strings.HasPrefix(cl, "../") {
-		return "", fmt.Errorf("invalid path %q", p)
-	}
-	base := path.Base(cl)
-	if base == ".bdrive" || strings.HasPrefix(base, ".bdrive-tmp-") {
-		return "", fmt.Errorf("reserved name %q", base)
+	cl := p
+	// The same set the scan walk would never have uploaded, at any depth:
+	// .bdrive/ is the mount's own identity (an upload of it repoints every
+	// device that pulls) and .git/ materializes hook scripts that run on a
+	// teammate's next commit. materialize re-checks this too — an op can also
+	// arrive from a peer's journal — but a hub that journals one has already
+	// handed it to every device.
+	if config.ReservedPath(cl) {
+		return "", fmt.Errorf("reserved name %q", cl)
 	}
 	return cl, nil
 }
@@ -262,15 +389,33 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	if err := s.quota().CheckWrite(s.orgOf(r.PathValue("project")), req.Size); err != nil {
+	if !sizeFitsContentAddress(req.SHA256, req.Size) {
+		http.Error(w, "declared size does not match the content address", http.StatusForbidden)
+		return
+	}
+	project := r.PathValue("project")
+	if rs, ok := v.source.(*RemoteSource); ok {
+		s.reconcileGrants(r.Context(), project, rs.Backend)
+	}
+	org := s.orgOf(project)
+	if err := s.quota().CheckWrite(org, req.Size+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 	if direct, isDirect := up.(DirectUploader); isDirect {
-		if exists, err := direct.HasBlob(r.Context(), req.SHA256); err == nil && exists {
+		if _, exists, err := direct.BlobSize(r.Context(), req.SHA256); err == nil && exists {
 			// Content already in the store (same file elsewhere, or a retry):
 			// skip the upload, go straight to commit.
 			writeJSON(w, map[string]any{"mode": "direct", "exists": true})
+			return
+		}
+		// Reserved, exactly like the device door: counted against the cap now,
+		// charged when the object is confirmed in storage, released for free
+		// if the caller never uploads. A browser upload that never comes back
+		// to commit is therefore still billed. Check and reservation are one
+		// critical section (see reserveIfFits).
+		if err := s.reserveIfFits(project, org, "blobs/"+req.SHA256, req.Size, s.Upload.ttl()); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
 		signed, err := direct.SignBlobPut(r.Context(), req.SHA256, req.Size, s.Upload.ttl())
@@ -286,6 +431,7 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 		}
 		// Backend can't presign right now (e.g. credentials that can't
 		// sign): degrade to uploading through the server.
+		s.claimGrant(project, "blobs/"+req.SHA256) // nothing was granted
 	}
 	writeJSON(w, map[string]any{"mode": "server"})
 }
@@ -301,12 +447,27 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	org, size := s.orgOf(r.PathValue("project")), max(r.ContentLength, 0)
-	if err := s.quota().CheckWrite(org, size); err != nil {
+	// Spool first, then charge what actually arrived. Content-Length is -1 on
+	// any chunked request, so max(r.ContentLength, 0) admitted an upload of any
+	// size against a quota of zero bytes and billed it at zero — the hole round
+	// 1 closed on the device door, still open on this one.
+	tmp, size, _, err := spool(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	project := r.PathValue("project")
+	if rs, ok := v.source.(*RemoteSource); ok {
+		s.reconcileGrants(r.Context(), project, rs.Backend)
+	}
+	org := s.orgOf(project)
+	if err := s.quota().CheckWrite(org, size+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := up.Upload(r.Context(), p, r.Body, r.ContentLength, s.requestUser(r)); err != nil {
+	if err := up.Upload(r.Context(), p, tmp, size, s.requestUser(r), ""); err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -330,14 +491,32 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	// The blob may already sit in storage (direct upload), but commit is
-	// what makes it part of the volume — so it is the accounting point.
+	// The blob may already sit in storage (direct upload), but commit is what
+	// makes it part of the volume — so it is the accounting point, and the
+	// only one in direct mode. Size comes from storage: req.Size is the
+	// caller's claim, and it would otherwise be both the quota charge and the
+	// journaled Op.Size.
+	// Bytes are charged once, where they land. If this commit finalizes a
+	// grant nothing has confirmed yet, it is the one charging them, from the
+	// size storage reports; if the reconciler (or a relayed put) already did,
+	// there is nothing left to claim and commit charges nothing — committing
+	// a path is not a second copy of the content.
+	claimed := s.claimGrant(r.PathValue("project"), "blobs/"+req.SHA256)
+	size, exists, err := direct.BlobSize(r.Context(), req.SHA256)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("commit: %v", err), http.StatusBadGateway)
+		return
+	}
+	if !exists {
+		http.Error(w, fmt.Sprintf("commit: %v", errBlobMissing), http.StatusConflict)
+		return
+	}
 	org := s.orgOf(r.PathValue("project"))
-	if err := s.quota().CheckWrite(org, req.Size); err != nil {
+	if err := s.quota().CheckWrite(org, size); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := direct.Commit(r.Context(), req.Path, req.SHA256, req.Size, s.requestUser(r), ""); err != nil {
+	if err := direct.Commit(r.Context(), req.Path, req.SHA256, size, s.requestUser(r), ""); err != nil {
 		code := http.StatusBadGateway
 		if err == errBlobMissing {
 			code = http.StatusConflict
@@ -345,7 +524,9 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 		http.Error(w, fmt.Sprintf("commit: %v", err), code)
 		return
 	}
-	s.quota().RecordUsage(org, req.Size)
+	if claimed {
+		s.quota().RecordUsage(org, size)
+	}
 	v.invalidate()
 	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
 }

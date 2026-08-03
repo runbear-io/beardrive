@@ -80,7 +80,7 @@ func TestRegistrySelfHeal(t *testing.T) {
 	if proj.ID == "" {
 		t.Fatal("SaveProject must assign a mount id")
 	}
-	if _, _, err := config.ResolveMount(folder); err != nil {
+	if _, _, err := config.EnrollMount(folder); err != nil {
 		t.Fatal(err)
 	}
 

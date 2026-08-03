@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -62,7 +64,8 @@ With no argument the remembered server is used, or ` + config.DefaultServer + `.
 				fmt.Println(settings.Server)
 				if settings.Token != "" {
 					if u, err := whoAmIOnServer(settings.Server, settings.Token); err == nil {
-						fmt.Printf("signed in as %s <%s>\n", u.Name, u.Email)
+						// The hub chose both of these; they reach a terminal.
+						fmt.Printf("signed in as %s <%s>\n", safeField(u.Name, 64), safeField(u.Email, 64))
 					} else {
 						fmt.Println("token no longer valid — run `bdrive login` again")
 					}
@@ -95,9 +98,6 @@ With no argument the remembered server is used, or ` + config.DefaultServer + `.
 				fmt.Printf("logged in to %s (no sign-in required by this server)\n", server)
 				return nil
 			}
-			if u.Scheme == "http" && u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" {
-				fmt.Println("warning: signing in over plain http — credentials travel unencrypted; prefer https (reverse proxy or tailscale)")
-			}
 			return runLogin(server, cfg, useDevice)
 		},
 	}
@@ -106,11 +106,33 @@ With no argument the remembered server is used, or ` + config.DefaultServer + `.
 	return c
 }
 
-// logoutNote is printed after every logout. It must stay honest: there is no
-// device-list page and no revoke route on the hub, and device tokens carry no
-// expiry (see internal/webapp/authlocal.go authToken) — logout only rewrites
-// the local settings file. login_test.go guards the wording.
-const logoutNote = "note: the token is only cleared locally — the server still accepts it, and there is no way to revoke it yet"
+// logoutNote is printed after every logout. It must stay honest: there is
+// still no device-list page and device tokens carry no expiry (see
+// internal/webapp/authlocal.go authToken), and a daemon already running keeps
+// the copy it started with until it exits. login_test.go guards the wording.
+const logoutNote = "note: a sync daemon already running keeps its own copy of the token until it exits (`bdrive stop`)"
+
+// revokeOnServer ends this device's token on the hub. The token authenticates
+// its own revocation, so signing out needs nothing else.
+func revokeOnServer(server, token string) error {
+	req, err := http.NewRequest(http.MethodDelete, server+"/api/auth/token", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := initClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil // the hub does not know this credential: already ended
+	}
+	if resp.StatusCode != http.StatusOK {
+		return httpBodyError(resp)
+	}
+	return nil
+}
 
 func logoutCmd() *cobra.Command {
 	var forget bool
@@ -136,6 +158,17 @@ Your synced folders are untouched; this only affects this device's session.`,
 				return nil
 			}
 			who, server := settings.Email, settings.Server
+			// End it on the hub FIRST, and say so when that fails: a token
+			// cleared only locally is a live credential with nobody watching
+			// it — the case an operator reaches for this command in (a lost
+			// laptop, a token in a log) is exactly the one where the local
+			// file no longer matters.
+			if settings.Token != "" && server != "" {
+				if err := revokeOnServer(server, settings.Token); err != nil {
+					fmt.Printf("warning: could not end this token on %s: %v\n", server, err)
+					fmt.Println("         it is cleared locally but the server may still accept it; run `bdrive logout` again when the server is reachable")
+				}
+			}
 			settings.Token, settings.Email, settings.Name = "", "", ""
 			if forget {
 				settings.Server = ""
@@ -165,6 +198,16 @@ Your synced folders are untouched; this only affects this device's session.`,
 // runLogin executes the sign-in flow against a server known to require auth
 // and persists server + token + account to settings.
 func runLogin(server string, cfg serverConfig, useDevice bool) error {
+	// Here, not in loginCmd's RunE. The warning used to sit above this function
+	// and only `bdrive login` reached it, while `bdrive init --server <url>`
+	// came through ensureLogin straight into this same credential exchange and
+	// said nothing — and INSTALL_FOR_AGENTS.md step 2 is titled "Do not run a
+	// login command", so every onboarding agent was routed onto the silent
+	// path. One sign-in door, one warning.
+	if u, err := url.Parse(server); err == nil && u.Scheme == "http" &&
+		u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1" {
+		fmt.Println("warning: signing in over plain http — credentials travel unencrypted; prefer https (reverse proxy or tailscale)")
+	}
 	loginPath := cfg.Auth.CLILogin
 	if loginPath == "" {
 		loginPath = "/auth/cli"
@@ -195,7 +238,7 @@ func runLogin(server string, cfg serverConfig, useDevice bool) error {
 	if err := config.SaveSettings(settings); err != nil {
 		return err
 	}
-	fmt.Printf("logged in to %s as %s <%s>\n", server, user.Name, user.Email)
+	fmt.Printf("logged in to %s as %s <%s>\n", server, safeField(user.Name, 64), safeField(user.Email, 64))
 	return nil
 }
 
@@ -231,12 +274,9 @@ func fetchServerConfig(server string) (serverConfig, error) {
 
 func whoAmIOnServer(server, token string) (serverUser, error) {
 	var u serverUser
-	req, err := http.NewRequest(http.MethodGet, server+"/api/auth/me", nil)
-	if err != nil {
-		return u, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := initClient.Do(req)
+	// Through serverDo like every other token-carrying CLI call, so the origin
+	// binding lives in exactly one place.
+	resp, err := serverDo(http.MethodGet, server+"/api/auth/me", token, nil)
 	if err != nil {
 		return u, err
 	}
@@ -246,6 +286,26 @@ func whoAmIOnServer(server, token string) (serverUser, error) {
 	}
 	err = json.NewDecoder(resp.Body).Decode(&u)
 	return u, err
+}
+
+// postAsDevice posts a login-flow request carrying this machine's device
+// identity. The hub binds that id to the account when it mints the token
+// (webapp.DeviceRegistry.Bind), and that binding is the ONLY thing that makes
+// the id this account's — so every mint point has to send it, not just the one
+// a fix happens to name: the loopback browser flow, the device-code flow, and
+// the login `bdrive init` runs inside itself all route through here.
+func postAsDevice(url string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if dev, err := config.LoadDevice(); err == nil && dev.ID != "" {
+		req.Header.Set("X-Bdrive-Device", dev.ID)
+		req.Header.Set("X-Bdrive-Device-Name", dev.Name)
+		req.Header.Set("X-Bdrive-Os", runtime.GOOS+"/"+runtime.GOARCH)
+	}
+	return initClient.Do(req)
 }
 
 func deviceName() string {
@@ -270,8 +330,21 @@ func browserLogin(server, loginPath string) (string, serverUser, error) {
 	var stateBuf [16]byte
 	rand.Read(stateBuf[:])
 	state := hex.EncodeToString(stateBuf[:])
+	// PKCE (RFC 7636, and RFC 8252 for exactly this loopback flow). `state`
+	// binds nothing: it is printed to stdout and handed to `open`/`xdg-open`
+	// as argv[1], so every local account can read it with `ps` — and with it
+	// and the listener port, any local process can walk a sign-in of ITS OWN
+	// account into this CLI's callback, after which the user's folders sync
+	// into somebody else's project. The verifier never leaves this process,
+	// so a code minted for any other flow cannot be redeemed here.
+	var verifierBuf [32]byte
+	rand.Read(verifierBuf[:])
+	verifier := hex.EncodeToString(verifierBuf[:])
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 	redirect := fmt.Sprintf("http://%s/callback", ln.Addr().String())
-	loginURL := fmt.Sprintf("%s%s?redirect=%s&state=%s", server, loginPath, redirect, state)
+	loginURL := fmt.Sprintf("%s%s?redirect=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
+		server, loginPath, redirect, state, challenge)
 
 	codeCh := make(chan string, 1)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +364,9 @@ func browserLogin(server, loginPath string) (string, serverUser, error) {
 	defer srv.Shutdown(context.Background())
 
 	fmt.Println("opening your browser to sign in (sign up there if you don't have an account):")
-	fmt.Println("  " + loginURL)
+	// The path came from the hub's /api/config — the first thing a server we
+	// have never talked to gets to print on this machine.
+	fmt.Println("  " + safeField(loginURL, 512))
 	if err := openBrowser(loginURL); err != nil {
 		// The loopback callback only works from a browser on this machine, so
 		// a URL the user pastes elsewhere would dead-end — use the code flow.
@@ -304,15 +379,17 @@ func browserLogin(server, loginPath string) (string, serverUser, error) {
 		if code == "" {
 			return "", serverUser{}, fmt.Errorf("sign-in was rejected")
 		}
-		return exchangeCode(server, code)
+		return exchangeCode(server, code, verifier)
 	case <-time.After(5 * time.Minute):
 		return "", serverUser{}, errors.New("timed out waiting for the browser sign-in (try `bdrive login --device`)")
 	}
 }
 
-func exchangeCode(server, code string) (string, serverUser, error) {
-	body, _ := json.Marshal(map[string]string{"code": code, "device": deviceName()})
-	resp, err := initClient.Post(server+"/api/auth/exchange", "application/json", bytes.NewReader(body))
+func exchangeCode(server, code, verifier string) (string, serverUser, error) {
+	body, _ := json.Marshal(map[string]string{
+		"code": code, "device": deviceName(), "code_verifier": verifier,
+	})
+	resp, err := postAsDevice(server+"/api/auth/exchange", body)
 	if err != nil {
 		return "", serverUser{}, err
 	}
@@ -337,7 +414,7 @@ func exchangeCode(server, code string) (string, serverUser, error) {
 // approving.
 func deviceCodeLogin(server string) (string, serverUser, error) {
 	body, _ := json.Marshal(map[string]string{"device": deviceName(), "os": runtime.GOOS})
-	resp, err := initClient.Post(server+"/api/auth/device/start", "application/json", bytes.NewReader(body))
+	resp, err := postAsDevice(server+"/api/auth/device/start", body)
 	if err != nil {
 		return "", serverUser{}, err
 	}
@@ -356,17 +433,18 @@ func deviceCodeLogin(server string) (string, serverUser, error) {
 	}
 	// Older hubs (pre-0.13) hand back a short code and expect it typed into
 	// /auth/device; keep that instruction for them.
+	// The code and the link are the hub's strings, printed to a terminal.
 	if start.VerifyURL == "" {
-		fmt.Printf("on any signed-in browser, open:\n  %s/auth/device\nand approve code: %s\n", server, start.Code)
+		fmt.Printf("on any signed-in browser, open:\n  %s/auth/device\nand approve code: %s\n", server, safeField(start.Code, 64))
 	} else {
-		fmt.Printf("to finish signing in, open this link in any browser:\n  %s\n", start.VerifyURL)
+		fmt.Printf("to finish signing in, open this link in any browser:\n  %s\n", safeField(sameOriginLink(server, start.VerifyURL), 300))
 	}
 
 	deadline := time.Now().Add(10 * time.Minute)
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Duration(start.Interval) * time.Second)
 		body, _ := json.Marshal(map[string]string{"code": start.Code, "device": deviceName()})
-		resp, err := initClient.Post(server+"/api/auth/device/poll", "application/json", bytes.NewReader(body))
+		resp, err := postAsDevice(server+"/api/auth/device/poll", body)
 		if err != nil {
 			continue // transient; keep polling
 		}
@@ -389,6 +467,33 @@ func deviceCodeLogin(server string) (string, serverUser, error) {
 		}
 	}
 	return "", serverUser{}, errors.New("timed out waiting for approval")
+}
+
+// sameOriginLink returns the hub's chosen sign-in link if it lives on the hub
+// being signed in to, and the hub's own /auth/device otherwise.
+//
+// safeField scrubs control characters and truncates; it never looked at the
+// ORIGIN, so the hub could point the person at any host it liked — and the
+// sentence framing it ("to finish signing in, open this link in any browser")
+// comes from the trusted local CLI, not from the hub. The runbook makes init
+// non-interactive, so this is the DEFAULT path, and its step 5 has the agent
+// hand init's output to the user: a credential-harvesting page reaches a human
+// relayed by their own agent, in the CLI's voice.
+//
+// Falling back rather than failing: the link is a convenience over a page the
+// hub always serves, so a hub that names someone else's host loses the
+// convenience and the sign-in still completes.
+func sameOriginLink(server, link string) string {
+	fallback := strings.TrimSuffix(server, "/") + "/auth/device"
+	su, err := url.Parse(server)
+	if err != nil {
+		return fallback
+	}
+	lu, err := url.Parse(link)
+	if err != nil || lu.Scheme != su.Scheme || lu.Host != su.Host {
+		return fallback
+	}
+	return link
 }
 
 func openBrowser(url string) error {

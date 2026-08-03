@@ -26,6 +26,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 //go:embed files
@@ -120,11 +124,35 @@ func load(name string) ([]File, error) {
 // WriteTo writes the template into dir and returns the paths it wrote. A path
 // that already exists is never overwritten and is left out of the result —
 // which is what makes seeding twice a no-op rather than a divergence.
+// Template and File are exported with exported fields, so "today every
+// template comes from the go:embed" is a property of the callers, not of this
+// function: the guard belongs where the write happens.
 func (t Template) WriteTo(dir string) ([]string, error) {
 	var wrote []string
 	for _, f := range t.Files {
+		if !SafePath(f.Path) {
+			return wrote, fmt.Errorf("template path %q is not a path inside the project", f.Path)
+		}
+		// SafePath and UnderRoot both pass `.bdrive/config.json` — clean,
+		// relative and squarely inside the root — and that file names the hub
+		// this folder pushes to. Reserved paths belong to beardrive and to
+		// git, never to a template, whoever built it.
+		if config.ReservedPath(f.Path) {
+			return wrote, fmt.Errorf("template path %q is reserved", f.Path)
+		}
 		abs := filepath.Join(dir, filepath.FromSlash(f.Path))
-		if _, err := os.Stat(abs); err == nil {
+		// Lexical containment answers about the STRING. Stat, MkdirAll and
+		// WriteFile all follow symlinks, so a name already in the folder — a
+		// symlinked directory, or a dangling link at a template file's own
+		// name — takes the write outside it. Same boundary the syncer and the
+		// file:// backend resolve on disk.
+		if !store.UnderRoot(dir, abs) {
+			continue
+		}
+		// Lstat, not Stat: a dangling symlink is "already there" too, and
+		// Stat fails on one, so the never-overwrite rule skipped it and
+		// WriteFile then created whatever it pointed at.
+		if _, err := os.Lstat(abs); err == nil {
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -137,6 +165,15 @@ func (t Template) WriteTo(dir string) ([]string, error) {
 	}
 	return wrote, nil
 }
+
+// SafePath reports whether p is a path a template may name: a clean, relative,
+// control-character-free path inside the project. It is the one rule both
+// seeding doors apply — WriteTo on disk, and the hub's seedTemplate, which
+// hands it to cleanUploadPath as well.
+//
+// The rule is journal.SafePath: a template file becomes an Op.Path on every
+// device, so this door may not be more permissive than the journal is.
+func SafePath(p string) bool { return journal.SafePath(p) }
 
 // Dirs lists every directory a template's paths imply, for the
 // every-directory-holds-a-file check.

@@ -10,7 +10,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | Command | Description |
 |---|---|
 | `bdrive login [server-url]` | Sign this device in. Browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
-| `bdrive logout` | Sign this device out — clear the saved token and account. `--forget` also drops the remembered server |
+| `bdrive logout` | Sign this device out — revokes this device's token on the hub, then clears it locally. `--forget` also drops the remembered server |
 | `bdrive init [folder]` | Create or connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY; flags (`--name`, `--project`, `--server`, `--only`, `--template`, `--yes`) for scripts. `--template docs\|wiki\|para` starts a new project from a structure instead of an empty folder. Also registers agent sync hooks for detected platforms (`--no-hooks` skips them) and a login item so sync resumes after a reboot (`--no-autostart` skips), and prints the project's hub link. Re-run to resume |
 | `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent, so running it twice is harmless. This is what the login item runs |
 | `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot: a user LaunchAgent on macOS, a systemd user unit on Linux (needs systemd), a per-user Run entry on Windows. `bdrive init` installs it; `--no-autostart` skips it |
@@ -59,9 +59,13 @@ menu (recommended first, "empty project" last, and preselected); `--yes` and
 non-TTY never prompt and stay empty.
 
 The hub seeds the template when the project is created, so it is there in the
-browser and arrives on every device that connects afterwards. Joining a project
-that already exists never restructures it, seeding never overwrites a file that
-already exists, and `--template` together with `--only` is refused before
+browser and arrives on every device that connects afterwards; `init` also
+writes the same structure locally from the binary's own copy, so the folder has
+what the command said it would even if the hub stored nothing. Files the hub
+seeds are journaled with no account and a `seeded from the <name> template`
+note, so change history tells them from a file a teammate wrote. Joining a
+project that already exists never restructures it, seeding never overwrites a
+file that already exists, and `--template` together with `--only` is refused before
 anything is written — scope rules live in the synced `.bdriveignore`, so a
 scope that left out the template's folders would hide them for the whole team.
 
@@ -212,8 +216,12 @@ bdrive init --project p-xxxxxxxx   # connect folders to the new project
 ```
 
 This works in both directions — cloud to self-hosted or self-hosted to
-cloud. The archive is the project's store layout in a tar.gz; the target
-project must be empty, and the destination hub needs uploads enabled. Shares,
+cloud. The archive is the project's store layout in a tar.gz; `import` always
+creates a NEW project (it never joins an existing one by name — pass `--name`
+if the archive's name is taken), and the destination hub needs uploads
+enabled. A single file in the archive may spool at most 256 MiB to local disk
+during import; `--max-blob` raises that if the project really holds a bigger
+file. Shares,
 invite links, and read-heat stay behind (they belong to the hub, not the
 project store). Step-by-step walkthrough:
 [Migrate between hubs](/reference/migration/).

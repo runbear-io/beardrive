@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 // Read telemetry: who consumes what, aggregated. Together with the write
@@ -26,7 +28,17 @@ import (
 //
 // Privacy: rows are daily aggregation buckets, never an event log. The actor
 // column (account email / device id / share token) exists only to count
-// distinct readers and never appears in an API response.
+// distinct readers and never appears in an API response — with exactly one
+// stated exception, ?by=device (handleHeat), which reports the ids of agent
+// devices. A device id is not a person and is already visible to every
+// project member through History's device join; nothing else in the column —
+// no email, no share token, no unowned device id — ever leaves the server.
+// The exception is only sound because the ingest path validates the id
+// (handleReadReport → ownsDevice): an actor recorded as an agent is shaped
+// like a device id and is not one another account is syncing — never an
+// arbitrary string, and never someone else's machine. This route also never
+// registers a device: registering the id it is about to judge is what turned
+// the round-2 check into a one-request speed bump.
 
 // Read kinds.
 const (
@@ -328,7 +340,32 @@ func (l *ReadLedger) compactLocked() {
 func (l *ReadLedger) persistLocked() error {
 	if len(l.pendingDel) > 0 {
 		if err := l.repo.DeleteBatch(l.pendingDel); err != nil {
-			return err
+			// Same one-transaction problem as the put path below, worse for
+			// being first: a key the store will never accept parks here
+			// forever and PutBatch is then never reached at all, so the whole
+			// hub's telemetry stops persisting. Retry one at a time; if some
+			// land, the ones that did not are keys this store will never
+			// accept, so drop them. If none land the store is down —
+			// transient — and the queue stands for the next flush.
+			if len(l.pendingDel) == 1 {
+				return err
+			}
+			var stuck []ReadStatKey
+			landed := 0
+			for _, key := range l.pendingDel {
+				if l.repo.DeleteBatch([]ReadStatKey{key}) == nil {
+					landed++
+				} else {
+					stuck = append(stuck, key)
+				}
+			}
+			if landed == 0 {
+				return err
+			}
+			for _, key := range stuck {
+				log.Printf("beardrive: read telemetry dropped an undeletable bucket (project %s, path %q): %v",
+					key.Project, key.Path, err)
+			}
 		}
 		l.pendingDel = nil
 	}
@@ -339,11 +376,47 @@ func (l *ReadLedger) persistLocked() error {
 	for key := range l.dirty {
 		batch = append(batch, l.byKey[key])
 	}
-	if err := l.repo.PutBatch(batch); err != nil {
+	err := l.repo.PutBatch(batch)
+	if err == nil {
+		l.dirty = map[ReadStatKey]bool{}
+		return nil
+	}
+	if len(batch) == 1 {
 		return err
 	}
-	l.dirty = map[ReadStatKey]bool{}
+	// One transaction, so one bucket the store refuses takes every other
+	// bucket down with it — and, because they stay dirty, every bucket the hub
+	// counts from then on. That is a hub-wide telemetry kill from the lowest
+	// privilege there is (Postgres rejects a NUL byte in a path; sqlite and
+	// the file backend store it happily). Retry one at a time: if some land,
+	// the ones that did not are content this store will never accept, so drop
+	// them rather than wedge the queue. If none land the store itself is
+	// down — transient — and everything stays dirty for the next flush.
+	var stuck []ReadStatKey
+	landed := 0
+	for key := range l.dirty {
+		if l.repo.PutBatch([]ReadStat{l.byKey[key]}) == nil {
+			delete(l.dirty, key)
+			landed++
+		} else {
+			stuck = append(stuck, key)
+		}
+	}
+	if landed == 0 {
+		return err
+	}
+	for _, key := range stuck {
+		log.Printf("beardrive: read telemetry dropped an unstorable bucket (project %s, path %q): %v",
+			key.Project, key.Path, err)
+		delete(l.dirty, key)
+	}
 	return nil
+}
+
+// hasControlChars reports whether s carries a C0/C7F control character —
+// never legitimate in a path, and fatal to a Postgres text column.
+func hasControlChars(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
 // ---- server integration ----
@@ -381,9 +454,9 @@ func (s *Server) recordRead(r *http.Request, path string) {
 // handleHeat serves per-path read aggregates: ?prefix= bounds to a folder,
 // ?days= bounds the window (default 30, 0 = all time). With ?by=device it
 // returns the agent-kind breakdown instead: per device (registry-joined),
-// reads per top-level folder. In both shapes, counts only — human actor
-// identities never leave the server (agent devices are already public via
-// history, so naming them here is consistent).
+// reads per top-level folder — the one place an actor id is reported, and
+// only ever a device the reporting account owned (see the package comment).
+// Human and share actors never leave the server in any shape.
 func (s *Server) handleHeat(v *volume, w http.ResponseWriter, r *http.Request) {
 	if s.Reads == nil {
 		http.Error(w, "read tracking is not enabled on this server", http.StatusNotFound)
@@ -431,10 +504,14 @@ type deviceHeat struct {
 
 func (s *Server) heatByDevice(w http.ResponseWriter, project string, since time.Time) {
 	byDevice := s.Reads.AgentHeat(project, since)
+	visible := s.deviceVisibleIn(project)
 	devices := make([]deviceHeat, 0, len(byDevice))
 	for id, folders := range byDevice {
 		d := deviceHeat{ID: id, Folders: folders}
-		if info, ok := s.Devices.Get(id); ok {
+		// Scoped join: a device owned by an account outside this project's org
+		// contributes no name or OS, so heat cannot become a window onto
+		// another org's machines.
+		if info, ok := s.Devices.LookupIn(id, visible); ok {
 			d.Name, d.OS = info.Name, info.OS
 		}
 		for _, n := range folders {
@@ -463,8 +540,7 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		http.Error(w, "read tracking is not enabled on this server", http.StatusNotFound)
 		return
 	}
-	_ = v
-	device := r.Header.Get("X-Bdrive-Device")
+	device := deviceID(r)
 	if device == "" {
 		http.Error(w, "agent read reports need a device identity", http.StatusBadRequest)
 		return
@@ -486,12 +562,46 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		http.Error(w, "too many reads in one report", http.StatusBadRequest)
 		return
 	}
-	s.observeDevice(r)
+	// The device id becomes the actor these buckets are keyed by, and /heat
+	// reports agent actors — so an unvalidated header would let any member
+	// plant any string (an id from another org, or an account email) and have
+	// the hub serve it back to the whole project as a reader. This route
+	// deliberately does NOT observe the device: registering the id it is about
+	// to judge is what made the round-2 check a one-request speed bump. Only
+	// /store/* traffic registers a device.
+	mine := s.ownsDevice(r, device)
+	// A reported path is a claim about a file, and the heat map is what the
+	// Dashboard's reads-x-staleness quadrant is built from — the view an
+	// operator reads to decide what is stale. Any member with PermRead could
+	// report any string, so the quadrant was member-writable fiction: a
+	// "compliance/soc2-evidence-2026.md" nobody ever wrote showed up as read.
+	// The project's own replayed state is the only thing that can say a path is
+	// real, and it is right here. A snapshot the store cannot produce records
+	// nothing this cycle: the client's spool is drained best-effort and retried,
+	// and telemetry must never fail a request (nor invent one).
+	snap, err := v.snapshot(r.Context())
+	if err != nil {
+		writeJSON(w, map[string]any{"accepted": 0})
+		return
+	}
 	project := projectID(r)
 	n := 0
 	for _, e := range req.Reads {
-		if e.Path == "" || strings.Contains(e.Path, "..") {
+		// A path is a bucket key that reaches the metadata store: a control
+		// character (a NUL above all) is rejected outright by Postgres, and a
+		// row the store will never accept has to be refused here rather than
+		// discovered at flush time.
+		// journal.SafePath is the rule, in the one place it is defined. This
+		// was a fourth copy of it, and it disagreed in both directions: it
+		// accepted "/etc/passwd", "a//b" and "./a", and refused "my..file".
+		if !journal.SafePath(e.Path) {
 			continue
+		}
+		if !mine {
+			continue // not this account's device: counted for nobody
+		}
+		if _, real := snap.files[e.Path]; !real {
+			continue // no such file in this project: a read of nothing is not a read
 		}
 		s.Reads.Record(project, e.Path, ReadKindAgent, device)
 		n++

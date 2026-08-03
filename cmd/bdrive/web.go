@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,6 +30,14 @@ type webConfig struct {
 	UploadTTL  string `json:"upload_ttl,omitempty"`  // duration, e.g. "15m"
 	ProjectsDB string `json:"projects_db,omitempty"` // hub project registry path
 	ShareRPM   int    `json:"share_rpm,omitempty"`   // per-IP rate on /s/* (default 120/min)
+	// TrustProxy makes the rate limiters read the client address from
+	// X-Forwarded-For sent by ANY peer. Usually unnecessary: a proxy that
+	// reaches the hub over loopback or a private network is trusted with no
+	// configuration. Set it only for a proxy on a PUBLIC address — on a
+	// directly-reachable hub the header is client-supplied, and trusting it
+	// lets one connection get a fresh bucket per request, which disables the
+	// share limiter and the login brute-force limiter alike.
+	TrustProxy bool `json:"trust_proxy,omitempty"`
 	// Auth tunes the hub's (always-on) authentication; hubs require
 	// sign-in unconditionally, only these knobs are optional.
 	Auth *struct {
@@ -42,6 +48,7 @@ type webConfig struct {
 		RequireApproval     *bool    `json:"require_approval,omitempty"`     // new accounts await admin approval
 		Admins              []string `json:"admins,omitempty"`               // hub admin emails (approve users, govern shares)
 		Brand               string   `json:"brand,omitempty"`                // name shown on the sign-in page
+		BaseURL             string   `json:"base_url,omitempty"`             // public origin used for MAILED links (never the request's Host)
 		SMTP                *struct {
 			Host string `json:"host"`
 			Port int    `json:"port"`
@@ -172,11 +179,24 @@ credentials); otherwise it is relayed through this server.`,
 			if remoteURL == "" && dir == "" {
 				dir = "."
 			}
+			// A config that asks for gating this mode cannot provide is
+			// refused, not silently honoured in part. The whole auth block —
+			// allowed_domains, require_approval, allow_signup, admins — is
+			// built only in the hub branch, so with a `dir` the operator got a
+			// server anyone can read and a config file that said otherwise.
+			// Same posture as ValidateSignupPolicy, which exists for exactly
+			// this and lives inside the branch that never runs here.
+			if dir != "" && cfg.Auth != nil {
+				return fmt.Errorf("the `auth` block configures a hub's sign-in and a `dir` selects " +
+					"the single-volume viewer, which is auth-free by design: remove one of them " +
+					"(use `remote:` to run a hub)")
+			}
 
 			srv := &webapp.Server{
-				Refresh:  refresh,
-				Upload:   webapp.UploadConfig{Enabled: upload, TTL: uploadTTL},
-				ShareRPM: cfg.ShareRPM,
+				Refresh:    refresh,
+				Upload:     webapp.UploadConfig{Enabled: upload, TTL: uploadTTL},
+				ShareRPM:   cfg.ShareRPM,
+				TrustProxy: cfg.TrustProxy,
 			}
 			var display string
 			var meta webapp.MetaStore // hub metadata store; nil means the file backend
@@ -241,7 +261,12 @@ credentials); otherwise it is relayed through this server.`,
 				srv.Root = be
 				srv.Projects = db
 				srv.Device = webapp.Identity{ID: dev.ID, Name: dev.Name, Author: dev.Author}
-				srv.Volume = volumeName(remoteURL)
+				// Display name only — and it goes out in /api/config, which is
+				// readable anonymously, so it must not be derived from the
+				// storage URL: on s3://acme-prod-drive that named the bucket
+				// to the whole internet. `--volume` / `volume:` stays the one
+				// way an operator puts a storage-flavoured string on the wire.
+				srv.Volume = "BearDrive"
 				if meta != nil {
 					display = remoteURL
 				} else {
@@ -303,6 +328,7 @@ credentials); otherwise it is relayed through this server.`,
 						auth.RequireApproval = *cfg.Auth.RequireApproval
 					}
 					auth.Brand = cfg.Auth.Brand
+					auth.BaseURL = cfg.Auth.BaseURL
 					if len(cfg.Auth.Admins) > 0 {
 						auth.Admins = make(map[string]bool, len(cfg.Auth.Admins))
 						for _, e := range cfg.Auth.Admins {
@@ -399,16 +425,4 @@ credentials); otherwise it is relayed through this server.`,
 	c.Flags().StringVarP(&configPath, "config", "c", "", "JSON config file; explicit flags override its values")
 	c.Flags().StringVar(&projectsDB, "projects-db", "", "hub project registry file (default: $BDRIVE_HOME/projects.json)")
 	return c
-}
-
-func volumeName(remoteURL string) string {
-	if u, err := url.Parse(remoteURL); err == nil {
-		if base := path.Base(strings.Trim(u.Path, "/")); base != "" && base != "." {
-			return base
-		}
-		if u.Host != "" {
-			return u.Host
-		}
-	}
-	return "beardrive"
 }

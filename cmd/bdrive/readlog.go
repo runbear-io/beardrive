@@ -131,7 +131,7 @@ func extractEventPaths(data []byte, folder string) []string {
 	case shellTools[tool]:
 		return statFiles(commandTokens(collectKeyStrings(root, "command")), folder)
 	case matchTools[tool]:
-		return statFiles(matchCandidates(root), folder)
+		return statFiles(matchCandidates(root, folder), folder)
 	}
 	return keyWalkPaths(root)
 }
@@ -251,15 +251,39 @@ func commandTokens(commands []string) []string {
 	return out
 }
 
-// matchCandidates mines a search tool's result for the files the matches
-// came from: every string in the response, line by line, both whole ("a
-// filenames list") and up to the first colon ("path:12:matched text").
-func matchCandidates(root any) []string {
+// matchCandidates mines a search tool's result for the files the matches came
+// from: every string in the response, line by line, resolved to the ONE file
+// that line came from — the whole line ("a filenames list") or its longest
+// colon-delimited prefix that exists ("path:12:matched text").
+//
+// Longest, and only one per line, because a colon is a legal character in a
+// synced filename: splitting at the FIRST colon and reporting both halves let
+// a file any project member can plant ("CLAUDE.md:notes") charge its reads to
+// a different file of the planter's choosing, under the reading device's own
+// genuine id, in a heat map that is an audit surface.
+//
+// The whole-line branch was the same hole one shape wider. A multiline search
+// result (`grep -U`, or any tool that prints context lines) carries the
+// `path:n:` prefix on the match line and raw file CONTENT on the rest — content
+// a teammate wrote. Every one of those lines was taken whole, and statFiles
+// only confirms that a file by that name exists, which is exactly what the
+// planter arranged. So the rule is per RESPONSE: if any line in it carries a
+// match LOCATION (a path followed by more of the line), the response is
+// match-formatted and its bare lines are content, not filenames. A response
+// with no located line at all is a filenames list (`grep -l`) and keeps
+// working.
+//
+// ponytail: costs the heading-style output of `rg` without --no-heading, where
+// the filename is on its own line and the match lines carry no path. Losing
+// some heat is telemetry; forging it is an audit surface lying.
+func matchCandidates(root any, folder string) []string {
 	m, ok := root.(map[string]any)
 	if !ok {
 		return nil
 	}
-	var out []string
+	var out, bare []string
+	located := false
+mined:
 	for _, key := range []string{"tool_response", "tool_output", "response", "result", "output"} {
 		var strs []string
 		var walk func(v any)
@@ -284,17 +308,48 @@ func matchCandidates(root any) []string {
 				if line == "" {
 					continue
 				}
-				out = append(out, line)
-				if i := strings.IndexByte(line, ':'); i > 0 {
-					out = append(out, line[:i])
+				p := matchedFile(line, folder)
+				if p == "" {
+					continue
 				}
-				if len(out) >= maxMinedPaths {
-					return out
+				if len(p) < len(line) {
+					located = true
+					out = append(out, p)
+				} else {
+					bare = append(bare, p)
+				}
+				if len(out)+len(bare) >= maxMinedPaths {
+					break mined
 				}
 			}
 		}
 	}
+	if !located {
+		return bare
+	}
 	return out
+}
+
+// matchedFile resolves one line of a search result to the file it came from:
+// the longest colon-delimited prefix (the whole line first) that is an
+// existing regular file. "" when none is.
+func matchedFile(line, folder string) string {
+	for cut := len(line); cut > 0; {
+		cand := line[:cut]
+		abs := cand
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(folder, cand)
+		}
+		if fi, err := os.Stat(abs); err == nil && fi.Mode().IsRegular() {
+			return cand
+		}
+		i := strings.LastIndexByte(cand, ':')
+		if i <= 0 {
+			return ""
+		}
+		cut = i
+	}
+	return ""
 }
 
 // statFiles keeps the candidates that are existing regular files (absolute,

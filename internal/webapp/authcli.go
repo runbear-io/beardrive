@@ -1,6 +1,9 @@
 package webapp
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -28,7 +31,7 @@ import (
 // provider, nothing to keep in sync.
 type CLIAuth struct {
 	session func(*http.Request) (User, bool)
-	issue   func(w http.ResponseWriter, userID, device string)
+	issue   func(w http.ResponseWriter, r *http.Request, userID, device string)
 
 	// Ephemeral single-use state; a server restart just cancels pending
 	// logins.
@@ -40,20 +43,22 @@ type CLIAuth struct {
 // consumed by the exchange) or a device-flow link (granted when its approval
 // page is POSTed, consumed by the poll).
 type cliGrant struct {
-	kind    string // "code" (browser callback) | "device" (poll flow)
-	user    string // set once granted
-	device  string // device flow: requested device name
-	os      string // device flow: requested device's OS
-	ip      string // device flow: where the request came from, as the server saw it
-	granted bool
-	expires time.Time
+	kind      string // "code" (browser callback) | "device" (poll flow)
+	challenge string // browser flow: PKCE S256 code_challenge, "" from a pre-PKCE CLI
+	link      string // device flow: the value in the URL the human opens (never the poll credential)
+	user      string // set once granted
+	device    string // device flow: requested device name
+	os        string // device flow: requested device's OS
+	ip        string // device flow: where the request came from, as the server saw it
+	granted   bool
+	expires   time.Time
 }
 
 // NewCLIAuth wires the two provider-specific pieces. session resolves the
 // browser session — cookie only, never a Bearer token, or a device token
 // could approve the next device. issue writes the CLI's {token, user}
 // response for an approved grant.
-func NewCLIAuth(session func(*http.Request) (User, bool), issue func(w http.ResponseWriter, userID, device string)) *CLIAuth {
+func NewCLIAuth(session func(*http.Request) (User, bool), issue func(w http.ResponseWriter, r *http.Request, userID, device string)) *CLIAuth {
 	return &CLIAuth{session: session, issue: issue, pending: make(map[string]cliGrant)}
 }
 
@@ -72,12 +77,100 @@ func (c *CLIAuth) Register(mux *http.ServeMux) {
 
 // ---- grants ----
 
+// maxPendingGrants bounds the map. POST /api/auth/device/start needs no
+// credential, so every unpolled start is hub memory an anonymous stranger
+// allocated; without a ceiling a loop of them is unbounded growth. Far above
+// any real hub's concurrent sign-ins.
+//
+// maxPendingPerIP is the half that matters for availability. A hub-wide cap
+// alone turns "one stranger exhausts memory" into "one stranger denies every
+// `bdrive login --device` on the hub", which is the same outage bought more
+// cheaply. Bounding per origin keeps a flood inside the address that sent it.
+//
+// A hub-wide cap that REFUSES is that same outage at 2x the price: two
+// addresses reach 512 and every honest sign-in is 503 for ten minutes. So the
+// hub-wide bound never refuses — it evicts, and it evicts from whichever
+// address is holding the most, which is the flooder by definition. A stranger
+// can cost himself his own pending grants and nobody else's.
+const (
+	maxPendingGrants = 512
+	maxPendingPerIP  = 256
+)
+
+// atGrantCap reports whether another grant from ip would exceed its per-origin
+// bound. Callers hold mu and have swept.
+func (c *CLIAuth) atGrantCap(ip string) bool {
+	if ip == "" {
+		return false
+	}
+	n := 0
+	for _, g := range c.pending {
+		if g.ip == ip {
+			if n++; n >= maxPendingPerIP {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sweepLocked drops grants that have expired. A grant the hub already reports
+// dead to every caller must not still be held, and only consumption used to
+// remove anything — so an id nobody polls was retained for the life of the
+// process. Every path that touches the map sweeps it, so reclaiming needs no
+// reaper goroutine. Callers hold mu.
+//
+// ponytail: O(n) per operation with n capped at maxPendingGrants; a heap keyed
+// by expiry only pays off at a far larger ceiling.
+// evictHeaviestLocked makes room for one grant by dropping the oldest grant
+// held by the address holding the most. Callers hold mu.
+func (c *CLIAuth) evictHeaviestLocked() {
+	byIP := map[string]int{}
+	for _, g := range c.pending {
+		byIP[g.ip]++
+	}
+	worst, n := "", 0
+	for ip, count := range byIP {
+		if count > n {
+			worst, n = ip, count
+		}
+	}
+	oldest, found := "", cliGrant{}
+	for id, g := range c.pending {
+		if g.ip != worst {
+			continue
+		}
+		if oldest == "" || g.expires.Before(found.expires) {
+			oldest, found = id, g
+		}
+	}
+	delete(c.pending, oldest)
+}
+
+func (c *CLIAuth) sweepLocked() {
+	now := time.Now()
+	for id, g := range c.pending {
+		if now.After(g.expires) {
+			delete(c.pending, id)
+		}
+	}
+}
+
+// newGrant records a pending sign-in, or returns "" when too many are already
+// outstanding.
 func (c *CLIAuth) newGrant(g cliGrant, ttl time.Duration) string {
 	id := randHex(16)
 	g.expires = time.Now().Add(ttl)
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sweepLocked()
+	if c.atGrantCap(g.ip) {
+		return ""
+	}
+	for len(c.pending) >= maxPendingGrants {
+		c.evictHeaviestLocked()
+	}
 	c.pending[id] = g
-	c.mu.Unlock()
 	return id
 }
 
@@ -85,8 +178,9 @@ func (c *CLIAuth) newGrant(g cliGrant, ttl time.Duration) string {
 func (c *CLIAuth) take(kind, id string) (cliGrant, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepLocked()
 	g, ok := c.pending[id]
-	if !ok || g.kind != kind || time.Now().After(g.expires) {
+	if !ok || g.kind != kind {
 		delete(c.pending, id)
 		return cliGrant{}, false
 	}
@@ -94,11 +188,60 @@ func (c *CLIAuth) take(kind, id string) (cliGrant, bool) {
 	return g, true
 }
 
+// takeGranted consumes a granted grant, and tells the caller whether IT was
+// the one that consumed it. Polling used to peek, decide, and then take in a
+// second acquisition of mu with the result discarded, so every poll that got
+// past peek reached issue: one human approval minted a token per poll in
+// flight, each independently valid and (there being no revocation route)
+// independently permanent. A single-use authorisation has to be consumed by
+// the same critical section that decides.
+//
+// exists distinguishes "no such grant" (401) from "not approved yet" (keep
+// polling); only the caller that gets ok == true may issue.
+func (c *CLIAuth) takeGranted(kind, id string) (g cliGrant, exists, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sweepLocked()
+	g, exists = c.pending[id]
+	if !exists || g.kind != kind {
+		return cliGrant{}, false, false
+	}
+	if !g.granted {
+		return g, true, false
+	}
+	delete(c.pending, id)
+	return g, true, true
+}
+
+// grantByLink resolves the value carried in the URL the human opens. It is
+// deliberately not a poll credential: everyone in an approval's path sees that
+// string (terminal scrollback, browser history, a forwarded message), and a
+// value that both displays and buys a permanent token is one leak away from
+// being the whole flow. The poll id still resolves here, because it is the
+// requesting client's own secret and older CLIs print it as the link.
+//
+// ponytail: linear scan of a map capped at maxPendingGrants, on a page load.
+func (c *CLIAuth) grantByLink(kind, token string) (id string, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sweepLocked()
+	if g, hit := c.pending[token]; hit && g.kind == kind {
+		return token, true
+	}
+	for id, g := range c.pending {
+		if g.kind == kind && g.link != "" && g.link == token {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 func (c *CLIAuth) peek(kind, id string) (cliGrant, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepLocked()
 	g, ok := c.pending[id]
-	if !ok || g.kind != kind || time.Now().After(g.expires) {
+	if !ok || g.kind != kind {
 		return cliGrant{}, false
 	}
 	return g, true
@@ -107,8 +250,9 @@ func (c *CLIAuth) peek(kind, id string) (cliGrant, bool) {
 func (c *CLIAuth) approveDevice(id, userID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepLocked()
 	g, ok := c.pending[id]
-	if !ok || g.kind != "device" || time.Now().After(g.expires) {
+	if !ok || g.kind != "device" {
 		return false
 	}
 	g.user, g.granted = userID, true
@@ -195,7 +339,17 @@ func (c *CLIAuth) pageCLI(w http.ResponseWriter, r *http.Request) {
 		note: `Approve this only if you just ran ` +
 			`<code style="white-space:nowrap">bdrive login</code> yourself.`,
 		approve: func(user User) {
-			code := c.newGrant(cliGrant{kind: "code", user: user.ID, granted: true}, time.Minute)
+			// PKCE: whatever the requesting CLI bound this flow to travels
+			// with the grant, and only that CLI can redeem the code.
+			code := c.newGrant(cliGrant{
+				kind: "code", user: user.ID, granted: true,
+				challenge: r.URL.Query().Get("code_challenge"),
+			}, time.Minute)
+			if code == "" {
+				authPage(w, "Try again", `<p class="err">Too many sign-ins are pending on this server right now.</p>
+<p class="alt">Run <code style="white-space:nowrap">bdrive login</code> again in a few minutes.</p>`)
+				return
+			}
 			q := u.Query()
 			q.Set("code", code)
 			q.Set("state", r.URL.Query().Get("state"))
@@ -229,6 +383,12 @@ func (c *CLIAuth) pageDevice(w http.ResponseWriter, r *http.Request) {
 		},
 		live: func() bool {
 			var ok bool
+			id, hit := c.grantByLink("device", token)
+			if !hit {
+				expired("is invalid, already used, or older than 10 minutes")
+				return false
+			}
+			token = id
 			if g, ok = c.peek("device", token); !ok {
 				expired("is invalid, already used, or older than 10 minutes")
 				return false
@@ -303,19 +463,48 @@ func orDash(s string) string {
 // long-lived device token.
 func (c *CLIAuth) apiExchange(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Code   string `json:"code"`
-		Device string `json:"device"`
+		Code     string `json:"code"`
+		Device   string `json:"device"`
+		Verifier string `json:"code_verifier"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	g, ok := c.take("code", req.Code)
-	if !ok || !g.granted {
+	if !ok || !g.granted || !pkceOK(g.challenge, req.Verifier) {
 		http.Error(w, "invalid or expired code", http.StatusUnauthorized)
 		return
 	}
-	c.issue(w, g.user, req.Device)
+	c.issue(w, r, g.user, req.Device)
+}
+
+// pkceOK checks RFC 7636 S256 proof-of-possession for the loopback flow.
+//
+// The `state` the CLI generates binds nothing: it is printed to the terminal
+// and handed to `open`/`xdg-open` as argv[1], where `ps` shows it to every
+// local account — so with it and the port (same string) any local process
+// could complete a sign-in of ITS OWN account into somebody else's CLI, and
+// that CLI's folders then sync into the attacker's project.
+//
+// There is no compat arm. A challenge-less grant used to be redeemable by a
+// challenge-less exchange so a pre-PKCE CLI kept working — but the hub cannot
+// tell a pre-PKCE binary from a caller that simply left the parameter out, so
+// the arm was a documented way to ask for no proof of possession and be given
+// none: no forged grant needed, just an omitted parameter.
+//
+// It applies to the loopback flow only — apiExchange is the sole caller and it
+// only ever takes a "code" grant. The device and invite flows prove possession
+// with a one-time code delivered to the machine itself and are untouched. A
+// binary too old to send a challenge must be upgraded, which is one `bdrive
+// login` away; the in-repo CLI has always sent one.
+func pkceOK(challenge, verifier string) bool {
+	if challenge == "" || verifier == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	return subtle.ConstantTimeCompare(
+		[]byte(base64.RawURLEncoding.EncodeToString(sum[:])), []byte(challenge)) == 1
 }
 
 // apiDeviceStart begins the headless flow: the CLI prints the approval link,
@@ -337,14 +526,33 @@ func (c *CLIAuth) apiDeviceStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	link := randHex(16)
+	// trimText, at the door, because the approval page is the hub's ONLY consent
+	// surface before a device credential is minted and every word on it except
+	// the address is chosen by an unauthenticated stranger. html.EscapeString
+	// stops markup, not text that renders as something other than itself: an RLO
+	// reorders the row, the isolates and zero-widths hide the rest of it, and NEL
+	// and the C1s are CSI to the terminal a copy-paste lands in. And the 128-rune
+	// cap is half the fix — 32 KiB of "A" pushed the System row, the Address row
+	// and the Approve button off the screen, so the reader approves a page whose
+	// evidence they never saw.
 	code := c.newGrant(cliGrant{
-		kind: "device", device: req.Device, os: req.OS, ip: requestIP(r),
+		kind: "device", link: link,
+		device: trimText(req.Device, 128), os: trimText(req.OS, 128),
+		ip: requestIP(r),
 	}, 10*time.Minute)
+	if code == "" {
+		// This route is unauthenticated, so the map is the one thing a
+		// stranger can grow: refuse rather than retain.
+		http.Error(w, "too many pending sign-ins — try again in a few minutes",
+			http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, map[string]any{
 		// "code" keeps its wire name: it is what the CLI polls with, and
 		// older clients still print it.
 		"code":       code,
-		"verify_url": requestBaseURL(r) + "/auth/device/" + code,
+		"verify_url": requestBaseURL(r) + "/auth/device/" + link,
 		"interval":   2,
 	})
 }
@@ -358,19 +566,18 @@ func (c *CLIAuth) apiDevicePoll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	g, ok := c.peek("device", req.Code)
-	if !ok {
+	g, exists, ok := c.takeGranted("device", req.Code)
+	if !exists {
 		http.Error(w, "invalid or expired code", http.StatusUnauthorized)
 		return
 	}
-	if !g.granted {
+	if !ok {
 		writeJSON(w, map[string]any{"pending": true})
 		return
 	}
-	c.take("device", req.Code)
-	device := req.Device
-	if device == "" {
-		device = g.device
-	}
-	c.issue(w, g.user, device)
+	// g.device, not req.Device: the approval page is this flow's entire
+	// consent surface and it disclosed the name recorded at start time. A
+	// device name chosen at poll time — after the human has clicked — is what
+	// the token row, the device list and any later revocation would name.
+	c.issue(w, r, g.user, g.device)
 }

@@ -58,7 +58,7 @@ func SaveSettings(s Settings) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if _, err := ensureHome(); err != nil {
 		return err
 	}
 	return writeJSON(path, s)

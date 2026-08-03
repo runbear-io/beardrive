@@ -648,7 +648,8 @@ func TestStoreObservesDevices(t *testing.T) {
 	srv.Devices, _ = OpenDeviceRegistry(filepath.Join(t.TempDir(), "devices.json"))
 	h := srv.Handler()
 
-	req := httptest.NewRequest("GET", "/api/p/"+p.ID+"/store/list?prefix=journal/", nil)
+	// Its own journal push: a read grants nothing, so it claims nothing.
+	req := httptest.NewRequest("PUT", "/api/p/"+p.ID+"/store/object?key=journal/dev-9.jsonl", nil)
 	req.Header.Set("X-Bdrive-Device", "dev-9")
 	req.Header.Set("X-Bdrive-Device-Name", "build-box")
 	req.Header.Set("X-Bdrive-Os", "linux/amd64")
@@ -656,7 +657,7 @@ func TestStoreObservesDevices(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
-		t.Fatalf("list: %d %s", rec.Code, rec.Body)
+		t.Fatalf("push: %d %s", rec.Code, rec.Body)
 	}
 	d, ok := srv.Devices.Get("dev-9")
 	if !ok || d.Name != "build-box" || d.OS != "linux/amd64" || d.IP != "192.0.2.55" {

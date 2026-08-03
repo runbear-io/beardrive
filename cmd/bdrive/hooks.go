@@ -2,12 +2,41 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/agenthooks"
 )
+
+// hookAgents turns an --agent flag value into the list agenthooks takes,
+// resolving EVERY name before either door writes anything. Install loops the
+// names and returns on the first unknown one — after registering the ones
+// before it — so argument order decided whether a command that reported
+// failure had already changed the machine (`--agent claude,bogus` wrote a
+// hook, `bogus,claude` did not). What it writes runs on every turn of every
+// session on the machine, so a refused list registers nothing at all — the
+// same posture `bdrive forget` takes with its arguments.
+//
+// An empty value is an explicit empty set, not "auto": an unexpanded shell
+// variable must not be indistinguishable from "every platform detected here".
+func hookAgents(flag string) ([]string, error) {
+	if flag == "auto" {
+		return nil, nil
+	}
+	if strings.TrimSpace(flag) == "" {
+		return nil, fmt.Errorf("--agent was given an empty value; name platforms (%s) or pass auto",
+			strings.Join(agenthooks.Agents, ", "))
+	}
+	agents := strings.Split(flag, ",")
+	for _, name := range agents {
+		if !slices.Contains(agenthooks.Agents, name) {
+			return nil, fmt.Errorf("unknown agent %q (supported: %s)", name, strings.Join(agenthooks.Agents, ", "))
+		}
+	}
+	return agents, nil
+}
 
 // bdrive hooks — register BearDrive's turn-boundary sync hooks with whatever
 // AI agent platforms the user works with (Claude Code, Codex, Gemini CLI,
@@ -63,9 +92,9 @@ func hooksCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var agents []string
-			if agentsFlag != "" && agentsFlag != "auto" {
-				agents = strings.Split(agentsFlag, ",")
+			agents, err := hookAgents(agentsFlag)
+			if err != nil {
+				return err
 			}
 			results, err := agenthooks.Install(folder, agents)
 			if err != nil {
@@ -103,9 +132,9 @@ func hooksCmd() *cobra.Command {
 			"is unaffected — the daemon keeps running; only turn-boundary sync stops.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var agents []string
-			if uninstallAgents != "" && uninstallAgents != "auto" {
-				agents = strings.Split(uninstallAgents, ",")
+			agents, err := hookAgents(uninstallAgents)
+			if err != nil {
+				return err
 			}
 			results, err := agenthooks.Uninstall(agents)
 			if err != nil {
