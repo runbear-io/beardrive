@@ -544,6 +544,11 @@ func TestSec_Share_RemovedOrgMemberLinkStopsServing(t *testing.T) {
 // secauthzQuota is a QuotaProvider that enforces a real seat cap, and can be
 // told to hold callers inside CheckSeat so two redemptions overlap.
 type secauthzQuota struct {
+	// Embedded so the read-side hooks (CheckRead/RecordEgress) come for
+	// free: this fake exercises the write path, and a widened interface
+	// should not need a no-op added here every time.
+	UnlimitedQuota
+
 	limit int
 
 	mu      sync.Mutex

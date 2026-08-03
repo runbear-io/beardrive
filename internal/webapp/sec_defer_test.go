@@ -940,6 +940,11 @@ func secdefDropDeviceRows(t *testing.T) {
 
 // secdefQuota records every CheckWrite / RecordUsage the hub makes.
 type secdefQuota struct {
+	// Embedded so the read-side hooks (CheckRead/RecordEgress) come for
+	// free: this fake exercises the write path, and a widened interface
+	// should not need a no-op added here every time.
+	UnlimitedQuota
+
 	checked []int64
 	usage   []int64
 }

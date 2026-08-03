@@ -81,7 +81,12 @@ classDiagram
         +walkFolder(folder, filter, fn)
         verdict: vSync vSkipFile vDescend vPruneDir vNested
     }
-    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan and Explain both go through it, so what --explain reports cannot drift from what leaves"
+    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain and Measure all go through it, so what --explain reports and what init warns about cannot drift from what leaves"
+
+    class Measure {
+        +Measure(folder, include) files, bytes
+    }
+    note for Measure "walk.go — sizes what a FIRST sync would upload, for the oversized-folder warning bdrive init prints (1 GiB / 20k files). Filter-aware on purpose: a 40 GB repo whose bulk is already ignored measures as the few MB that really sync, so the warning fires on the folder nobody meant to share and stays quiet on an ordinary checkout. Advice only — an unreadable subtree is skipped, never fatal"
 
     class Explain {
         +Explain(folder, include, accepted) two lists
@@ -135,6 +140,8 @@ classDiagram
     Session --> Filter : SkipUp on scan, Skip on materialize
     Session --> walkFolder : scan
     Explain --> walkFolder : same predicate
+    Measure --> walkFolder : same predicate
+    Measure --> Filter : own fresh instance
     Explain --> Filter : own fresh instance
     Explain ..> Entry : not-synced lines
     walkFolder --> Filter : SkipUp / PruneDir / addNestedMount

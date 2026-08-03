@@ -41,6 +41,43 @@ echo "== GCS bucket for blobs/journals =="
 gcloud storage buckets describe "gs://$BUCKET" >/dev/null 2>&1 || \
   gcloud storage buckets create "gs://$BUCKET" --location "$REGION" --uniform-bucket-level-access
 
+# Age old objects down to Nearline. Every version of every file is retained
+# forever, so storage grows monotonically against flat per-seat revenue; at
+# 30 days Nearline halves the per-GB cost ($0.020 → $0.010 in us-central1).
+#
+# Nearline and NOT Coldline/Archive, deliberately — see deploy/README.md
+# "Storage tiering". Colder tiers only pay off when an object is read less
+# than roughly once a month (Coldline) or once a year (Archive), and today a
+# BearDrive device that syncs a project for the first time downloads EVERY
+# historical blob, not just the current file tree. So blob reads scale with
+# how often anyone adds a device, which is nowhere near cold enough for
+# Archive to be anything but a bill increase. Revisit when a first sync
+# fetches only current-state blobs.
+#
+# Applied bucket-wide rather than to blobs/ only: journal objects sit under
+# the same per-project prefixes and a GCS lifecycle prefix cannot express
+# "*/blobs/". That is safe here because a peer journal is re-fetched only
+# when the listing shows it GREW (internal/syncer pull), and one that grew
+# was just rewritten and is Standard again.
+if [ "${LIFECYCLE:-1}" = "1" ]; then
+  echo "== GCS lifecycle: Nearline at 30 days (LIFECYCLE=0 to skip) =="
+  TMP_LIFECYCLE="$(mktemp)"
+  cat >"$TMP_LIFECYCLE" <<'JSON'
+{
+  "lifecycle": {
+    "rule": [
+      {
+        "action": { "type": "SetStorageClass", "storageClass": "NEARLINE" },
+        "condition": { "age": 30, "matchesStorageClass": ["STANDARD"] }
+      }
+    ]
+  }
+}
+JSON
+  gcloud storage buckets update "gs://$BUCKET" --lifecycle-file="$TMP_LIFECYCLE"
+  rm -f "$TMP_LIFECYCLE"
+fi
+
 echo "== Cloud SQL Postgres (this takes several minutes) =="
 gcloud sql instances describe "$SQL_INSTANCE" >/dev/null 2>&1 || \
   gcloud sql instances create "$SQL_INSTANCE" --database-version POSTGRES_16 \

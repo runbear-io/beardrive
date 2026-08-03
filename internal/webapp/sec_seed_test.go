@@ -33,6 +33,11 @@ import (
 // secaudCapQuota; a separate copy so this file's arithmetic is readable at the
 // assertion.
 type sec10CapQuota struct {
+	// Embedded so the read-side hooks (CheckRead/RecordEgress) come for
+	// free: this fake exercises the write path, and a widened interface
+	// should not need a no-op added here every time.
+	UnlimitedQuota
+
 	mu       sync.Mutex
 	cap      int64
 	recorded int64

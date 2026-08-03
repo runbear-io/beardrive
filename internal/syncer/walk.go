@@ -70,3 +70,36 @@ func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.Dir
 		return nil
 	})
 }
+
+// Measure reports what a first sync of this folder would actually upload:
+// the number of files and their total bytes, after the same filter the cycle
+// uses. It exists so `bdrive init` can warn about a folder nobody meant to
+// sync (a home directory, a video library, a checkout whose .bdriveignore
+// doesn't cover its build output) BEFORE the first push rather than after.
+//
+// It is deliberately filter-aware: a 40 GB repo whose bulk is node_modules
+// measures as the few MB that really sync, so the warning fires on the cases
+// that are actually expensive and stays quiet on the ones the starter rules
+// already handle.
+//
+// Unreadable entries are skipped rather than failing — this is advice, and a
+// permission error in one subtree must never block init.
+func Measure(folder string, include []string) (files int, bytes int64, err error) {
+	filter, err := LoadFilter(folder, include)
+	if err != nil {
+		return 0, 0, err
+	}
+	err = walkFolder(folder, filter, func(_, _ string, d fs.DirEntry, v verdict) error {
+		if v != vSync {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		files++
+		bytes += info.Size()
+		return nil
+	})
+	return files, bytes, err
+}

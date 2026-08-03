@@ -22,6 +22,11 @@ func mustJSON(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 
 // recQuota records every hook call and can be told to say no.
 type recQuota struct {
+	// Embedded so the read-side hooks (CheckRead/RecordEgress) come for
+	// free: this fake exercises the write path, and a widened interface
+	// should not need a no-op added here every time.
+	UnlimitedQuota
+
 	mu     sync.Mutex
 	denyW  bool
 	denyS  bool

@@ -278,8 +278,17 @@ classDiagram
         +CheckWrite(org, bytes)
         +CheckSeat(org, members)
         +RecordUsage(org, bytes)
+        +CheckRead(org, bytes)
+        +RecordEgress(org, bytes)
     }
     class UnlimitedQuota
+    note for QuotaProvider "The read half is deliberately ASYMMETRIC. CheckRead is called on /s/* and nowhere else: a public share link is the only unauthenticated door to stored bytes, so it is the only egress a plan can cap and the only bandwidth number worth publishing. Refusing a device mid-sync would surface as ErrForbidden, which the syncer reads as 'access is gone — pause and touch nothing', so /store/* and the viewer only RecordEgress. Sync must never break over a bill"
+    class countingWriter {
+        <<quota.go>>
+        +Write(p) n
+        +n int64
+    }
+    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file"
 
     class grant {
         +project +org +key
@@ -314,6 +323,8 @@ classDiagram
     Server *-- reservations : holds before it charges
     reservations *-- grant
     reservations ..> QuotaProvider : CheckWrite(size + outstanding), RecordUsage on landing
+    ShareDB ..> QuotaProvider : CheckRead before the stream, RecordEgress after
+    Server ..> countingWriter : every bytes-out route that bills
     reservations ..> Backend : reconcile — did the blob land
     Server *-- journalDoor : /store/* is the only way a device writes
     journalDoor ..> DeviceRegistry : OwnerOf gates the journal key

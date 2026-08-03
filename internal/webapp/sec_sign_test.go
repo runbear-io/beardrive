@@ -74,6 +74,11 @@ func secsignHub(t *testing.T) (http.Handler, *Server, Project, *secsignBackend) 
 
 // secsignQuota records every byte the hub charges and every byte it books.
 type secsignQuota struct {
+	// Embedded so the read-side hooks (CheckRead/RecordEgress) come for
+	// free: this fake exercises the write path, and a widened interface
+	// should not need a no-op added here every time.
+	UnlimitedQuota
+
 	mu                sync.Mutex
 	checked, recorded int64
 }

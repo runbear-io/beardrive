@@ -448,6 +448,24 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	// member reloading is debounced to a visit, distinct visitors still count.
 	s.Reads.Record(sh.Project, sh.Path, ReadKindShare, sh.Token+"/"+s.clientIP(r))
 
+	// Share links are the only unauthenticated door to stored bytes, so they
+	// are the only egress a plan actually caps. The per-IP limiter above
+	// bounds REQUESTS; this bounds BYTES, which is the number a pricing page
+	// can promise and a scraper behind many IPs can otherwise ignore.
+	org := s.orgOf(sh.Project)
+	if err := s.quota().CheckRead(org, fi.Size); err != nil {
+		// Not "forbidden": nothing is wrong with the link or the reader, the
+		// owner is over their transfer allowance. Say so plainly — whoever
+		// opened this has no relationship with us and no way to fix it.
+		http.Error(w, "This link has exceeded its transfer limit for now. "+
+			"Ask whoever shared it to get in touch with us.", http.StatusTooManyRequests)
+		return
+	}
+	// Count what actually leaves, on every branch below, including a transfer
+	// the reader abandons halfway.
+	cw := &countingWriter{w: w}
+	defer func() { s.quota().RecordEgress(org, cw.n) }()
+
 	rc, err := v.source.Open(r.Context(), sh.Path, fi)
 	if err != nil {
 		http.Error(w, "content temporarily unavailable", http.StatusBadGateway)
@@ -458,7 +476,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Type", contentType(sh.Path))
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(path.Base(sh.Path))))
-		io.Copy(w, rc)
+		io.Copy(cw, rc)
 		return
 	}
 
@@ -475,14 +493,14 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, sharedMarkdownShell, html.EscapeString(path.Base(sh.Path)), updatedStamp(fi.Time), body)
+		fmt.Fprintf(cw, sharedMarkdownShell, html.EscapeString(path.Base(sh.Path)), updatedStamp(fi.Time), body)
 	case ".html", ".htm":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.Copy(w, rc)
+		io.Copy(cw, rc)
 	default:
 		w.Header().Set("Content-Type", contentType(sh.Path))
 		setContentLength(w, rc) // measured, never the journal's Size field
-		io.Copy(w, rc)
+		io.Copy(cw, rc)
 	}
 }
 

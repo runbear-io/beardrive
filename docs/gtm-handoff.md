@@ -61,12 +61,13 @@ Draft copy is ready to paste; adjust voice as you like.
    title, body, and the first-comment founder note. Post from your
    account; be present for the first 3 hours to answer everything.
 11. **Product Hunt** — drafts in launch-plan.md. Schedule after HN, not
-   the same day. Before PH: replace the mailto waitlist on the site
-   with a real form (any hosted waitlist works) — email-composer
-   friction kills launch-day conversion.
-12. **Claude Code plugin discoverability** — submit/announce the
-   marketplace entry wherever Anthropic surfaces community plugins
-   (Discord, awesome-lists PRs from your account).
+   the same day. This one launches **BearDrive Cloud**, which is live with
+   open signup and a public `/pricing` page; there is no waitlist and no
+   mailto form anywhere, so nothing needs replacing before PH.
+12. **Agent onboarding discoverability** — announce the paste-prompt
+   onboarding (`INSTALL_FOR_AGENTS.md`) wherever agent users gather. There
+   is no Claude Code plugin or marketplace entry to submit — the
+   integration is `internal/agenthooks` plus that runbook.
 
 ## P3 — measurement plumbing (see metrics.md)
 
