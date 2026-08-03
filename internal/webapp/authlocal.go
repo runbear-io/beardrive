@@ -59,6 +59,7 @@ type BuiltinAuth struct {
 	BindDevice func(email string, r *http.Request) error
 
 	store AccountRepo
+	ver   versionGate // skips the re-read when the store has not moved
 
 	// cli serves `bdrive login` — the browser and device flows, shared with
 	// every other provider (see CLIAuth), which is why nothing about them
@@ -196,9 +197,13 @@ func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error
 // A store that cannot answer leaves the maps in place — see ProjectDB.refresh
 // for the trade.
 //
-// ponytail: one full Load per authenticated request; see OrgDB.refresh for the
-// upgrade path if it ever shows up in a profile.
+// Gated on the store's change token (Versioned) like ProjectDB.refresh: still
+// a re-read on every authenticated request, but only when something moved.
 func (a *BuiltinAuth) refresh() {
+	token, stale := a.ver.stale(a.store)
+	if !stale {
+		return
+	}
 	users, tokens, _, err := a.store.Load()
 	if err != nil {
 		if !a.warnedLoad {
@@ -208,6 +213,7 @@ func (a *BuiltinAuth) refresh() {
 		return
 	}
 	a.warnedLoad = false
+	a.ver.fresh(token)
 	nextUsers := make(map[string]*authUser, len(users))
 	for _, u := range users {
 		nextUsers[u.ID] = u

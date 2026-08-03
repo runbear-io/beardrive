@@ -20,7 +20,7 @@ import (
 // The trailing User is the account that ASKED for the template. It is
 // deliberately unused: see the Upload call below.
 func (s *Server) seedTemplate(ctx context.Context, projectID string, t templates.Template, _ User) error {
-	v, err := s.projectVolume(projectID)
+	_, v, err := s.projectVolume(projectID)
 	if err != nil {
 		return err
 	}

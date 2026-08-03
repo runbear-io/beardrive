@@ -74,7 +74,7 @@ func (s *Server) handleOrgShares(w http.ResponseWriter, r *http.Request) {
 		// row carries the public /s/ token, so listing one to a member who is
 		// denied that project hands them the file the denial exists to
 		// withhold. Same resolver the per-project /shares route uses.
-		if !atLeast(s.projectPerm(r, p.ID), PermRead) {
+		if !atLeast(s.projectPermOf(r, p), PermRead) {
 			continue
 		}
 		for _, sh := range s.Shares.List(p.ID) {

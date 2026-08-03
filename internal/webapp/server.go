@@ -243,17 +243,20 @@ func (s *Server) single() *volume {
 	return s.vol
 }
 
-// projectVolume resolves a project id to its volume, creating the (cached)
-// source over the project's storage prefix on first use.
-func (s *Server) projectVolume(id string) (*volume, error) {
+// projectVolume resolves a project id to its record and its volume, creating
+// the (cached) source over the project's storage prefix on first use. It
+// returns the Project so the permission check does not have to resolve the id
+// a second time — see projectPermOf.
+func (s *Server) projectVolume(id string) (Project, *volume, error) {
 	if s.Root == nil || s.Projects == nil {
-		return nil, fmt.Errorf("this server does not host projects")
+		return Project{}, nil, fmt.Errorf("this server does not host projects")
 	}
 	if !projectIDRe.MatchString(id) {
-		return nil, fmt.Errorf("invalid project id %q", id)
+		return Project{}, nil, fmt.Errorf("invalid project id %q", id)
 	}
-	if _, ok := s.Projects.Get(id); !ok {
-		return nil, fmt.Errorf("no such project %q", id)
+	p, ok := s.Projects.Get(id)
+	if !ok {
+		return Project{}, nil, fmt.Errorf("no such project %q", id)
 	}
 	s.volsMu.Lock()
 	defer s.volsMu.Unlock()
@@ -268,7 +271,7 @@ func (s *Server) projectVolume(id string) (*volume, error) {
 		}
 		s.vols[id] = v
 	}
-	return v, nil
+	return p, v, nil
 }
 
 // RemoteSource reads a beardrive remote: it fetches every journal and folds the
@@ -465,12 +468,14 @@ func (s *Server) Handler() http.Handler {
 	proj := func(level string, h func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("project")
-			v, err := s.projectVolume(id)
+			p, v, err := s.projectVolume(id)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			if !s.requirePerm(w, r, id, level) {
+			// p, not id: the resolver has already read the registry once for
+			// this request and re-reading it is the hub's per-request cost.
+			if !s.requirePermOn(w, r, p, level) {
 				return
 			}
 			// Read recording (and anything else downstream) finds the project
@@ -685,7 +690,7 @@ func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 	// affordances without a second fetch per project on every render.
 	visible := []projectView{}
 	for _, p := range s.Projects.List() {
-		perm := s.projectPerm(r, p.ID)
+		perm := s.projectPermOf(r, p)
 		if !atLeast(perm, PermRead) {
 			continue
 		}
@@ -717,7 +722,7 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, ok := s.Projects.Get(r.PathValue("project"))
-	perm := s.projectPerm(r, p.ID)
+	perm := s.projectPermOf(r, p)
 	if !ok || !atLeast(perm, PermRead) {
 		http.Error(w, "no such project", http.StatusNotFound)
 		return
@@ -811,13 +816,13 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			}
 			p, _ = s.Projects.Get(p.ID)
 		}
-	} else if !atLeast(s.projectPerm(r, p.ID), PermRead) {
+	} else if !atLeast(s.projectPermOf(r, p), PermRead) {
 		// GetOrCreate is create-or-join by name: without this, POSTing the
 		// name of a project you've been cut off from would hand back its id.
 		http.Error(w, permDenied(PermRead), http.StatusForbidden)
 		return
 	}
-	writeJSON(w, map[string]any{"project": projectJSON(p, s.projectPerm(r, p.ID)), "created": created})
+	writeJSON(w, map[string]any{"project": projectJSON(p, s.projectPermOf(r, p)), "created": created})
 }
 
 // orgForCreate resolves which org a new project lands in: the explicitly

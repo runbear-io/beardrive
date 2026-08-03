@@ -64,12 +64,12 @@ func OpenSQLStore(driver, dsn string) (MetaStore, error) {
 		db.Close()
 		return nil, err
 	}
-	s.accounts = &sqlAccountRepo{s}
-	s.projects = &sqlProjectRepo{s}
-	s.orgs = &sqlOrgRepo{s}
-	s.shares = &sqlShareRepo{s}
-	s.devices = &sqlDeviceRepo{s}
-	s.reads = &sqlReadRepo{s}
+	s.accounts = &sqlAccountRepo{s: s, w: regWriter{s, regAccounts}}
+	s.projects = &sqlProjectRepo{s: s, w: regWriter{s, regProjects}}
+	s.orgs = &sqlOrgRepo{s: s, w: regWriter{s, regOrgs}}
+	s.shares = &sqlShareRepo{s: s, w: regWriter{s, regShares}}
+	s.devices = &sqlDeviceRepo{s: s, w: regWriter{s, regDevices}}
+	s.reads = &sqlReadRepo{s: s, w: regWriter{s, regReads}}
 	return s, nil
 }
 
@@ -102,6 +102,69 @@ func (s *sqlMetaStore) q(query string) string {
 func (s *sqlMetaStore) exec(query string, args ...any) error {
 	_, err := s.db.Exec(s.q(query), args...)
 	return err
+}
+
+// Registry names in meta_version. One per service registry, matching what a
+// single refresh() reloads — so orgs, members and invites share one counter,
+// because OrgDB.refresh reloads all three together.
+const (
+	regAccounts = "accounts"
+	regProjects = "projects"
+	regOrgs     = "orgs"
+	regShares   = "shares"
+	regDevices  = "devices"
+	regReads    = "reads"
+)
+
+// inTx runs fn in a transaction that also bumps reg's change token. Same
+// transaction on purpose: a token that has not moved must mean no write
+// landed, or refresh() would skip a reload it needed. The upsert-increment is
+// portable — both engines take excluded.* in DO UPDATE.
+func (s *sqlMetaStore) inTx(reg string, fn func(*sql.Tx) error) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(s.q(`INSERT INTO meta_version (name,version) VALUES (?,1)
+		ON CONFLICT(name) DO UPDATE SET version = meta_version.version + 1`), reg); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// regWriter is one registry's write handle: sqlMetaStore.exec plus that
+// registry's change-token bump, in one transaction. Repos hold one rather than
+// passing the registry name at each call, so the QUERY stays argument zero and
+// TestSec_DB_QueryRewriteOnlyEverSeesStaticSQL keeps checking every call site
+// the way it already checks exec's.
+type regWriter struct {
+	s   *sqlMetaStore
+	reg string
+}
+
+func (w regWriter) exec(query string, args ...any) error {
+	return w.s.inTx(w.reg, func(tx *sql.Tx) error {
+		_, err := tx.Exec(w.s.q(query), args...)
+		return err
+	})
+}
+
+// version reads a registry's change token. A store that predates the table has
+// no row for it, which is version zero — correct, since no write has happened
+// through a binary that counts.
+func (s *sqlMetaStore) version(reg string) (string, error) {
+	var v int64
+	switch err := s.db.QueryRow(s.q(`SELECT version FROM meta_version WHERE name = ?`), reg).Scan(&v); {
+	case err == sql.ErrNoRows:
+		return "0", nil
+	case err != nil:
+		return "", err
+	}
+	return strconv.FormatInt(v, 10), nil
 }
 
 // tenc / tdec store times as RFC3339 text (empty string for the zero time),
@@ -186,6 +249,12 @@ func (s *sqlMetaStore) migrate() error {
 			PRIMARY KEY (project, email))`,
 		`CREATE TABLE IF NOT EXISTS schema_meta (
 			key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`,
+		// One counter per registry, bumped inside every write transaction, so
+		// refresh() can ask "has anything moved?" with one primary-key lookup
+		// instead of re-running the registry's whole (unfiltered, multi-table)
+		// Load on every authenticated request. See Versioned.
+		`CREATE TABLE IF NOT EXISTS meta_version (
+			name TEXT PRIMARY KEY, version BIGINT NOT NULL DEFAULT 0)`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
@@ -305,7 +374,12 @@ func (s *sqlMetaStore) addColumns(table string, cols, guarded map[string]string)
 
 // ---- accounts ----
 
-type sqlAccountRepo struct{ s *sqlMetaStore }
+type sqlAccountRepo struct {
+	s *sqlMetaStore
+	w regWriter
+}
+
+func (r *sqlAccountRepo) Version() (string, error) { return r.s.version(regAccounts) }
 
 func (r *sqlAccountRepo) Load() ([]*authUser, []authToken, *authPolicy, error) {
 	var users []*authUser
@@ -369,39 +443,41 @@ func (r *sqlAccountRepo) PutAccount(u *authUser) error {
 	// the victim's device tokens and memberships to the newcomer while their
 	// password hash disappears. WHERE makes it a no-op; the rowcount check
 	// turns that into an error the caller sees.
-	res, err := r.s.db.Exec(r.s.q(`INSERT INTO accounts (id,email,name,pass,status,created) VALUES (?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET email=excluded.email, name=excluded.name, pass=excluded.pass,
-		status=excluded.status, created=excluded.created
-		WHERE lower(accounts.email) = lower(excluded.email)`),
-		u.ID, u.Email, u.Name, u.Pass, u.Status, tenc(u.Created))
-	if err != nil {
-		return err
-	}
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return fmt.Errorf("account id %s already belongs to another account", u.ID)
-	}
-	return nil
+	return r.s.inTx(regAccounts, func(tx *sql.Tx) error {
+		res, err := tx.Exec(r.s.q(`INSERT INTO accounts (id,email,name,pass,status,created) VALUES (?,?,?,?,?,?)
+			ON CONFLICT(id) DO UPDATE SET email=excluded.email, name=excluded.name, pass=excluded.pass,
+			status=excluded.status, created=excluded.created
+			WHERE lower(accounts.email) = lower(excluded.email)`),
+			u.ID, u.Email, u.Name, u.Pass, u.Status, tenc(u.Created))
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			return fmt.Errorf("account id %s already belongs to another account", u.ID)
+		}
+		return nil
+	})
 }
 
 func (r *sqlAccountRepo) DeleteAccount(id string) error {
-	return r.s.exec(`DELETE FROM accounts WHERE id = ?`, id)
+	return r.w.exec(`DELETE FROM accounts WHERE id = ?`, id)
 }
 
 func (r *sqlAccountRepo) PutToken(t authToken) error {
 	if err := checkToken(t); err != nil {
 		return err
 	}
-	return r.s.exec(`INSERT INTO tokens (hash,user_id,device,created) VALUES (?,?,?,?)
+	return r.w.exec(`INSERT INTO tokens (hash,user_id,device,created) VALUES (?,?,?,?)
 		ON CONFLICT(hash) DO UPDATE SET user_id=excluded.user_id, device=excluded.device, created=excluded.created`,
 		t.Hash, t.User, t.Device, tenc(t.Created))
 }
 
 func (r *sqlAccountRepo) DeleteToken(hash string) error {
-	return r.s.exec(`DELETE FROM tokens WHERE hash = ?`, hash)
+	return r.w.exec(`DELETE FROM tokens WHERE hash = ?`, hash)
 }
 
 func (r *sqlAccountRepo) PutPolicy(p authPolicy) error {
-	return r.s.exec(`INSERT INTO auth_policy (id,require_verification,require_approval) VALUES (1,?,?)
+	return r.w.exec(`INSERT INTO auth_policy (id,require_verification,require_approval) VALUES (1,?,?)
 		ON CONFLICT(id) DO UPDATE SET require_verification=excluded.require_verification,
 		require_approval=excluded.require_approval`,
 		b2i(p.RequireVerification), b2i(p.RequireApproval))
@@ -409,7 +485,12 @@ func (r *sqlAccountRepo) PutPolicy(p authPolicy) error {
 
 // ---- projects ----
 
-type sqlProjectRepo struct{ s *sqlMetaStore }
+type sqlProjectRepo struct {
+	s *sqlMetaStore
+	w regWriter
+}
+
+func (r *sqlProjectRepo) Version() (string, error) { return r.s.version(regProjects) }
 
 func (r *sqlProjectRepo) Load() ([]Project, error) {
 	rows, err := r.s.db.Query(
@@ -471,30 +552,27 @@ func (r *sqlProjectRepo) Put(p Project) error {
 	if err := checkProject(p); err != nil {
 		return err
 	}
-	tx, err := r.s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(r.s.q(
-		`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
-		VALUES (?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
-		description=excluded.description, icon=excluded.icon,
-		creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`),
-		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), p.ID); err != nil {
-		return err
-	}
-	for email, level := range p.Perms {
-		if _, err := tx.Exec(r.s.q(`INSERT INTO project_perms (project,email,level) VALUES (?,?,?)`),
-			p.ID, email, level); err != nil {
+	return r.s.inTx(regProjects, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(r.s.q(
+			`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
+			VALUES (?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
+			description=excluded.description, icon=excluded.icon,
+			creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`),
+			p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template); err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), p.ID); err != nil {
+			return err
+		}
+		for email, level := range p.Perms {
+			if _, err := tx.Exec(r.s.q(`INSERT INTO project_perms (project,email,level) VALUES (?,?,?)`),
+				p.ID, email, level); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // PutMeta writes the project's own columns and does not touch project_perms —
@@ -503,8 +581,7 @@ func (r *sqlProjectRepo) PutMeta(p Project) error {
 	if err := checkProject(p); err != nil {
 		return err
 	}
-	return r.s.exec(
-		`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
+	return r.w.exec(`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
 		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
 		description=excluded.description, icon=excluded.icon,
@@ -518,30 +595,30 @@ func (r *sqlProjectRepo) PutPerm(project, email, level string) error {
 		return err
 	}
 	if level == "" {
-		return r.s.exec(`DELETE FROM project_perms WHERE project = ? AND email = ?`, project, email)
+		return r.w.exec(`DELETE FROM project_perms WHERE project = ? AND email = ?`, project, email)
 	}
-	return r.s.exec(`INSERT INTO project_perms (project,email,level) VALUES (?,?,?)
+	return r.w.exec(`INSERT INTO project_perms (project,email,level) VALUES (?,?,?)
 		ON CONFLICT(project,email) DO UPDATE SET level=excluded.level`, project, email, level)
 }
 
 func (r *sqlProjectRepo) Delete(id string) error {
-	tx, err := r.s.db.Begin()
-	if err != nil {
+	return r.s.inTx(regProjects, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), id); err != nil {
+			return err
+		}
+		_, err := tx.Exec(r.s.q(`DELETE FROM projects WHERE id = ?`), id)
 		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), id); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(r.s.q(`DELETE FROM projects WHERE id = ?`), id); err != nil {
-		return err
-	}
-	return tx.Commit()
+	})
 }
 
 // ---- orgs (+ members, + invites) ----
 
-type sqlOrgRepo struct{ s *sqlMetaStore }
+type sqlOrgRepo struct {
+	s *sqlMetaStore
+	w regWriter
+}
+
+func (r *sqlOrgRepo) Version() (string, error) { return r.s.version(regOrgs) }
 
 func (r *sqlOrgRepo) Load() ([]Org, []OrgInvite, error) {
 	orgs := map[string]*Org{}
@@ -616,26 +693,23 @@ func (r *sqlOrgRepo) PutOrg(o Org) error {
 	if err := checkOrg(o); err != nil {
 		return err
 	}
-	tx, err := r.s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(r.s.q(`INSERT INTO orgs (id,name,created) VALUES (?,?,?)
-		ON CONFLICT(id) DO UPDATE SET name=excluded.name, created=excluded.created`),
-		o.ID, o.Name, tenc(o.Created)); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(r.s.q(`DELETE FROM org_members WHERE org = ?`), o.ID); err != nil {
-		return err
-	}
-	for email, role := range o.Members {
-		if _, err := tx.Exec(r.s.q(`INSERT INTO org_members (org,email,role,joined) VALUES (?,?,?,?)`),
-			o.ID, email, role, tenc(o.Joined[email])); err != nil {
+	return r.s.inTx(regOrgs, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(r.s.q(`INSERT INTO orgs (id,name,created) VALUES (?,?,?)
+			ON CONFLICT(id) DO UPDATE SET name=excluded.name, created=excluded.created`),
+			o.ID, o.Name, tenc(o.Created)); err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		if _, err := tx.Exec(r.s.q(`DELETE FROM org_members WHERE org = ?`), o.ID); err != nil {
+			return err
+		}
+		for email, role := range o.Members {
+			if _, err := tx.Exec(r.s.q(`INSERT INTO org_members (org,email,role,joined) VALUES (?,?,?,?)`),
+				o.ID, email, role, tenc(o.Joined[email])); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // PutOrgMeta writes the org's own columns and does not touch org_members —
@@ -644,7 +718,7 @@ func (r *sqlOrgRepo) PutOrgMeta(o Org) error {
 	if err := checkOrg(o); err != nil {
 		return err
 	}
-	return r.s.exec(`INSERT INTO orgs (id,name,created) VALUES (?,?,?)
+	return r.w.exec(`INSERT INTO orgs (id,name,created) VALUES (?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, created=excluded.created`,
 		o.ID, o.Name, tenc(o.Created))
 }
@@ -655,45 +729,45 @@ func (r *sqlOrgRepo) PutMember(org, email, role string, joined time.Time) error 
 		return err
 	}
 	if role == "" {
-		return r.s.exec(`DELETE FROM org_members WHERE org = ? AND email = ?`, org, email)
+		return r.w.exec(`DELETE FROM org_members WHERE org = ? AND email = ?`, org, email)
 	}
-	return r.s.exec(`INSERT INTO org_members (org,email,role,joined) VALUES (?,?,?,?)
+	return r.w.exec(`INSERT INTO org_members (org,email,role,joined) VALUES (?,?,?,?)
 		ON CONFLICT(org,email) DO UPDATE SET role=excluded.role, joined=excluded.joined`,
 		org, email, role, tenc(joined))
 }
 
 func (r *sqlOrgRepo) DeleteOrg(id string) error {
-	tx, err := r.s.db.Begin()
-	if err != nil {
+	return r.s.inTx(regOrgs, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(r.s.q(`DELETE FROM org_members WHERE org = ?`), id); err != nil {
+			return err
+		}
+		_, err := tx.Exec(r.s.q(`DELETE FROM orgs WHERE id = ?`), id)
 		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(r.s.q(`DELETE FROM org_members WHERE org = ?`), id); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(r.s.q(`DELETE FROM orgs WHERE id = ?`), id); err != nil {
-		return err
-	}
-	return tx.Commit()
+	})
 }
 
 func (r *sqlOrgRepo) PutInvite(i OrgInvite) error {
 	if err := checkInvite(i); err != nil {
 		return err
 	}
-	return r.s.exec(`INSERT INTO invites (token,org,creator,created,expires,uses) VALUES (?,?,?,?,?,?)
+	return r.w.exec(`INSERT INTO invites (token,org,creator,created,expires,uses) VALUES (?,?,?,?,?,?)
 		ON CONFLICT(token) DO UPDATE SET org=excluded.org, creator=excluded.creator,
 		created=excluded.created, expires=excluded.expires, uses=excluded.uses`,
 		i.Token, i.Org, i.Creator, tenc(i.Created), tenc(i.Expires), i.Uses)
 }
 
 func (r *sqlOrgRepo) DeleteInvite(token string) error {
-	return r.s.exec(`DELETE FROM invites WHERE token = ?`, token)
+	return r.w.exec(`DELETE FROM invites WHERE token = ?`, token)
 }
 
 // ---- shares ----
 
-type sqlShareRepo struct{ s *sqlMetaStore }
+type sqlShareRepo struct {
+	s *sqlMetaStore
+	w regWriter
+}
+
+func (r *sqlShareRepo) Version() (string, error) { return r.s.version(regShares) }
 
 func (r *sqlShareRepo) Load() ([]Share, error) {
 	rows, err := r.s.db.Query(`SELECT token, project, path, creator, created, expires FROM shares`)
@@ -718,19 +792,24 @@ func (r *sqlShareRepo) Put(s Share) error {
 	if err := checkShare(s); err != nil {
 		return err
 	}
-	return r.s.exec(`INSERT INTO shares (token,project,path,creator,created,expires) VALUES (?,?,?,?,?,?)
+	return r.w.exec(`INSERT INTO shares (token,project,path,creator,created,expires) VALUES (?,?,?,?,?,?)
 		ON CONFLICT(token) DO UPDATE SET project=excluded.project, path=excluded.path,
 		creator=excluded.creator, created=excluded.created, expires=excluded.expires`,
 		s.Token, s.Project, s.Path, s.Creator, tenc(s.Created), tenc(s.Expires))
 }
 
 func (r *sqlShareRepo) Delete(token string) error {
-	return r.s.exec(`DELETE FROM shares WHERE token = ?`, token)
+	return r.w.exec(`DELETE FROM shares WHERE token = ?`, token)
 }
 
 // ---- devices ----
 
-type sqlDeviceRepo struct{ s *sqlMetaStore }
+type sqlDeviceRepo struct {
+	s *sqlMetaStore
+	w regWriter
+}
+
+func (r *sqlDeviceRepo) Version() (string, error) { return r.s.version(regDevices) }
 
 func (r *sqlDeviceRepo) Load() ([]DeviceInfo, error) {
 	rows, err := r.s.db.Query(`SELECT id, name, os, user_email, ip, first_seen, last_seen FROM device_rows`)
@@ -755,19 +834,24 @@ func (r *sqlDeviceRepo) Put(d DeviceInfo) error {
 	if err := checkDevice(d); err != nil {
 		return err
 	}
-	return r.s.exec(`INSERT INTO device_rows (user_email,id,name,os,ip,first_seen,last_seen) VALUES (?,?,?,?,?,?,?)
+	return r.w.exec(`INSERT INTO device_rows (user_email,id,name,os,ip,first_seen,last_seen) VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(user_email,id) DO UPDATE SET name=excluded.name, os=excluded.os,
 		ip=excluded.ip, last_seen=excluded.last_seen`,
 		d.User, d.ID, d.Name, d.OS, d.IP, tenc(d.FirstSeen), tenc(d.LastSeen))
 }
 
 func (r *sqlDeviceRepo) Delete(user, id string) error {
-	return r.s.exec(`DELETE FROM device_rows WHERE user_email = ? AND id = ?`, user, id)
+	return r.w.exec(`DELETE FROM device_rows WHERE user_email = ? AND id = ?`, user, id)
 }
 
 // ---- reads ----
 
-type sqlReadRepo struct{ s *sqlMetaStore }
+type sqlReadRepo struct {
+	s *sqlMetaStore
+	w regWriter
+}
+
+func (r *sqlReadRepo) Version() (string, error) { return r.s.version(regReads) }
 
 func (r *sqlReadRepo) Load() ([]ReadStat, error) {
 	rows, err := r.s.db.Query(`SELECT project, path, day, kind, actor, count, last FROM read_stats`)
@@ -794,34 +878,28 @@ func (r *sqlReadRepo) PutBatch(stats []ReadStat) error {
 			return err
 		}
 	}
-	tx, err := r.s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, st := range stats {
-		if _, err := tx.Exec(r.s.q(`INSERT INTO read_stats (project,path,day,kind,actor,count,last)
-			VALUES (?,?,?,?,?,?,?)
-			ON CONFLICT(project,path,day,kind,actor) DO UPDATE SET count=excluded.count, last=excluded.last`),
-			st.Project, st.Path, st.Day, st.Kind, st.Actor, st.Count, tenc(st.Last)); err != nil {
-			return err
+	return r.s.inTx(regReads, func(tx *sql.Tx) error {
+		for _, st := range stats {
+			if _, err := tx.Exec(r.s.q(`INSERT INTO read_stats (project,path,day,kind,actor,count,last)
+				VALUES (?,?,?,?,?,?,?)
+				ON CONFLICT(project,path,day,kind,actor) DO UPDATE SET count=excluded.count, last=excluded.last`),
+				st.Project, st.Path, st.Day, st.Kind, st.Actor, st.Count, tenc(st.Last)); err != nil {
+				return err
+			}
 		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 func (r *sqlReadRepo) DeleteBatch(keys []ReadStatKey) error {
-	tx, err := r.s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, k := range keys {
-		if _, err := tx.Exec(r.s.q(`DELETE FROM read_stats
-			WHERE project = ? AND path = ? AND day = ? AND kind = ? AND actor = ?`),
-			k.Project, k.Path, k.Day, k.Kind, k.Actor); err != nil {
-			return err
+	return r.s.inTx(regReads, func(tx *sql.Tx) error {
+		for _, k := range keys {
+			if _, err := tx.Exec(r.s.q(`DELETE FROM read_stats
+				WHERE project = ? AND path = ? AND day = ? AND kind = ? AND actor = ?`),
+				k.Project, k.Path, k.Day, k.Kind, k.Actor); err != nil {
+				return err
+			}
 		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,28 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// fileVersion is the file backend's Versioned token: size and modification
+// time, which the temp-file + rename every write goes through always moves.
+// A missing file gets its own token, so creating one counts as a change.
+//
+// ponytail: mtime+size, not an inode and not a content hash. Two hub PROCESSES
+// writing the same byte count within one filesystem timestamp tick would look
+// unchanged to each other — nanosecond mtimes (APFS, ext4, xfs, btrfs, ZFS)
+// make that a theoretical window, and the file backend is not multi-process-
+// safe regardless: every write is still read-modify-write-rename, so two
+// processes can lose each other's records outright. This narrows the
+// stale-read race; it does not close it. The SQL backend is the fix.
+func fileVersion(path string) (string, error) {
+	fi, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return "absent", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(fi.Size(), 10) + "@" + strconv.FormatInt(fi.ModTime().UnixNano(), 10), nil
 }
 
 func readJSONFile(path string, into any) (found bool, err error) {
@@ -110,6 +133,8 @@ type fileAccountRepo struct {
 func newFileAccountRepo(path string) *fileAccountRepo {
 	return &fileAccountRepo{path: path, users: map[string]*authUser{}, tokens: map[string]authToken{}}
 }
+
+func (r *fileAccountRepo) Version() (string, error) { return fileVersion(r.path) }
 
 func (r *fileAccountRepo) Load() ([]*authUser, []authToken, *authPolicy, error) {
 	r.mu.Lock()
@@ -230,6 +255,8 @@ func newFileProjectRepo(path string) *fileProjectRepo {
 	return &fileProjectRepo{path: path, byID: map[string]Project{}}
 }
 
+func (r *fileProjectRepo) Version() (string, error) { return fileVersion(r.path) }
+
 func (r *fileProjectRepo) Load() ([]Project, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -347,6 +374,8 @@ type fileOrgRepo struct {
 func newFileOrgRepo(path string) *fileOrgRepo {
 	return &fileOrgRepo{path: path, byID: map[string]Org{}, invites: map[string]OrgInvite{}}
 }
+
+func (r *fileOrgRepo) Version() (string, error) { return fileVersion(r.path) }
 
 func (r *fileOrgRepo) Load() ([]Org, []OrgInvite, error) {
 	r.mu.Lock()
@@ -503,6 +532,8 @@ func newFileShareRepo(path string) *fileShareRepo {
 	return &fileShareRepo{path: path, byToken: map[string]Share{}}
 }
 
+func (r *fileShareRepo) Version() (string, error) { return fileVersion(r.path) }
+
 func (r *fileShareRepo) Load() ([]Share, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -581,6 +612,8 @@ func newFileDeviceRepo(path string) *fileDeviceRepo {
 	return &fileDeviceRepo{path: path, rows: map[devKey]DeviceInfo{}}
 }
 
+func (r *fileDeviceRepo) Version() (string, error) { return fileVersion(r.path) }
+
 func (r *fileDeviceRepo) Load() ([]DeviceInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -655,6 +688,8 @@ type fileReadRepo struct {
 func newFileReadRepo(path string) *fileReadRepo {
 	return &fileReadRepo{path: path, byKey: map[ReadStatKey]ReadStat{}}
 }
+
+func (r *fileReadRepo) Version() (string, error) { return fileVersion(r.path) }
 
 func (r *fileReadRepo) Load() ([]ReadStat, error) {
 	r.mu.Lock()

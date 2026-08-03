@@ -44,7 +44,8 @@ type ShareDB struct {
 	repo ShareRepo
 
 	mu      sync.Mutex
-	warned  bool // "re-read failed" logged once (see refresh)
+	ver     versionGate // skips the re-read when the store has not moved
+	warned  bool        // "re-read failed" logged once (see refresh)
 	byToken map[string]Share
 }
 
@@ -63,6 +64,10 @@ type ShareDB struct {
 // ponytail: one full Load per share resolution; see OrgDB.refresh for the
 // upgrade path if it ever shows up in a profile.
 func (db *ShareDB) refresh() {
+	token, stale := db.ver.stale(db.repo)
+	if !stale {
+		return
+	}
 	list, err := db.repo.Load()
 	if err != nil {
 		if !db.warned {
@@ -72,6 +77,7 @@ func (db *ShareDB) refresh() {
 		return
 	}
 	db.warned = false
+	db.ver.fresh(token)
 	next := make(map[string]Share, len(list))
 	for _, s := range list {
 		next[s.Token] = s
@@ -423,7 +429,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
 		return
 	}
-	v, err := s.projectVolume(sh.Project)
+	_, v, err := s.projectVolume(sh.Project)
 	if err != nil {
 		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
 		return

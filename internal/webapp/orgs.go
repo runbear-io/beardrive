@@ -74,7 +74,8 @@ type OrgDB struct {
 	repo OrgRepo
 
 	mu      sync.Mutex
-	warned  bool // "re-read failed" logged once (see refresh)
+	ver     versionGate // skips the re-read when the store has not moved
+	warned  bool        // "re-read failed" logged once (see refresh)
 	byID    map[string]Org
 	invites map[string]OrgInvite
 	// seniority, when set, lists accounts oldest first. It resolves the ONE
@@ -214,11 +215,13 @@ func (db *OrgDB) putMember(prev, next Org, email, role string) error {
 // transient read error would 403 the whole hub. Same trade, same reasons as
 // ProjectDB.refresh.
 //
-// ponytail: one full Load per authorization read, and with BuiltinAuth.refresh
-// and ProjectDB.refresh that is now three per request. Correctness floor, not a
-// cache. If it shows up in a profile the fix is a version/mtime check inside the
-// repo, never a TTL up here — a TTL is exactly the staleness window this removes.
+// Gated on the store's change token (Versioned) like ProjectDB.refresh: still
+// a re-read on every authorization read, but only when something moved.
 func (db *OrgDB) refresh() {
+	token, stale := db.ver.stale(db.repo)
+	if !stale {
+		return
+	}
 	orgs, invites, err := db.repo.Load()
 	if err != nil {
 		if !db.warned {
@@ -228,6 +231,7 @@ func (db *OrgDB) refresh() {
 		return
 	}
 	db.warned = false
+	db.ver.fresh(token)
 	nextOrgs := make(map[string]Org, len(orgs))
 	for _, o := range orgs {
 		nextOrgs[o.ID] = o

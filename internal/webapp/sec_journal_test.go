@@ -251,7 +251,7 @@ func TestSec_Journal_HostilePathCannotBeLaunderedThroughRestoreOrRemove(t *testi
 		planted.Write(line)
 		planted.WriteByte('\n')
 	}
-	v, err := srv.projectVolume(alice.ID)
+	_, v, err := srv.projectVolume(alice.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

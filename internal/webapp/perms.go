@@ -13,10 +13,11 @@ import (
 // string on Project.Default, so an existing hub upgrades with no migration and
 // no change in behavior until someone edits permissions.
 //
-// One resolver (projectPerm) and one choke point (the proj() wrapper in
-// server.go): every per-project route declares the level it needs at
-// registration, so no handler grows its own check and a missed handler cannot
-// become a silent authorization hole.
+// One resolver (projectPerm, and projectPermOf when the caller already holds
+// the Project — same rules, one fewer registry read) and one choke point (the
+// proj() wrapper in server.go): every per-project route declares the level it
+// needs at registration, so no handler grows its own check and a missed
+// handler cannot become a silent authorization hole.
 
 const (
 	PermNone  = "none"  // the project is hidden: absent from the list, 403 everywhere
@@ -71,7 +72,23 @@ func (s *Server) projectPerm(r *http.Request, projectID string) string {
 		return PermAdmin
 	}
 	p, ok := s.Projects.Get(projectID)
-	if !ok || p.Org == "" {
+	if !ok {
+		return PermNone
+	}
+	return s.projectPermOf(r, p)
+}
+
+// projectPermOf is projectPerm for a caller that has already resolved the
+// project — every per-project route does, in proj(). Resolving it twice per
+// request re-read the whole registry twice (see ProjectDB.refresh): 24 ms a
+// request at 5k projects on the file backend, nine unfiltered SELECTs on
+// Postgres. Same rules, same fail-closed defaults; the resolution just does
+// not happen again.
+func (s *Server) projectPermOf(r *http.Request, p Project) string {
+	if s.Dir == nil || s.Auth == nil {
+		return PermAdmin
+	}
+	if p.Org == "" {
 		return PermNone
 	}
 	email := normEmail(s.requestUser(r).Email)
@@ -90,10 +107,19 @@ func (s *Server) projectPerm(r *http.Request, projectID string) string {
 
 // requirePerm answers the request itself when the caller is short of level.
 func (s *Server) requirePerm(w http.ResponseWriter, r *http.Request, projectID, level string) bool {
-	if atLeast(s.projectPerm(r, projectID), level) {
+	return s.permit(w, s.projectPerm(r, projectID), level)
+}
+
+// requirePermOn is requirePerm for a caller holding the resolved project.
+func (s *Server) requirePermOn(w http.ResponseWriter, r *http.Request, p Project, level string) bool {
+	return s.permit(w, s.projectPermOf(r, p), level)
+}
+
+func (s *Server) permit(w http.ResponseWriter, have, want string) bool {
+	if atLeast(have, want) {
 		return true
 	}
-	http.Error(w, permDenied(level), http.StatusForbidden)
+	http.Error(w, permDenied(want), http.StatusForbidden)
 	return false
 }
 
@@ -128,7 +154,7 @@ func (s *Server) handleProjectPerms(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(grants, func(i, j int) bool { return grants[i]["email"] < grants[j]["email"] })
 	writeJSON(w, map[string]any{
 		"default": p.level(),
-		"me":      s.projectPerm(r, id),
+		"me":      s.projectPermOf(r, p),
 		"creator": p.Creator,
 		"grants":  grants,
 	})
@@ -236,7 +262,7 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request, id, level strin
 		http.Error(w, "no such project", http.StatusNotFound)
 		return Project{}, false
 	}
-	if !s.requirePerm(w, r, id, level) {
+	if !s.requirePermOn(w, r, p, level) {
 		return Project{}, false
 	}
 	return p, true

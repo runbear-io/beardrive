@@ -81,6 +81,7 @@ type DeviceRegistry struct {
 	repo DeviceRepo
 
 	mu     sync.Mutex
+	ver    versionGate // skips the re-read when the store has not moved
 	byKey  map[devKey]DeviceInfo
 	latest map[string]devKey // id → most recently observed row, for display joins
 	// lastSav throttles disk writes per row.
@@ -132,11 +133,16 @@ func OpenDeviceRegistry(path string) (*DeviceRegistry, error) {
 // answer is the last one the store agreed to, and dropping the whole registry on
 // a transient read error would unclaim every device at once.
 //
-// ponytail: Observe deliberately does NOT refresh — it is the per-request hot
-// path, it only merges the caller's own row, and every gate above it (OwnerOf,
-// MayActAs) refreshes before deciding. If that ever needs to change, the fix is
-// a version check inside the repo, not a TTL up here.
+// Gated on the store's change token (Versioned) like ProjectDB.refresh.
+//
+// ponytail: Observe deliberately does NOT refresh at all — it is the
+// per-request hot path, it only merges the caller's own row, and every gate
+// above it (OwnerOf, MayActAs) refreshes before deciding.
 func (r *DeviceRegistry) refresh() {
+	token, stale := r.ver.stale(r.repo)
+	if !stale {
+		return
+	}
 	list, err := r.repo.Load()
 	if err != nil {
 		if !r.warnedR {
@@ -146,6 +152,7 @@ func (r *DeviceRegistry) refresh() {
 		return
 	}
 	r.warnedR = false
+	r.ver.fresh(token)
 	byKey := make(map[devKey]DeviceInfo, len(list))
 	latest := make(map[string]devKey, len(list))
 	for _, d := range list {

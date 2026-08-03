@@ -392,7 +392,7 @@ func secfixShareFile(t *testing.T, srv *Server, projectID, path, content string)
 	rec := doAs(t, h, "PUT", "/api/p/"+projectID+"/store/object?key=blobs/"+sha, []byte(content), nil)
 	if rec.Code != 200 {
 		// hub with auth: push through the server's own backend instead.
-		v, err := srv.projectVolume(projectID)
+		_, v, err := srv.projectVolume(projectID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -633,7 +633,7 @@ func TestSec_Path_HostileBlobCannotRepointALiveShare(t *testing.T) {
 	const secretText = "dave's private board minutes"
 	secfixShareFile(t, srv, p.ID, "notes.md", good)
 	daveSha := shaOf(secretText)
-	dv, err := srv.projectVolume(dp.ID)
+	_, dv, err := srv.projectVolume(dp.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -671,7 +671,7 @@ func TestSec_Path_HostileBlobCannotRepointALiveShare(t *testing.T) {
 		t.Fatalf("bob pushes: %d %s", rec.Code, rec.Body)
 	}
 	// Force a fresh fold of the journals.
-	v, _ := srv.projectVolume(p.ID)
+	_, v, _ := srv.projectVolume(p.ID)
 	v.mu.Lock()
 	v.snap = nil
 	v.mu.Unlock()

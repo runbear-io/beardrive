@@ -78,6 +78,58 @@ type ReadRepo interface {
 	DeleteBatch(keys []ReadStatKey) error
 }
 
+// ---- cheap change detection ---------------------------------------------
+
+// Versioned is the optional "has anything moved?" check on a repository: a
+// token that changes whenever anything the repo stores changes.
+//
+// Every registry re-reads its whole store on every authorization read (see
+// ProjectDB.refresh) — that is a correctness floor, not a cache, and it stays.
+// This is the same read made cheap: one os.Stat, or one primary-key lookup,
+// instead of a full JSON parse or nine unfiltered SELECTs on every
+// authenticated request. It is NOT a TTL: a token that moved is always
+// followed by the full re-read, so the staleness window rounds 12-14 closed
+// stays closed.
+//
+// A repo that cannot answer — no implementation, or an error — is treated as
+// changed, so the fallback is exactly the unconditional re-read that was
+// always there. An implementation must never return an empty token.
+type Versioned interface {
+	Version() (string, error)
+}
+
+// versionGate is the per-registry half of that check. It remembers the token
+// of the last SUCCESSFUL load, so a load that failed never leaves the registry
+// marked fresh. Callers hold the registry's own mutex — refresh() already does.
+type versionGate struct {
+	token string
+	valid bool
+}
+
+// stale reports whether repo may have changed since the last successful load,
+// and returns the token to record once that load succeeds.
+func (g *versionGate) stale(repo any) (token string, stale bool) {
+	v, ok := repo.(Versioned)
+	if !ok {
+		return "", true
+	}
+	cur, err := v.Version()
+	if err != nil || cur == "" {
+		return "", true // can't tell → re-read, and record nothing
+	}
+	if g.valid && cur == g.token {
+		return cur, false
+	}
+	return cur, true
+}
+
+// fresh records the token of a load that succeeded.
+func (g *versionGate) fresh(token string) {
+	if token != "" {
+		g.token, g.valid = token, true
+	}
+}
+
 // ---- what a metadata store will hold ------------------------------------
 
 // storable refuses text that no metadata backend can hold faithfully, so all

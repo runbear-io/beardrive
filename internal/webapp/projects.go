@@ -74,6 +74,7 @@ type ProjectDB struct {
 	repo ProjectRepo
 
 	mu     sync.Mutex
+	ver    versionGate // skips the re-read when the store has not moved
 	byID   map[string]Project
 	warned bool // re-read failure logged once
 }
@@ -198,11 +199,17 @@ func (db *ProjectDB) putPerm(prev, next Project, email, level string) error {
 // answer is the last one the store agreed to, and dropping the whole registry
 // on a transient read error would 404 every project on the hub.
 //
-// ponytail: one full Load per authorization read. The registries are small
-// (projects, not files) and this is a correctness floor, not a cache; if it
-// ever shows up in a profile the fix is a version/mtime check inside the repo,
-// not a TTL up here — a TTL is exactly the staleness window this removes.
+// It re-reads only when the store says something moved (Versioned): one
+// os.Stat on the file backend, one primary-key lookup on SQL. That is the
+// version check this comment used to name as the upgrade path, taken because
+// the unconditional Load was 24 ms at 5k projects under a hub-wide mutex.
+// It is NOT a TTL — a token that moved is always followed by the full re-read,
+// so the staleness window this removes stays removed.
 func (db *ProjectDB) refresh() {
+	token, stale := db.ver.stale(db.repo)
+	if !stale {
+		return
+	}
 	list, err := db.repo.Load()
 	if err != nil {
 		if !db.warned {
@@ -212,6 +219,7 @@ func (db *ProjectDB) refresh() {
 		return
 	}
 	db.warned = false
+	db.ver.fresh(token)
 	next := make(map[string]Project, len(list))
 	for _, p := range list {
 		next[p.ID] = p
