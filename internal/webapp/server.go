@@ -382,9 +382,7 @@ func (r *RemoteSource) verify(ctx context.Context, sha string) error {
 	// time.Since is the hub's. A hub whose clock runs ahead of storage would
 	// otherwise overstate the object's age and seal it while a minted URL is
 	// still live — after which a replay is served from cache for the life of
-	// the process. Waiting a multiple of the TTL costs a handful of extra
-	// hashes on a young blob and removes the dependency on the two clocks
-	// agreeing, which nothing here can check.
+	// the process.
 	if o, ok, err := r.blobStat(ctx, sha); err == nil && ok &&
 		!o.Modified.IsZero() && time.Since(o.Modified) > r.sealAfter() {
 		r.sealed.Store(sha, struct{}{})
@@ -393,13 +391,22 @@ func (r *RemoteSource) verify(ctx context.Context, sha string) error {
 }
 
 // sealAfter is how old a stored blob must be before its verification may be
-// cached: the presign TTL plus a margin for clock skew between the hub and the
-// object store. The margin is the whole point — the correctness argument is
-// "no live URL can exist any more", and that is a claim about time measured on
-// two machines the hub cannot reconcile.
+// cached: the presign TTL plus an allowance for clock skew between the hub and
+// the object store. The allowance is the whole point — the correctness
+// argument is "no live URL can exist any more", and that is a claim about time
+// measured on two machines the hub cannot reconcile.
+//
+// Waiting longer costs only a few extra hashes on a blob younger than this,
+// which is the behavior the check had for every blob anyway.
+//
+// ponytail: a fixed allowance, so it is a bound and not a proof — a hub whose
+// clock runs more than an hour ahead of its object store can still seal early.
+// Closing it properly means measuring the age on ONE clock (record the hub time
+// of the first verification, seal on a later one that finds Modified
+// unchanged), which costs a second map and never seals on a first read.
 func (r *RemoteSource) sealAfter() time.Duration {
-	const skewMargin = time.Hour
-	return r.presignTTL() + skewMargin
+	const skewAllowance = time.Hour
+	return r.presignTTL() + skewAllowance
 }
 
 // Identity is the device identity uploads are journaled under.

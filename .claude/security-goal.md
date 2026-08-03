@@ -1658,6 +1658,13 @@ New from round 4 — consequences of that round's own fixes, named on purpose:
   seconds old and is not sealed. Two premises hold it up and would break it
   loudly if they changed: **blobs are never deleted** (`remote.Backend` has no
   delete) and `RemoteSource.PresignTTL` is the TTL the doors actually use.
+  **The age comparison crosses two clocks** — `o.Modified` is the object
+  store's, `time.Since` is the hub's — so `sealAfter` waits the TTL plus a fixed
+  one-hour allowance. That is a bound, not a proof: a hub running more than an
+  hour ahead of its storage can still seal a blob whose URL is live. Closing it
+  properly means measuring the age on ONE clock (hub time of the first
+  verification, seal on a later one that finds `Modified` unchanged), which
+  costs a second map and never seals on a first read.
   Residuals unchanged: the poisoned object still *sits* in storage, the seal is
   per-process so a restart re-hashes once per blob, and a persisted
   verified-set is still the upgrade.

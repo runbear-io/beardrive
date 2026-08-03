@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -48,16 +51,36 @@ func (b *sealBackend) count() int {
 	return b.gets
 }
 
-// sealSource builds a RemoteSource over a counting, signing file:// backend.
-func sealSource(t testing.TB, ttl time.Duration) (*RemoteSource, *sealBackend) {
+// sealSource builds a RemoteSource over a counting, signing file:// backend,
+// and hands back the directory behind it so a test can age what it stores.
+func sealSource(t testing.TB, ttl time.Duration) (*RemoteSource, *sealBackend, string) {
 	t.Helper()
-	be, err := remote.Open(context.Background(), "file://"+t.TempDir())
+	dir := t.TempDir()
+	be, err := remote.Open(context.Background(), "file://"+dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { be.Close() })
 	c := &sealBackend{Backend: be}
-	return &RemoteSource{Backend: c, PresignTTL: ttl}, c
+	return &RemoteSource{Backend: c, PresignTTL: ttl}, c, dir
+}
+
+// sealAge backdates everything the store holds, so the hub reads the object as
+// d old. Since the skew margin is an absolute allowance rather than a multiple
+// of the TTL, a short TTL no longer stands in for an old object — the object
+// has to actually be old. Walks rather than guessing the key layout.
+func sealAge(t testing.TB, dir string, d time.Duration) {
+	t.Helper()
+	when := time.Now().Add(-d)
+	err := filepath.WalkDir(dir, func(p string, e fs.DirEntry, err error) error {
+		if err != nil || e.IsDir() {
+			return err
+		}
+		return os.Chtimes(p, when, when)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // sealPut stores content under its own address and returns the sha.
@@ -89,8 +112,9 @@ func sealRead(t testing.TB, src *RemoteSource, sha string) string {
 // the verification is cached and a read costs exactly one storage read — the
 // point of the whole change.
 func TestBlobVerificationStopsOnceTheObjectCannotChange(t *testing.T) {
-	src, be := sealSource(t, time.Nanosecond) // anything stored is already past it
+	src, be, dir := sealSource(t, time.Minute)
 	sha := sealPut(t, be, "reviewed content")
+	sealAge(t, dir, time.Hour+10*time.Minute) // past the TTL and the skew margin
 
 	if got := sealRead(t, src, sha); got != "reviewed content" {
 		t.Fatalf("first read returned %q", got)
@@ -114,15 +138,32 @@ func TestBlobVerificationStopsOnceTheObjectCannotChange(t *testing.T) {
 // boundary that keeps round 14's finding fixed; the attack itself is asserted
 // by TestSec_Blob_AVerifiedBlobIsRecheckedWhenTheStoredObjectChanges.
 func TestBlobVerificationRepeatsWhileAPresignedURLCouldBeLive(t *testing.T) {
-	src, be := sealSource(t, time.Hour) // nothing written today is past it
-	sha := sealPut(t, be, "fresh content")
+	for _, c := range []struct {
+		name string
+		ttl  time.Duration
+		age  time.Duration
+	}{
+		// Inside the TTL: a minted URL is plainly still live.
+		{"younger than the TTL", time.Hour, time.Minute},
+		// Past the TTL but inside the skew margin. The object's age comes from
+		// the STORE's clock and the comparison runs on the HUB's, so "past the
+		// TTL" by a few minutes is not proof that the URL is dead — a hub
+		// running ahead of storage would seal a blob still open to a replay.
+		{"past the TTL, inside the skew margin", time.Minute, 30 * time.Minute},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src, be, dir := sealSource(t, c.ttl)
+			sha := sealPut(t, be, "fresh content")
+			sealAge(t, dir, c.age)
 
-	sealRead(t, src, sha)
-	first := be.count()
-	sealRead(t, src, sha)
-	if n := be.count() - first; n < 2 {
-		t.Errorf("a read of a blob that a live presigned URL could still overwrite cost %d storage reads, "+
-			"want at least 2 (re-verify + stream): the verification was cached too early", n)
+			sealRead(t, src, sha)
+			first := be.count()
+			sealRead(t, src, sha)
+			if n := be.count() - first; n < 2 {
+				t.Errorf("a read of a blob that a live presigned URL could still overwrite cost %d storage reads, "+
+					"want at least 2 (re-verify + stream): the verification was cached too early", n)
+			}
+		})
 	}
 }
 
@@ -137,13 +178,15 @@ func BenchmarkBlobRead(b *testing.B) {
 	for _, c := range []struct {
 		name string
 		ttl  time.Duration
+		age  time.Duration
 	}{
-		{"unsealed(before)", time.Hour}, // a live URL could still overwrite it
-		{"sealed(after)", time.Nanosecond},
+		{"unsealed(before)", time.Hour, 0},            // a live URL could still overwrite it
+		{"sealed(after)", time.Minute, 2 * time.Hour}, // past the TTL and the margin
 	} {
 		b.Run(c.name, func(b *testing.B) {
-			src, be := sealSource(b, c.ttl)
+			src, be, dir := sealSource(b, c.ttl)
 			sha := sealPut(b, be, content)
+			sealAge(b, dir, c.age)
 			rc, err := src.OpenBlob(context.Background(), sha) // warm the seal
 			if err != nil {
 				b.Fatal(err)
@@ -170,13 +213,16 @@ func BenchmarkBlobRead(b *testing.B) {
 // A blob whose stored bytes do not hash to its key is refused every time, and
 // never sealed — a failed verification must not become a cached "checked".
 func TestBlobThatFailsVerificationIsNeverSealed(t *testing.T) {
-	src, be := sealSource(t, time.Nanosecond)
+	src, be, dir := sealSource(t, time.Minute)
 	sha := sealPut(t, be, "honest")
 	// Overwrite with something else under the same key, the way a replayed
 	// presigned PUT does.
 	if err := be.Put(context.Background(), "blobs/"+sha, strings.NewReader("hostile"), 7); err != nil {
 		t.Fatal(err)
 	}
+	// Old enough to seal, so this proves the hash is checked BEFORE the cache
+	// is populated rather than the age doing the refusing.
+	sealAge(t, dir, time.Hour+10*time.Minute)
 	for i := 0; i < 3; i++ {
 		if _, err := src.OpenBlob(context.Background(), sha); err == nil {
 			t.Fatalf("read %d served content that does not hash to its key", i)
