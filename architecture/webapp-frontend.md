@@ -83,6 +83,7 @@ classDiagram
         +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
         +heat.ts ageRange isFlatRange ageSpanLabel (treemap scale)
         +heat.ts orphanPaths (reads whose file left the tree)
+        +heat.ts placeLabels LABEL_MAX (scatter danger-dot labels)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +utils.ts
     }
@@ -97,7 +98,7 @@ classDiagram
     Browser --> components
     HubApp --> components
     components --> nav : linkProps navigate
-    components --> lib : diffText groupRuns hotPathSplit
+    components --> lib : diffText groupRuns hotPathSplit placeLabels
     hooks --> lib : re-exports heat.ts, sniffBytes
     hooks --> api
     Browser --> hooks
