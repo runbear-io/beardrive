@@ -197,7 +197,12 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	// cookie-authenticated GET whose URL one member can hand another, answering
 	// with content the attacker wrote under a Content-Type the hub chose.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	io.Copy(w, rc)
+	// Recorded, never checked. This is a device syncing: refusing it here
+	// surfaces as ErrForbidden, which the syncer reads as "access is gone —
+	// pause and touch nothing". Sync must not break over a bill.
+	cw := &countingWriter{w: w}
+	io.Copy(cw, rc)
+	s.quota().RecordEgress(s.orgOf(r.PathValue("project")), cw.n)
 }
 
 func (s *Server) handleStoreExists(v *volume, w http.ResponseWriter, r *http.Request) {

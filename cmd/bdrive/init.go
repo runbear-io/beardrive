@@ -22,13 +22,21 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
+	"github.com/runbear-io/beardrive/internal/syncer"
 	"github.com/runbear-io/beardrive/internal/templates"
 )
 
-// starterIgnore is seeded into new projects so build artifacts and
-// dependency trees don't flood the sync. Users edit it freely; it syncs to
-// every device like a normal file.
+// starterIgnore is seeded into new projects so build artifacts, dependency
+// trees and large binaries don't flood the sync. Users edit it freely; it
+// syncs to every device like a normal file.
+//
+// Deliberately aggressive: every version of every file is retained forever,
+// so a big binary checked in once is paid for forever, on every device that
+// ever syncs the project. Anything genuinely wanted back is one deleted line
+// away, which is much cheaper than the reverse.
 const starterIgnore = `# bdrive ignore rules (gitignore-style). This file syncs across devices.
+
+# Dependency trees and build output
 node_modules/
 dist/
 build/
@@ -41,11 +49,74 @@ __pycache__/
 venv/
 .next/
 .cache/
+
+# (.git/ and .bdrive/ are never synced — that is built in, not a rule here,
+# so removing a line cannot turn it on.)
+
+# Large binaries. Sync the document, link the video.
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.iso
+*.dmg
+*.zip
+*.tar.gz
+
+# macOS library/junk
+Library/
 .DS_Store
+
+# Local-only
 *.log
 .env
 .env.*
 `
+
+// warnBigFolder prints a warning when the folder about to sync is far larger
+// than anything a shared knowledge project should be, and says how to narrow
+// it. Advice only — it never blocks init and never fails it.
+//
+// The thresholds are guardrails, not policy: they exist to catch the "pointed
+// bdrive at my home directory" mistake while it is still cheap to undo, since
+// every version is retained forever and each new device pulls the whole
+// history.
+const (
+	bigFolderBytes = 1 << 30 // 1 GiB
+	bigFolderFiles = 20_000
+)
+
+func warnBigFolder(folder string, include []string) {
+	files, bytes, err := syncer.Measure(folder, include)
+	if err != nil || (bytes < bigFolderBytes && files < bigFolderFiles) {
+		return
+	}
+	fmt.Printf("\n⚠ this folder would sync %s across %s.\n", humanSize(bytes), plural(files, "file"))
+	fmt.Printf("  Every version is kept forever and every new device pulls all of it.\n")
+	fmt.Printf("  If that's more than you meant to share:\n")
+	fmt.Printf("    bdrive scope add <dir>    sync only certain folders\n")
+	fmt.Printf("    bdrive scope --explain    show what is and isn't syncing\n")
+	fmt.Printf("  or add patterns to .bdriveignore.\n\n")
+}
+
+// humanSize renders a byte count for the warning above.
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.0f MB", float64(n)/(1<<20))
+	default:
+		return fmt.Sprintf("%d KB", n/(1<<10))
+	}
+}
+
+func plural(n int, unit string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, unit)
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
+}
 
 // initCmd is the front door: sign in if needed, create or connect a project,
 // choose what syncs, and start syncing — one command, interactive on a TTY,
@@ -325,6 +396,10 @@ the folder was renamed or moved.`,
 				}
 				fmt.Printf("  syncing: %s only (rules written to .bdriveignore)\n", strings.Join(dirs, ", "))
 			}
+			// After the ignore file and any scope rules are on disk, so the
+			// measurement is of what would REALLY sync — and before the first
+			// cycle, so narrowing is still free.
+			warnBigFolder(folder, proj.Include)
 			if err := startSync(cmd.Context(), folder, proj, foreground, 3*time.Second, 10*time.Second); err != nil {
 				return err
 			}

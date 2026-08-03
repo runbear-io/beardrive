@@ -46,6 +46,11 @@ func secaudOpLine(seq int, dev, kind, path, blob string) string {
 // secaudCapQuota is a QuotaProvider with a real ceiling — the only kind that
 // can show whether an outstanding presigned grant counts against it.
 type secaudCapQuota struct {
+	// Embedded so the read-side hooks (CheckRead/RecordEgress) come for
+	// free: this fake exercises the write path, and a widened interface
+	// should not need a no-op added here every time.
+	UnlimitedQuota
+
 	mu       sync.Mutex
 	cap      int64
 	recorded int64

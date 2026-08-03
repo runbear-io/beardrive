@@ -112,6 +112,11 @@ func TestSec_Journal_OwnershipIsNotAHubWideDeviceExistenceOracle(t *testing.T) {
 
 // secfx5Cap is a QuotaProvider with a real byte cap, so CheckWrite can say no.
 type secfx5Cap struct {
+	// Embedded so the read-side hooks (CheckRead/RecordEgress) come for
+	// free: this fake exercises the write path, and a widened interface
+	// should not need a no-op added here every time.
+	UnlimitedQuota
+
 	mu       sync.Mutex
 	limit    int64
 	used     int64

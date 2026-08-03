@@ -233,6 +233,11 @@ func TestSec_Store_AJournalCannotNameAPathTheUploadDoorRefuses(t *testing.T) {
 // managed deployment swaps ("billing and plan logic live in the managed
 // service"), and round 6 moved the call to it INSIDE the ledger mutex.
 type secfx6BlockQuota struct {
+	// Embedded so the read-side hooks (CheckRead/RecordEgress) come for
+	// free: this fake exercises the write path, and a widened interface
+	// should not need a no-op added here every time.
+	UnlimitedQuota
+
 	mu      sync.Mutex
 	n       int
 	blockOn int

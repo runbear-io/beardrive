@@ -48,6 +48,11 @@ func secstoreUnsized(t *testing.T, h http.Handler, method, url string, body []by
 // secstoreQuota is a plan-limited quota provider: the seam a managed
 // deployment plugs in. It refuses writes that would exceed limit.
 type secstoreQuota struct {
+	// Embedded so the read-side hooks (CheckRead/RecordEgress) come for
+	// free: this fake exercises the write path, and a widened interface
+	// should not need a no-op added here every time.
+	UnlimitedQuota
+
 	mu    sync.Mutex
 	limit int64
 	used  int64

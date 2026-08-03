@@ -74,8 +74,66 @@ so the deploy config temporarily allows **domain-gated self-signup**
   set `--min-instances 0` to save more, at the cost of cold-start journal
   folding on first hit). ~$5–15/mo warm.
 - **Cloud SQL** `db-f1-micro`: ~$8–15/mo (smallest shared-core tier).
-- **GCS**: pay per GB stored + egress. Cheap for text; consider a lifecycle
-  policy later.
+- **GCS**: pay per GB stored + egress. Cheap for text. `gcp-cloudrun.sh`
+  installs a Nearline-at-30-days lifecycle rule by default (`LIFECYCLE=0`
+  skips it) — see below for why it stops there.
+
+## Storage tiering
+
+Every version of every file is retained forever, so stored bytes only ever
+grow while per-seat revenue stays flat. Aging objects down is the lever.
+
+Prices below are us-central1 regional, verified 2026-08-03 — re-check before
+relying on them, GCP moves them.
+
+| Class | Storage $/GB/mo | Retrieval $/GB | Min duration |
+|---|---|---|---|
+| Standard | 0.020 | — | none |
+| Nearline | 0.010 | 0.01 | 30 days |
+| Coldline | 0.004 | 0.02 | 90 days |
+| Archive | 0.0012 | 0.05 | 365 days |
+
+Archive really is ~6% of Standard, and GCS serves every class at the same
+millisecond latency — there is no restore job to wait on. The catch is the
+retrieval fee, so the break-even is entirely about **how often a given object
+is read**. Writing `r` for reads per GB per month:
+
+- Nearline beats Standard while `r < 1.0/mo`
+- Coldline beats Nearline while `r < 0.6/mo`
+- Archive beats Coldline while `r < 0.09/mo` (about once a year)
+
+**This is why the script stops at Nearline.** The tempting assumption is that
+old blobs are cold because old versions are rarely opened. That is not true
+here: a device syncing a project for the first time downloads a blob for
+*every put op in every peer journal* — the entire history, not just the
+current file tree (`internal/syncer` `pull`). Measured on a 10-version file
+whose working tree is 1 KB, a fresh device pulls 10 KB.
+
+So the read rate on old blobs tracks **how often anyone adds a device**, not
+how often anyone opens an old version. A team that adds or replaces roughly
+one device a month drives `r ≈ 1`, which makes Coldline a wash and Archive a
+straight bill increase.
+
+Two consequences worth acting on, in this order:
+
+1. **The real lever is not the lifecycle policy.** Making a first sync fetch
+   only current-state blobs (history stays available on demand through the
+   existing `/blob?sha=` route) cuts onboarding egress from "all history" to
+   "the working tree" *and* makes old blobs genuinely cold — which is what
+   makes Coldline and Archive safe to turn on afterwards. Until then the
+   ladder is priced against a read pattern the sync engine does not have.
+2. **Egress scales with devices × total history**, not with change volume,
+   and every byte is relayed: blob reads have no presigned path (only
+   `remote.PutSigner` exists — uploads can go direct to storage, downloads
+   cannot), so they stream GCS → Cloud Run → client. Same-region GCS→Cloud Run
+   transfer is free, so this is one egress charge, not two — but it does
+   occupy the single `max-instances=1` container for the whole transfer.
+
+The lifecycle rule is applied bucket-wide rather than to `blobs/` alone
+because journals live under the same per-project prefixes and a GCS
+lifecycle `matchesPrefix` cannot express `*/blobs/`. That is safe: a peer
+journal is re-fetched only when the listing shows it grew, and one that grew
+was just rewritten, so it is Standard again.
 
 ## Notes / limits (single-instance build)
 
