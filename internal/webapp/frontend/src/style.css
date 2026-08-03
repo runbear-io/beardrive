@@ -626,6 +626,13 @@ a.ai-main:hover { color: var(--accent); }
 .in-pt:hover { opacity: 1; }
 .in-pt.cold { fill: var(--text-ghost); opacity: .25; }
 .in-pt.danger { fill: #e05d5d; opacity: .6; }
+/* basename beside a hot+stale dot; pointer-events off so it never eats the click */
+.in-pt-label { fill: var(--text-faint); font-size: 11px; pointer-events: none; }
+/* the "dot size = …" caption, right-aligned in the panel heading — same
+   max-width as .in-chart so it lands over the plot's right edge, not the
+   column's */
+.in-h3-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; max-width: 760px; }
+.in-cap { font-size: 11.5px; color: var(--text-faint); font-weight: 400; text-transform: none; letter-spacing: 0; }
 /* treemap */
 .in-treemap { background: #0c0d10; }
 .in-tm-group { fill: none; stroke: var(--border); stroke-width: 1; cursor: pointer; pointer-events: all; }
