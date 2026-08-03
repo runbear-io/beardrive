@@ -286,9 +286,13 @@ test("TestSec_NewProjectDialog_TypedNameClosesThePastePromptClause", async ({ pa
  * cannot be built. The reachable half of the same class — a strong-RTL
  * LETTER, which cannot be refused without refusing Hebrew filenames — is
  * covered by TestSec_Listing_StrongRTLLetterReordersARenderedRow and fixed
- * in style.css with unicode-bidi: isolate-override, which was chosen over
- * isolate / plaintext / <bdi> because only isolate-override fixes
- * intra-string reordering.
+ * in style.css with `unicode-bidi:isolate-override`, chosen over the weaker
+ * isolation modes and over `<bdi>` because only that one fixes reordering
+ * WITHIN the string rather than merely around it.
+ *
+ * (Deliberately not writing the weaker mode's bare name here: Tailwind's
+ * content scanner reads this file, and a bare token would emit a dead
+ * utility class into the shipped CSS bundle. It did, once.)
  *
  * Kept as a skip rather than deleted so the scoreboard's row 17 entry
  * resolves to something, and so the numbers above survive.
