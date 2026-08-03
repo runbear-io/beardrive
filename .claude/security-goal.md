@@ -199,37 +199,18 @@ the next person decides them deliberately.
   containers on this host; two rounds burned budget confirming it. Everything
   Linux-specific (the systemd user unit, the reboot scenario) is verified by
   reading only — see failure mode 3.
-- **`TestSec_ProjectName_RenameBypassesTheCreateNameRule` is red and stays
-  red.** The hole it names is fixed and separately verified; the test cannot
-  pass as written because its own control creates a project with the normalized
-  name in the same org before renaming into it, which the unique-name-per-org
-  rule correctly refuses. Anyone re-running the suite will see one failure.
-  Re-aim the test (drop its control create, or use a second org) rather than
-  re-opening the fix.
-- **Two specs in `e2e/sec14fe.spec.ts` are fixture-blocked by round 14's own
-  fix.** `…UnicodeLineSeparatorRendersIdenticallyToASpace` and
-  `TestSec_SharesTable_AuditRowCanBeTwoDifferentFiles` upload a U+2028 path to
-  demonstrate a rendering collision; `SafeText` now refuses it at ingest, so
-  their setup 400s. The rendering claim they proved is recorded in row 17.
-- **The upgrade floor is judged against the materialization cache, not the
-  rules.** `syncer.vouchedFloor` keeps a peer's `!` line when the path it
-  re-includes is already in this mount's cache (this device is demonstrably
-  syncing it) and drops it otherwise. That is what stops a blanket "drop every
-  negation" from silently ending uploads on any device with a `bdrive scope`
-  block, whose managed block is `/*` plus nothing but negations. The collateral
-  is pinned by `TestUpgradedScopedDeviceKeepsUploading` (`internal/syncer`, not
-  a `TestSec_` — it guards the fix, it does not attack anything). Residual: a
-  peer who widens scope onto a folder nothing has published yet stays refused
-  on the upgraded device until its user saves `.bdriveignore`. Deliberate — that
-  is the same shape as the attack.
-- **The journal append-only guard refuses truncation, not rewriting.**
-  `journalKeepsItsOps` requires every stored `Seq` to survive a push. A body
-  that keeps every `Seq` and changes what one of them says still edits the
-  record. The stronger rule is a byte-prefix compare — which is what an honest
-  client always produces — and it is not what shipped because two established
-  fixtures (`sec_audit2`, `sec_path`) drive that door by replacing a journal
-  wholesale. Upgrade path: byte prefix, with those two fixtures switched to
-  append.
+- **Closed after the loop stopped (post-round-14 landing pass).** Three tests
+  listed here as red have been re-aimed and are green;
+  `TestSec_ProjectName_RenameBypassesTheCreateNameRule` was failing *against the
+  fixed code* because its own control created a project with the normalized name
+  in the same org before renaming into it. It is now sabotage-verified: reverting
+  `Update`'s `projectLabel` call turns it red. The two `e2e/sec14fe.spec.ts`
+  specs were fixture-blocked by round 14's own U+2028 ingest fix — one now
+  asserts that ingest guard and keeps the browser measurement (70.9844 x 16, one
+  line box, pixel-identical to an ASCII space) as the reason the guard matters;
+  the other is skipped with its numbers preserved, its reachable sibling being
+  the strong-RTL letter spec, which is green. **Suite is now 1052 `TestSec_*`
+  assertions green, 0 red; Playwright 133 passed, 1 skipped.**
 
 ### What is unverified rather than clean
 
