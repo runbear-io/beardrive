@@ -1,7 +1,6 @@
 package webapp
 
 import (
-	"database/sql"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -54,13 +53,14 @@ func dbverPostgres(t *testing.T, into map[string]MetaStore) {
 		t.Log("BDRIVE_TEST_POSTGRES not set — the change token is UNTESTED against Postgres in this run")
 		return
 	}
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("postgres reset: %v", err)
-	}
-	db.Exec(`DROP TABLE IF EXISTS accounts, tokens, auth_policy, projects, project_perms,
-		orgs, org_members, invites, shares, devices, device_rows, read_stats, meta_version, schema_meta`)
-	db.Close()
+	// Deliberately no DROP. Every backend here shares ONE database with the
+	// conformance harness, whose own reset drops a SUBSET of the tables — so a
+	// more thorough drop from this test leaves a residue that reset does not
+	// expect (schema_meta recording version 1 over a projects table rebuilt
+	// without default_level is exactly the half-applied migration the startup
+	// guard refuses). This test does not need a clean database: it asserts by
+	// project id, and GetOrCreate is create-or-join, so pre-existing rows change
+	// nothing.
 	st, err := OpenSQLStore("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)

@@ -55,7 +55,17 @@ func metaBackends(t *testing.T) []metaBackend {
 					t.Fatalf("postgres reset: %v", err)
 				}
 				defer db.Close()
-				db.Exec(`DROP TABLE IF EXISTS accounts, tokens, auth_policy, projects, orgs, org_members, invites, shares, devices, read_stats`)
+				// EVERY table migrate() creates, schema_meta included. A
+				// partial reset is not a reset: dropping projects while
+				// leaving schema_meta recording version 1 reproduces, exactly,
+				// the half-applied migration addColumns refuses to touch — the
+				// next open rebuilds projects WITHOUT the guarded
+				// default_level column and then finds a version that says it
+				// should be there. It also used to leave project_perms and
+				// device_rows rows behind for the following test to inherit.
+				db.Exec(`DROP TABLE IF EXISTS accounts, tokens, auth_policy, projects, project_perms,
+					orgs, org_members, invites, shares, devices, device_rows, read_stats,
+					meta_version, schema_meta`)
 			},
 			open: func(t *testing.T) MetaStore {
 				s, err := OpenSQLStore("pgx", dsn)
