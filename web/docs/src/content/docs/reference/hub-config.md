@@ -45,7 +45,8 @@ cloud credentials on the serving machine.
   "refresh": "10s",
   "projects_db": "/var/lib/bdrive/projects.json",
   "share_rpm": 120,                  // per-IP rate limit on public /s/* links
-  "trust_proxy": false,              // true only when a reverse proxy fronts the hub
+  "trust_proxy": false,              // only for a proxy on a PUBLIC address; a proxy on
+                                     // loopback/private is trusted with no config
   "auth": {                          // optional knobs; hub auth is always on
     // Signup is invite-only by default. To allow self-service signup,
     // open it WITH a gate (an ungated open hub is refused at startup):
@@ -73,23 +74,27 @@ See [Authentication](/self-hosting/authentication/) for the `auth` block and
 
 ## Running behind a reverse proxy
 
-`trust_proxy` (default `false`) decides where the hub reads a caller's IP
-address from. It keys two rate limiters: the one on public share links
-(`share_rpm`) and the one on `POST /auth/login`, `/auth/signup` and
-`/auth/reset` that blunts password brute-force and account enumeration.
+The hub reads a caller's IP address to key two rate limiters: the one on
+public share links (`share_rpm`) and the one on `POST /auth/login`,
+`/auth/signup` and `/auth/reset` that blunts password brute-force and account
+enumeration.
 
-- **Default (`false`)** — the address is the connection's own. Correct for a
-  hub clients reach directly.
-- **`true`** — the **last** `X-Forwarded-For` entry is used instead: the header
-  grows left to right, each proxy appending what it saw, so the last entry is
-  the one your proxy added and everything before it is whatever the client
-  chose to send. Set this only when a proxy you control (nginx, Caddy, a cloud
-  load balancer) sits in front of the hub.
+**Most deployments need no configuration.** The hub trusts `X-Forwarded-For`
+when the connection itself comes from loopback or a private address
+(RFC 1918, or IPv6 unique-local `fc00::/7`) — which is where nginx, Caddy, a
+Docker/Compose sidecar, Fly.io and Cloud Run all sit. When the connection comes
+from a public address the header is whatever the client typed, so it is ignored
+and the hub logs a line saying so once.
 
-Leaving it `false` behind a proxy costs you accuracy: every request looks like
-it comes from the proxy, so the limiters throttle all your users as one. Turning
-it `true` on a directly-reachable hub costs you the limiters entirely — any
-caller can pick a fresh address per request and never be throttled.
+The trusted entry is always the **last** `X-Forwarded-For` value on the **last**
+field line: the header grows left to right, each proxy appending what it saw, so
+everything before the last entry is whatever the client chose to send.
+
+`trust_proxy` (default `false`) is the override for the one shape the peer
+check cannot see: a proxy that reaches the hub from a **public** address. It
+honors the header from any peer, so never set it on a hub clients can reach
+directly — any caller could then pick a fresh address per request and never be
+throttled.
 
 ## Uploads
 

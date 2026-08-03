@@ -315,8 +315,8 @@ the positional argument), `--upload` (allow client writes, off by default),
   "refresh": "10s",
   "projects_db": "/var/lib/bdrive/projects.json",
   "share_rpm": 120,                  // per-IP rate limit on public /s/* links
-  "trust_proxy": false,              // read the client IP from X-Forwarded-For —
-                                     // only when a reverse proxy you control fronts the hub
+  "trust_proxy": false,              // read X-Forwarded-For from a proxy on a PUBLIC address;
+                                     // a proxy on loopback/private is already trusted
   "auth": {                          // optional knobs; hub auth is always on
     // Signup is invite-only by default. To allow self-service signup,
     // open it WITH a gate (an ungated open hub is refused at startup):

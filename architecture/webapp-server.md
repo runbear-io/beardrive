@@ -32,7 +32,7 @@ classDiagram
         -grants reservation ledger
         +Handler() http.Handler
     }
-    note for Server "clientIP is a METHOD now, not a package func: X-Forwarded-For is honored only when TrustProxy is set, and then only its LAST hop. Every caller that gates on an IP — the auth rate limiter, /s/*, device rows, share telemetry — goes through it, so a client-supplied header cannot forge the identity a limiter counts"
+    note for Server "clientIP is a METHOD now, not a package func: X-Forwarded-For is honored when the PEER is loopback/private (the operator's own proxy) or TrustProxy is set, and then only its LAST hop. Every caller that gates on an IP — the auth rate limiter, /s/*, device rows, share telemetry — goes through it, so a client-supplied header cannot forge the identity a limiter counts"
 
     class volume {
         -source Source

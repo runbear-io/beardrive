@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -53,6 +54,50 @@ func TestSharedRouteRateLimited(t *testing.T) {
 	}
 	if code := get("10.0.0.2"); code != 200 {
 		t.Fatalf("fresh IP after another's limit: %d, want 200", code)
+	}
+}
+
+// clientIP decides the rate-limit key by PEER. The security half (a public
+// peer's header is ignored) is pinned by TestSec_RateLimit_*; this is the
+// usability half: a hub behind nginx/Caddy/Fly/Cloud Run gets per-user
+// buckets out of the box, instead of keying every user in the world on the
+// proxy's one address and answering correct passwords with "too many
+// attempts" the morning after an upgrade.
+func TestClientIPTrustsLocalProxyWithoutConfig(t *testing.T) {
+	req := func(remoteAddr string, xff ...string) *http.Request {
+		r := httptest.NewRequest("GET", "http://hub.test/", nil)
+		r.RemoteAddr = remoteAddr
+		for _, v := range xff {
+			r.Header.Add("X-Forwarded-For", v)
+		}
+		return r
+	}
+	open := &Server{}
+	trusting := &Server{TrustProxy: true}
+
+	for _, c := range []struct {
+		name string
+		srv  *Server
+		req  *http.Request
+		want string
+	}{
+		{"loopback proxy is the operator's own", open, req("127.0.0.1:5555", "198.51.100.7"), "198.51.100.7"},
+		{"ipv6 loopback too", open, req("[::1]:5555", "198.51.100.7"), "198.51.100.7"},
+		{"rfc1918 sidecar", open, req("10.1.2.3:5555", "198.51.100.7"), "198.51.100.7"},
+		{"ipv6 unique-local (fly.io)", open, req("[fdaa:0:1::3]:5555", "198.51.100.7"), "198.51.100.7"},
+		{"public peer is a client, header ignored", open, req("203.0.113.9:5555", "198.51.100.7"), "203.0.113.9"},
+		{"public peer with trust_proxy on", trusting, req("203.0.113.9:5555", "198.51.100.7"), "198.51.100.7"},
+		{"no header, unchanged", open, req("127.0.0.1:5555"), "127.0.0.1"},
+		// The round-13/14 holes: the trusted hop is the last element of the
+		// last field line, whichever peer supplied it.
+		{"last element wins", open, req("127.0.0.1:5555", "1.2.3.4, 10.9.9.9"), "10.9.9.9"},
+		{"last field line wins", open, req("127.0.0.1:5555", "1.2.3.4", "10.9.9.9"), "10.9.9.9"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.srv.clientIP(c.req); got != c.want {
+				t.Errorf("clientIP = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
 

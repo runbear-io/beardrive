@@ -31,10 +31,12 @@ type webConfig struct {
 	ProjectsDB string `json:"projects_db,omitempty"` // hub project registry path
 	ShareRPM   int    `json:"share_rpm,omitempty"`   // per-IP rate on /s/* (default 120/min)
 	// TrustProxy makes the rate limiters read the client address from
-	// X-Forwarded-For. Set it only when a reverse proxy you control fronts
-	// the hub: on a directly-reachable hub the header is client-supplied, and
-	// trusting it lets one connection get a fresh bucket per request — which
-	// disables the share limiter and the login brute-force limiter alike.
+	// X-Forwarded-For sent by ANY peer. Usually unnecessary: a proxy that
+	// reaches the hub over loopback or a private network is trusted with no
+	// configuration. Set it only for a proxy on a PUBLIC address — on a
+	// directly-reachable hub the header is client-supplied, and trusting it
+	// lets one connection get a fresh bucket per request, which disables the
+	// share limiter and the login brute-force limiter alike.
 	TrustProxy bool `json:"trust_proxy,omitempty"`
 	// Auth tunes the hub's (always-on) authentication; hubs require
 	// sign-in unconditionally, only these knobs are optional.

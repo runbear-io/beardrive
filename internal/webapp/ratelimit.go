@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -73,13 +74,23 @@ func (l *rateLimiter) allow(key string) bool {
 }
 
 // clientIP is the rate-limit key: the connection's address, or the hop the
-// operator's own proxy added when TrustProxy says one fronts this hub.
+// operator's own proxy added.
 //
 // The header is attacker-controlled on a directly-reachable hub, and this key
-// is what throttles both /s/* and the login endpoint — so trusting it by
-// default hands anyone an unlimited-rate bucket per request and turns off the
-// password brute-force limiter. TrustProxy is therefore opt-in: a hub behind a
-// load balancer sets it, a hub on the open internet must not.
+// is what throttles both /s/* and the login endpoint — so trusting it from
+// anyone hands every client an unlimited-rate bucket per request and turns off
+// the password brute-force limiter.
+//
+// So it is trusted by PEER, not by configuration. A reverse proxy that fronts
+// a hub reaches it over loopback or a private network — a sidecar, a container
+// network, a Fly/Cloud Run internal address — so an X-Forwarded-For arriving
+// from such a peer is the operator's own infrastructure and is honored with no
+// config at all. Requiring opt-in instead was a day-one outage for every
+// proxied hub: the peer is the proxy, so ALL its users shared one 10/min login
+// bucket and correct passwords started answering "too many attempts".
+// A peer on a PUBLIC address is a client, and its header is a lie — that hub
+// keeps ignoring it, and logs once so the case is not silent. TrustProxy stays
+// as the override for the remaining shape: a proxy on a public address.
 //
 // The LAST element is the trusted one. X-Forwarded-For grows left to right —
 // each proxy APPENDS what it saw — so a client that sends its own header keeps
@@ -94,19 +105,42 @@ func (l *rateLimiter) allow(key string) bool {
 // hop in the last one. With Get, a client that sends its own line was the
 // entire key again.
 func (s *Server) clientIP(r *http.Request) string {
-	if s.TrustProxy {
-		if lines := r.Header.Values("X-Forwarded-For"); len(lines) > 0 {
-			parts := strings.Split(lines[len(lines)-1], ",")
-			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
-				return last
-			}
-		}
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
 	}
+	fwd := lastForwardedFor(r)
+	if fwd == "" {
+		return host
+	}
+	if s.TrustProxy || localPeer(host) {
+		return fwd
+	}
+	s.xffWarnOnce.Do(func() {
+		log.Printf("beardrive: ignoring X-Forwarded-For from %s — that is a public address, "+
+			"so the header is client-supplied; set trust_proxy if a proxy you control fronts this hub", host)
+	})
 	return host
+}
+
+// lastForwardedFor is the hop the nearest proxy appended: the last element of
+// the last field line, empty when there is no header.
+func lastForwardedFor(r *http.Request) string {
+	lines := r.Header.Values("X-Forwarded-For")
+	if len(lines) == 0 {
+		return ""
+	}
+	parts := strings.Split(lines[len(lines)-1], ",")
+	return strings.TrimSpace(parts[len(parts)-1])
+}
+
+// localPeer reports whether the connection came from an address only the
+// operator's own network can hold. Both predicates are stdlib: IsPrivate is
+// RFC 1918 plus IPv6 unique-local (fc00::/7), which is what a sidecar, a
+// container network and a cloud runtime's internal hop all sit in.
+func localPeer(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
 }
 
 // shareLimiter lazily builds the /s/* limiter from ShareRPM.
