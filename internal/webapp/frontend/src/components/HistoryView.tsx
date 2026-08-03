@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HistoryEntry } from "../api/types";
@@ -6,6 +6,8 @@ import { HistoryRow, NoteText, type RemoveAction, type RestoreAction } from "./H
 import { Icon } from "./shell";
 import { whoChanged } from "../util";
 import { groupRuns, runFileCount, type Run } from "../lib/runs";
+import { HistoryFilters, authorsOf } from "./HistoryFilters";
+import { historyFilterQuery, hasHistoryFilters, type HistoryFilters as Filters } from "../router";
 
 /* ---- history ----
    Every change ever made, straight from the journals: who (account), when,
@@ -28,17 +30,22 @@ export function HistoryView(props: {
   onRendered?: () => void;
   restore?: RestoreAction;
   remove?: RemoveAction;
+  // Reader filters, straight from the URL. Applied server-side, so they
+  // narrow the whole feed and not just the loaded page.
+  filters?: Filters;
+  onFilters?: (f: Filters) => void;
 }) {
-  const { apiBase, target, isFolder, onMeta, onRendered, restore, remove } = props;
+  const { apiBase, target, isFolder, onMeta, onRendered, restore, remove, filters } = props;
   const q = !target
     ? { prefix: "" }
     : isFolder(target)
       ? { prefix: target + "/" }
       : { path: target };
   const qs =
-    "path" in q && q.path !== undefined
+    ("path" in q && q.path !== undefined
       ? "path=" + encodeURIComponent(q.path)
-      : "prefix=" + encodeURIComponent(q.prefix ?? "");
+      : "prefix=" + encodeURIComponent(q.prefix ?? "")) +
+    historyFilterQuery(filters).replace("?", "&");
   // Paged: the server hands back a cursor while entries remain, so a project
   // with thousands of changes is reachable to its first one. Pages accumulate
   // into one array — groupRuns and prevBlob both work over the whole window,
@@ -59,6 +66,8 @@ export function HistoryView(props: {
     staleTime: 15_000,
   });
 
+  const seenAuthors = useRef(new Set<string>());
+
   useEffect(() => {
     if (error) onMeta("History unavailable: " + (error as Error).message);
   }, [error, onMeta]);
@@ -66,8 +75,20 @@ export function HistoryView(props: {
     if (data) onRendered?.();
   }, [data, onRendered]);
 
-  if (!data) return null;
-  const entries = data.pages.flatMap((p) => p.entries || []);
+  const entries = data ? data.pages.flatMap((p) => p.entries || []) : [];
+  // The author list accumulates and never shrinks: filtering BY an author
+  // leaves only their rows loaded, so a list rebuilt from the current feed
+  // would drop every other name and strand the reader on "Anyone" as the
+  // only way out.
+  for (const a of authorsOf(entries)) seenAuthors.current.add(a);
+  const bar = props.onFilters && (
+    <HistoryFilters
+      filters={filters}
+      authors={[...seenAuthors.current].sort()}
+      onChange={props.onFilters}
+    />
+  );
+  if (!data) return bar ? <div className="history">{bar}</div> : null;
   // Diffs are a per-file affair: the subtree feed mixes paths, and each row
   // there would need its own predecessor lookup for no review benefit.
   const perFile = !!target && !isFolder(target);
@@ -103,7 +124,19 @@ export function HistoryView(props: {
   };
   return (
     <div className="history">
-      {entries.length === 0 && <div className="empty">No history yet.</div>}
+      {bar}
+      {entries.length === 0 &&
+        (hasHistoryFilters(filters) ? (
+          <div className="empty">
+            No changes match these filters.
+            <br />
+            <button type="button" className="btn hf-clear-empty" onClick={() => props.onFilters?.({})}>
+              Clear filters
+            </button>
+          </div>
+        ) : (
+          <div className="empty">No history yet.</div>
+        ))}
       {groupRuns(entries).map((item, n) =>
         item.run ? (
           <RunGroup

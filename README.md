@@ -97,7 +97,8 @@ actually read (and which hot ones nobody maintains).
 - **Change tracking** — `bdrive log` and the web UI's History view show
   which account changed which file, when, from which device (name, OS).
   Content is stored content-addressed, so every version is retained — view
-  or download any point in a file's history.
+  or download any point in a file's history. The feed can be narrowed by
+  path, author and date range, and the narrowed view has its own URL.
 - **Cloud-provider agnostic** — a hub can store on Amazon S3 (`s3://`),
   Google Cloud Storage (`gs://`), any S3-compatible store (MinIO, Cloudflare
   R2 via `AWS_ENDPOINT_URL`), or a plain shared directory (`file://`, e.g. a
@@ -493,7 +494,10 @@ IP), with view/download of any past version (content is
 content-addressed and retained forever; reverting to a version is the next
 phase and the API is already shaped for it). Folder rows have a history
 shortcut for a subtree feed; the topbar button shows the current file's
-versions or the whole project feed.
+versions or the whole project feed. A filter bar above the feed narrows it
+by path substring, author and date range (UTC) — the filters ride in the
+URL, so a narrowed feed is a link you can send, and they are applied
+server-side, so paging through a filtered feed stays correct.
 
 Hubs also track **read heat**: viewer opens and downloads count as human
 reads, share-link hits as share reads, and agent tool reads (reported by

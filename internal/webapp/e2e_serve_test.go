@@ -238,6 +238,9 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	put("archive/old-runbook.md", "# Old runbook\n\nStill read, never maintained.\n", 150*24*time.Hour)
 	put("archive/legacy-notes.md", "# Legacy notes\n\nStale, still consulted.\n", 95*24*time.Hour)
 	ops[2].Note = "expanded the guide — https://claude.ai/session/e2e" // the one row with a note expander
+	// A second account, so the history filter bar has more than one name to
+	// offer — and something to exclude when a reader picks one.
+	ops[4].User, ops[4].UserName, ops[4].Author = "bob@x.io", "Bob", "bob@x.io"
 	// One agent run that touched two files — the history feed groups it into
 	// a single card. One file it edited and one it created (whose undo is a
 	// removal, since restore cannot un-create). Both of these ops are the head

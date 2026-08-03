@@ -668,6 +668,23 @@ a.ai-main:hover { color: var(--accent); }
 .in-matrix rect:hover { opacity: .85; }
 
 /* ---- history ---- */
+/* The filter bar. Wraps rather than scrolls: every control has to stay
+   reachable on a phone, and a horizontally scrolled toolbar hides the
+   Clear that gets you back out. */
+.hfilters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.hf-search { position: relative; display: flex; align-items: center; flex: 1 1 200px; min-width: 160px; }
+.hf-search .ico { position: absolute; left: 9px; width: 14px; height: 14px; color: var(--text-ghost); pointer-events: none; }
+.hf-search input { height: 30px; padding-left: 29px; font-size: 12.5px; border-radius: var(--r-ctl); background: var(--surface); }
+.hf-search input::-webkit-search-cancel-button { filter: invert(.6); }
+.hf-user { height: 30px; max-width: 190px; padding: 0 8px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; }
+.hf-dates { display: flex; align-items: center; gap: 6px; }
+.hf-lbl { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-ghost); }
+.hf-date { width: 140px; height: 30px; font-size: 12.5px; border-radius: var(--r-ctl); background: var(--surface); }
+.hf-date::-webkit-calendar-picker-indicator { filter: invert(.6); cursor: pointer; }
+.hf-dash { color: var(--text-ghost); }
+.hf-clear { height: 30px; padding: 0 10px; border: none; border-radius: var(--r-ctl); background: none; color: var(--text-dim); font: inherit; font-size: 12.5px; cursor: pointer; }
+.hf-clear:hover { color: var(--text); background: var(--hover); }
+.hf-clear-empty { margin-top: 12px; }
 /* .history width comes from .page (app) */
 .hentry { padding: 11px 12px; border-bottom: 1px solid var(--border); --hindent: 72px; }
 .hentry:hover { background: rgba(255,255,255,.015); }
@@ -858,6 +875,11 @@ a.ai-main:hover { color: var(--accent); }
      wrap so the controls keep room next to long names/URLs. */
   .admin-item { flex-wrap: wrap; row-gap: 8px; padding: 12px 14px; }
   .admin-item select { height: 44px; }
+  /* 30px controls are too small to tap; the bar already wraps, so growing
+     them costs nothing but a second row. */
+  .hf-search input, .hf-user, .hf-date, .hf-clear { height: 44px; }
+  .hf-dates { flex: 1 1 100%; }
+  .hf-date { flex: 1; width: auto; min-width: 0; }
   .ai-btn, .ai-del { height: auto; min-height: 44px; padding: 0 12px; }
   /* react-table renders rows as `display: table-row`, which makes every
      flex rule above inert and lets the last column (Remove) fall outside
