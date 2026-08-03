@@ -1,7 +1,7 @@
 // Run with `npm test` (node's built-in runner; node ≥ 23 strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseRoute } from "./router.ts";
+import { parseRoute, urlForView, historyFilterQuery } from "./router.ts";
 
 // A trailing slash is what a browser hands you when you copy a folder URL,
 // so /notes/ has to be the same page as /notes.
@@ -67,4 +67,32 @@ test("odd characters round-trip", () => {
   const r = parseRoute("/p-1/notes/a%20b/", "hub");
   assert.equal(r.path, "notes/a b");
   assert.equal(r.trailingSlash, true);
+});
+
+// History filters live in the URL, so a narrowed feed is linkable and comes
+// back on reload and Back. Round-trip: parse → build → same URL.
+test("history filters round-trip through the URL", () => {
+  const r = parseRoute("/p-1/history/notes?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31", "hub");
+  assert.equal(r.view, "history");
+  assert.equal(r.viewTarget, "notes");
+  assert.deepEqual(r.filters, {
+    q: "runbook",
+    user: "mira@acme.io",
+    since: "2026-07-01",
+    until: "2026-07-31",
+  });
+  assert.equal(
+    urlForView("history", "p-1", "notes", r.filters),
+    "/p-1/history/notes?q=runbook&user=mira%40acme.io&since=2026-07-01&until=2026-07-31",
+  );
+});
+
+// An unfiltered feed keeps the bare URL it has always had — no empty ?q=.
+test("no filters means no query string", () => {
+  assert.equal(parseRoute("/p-1/history", "hub").filters, undefined);
+  assert.equal(historyFilterQuery(undefined), "");
+  assert.equal(historyFilterQuery({ q: "" }), "");
+  assert.equal(urlForView("history", "p-1"), "/p-1/history");
+  // other views ignore them entirely
+  assert.equal(urlForView("dashboard", "p-1", "", { q: "x" }), "/p-1/dashboard");
 });

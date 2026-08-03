@@ -59,6 +59,31 @@ function legacyView(head: string): ViewName | undefined {
 
 export type ViewName = "dashboard" | "history" | "install" | "settings";
 
+// How a reader has narrowed the history feed. Server-side filters, so they
+// ride to the API verbatim — and they live in the URL rather than component
+// state so a filtered feed is linkable, survives reload, and comes back on
+// Back like any other page (see CLAUDE.md: every surface owns a URL).
+export interface HistoryFilters {
+  q?: string; // substring of the path
+  user?: string; // exact account
+  since?: string; // YYYY-MM-DD (UTC), inclusive
+  until?: string; // YYYY-MM-DD (UTC), inclusive
+}
+export const HISTORY_FILTER_KEYS = ["q", "user", "since", "until"] as const;
+
+export function hasHistoryFilters(f?: HistoryFilters): boolean {
+  return !!f && HISTORY_FILTER_KEYS.some((k) => !!f[k]);
+}
+
+// The query string for a filter set — "" when nothing is set, so an
+// unfiltered view keeps the bare URL it has always had.
+export function historyFilterQuery(f?: HistoryFilters): string {
+  const p = new URLSearchParams();
+  for (const k of HISTORY_FILTER_KEYS) if (f?.[k]) p.set(k, f[k]!);
+  const s = p.toString();
+  return s ? "?" + s : "";
+}
+
 export interface Route {
   // Org administration is not project-scoped, so it is a top-level route
   // rather than a view under a project. The server hands out this URL (see
@@ -90,6 +115,9 @@ export interface Route {
   // not a property of the project — a teammate connecting next week has their
   // own answer, and would be told the wrong thing by a persisted flag.
   connect?: string;
+  // History feed filters (?q=&user=&since=&until=). Only ever set on the
+  // history view; absent when nothing is filtered.
+  filters?: HistoryFilters;
 }
 
 // `url` is pathname + search (what useLocationPath hands back).
@@ -101,6 +129,12 @@ export function parseRoute(url: string, mode: "volume" | "hub"): Route {
   const r = parsePath(qi === -1 ? url : url.slice(0, qi), mode);
   if (version) r.version = version;
   if (connect) r.connect = connect;
+  const filters: HistoryFilters = {};
+  for (const k of HISTORY_FILTER_KEYS) {
+    const v = q?.get(k);
+    if (v) filters[k] = v;
+  }
+  if (hasHistoryFilters(filters)) r.filters = filters;
   return r;
 }
 
@@ -148,9 +182,15 @@ export function urlForPath(path: string, projectId?: string, version?: string): 
   return "/" + enc + q;
 }
 
-// The URL for a special view of a project.
-export function urlForView(view: ViewName, projectId?: string, target?: string): string {
+// The URL for a special view of a project, optionally carrying the history
+// filter set (ignored by every other view).
+export function urlForView(
+  view: ViewName,
+  projectId?: string,
+  target?: string,
+  filters?: HistoryFilters,
+): string {
   let s = (projectId ? "/" + projectId : "") + "/" + view;
   if (target) s += "/" + encodePath(target.replace(/\/+$/, ""));
-  return s;
+  return s + (view === "history" ? historyFilterQuery(filters) : "");
 }

@@ -231,7 +231,16 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	png := "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" +
 		"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
 	put("assets/logo.png", png, 24*time.Hour)
+	// Hot but stale: read a lot, unchanged for months. Every other seeded file
+	// is hours old, so without these the Dashboard's danger quadrant — the one
+	// thing that panel exists to surface — was empty in every test.
+	put("archive/retired-spec.md", "# Retired spec\n\nNobody has touched this in months.\n", 210*24*time.Hour)
+	put("archive/old-runbook.md", "# Old runbook\n\nStill read, never maintained.\n", 150*24*time.Hour)
+	put("archive/legacy-notes.md", "# Legacy notes\n\nStale, still consulted.\n", 95*24*time.Hour)
 	ops[2].Note = "expanded the guide — https://claude.ai/session/e2e" // the one row with a note expander
+	// A second account, so the history filter bar has more than one name to
+	// offer — and something to exclude when a reader picks one.
+	ops[4].User, ops[4].UserName, ops[4].Author = "bob@x.io", "Bob", "bob@x.io"
 	// One agent run that touched two files — the history feed groups it into
 	// a single card. One file it edited and one it created (whose undo is a
 	// removal, since restore cannot un-create). Both of these ops are the head
@@ -272,6 +281,10 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 		{"guide.md", ReadKindHuman, "bob@x.io", 5},
 		{"guide.md", ReadKindAgent, "seed", 9},
 		{"notes/readme.md", ReadKindAgent, "seed", 2},
+		// The danger quadrant: hot enough to matter, stale enough to worry.
+		{"archive/retired-spec.md", ReadKindAgent, "seed", 14},
+		{"archive/old-runbook.md", ReadKindHuman, "bob@x.io", 11},
+		{"archive/legacy-notes.md", ReadKindAgent, "seed", 8},
 		// Read history for the file the seed deletes above: heat rows outlive
 		// their file, and the Dashboard must say so rather than drop them.
 		{"scratch.md", ReadKindHuman, "alice@x.io", 4},

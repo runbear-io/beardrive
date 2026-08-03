@@ -54,6 +54,24 @@ func (f *fakeRemote) putAt(dev, path, content string, at time.Time) {
 	writeFileT(f.t, p, data)
 }
 
+// putFull writes a put carrying both an account and a wall-clock time — what
+// the filter tests need to slice a feed by author and by day at once.
+func (f *fakeRemote) putFull(dev, user, path, content string, at time.Time) {
+	f.t.Helper()
+	f.putAs(dev, user, strings.ToUpper(user[:1])+user[1:], path, content)
+	p := filepath.Join(f.dir, "journal", dev+".jsonl")
+	ops, err := journal.ReadFile(p)
+	if err != nil || len(ops) == 0 {
+		f.t.Fatal(err)
+	}
+	ops[len(ops)-1].Time = at
+	data, err := journal.Marshal(ops)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	writeFileT(f.t, p, data)
+}
+
 func writeFileT(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -397,6 +415,137 @@ func TestHistoryPagingAcrossLamportAndTime(t *testing.T) {
 	// a garbage cursor is an error, not a silent full page
 	if rec := do(t, h, "GET", base+"history?cursor=not-a-cursor", nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad cursor: %d, want 400", rec.Code)
+	}
+}
+
+// seedFiltered builds a feed with two authors, three days and paths that
+// differ in case, so every filter has something to include and something to
+// leave out.
+func seedFiltered(t *testing.T) (http.Handler, string) {
+	t.Helper()
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	day := func(d, h int) time.Time { return time.Date(2026, 7, d, h, 30, 0, 0, time.UTC) }
+	f.putFull("dev1", "mira@acme.io", "docs/Runbook.md", "v1", day(1, 9))
+	f.putFull("dev1", "mira@acme.io", "docs/runbook-old.md", "v1", day(15, 12))
+	f.putFull("dev2", "ken@acme.io", "docs/plan.md", "p1", day(31, 23))
+	f.putFull("dev2", "ken@acme.io", "notes/runbook.md", "n1", day(15, 0))
+	return srv.Handler(), "/api/p/" + p.ID + "/"
+}
+
+// histPaths runs one history request and returns the paths it yielded, in
+// order, plus the next cursor.
+func histPaths(t *testing.T, h http.Handler, u string) ([]string, string) {
+	t.Helper()
+	rec := do(t, h, "GET", u, nil)
+	if rec.Code != 200 {
+		t.Fatalf("history %s: %d %s", u, rec.Code, rec.Body)
+	}
+	var out struct {
+		Entries []HistoryEntry `json:"entries"`
+		Next    string         `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, e := range out.Entries {
+		got = append(got, e.Path)
+	}
+	return got, out.Next
+}
+
+// The reader filters: substring, author, date window, and every combination
+// of them — including with the existing prefix scoping.
+func TestHistoryFilters(t *testing.T) {
+	h, base := seedFiltered(t)
+	for _, c := range []struct {
+		q    string
+		want []string
+	}{
+		// substring, case-insensitive, matching a path the prefix scoping couldn't express
+		{"q=runbook", []string{"docs/runbook-old.md", "notes/runbook.md", "docs/Runbook.md"}},
+		{"q=RUNBOOK", []string{"docs/runbook-old.md", "notes/runbook.md", "docs/Runbook.md"}},
+		{"q=.md", []string{"docs/plan.md", "docs/runbook-old.md", "notes/runbook.md", "docs/Runbook.md"}},
+		{"q=nothing-here", []string{}},
+		// author, exact
+		{"user=mira@acme.io", []string{"docs/runbook-old.md", "docs/Runbook.md"}},
+		{"user=ken@acme.io", []string{"docs/plan.md", "notes/runbook.md"}},
+		{"user=nobody@acme.io", []string{}},
+		// bare dates are UTC days, inclusive at BOTH ends: the 1st 09:30 and
+		// the 31st 23:30 both survive a 07-01..07-31 window.
+		{"since=2026-07-01&until=2026-07-31", []string{"docs/plan.md", "docs/runbook-old.md", "notes/runbook.md", "docs/Runbook.md"}},
+		{"since=2026-07-02", []string{"docs/plan.md", "docs/runbook-old.md", "notes/runbook.md"}},
+		{"until=2026-07-15", []string{"docs/runbook-old.md", "notes/runbook.md", "docs/Runbook.md"}},
+		{"since=2026-07-15&until=2026-07-15", []string{"docs/runbook-old.md", "notes/runbook.md"}},
+		// an RFC3339 bound is inclusive to the second it names
+		{"since=2026-07-31T23:30:00Z", []string{"docs/plan.md"}},
+		{"until=2026-07-01T09:30:00Z", []string{"docs/Runbook.md"}},
+		// since > until means nothing, not an error
+		{"since=2026-07-31&until=2026-07-01", []string{}},
+		// composed with each other…
+		{"q=runbook&user=mira@acme.io", []string{"docs/runbook-old.md", "docs/Runbook.md"}},
+		{"q=runbook&user=mira@acme.io&since=2026-07-10&until=2026-07-20", []string{"docs/runbook-old.md"}},
+		// …and with the existing prefix/path scoping
+		{"prefix=docs/&q=runbook", []string{"docs/runbook-old.md", "docs/Runbook.md"}},
+		{"prefix=notes/&user=mira@acme.io", []string{}},
+		{"path=docs/Runbook.md&q=runbook", []string{"docs/Runbook.md"}},
+		{"path=docs/Runbook.md&user=ken@acme.io", []string{}},
+	} {
+		if got, _ := histPaths(t, h, base+"history?"+c.q); !slices.Equal(got, c.want) {
+			t.Errorf("?%s = %v, want %v", c.q, got, c.want)
+		}
+	}
+}
+
+// Filtering happens before the cursor skip, so paging a filtered feed walks
+// exactly the unpaged filtered set — no repeats, no gaps, same order. Filter
+// after the skip and this test loses entries.
+func TestHistoryFilterPaging(t *testing.T) {
+	h, base := seedFiltered(t)
+	filter := "q=runbook"
+	want, next := histPaths(t, h, base+"history?"+filter)
+	if len(want) != 3 || next != "" {
+		t.Fatalf("unpaged filtered feed = %v (next %q)", want, next)
+	}
+	var got []string
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > len(want) {
+			t.Fatalf("paging did not terminate: %v", got)
+		}
+		page, next := histPaths(t, h, base+"history?"+filter+"&n=2"+cursorArg(cursor))
+		if len(page) == 0 {
+			t.Fatalf("empty page %d", pages)
+		}
+		got = append(got, page...)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("paged filtered = %v, want %v", got, want)
+	}
+}
+
+// A date we can't parse is a 400, not a silently unfiltered feed.
+func TestHistoryBadDateRange(t *testing.T) {
+	h, base := seedFiltered(t)
+	for _, q := range []string{"since=yesterday", "until=2026-13-45", "since=2026-07-01&until=soon", "since="} {
+		rec := do(t, h, "GET", base+"history?"+q, nil)
+		if q == "since=" { // an empty value is "no filter", like every other param
+			if rec.Code != 200 {
+				t.Errorf("?%s = %d, want 200", q, rec.Code)
+			}
+			continue
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("?%s = %d, want 400", q, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "\"entries\"") {
+			t.Errorf("?%s returned a feed body: %s", q, rec.Body)
+		}
 	}
 }
 

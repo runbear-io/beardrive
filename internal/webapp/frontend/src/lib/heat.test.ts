@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { heatFor, heatLevel, heatText, heatTotal, hotPathSplit } from "./heat.ts";
 import { ageRange, ageSpanLabel, isFlatRange, FLAT_AGE_SPREAD, orphanPaths } from "./heat.ts";
+import { placeLabels, LABEL_MAX } from "./heat.ts";
 import type { HeatMap } from "../api/types.ts";
 
 // One fixture, read by both surfaces: the file header (heatText/heatTotal) and
@@ -126,4 +127,57 @@ test("orphanPaths: heat rows whose file left the tree, sorted", () => {
   assert.deepEqual(orphanPaths(FIXTURE, new Set(Object.keys(FIXTURE))), []);
   assert.deepEqual(orphanPaths({}, known), []);
   assert.deepEqual(orphanPaths(null, known), []);
+});
+
+/* ---- placeLabels: the danger dots' basenames (BEA-60) ---- */
+
+const BOUNDS = { right: 704, top: 28, bottom: 322 }; // W - M.r, M.t + 8, H - M.b - 4
+const dot = (path: string, reads: number, cx: number, cy: number, r = 3) => ({
+  path,
+  reads,
+  cx,
+  cy,
+  r,
+});
+
+test("placeLabels: basenames, busiest first, capped at six", () => {
+  const dots = Array.from({ length: 9 }, (_, i) => dot(`archive/f${i}.md`, i, 400, 40 + i * 40));
+  const out = placeLabels(dots, BOUNDS);
+  assert.equal(out.length, LABEL_MAX);
+  assert.deepEqual(
+    out.map((l) => l.name),
+    ["f8.md", "f7.md", "f6.md", "f5.md", "f4.md", "f3.md"],
+  );
+  assert.deepEqual(placeLabels([], BOUNDS), []);
+});
+
+test("placeLabels: sits right of the dot, flips left rather than leave the frame", () => {
+  const [near] = placeLabels([dot("a/near-edge.md", 5, 400, 100, 7)], BOUNDS);
+  assert.equal(near.anchor, "start");
+  assert.equal(near.x, 411); // cx + r + 4
+  const [far] = placeLabels([dot("a/a-very-long-filename.md", 5, 690, 100, 7)], BOUNDS);
+  assert.equal(far.anchor, "end");
+  assert.equal(far.x, 679); // cx - r - 4, text runs back into the frame
+});
+
+test("placeLabels: colliding labels stack instead of overprinting", () => {
+  // Three dots within a couple of px of each other: the naive placement puts
+  // all three basenames on the same baseline.
+  const out = placeLabels(
+    [dot("a/one.md", 9, 500, 100), dot("a/two.md", 8, 505, 101), dot("a/three.md", 7, 510, 99)],
+    BOUNDS,
+  );
+  const ys = out.map((l) => l.y).sort((a, b) => a - b);
+  for (let i = 1; i < ys.length; i++) assert.ok(ys[i] - ys[i - 1] >= 11, `overlap: ${ys}`);
+  assert.ok(ys.every((y) => y >= BOUNDS.top && y <= BOUNDS.bottom));
+});
+
+test("placeLabels: stacks upward when downward would leave the frame", () => {
+  const out = placeLabels(
+    Array.from({ length: 5 }, (_, i) => dot(`a/f${i}.md`, 9 - i, 500, BOUNDS.bottom - 1)),
+    BOUNDS,
+  );
+  const ys = out.map((l) => l.y).sort((a, b) => a - b);
+  assert.ok(ys.every((y) => y >= BOUNDS.top && y <= BOUNDS.bottom), `out of frame: ${ys}`);
+  for (let i = 1; i < ys.length; i++) assert.ok(ys[i] - ys[i - 1] >= 11, `overlap: ${ys}`);
 });

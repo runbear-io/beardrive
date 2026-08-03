@@ -108,3 +108,55 @@ export function ageSpanLabel(min: number, max: number): string {
     b = Math.round(max);
   return a === b ? `${a}d` : `${a}–${b}d`;
 }
+
+/* ---- scatter dot labels ---- */
+
+// Only the danger quadrant gets named: it is the one the panel exists to
+// surface, and a label per dot at hundreds of files is unreadable.
+export const LABEL_MAX = 6;
+const LABEL_LH = 11; // line height at the 11px label size = the collision gap
+const LABEL_CH = 5.5; // ~average glyph width; only picks which side of the dot
+
+export interface Dot {
+  path: string;
+  reads: number;
+  cx: number;
+  cy: number;
+  r: number;
+}
+export interface PlacedLabel {
+  path: string;
+  name: string;
+  x: number;
+  y: number;
+  anchor: "start" | "end";
+}
+
+/* Basenames for the busiest danger dots, placed beside their dot: to the
+   right, flipped left when the text would leave the frame, and stacked down
+   (up, if down runs out of frame) when two would collide. Pure so it can be
+   unit-tested — Insights.tsx can't be, see above. */
+export function placeLabels(
+  dots: Dot[],
+  bounds: { right: number; top: number; bottom: number },
+): PlacedLabel[] {
+  const out: PlacedLabel[] = [];
+  for (const d of [...dots].sort((a, b) => b.reads - a.reads).slice(0, LABEL_MAX)) {
+    const name = d.path.split("/").pop()!;
+    let x = d.cx + d.r + 4,
+      anchor: "start" | "end" = "start";
+    if (x + name.length * LABEL_CH > bounds.right) {
+      x = d.cx - d.r - 4;
+      anchor = "end";
+    }
+    const free = (v: number) => out.every((o) => Math.abs(o.y - v) >= LABEL_LH);
+    let y = d.cy;
+    while (y <= bounds.bottom && !free(y)) y += LABEL_LH;
+    if (y > bounds.bottom) {
+      y = d.cy;
+      while (y >= bounds.top && !free(y)) y -= LABEL_LH;
+    }
+    out.push({ path: d.path, name, x, y: Math.min(bounds.bottom, Math.max(bounds.top, y)), anchor });
+  }
+  return out;
+}

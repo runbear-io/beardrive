@@ -39,8 +39,10 @@ classDiagram
         +parseRoute(url, mode) Route
         +Route.version ?v= sha, one past version
         +Route.trailingSlash notes/ resolves, then replaces to notes
+        +Route.filters q user since until, history feed
+        +historyFilterQuery(filters) / hasHistoryFilters
         +urlForPath(path, projectId, version)
-        +urlForView / encodePath / decodePath
+        +urlForView(view, projectId, target, filters) / encodePath / decodePath
     }
     class nav {
         +navigate(url)
@@ -75,13 +77,14 @@ classDiagram
 
     class components {
         FileView FolderListing FileTree
-        HistoryView HistoryRow DiffView VersionBanner
+        HistoryView HistoryRow HistoryFilters DiffView VersionBanner
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
         Palette shell AccountBar ...
     }
-    note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; &quot;Empty project&quot; (the empty value) stays preselected so an unpicked create behaves exactly as it did before templates. modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
+    note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; 'Empty project' (value: the empty string) stays preselected so an unpicked create behaves exactly as it did before templates. modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
+    note for components "HistoryFilters drives the SERVER (?q=/?user=/?since=/?until= on the history API), never the loaded page — filtering what is on screen would lie about everything below the fold and break next_cursor. Its state is Route.filters, so a narrowed feed is linkable, survives reload, and Back undoes it; the author list accumulates across fetches, because filtering by one author leaves only their rows loaded"
     note for components "FileView's transformHTML now drops `data:image/svg` from any rendered img and any `data:` href from any rendered link — goldmark admits them, and an inline SVG is a document rather than a picture (the same property the server's sandboxInline walls off). Insights builds its per-device folder bag with Object.create(null), since folder names come off a peer's journal and one named __proto__ silently emptied the matrix. style.css sets unicode-bidi isolate-override on the peer-authored strings a reader is expected to CHECK (listing rows, breadcrumb, history path/note/device) — journal.SafeText refuses the bidi CONTROLS, but a single strong-RTL LETTER is legal and still reorders a row"
     note for components "components/ui — shadcn/ui primitives (Radix, copied in), themed from BearDrive tokens in tw.css; rendered markdown is transformed as a string before mounting, link clicks delegated on the container — never patch the dangerouslySetInnerHTML subtree"
 
@@ -91,6 +94,7 @@ classDiagram
         +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
         +heat.ts ageRange isFlatRange ageSpanLabel (treemap scale)
         +heat.ts orphanPaths (reads whose file left the tree)
+        +heat.ts placeLabels LABEL_MAX (scatter danger-dot labels)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +utils.ts
     }
@@ -106,7 +110,7 @@ classDiagram
     Browser --> components
     HubApp --> components
     components --> nav : linkProps navigate
-    components --> lib : diffText groupRuns hotPathSplit
+    components --> lib : diffText groupRuns hotPathSplit placeLabels
     hooks --> lib : re-exports heat.ts, sniffBytes
     hooks --> api
     Browser --> hooks

@@ -368,6 +368,9 @@ export default function Browser(props: {
         onRendered={onRendered}
         restore={canRestore ? { onRestore, busy: restoring } : undefined}
         remove={canRestore ? { onRemove, busy: removing } : undefined}
+        filters={route.filters}
+        /* push, not replace: a filter is a navigation, and Back undoes it */
+        onFilters={(f) => navigate(urlForView("history", project?.id, route.viewTarget || "", f))}
       />
     );
   } else if (path) {

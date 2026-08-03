@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node } from "../api/types";
 import { heatTotal, hotPathSplit } from "../hooks/useBrowse";
-import { ageRange, ageSpanLabel, isFlatRange, orphanPaths } from "../lib/heat";
+import { ageRange, ageSpanLabel, isFlatRange, orphanPaths, placeLabels } from "../lib/heat";
 import { linkProps } from "../nav";
 
 /* ---- the project Dashboard: the read×write matrix ----
@@ -190,7 +190,12 @@ export function Insights(props: {
       <Treemap pts={pts} onOpenFile={props.onOpenFile} onOpenFolder={props.onOpenFolder} isFolder={props.isFolder} />
       {orphanNote}
 
-      <h3 className="dl-h3">Reads × freshness</h3>
+      {/* The size caption belongs in the header, not in the plot: inside the
+          <svg> it was drawn on top of the "hot + stale" quadrant label. */}
+      <h3 className="dl-h3 in-h3-row">
+        Reads × freshness
+        <span className="in-cap">dot size = agent share of reads</span>
+      </h3>
       <Scatter pts={pts} onOpenFile={props.onOpenFile} />
       {orphanNote}
 
@@ -444,8 +449,30 @@ function Scatter({ pts, onOpenFile }: { pts: Pt[]; onOpenFile: (p: string) => vo
   const maxReads = Math.max(HOT_READS * 2, ...pts.map((p) => p.reads));
   const lx = (d: number) => Math.log10(d + 1) / Math.log10(maxDays + 1);
   const ly = (r: number) => Math.log10(r + 1) / Math.log10(maxReads + 1);
-  const X = (d: number) => M.l + lx(d) * (W - M.l - M.r);
-  const Y = (r: number) => H - M.b - ly(r) * (H - M.t - M.b);
+  /* Radius encodes the agent share of the file's reads. The plotted box is
+     inset by the largest radius the formula can produce, so the busiest file
+     — which lands at the very top of the range — sits wholly inside the frame
+     instead of straddling its border. Derived, not hardcoded: a future radius
+     change can't quietly reintroduce the clipping. The thresholds, the danger
+     rect and the dots all read X/Y, so they move together; the axis lines use
+     M directly and stay put. */
+  const dotR = (share: number) => 3 + 4 * share;
+  const rMax = dotR(1);
+  const X = (d: number) => M.l + rMax + lx(d) * (W - M.l - M.r - 2 * rMax);
+  const Y = (r: number) => H - M.b - rMax - ly(r) * (H - M.t - M.b - 2 * rMax);
+
+  const labels = placeLabels(
+    pts
+      .filter((p) => p.danger)
+      .map((p) => ({
+        path: p.path,
+        reads: p.reads,
+        cx: X(p.days),
+        cy: Y(p.reads),
+        r: dotR(p.total ? (p.agent || 0) / p.total : 0),
+      })),
+    { right: W - M.r, top: M.t + 8, bottom: H - M.b - 4 },
+  );
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="in-chart">
@@ -483,19 +510,15 @@ function Scatter({ pts, onOpenFile }: { pts: Pt[]; onOpenFile: (p: string) => vo
       <text x={M.l + 6} y={H - M.b - 8} className="in-quad">
         cold + fresh
       </text>
-      <text x={W - M.r - 6} y={M.t + 28} className="in-label" textAnchor="end">
-        dot size = agent share of reads
-      </text>
       {pts.map((p) => {
-        // Radius encodes the agent share of the file's reads; translucent
-        // dots keep the cloud readable at hundreds of files.
+        // Translucent dots keep the cloud readable at hundreds of files.
         const share = p.total ? (p.agent || 0) / p.total : 0;
         return (
           <circle
             key={p.path}
             cx={Number(X(p.days).toFixed(1))}
             cy={Number(Y(p.reads).toFixed(1))}
-            r={Number((3 + 4 * share).toFixed(1))}
+            r={Number(dotR(share).toFixed(1))}
             className={"in-pt" + (p.danger ? " danger" : p.reads ? "" : " cold")}
             onClick={() => onOpenFile(p.path)}
           >
@@ -505,6 +528,19 @@ function Scatter({ pts, onOpenFile }: { pts: Pt[]; onOpenFile: (p: string) => vo
           </circle>
         );
       })}
+      {/* The danger quadrant's story is unreadable if you have to hover dot by
+          dot to learn which file is which; the tooltips stay for the rest. */}
+      {labels.map((l) => (
+        <text
+          key={l.path}
+          x={Number(l.x.toFixed(1))}
+          y={Number(l.y.toFixed(1))}
+          textAnchor={l.anchor}
+          className="in-pt-label"
+        >
+          {l.name}
+        </text>
+      ))}
     </svg>
   );
 }
