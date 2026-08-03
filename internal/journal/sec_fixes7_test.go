@@ -117,7 +117,7 @@ func TestSec_Path_SafePathIsTotalOverArbitraryBytes(t *testing.T) {
 		if !got {
 			t.Errorf("SafePath(%q) = false for ordinary byte %#x", s, b)
 		}
-		if SafePath("docs/" + s + "/leaf.md") != true {
+		if SafePath("docs/"+s+"/leaf.md") != true {
 			t.Errorf("SafePath of byte %#x as a middle segment = false", b)
 		}
 	}

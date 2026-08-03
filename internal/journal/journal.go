@@ -146,7 +146,22 @@ func SafePath(p string) bool {
 	// the C0s render as nothing, so "notes\x7f.md" and "notes.md" are two
 	// indistinguishable entries in one tree. Refusing at every ingest is what
 	// keeps that divergence unreachable.
-	return SafeText(p)
+	//
+	// ZWNJ and ZWJ are the exception, and they are the reason a path needs its
+	// own rule at all rather than just calling SafeText. Both are category Cf,
+	// so the class test below refuses them — and both are ORTHOGRAPHICALLY
+	// REQUIRED: U+200C is what makes "می‌روم" ("I go") the right word in
+	// Persian rather than the wrong one, it is mandatory in Devanagari and
+	// several other Indic scripts, and U+200D is in every multi-person and
+	// profession emoji the macOS file dialog offers. Refusing them does not
+	// harden a hub, it tells a Persian speaker their filenames are illegal.
+	//
+	// The confusability they buy an attacker is real but small and local: a
+	// zero-width joiner cannot REORDER anything (that is the bidi family, still
+	// refused), so the worst case is two similar-looking names inside a project
+	// the reader already has access to — a confusion, not a boundary crossing.
+	// A note has no such requirement, so SafeText keeps refusing them.
+	return safeRunes(p, true)
 }
 
 // SafeText reports whether s is free of the characters that make one rendered
@@ -171,7 +186,12 @@ func SafePath(p string) bool {
 // bidi overrides that reorder a rendered row") and strips them on the way to a
 // terminal (cmd/bdrive safeField). The path and the note, which reach further
 // than either, checked none of them.
-func SafeText(s string) bool {
+func SafeText(s string) bool { return safeRunes(s, false) }
+
+// safeRunes is the character rule itself, in one place. allowJoiners carves out
+// ZWNJ and ZWJ for paths only — see SafePath for why a filename needs them and
+// a note does not.
+func safeRunes(s string, allowJoiners bool) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 || s[i] == 0x7f {
 			return false
@@ -196,6 +216,11 @@ func SafeText(s string) bool {
 		//
 		// One rule instead of a list to keep extending: text that renders as
 		// nothing cannot be part of a name a reader is expected to check.
+		case r == 0x200c || r == 0x200d:
+			// ZWNJ / ZWJ: refused in free text, required in real filenames.
+			if !allowJoiners {
+				return false
+			}
 		case unicode.Is(unicode.Cf, r), r >= 0xe0000 && r <= 0xe01ef:
 			return false
 		// The two Unicode line breaks the class test above cannot reach: U+2028

@@ -50,10 +50,19 @@ func TestSec_Path_SafeTextRefusesTheZeroWidthCharactersThatHideADuplicate(t *tes
 				"of this function exists to make unreachable, and the same rendering property "+
 				"U+200E/U+200F are refused for.", p, tc.r, tc.name)
 		}
-		if SafePath(p) {
-			t.Errorf("SafePath(%q) = true: every ingest door (journalOps, cleanUploadPath, "+
-				"unsafeRel, the read ledger) delegates here, so this reaches the tree, the "+
-				"metadata store and the Share button.", p)
+		// SafePath deliberately diverges from SafeText for the two JOINERS.
+		// U+200C is orthographically required in Persian and several Indic
+		// scripts ("\u0645\u06cc\u200c\u0631\u0648\u0645" is a word, not an attack) and U+200D builds
+		// most multi-person emoji, so refusing them in a FILENAME does not
+		// harden a hub — it makes those users' files unsyncable. The
+		// confusability they buy is also already reachable without them:
+		// a Cyrillic homoglyph produces the identical "two rows, one reader"
+		// tree and is allowed, so this clause was paying an i18n cost for a
+		// partial mitigation. A note has no orthography, so SafeText above
+		// still refuses all four.
+		wantPath := tc.r == 0x200c || tc.r == 0x200d
+		if SafePath(p) != wantPath {
+			t.Errorf("SafePath(%q) = %v, want %v (U+%04X %s)", p, !wantPath, wantPath, tc.r, tc.name)
 		}
 	}
 

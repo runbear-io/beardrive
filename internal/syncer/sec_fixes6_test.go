@@ -94,9 +94,9 @@ func TestSec_Pull_AnInertOpCannotBuyAPeerTheRightToUndoAnAppliedOp(t *testing.T)
 		t.Errorf("control: a.txt vanished too — the rewrite dropped more than the targeted op")
 	}
 	if !secfx5Exists(d.Folder, "notes.md") {
-		t.Errorf("a peer un-published an op every device had already applied and notes.md was "+
-			"removed from the victim's working folder. No delete op names it, nothing is in "+
-			"History. Round 6's guard is `len(all) < len(prev)` — an op COUNT — so one inert "+
+		t.Errorf("a peer un-published an op every device had already applied and notes.md was " +
+			"removed from the victim's working folder. No delete op names it, nothing is in " +
+			"History. Round 6's guard is `len(all) < len(prev)` — an op COUNT — so one inert " +
 			"delete of a path that never existed pays for the removal of a real put.")
 	}
 	// And it stays gone: the local copy is now the rewritten object.

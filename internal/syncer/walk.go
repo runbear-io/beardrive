@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 // verdict is what the sync predicate decided about one entry on disk.
@@ -44,7 +45,8 @@ func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.Dir
 			// SkipUp, not Skip: this walk is the upload door, and a negation a
 			// TEAMMATE pushed must not widen what leaves this machine. See
 			// Filter.SkipUp.
-			if !d.Type().IsRegular() || config.ReservedPath(rel) || filter.SkipUp(rel) {
+			if !d.Type().IsRegular() || !journal.SafePath(rel) ||
+				config.ReservedPath(rel) || filter.SkipUp(rel) {
 				v = vSkipFile
 			} else {
 				v = vSync
