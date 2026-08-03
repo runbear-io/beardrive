@@ -71,17 +71,34 @@ func (r *RemoteSource) SignBlobPut(ctx context.Context, blob string, size int64,
 }
 
 func (r *RemoteSource) BlobSize(ctx context.Context, blob string) (int64, bool, error) {
+	o, ok, err := r.blobStat(ctx, blob)
+	return o.Size, ok, err
+}
+
+// blobStat is the stored object behind a blob: its size, its last-modified
+// time (zero on a backend that does not report one), and whether it is there.
+// One metadata call, no egress.
+func (r *RemoteSource) blobStat(ctx context.Context, blob string) (remote.Object, bool, error) {
 	key := "blobs/" + blob
 	objs, err := r.Backend.List(ctx, key) // full key as prefix: at most one hit
 	if err != nil {
-		return 0, false, err
+		return remote.Object{}, false, err
 	}
 	for _, o := range objs {
 		if o.Key == key {
-			return o.Size, true, nil
+			return o, true, nil
 		}
 	}
-	return 0, false, nil
+	return remote.Object{}, false, nil
+}
+
+// presignTTL is how long a presigned upload URL to this source stays valid —
+// the window in which a blob is writable by someone other than the hub.
+func (r *RemoteSource) presignTTL() time.Duration {
+	if r.PresignTTL > 0 {
+		return r.PresignTTL
+	}
+	return DefaultUploadTTL
 }
 
 // spool reads src to a temp file, rewound and ready to re-read, and reports

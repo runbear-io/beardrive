@@ -101,7 +101,7 @@ func (b *localBackend) List(_ context.Context, prefix string) ([]Object, error) 
 		if err != nil {
 			return nil
 		}
-		out = append(out, Object{Key: key, Size: info.Size()})
+		out = append(out, Object{Key: key, Size: info.Size(), Modified: info.ModTime()})
 		return nil
 	})
 	return out, err

@@ -102,7 +102,7 @@ func (b *s3Backend) List(ctx context.Context, prefix string) ([]Object, error) {
 		}
 		for _, o := range page.Contents {
 			key := strings.TrimPrefix(aws.ToString(o.Key), strip)
-			out = append(out, Object{Key: key, Size: aws.ToInt64(o.Size)})
+			out = append(out, Object{Key: key, Size: aws.ToInt64(o.Size), Modified: aws.ToTime(o.LastModified)})
 		}
 	}
 	return out, nil

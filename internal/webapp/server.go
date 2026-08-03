@@ -266,7 +266,12 @@ func (s *Server) projectVolume(id string) (Project, *volume, error) {
 	v, ok := s.vols[id]
 	if !ok {
 		v = &volume{
-			source:  &RemoteSource{Backend: remote.Prefixed(s.Root, id), Device: s.Device},
+			source: &RemoteSource{
+				Backend: remote.Prefixed(s.Root, id), Device: s.Device,
+				// The real TTL the presign doors hand out, so verify seals a
+				// blob no earlier than the last URL for it can expire.
+				PresignTTL: s.Upload.ttl(),
+			},
 			refresh: s.Refresh,
 		}
 		s.vols[id] = v
@@ -283,8 +288,17 @@ type RemoteSource struct {
 	// Device identifies this server in ops it journals for uploads. Required
 	// for uploads; irrelevant for reading.
 	Device Identity
+	// PresignTTL is the lifetime the hub gives a presigned upload URL. It is
+	// how long a blob stays writable by anyone but the hub, and therefore when
+	// verify may stop re-hashing it. Zero means DefaultUploadTTL — set it to
+	// the server's real UploadConfig.ttl(), or a longer configured TTL would
+	// seal an object that can still change.
+	PresignTTL time.Duration
 
 	upmu sync.Mutex // serializes read-modify-write of our own journal
+	// sealed holds the blobs this process has verified AND proved immutable.
+	// See verify.
+	sealed sync.Map // sha (string) → struct{}
 }
 
 // OpenBlob is the one way a blob's bytes leave the hub, and on a hub whose
@@ -295,17 +309,20 @@ type RemoteSource struct {
 // content under a sha256 it chose, and the viewer, share links, history and
 // every peer would then serve it.
 //
-// Verified on EVERY read, and skipped entirely on a backend that cannot
-// presign, where the write path already checked. It used to be once per blob
-// per process, on the premise that blobs are immutable — which is false on the
-// hub that needs the check: SignPut hands out a URL that stays valid for its
-// whole TTL and an object store accepts every PUT to it, not the first. So
-// uploading the honest bytes, letting one reader populate the cache, and then
-// replaying the same URL with hostile bytes served them under the reviewed
-// sha to the viewer, history, share links and every syncing device.
-// ponytail: costs one extra storage read per blob read on S3/GCS. A cache can
-// come back when it can be keyed on the stored object's identity (ETag /
-// generation), which the Backend interface does not carry today.
+// Skipped entirely on a backend that cannot presign, where the write path
+// already checked. It used to be once per blob per process, on the premise
+// that blobs are immutable — which is false on the hub that needs the check:
+// SignPut hands out a URL that stays valid for its whole TTL and an object
+// store accepts every PUT to it, not the first. So uploading the honest bytes,
+// letting one reader populate the cache, and then replaying the same URL with
+// hostile bytes served them under the reviewed sha to the viewer, history,
+// share links and every syncing device.
+//
+// Verifying on EVERY read closed that, and cost every S3/GCS hub 2x object-
+// store egress and a serialized full-object hash before the reader's first
+// byte — on every viewer open, render, download and /s/* hit. The cache is
+// back, keyed on the one thing that makes the premise TRUE rather than assumed:
+// see verify.
 func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser, error) {
 	if !blobRe.MatchString(sha) {
 		return nil, fmt.Errorf("invalid content reference")
@@ -316,8 +333,36 @@ func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser,
 	return r.Backend.Get(ctx, "blobs/"+sha)
 }
 
+// verify re-hashes a stored blob, unless this process has already proved that
+// nobody but the hub can write it any more.
+//
+// The proof is the presign TTL and the fact that BOTH presign doors —
+// handleStoreSign and handleUploadInit — refuse to sign a key that already
+// exists. So every presigned URL a blob ever gets was minted BEFORE its first
+// PUT, and expires at mint+TTL, which is earlier than firstPUT+TTL. Once the
+// stored object is older than the TTL, no live URL for it can exist and none
+// will ever be minted again: the hub is the only writer left, and the hub
+// hashes what it relays. That is when the object really is immutable, and only
+// then is the verification cached — for the life of the process, keyed on the
+// sha, no expiry needed.
+//
+// The age is read AFTER the hash on purpose. A replay lands a NEW object with
+// a new modification time, so an object that was rewritten mid-check reads as
+// seconds old and is not sealed.
+//
+// Two premises this rests on, both true today and both worth breaking loudly:
+// blobs are never deleted (remote.Backend has no delete at all — history keeps
+// every version forever), and PresignTTL is the real TTL the doors use. A
+// backend that does not report Modified never seals, which is the safe answer.
+//
+// ponytail: per-process, so the first read of each blob after a restart still
+// pays the full hash. Persisting it needs somewhere to record "the hub has
+// seen these bytes", which is a metadata-store change for a cost paid once.
 func (r *RemoteSource) verify(ctx context.Context, sha string) error {
 	if _, canSign := r.Backend.(remote.PutSigner); !canSign {
+		return nil
+	}
+	if _, ok := r.sealed.Load(sha); ok {
 		return nil
 	}
 	rc, err := r.Backend.Get(ctx, "blobs/"+sha)
@@ -332,6 +377,10 @@ func (r *RemoteSource) verify(ctx context.Context, sha string) error {
 	}
 	if hex.EncodeToString(h.Sum(nil)) != sha {
 		return fmt.Errorf("stored content does not hash to its key")
+	}
+	if o, ok, err := r.blobStat(ctx, sha); err == nil && ok &&
+		!o.Modified.IsZero() && time.Since(o.Modified) > r.presignTTL() {
+		r.sealed.Store(sha, struct{}{})
 	}
 	return nil
 }

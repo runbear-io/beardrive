@@ -96,7 +96,7 @@ func (b *gcsBackend) List(ctx context.Context, prefix string) ([]Object, error) 
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, Object{Key: strings.TrimPrefix(attrs.Name, strip), Size: attrs.Size})
+		out = append(out, Object{Key: strings.TrimPrefix(attrs.Name, strip), Size: attrs.Size, Modified: attrs.Updated})
 	}
 	return out, nil
 }

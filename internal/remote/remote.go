@@ -32,6 +32,10 @@ var ErrForbidden = errors.New("forbidden")
 type Object struct {
 	Key  string
 	Size int64
+	// Modified is when the store last wrote this object, when the backend
+	// reports it (S3, GCS) and the zero time when it does not. It is how the
+	// hub decides an object can no longer change — see RemoteSource.verify.
+	Modified time.Time
 }
 
 // SignedPut is a presigned direct-upload request: whoever holds the URL can

@@ -106,7 +106,7 @@ func (p *prefixed) List(ctx context.Context, prefix string) ([]Object, error) {
 		if !safeKey(rel) {
 			continue
 		}
-		out = append(out, Object{Key: rel, Size: o.Size})
+		out = append(out, Object{Key: rel, Size: o.Size, Modified: o.Modified})
 	}
 	return out, nil
 }
