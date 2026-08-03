@@ -88,82 +88,60 @@ test.afterAll(async ({ browser }) => {
 });
 
 /* ------------------------------------------------------------------ *
- * 1. U+2028 / U+2029 in a path — round 13's lead, closed in a browser.
+ * 1. U+2028 / U+2029 in a path — the ingest guard, and the measurement
+ *    that says why it is load-bearing.
  *
  * journal.SafeText refuses every category-Cf character on the stated rule
  * "text that renders as nothing cannot be part of a name a reader is
  * expected to check". U+2028 and U+2029 are categories Zl and Zp, outside
- * that class, so the hub accepts them in a path (Go half:
- * TestSec_Path_UnicodeLineSeparatorsAcceptedInAPath). Round 13 could not
- * assert VISUAL identity from Go. The browser can: measure the inked width
- * of the rendered name against a genuine "line sep.md" in the same list.
+ * that class, so the hub used to accept them in a path.
+ *
+ * This test ORIGINALLY measured what that cost, in a browser, because Go
+ * cannot: it uploaded a U+2028 name beside a genuine "line sep.md" and
+ * measured both rendered rows with Range.getClientRects() over the live
+ * text nodes. They came back byte-for-byte different and pixel-for-pixel
+ * identical:
+ *
+ *     70.9844 x 16, one line box, for both
+ *
+ * Two different files, one visible name, in the list a reader picks from
+ * and in the share audit an owner checks.
+ *
+ * That measurement can no longer be set up: SafeText now refuses both code
+ * points at ingest. The guard is the only thing between those numbers and
+ * the folder listing, so this test asserts the guard and keeps the numbers
+ * as the reason it matters. Relax SafeText and this goes red before the
+ * rendering collision returns.
  * ------------------------------------------------------------------ */
 test("TestSec_Listing_UnicodeLineSeparatorRendersIdenticallyToASpace", async ({ page }) => {
   await login(page);
   const dir = `${HOSTILE}-ls`;
   const SPACE = "line sep.md";
-  const LS = "line sep.md";
-  const PS = "line sep.md";
+  const LS = "line\u2028sep.md";
+  const PS = "line\u2029sep.md";
   // The payloads really are the code points this test claims to be about.
   expect([...LS].map((c) => c.codePointAt(0))).toContain(0x2028);
   expect([...PS].map((c) => c.codePointAt(0))).toContain(0x2029);
 
+  // Control: the ASCII-space sibling IS accepted, so a refusal below is the
+  // character being judged and not a broken fixture.
   await upload(page, `${dir}/${SPACE}`, "space\n");
-  await upload(page, `${dir}/${LS}`, "line separator\n");
-  await upload(page, `${dir}/${PS}`, "paragraph separator\n");
-  // A plain ASCII sibling nobody could confuse: the render control.
-  await upload(page, `${dir}/zz-control.md`, "control\n");
 
-  await page.goto(`/${projectId}/${dir}`);
-  await page.waitForSelector(".dl-items");
-  // PROOF OF RENDER: the control row is on screen with its own text. If the
-  // pane were empty or still loading, this fails before any measurement.
-  await expect(page.locator(`.dl-row[title="${dir}/zz-control.md"] .dl-name`)).toHaveText("zz-control.md");
-  await expect(page.locator(".dl-row")).toHaveCount(4);
-
-  // Measured by the browser's layout engine over the live text nodes.
-  const geo = await page.evaluate(() =>
-    [...document.querySelectorAll<HTMLElement>(".dl-row")].map((row) => {
-      const span = row.querySelector(".dl-name")!;
-      const r = document.createRange();
-      r.selectNodeContents(span);
-      const b = r.getBoundingClientRect();
-      return {
-        path: row.getAttribute("title")!,
-        codePoints: [...(span.textContent || "")].map((c) => c.codePointAt(0)!),
-        inkWidth: +b.width.toFixed(4),
-        inkHeight: +b.height.toFixed(4),
-        lineBoxes: r.getClientRects().length,
-      };
-    }),
-  );
-  const by = (p: string) => geo.find((g) => g.path === `${dir}/${p}`)!;
-  const space = by(SPACE);
-  const ls = by(LS);
-  const ps = by(PS);
-  const control = by("zz-control.md");
-
-  // Control on the measurement itself: two genuinely different names must
-  // measure differently, or the instrument is broken and everything below is
-  // meaningless.
-  expect(
-    control.inkWidth,
-    "the width measurement cannot tell 'zz-control.md' from 'line sep.md' — the instrument is broken",
-  ).not.toBe(space.inkWidth);
-  // And the payload really did survive ingest as the separator, not a space.
-  expect(ls.codePoints, "the U+2028 path was normalized on the way in").toContain(0x2028);
-  expect(ps.codePoints, "the U+2029 path was normalized on the way in").toContain(0x2029);
-
-  for (const [name, got] of [
-    ["U+2028 LINE SEPARATOR", ls],
-    ["U+2029 PARAGRAPH SEPARATOR", ps],
+  for (const [name, payload] of [
+    ["U+2028 LINE SEPARATOR", LS],
+    ["U+2029 PARAGRAPH SEPARATOR", PS],
   ] as const) {
+    const init = await api(page, "post", `/api/p/${projectId}/upload/init`, {
+      path: `${dir}/${payload}`,
+      sha256: crypto.createHash("sha256").update("x\n").digest("hex"),
+      size: 2,
+    });
     expect(
-      { w: got.inkWidth, h: got.inkHeight, lines: got.lineBoxes },
-      `${name}: the folder row for ${JSON.stringify(got.path)} renders to exactly the same glyph run as ` +
-        `${JSON.stringify(space.path)} — same inked width, same height, same single line box. Two different ` +
-        `files, one visible name, in the list a reader picks from.`,
-    ).not.toEqual({ w: space.inkWidth, h: space.inkHeight, lines: space.lineBoxes });
+      init.status,
+      `${name} was accepted into a path. It paints to exactly the same glyph run as an ASCII space ` +
+        `(70.9844 x 16, one line box, measured in Chromium), so the folder listing and the share ` +
+        `audit would show one visible name for two different files.`,
+    ).not.toBe(200);
   }
 });
 
@@ -291,62 +269,31 @@ test("TestSec_NewProjectDialog_TypedNameClosesThePastePromptClause", async ({ pa
 });
 
 /* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *
  * 4. SharesTable, driven — the other surface round 12 cleared by reading.
  *
- * This is the audit view an owner uses to answer "what have we made
- * public?". It renders a peer-written path three times: the link text, the
- * title tooltip and the Revoke button's accessible name.
+ * The org's public-link audit is where an owner answers "what have we made
+ * public?". This test ORIGINALLY minted two shares for two different files
+ * whose names differed only by U+2028 vs an ASCII space, and measured both
+ * rendered rows:
+ *
+ *     178.6719 x 14, one line box, for both
+ *
+ * — the audit showed one name for two files, and the title tooltip an owner
+ * would hover to disambiguate said the same thing for both.
+ *
+ * That collision is now refused at ingest (see test 1), so the fixture
+ * cannot be built. The reachable half of the same class — a strong-RTL
+ * LETTER, which cannot be refused without refusing Hebrew filenames — is
+ * covered by TestSec_Listing_StrongRTLLetterReordersARenderedRow and fixed
+ * in style.css with unicode-bidi: isolate-override, which was chosen over
+ * isolate / plaintext / <bdi> because only isolate-override fixes
+ * intra-string reordering.
+ *
+ * Kept as a skip rather than deleted so the scoreboard's row 17 entry
+ * resolves to something, and so the numbers above survive.
  * ------------------------------------------------------------------ */
-test("TestSec_SharesTable_AuditRowCanBeTwoDifferentFiles", async ({ page }) => {
-  await login(page);
-  const dir = `${HOSTILE}-share`;
-  const SPACE = `${dir}/line sep.md`;
-  const LS = `${dir}/line sep.md`;
-  await upload(page, SPACE, "space\n");
-  await upload(page, LS, "line separator\n");
-  for (const p of [SPACE, LS]) {
-    const r = await api(page, "post", `/api/p/${projectId}/shares`, { path: p });
-    expect(r.status, r.body).toBe(200);
-  }
-
-  await page.goto(`/${projectId}/settings`);
-  await page.waitForSelector(".shares-table");
-  // PROOF OF RENDER: two rows really are painted, with links and Revoke controls.
-  await expect(page.locator(".shares-table tbody tr")).toHaveCount(2);
-  await expect(page.locator(".shares-table a.ai-main").first()).toBeVisible();
-  await expect(page.locator(".shares-table .ai-del").first()).toBeVisible();
-
-  // Measured, not string-compared: the two textContents obviously DIFFER as
-  // strings (one holds U+2028) — that is exactly the point. What an auditor
-  // sees is the painted glyph run, so that is what gets compared. (The first
-  // cut of this test compared textContent and passed against the live hole.)
-  const cells = await page.locator(".shares-table a.ai-main").evaluateAll((as) =>
-    as.map((a) => {
-      const r = document.createRange();
-      r.selectNodeContents(a);
-      const b = r.getBoundingClientRect();
-      return {
-        text: a.textContent || "",
-        title: a.getAttribute("title") || "",
-        href: a.getAttribute("href") || "",
-        ink: [+b.width.toFixed(4), +b.height.toFixed(4), r.getClientRects().length].join("x"),
-      };
-    }),
-  );
-  // The hrefs differ, so these really are two distinct shares of two distinct
-  // files — the rendered row is the only thing that collapses them.
-  expect(new Set(cells.map((c) => c.href)).size, "the fixture made one share, not two").toBe(2);
-  // And the underlying strings differ, so an equal ink measurement below is a
-  // rendering collision and not two identical rows.
-  expect(new Set(cells.map((c) => c.text)).size, "the two shares carry the same path string").toBe(2);
-
-  expect(
-    new Set(cells.map((c) => c.ink)).size,
-    `both public-link rows paint the identical glyph run (${cells[0].ink}) for two different files. An owner ` +
-      `auditing "what have we made public?" is shown one name twice, and the title tooltip they would hover ` +
-      `to check says the same thing (${JSON.stringify(cells.map((c) => c.title))}).`,
-  ).toBe(2);
-});
+test.skip("TestSec_SharesTable_AuditRowCanBeTwoDifferentFiles", async () => {});
 
 /* ------------------------------------------------------------------ *
  * 6. The device-approval page, as a rendered document.
