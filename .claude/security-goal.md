@@ -1644,11 +1644,32 @@ New from round 4 — consequences of that round's own fixes, named on purpose:
   `device.json` id, so after the second account signs in its pushes are refused
   with 403 and no CLI command explains it. Both want a real per-project device
   claim, which is new state.
-- **Presigned blobs are verified on READ, once per blob per hub process.** The
-  bytes never pass through the hub, so nothing else can. This costs one extra
-  storage read per blob per process on S3/GCS, the poisoned object still *sits*
-  in storage (it is simply never served), and a restart re-verifies. A
-  persisted verified-set is the upgrade.
+- **Presigned blobs are verified on READ, until the object is provably
+  immutable.** The bytes never pass through the hub, so nothing else can check
+  them. Round 14 made this run on EVERY read, which cost every S3/GCS hub 2x
+  object-store egress and a full-object hash before the reader's first byte
+  (measured 2.41 ms -> 0.39 ms and 2 -> 1 storage reads per 4 MiB read,
+  `BenchmarkBlobRead`). It is now cached again, but only on a PROOF rather than
+  an assumption: both presign doors refuse to sign a key that already exists,
+  so every URL a blob ever gets was minted before its first PUT and dies at
+  mint+`Upload.ttl()`; past that age no live URL can exist and none will be
+  minted, and the hub — which hashes what it relays — is the only writer left.
+  `verify` reads the object's age AFTER hashing, so a replay mid-check reads as
+  seconds old and is not sealed. Two premises hold it up and would break it
+  loudly if they changed: **blobs are never deleted** (`remote.Backend` has no
+  delete) and `RemoteSource.PresignTTL` is the TTL the doors actually use.
+  Residuals unchanged: the poisoned object still *sits* in storage, the seal is
+  per-process so a restart re-hashes once per blob, and a persisted
+  verified-set is still the upgrade.
+  **NOT done — binding the content hash into the presigned URL.** GCS cannot:
+  `x-goog-hash` takes only crc32c and md5, and the md5 would be declared by the
+  same client that declares the sha, so a chosen-prefix collision defeats it.
+  On S3 the SDK hoists `ChecksumSHA256` into the query string rather than
+  `SignedHeader` — inside the signature, but whether S3 *enforces* a hoisted
+  checksum, and whether an unsigned request header would override it, needs a
+  live bucket to answer. Left out rather than shipped untested, since with the
+  seal it would add no security `verify` is not already providing in the only
+  window it applies to.
 - **`/store/sign` books the DECLARED size against the quota.** A device that
   signs and never uploads is charged; one that uploads fewer bytes is
   over-charged. The direction is safe but it is not reconciliation, and
@@ -1667,8 +1688,40 @@ New from round 4 — consequences of that round's own fixes, named on purpose:
   harmless for `Replay`, which reads none of them.
 - **`requestIP` (the CLI device grant) no longer honours `X-Forwarded-For`.**
   Behind a proxy the recorded address is now the proxy's rather than a value
-  the client chose. Everything with a `*Server` uses `s.clientIP`, which
-  respects `trust_proxy`.
+  the client chose. Everything with a `*Server` uses `s.clientIP`.
+- **`clientIP` trusts `X-Forwarded-For` by PEER, not by configuration.** Round
+  14 gated it on the opt-in `trust_proxy`, which was a day-one outage for every
+  hub behind nginx / Caddy / Fly / Cloud Run that upgraded without editing its
+  config: the peer is the proxy, so ALL users shared one 10/min login bucket
+  and share links capped hub-wide at 120/min, with no log line saying why. The
+  header is now honoured when the connection comes from loopback or a private
+  address (`net.IP.IsLoopback() || IsPrivate()`) — where a sidecar, a container
+  network and a cloud runtime's internal hop all sit — and still ignored from a
+  public peer, which now logs once. `trust_proxy` remains the override for a
+  proxy on a public address. **The widening this accepts**: on a hub whose
+  private network an attacker can already reach, that attacker can pick its own
+  rate-limit bucket. Which hop is taken is unchanged (last element of the last
+  field line) and rounds 13/14's tests still pin it;
+  `TestClientIPTrustsLocalProxyWithoutConfig` pins the new peer rule.
+- **Registry re-reads are gated on a change token, not removed.** Every
+  registry still re-reads its store before every authorization decision — the
+  floor rounds 12-14 built — but asks `Versioned` first: one `os.Stat` (file)
+  or one lookup on a per-registry `meta_version` counter bumped inside every
+  write transaction (SQL). A repo that cannot answer, or errors, counts as
+  CHANGED, so the fallback is the unconditional re-read. Not a TTL: a moved
+  token is always followed by the full re-read. And `proj()` no longer resolves
+  the project twice (`projectPermOf`). Measured: one resolve + permission check
+  at 5k projects went 14.14 ms -> 3.9 us (file) and 10.86 ms -> 21.5 us
+  (sqlite), and is now flat in project count.
+  **The file backend does NOT become multi-process-safe from this.** Every
+  write is still read-modify-write-rename, so two processes can still lose each
+  other's records outright — that is unchanged and unfixed. On top of it, the
+  mtime+size token would miss two processes writing the same byte count within
+  one filesystem timestamp tick (a theoretical window at the nanosecond mtimes
+  every supported filesystem has, but a real one on a coarse-timestamp FS).
+  `refresh` narrows the stale-read race; it does not close it. SQL is the fix,
+  and `TestVersionGateSeesAnotherProcessWrite` runs on file, sqlite and
+  Postgres.
 - **The SQL device table was replaced, not altered.** `device_rows` is keyed
   `(user_email, id)`; the old `devices` table is left in place and its rows are
   copied once. Nothing reads `devices` any more.

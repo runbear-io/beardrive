@@ -53,9 +53,12 @@ classDiagram
     class RemoteSource {
         +Backend remote.Backend
         +Device Identity
+        +PresignTTL time.Duration
         +Remove(ctx, path, who, note)
         +OpenBlob(ctx, sha)
-        -verify(ctx, sha) re-hash on read
+        -verify(ctx, sha) re-hash until sealed
+        -blobStat(ctx, blob) remote.Object
+        -sealed sync.Map sha→proved immutable
         -loadSourcedOps(ctx) []sourcedOp
         -appendOp(ctx, op)
     }
@@ -64,7 +67,7 @@ classDiagram
         +From journal key's device
     }
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
-    note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes on every read whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it"
+    note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
     class Uploader {
         <<interface>>
         +Upload(ctx, path, r, size, who, note)
@@ -97,7 +100,7 @@ classDiagram
         +SignPut(ctx, key, size, ttl)
     }
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
-    note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too"
+    note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too. Object carries Modified (S3 LastModified, GCS Updated, file mtime; zero where the backend has none) — RemoteSource.verify reads it to decide when a blob can no longer be rewritten by a presigned URL"
 
     class AuthProvider {
         <<interface>>
@@ -409,6 +412,19 @@ classDiagram
         +Load() +Put +Delete(user, id)
     }
 
+    class Versioned {
+        <<optional interface>>
+        +Version() (string, error)
+    }
+    note for Versioned "Every registry re-reads its whole store before every authorization decision — a correctness floor, not a cache. This is that read made cheap: one os.Stat (file) or one lookup on a per-registry meta_version counter bumped inside every write transaction (SQL). A repo that cannot answer, or errors, counts as CHANGED, so the fallback is the unconditional re-read. Not a TTL: a moved token is always followed by the full re-read"
+
+    class versionGate {
+        <<per registry>>
+        -token, valid
+        +stale(repo) token, bool
+        +fresh(token)
+    }
+
     class rowScopedProjectRepo {
         <<optional interface>>
         +PutMeta(p)
@@ -471,6 +487,14 @@ classDiagram
     DeviceRegistry o-- DeviceRepo
     ReadLedger o-- ReadRepo
 
+    BuiltinAuth *-- versionGate
+    ProjectDB *-- versionGate
+    OrgDB *-- versionGate
+    ShareDB *-- versionGate
+    DeviceRegistry *-- versionGate
+    versionGate ..> Versioned : asks before every reload
+    fileMetaStore ..> Versioned : mtime + size
+    sqlMetaStore ..> Versioned : meta_version row per registry
     fileMetaStore ..> rowScopedProjectRepo : its project and org repos also implement
     sqlMetaStore ..> rowScopedProjectRepo : its project and org repos also implement
     fileMetaStore ..> rowScopedOrgRepo
