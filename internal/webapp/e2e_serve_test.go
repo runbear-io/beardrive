@@ -271,6 +271,9 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 		{"guide.md", ReadKindHuman, "bob@x.io", 5},
 		{"guide.md", ReadKindAgent, "seed", 9},
 		{"notes/readme.md", ReadKindAgent, "seed", 2},
+		// Read history for the file the seed deletes above: heat rows outlive
+		// their file, and the Dashboard must say so rather than drop them.
+		{"scratch.md", ReadKindHuman, "alice@x.io", 4},
 	} {
 		stats = append(stats, ReadStat{Project: projectID, Path: rd.path, Day: day,
 			Kind: rd.kind, Actor: rd.actor, Count: rd.n, Last: now})

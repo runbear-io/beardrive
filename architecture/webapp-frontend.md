@@ -90,6 +90,7 @@ classDiagram
         +runs.ts groupRuns runFileCount
         +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
         +heat.ts ageRange isFlatRange ageSpanLabel (treemap scale)
+        +heat.ts orphanPaths (reads whose file left the tree)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +utils.ts
     }

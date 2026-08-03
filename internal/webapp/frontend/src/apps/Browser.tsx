@@ -283,6 +283,24 @@ export default function Browser(props: {
     const items: PaletteItem[] = [];
     const add = (icon: string, label: string, kind: string, run: () => void) =>
       items.push({ icon, label, kind, run });
+    // The project's own destinations, first and unconditional: on a path that
+    // doesn't resolve the tree-derived entries are gone and the switcher lists
+    // only OTHER projects, so without these the palette — the natural escape
+    // hatch on a dead route — is the one surface with no way back. An empty
+    // query scores everything 0 and the sort is stable, so first here is first
+    // on screen. Panels aren't routes and only close on a location CHANGE, so
+    // picking the page you're already on needs the explicit close.
+    if (hub && project) {
+      const pid = project.id;
+      const go = (to: string) => () => {
+        props.onClosePanel?.();
+        navigate(to);
+      };
+      add("folder", "Go to project root", "action", go("/" + pid));
+      add("dashboard", "Dashboard", "action", go(urlForView("dashboard", pid)));
+      add("terminal", "Installation", "action", go(urlForView("install", pid)));
+      add("gear", "Settings", "action", go(urlForView("settings", pid)));
+    }
     if (hub && project && path) {
       if (isFile) add("share", "Share: " + path, "action", shareNow);
       add("hist", "History: " + path, "action", historyNow);
@@ -302,7 +320,7 @@ export default function Browser(props: {
     for (const d of dirIndex.keys()) add("folder", d, "folder", () => openPath(d));
     for (const f of flatFiles) add("doc", f.path, "file", () => openPath(f.path));
     return items;
-  }, [hub, project, path, isFile, config.auth?.enabled, dirIndex, flatFiles, props.projects, shareNow, historyNow, openHistory, openPath]);
+  }, [hub, project, path, isFile, config.auth?.enabled, dirIndex, flatFiles, props.projects, props.onClosePanel, shareNow, historyNow, openHistory, openPath]);
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
   useEffect(() => {
@@ -334,6 +352,7 @@ export default function Browser(props: {
         installHref={project ? urlForView("install", project.id) : undefined}
         onOpenFile={openPath}
         onOpenFolder={openPath}
+        onOpenHistory={openHistory}
         isFolder={isFolderFn}
       />
     );
@@ -432,6 +451,7 @@ export default function Browser(props: {
             loading={!loaded}
             onOpenFile={openPath}
             onOpenFolder={openPath}
+            onOpenHistory={openHistory}
             isFolder={isFolderFn}
           />
         </div>
