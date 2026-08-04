@@ -42,6 +42,28 @@ export async function copyText(text: string): Promise<boolean> {
   return false;
 }
 
+/* Last project opened on this browser. localStorage throws in Safari's
+   private mode and wherever storage is disabled, so both sides swallow — a
+   preference is never worth a broken page. Origin-scoped already, so two
+   hubs never share an answer. */
+const LAST_PROJECT = "bdrive.lastProject";
+
+export function lastProject(): string {
+  try {
+    return localStorage.getItem(LAST_PROJECT) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function rememberProject(id: string) {
+  try {
+    localStorage.setItem(LAST_PROJECT, id);
+  } catch {
+    /* preference only */
+  }
+}
+
 /* Who made a change, as history renders it everywhere: the account, with
    the display name in front when the server knows one, falling back to the
    git/OS identity of an offline device. */

@@ -199,3 +199,34 @@ test("new-project modal cancels on Escape", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(page.locator(".modal-input")).toHaveCount(0);
 });
+
+// BEA-75. Landing on "/" used to open whatever project sorts first, so a
+// bookmark or a new tab threw away wherever you actually were. Both specs
+// create or read state, so they sit at the end of the file with the other
+// mutating ones.
+test("landing returns to the last project opened, not the first one", async ({ page }) => {
+  await login(page);
+  // Named to sort last, so it can never be projects[0] — that is what makes
+  // the assertion mean anything.
+  const made = (await (await page.request.post("/api/projects", { data: { name: "zz-last" } })).json())
+    .project;
+  await page.goto("/" + made.id);
+  await expect(page.locator("#project-select")).toContainText("zz-last");
+  await page.goto("/"); // no project in the URL, the way a bookmark arrives
+  await page.waitForURL("/" + made.id);
+  await expect(page.locator("#project-select")).toContainText("zz-last");
+});
+
+test("a remembered project that is gone falls back silently", async ({ page }) => {
+  await login(page);
+  const errors: Error[] = [];
+  page.on("pageerror", (e) => errors.push(e));
+  await page.addInitScript(() =>
+    localStorage.setItem("bdrive.lastProject", "00000000-0000-0000-0000-000000000000"),
+  );
+  await page.goto("/");
+  await page.waitForURL(/\/[0-9a-f-]{36}$/);
+  await expect(page.locator("#project-select")).toContainText(/.+/);
+  await expect(page.locator("#toast.show, [data-sonner-toast]")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});

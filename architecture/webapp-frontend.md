@@ -23,6 +23,7 @@ classDiagram
     class HubApp {
         project list, org walls
         admin panels, invites
+        remembers last opened project (localStorage)
     }
     class VolumeApp {
         thin wrapper: one volume
