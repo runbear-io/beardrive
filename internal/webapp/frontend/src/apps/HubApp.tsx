@@ -15,6 +15,7 @@ import { ConnectGuide } from "../components/ConnectGuide";
 import { EmptyState } from "../components/EmptyState";
 import { EXISTING, NewProjectDialog } from "../components/NewProjectDialog";
 import { toast } from "../toast";
+import { lastProject, rememberProject } from "../util";
 import Browser from "./Browser";
 
 export default function HubApp({ config }: { config: ServerConfig }) {
@@ -87,11 +88,17 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     />
   ) : null;
 
+  // Precedence: the URL wins, then an org joined this page-load, then the
+  // project this browser last opened, then whatever sorts first. Looking the
+  // remembered id up in `projects` is the whole "deleted / access revoked /
+  // different account signed in" story — it simply doesn't match and the
+  // fallback takes over, with nothing on screen to say so.
   const current: Project | null = useMemo(() => {
     if (!projects) return null;
     return (
       projects.find((p) => p.id === route.project) ||
       (joinedOrgId && projects.find((p) => p.org === joinedOrgId)) ||
+      projects.find((p) => p.id === lastProject()) ||
       projects[0] ||
       null
     );
@@ -101,6 +108,9 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     document.title = current
       ? current.name + " — BearDrive"
       : config.brand || "BearDrive";
+    // Fires on exactly the events that matter — sidebar, deep link, palette,
+    // post-create navigate — so the memory needs no subscription of its own.
+    if (current) rememberProject(current.id);
   }, [current, config]);
 
   if (joinToken) {
