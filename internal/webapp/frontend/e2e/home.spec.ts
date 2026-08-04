@@ -217,12 +217,68 @@ test("per-file history: a binary version says so instead of diffing", async ({ p
   await expect(dv.locator("a", { hasText: "download this version" })).toBeVisible();
 });
 
-test("the whole-project feed carries no diff controls", async ({ page }) => {
+// BEA-58: the diff shipped, but only the per-file page passed the prop, so a
+// reviewer who opened the whole-project feed first concluded the product had
+// no diff at all. Every feed offers it now — and the assertion that matters is
+// that a row in a MIXED-path feed diffs against its own path's predecessor.
+
+test("the whole-project feed diffs a row against its own predecessor", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/history`);
-  await expect(page.locator(".history .hentry").first()).toBeVisible();
-  await expect(page.locator(".history .hdiff-btn")).toHaveCount(0);
+  // Never nth(0): the newest row is the run's, not guide.md's.
+  const row = page.locator(".history > .hentry", { hasText: "guide.md" }).first();
+  await expect(row).toContainText("edited");
+  await row.locator(".hdiff-btn").click();
+  const dv = row.locator(".dv");
+  await expect(dv).toBeVisible();
+  // guide.md's own first version — not whichever row sits below it in the feed.
+  await expect(dv.locator(".dv-rm")).toContainText("First version of the guide.");
+  await expect(dv.locator(".dv-ins")).toContainText("Second version of the guide, with more detail.");
+  await expect(dv.locator(".dv-add")).toHaveText("+1");
+  await expect(dv.locator(".dv-del")).toHaveText("−1");
+  // Expanding is not navigating.
+  await expect(page).toHaveURL(`/${pid}/history`);
+
+  // A delete has no content to diff, and says nothing at all — not "first
+  // version".
+  const del = page.locator(".hentry.delete", { hasText: "scratch.md" }).first();
+  await expect(del.locator(".hdiff-btn")).toHaveCount(0);
+  await expect(del.locator(".hdiff-none")).toHaveCount(0);
+  // index.md has one version only, so it says so rather than rendering an
+  // empty diff.
+  const only = page.locator(".history > .hentry", { hasText: "index.md" }).first();
+  await expect(only.locator(".hdiff-btn")).toHaveCount(0);
+  await expect(only.locator(".hdiff-none")).toContainText("nothing to compare against");
+  await expect(only.locator(".dv")).toHaveCount(0);
+
+  // Rows inside a run card get it too: run.idx[k] indexes back into the flat
+  // list, so the card's rows compare against their own paths — the rewritten
+  // file against its 24h-old version, and the file the run CREATED against
+  // nothing.
+  const inCard = page.locator(".hrun-body .hentry", { hasText: "notes/readme.md" }).first();
+  await inCard.locator(".hdiff-btn").click();
+  await expect(inCard.locator(".dv-rm")).toContainText("Nested folder content.");
+  await expect(inCard.locator(".dv-ins")).toContainText("Rewritten during the agent run.");
+  const created = page.locator(".hrun-body .hentry", { hasText: "runbook.md" }).first();
+  await expect(created.locator(".hdiff-btn")).toHaveCount(0);
+  await expect(created.locator(".hdiff-none")).toContainText("nothing to compare against");
+});
+
+test("the folder feed diffs a row against its own predecessor", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history/notes`);
+  // The run touched one file inside notes/, so it is a bare row here, not a
+  // card. Its predecessor is the 24h-old version, further down this feed.
+  const row = page.locator(".history > .hentry", { hasText: "notes/readme.md" }).first();
+  await row.locator(".hdiff-btn").click();
+  const dv = row.locator(".dv");
+  await expect(dv).toBeVisible();
+  await expect(dv.locator(".dv-rm")).toContainText("Nested folder content.");
+  await expect(dv.locator(".dv-ins")).toContainText("Rewritten during the agent run.");
+  // Expanding is not navigating.
+  await expect(page).toHaveURL(`/${pid}/history/notes`);
 });
 
 test("folder listing's Full history goes to the subtree feed", async ({ page }) => {
