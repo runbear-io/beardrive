@@ -89,9 +89,6 @@ export function HistoryView(props: {
     />
   );
   if (!data) return bar ? <div className="history">{bar}</div> : null;
-  // Diffs are a per-file affair: the subtree feed mixes paths, and each row
-  // there would need its own predecessor lookup for no review benefit.
-  const perFile = !!target && !isFolder(target);
   // Entries arrive newest-first, so a row's predecessor is the next entry
   // below it on the same path that still has content. This keeps scanning the
   // flat list, never a group: it is a per-path lookup, and grouping must not
@@ -144,7 +141,6 @@ export function HistoryView(props: {
             run={item.run}
             onOpen={props.onOpen}
             apiBase={apiBase}
-            perFile={perFile}
             prevBlob={prevBlob}
             restoreSha={restoreSha}
             restore={restore}
@@ -156,7 +152,12 @@ export function HistoryView(props: {
             entry={entries[item.i]}
             apiBase={apiBase}
             onOpen={props.onOpen}
-            diff={perFile ? { apiBase, prev: prevBlob(item.i) } : undefined}
+            /* Every feed, not just the per-file one (BEA-58): prevBlob is a
+               per-path lookup, so a mixed-path feed diffs each row against its
+               own predecessor. A review-focused reader opens the whole-project
+               feed first, and finding no diff there read as "this product has
+               none". */
+            diff={{ apiBase, prev: prevBlob(item.i) }}
             restore={restore}
             restoreSha={restoreSha(item.i)}
             /* no `remove`: an add outside a run card isn't attributable to a
@@ -185,7 +186,6 @@ function RunGroup({
   run,
   onOpen,
   apiBase,
-  perFile,
   prevBlob,
   restoreSha,
   restore,
@@ -194,7 +194,6 @@ function RunGroup({
   run: Run;
   onOpen: (path: string, version?: string) => void;
   apiBase: string;
-  perFile: boolean;
   prevBlob: (i: number) => string | undefined;
   restoreSha: (i: number) => string | undefined;
   restore?: RestoreAction;
@@ -240,7 +239,10 @@ function RunGroup({
               entry={e}
               apiBase={apiBase}
               onOpen={onOpen}
-              diff={perFile ? { apiBase, prev: prevBlob(run.idx[k]) } : undefined}
+              /* run.idx[k] indexes back into the flat list, so a row inside a
+                 card compares against its own predecessor, not its neighbour
+                 in the card. */
+              diff={{ apiBase, prev: prevBlob(run.idx[k]) }}
               restore={restore}
               remove={remove}
               restoreSha={restoreSha(run.idx[k])}

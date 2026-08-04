@@ -61,14 +61,14 @@ export function HistoryRow({
 }: {
   entry: HistoryEntry;
   // Its own prop, not something nested in `diff`: the version controls below
-  // belong on every feed, and `diff` is per-file-only by design.
+  // belong on every row that has content, diff or no diff.
   apiBase: string;
   // The row's own version (e.blob) rides along: a row is an address for the
   // bytes it describes, not a shortcut to whatever the file says now.
   onOpen: (path: string, version?: string) => void;
-  // Present only in the per-file history view, where "the previous version"
-  // is unambiguous. `prev` is the sha of the entry before this one on the
-  // same path; absent means this is the first version.
+  // Present in every paged history feed. `prev` is the sha of the entry
+  // before this one ON THE SAME PATH; absent means there is no earlier
+  // version in the loaded window.
   diff?: { apiBase: string; prev?: string };
   restore?: RestoreAction;
   // Only ever offered on an add inside a run card, where "this run created
