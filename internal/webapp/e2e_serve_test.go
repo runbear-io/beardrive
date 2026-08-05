@@ -288,6 +288,10 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 		// Read history for the file the seed deletes above: heat rows outlive
 		// their file, and the Dashboard must say so rather than drop them.
 		{"scratch.md", ReadKindHuman, "alice@x.io", 4},
+		// The only share reads in the seed, and deliberately on a path no
+		// other assertion counts: the Dashboard's share lens has to isolate
+		// exactly one file, which it can't prove if the file has other reads.
+		{"notes/deep/topic.md", ReadKindShare, "tok-e2e/203.0.113.7", 3},
 	} {
 		stats = append(stats, ReadStat{Project: projectID, Path: rd.path, Day: day,
 			Kind: rd.kind, Actor: rd.actor, Count: rd.n, Last: now})

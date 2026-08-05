@@ -12,7 +12,13 @@ import { revokeShare, shareDetail } from "./SharesTable";
 
    Anyone with read sees the banner (a member should know the folder they
    rely on is exposed); Revoke is offered where the Share button already is,
-   and the server checks again anyway. */
+   and the server checks again anyway.
+
+   Same decision, one surface wider: project Settings shows a read-only member
+   every active public link and who created it (BEA-69 — the owner's call,
+   benchmarked against Google Drive showing a viewer who has access). Neither
+   this banner nor that list is a leak to hide later; both routes stay
+   PermRead. */
 export function ShareBanner({
   shares,
   canRevoke,

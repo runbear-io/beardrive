@@ -524,8 +524,6 @@ const sharedMarkdownShell = `<!doctype html><html lang="en"><head><meta charset=
 body{font:16px/1.7 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",sans-serif;color:#24292f;
 max-width:720px;margin:0 auto;padding:52px 24px 96px}
 a{color:#b26a00}
-@media (prefers-color-scheme: dark){body{background:#0a0b0d;color:#c6cbd3}
-a{color:#ffcf85}code,pre{background:#15171b}h1,h2,h3{color:#f4f6f9}}
 h1,h2,h3{line-height:1.25;letter-spacing:-.018em}
 pre{padding:12px;border-radius:8px;overflow-x:auto;background:#f6f8fa}
 code{background:#f6f8fa;padding:2px 5px;border-radius:4px;font-size:.9em}
@@ -542,7 +540,22 @@ pre{max-width:100%%}
 footer.bdrive{margin-top:64px;padding-top:14px;border-top:1px solid #d0d7de;font-size:12.5px;color:#57606a}
 footer.bdrive a{color:inherit}
 .updated{font-size:12.5px;color:#57606a;margin-bottom:28px}
-@media (prefers-color-scheme: dark){footer.bdrive{border-color:#3a3a44;color:#888}.updated{color:#888}}
+/* Dark theme LAST: these rules sit at the same specificity as the light ones
+   above, so source order is the whole fix — a dark block placed earlier loses
+   to every light rule that follows it. Values are the hub's @theme tokens
+   (frontend/src/tw.css), never hand-picked, so the two surfaces agree. */
+@media (prefers-color-scheme: dark){
+body{background:#0a0b0d;color:#eef0f3}
+a{color:#ffcf85}
+h1,h2,h3{color:#eef0f3}
+pre,code{background:#15171b}
+blockquote{border-left-color:rgba(255,255,255,.07);color:#9aa0a9}
+td,th{border-color:rgba(255,255,255,.07)}
+table.frontmatter{background:#15171b;color:#9aa0a9}
+table.frontmatter th,table.frontmatter td{border-bottom-color:rgba(255,255,255,.07)}
+table.frontmatter th{color:#868b93}
+footer.bdrive{border-top-color:rgba(255,255,255,.07);color:#868b93}
+.updated{color:#868b93}}
 </style></head><body>%s%s
 <footer class="bdrive">Shared with <a href="https://github.com/runbear-io/beardrive" rel="noopener">BearDrive</a> — synced files for AI agent teams</footer>
 </body></html>`

@@ -141,6 +141,13 @@ func permDenied(level string) string {
 // handleProjectPerms returns the project's permission settings: the default
 // level, the caller's own effective level, and the explicit grants. Any member
 // with read may look; the grants are org-internal, not secrets.
+//
+// Re-confirmed by the owner in BEA-69 after a read-only member reported seeing
+// the whole People matrix: the benchmark is Google Drive, where a viewer can
+// see who has access, and hiding grants makes "why can't I edit this?"
+// unanswerable. Same call for the project's public-links list
+// (handleShareList, also PermRead). Raising either to PermWrite is a product
+// decision, not a hardening fix — TestReadMemberSeesSharesAndGrants pins both.
 func (s *Server) handleProjectPerms(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("project")
 	p, ok := s.project(w, r, id, PermRead)
