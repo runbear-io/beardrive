@@ -111,6 +111,94 @@ test("the gutter belongs to the scroll container, not the column", async ({ page
   }
 });
 
+/* The who/when/how-hot line is what the product is differentiated by, and a
+   phone is exactly when you're catching up — but ≤900px used to `display:
+   none` it on the file view and ellipsise it to `claude-…` / `Alice <ali…` in
+   History. Desktop values are read first and compared, rather than hard-coded:
+   the seeded hub's read counts drift, so a literal would flake. */
+test("provenance survives to a phone on the file view and in History", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const runHead = page.locator(".hrun-head").first();
+
+  const read = async () => {
+    await page.goto(`/${pid}/index.md`);
+    // Not waitForSelector: #meta is always in the DOM, empty until the file
+    // loads and (before this fix) display:none below 900px.
+    await expect(page.locator("#meta")).not.toBeEmpty();
+    const meta = await page.locator("#meta").textContent();
+    await page.goto(`/${pid}/history`);
+    await page.waitForSelector(".hrun-head");
+    return {
+      meta,
+      note: await runHead.locator(".hrun-note").textContent(),
+      runMeta: await runHead.locator(".hrun-meta").textContent(),
+      time: await runHead.locator(".hrun-time").textContent(),
+    };
+  };
+
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const desktop = await read();
+  expect(desktop.meta, "desktop provenance line").toBeTruthy();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/${pid}/index.md`);
+  await expect(page.locator("#meta")).not.toBeEmpty();
+  await expect(page.locator("#meta"), "390px: provenance line visible").toBeVisible();
+
+  const m = await page.evaluate(() => {
+    const bar = document.querySelector("#topbar") as HTMLElement;
+    const meta = document.querySelector("#meta") as HTMLElement;
+    const btns = [...bar.querySelectorAll<HTMLElement>(".btn, .icon-btn")].filter(
+      (b) => b.getBoundingClientRect().width > 0,
+    );
+    const last = btns[btns.length - 1].getBoundingClientRect();
+    const content = document.querySelector("#content") as HTMLElement;
+    return {
+      // Actions stay flush right on row 1, above the wrapped meta row.
+      gapFromRight: Math.round(bar.getBoundingClientRect().right - last.right),
+      actionsAboveMeta: last.bottom <= meta.getBoundingClientRect().top + 1,
+      tap: Math.min(...btns.map((b) => b.getBoundingClientRect().height)),
+      // Nothing clipped, and the grown topbar pushes content down rather
+      // than overlapping it.
+      clipped: meta.scrollWidth > meta.clientWidth + 1 || meta.scrollHeight > meta.clientHeight + 1,
+      contentBelow: content.getBoundingClientRect().top >= bar.getBoundingClientRect().bottom - 1,
+      overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    };
+  });
+  expect(m.gapFromRight, "390px: actions flush right").toBeLessThanOrEqual(10);
+  expect(m.actionsAboveMeta, "390px: actions stayed on the first row").toBe(true);
+  expect(m.tap, "390px: action tap target").toBeGreaterThanOrEqual(44);
+  expect(m.clipped, "390px: provenance line clipped").toBe(false);
+  expect(m.contentBelow, "390px: topbar overlaps the page").toBe(true);
+  expect(m.overflow, "390px: horizontal page scroll").toBe(false);
+
+  const mobile = await read();
+  expect(mobile, "390px: same provenance as desktop").toEqual(desktop);
+
+  const clip = await page.evaluate(() => {
+    const head = document.querySelector(".hrun-head") as HTMLElement;
+    const bad = (sel: string) => {
+      const el = head.querySelector(sel) as HTMLElement;
+      return el.scrollWidth > el.clientWidth + 1;
+    };
+    return { note: bad(".hrun-note"), meta: bad(".hrun-meta") };
+  });
+  expect(clip.note, "390px: run note clipped").toBe(false);
+  expect(clip.meta, "390px: run meta clipped").toBe(false);
+
+  // Routes with no provenance must not gain a blank strip: the topbar is
+  // exactly its desktop height there.
+  await page.goto(`/${pid}/notes`);
+  await page.waitForSelector(".dl-row");
+  const folder = await page.evaluate(() => ({
+    metaShown: getComputedStyle(document.querySelector("#meta") as HTMLElement).display !== "none",
+    barHeight: Math.round((document.querySelector("#topbar") as HTMLElement).getBoundingClientRect().height),
+  }));
+  expect(folder.metaShown, "390px: empty meta on a folder route").toBe(false);
+  expect(folder.barHeight, "390px: folder topbar height").toBe(52);
+});
+
 /* Mobile folder rows used to drop .dl-meta entirely below 430px, leaving an
    unlabelled coloured dot as the only signal — and the dot's meaning lived in
    a title= that touch never shows and screen readers never read. The meta now

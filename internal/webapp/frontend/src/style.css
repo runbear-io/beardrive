@@ -879,10 +879,19 @@ a.ai-main:hover { color: var(--accent); }
   #topbar .btn .ico { width: 18px; height: 18px; }
   #more-btn:not([hidden]) { display: inline-flex; }
   #history-btn, #upload-btn, #download { display: none !important; }
-  /* Desktop right-aligns the actions via #meta's flex:1 — with meta
-     hidden here, the crumb becomes the spacer so Search/Share/⋯ pin to
-     the top-right corner. */
-  #meta { display: none; }
+  /* Who/when/how-hot is the line people catch up from, so it survives to a
+     phone on its own row instead of being hidden. `order: 1` is load-bearing:
+     meta sits before the actions in the DOM, so a bare flex-wrap would drag
+     Search/Share/⋯ down with it. The crumb keeps flex:1 and stays the spacer
+     that pins them to the top-right corner. */
+  #topbar { flex-wrap: wrap; height: auto; min-height: 52px; }
+  #meta {
+    order: 1; flex: 1 1 100%; text-align: left;
+    white-space: normal; overflow: visible; padding: 0 0 8px;
+  }
+  /* Folder, dashboard and history routes carry no meta — without this they
+     gain a blank strip under the crumb. */
+  #meta:empty { display: none; }
   #crumb { flex: 1; }
   #vault { padding: 0 8px 0 12px; }
   .icon-btn2, #signout,   #tree .row, #projects .row { height: 44px; }
@@ -901,6 +910,13 @@ a.ai-main:hover { color: var(--accent); }
   .hf-search input, .hf-user, .hf-date, .hf-clear { height: 44px; }
   .hf-dates { flex: 1 1 100%; }
   .hf-date { flex: 1; width: auto; min-width: 0; }
+  /* The desktop run header ellipsises the note at 46% and the meta at
+     whatever is left, which on a phone clips to `claude-…` / `Alice <ali…` —
+     the two fields the row exists to carry. Let it wrap instead; `order: 1`
+     drops the meta below the note while the time stays on the first row. */
+  .hrun-head { flex-wrap: wrap; row-gap: 4px; }
+  .hrun-note { max-width: none; white-space: normal; overflow: visible; }
+  .hrun-meta { order: 1; flex: 1 1 100%; white-space: normal; overflow: visible; }
   .ai-btn, .ai-del { height: auto; min-height: 44px; padding: 0 12px; }
   /* react-table renders rows as `display: table-row`, which makes every
      flex rule above inert and lets the last column (Remove) fall outside
