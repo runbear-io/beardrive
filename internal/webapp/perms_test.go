@@ -337,6 +337,58 @@ func TestPermissionsGET(t *testing.T) {
 	}
 }
 
+// A read member sees the People matrix and the project's public links, creator
+// included. Deliberate, and answered by the owner (BEA-69, 2026-08-03): the
+// benchmark is Google Drive, where a viewer can see who has access — hiding
+// grants makes "why can't I edit this?" unanswerable, and the per-file
+// ShareBanner already tells a read-only member the file they rely on is
+// public. TestReadOnlyMemberRoutes only checks these two routes are not 403,
+// so an "improvement" that returned an empty body to read members would pass
+// every other test in the repo. Tightening either route to PermWrite is a
+// product decision, not a hardening fix; this test is here so it cannot happen
+// by accident.
+func TestReadMemberSeesSharesAndGrants(t *testing.T) {
+	h, srv, c, p := permHub(t)
+	if err := srv.Projects.SetPerm(p.ID, "bob@x.io", PermRead); err != nil {
+		t.Fatal(err)
+	}
+	sh, err := srv.Shares.Create(p.ID, "x.md", "alice@x.io", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/shares", nil, c["bob"])
+	if rec.Code != 200 {
+		t.Fatalf("GET shares as a read member: %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Shares []map[string]any `json:"shares"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Shares) != 1 {
+		t.Fatalf("shares = %+v, want the one link alice minted", out.Shares)
+	}
+	got := out.Shares[0]
+	if got["token"] != sh.Token || got["path"] != "x.md" {
+		t.Errorf("share = %+v, want token %q on x.md", got, sh.Token)
+	}
+	if url, _ := got["url"].(string); !strings.HasSuffix(url, "/s/"+sh.Token) {
+		t.Errorf("url = %q, want it to end in /s/%s", url, sh.Token)
+	}
+	// The field the issue is actually about, and the one a hardening pass
+	// would strip first. It exposes nothing new: the People table already
+	// shows every member's email to every member.
+	if got["creator"] != "alice@x.io" {
+		t.Errorf("creator = %v, want alice@x.io", got["creator"])
+	}
+	// And the grants alongside it, from the same read-only session.
+	rec = doAs(t, h, "GET", "/api/p/"+p.ID+"/permissions", nil, c["bob"])
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "bob@x.io") {
+		t.Fatalf("GET permissions as a read member: %d %s", rec.Code, rec.Body)
+	}
+}
+
 // The project list carries the caller's level *alongside* every ordinary
 // Project field. Regression guard: an earlier version hand-listed the fields
 // it returned, which silently dropped description and icon the moment those
