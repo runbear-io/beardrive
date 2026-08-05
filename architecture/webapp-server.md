@@ -265,6 +265,7 @@ classDiagram
         -byKey, dirty, seen
         +Record(...)
         +Heat(project, prefix, days)
+        +ShareOpens(project)
     }
     class ReadStat {
         +Project +Path +Day +Kind +Actor +Count +Last
@@ -272,6 +273,10 @@ classDiagram
     class HeatEntry {
         +Human +Agent +Share +Readers +LastRead
     }
+    class ShareOpen {
+        +Count +Last
+    }
+    note for ShareOpen "The receipt on a public link: share-kind buckets only, which is what makes Last mean last OPENED — HeatEntry.LastRead is cross-kind, so a member viewing the file in the hub would otherwise move the date. Counts, never openers: the share actor is token+IP. Keyed by path, so two tokens on one file report the same number. Callers build the map ONCE per project and index it; a per-share call is a full byKey scan per row"
 
     class QuotaProvider {
         <<interface>>
@@ -371,6 +376,8 @@ classDiagram
     RemoteSource ..> sourcedOp : attribution comes from the journal key
     ReadLedger ..> ReadStat
     ReadLedger ..> HeatEntry
+    ReadLedger ..> ShareOpen
+    ShareDB ..> ShareOpen : shares list joins the open count per path
     QuotaProvider <|.. UnlimitedQuota
 ```
 
