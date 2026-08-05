@@ -17,9 +17,11 @@ export const EXISTING = "__existing__";
 // shape. This is a local useState over the Dialog we already have.
 //
 // The options come from /api/config, so a hub that ships another template
-// needs no change here. "Empty project" is the synthetic first-class option
-// (value "") and stays preselected: creating a project without picking
-// anything must behave exactly as it did before templates existed.
+// needs no change here. The first option is both the badged one and the
+// preselected one — by construction, since the initial state is read off the
+// same array the badge indexes into. On a hub shipping no templates that
+// first option is "I already have a folder", which still creates an empty
+// project.
 export function NewProjectDialog({
   templates,
   onCreate,
@@ -29,10 +31,24 @@ export function NewProjectDialog({
   onCreate: (name: string, template: string) => Promise<void>;
   onClose: () => void;
 }) {
+  // Recommended first, then the rest, then the two that seed nothing. The
+  // divider before them is doing real work: everything above answers "what
+  // should we put in it", everything below answers "nothing".
+  const options = [
+    ...templates.map((t) => ({ value: t.name, title: t.title, blurb: t.blurb, rule: false })),
+    {
+      value: EXISTING,
+      title: "I already have a folder",
+      blurb: "nothing is seeded — connect it and your files stay as they are",
+      rule: true,
+    },
+    { value: "", title: "Empty project", blurb: "just the folder", rule: false },
+  ];
+
   const [name, setName] = useState("");
   // "" is an empty project; EXISTING is also an empty project — same artifact,
   // different intent, and the intent is what the next screen needs to know.
-  const [template, setTemplate] = useState("");
+  const [template, setTemplate] = useState(options[0].value);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -49,20 +65,6 @@ export function NewProjectDialog({
       setBusy(false);
     }
   };
-
-  // Recommended first, then the rest, then the two that seed nothing. The
-  // divider before them is doing real work: everything above answers "what
-  // should we put in it", everything below answers "nothing".
-  const options = [
-    ...templates.map((t) => ({ value: t.name, title: t.title, blurb: t.blurb, rule: false })),
-    {
-      value: EXISTING,
-      title: "I already have a folder",
-      blurb: "nothing is seeded — connect it and your files stay as they are",
-      rule: true,
-    },
-    { value: "", title: "Empty project", blurb: "just the folder", rule: false },
-  ];
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
