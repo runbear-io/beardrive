@@ -118,6 +118,10 @@ export interface Route {
   // History feed filters (?q=&user=&since=&until=). Only ever set on the
   // history view; absent when nothing is filtered.
   filters?: HistoryFilters;
+  // The history target arrived as ?path=/?prefix= rather than as a path
+  // segment. Same treatment as legacyView: it resolves, then the app
+  // replaces it with the canonical /history/<target> URL.
+  queryTarget?: boolean;
 }
 
 // `url` is pathname + search (what useLocationPath hands back).
@@ -135,6 +139,20 @@ export function parseRoute(url: string, mode: "volume" | "hub"): Route {
     if (v) filters[k] = v;
   }
   if (hasHistoryFilters(filters)) r.filters = filters;
+  // The History API takes ?path=/?prefix= (see CLAUDE.md), so a reader who
+  // has seen the API types the query form at the page too. Honour it and
+  // normalize, rather than dropping it and rendering the whole project as if
+  // the file had no history of its own. The two are aliases, not modes: the
+  // view decides file-vs-subtree from the tree, exactly as it does for
+  // /history/<target>. A path segment already present wins, which is also
+  // what leaves ?path= on every other view untouched.
+  if (r.view === "history" && !r.viewTarget) {
+    const t = (q?.get("path") || q?.get("prefix") || "").replace(/^\/+|\/+$/g, "");
+    if (t) {
+      r.viewTarget = decodePath(t);
+      r.queryTarget = true;
+    }
+  }
   return r;
 }
 
