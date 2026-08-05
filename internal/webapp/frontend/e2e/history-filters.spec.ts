@@ -105,3 +105,40 @@ test("the folder feed and the per-file version list filter too", async ({ page }
   await page.goto(`/${pid}/history/guide.md?user=bob%40x.io`);
   await expect(page.locator(rows)).toHaveCount(0);
 });
+
+// BEA-64: the History API takes ?path=, so the query form is what a reader
+// who has seen the API types at the page. It used to be dropped, rendering
+// the whole project as if the file had no history of its own.
+test("?path= lands on that file's feed, normalizes the URL, and keeps filters", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history`);
+  await expect(page.locator(rows).first()).toBeVisible();
+
+  // Arrive from a real page, so Back has somewhere to go that is not the
+  // ?path= URL — the redirect must replace, not push.
+  await page.goto(`/${pid}/history?path=guide.md&user=alice%40x.io`);
+  await page.waitForURL(`/${pid}/history/guide.md?user=alice%40x.io`);
+  await expect(page.locator("#crumb")).toHaveText("History — guide.md");
+  await expect(page.locator(`${rows} .hpath`).first()).toBeVisible();
+  for (const p of await page.locator(`${rows} .hpath`).allTextContents()) {
+    expect(p).toContain("guide.md");
+  }
+  await expect(page.locator(".hfilters select.hf-user")).toHaveValue("alice@x.io");
+
+  await page.goBack();
+  await expect(page).toHaveURL(`/${pid}/history`);
+
+  // ?prefix= is the same parameter by another name, and lands on the subtree.
+  await page.goto(`/${pid}/history?prefix=notes`);
+  await page.waitForURL(`/${pid}/history/notes`);
+  await expect(page.locator("#crumb")).toHaveText("History — notes/ (folder)");
+  for (const p of await page.locator(`${rows} .hpath`).allTextContents()) {
+    expect(p).toContain("notes/");
+  }
+
+  // The path route is canonical, so it wins and stays put.
+  await page.goto(`/${pid}/history/guide.md?path=notes/readme.md`);
+  await expect(page.locator("#crumb")).toHaveText("History — guide.md");
+  await expect(page).toHaveURL(`/${pid}/history/guide.md?path=notes/readme.md`);
+});

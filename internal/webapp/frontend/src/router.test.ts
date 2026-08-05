@@ -96,3 +96,69 @@ test("no filters means no query string", () => {
   // other views ignore them entirely
   assert.equal(urlForView("dashboard", "p-1", "", { q: "x" }), "/p-1/dashboard");
 });
+
+// BEA-64: the History API takes ?path=/?prefix=, so a reader who has seen it
+// types the query form at the page too. It used to be dropped, which rendered
+// the whole project as if the file had no history.
+test("?path= and ?prefix= name the history target and ask to be normalized", () => {
+  const p = parseRoute("/p-1/history?path=guide.md", "hub");
+  assert.equal(p.view, "history");
+  assert.equal(p.viewTarget, "guide.md");
+  assert.equal(p.queryTarget, true);
+  assert.equal(urlForView("history", "p-1", p.viewTarget, p.filters), "/p-1/history/guide.md");
+
+  // Aliases, not modes: the view decides file-vs-subtree from the tree.
+  const x = parseRoute("/p-1/history?prefix=notes", "hub");
+  assert.equal(x.viewTarget, "notes");
+  assert.equal(x.queryTarget, true);
+
+  // Same trailing-slash tolerance a path segment gets.
+  const s = parseRoute("/p-1/history?prefix=notes/", "hub");
+  assert.equal(s.viewTarget, "notes");
+  assert.equal(s.queryTarget, true);
+
+  // A value that is nothing but separators names no file.
+  const empty = parseRoute("/p-1/history?path=/", "hub");
+  assert.equal(empty.viewTarget, "");
+  assert.ok(!empty.queryTarget);
+});
+
+// The path route is the canonical one, so it wins and stays put — otherwise
+// arriving at a file's feed with a stray ?path= would bounce you elsewhere.
+test("a path segment beats ?path=, and other views ignore it", () => {
+  const r = parseRoute("/p-1/history/a.md?path=b.md", "hub");
+  assert.equal(r.viewTarget, "a.md");
+  assert.equal(r.queryTarget, undefined);
+
+  const d = parseRoute("/p-1/dashboard?path=guide.md", "hub");
+  assert.equal(d.view, "dashboard");
+  assert.equal(d.viewTarget, "");
+  assert.equal(d.queryTarget, undefined);
+
+  // Not a view at all: a file named like the parameter must not be hijacked.
+  const f = parseRoute("/p-1/notes/readme.md?path=guide.md", "hub");
+  assert.equal(f.path, "notes/readme.md");
+  assert.equal(f.queryTarget, undefined);
+});
+
+// The normalization is a redirect, so anything else in the query string has
+// to survive it — losing the author filter on the hop is the same bug again.
+test("filters survive the ?path= normalization", () => {
+  const r = parseRoute("/p-1/history?path=guide.md&user=alice@x.io", "hub");
+  assert.equal(r.viewTarget, "guide.md");
+  assert.equal(r.queryTarget, true);
+  assert.deepEqual(r.filters, { user: "alice@x.io" });
+  assert.equal(
+    urlForView("history", "p-1", r.viewTarget, r.filters),
+    "/p-1/history/guide.md?user=alice%40x.io",
+  );
+});
+
+// Encoded slashes survive both decodes, so a target that arrived
+// double-encoded re-encodes to exactly one URL rather than another redirect.
+test("an encoded separator in ?path= round-trips", () => {
+  const r = parseRoute("/p-1/history?path=a%2Fb.md", "hub");
+  assert.equal(r.viewTarget, "a/b.md");
+  assert.equal(r.queryTarget, true);
+  assert.equal(urlForView("history", "p-1", r.viewTarget), "/p-1/history/a/b.md");
+});
