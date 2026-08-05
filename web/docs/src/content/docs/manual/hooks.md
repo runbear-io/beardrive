@@ -104,14 +104,10 @@ machine-wide:
 |---|---|
 | macOS | `~/Library/LaunchAgents/ai.beardrive.daemon.plist` (launchd loads it at login) |
 | Linux | `~/.config/systemd/user/beardrive.service` plus the `default.target.wants` symlink that enables it (honors `XDG_CONFIG_HOME`) |
-| Windows | a `BearDrive` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` — visible in Task Manager's Startup tab, where you can disable it |
 
 Linux needs systemd as the init system. Without it — Alpine or another
 runit/OpenRC distro, WSL1, a slim container — `bdrive autostart` says so rather
 than writing a unit nothing would read.
-
-On Windows you may see a console window flicker at logon: bdrive is a console
-program and `resume` exits in milliseconds. Nothing is wrong.
 
 Either way this is not the only thing that recovers sync: an agent turn in a
 project syncs it too, so a machine you actually work on catches up on its own.
