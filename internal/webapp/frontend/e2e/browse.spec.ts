@@ -777,3 +777,21 @@ test("an old version of an extensionless file previews the same way", async ({ p
   await page.goto(`/${pid}/sniff/LICENSE?v=${"0".repeat(64)}`);
   await expect(page.locator("#content .empty")).toContainText("That version isn't available.");
 });
+
+// BEA-83. A deep link to a project id you can't see used to swap in another
+// project and throw the path away, with nothing on screen to say so.
+test("a bogus project deep link says so and keeps the URL", async ({ page }) => {
+  await login(page);
+  await page.goto("/no-such-project-xyz/some/file.md");
+  await expect(page.locator("#content .empty")).toContainText("Project not found");
+  expect(page.url()).toContain("/no-such-project-xyz/some/file.md");
+  await expect(page.locator("#sidebar")).toBeVisible();
+  await page.reload(); // no bounce, no loop
+  await expect(page.locator("#content .empty")).toContainText("Project not found");
+  expect(page.url()).toContain("/no-such-project-xyz/some/file.md");
+  // The two other URL rewrites off current.id must not undo the fix either.
+  await page.goto("/no-such-project-xyz/insights");
+  expect(page.url()).toContain("/no-such-project-xyz/insights");
+  await page.goto("/no-such-project-xyz/notes/");
+  expect(page.url()).toContain("/no-such-project-xyz/notes/");
+});
