@@ -433,6 +433,46 @@ func TestShareLastUpdatedStamp(t *testing.T) {
 	}
 }
 
+// TestShareDarkThemeIsLast: the share page is the surface strangers see first,
+// so in dark mode it must not show white slabs. Every dark rule sits at the
+// same specificity as the light one it overrides, which makes SOURCE ORDER the
+// whole feature — a dark block placed before the light rules (as it was) loses
+// silently and the page still renders light. Assert placement, not presence.
+func TestShareDarkThemeIsLast(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	f.put("dev1", "wiki/themed.md", "---\ntitle: Q3\n---\n\n# Q3\n\n> quote\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n```go\nx := 1\n```\n")
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/themed.md")
+	body := do(t, h, "GET", "/s/"+token, nil).Body.String()
+
+	if strings.Contains(body, "%!") {
+		t.Fatalf("format verb leaked into the page (a %% needs doubling in the const): %s", body)
+	}
+	dark := strings.LastIndex(body, "prefers-color-scheme")
+	if dark < 0 {
+		t.Fatal("no dark block at all")
+	}
+	// Every light surface colour must be settled before the dark block opens.
+	for _, light := range []string{"#f6f8fa", "#d0d7de", "#d8dee4", "#6e7781", "#57606a"} {
+		if i := strings.LastIndex(body, light); i > dark {
+			t.Errorf("light literal %s at %d comes after the dark block at %d — it wins in dark mode", light, i, dark)
+		}
+	}
+	// ...and the dark block has to actually cover the surfaces that were light.
+	block := body[dark:]
+	for _, sel := range []string{"pre,code{background:#15171b}", "blockquote{", "td,th{", "table.frontmatter{", "footer.bdrive{"} {
+		if !strings.Contains(block, sel) {
+			t.Errorf("dark block has no rule for %q", sel)
+		}
+	}
+	// Hub tokens, not a hand-picked palette (tw.css: --color-text, --color-bg).
+	if !strings.Contains(block, "background:#0a0b0d;color:#eef0f3") {
+		t.Error("dark body must use the hub's bg/text tokens")
+	}
+	if strings.Contains(body, "#c6cbd3") || strings.Contains(body, "#3a3a44") {
+		t.Error("ad-hoc dark greys survived; use the tw.css tokens")
+	}
+}
+
 func jsonReq(t *testing.T, method, url string, body any) *http.Request {
 	t.Helper()
 	var data []byte
