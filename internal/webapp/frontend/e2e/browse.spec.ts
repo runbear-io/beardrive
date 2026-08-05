@@ -777,3 +777,24 @@ test("an old version of an extensionless file previews the same way", async ({ p
   await page.goto(`/${pid}/sniff/LICENSE?v=${"0".repeat(64)}`);
   await expect(page.locator("#content .empty")).toContainText("That version isn't available.");
 });
+
+// BEA-81: an old URL for a file that has since been renamed or dragged into
+// a folder still lands on the file, rewrites itself, and says what happened.
+test("a moved file's old URL redirects and says so", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/old-guide.md`);
+  await page.waitForURL(`/${pid}/archive/moved-guide.md`);
+  await expect(page.locator("#content")).toContainText("This file has been moved");
+  await expect(page.locator(".vbanner")).toContainText("Moved from old-guide.md");
+  // replace, not push: Back must not bounce off the dead URL forever.
+  await expect(page.locator(".notfound")).toHaveCount(0);
+});
+
+test("a path that never existed still gets the not-found card", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/nothing-here.md`);
+  await expect(page.locator(".notfound")).toBeVisible();
+  await expect(page.locator(".vbanner")).toHaveCount(0);
+});

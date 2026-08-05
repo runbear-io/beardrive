@@ -5,10 +5,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
-import { postJSON } from "../api/http";
+import { getJSON, postJSON } from "../api/http";
 import type { Project, ServerConfig } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { useShares } from "../hooks/useHub";
@@ -77,6 +77,29 @@ export default function Browser(props: {
   const isFile = !!path && loaded && !isDir && flatFiles.some((f) => f.path === path);
   const isMissing = !!path && loaded && !isDir && !isFile;
   const listingShowing = isDir && !route.view;
+
+  /* ---- an address whose file moved ----
+     Files get renamed and dragged into folders, and the old URL is already
+     in someone's notes. The server can pair the delete with the put that
+     carried the same blob, so ask it — but only once the tree says the path
+     is gone, so the happy path costs nothing. It is a separate call rather
+     than the X-Bdrive-Canonical-Path header /file answers with, because we
+     never fetch a missing file at all, and a moved FOLDER has no content
+     fetch to hang a header on. */
+  const { data: moved } = useQuery({
+    queryKey: ["resolve", apiBase, path],
+    queryFn: () =>
+      getJSON<{ to: string; kind: string }>(apiBase + "resolve?path=" + encodeURIComponent(path)),
+    enabled: isMissing,
+    retry: false, // a 404 here is the normal answer, not a flake
+    staleTime: 60_000,
+  });
+  const [movedFrom, setMovedFrom] = useState<{ from: string; to: string } | null>(null);
+  useEffect(() => {
+    if (!isMissing || !moved?.to) return;
+    setMovedFrom({ from: path, to: moved.to });
+    navigate(urlForPath(moved.to, project?.id), { replace: true });
+  }, [isMissing, moved, path, project?.id]);
 
   /* ---- tree expansion ---- */
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -462,6 +485,26 @@ export default function Browser(props: {
     );
   } else {
     view = <div className="empty">Select a file to read it.</div>;
+  }
+
+  // Arriving here by redirect: say so, or the URL silently changed under a
+  // reader who typed the other one. Above whatever the destination renders,
+  // so a moved folder gets it too.
+  if (movedFrom && movedFrom.to === path) {
+    view = (
+      <>
+        <div className="vbanner" role="status">
+          <span className="vb-icon">
+            <Icon name="link" />
+          </span>
+          <div className="vb-text">
+            <b>Moved from {movedFrom.from}</b>
+            <span>The URL has been updated.</span>
+          </div>
+        </div>
+        {view}
+      </>
+    );
   }
 
   const crumb = panel ? (

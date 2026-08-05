@@ -51,11 +51,18 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	// The sha must be a version OF THIS PATH: without this, restore would
-	// paste any blob in the store onto any path.
+	// The sha must be a version OF THIS FILE: without this, restore would
+	// paste any blob in the store onto any path. "This file" includes the
+	// paths it lived at before it moved — otherwise a moved file can never
+	// be restored to anything older than its move. Ancestors only: the put
+	// is written at the current path, so a descendant's versions are not
+	// reachable from here anyway. buildMoveIndex needs journal order.
+	journal.Sort(all)
+	chain := chainSegments(buildMoveIndex(all), p)
 	var found *journal.Op
 	for i := range all {
-		if op := &all[i]; op.Kind == journal.KindPut && op.Path == p && op.Blob == req.SHA {
+		op := &all[i]
+		if op.Kind == journal.KindPut && op.Blob == req.SHA && inSegments(chain, op.Path, op.Time) {
 			found = op
 			break
 		}
