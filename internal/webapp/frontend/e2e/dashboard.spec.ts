@@ -139,6 +139,56 @@ test("a project with no files says so instead of drawing empty charts", async ({
   }
 });
 
+/* BEA-68: the treemap used to paint the full green→red ramp even when every
+   file was the same age, then the legend under it admitted the colour meant
+   nothing. Three checks: the seeded project spans months and keeps its colours;
+   an all-new project goes grey; and the flat test is per-scope, not per-project. */
+
+const fills = (page: import("@playwright/test").Page) =>
+  page.locator(".in-tm-cell").evaluateAll((els) => els.map((e) => e.getAttribute("fill")!));
+
+test("a range worth colouring keeps its colours", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/dashboard`);
+  await expect(page.locator(".in-tm-range")).toContainText("observed:");
+  await expect(page.locator(".in-sw-age")).not.toHaveClass(/in-sw-flat/);
+  // 2h-old files next to 210d-old ones: not one flat fill.
+  expect(new Set(await fills(page)).size).toBeGreaterThan(1);
+});
+
+test("a project too young to rank goes grey instead of all-clear green", async ({ page }) => {
+  await login(page);
+  const made = await (await page.request.post("/api/projects", { data: { name: "brandnew" } })).json();
+  const pid = made.project.id;
+  try {
+    for (const p of ["a.md", "b.md"]) {
+      await page.request.put(`/api/p/${pid}/upload/content?path=${p}`, { data: `# ${p}\n` });
+    }
+    await page.goto(`/${pid}/dashboard`);
+    await expect(page.locator(".in-treemap")).toBeVisible();
+    const f = await fills(page);
+    expect(f.length).toBe(2);
+    expect(new Set(f).size).toBe(1); // one fill, and it is not on the ramp
+    expect(f[0]).toBe("rgb(150,156,164)");
+    await expect(page.locator(".in-tm-range")).toContainText("colour off");
+    await expect(page.locator(".in-sw-age")).toHaveClass(/in-sw-flat/);
+  } finally {
+    await page.request.delete("/api/projects/" + pid);
+  }
+});
+
+test("the flat test follows the scope, not the project", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  // notes/ holds only 90min- and 24h-old files, inside a project spanning 210d.
+  await page.goto(`/${pid}/dashboard/notes`);
+  await expect(page.locator(".in-tm-range")).toContainText("colour off");
+  expect(new Set(await fills(page)).size).toBe(1);
+  await page.goto(`/${pid}/dashboard`);
+  await expect(page.locator(".in-tm-range")).toContainText("observed:");
+});
+
 // The other zero state, which was never broken: files that nobody has read
 // still get a map, a scatter and a self-explaining hot path.
 test("files with no reads still chart", async ({ page }) => {
