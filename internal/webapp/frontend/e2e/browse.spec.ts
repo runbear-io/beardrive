@@ -406,7 +406,8 @@ test("public links: banner and settings table fit a 390px viewport", async ({ pa
   await expect(page.locator(".admin-item", { hasText: "guide.md" })).toBeVisible();
   expect(await sideways()).toBe(false);
   // The table takes its own horizontal scroll rather than widening the page.
-  const box = page.locator(".project-settings .admin-card-table").last();
+  // By class, not by position: People renders through the same AdminTable.
+  const box = page.locator(".project-settings .shares-table");
   expect(await box.evaluate((el) => getComputedStyle(el).overflowX)).toBe("auto");
 
   await page.request.delete(`/api/shares/${made.token}`);

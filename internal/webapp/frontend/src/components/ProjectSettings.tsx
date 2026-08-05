@@ -26,9 +26,10 @@ import { atLeast } from "../api/types";
 import type { Org, PermLevel, Project, ProjectPerms } from "../api/types";
 
 // Settings for the open project (sidebar menu): General edits the name,
-// description and icon; About holds the identity facts; People says who can
-// do what; the danger zone deletes. Install/connect lives on the Installation
-// page.
+// description and icon; Public links answers "is anything of ours public right
+// now?" and sits high for that reason; People says who can do what; About
+// holds the identity facts; the danger zone deletes. Install/connect lives on
+// the Installation page.
 
 const MAX_DESC = 280;
 
@@ -219,6 +220,10 @@ export function ProjectSettings({
         </CardContent>
       </Card>
 
+      <PublicLinks project={project} />
+
+      <People project={project} org={org} />
+
       <Card>
         <CardHeader>
           <CardTitle>About</CardTitle>
@@ -245,10 +250,6 @@ export function ProjectSettings({
           </dl>
         </CardContent>
       </Card>
-
-      <People project={project} org={org} />
-
-      <PublicLinks project={project} />
 
       {/* Admin-only, and only as UX: handleProjectDelete enforces it too. */}
       {mayEdit && (
