@@ -79,20 +79,20 @@ test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await ctx.close();
 });
 
-test("no projects: the create dialog opens itself, and the page behind is no dead end", async ({
+test("no projects: the onboarding page renders with no dialog, and New project opens one", async ({
   page,
 }) => {
   await login(page, "solo@example.com");
-  // With nothing to browse, the one useful action opens on arrival.
-  await expect(page.locator(".modal .start-points")).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(page.locator(".modal-input")).toHaveCount(0);
+  // Nothing opens on arrival — the page's own button used to sit behind a
+  // dialog nobody asked for, pointer-blocked.
+  await expect(page.locator("[role=dialog]")).toHaveCount(0);
 
-  // Closing it leaves a page that says what to do — and a way back in.
+  // The page says what to do, and the button works on the first attempt.
   await expect(page.locator(".onboard h1")).toHaveText("Welcome to BearDrive");
   await expect(page.locator(".ob-start h3")).toHaveText("Start a project");
+  await page.click("#ob-new", { timeout: 2000, trial: true }); // no retry loop
   await page.click("#ob-new");
-  await expect(page.locator(".modal-input")).toBeVisible();
+  await expect(page.locator(".modal .start-points")).toBeVisible();
   await page.keyboard.press("Escape");
   // Dismissed once, it stays dismissed until asked for again.
   await expect(page.locator(".modal-input")).toHaveCount(0);
