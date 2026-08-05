@@ -52,7 +52,24 @@ interface Pt {
   orphan?: boolean;
 }
 
-type Lens = "all" | "human" | "agent";
+type Lens = "all" | "human" | "agent" | "share";
+
+const LENS_ORDER = ["all", "human", "agent", "share"] as const;
+const LENS_LABEL: Record<Lens, string> = {
+  all: "All reads",
+  human: "Human reads",
+  agent: "Agent reads",
+  share: "Shared reads",
+};
+
+/* A pure lens paints one color by definition — its own. Without a share
+   entry the bar would fall back to the real split and show share-only reads
+   in somebody else's color. */
+const PURE: Partial<Record<Lens, { agent: number; human: number; share: number }>> = {
+  agent: { agent: 1, human: 0, share: 0 },
+  human: { agent: 0, human: 1, share: 0 },
+  share: { agent: 0, human: 0, share: 1 },
+};
 
 export function Insights(props: {
   flatFiles: Node[];
@@ -175,13 +192,13 @@ export function Insights(props: {
           : "Reads over the last 30 days × how long since each file changed. Hot but stale knowledge — read a lot, maintained by nobody — is the danger zone."}
       </p>
       <div className="in-lens">
-        {(["all", "human", "agent"] as const).map((l) => (
+        {LENS_ORDER.map((l) => (
           <button
             key={l}
             className={"in-lens-btn" + (l === lens ? " active" : "")}
             onClick={() => setLens(l)}
           >
-            {l === "all" ? "All reads" : l === "human" ? "Human reads" : "Agent reads"}
+            {LENS_LABEL[l]}
           </button>
         ))}
       </div>
@@ -569,12 +586,7 @@ function HotPath({
       <div className="in-hotpath">
         {top.map((p) => {
           // Split of the lens reads: pure lenses are single-color by definition.
-          const f =
-            lens === "agent"
-              ? { agent: 1, human: 0, share: 0 }
-              : lens === "human"
-                ? { agent: 0, human: 1, share: 0 }
-                : hotPathSplit(p);
+          const f = PURE[lens] ?? hotPathSplit(p);
           const pct = (p.reads / max) * 100;
           // The file view would land on the not-found page for a path that
           // left the project; History still has the content.
