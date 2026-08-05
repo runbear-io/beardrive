@@ -267,9 +267,18 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   }
 
   // A renamed view URL (/insights) still resolves; swap it for the current
-  // one so there is one live URL per page.
+  // one so there is one live URL per page. Filters ride along: the hop is a
+  // rename, not a reset, and dropping them would silently widen the feed.
   if (route.legacyView && route.view) {
-    return <Redirect to={urlForView(route.view, current.id, route.viewTarget)} />;
+    return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
+  }
+
+  // /history?path=guide.md resolved to guide.md's feed (the query form is
+  // what the History API teaches); put the canonical path URL in the address
+  // bar. Below the unknown-project redirect for the same reason the trailing
+  // slash one is: normalizing on a bad project id would pin the wrong project.
+  if (route.queryTarget && route.view) {
+    return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
   }
 
   // /notes/ is the same page as /notes — resolve it, then take the slash off
