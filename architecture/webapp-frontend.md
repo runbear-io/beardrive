@@ -40,6 +40,7 @@ classDiagram
         +parseRoute(url, mode) Route
         +Route.version ?v= sha, one past version
         +Route.trailingSlash notes/ resolves, then replaces to notes
+        +Route.queryTarget history ?path= / ?prefix= resolves, then replaces to /history/target
         +Route.filters q user since until, history feed
         +historyFilterQuery(filters) / hasHistoryFilters
         +urlForPath(path, projectId, version)
