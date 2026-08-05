@@ -31,7 +31,9 @@ classDiagram
     class Browser {
         folder listing, file view
         per-view routes
+        +moved: /resolve?path= on a tree miss only
     }
+    note for Browser "A missing path is decided from /tree alone — the file is never fetched — so the X-Bdrive-Canonical-Path header /file answers with would never reach the browser, and a moved FOLDER has no content fetch to hang a header on. The not-found branch asks GET /resolve?path= instead, then replaceState-navigates to the destination and prints one Moved from … line above it (BEA-81)"
 
     class router {
         +VIEW_ROUTES dashboard history install settings

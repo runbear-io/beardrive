@@ -203,6 +203,18 @@ type volume struct {
 
 type snapshot struct {
 	files map[string]FileInfo
+	// moves is the derived rename index (see moves.go), cached with the
+	// listing it was replayed alongside. Nil for a source that has no
+	// journals to derive it from — every resolver then answers "not found",
+	// so the DirSource exclusion falls out instead of needing a rule.
+	moves moveIndex
+}
+
+// MoveSource is a Source that can also report where its files came from.
+// Optional, like Uploader: implementing it keeps the replay ONE pass, so the
+// move index costs no extra journal read.
+type MoveSource interface {
+	FilesWithMoves(context.Context) (map[string]FileInfo, moveIndex, error)
 }
 
 func (v *volume) snapshot(ctx context.Context) (*snapshot, error) {
@@ -211,14 +223,23 @@ func (v *volume) snapshot(ctx context.Context) (*snapshot, error) {
 	if v.snap != nil && time.Since(v.at) < v.refresh {
 		return v.snap, nil
 	}
-	files, err := v.source.Files(ctx)
+	var (
+		files map[string]FileInfo
+		moves moveIndex
+		err   error
+	)
+	if ms, ok := v.source.(MoveSource); ok {
+		files, moves, err = ms.FilesWithMoves(ctx)
+	} else {
+		files, err = v.source.Files(ctx)
+	}
 	if err != nil {
 		if v.snap != nil {
 			return v.snap, nil // serve stale rather than fail
 		}
 		return nil, err
 	}
-	v.snap, v.at = &snapshot{files: files}, time.Now()
+	v.snap, v.at = &snapshot{files: files, moves: moves}, time.Now()
 	return v.snap, nil
 }
 
@@ -468,9 +489,16 @@ func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) 
 }
 
 func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
+	files, _, err := r.FilesWithMoves(ctx)
+	return files, err
+}
+
+// FilesWithMoves is the replay, plus the rename index derived from the same
+// sorted ops — one pass, so the index rides in the cached snapshot.
+func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo, moveIndex, error) {
 	all, err := r.loadOps(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	journal.Sort(all)
 	files := make(map[string]FileInfo)
@@ -495,7 +523,7 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 			delete(files, op.Path)
 		}
 	}
-	return files, nil
+	return files, buildMoveIndex(all), nil
 }
 
 func (r *RemoteSource) Open(ctx context.Context, _ string, fi FileInfo) (io.ReadCloser, error) {
@@ -567,6 +595,7 @@ func (s *Server) Handler() http.Handler {
 		"/api/p/{project}/": proj,
 	} {
 		mux.HandleFunc("GET "+prefix+"tree", resolve(PermRead, s.handleTree))
+		mux.HandleFunc("GET "+prefix+"resolve", resolve(PermRead, s.handleResolve))
 		mux.HandleFunc("GET "+prefix+"file", resolve(PermRead, s.handleFile))
 		mux.HandleFunc("GET "+prefix+"download", resolve(PermRead, s.handleDownload))
 		mux.HandleFunc("GET "+prefix+"render", resolve(PermRead, s.handleRender))
@@ -1008,7 +1037,18 @@ func lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
 	}
 	fi, ok := snap.files[p]
 	if !ok {
-		return "", FileInfo{}, http.StatusNotFound, fmt.Errorf("no such file: %s", p)
+		// The address is empty — but the file may have moved out of it. A
+		// LIVE path always wins, which falls out of the ordering: the
+		// snapshot hit above returns first, so nothing redirects while
+		// something still answers at the old address.
+		to, moved := resolveForward(snap.moves, snap.files, p)
+		if !moved {
+			return "", FileInfo{}, http.StatusNotFound, fmt.Errorf("no such file: %s", p)
+		}
+		// The canonical path is what gets returned, so the read is recorded
+		// against it (heat doesn't split across old and new) and the render
+		// payload names it.
+		p, fi = to, snap.files[to]
 	}
 	return p, fi, 0, nil
 }
@@ -1019,6 +1059,7 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 		http.Error(w, err.Error(), code)
 		return
 	}
+	setCanonical(w, r, p)
 	// Count the read before the ETag check: a 304 render is still a person
 	// reading the file, and skipping it would undercount the hottest pages.
 	s.recordRead(r, p)
@@ -1086,6 +1127,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), code)
 		return
 	}
+	setCanonical(w, r, p)
 	s.recordRead(r, p)
 	rc, err := v.source.Open(r.Context(), p, fi)
 	if err != nil {
