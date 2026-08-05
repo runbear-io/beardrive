@@ -683,6 +683,9 @@ a.ai-main:hover { color: var(--accent); }
 .in-sw.share { background: #b478e8; }
 /* the treemap's freshness scale: one gradient bar, not a row of chips */
 .in-sw-age { width: 84px; margin: 0 5px; }
+/* The scale is off in this scope: grey the swatch out rather than recompute
+   the gradient, so the legend looks as inert as the cells now are. */
+.in-sw-flat { filter: grayscale(1); opacity: .45; }
 .in-tm-range { margin-left: 14px; color: var(--text-ghost); }
 /* coverage matrix */
 .in-matrix rect { transition: opacity .1s; }

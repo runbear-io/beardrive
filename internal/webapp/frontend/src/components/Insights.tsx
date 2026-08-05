@@ -52,7 +52,24 @@ interface Pt {
   orphan?: boolean;
 }
 
-type Lens = "all" | "human" | "agent";
+type Lens = "all" | "human" | "agent" | "share";
+
+const LENS_ORDER = ["all", "human", "agent", "share"] as const;
+const LENS_LABEL: Record<Lens, string> = {
+  all: "All reads",
+  human: "Human reads",
+  agent: "Agent reads",
+  share: "Shared reads",
+};
+
+/* A pure lens paints one color by definition — its own. Without a share
+   entry the bar would fall back to the real split and show share-only reads
+   in somebody else's color. */
+const PURE: Partial<Record<Lens, { agent: number; human: number; share: number }>> = {
+  agent: { agent: 1, human: 0, share: 0 },
+  human: { agent: 0, human: 1, share: 0 },
+  share: { agent: 0, human: 0, share: 1 },
+};
 
 export function Insights(props: {
   flatFiles: Node[];
@@ -175,13 +192,13 @@ export function Insights(props: {
           : "Reads over the last 30 days × how long since each file changed. Hot but stale knowledge — read a lot, maintained by nobody — is the danger zone."}
       </p>
       <div className="in-lens">
-        {(["all", "human", "agent"] as const).map((l) => (
+        {LENS_ORDER.map((l) => (
           <button
             key={l}
             className={"in-lens-btn" + (l === lens ? " active" : "")}
             onClick={() => setLens(l)}
           >
-            {l === "all" ? "All reads" : l === "human" ? "Human reads" : "Agent reads"}
+            {LENS_LABEL[l]}
           </button>
         ))}
       </div>
@@ -216,6 +233,12 @@ export function Insights(props: {
     </div>
   );
 }
+
+/* The fill when the scope has no usable age range: a grey, deliberately not a
+   point on the freshness ramp. An all-0–3d project is "not enough range to
+   rank", not "all clear" — painting the ramp's healthy green and then
+   disclaiming it in the legend told the reader the opposite of the truth. */
+const TM_FLAT = "rgb(150,156,164)";
 
 /* Staleness color: fresh green → amber → red over 0..300 days. */
 function staleColor(days: number): string {
@@ -315,6 +338,12 @@ function Treemap({
 }) {
   const W = 720,
     H = 480;
+  // Whether the colour says anything at all, decided once here and shared with
+  // the legend below — the cells used to paint the ramp while the legend under
+  // them said the colour carried no signal. `pts` is every file in scope, read
+  // or not, so this is per-scope and independent of the read-type lens.
+  const range = ageRange(pts.map((p) => p.days));
+  const flat = !!range && isFlatRange(range.min, range.max);
   // Two levels: top-level folder groups, files within each.
   const groups = new Map<string, { name: string; files: Pt[]; value: number; reads: number }>();
   for (const p of pts) {
@@ -372,7 +401,7 @@ function Treemap({
           width={Math.max(0.4, c.w - 1.2)}
           height={Math.max(0.4, c.h - 1.2)}
           rx={1.5}
-          fill={staleColor(c.item.days)}
+          fill={flat ? TM_FLAT : staleColor(c.item.days)}
           className="in-tm-cell"
           data-path={c.item.path}
         >
@@ -409,7 +438,7 @@ function Treemap({
       >
         {cells}
       </svg>
-      <FreshnessLegend pts={pts} />
+      <FreshnessLegend range={range} flat={flat} />
     </>
   );
 }
@@ -418,22 +447,19 @@ function Treemap({
    On a young project the whole scope lands inside one colour stop, and saying
    so is the honest thing — the alternative, a relative scale, would paint a
    3-day-old file the red that means hot-and-stale everywhere else here. */
-function FreshnessLegend({ pts }: { pts: Pt[] }) {
-  const r = ageRange(pts.map((p) => p.days));
+function FreshnessLegend({ range: r, flat }: { range: { min: number; max: number } | null; flat: boolean }) {
   if (!r) return null;
   const span = ageSpanLabel(r.min, r.max);
   return (
     <p className="in-legend in-tm-legend">
       freshness 0d
       <span
-        className="in-sw in-sw-age"
+        className={"in-sw in-sw-age" + (flat ? " in-sw-flat" : "")}
         style={{ background: `linear-gradient(to right, ${[0, 60, 150, 300].map(staleColor).join(", ")})` }}
       />
       300d+
       <span className="in-tm-range">
-        {isFlatRange(r.min, r.max)
-          ? `all files here: ${span} old — colour carries no signal in this range`
-          : `observed: ${span} old`}
+        {flat ? `all files here: ${span} old — colour off, not enough range to rank` : `observed: ${span} old`}
       </span>
     </p>
   );
@@ -569,12 +595,7 @@ function HotPath({
       <div className="in-hotpath">
         {top.map((p) => {
           // Split of the lens reads: pure lenses are single-color by definition.
-          const f =
-            lens === "agent"
-              ? { agent: 1, human: 0, share: 0 }
-              : lens === "human"
-                ? { agent: 0, human: 1, share: 0 }
-                : hotPathSplit(p);
+          const f = PURE[lens] ?? hotPathSplit(p);
           const pct = (p.reads / max) * 100;
           // The file view would land on the not-found page for a path that
           // left the project; History still has the content.

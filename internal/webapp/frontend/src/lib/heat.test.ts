@@ -109,6 +109,8 @@ test("ageRange survives more files than the spread operator would take", () => {
 test("isFlatRange: the young-project case the legend must admit to", () => {
   assert.equal(isFlatRange(0, 3), true); // the repro: all content ≤3d old
   assert.equal(isFlatRange(0, 0), true);
+  // The treemap now greys its cells on this boundary, not just the legend.
+  assert.equal(isFlatRange(0, FLAT_AGE_SPREAD - 0.1), true);
   assert.equal(isFlatRange(0, FLAT_AGE_SPREAD), false); // boundary is exclusive
   assert.equal(isFlatRange(0, 140), false);
   assert.equal(isFlatRange(200, 203), true); // uniformly stale is flat too
