@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 
 /* ---- command palette (⌘K / Ctrl+K) ----
    One box for everything: fuzzy-jump to any file, switch projects, and run
-   quick actions (share, history, upload, download, sign out). */
+   quick actions (history always, share and download on a file, sign out). */
 
 export interface PaletteItem {
   icon: string;
