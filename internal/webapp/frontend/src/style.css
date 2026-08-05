@@ -392,7 +392,27 @@ button, input, a.btn { font-family: inherit; }
 /* The scroll container owns scrolling and the page gutter — never a width.
    Width and centering belong to .page (one per view), so every route shares
    the same column edges and the gutter never eats into the reading measure. */
-#content { flex: 1; overflow-y: auto; padding: 44px 40px 110px; scroll-behavior: smooth; }
+#content { flex: 1; overflow-y: auto; padding: 44px 40px 110px; scroll-behavior: smooth; scrollbar-gutter: stable; }
+/* #content is the only scroller in the app, so with the platform's overlay
+   scrollbars nothing at rest says a route has more below (that's how Public
+   links went missing on settings). Giving ::-webkit-scrollbar an explicit
+   width turns it into a classic, always-visible bar — which is also what makes
+   scrollbar-gutter mean anything on macOS. Pointer-fine only: touch keeps
+   overlay scrollbars and the mobile layout is untouched. */
+@media (pointer: fine) {
+  #content::-webkit-scrollbar { width: 10px; }
+  #content::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 5px; }
+  #content::-webkit-scrollbar-track { background: transparent; }
+  /* Chromium drops every ::-webkit-scrollbar rule the moment scrollbar-width
+     or scrollbar-color is set on the same element — and the standard
+     properties alone leave macOS's overlay bar, which is invisible at rest and
+     takes no width. So the standard properties are for engines with no webkit
+     pseudo-element (Firefox) only. Setting both is the trap: it silently
+     restores the bug. */
+  @supports not selector(::-webkit-scrollbar) {
+    #content { scrollbar-width: thin; scrollbar-color: var(--border-2) transparent; }
+  }
+}
 .page { width: 100%; max-width: var(--page-app); margin-inline: auto; min-width: 0; }
 .page.read { max-width: var(--page-read); }
 .page.wide { max-width: var(--page-wide); }
