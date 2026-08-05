@@ -41,12 +41,16 @@ export function SharesTable({
   showProject = false,
   canRevoke = true,
   empty = "No public shares.",
+  loading = false,
 }: {
   shares: ShareInfo[];
   onChanged: () => void;
   showProject?: boolean;
   canRevoke?: boolean;
   empty?: string;
+  // An empty array is not a settled answer while the request is in flight, and
+  // "nothing is public" is the one wrong answer nobody should read for a frame.
+  loading?: boolean;
 }) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const col = useMemo(() => createColumnHelper<ShareInfo>(), []);
@@ -98,6 +102,15 @@ export function SharesTable({
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
   });
+
+  // Same shell and metrics as the empty state, so the section is one row tall
+  // either way and doesn't jump when the data lands.
+  if (loading)
+    return (
+      <div className="admin-list">
+        <div className="admin-empty">Loading…</div>
+      </div>
+    );
 
   if (shares.length === 0)
     return (
