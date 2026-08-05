@@ -59,13 +59,23 @@ classDiagram
         -verify(ctx, sha) re-hash until sealed
         -blobStat(ctx, blob) remote.Object
         -sealed sync.Map sha→proved immutable
+        -jcache map key→cachedJournal
+        -jbytes int64 raw bytes cached
         -loadSourcedOps(ctx) []sourcedOp
+        -cacheJournals(keep, misses, parsed, sizes)
         -appendOp(ctx, op)
     }
     class sourcedOp {
         +Op journal.Op
         +From journal key's device
     }
+    class cachedJournal {
+        +size int64
+        +mod time.Time
+        +bytes int64
+        +ops []journal.Op
+    }
+    note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp rewrites its key with strictly more bytes — so the (Size, Modified) List already reports proves a parse is still current. That is why the cache needs no expiry and no new Backend method: loadSourcedOps still Lists on every request, and fetches only the keys whose size or mtime moved (concurrently, limit 8). History used to re-download and re-parse EVERY journal per page, which is what made it 8-10s and made paging cost more rather than less. Bounded by a per-project raw-byte cap with all-or-nothing eviction"
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
     class Uploader {
@@ -369,6 +379,7 @@ classDiagram
     DeviceRegistry ..> DeviceInfo
     DeviceRegistry *-- devKey : (account, id)
     RemoteSource ..> sourcedOp : attribution comes from the journal key
+    RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime
     ReadLedger ..> ReadStat
     ReadLedger ..> HeatEntry
     QuotaProvider <|.. UnlimitedQuota
