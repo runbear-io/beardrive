@@ -27,7 +27,11 @@ are deliberately scoped for outside contributors.
 
 - **FUSE / NFS mount mode** — lazy-loading huge volumes instead of full
   materialization.
-- **Search across the hub** — full-text + wikilink graph over a project.
+- **Search across the hub** — full-text + wikilink graph over a project, in the
+  browser and across projects. Searching *contents* already works locally today
+  (`bdrive grep`, over the files a project syncs); what is still exploring is
+  doing it hub-side, which needs a content index the storage layer has no home
+  for yet.
 - **Webhooks / notifications** — "a file changed in `reports/`" pushed to
   Slack or similar (hub-side).
 
