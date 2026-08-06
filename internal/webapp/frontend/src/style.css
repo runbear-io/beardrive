@@ -752,6 +752,17 @@ a.ai-main:hover { color: var(--accent); }
 /* Rows inside a card don't repeat the card's own border or note. */
 .hrun-body { border-top: 1px solid var(--border); }
 .hrun-body .hentry:last-child { border-bottom: none; }
+/* "this run read it too" — a quieter badge than the kind pill it follows,
+   because the change is still the headline of the row. */
+.hread { flex: none; padding: 2px 6px; border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; color: var(--text-dim); background: var(--hover); }
+/* What the run read and did NOT change: same two columns as a change row so
+   the eye reads one list, dimmer because nothing moved. */
+.hrun-reads { border-top: 1px solid var(--border); padding: 4px 0 6px; }
+.hrun-reads-head { padding: 6px 14px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); }
+.hrun-read { display: flex; gap: 10px; align-items: center; width: 100%; padding: 5px 14px; border: none; background: none; font: inherit; text-align: left; cursor: pointer; }
+.hrun-read:hover { background: rgba(255,255,255,.015); }
+.hrun-read .hkind { color: var(--text-dim); background: var(--hover); }
+.hrun-foot { padding: 8px 14px 10px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-faint); }
 
 /* ---- restore / remove ---- */
 .hrestore-btn, .hremove-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 2px 8px 2px 5px; border: 1px solid var(--border); border-radius: 5px; background: none; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; }

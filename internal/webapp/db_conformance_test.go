@@ -65,7 +65,7 @@ func metaBackends(t *testing.T) []metaBackend {
 				// device_rows rows behind for the following test to inherit.
 				db.Exec(`DROP TABLE IF EXISTS accounts, tokens, auth_policy, projects, project_perms,
 					orgs, org_members, invites, shares, devices, device_rows, read_stats,
-					meta_version, schema_meta`)
+					read_sessions, meta_version, schema_meta`)
 			},
 			open: func(t *testing.T) MetaStore {
 				s, err := OpenSQLStore("pgx", dsn)
@@ -221,7 +221,20 @@ func TestMetaStoreConformance(t *testing.T) {
 			reads.Record(p1.ID, "handbook.md", ReadKindHuman, "dev@x.io")
 			reads.Record(p1.ID, "handbook.md", ReadKindHuman, "boss@x.io")
 			reads.Record(p1.ID, "wiki/deep.md", ReadKindAgent, "d1")
+			// Per-session read detail rides its own repo, so it needs its own
+			// pass on every backend: two sessions on one device must stay two
+			// sets of rows, and one of them must prune away by date.
+			reads.WithSessions(st.SessionReads(), 0)
+			reads.RecordSession(p1.ID, "sess-a", "d1", "handbook.md")
+			reads.RecordSession(p1.ID, "sess-a", "d1", "wiki/deep.md")
+			reads.RecordSession(p1.ID, "sess-b", "d1", "handbook.md")
 			if err := reads.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.SessionReads().PutBatch([]SessionRead{{
+				Project: p1.ID, Session: "sess-old", Device: "d1", Path: "handbook.md",
+				Last: time.Now().UTC().Add(-90 * 24 * time.Hour),
+			}}); err != nil {
 				t.Fatal(err)
 			}
 
@@ -322,6 +335,37 @@ func TestMetaStoreConformance(t *testing.T) {
 			}
 			if sub := reads2.Heat(p1.ID, "wiki", time.Time{}); len(sub) != 1 {
 				t.Fatalf("prefix heat = %+v, want only wiki/deep.md", sub)
+			}
+
+			sessions := st2.SessionReads()
+			got, err := sessions.ListBySession(p1.ID, "sess-a", "d1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 2 || got[0].Path != "handbook.md" || got[1].Path != "wiki/deep.md" {
+				t.Fatalf("session-a rows lost across reload: %+v", got)
+			}
+			if other, _ := sessions.ListBySession(p1.ID, "sess-b", "d1"); len(other) != 1 {
+				t.Fatalf("session-b rows = %+v, want its own single row", other)
+			}
+			// Wrong device, same session id: the query is keyed on both, which
+			// is what keeps a forged report off somebody else's run card.
+			if none, _ := sessions.ListBySession(p1.ID, "sess-a", "d2"); len(none) != 0 {
+				t.Fatalf("session rows leaked across devices: %+v", none)
+			}
+			if err := sessions.PruneBefore(time.Now().UTC().AddDate(0, 0, -30)); err != nil {
+				t.Fatal(err)
+			}
+			if old, _ := sessions.ListBySession(p1.ID, "sess-old", "d1"); len(old) != 0 {
+				t.Fatalf("prune left expired session rows: %+v", old)
+			}
+			if kept, _ := sessions.ListBySession(p1.ID, "sess-a", "d1"); len(kept) != 2 {
+				t.Fatalf("prune took recent session rows too: %+v", kept)
+			}
+			// The aggregate the run cards do NOT come from is untouched by any
+			// of that — session rows never enter the bucket map.
+			if e := reads2.Heat(p1.ID, "", time.Time{})["handbook.md"]; e.Human != 2 {
+				t.Fatalf("bucket heat changed with session rows: %+v", e)
 			}
 		})
 	}

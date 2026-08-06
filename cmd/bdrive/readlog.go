@@ -41,18 +41,22 @@ to run it by hand.`,
 				return nil
 			}
 			data, _ := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 1<<20))
+			// Parsed once, like syncCmd hoists it: stdin is already drained
+			// here, and logReads runs once per mount.
+			session := eventSessionID(data)
 			// The session's directory is rarely the mount root, so reads are
 			// attributed to whichever mount actually contains them.
 			for _, target := range syncTargets(folder) {
-				logReads(target, data)
+				logReads(target, data, session)
 			}
 			return nil
 		},
 	}
 }
 
-// logReads spools the reads from one hook event that fall inside one mount.
-func logReads(folder string, data []byte) {
+// logReads spools the reads from one hook event that fall inside one mount,
+// tagged with the agent session they happened in (see store.ReadEvent).
+func logReads(folder string, data []byte, session string) {
 	// LoadProject, not ResolveMount: a hook must never enroll this
 	// device (registry self-heal) — and syncBlocked keeps a paused
 	// or never-inited project's spool from even being created.
@@ -89,7 +93,7 @@ func logReads(folder string, data []byte) {
 		if filter.Skip(rel) {
 			continue // not part of the project (ignore/include rules)
 		}
-		st.LogRead(rel) // best-effort; the hook must never fail the turn
+		st.LogRead(rel, session) // best-effort; the hook must never fail the turn
 	}
 }
 

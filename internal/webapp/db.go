@@ -3,6 +3,7 @@ package webapp
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -25,6 +26,7 @@ type MetaStore interface {
 	Shares() ShareRepo
 	Devices() DeviceRepo
 	Reads() ReadRepo
+	SessionReads() SessionReadRepo
 	Close() error
 }
 
@@ -76,6 +78,19 @@ type ReadRepo interface {
 	Load() ([]ReadStat, error)
 	PutBatch(stats []ReadStat) error // upsert by (project, path, day, kind, actor)
 	DeleteBatch(keys []ReadStatKey) error
+}
+
+// SessionReadRepo persists which paths one agent session read (see
+// SessionRead). Deliberately its OWN repo rather than a session column on
+// read_stats: ReadLedger loads every read_stats row into one map at boot and
+// ReadLedger.Heat linearly scans that whole map on every heat request,
+// hub-wide — so multiplying its row count by session cardinality would slow
+// the Dashboard for projects that never ran an agent. These rows never enter
+// that map; they are queried by primary key and pruned by date.
+type SessionReadRepo interface {
+	PutBatch(reads []SessionRead) error // upsert by (project, session, device, path)
+	ListBySession(project, session, device string) ([]SessionRead, error)
+	PruneBefore(t time.Time) error
 }
 
 // ---- cheap change detection ---------------------------------------------
@@ -205,4 +220,8 @@ func checkDevice(d DeviceInfo) error {
 
 func checkReadStat(s ReadStat) error {
 	return storable(s.Project, s.Path, s.Day, s.Kind, s.Actor)
+}
+
+func checkSessionRead(s SessionRead) error {
+	return storable(s.Project, s.Session, s.Path, s.Device)
 }

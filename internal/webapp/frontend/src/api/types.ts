@@ -183,6 +183,10 @@ export interface HistoryEntry {
   author?: string;
   device: DeviceInfo;
   note?: string;
+  // The agent session this change was committed during (hook-set, and unlike
+  // the note not settable by hand). It groups a run card and is the key the
+  // card's reads are fetched with.
+  session?: string;
 }
 
 // POST .../shares (handleShareCreate, shares.go)

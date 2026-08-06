@@ -36,6 +36,7 @@ type sqlMetaStore struct {
 	shares   *sqlShareRepo
 	devices  *sqlDeviceRepo
 	reads    *sqlReadRepo
+	sessions *sqlSessionReadRepo
 }
 
 // OpenSQLStore opens (and migrates) a SQL metadata store. driver is "sqlite"
@@ -70,16 +71,18 @@ func OpenSQLStore(driver, dsn string) (MetaStore, error) {
 	s.shares = &sqlShareRepo{s: s, w: regWriter{s, regShares}}
 	s.devices = &sqlDeviceRepo{s: s, w: regWriter{s, regDevices}}
 	s.reads = &sqlReadRepo{s: s, w: regWriter{s, regReads}}
+	s.sessions = &sqlSessionReadRepo{s: s}
 	return s, nil
 }
 
-func (s *sqlMetaStore) Accounts() AccountRepo { return s.accounts }
-func (s *sqlMetaStore) Projects() ProjectRepo { return s.projects }
-func (s *sqlMetaStore) Orgs() OrgRepo         { return s.orgs }
-func (s *sqlMetaStore) Shares() ShareRepo     { return s.shares }
-func (s *sqlMetaStore) Devices() DeviceRepo   { return s.devices }
-func (s *sqlMetaStore) Reads() ReadRepo       { return s.reads }
-func (s *sqlMetaStore) Close() error          { return s.db.Close() }
+func (s *sqlMetaStore) Accounts() AccountRepo         { return s.accounts }
+func (s *sqlMetaStore) Projects() ProjectRepo         { return s.projects }
+func (s *sqlMetaStore) Orgs() OrgRepo                 { return s.orgs }
+func (s *sqlMetaStore) Shares() ShareRepo             { return s.shares }
+func (s *sqlMetaStore) Devices() DeviceRepo           { return s.devices }
+func (s *sqlMetaStore) Reads() ReadRepo               { return s.reads }
+func (s *sqlMetaStore) SessionReads() SessionReadRepo { return s.sessions }
+func (s *sqlMetaStore) Close() error                  { return s.db.Close() }
 
 // q rebinds ?-placeholders to $1,$2,… for Postgres; SQLite keeps ?.
 func (s *sqlMetaStore) q(query string) string {
@@ -244,6 +247,16 @@ func (s *sqlMetaStore) migrate() error {
 			kind TEXT NOT NULL, actor TEXT NOT NULL,
 			count INTEGER NOT NULL DEFAULT 0, last TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (project, path, day, kind, actor))`,
+		// Which paths one agent session read. Its own table, NOT a column on
+		// read_stats: read_stats is loaded whole into ReadLedger's map at boot
+		// and linearly scanned on every heat request, so session cardinality
+		// there would cost every project on the hub. Queried by primary key
+		// prefix, pruned by date — never loaded whole.
+		`CREATE TABLE IF NOT EXISTS read_sessions (
+			project TEXT NOT NULL, session TEXT NOT NULL, device TEXT NOT NULL,
+			path TEXT NOT NULL, last TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (project, session, device, path))`,
+		`CREATE INDEX IF NOT EXISTS read_sessions_last ON read_sessions (last)`,
 		`CREATE TABLE IF NOT EXISTS project_perms (
 			project TEXT NOT NULL, email TEXT NOT NULL, level TEXT NOT NULL,
 			PRIMARY KEY (project, email))`,
@@ -902,4 +915,59 @@ func (r *sqlReadRepo) DeleteBatch(keys []ReadStatKey) error {
 		}
 		return nil
 	})
+}
+
+// ---- session reads ----
+
+// No regWriter: these rows are telemetry detail, never read through a
+// registry's refresh path, so there is no version counter to bump.
+type sqlSessionReadRepo struct {
+	s *sqlMetaStore
+}
+
+func (r *sqlSessionReadRepo) PutBatch(reads []SessionRead) error {
+	for _, sr := range reads {
+		if err := checkSessionRead(sr); err != nil {
+			return err
+		}
+	}
+	tx, err := r.s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, sr := range reads {
+		if _, err := tx.Exec(r.s.q(`INSERT INTO read_sessions (project,session,device,path,last)
+			VALUES (?,?,?,?,?)
+			ON CONFLICT(project,session,device,path) DO UPDATE SET last=excluded.last`),
+			sr.Project, sr.Session, sr.Device, sr.Path, tenc(sr.Last)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (r *sqlSessionReadRepo) ListBySession(project, session, device string) ([]SessionRead, error) {
+	rows, err := r.s.db.Query(r.s.q(`SELECT project, session, device, path, last FROM read_sessions
+		WHERE project = ? AND session = ? AND device = ? ORDER BY path`), project, session, device)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionRead
+	for rows.Next() {
+		var sr SessionRead
+		var last string
+		if err := rows.Scan(&sr.Project, &sr.Session, &sr.Device, &sr.Path, &last); err != nil {
+			return nil, err
+		}
+		sr.Last = tdec(last)
+		out = append(out, sr)
+	}
+	return out, rows.Err()
+}
+
+func (r *sqlSessionReadRepo) PruneBefore(t time.Time) error {
+	_, err := r.s.db.Exec(r.s.q(`DELETE FROM read_sessions WHERE last < ?`), tenc(t))
+	return err
 }

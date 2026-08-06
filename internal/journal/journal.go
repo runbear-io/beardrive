@@ -43,6 +43,18 @@ type Op struct {
 	Size       int64     `json:"size,omitempty"`
 	Mode       uint32    `json:"mode,omitempty"` // permission bits
 	Note       string    `json:"note,omitempty"` // e.g. "conflict copy of <path>"
+	// Session is the agent session this op was committed during, set ONLY by
+	// the agent sync hook (`bdrive sync --hook`). Display/join only — never an
+	// input to Less or Replay, exactly like Mtime below, so replay stays
+	// deterministic and ops written before this field existed simply carry "".
+	//
+	// It exists because Note is user-settable (`bdrive sync --note`): joining
+	// a run's reads to its writes on the note string would let any member with
+	// write access forge a note that collides with a teammate's session and
+	// hang their reads off it. This field is the un-forgeable half of that
+	// pair, so the join reads it and never the note.
+	Session string `json:"session,omitempty"`
+
 	// Mtime is when the file was last written, as opposed to Time, which is
 	// when the op was committed. Display only — never an input to Less or
 	// Replay, since it comes from the filesystem and can be anything.

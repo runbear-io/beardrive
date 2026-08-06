@@ -353,7 +353,11 @@ func journalOps(key string, tmp *os.File) ([]journal.Op, error) {
 		// and a C0 run in author is the "renders as nothing" shape its own doc
 		// comment names. DeviceName is absent on purpose: History serves the
 		// device REGISTRY's name, not the op's.
-		if !journal.SafeText(op.Note) || !journal.SafeText(op.Author) || !journal.SafeText(op.UserName) {
+		// Op.Session joins that list for the same reason: History serves it
+		// beside the note and the frontend groups run cards on it, so it is
+		// peer-written free text rendered in the audit surface.
+		if !journal.SafeText(op.Note) || !journal.SafeText(op.Author) ||
+			!journal.SafeText(op.UserName) || !journal.SafeText(op.Session) {
 			return nil, fmt.Errorf("journal carries invalid text")
 		}
 	}
