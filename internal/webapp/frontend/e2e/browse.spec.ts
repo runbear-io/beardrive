@@ -485,7 +485,8 @@ test("history groups one agent run into a single card", async ({ page }) => {
   const run = page.locator(".hrun");
   await expect(run).toHaveCount(1);
   await expect(run.locator(".hrun-note")).toHaveText("claude-code session 8f21e4");
-  await expect(run.locator(".hrun-meta")).toContainText("2 files");
+  // Both halves of the run, since the seed gives it session reads (BEA-98).
+  await expect(run.locator(".hrun-meta")).toContainText("changed 2");
   await expect(run.locator(".hrun-meta")).toContainText("seed-agent");
   // Both of the run's changes live inside the card...
   await expect(run.locator(".hentry")).toHaveCount(2);

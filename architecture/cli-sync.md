@@ -19,6 +19,7 @@ classDiagram
         +Account config.Settings
         +Backend remote.Backend
         +Note string
+        +SessionID string
         +Prune bool
         +OnProgress func
         +Cycle(ctx) Result
@@ -107,7 +108,8 @@ classDiagram
         +LoadCache / SaveCache mountID
         +LoadSync / SaveSync
         +SaveNote / LoadNote
-        +PendingReads read spool
+        +LogRead(rel, session) read spool
+        +PendingReads dedup on path+session
         +Lock() flock
     }
     note for Store "internal/store — ~/.bdrive/volumes/mount-id: content-addressed blobs, per-device journal copies, state cache, paused marker (free funcs Paused/SetPaused, no flock)"
@@ -117,9 +119,10 @@ classDiagram
         +Author +User +UserName
         +Kind put or delete
         +Path +Blob +Size +Mode +Note
+        +Session agent session, hook-set
         +Mtime when the file was written
     }
-    note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay"
+    note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay. Session holds the same standing: set only by `bdrive sync --hook` (never by --note, which any member can spell), display/join-only, and the key History run cards group on — a note is forgeable, a session id is not"
     note for Op "Op now owns its own JSON: a Path that is not valid UTF-8 rides as a base64 `path_raw` sidecar and is restored only when the lossy form still matches, so one line can never name two different files on two readers. Less falls through to Kind/Path/Blob/Size/Mode, making the order TOTAL — two ops can no longer tie and replay differently per device. Parse skips an undecodable line and drops an unknown Kind instead of failing the whole journal"
 
     class Backend {

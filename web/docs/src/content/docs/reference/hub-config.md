@@ -63,7 +63,8 @@ cloud credentials on the serving machine.
   },
   "reads": {                         // read heatmap telemetry (hub mode)
     "enabled": true,                 // default true; aggregate counts only
-    "retention_days": 400            // daily buckets older than this fold into all-time totals
+    "retention_days": 400,           // daily buckets older than this fold into all-time totals
+    "session_retention_days": 30     // how long History's run cards keep per-session read detail
   },
   "database": { "driver": "sqlite", "dsn": "/var/lib/bdrive/hub.db" }
 }

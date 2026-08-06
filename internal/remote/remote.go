@@ -65,8 +65,13 @@ type Backend interface {
 
 // ReadEvent is one agent file read reported to the hub for its read heatmap.
 type ReadEvent struct {
-	Path string    `json:"path"`
-	Time time.Time `json:"time,omitzero"`
+	Path string `json:"path"`
+	// Session is the agent session the read happened in, so the hub can join
+	// a run's reads to the writes journal.Op.Session carries. A client string
+	// — the hub pins each recorded row to the device it validated, never to
+	// anything in this body (see handleReadReport).
+	Session string    `json:"session,omitempty"`
+	Time    time.Time `json:"time,omitzero"`
 }
 
 // ReadReporter is the optional read-telemetry capability, in the PutSigner
