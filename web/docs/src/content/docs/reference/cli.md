@@ -17,6 +17,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive stop [folder]` | Stop syncing — daemon and agent sync hooks both pause. Files stay on disk; `bdrive init` resumes |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes. Run from the mount root; the daemon picks changes up in seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub |
 | `bdrive scope --explain` | List every path in the folder, split into what syncs and what does not, with counts — the verifiable answer to "what leaves this machine". Pure read: no daemon, no lock, no network |
+| `bdrive grep <pattern> [folder]` | Search the text **inside** the files a project syncs. `pattern` is a Go RE2 regexp, or a literal string with `-F`. `-i` ignores case, `-l` prints matching paths only, `-n` caps the lines printed (default 200, `0` = all). Pure read: no daemon, no lock, no network |
 | `bdrive forget <path>...` | Stop syncing a path and remove it from the hub. Adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file. `--list`, `--revoke`, `--expires` (the hub's Share dialog can also set an expiry on an existing link) |
@@ -122,6 +123,36 @@ run *created*, open that run in the hub's History view and use the row's
 **undo — remove file** button (it asks first: the file leaves every synced
 device, and the DELETED row it leaves behind restores it). From the CLI, delete
 the file yourself and let the next sync carry that.
+
+### `bdrive grep` — search what is inside the files
+
+`bdrive grep` searches file *contents*, not names:
+
+```sh
+bdrive grep 'retention.*fold'
+# wiki/runbook.md:42: the retention fold collapses day buckets
+# specs/reads.md:8: retention folding happens at boot
+# 2 files, 2 matching lines
+
+bdrive grep -i -l TODO      # matching paths only, case-insensitive
+bdrive grep -F 'a[b]c'      # literal string, not a regexp
+```
+
+**It searches exactly what the project syncs.** A `.bdriveignore` rule or a
+narrowed `bdrive scope` excludes a file from search the same way it excludes it
+from sync, so results never mention a file your teammates cannot see, and
+`.bdrive/` state never appears. Binary files are skipped.
+
+It reads the real files on disk, so it works offline, takes no lock, and never
+blocks on a sync in progress. Exit status is 0 when something matched and 1
+when nothing did — `bdrive grep -q` has no equivalent, use `-l` and check the
+status.
+
+:::note[Local, not hub-wide]
+This searches *this* folder. Searching contents across a whole hub, or from the
+browser, is not built yet — the ⌘K palette covers file names, projects and
+actions.
+:::
 
 ### `bdrive forget` and `bdrive sync --prune` — cleaning up the hub
 
