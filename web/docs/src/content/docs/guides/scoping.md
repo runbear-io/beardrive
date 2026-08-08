@@ -231,3 +231,12 @@ Regardless of configuration:
 the seeded default covers the common cases. But treat it as hygiene, not a
 security control: any org member can mint a public link for any synced file.
 Secrets belong in a secret manager, not in a folder you hand to agents.
+
+Minting a share link is the one place the hub reads the bytes first: it scans
+the **first 1 MiB** for credential-shaped strings (AWS access key, private key
+block, GitHub/Slack/GitLab/OpenAI token) and refuses, naming the rule and the
+line but never the matched text. `bdrive share --force` — or **Share anyway**
+in the web UI — overrides it. Know what that check does *not* cover: it runs
+**at the moment you share**, and a link serves the file's latest content
+forever, so a key written into an already-shared file is never caught. It is a
+last-line backstop, not a reason to sync a folder you wouldn't otherwise.

@@ -23,6 +23,7 @@ func shareCmd() *cobra.Command {
 	var expires time.Duration
 	var list bool
 	var revoke string
+	var force bool
 	c := &cobra.Command{
 		Use:   "share [file]",
 		Short: "Share a synced file publicly by URL",
@@ -32,9 +33,16 @@ PDFs open inline — with no account. The link always serves the file's
 latest synced content and lives until revoked (use --expires to limit it).
 
 The file must be inside an initialized project and already synced (the
-daemon usually gets it there within seconds of saving).`,
+daemon usually gets it there within seconds of saving).
+
+Before minting, the hub reads the first 1 MiB of the file and refuses if it
+finds credential-shaped strings — an AWS key, a private key block, a GitHub
+or Slack or GitLab token. That check happens at the moment you share: a link
+serves the file's latest content, so later changes are never re-checked.
+Use --force to share anyway.`,
 		Example: `  bdrive share wiki/report.html
   bdrive share deck.pdf --expires 168h    # link dies after a week
+  bdrive share deploy.md --force          # share despite a credentials warning
   bdrive share --list                     # this project's links
   bdrive share --revoke <token-or-url>`,
 		Args: cobra.MaximumNArgs(1),
@@ -68,9 +76,12 @@ daemon usually gets it there within seconds of saving).`,
 			if err != nil {
 				return err
 			}
-			body := map[string]string{"path": filepath.ToSlash(rel)}
+			body := map[string]any{"path": filepath.ToSlash(rel)}
 			if expires > 0 {
 				body["expires_in"] = expires.String()
+			}
+			if force {
+				body["confirm"] = true
 			}
 			data, _ := json.Marshal(body)
 			resp, err := serverDo(http.MethodPost, server+"/api/p/"+projectID+"/shares", settings.Token, data)
@@ -80,6 +91,11 @@ daemon usually gets it there within seconds of saving).`,
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusNotFound {
 				return fmt.Errorf("%s (if you just saved it, wait a few seconds for the daemon or run `bdrive sync`)", strings.TrimSpace(readBody(resp)))
+			}
+			// Before the generic fallthrough: httpBodyError would print the raw
+			// JSON, and this is the one status the user can act on.
+			if resp.StatusCode == http.StatusConflict {
+				return secretsFound(filepath.ToSlash(rel), resp)
 			}
 			if resp.StatusCode != http.StatusOK {
 				return httpBodyError(resp)
@@ -101,10 +117,36 @@ daemon usually gets it there within seconds of saving).`,
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&force, "force", false, "share it even if the file looks like it contains credentials")
 	c.Flags().DurationVar(&expires, "expires", 0, "make the link expire (e.g. 24h, 168h); default: lives until revoked")
 	c.Flags().BoolVar(&list, "list", false, "list this project's share links")
 	c.Flags().StringVar(&revoke, "revoke", "", "revoke a share link (token or full URL)")
 	return c
+}
+
+// secretsFound turns the hub's 409 into the message that stops the share.
+// The wording is load-bearing: a link serves the file's LATEST content
+// forever, so this says the file was checked *at the moment you shared it* —
+// never that the file is clean.
+func secretsFound(rel string, resp *http.Response) error {
+	var out struct {
+		Findings []struct {
+			Rule string `json:"rule"`
+			Line int    `json:"line"`
+		} `json:"findings"`
+	}
+	// Not readBody: that does a single 256-byte Read and would truncate a
+	// long findings list mid-JSON.
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || len(out.Findings) == 0 {
+		return fmt.Errorf("%s looks like it contains credentials; nothing was shared (re-run with --force if that is intentional)", rel)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s looks like it contains credentials (checked at the moment you shared it):\n", rel)
+	for _, f := range out.Findings {
+		fmt.Fprintf(&b, "  line %-4d %s\n", f.Line, f.Rule)
+	}
+	b.WriteString("Nothing was shared. Re-run with --force if that is intentional.")
+	return fmt.Errorf("%s", b.String())
 }
 
 func listShares(settings config.Settings) error {
