@@ -1238,6 +1238,13 @@ func storageErr(w http.ResponseWriter, code int, msg string, err error) {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+// writeJSONStatus is writeJSON for the answers a client has to read the body
+// of — a 409 whose findings the CLI and the browser both decode.
+func writeJSONStatus(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
 }

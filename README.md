@@ -485,8 +485,27 @@ carry a strict CSP, never see auth cookies, and sit behind a generous
 per-IP rate limit (`share_rpm`), so a malicious shared file's scripts
 can't touch hub sessions and a scraper can't turn the hub into a CDN.
 Any org member can mint links, and a link is public to whoever has the
-URL — don't share folders that hold secrets, and note a LAN-bound hub
-means LAN-only links.
+URL — note that a LAN-bound hub means LAN-only links.
+
+Before it mints, the hub reads the **first 1 MiB** of the file and refuses
+if it finds credential-shaped strings — an AWS access key, a private key
+block, a GitHub, Slack, GitLab or OpenAI token. It names the rule and the
+line, never the matched text, and nothing is shared:
+
+```
+$ bdrive share deploy.md
+Error: deploy.md looks like it contains credentials (checked at the moment you shared it):
+  line 12   aws_access_key_id
+  line 40   private_key
+Nothing was shared. Re-run with --force if that is intentional.
+```
+
+`--force` shares it anyway (the web UI's Share button asks the same
+question and offers **Share anyway**). Know the two limits: the check runs
+**at the moment you share**, and a link serves the file's latest content
+forever — so a key committed into an already-shared file is never caught —
+and it only reads the first 1 MiB. It shortens the odds; it is not a
+promise that a file is clean.
 
 ### Agent integration
 

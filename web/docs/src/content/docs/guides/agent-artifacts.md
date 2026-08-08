@@ -79,8 +79,11 @@ scripts can't touch hub sessions and a scraper can't turn your hub into a CDN.
 
 :::caution
 Any org member can mint links, and a link is public to whoever holds the URL.
-Don't put secrets in a synced folder. Note also that a LAN-bound hub means
-LAN-only links.
+Before minting, the hub scans the first 1 MiB of the file for
+credential-shaped strings and refuses (`--force`, or **Share anyway** in the
+UI, overrides it) — but that check runs *at the moment you share*, and a link
+serves the file's latest content forever, so don't put secrets in a synced
+folder. Note also that a LAN-bound hub means LAN-only links.
 :::
 
 ## Who wrote what

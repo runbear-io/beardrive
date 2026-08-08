@@ -227,6 +227,9 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	put("guide.md", "# Guide\n\nSecond version of the guide, with more detail.\n", 2*time.Hour)
 	put("notes/readme.md", "# Notes\n\nNested folder content.\n", 24*time.Hour)
 	put("notes/deep/topic.md", "# Topic\n\nDeeply nested file.\n", 24*time.Hour)
+	// The share gate needs something to fire on. Fabricated, AWS-shaped —
+	// not a credential, and the only seeded file that holds one.
+	put("deploy.md", "# Deploy\n\nexport AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n", 24*time.Hour)
 	// Tiny valid PNG (1x1), enough to exercise the binary/download path.
 	png := "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" +
 		"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"

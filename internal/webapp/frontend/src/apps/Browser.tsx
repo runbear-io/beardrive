@@ -32,6 +32,33 @@ import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
 import { VersionBanner } from "../components/VersionBanner";
 
+// The hub's six share-time credential rules, in words. Only one caller
+// (shareNow), so it lives here rather than in its own file.
+const SECRET_LABELS: Record<string, string> = {
+  aws_access_key_id: "an AWS access key",
+  openai_api_key: "an OpenAI API key",
+  github_pat: "a GitHub token",
+  slack_token: "a Slack token",
+  private_key: "a private key",
+  gitlab_pat: "a GitLab token",
+};
+
+// secretsMessage phrases the 409 for the confirm dialog. The second sentence
+// is not decoration: a link always serves the file's LATEST content, so the
+// copy may only ever claim what was true at the moment of sharing — never
+// that the file is clean.
+function secretsMessage(findings: { rule: string; line: number }[] = []): string {
+  const parts = findings.map((f) => `${SECRET_LABELS[f.rule] ?? f.rule} (line ${f.line})`);
+  const what =
+    parts.length > 1
+      ? parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1]
+      : parts[0] || "something credential-shaped";
+  return (
+    `BearDrive found ${what} in this file. The check covers the file at the moment you share it — ` +
+    `a link always serves the file's latest content, so later changes are never checked. Share anyway?`
+  );
+}
+
 // The browsing surface shared by hub projects and single-volume mode: the
 // file tree, folder listings, file views, and every topbar action. Sidebar
 // chrome (vault header, project nav, org bar) is injected by the caller;
@@ -185,12 +212,23 @@ export default function Browser(props: {
 
   const shareNow = useCallback(async () => {
     // Shares are per-file; a selected folder has nothing to mint.
-    try {
-      const r = await fetch(apiBase + "shares", {
+    const post = (confirm: boolean) =>
+      fetch(apiBase + "shares", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
+        body: JSON.stringify(confirm ? { path, confirm: true } : { path }),
       });
+    try {
+      let r = await post(false);
+      // 409: the hub found credential-shaped strings and minted nothing.
+      // Read the structured body — this is a raw fetch, so it never passes
+      // through errorFor() in api/http.ts, which would flatten it to a toast.
+      if (r.status === 409) {
+        const { findings } = (await r.json()) as { findings?: { rule: string; line: number }[] };
+        if (!(await modalConfirm("This file may contain credentials", secretsMessage(findings), "Share anyway", true)))
+          return; // Cancel mints nothing, and fires no share_created
+        r = await post(true);
+      }
       if (!r.ok) throw new Error(await r.text());
       const s = await r.json();
       // Fired here rather than by the table in api/http.ts, because this is

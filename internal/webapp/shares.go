@@ -249,6 +249,7 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 	var req struct {
 		Path      string `json:"path"`
 		ExpiresIn string `json:"expires_in,omitempty"` // Go duration, e.g. "168h"
+		Confirm   bool   `json:"confirm,omitempty"`    // share it anyway, secrets and all
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
@@ -275,12 +276,61 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	if !req.Confirm && !s.alreadyPublic(r.PathValue("project"), p) {
+		rc, err := v.source.Open(r.Context(), p, snap.files[p])
+		if err != nil {
+			// Fails CLOSED. The repo's "degrade rather than fail" posture is for
+			// sync cycles; minting is a rare interactive action, and a check
+			// that skips itself on a storage hiccup is exactly the false
+			// confidence this gate exists to remove.
+			storageErr(w, http.StatusServiceUnavailable, "could not read the file to check it for credentials", err)
+			return
+		}
+		// 1 MiB and close: source.Open streams from the object store, so this
+		// aborts the rest of the transfer rather than pulling a 500 MB file
+		// down to look at its first megabyte. Don't "fix" it into a ReadAll.
+		buf, err := io.ReadAll(io.LimitReader(rc, secretScanLimit))
+		rc.Close()
+		if err != nil {
+			storageErr(w, http.StatusServiceUnavailable, "could not read the file to check it for credentials", err)
+			return
+		}
+		if findings := scanSecrets(buf); len(findings) > 0 {
+			writeJSONStatus(w, http.StatusConflict, map[string]any{
+				"error":    "this file looks like it contains credentials",
+				"findings": findings,
+			})
+			return
+		}
+	}
 	sh, err := s.Shares.Create(r.PathValue("project"), p, s.requestUser(r).Email, ttl)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, shareJSON(r, sh))
+}
+
+// alreadyPublic reports whether this path is already served to anyone with a
+// URL. If it is, minting skips the credential scan: the content is public
+// already, so withholding the link protects nothing and would break the
+// "clicking Share again gives me the same link" behaviour the dialog is built
+// on.
+//
+// It cannot key off ShareDB.Create's reuse branch, which is narrower (that one
+// also requires no expiry on either side), and it has to drop links whose
+// creator left the org — those 404 at /s/ (shareCreatorStillBelongs), so a
+// secrets file whose only link is already dead must not wave through.
+func (s *Server) alreadyPublic(project, p string) bool {
+	if s.Shares == nil {
+		return false
+	}
+	for _, sh := range s.Shares.List(project) { // List already drops expired
+		if sh.Path == p && s.shareCreatorStillBelongs(sh) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleShareList(v *volume, w http.ResponseWriter, r *http.Request) {
