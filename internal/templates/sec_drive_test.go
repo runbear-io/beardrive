@@ -89,7 +89,7 @@ func TestSec_Templates_GetIsTheOnlyDoorAndItIsClosed(t *testing.T) {
 // another file of this package) grew one, the two surfaces that render the
 // choice to a user would start offering it and Get would start loading it.
 func TestSec_Templates_TheRegistryHasNoWriteDoor(t *testing.T) {
-	want := []string{"docs", "wiki", "para"}
+	want := []string{"docs", "wiki", "para", "skills"}
 	if got := Names(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Names() = %q, want %q — the shipped set changed; every name here is "+
 			"concatenated into an embed path and rendered as a choice on the hub", got, want)

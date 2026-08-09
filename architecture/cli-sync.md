@@ -67,9 +67,10 @@ classDiagram
         +ReservedDir(name) .git .bdrive
         +ReservedName(name) .DS_Store, tmp
         +AgentHookConfig(p) bool
+        +AgentConfigDir(name) bool
         +ReservedPath(p) bool
     }
-    note for ReservedPath "Case-and-trailing-dot folded, so `.BDRIVE.` is still reserved. AgentHookConfig names the files an agent EXECUTES (.claude/settings.json, .codex/*, .gemini, .hermes, .mcp.json at any depth) — a synced project must never be able to hand a teammate's agent new hooks. Deliberately its own list, not derived from internal/agenthooks: config imports nothing"
+    note for ReservedPath "Case-and-trailing-dot folded, so `.BDRIVE.` is still reserved. AgentHookConfig names the files an agent EXECUTES (.claude/settings.json, .codex/*, .gemini, .hermes, .mcp.json at any depth) — a synced project must never be able to hand a teammate's agent new hooks. Deliberately its own list, not derived from internal/agenthooks: config imports nothing. AgentConfigDir answers about ONE segment, for init's mount-root gate: the reserved rule only sees segments BELOW a root, so mounting ~/.claude itself leaves settings.json a bare top-level file"
 
     class UnderRoot {
         <<internal/store — one rule>>
@@ -176,11 +177,11 @@ classDiagram
 
     class Templates {
         <<internal/templates>>
-        go:embed files/docs, files/wiki, files/para
+        go:embed all:files — docs, wiki, para, skills
         List / Get / Names
         WriteTo(dir) skips existing paths
     }
-    note for Templates "init --template <name>: refused with --only and on an unknown name BEFORE any write. The hub seeds at creation (the CLI creates through POST /api/projects), so WriteTo runs only as the fallback for a hub too old to know the field, and in an already-initialized folder — the agent's post-init path. Skipping existing paths is what makes a double-seed a no-op"
+    note for Templates "The embed directive is `all:` — a plain pattern drops dot-prefixed paths silently, and the skills template IS .claude/skills/<name>/SKILL.md. init --template <name>: refused with --only and on an unknown name BEFORE any write. The hub seeds at creation (the CLI creates through POST /api/projects), so WriteTo runs only as the fallback for a hub too old to know the field, and in an already-initialized folder — the agent's post-init path. Skipping existing paths is what makes a double-seed a no-op"
 
     class syncBlocked {
         <<gate>>
@@ -265,6 +266,7 @@ classDiagram
     Commands --> openSession : after the gate
     openSession --> MountRegistry : ResolveMount — self-heal only, never enrolls
     Commands --> Templates : init --template (seed) / init resume (agent's post-init path)
+    Commands ..> ReservedPath : init refuses an AgentConfigDir mount root
     Commands --> startSync : init
     startSync --> MountRegistry : EnrollMount — the only writer
     startSync --> PausedMarker : clears

@@ -98,6 +98,7 @@ export default defineConfig({
             { label: "Turn a personal brain into a company brain", slug: "use-cases/company-brain" },
             { label: "Run a personal wiki, publish part of it", slug: "use-cases/personal-wiki" },
             { label: "Carry one context across agents and devices", slug: "use-cases/multi-device" },
+            { label: "Give every agent on the team the same skills", slug: "use-cases/shared-skills" },
           ],
         },
         {
