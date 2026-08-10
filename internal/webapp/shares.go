@@ -280,7 +280,8 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, shareJSON(r, sh))
+	// No opens: a freshly minted link has nothing to report.
+	writeJSON(w, shareJSON(r, sh, nil))
 }
 
 func (s *Server) handleShareList(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -288,10 +289,12 @@ func (s *Server) handleShareList(v *volume, w http.ResponseWriter, r *http.Reque
 		http.Error(w, "sharing is not enabled on this server", http.StatusNotFound)
 		return
 	}
-	shares := s.Shares.List(r.PathValue("project"))
+	project := r.PathValue("project")
+	shares := s.Shares.List(project)
+	opens := s.Reads.ShareOpens(project) // once, outside the loop — never per share
 	out := make([]map[string]any, 0, len(shares))
 	for _, sh := range shares {
-		out = append(out, shareJSON(r, sh))
+		out = append(out, shareJSON(r, sh, opens))
 	}
 	writeJSON(w, map[string]any{"shares": out})
 }
@@ -359,10 +362,16 @@ func (s *Server) handleShareExpiry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such share", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, shareJSON(r, updated))
+	// Same as create: an expiry edit is not the surface that reports opens.
+	writeJSON(w, shareJSON(r, updated, nil))
 }
 
-func shareJSON(r *http.Request, sh Share) map[string]any {
+// shareJSON renders one link. opens is the project's share-open map from
+// ReadLedger.ShareOpens, built ONCE by the caller and indexed here — passing
+// nil means "not measured" (reads are off, or this is a single-share reply
+// that has nothing to report yet), and then neither receipt key appears.
+// Absent is not zero: `0` would be a lie on a hub with reads disabled.
+func shareJSON(r *http.Request, sh Share, opens map[string]ShareOpen) map[string]any {
 	out := map[string]any{
 		"token": sh.Token, "path": sh.Path, "project": sh.Project,
 		"url": requestBaseURL(r) + "/s/" + sh.Token, "created": sh.Created,
@@ -372,6 +381,16 @@ func shareJSON(r *http.Request, sh Share) map[string]any {
 	}
 	if !sh.Expires.IsZero() {
 		out["expires"] = sh.Expires
+	}
+	if opens != nil {
+		// Keyed by path, not token: heat has no token dimension, so two
+		// links on one file report the same number. Documented, and asserted
+		// in shares_test.go so it can't regress into a silent wrong answer.
+		o := opens[sh.Path]
+		out["opens"] = o.Count
+		if o.Count > 0 {
+			out["last_opened"] = o.Last
+		}
 	}
 	return out
 }
@@ -439,14 +458,19 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "content temporarily unavailable", http.StatusBadGateway)
 		return
 	}
-	fi, ok := snap.files[sh.Path]
+	// A share token is a promise about ONE file, so it follows that file
+	// when it moves — the opposite of a viewer URL, which is an address and
+	// always serves whatever lives there now. That also closes a leak: a
+	// share used to serve whatever unrelated file later occupied its path.
+	sp, ok := resolveShare(snap.moves, snap.files, sh.Path, sh.Created)
 	if !ok {
 		http.Error(w, "the shared file no longer exists", http.StatusNotFound)
 		return
 	}
+	fi := snap.files[sp]
 	// A share hit is external consumption. Actor is token+IP: one audience
 	// member reloading is debounced to a visit, distinct visitors still count.
-	s.Reads.Record(sh.Project, sh.Path, ReadKindShare, sh.Token+"/"+s.clientIP(r))
+	s.Reads.Record(sh.Project, sp, ReadKindShare, sh.Token+"/"+s.clientIP(r))
 
 	// Share links are the only unauthenticated door to stored bytes, so they
 	// are the only egress a plan actually caps. The per-IP limiter above
@@ -466,7 +490,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	cw := &countingWriter{w: w}
 	defer func() { s.quota().RecordEgress(org, cw.n) }()
 
-	rc, err := v.source.Open(r.Context(), sh.Path, fi)
+	rc, err := v.source.Open(r.Context(), sp, fi)
 	if err != nil {
 		http.Error(w, "content temporarily unavailable", http.StatusBadGateway)
 		return
@@ -474,13 +498,13 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	defer rc.Close()
 
 	if r.URL.Query().Get("download") == "1" {
-		w.Header().Set("Content-Type", contentType(sh.Path))
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(path.Base(sh.Path))))
+		w.Header().Set("Content-Type", contentType(sp))
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(path.Base(sp))))
 		io.Copy(cw, rc)
 		return
 	}
 
-	switch strings.ToLower(path.Ext(sh.Path)) {
+	switch strings.ToLower(path.Ext(sp)) {
 	case ".md", ".markdown":
 		src, err := io.ReadAll(rc)
 		if err != nil {
@@ -493,12 +517,12 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(cw, sharedMarkdownShell, html.EscapeString(path.Base(sh.Path)), updatedStamp(fi.Time), body)
+		fmt.Fprintf(cw, sharedMarkdownShell, html.EscapeString(path.Base(sp)), updatedStamp(fi.Time), body)
 	case ".html", ".htm":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.Copy(cw, rc)
 	default:
-		w.Header().Set("Content-Type", contentType(sh.Path))
+		w.Header().Set("Content-Type", contentType(sp))
 		setContentLength(w, rc) // measured, never the journal's Size field
 		io.Copy(cw, rc)
 	}
@@ -543,12 +567,17 @@ footer.bdrive a{color:inherit}
 /* Dark theme LAST: these rules sit at the same specificity as the light ones
    above, so source order is the whole fix — a dark block placed earlier loses
    to every light rule that follows it. Values are the hub's @theme tokens
-   (frontend/src/tw.css), never hand-picked, so the two surfaces agree. */
+   (frontend/src/tw.css), never hand-picked, so the two surfaces agree.
+   Inline code carries its own tint and edge so a chip reads as code and not
+   as prose; the edge is an inset shadow rather than a border because a border
+   would change the chip's box metrics and light mode has to stay untouched. */
 @media (prefers-color-scheme: dark){
 body{background:#0a0b0d;color:#eef0f3}
 a{color:#ffcf85}
 h1,h2,h3{color:#eef0f3}
 pre,code{background:#15171b}
+code{color:#e4d9c4;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07)}
+pre code{color:inherit;box-shadow:none}
 blockquote{border-left-color:rgba(255,255,255,.07);color:#9aa0a9}
 td,th{border-color:rgba(255,255,255,.07)}
 table.frontmatter{background:#15171b;color:#9aa0a9}

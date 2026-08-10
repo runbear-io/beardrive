@@ -71,6 +71,7 @@ export function ConnectGuide({ project, existing }: { project: Project; existing
           The agent installs the CLI, signs this machine in, and registers the sync hooks — asking
           before anything it changes.
         </p>
+        <p className="gd-desc">Runs on macOS and Linux. Windows is not supported yet.</p>
         <details className="gd-manual">
           <summary>What exactly happens</summary>
           <ul className="gd-desc gd-list">

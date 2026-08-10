@@ -22,10 +22,14 @@ test("deep link to a project resolves after reload", async ({ page }) => {
   await expect(page).toHaveURL("/" + pid);
 });
 
-test("unknown project id falls back to a real project", async ({ page }) => {
+// BEA-83 replaced the silent fallback with a not-found page: the sidebar
+// still shows a real project (the fallback chain is unchanged), but the URL
+// you typed stays put and the content pane says the id resolved to nothing.
+test("unknown project id says so instead of swapping projects", async ({ page }) => {
   await login(page);
   await page.goto("/p-00000000");
-  await page.waitForURL(/\/[0-9a-f-]{36}$/);
+  await expect(page.locator("#content .empty")).toContainText("Project not found");
+  await expect(page).toHaveURL("/p-00000000");
   await expect(page.locator("#project-select")).toContainText(/.+/);
 });
 
@@ -79,20 +83,20 @@ test("join link accepts an invite after sign-in", async ({ page, browser }) => {
   await ctx.close();
 });
 
-test("no projects: the create dialog opens itself, and the page behind is no dead end", async ({
+test("no projects: the onboarding page renders with no dialog, and New project opens one", async ({
   page,
 }) => {
   await login(page, "solo@example.com");
-  // With nothing to browse, the one useful action opens on arrival.
-  await expect(page.locator(".modal .start-points")).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(page.locator(".modal-input")).toHaveCount(0);
+  // Nothing opens on arrival — the page's own button used to sit behind a
+  // dialog nobody asked for, pointer-blocked.
+  await expect(page.locator("[role=dialog]")).toHaveCount(0);
 
-  // Closing it leaves a page that says what to do — and a way back in.
+  // The page says what to do, and the button works on the first attempt.
   await expect(page.locator(".onboard h1")).toHaveText("Welcome to BearDrive");
   await expect(page.locator(".ob-start h3")).toHaveText("Start a project");
+  await page.click("#ob-new", { timeout: 2000, trial: true }); // no retry loop
   await page.click("#ob-new");
-  await expect(page.locator(".modal-input")).toBeVisible();
+  await expect(page.locator(".modal .start-points")).toBeVisible();
   await page.keyboard.press("Escape");
   // Dismissed once, it stays dismissed until asked for again.
   await expect(page.locator(".modal-input")).toHaveCount(0);

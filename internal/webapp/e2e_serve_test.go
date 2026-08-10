@@ -268,6 +268,19 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	// A second version of the same binary, so the history diff has a
 	// predecessor to refuse to diff (the "binary — no diff" path).
 	put("assets/logo.png", png+"\x00trailing", 3*time.Hour)
+	// A file that MOVED: the same blob put at the new path and the old path
+	// deleted, one device, one cycle — the shape the scanner emits for a
+	// rename. The old URL has to keep working (BEA-81).
+	put("old-guide.md", "# Old guide\n\nThis file has been moved.\n", 30*time.Hour)
+	put("archive/moved-guide.md", "# Old guide\n\nThis file has been moved.\n", 5*time.Hour)
+	lam++
+	seq++
+	ops = append(ops, journal.Op{
+		Seq: seq, Lamport: lam, Time: now.Add(-5 * time.Hour).Add(time.Second),
+		Device: "seed", DeviceName: "seed-agent", Author: "alice@x.io",
+		User: "alice@x.io", UserName: "Alice",
+		Kind: journal.KindDelete, Path: "old-guide.md",
+	})
 	// One removed file, so the history feed has a delete row: deletes have no
 	// content, so their rows stay unclickable while every other row is now an
 	// address for its own version.

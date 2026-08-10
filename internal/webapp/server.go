@@ -38,6 +38,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/templates"
@@ -203,6 +205,18 @@ type volume struct {
 
 type snapshot struct {
 	files map[string]FileInfo
+	// moves is the derived rename index (see moves.go), cached with the
+	// listing it was replayed alongside. Nil for a source that has no
+	// journals to derive it from — every resolver then answers "not found",
+	// so the DirSource exclusion falls out instead of needing a rule.
+	moves moveIndex
+}
+
+// MoveSource is a Source that can also report where its files came from.
+// Optional, like Uploader: implementing it keeps the replay ONE pass, so the
+// move index costs no extra journal read.
+type MoveSource interface {
+	FilesWithMoves(context.Context) (map[string]FileInfo, moveIndex, error)
 }
 
 func (v *volume) snapshot(ctx context.Context) (*snapshot, error) {
@@ -211,14 +225,23 @@ func (v *volume) snapshot(ctx context.Context) (*snapshot, error) {
 	if v.snap != nil && time.Since(v.at) < v.refresh {
 		return v.snap, nil
 	}
-	files, err := v.source.Files(ctx)
+	var (
+		files map[string]FileInfo
+		moves moveIndex
+		err   error
+	)
+	if ms, ok := v.source.(MoveSource); ok {
+		files, moves, err = ms.FilesWithMoves(ctx)
+	} else {
+		files, err = v.source.Files(ctx)
+	}
 	if err != nil {
 		if v.snap != nil {
 			return v.snap, nil // serve stale rather than fail
 		}
 		return nil, err
 	}
-	v.snap, v.at = &snapshot{files: files}, time.Now()
+	v.snap, v.at = &snapshot{files: files, moves: moves}, time.Now()
 	return v.snap, nil
 }
 
@@ -299,7 +322,32 @@ type RemoteSource struct {
 	// sealed holds the blobs this process has verified AND proved immutable.
 	// See verify.
 	sealed sync.Map // sha (string) → struct{}
+
+	jmu    sync.Mutex               // guards jcache and jbytes
+	jcache map[string]cachedJournal // "journal/<dev>.jsonl" → parsed ops
+	jbytes int64                    // raw journal bytes currently cached
 }
+
+// cachedJournal is one journal's parsed ops plus the (size, modified) that
+// proves the parse is still current. See loadSourcedOps.
+type cachedJournal struct {
+	size  int64
+	mod   time.Time
+	bytes int64 // raw bytes this entry stands for, for the ceiling
+	ops   []journal.Op
+}
+
+// journalFetchConcurrency bounds the parallel journal fetches on a cold load.
+// A cache can never help a first request, and that loop is one serial round
+// trip to S3 per device that has ever synced the project.
+const journalFetchConcurrency = 8
+
+// ponytail: a per-project raw-byte cap with all-or-nothing eviction, so the
+// real ceiling is maxCachedJournalBytes x the number of projects a hub has
+// touched since start — s.vols never evicts. Closing it properly means one
+// budget shared across RemoteSources with LRU, or reading only the appended
+// tail of each journal, which makes the cache small in the first place.
+const maxCachedJournalBytes = 64 << 20
 
 // OpenBlob is the one way a blob's bytes leave the hub, and on a hub whose
 // storage can presign it is also the only place left that can tell a content
@@ -436,41 +484,133 @@ type sourcedOp struct {
 	From string
 }
 
+// loadSourcedOps folds every journal on the remote into one slice of ops. It
+// is the funnel every reader goes through — history, folder listings, restore,
+// and the hub's own appendOp — so re-downloading and re-parsing every journal
+// here was the whole cost of a history page, paid again per "load more".
+//
+// Journals only ever GROW: a device appends only to its own (the one-writer
+// invariant) and the hub's appendOp rewrites its key with strictly more bytes.
+// Nothing shrinks or rewrites one in place, so the (Size, Modified) that List
+// already reports proves a parse we still hold is current — no staleness
+// window, no time-based expiry, and no new Backend method. The List is the one
+// round trip every request still pays.
+//
+// No singleflight: two requests that miss the same journal at the same moment
+// both fetch it, which is what every request did before this existed.
 func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) {
 	objs, err := r.Backend.List(ctx, "journal/")
 	if err != nil {
 		return nil, fmt.Errorf("list journals: %w", err)
 	}
-	var all []sourcedOp
+	keep := make([]remote.Object, 0, len(objs))
 	for _, o := range objs {
-		if !strings.HasSuffix(o.Key, ".jsonl") {
+		if strings.HasSuffix(o.Key, ".jsonl") {
+			keep = append(keep, o)
+		}
+	}
+
+	parsed := make([][]journal.Op, len(keep))
+	var misses []int
+	r.jmu.Lock()
+	// Pruning here rather than after the fetch: a journal that VANISHED is a
+	// pass with no misses at all, so a prune on the store path would never see
+	// it and the entry would stay resident for the life of the process.
+	live := make(map[string]bool, len(keep))
+	for i, o := range keep {
+		live[o.Key] = true
+		if c, ok := r.jcache[o.Key]; ok && c.size == o.Size && c.mod.Equal(o.Modified) {
+			parsed[i] = c.ops
 			continue
 		}
-		rc, err := r.Backend.Get(ctx, o.Key)
-		if err != nil {
-			return nil, fmt.Errorf("fetch %s: %w", o.Key, err)
+		misses = append(misses, i)
+	}
+	for k, c := range r.jcache {
+		if !live[k] {
+			r.jbytes -= c.bytes
+			delete(r.jcache, k)
 		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
+	}
+	r.jmu.Unlock()
+
+	if len(misses) > 0 {
+		sizes := make([]int64, len(keep))
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(journalFetchConcurrency)
+		for _, i := range misses {
+			g.Go(func() error {
+				rc, err := r.Backend.Get(gctx, keep[i].Key)
+				if err != nil {
+					return fmt.Errorf("fetch %s: %w", keep[i].Key, err)
+				}
+				data, err := io.ReadAll(rc)
+				rc.Close()
+				if err != nil {
+					return err
+				}
+				sizes[i] = int64(len(data))
+				// A corrupt journal is ignored rather than breaking the view —
+				// and cached as zero ops, or it is re-downloaded on every
+				// request for as long as it stays corrupt.
+				if ops, err := journal.Parse(data); err == nil {
+					parsed[i] = ops
+				}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
 			return nil, err
 		}
-		ops, err := journal.Parse(data)
-		if err != nil {
-			continue // corrupt journal; ignore rather than break the view
-		}
+		r.cacheJournals(keep, misses, parsed, sizes)
+	}
+
+	// A fresh outer slice on every call: handleHistory and Files both sort what
+	// they are handed, and the cached ops must never be the thing they reorder.
+	// journal.Op is all value fields, so appending one copies it.
+	var all []sourcedOp
+	for i, o := range keep {
 		from := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
-		for _, op := range ops {
+		for _, op := range parsed[i] {
 			all = append(all, sourcedOp{Op: op, From: from})
 		}
 	}
 	return all, nil
 }
 
+// cacheJournals records what the fetch pass parsed, and enforces the byte
+// ceiling by dropping everything — a cold pass costs what every pass cost
+// before this cache existed, so the fallback is today's behavior, not an error.
+func (r *RemoteSource) cacheJournals(keep []remote.Object, misses []int, parsed [][]journal.Op, sizes []int64) {
+	r.jmu.Lock()
+	defer r.jmu.Unlock()
+	if r.jcache == nil {
+		r.jcache = make(map[string]cachedJournal, len(keep))
+	}
+	for _, i := range misses {
+		if c, ok := r.jcache[keep[i].Key]; ok {
+			r.jbytes -= c.bytes
+		}
+		r.jcache[keep[i].Key] = cachedJournal{
+			size: keep[i].Size, mod: keep[i].Modified, bytes: sizes[i], ops: parsed[i],
+		}
+		r.jbytes += sizes[i]
+	}
+	if r.jbytes > maxCachedJournalBytes {
+		r.jcache, r.jbytes = nil, 0
+	}
+}
+
 func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
+	files, _, err := r.FilesWithMoves(ctx)
+	return files, err
+}
+
+// FilesWithMoves is the replay, plus the rename index derived from the same
+// sorted ops — one pass, so the index rides in the cached snapshot.
+func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo, moveIndex, error) {
 	all, err := r.loadOps(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	journal.Sort(all)
 	files := make(map[string]FileInfo)
@@ -495,7 +635,7 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 			delete(files, op.Path)
 		}
 	}
-	return files, nil
+	return files, buildMoveIndex(all), nil
 }
 
 func (r *RemoteSource) Open(ctx context.Context, _ string, fi FileInfo) (io.ReadCloser, error) {
@@ -567,6 +707,7 @@ func (s *Server) Handler() http.Handler {
 		"/api/p/{project}/": proj,
 	} {
 		mux.HandleFunc("GET "+prefix+"tree", resolve(PermRead, s.handleTree))
+		mux.HandleFunc("GET "+prefix+"resolve", resolve(PermRead, s.handleResolve))
 		mux.HandleFunc("GET "+prefix+"file", resolve(PermRead, s.handleFile))
 		mux.HandleFunc("GET "+prefix+"download", resolve(PermRead, s.handleDownload))
 		mux.HandleFunc("GET "+prefix+"render", resolve(PermRead, s.handleRender))
@@ -1008,7 +1149,18 @@ func lookup(v *volume, r *http.Request) (string, FileInfo, int, error) {
 	}
 	fi, ok := snap.files[p]
 	if !ok {
-		return "", FileInfo{}, http.StatusNotFound, fmt.Errorf("no such file: %s", p)
+		// The address is empty — but the file may have moved out of it. A
+		// LIVE path always wins, which falls out of the ordering: the
+		// snapshot hit above returns first, so nothing redirects while
+		// something still answers at the old address.
+		to, moved := resolveForward(snap.moves, snap.files, p)
+		if !moved {
+			return "", FileInfo{}, http.StatusNotFound, fmt.Errorf("no such file: %s", p)
+		}
+		// The canonical path is what gets returned, so the read is recorded
+		// against it (heat doesn't split across old and new) and the render
+		// payload names it.
+		p, fi = to, snap.files[to]
 	}
 	return p, fi, 0, nil
 }
@@ -1019,6 +1171,7 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 		http.Error(w, err.Error(), code)
 		return
 	}
+	setCanonical(w, r, p)
 	// Count the read before the ETag check: a 304 render is still a person
 	// reading the file, and skipping it would undercount the hottest pages.
 	s.recordRead(r, p)
@@ -1086,6 +1239,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), code)
 		return
 	}
+	setCanonical(w, r, p)
 	s.recordRead(r, p)
 	rc, err := v.source.Open(r.Context(), p, fi)
 	if err != nil {

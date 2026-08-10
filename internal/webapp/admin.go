@@ -77,8 +77,12 @@ func (s *Server) handleOrgShares(w http.ResponseWriter, r *http.Request) {
 		if !atLeast(s.projectPermOf(r, p), PermRead) {
 			continue
 		}
+		// One scan per visible project, zero per share — and after the
+		// permission check, since there is no reason to scan for a project
+		// the caller cannot see.
+		opens := s.Reads.ShareOpens(p.ID)
 		for _, sh := range s.Shares.List(p.ID) {
-			j := shareJSON(r, sh)
+			j := shareJSON(r, sh, opens)
 			j["project_name"] = p.Name
 			out = append(out, j)
 		}
