@@ -8,7 +8,7 @@ import { modalConfirm, modalPrompt } from "../modal";
 import { toast } from "../toast";
 import { useHubRefresh, usePermissions, useShares } from "../hooks/useHub";
 import { PROJECT_ICONS, ProjectIcon } from "./shell";
-import { SharesTable } from "./SharesTable";
+import { OPENS_NOTE, SharesTable } from "./SharesTable";
 import { projColor } from "./ProjectNav";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -297,7 +297,7 @@ export function ProjectSettings({
 // there to find one project's links.
 function PublicLinks({ project }: { project: Project }) {
   const qc = useQueryClient();
-  const { data: shares, error } = useShares(project.id);
+  const { data: shares, error, isLoading } = useShares(project.id);
   if (error) return null; // sharing is off on this server, or single-volume mode
   return (
     <Card>
@@ -305,12 +305,16 @@ function PublicLinks({ project }: { project: Project }) {
         <CardTitle>Public links</CardTitle>
         <CardDescription>
           Files in this project that anyone with the URL can read — no account needed.
+          {/* Only when the hub actually measures opens: on a hub with read
+              telemetry off there is no number, so promising one would lie. */}
+          {(shares || []).some((s) => s.opens !== undefined) && <> {OPENS_NOTE}</>}
         </CardDescription>
       </CardHeader>
       <Separator />
       <CardContent>
         <SharesTable
           shares={shares || []}
+          loading={isLoading}
           canRevoke={atLeast(project.perm, "write")}
           onChanged={() => qc.invalidateQueries({ queryKey: ["shares", project.id] })}
           empty="No public links."

@@ -146,11 +146,68 @@ func TestReadLedgerRetentionFold(t *testing.T) {
 	}
 }
 
+// TestShareOpens pins the receipt accessor: share buckets only (so Last
+// really means *last opened*), all-time (a link's lifetime is the question),
+// and counts with no trace of the actor, which is token+"/"+IP.
+func TestShareOpens(t *testing.T) {
+	repo := newFileReadRepo(filepath.Join(t.TempDir(), "reads.json"))
+	old := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	if err := repo.PutBatch([]ReadStat{
+		// Two share buckets on one path, one of them the retention fold:
+		// all-time means both count, so no day filter may creep in.
+		{Project: "p-1", Path: "a.md", Day: "", Kind: ReadKindShare, Actor: "tok/1.2.3.4", Count: 2, Last: old},
+		{Project: "p-1", Path: "a.md", Day: "2026-03-02", Kind: ReadKindShare, Actor: "tok/5.6.7.8", Count: 1, Last: old.Add(time.Hour)},
+		// A NEWER human read of the same path. It must move neither the
+		// count nor the date — this is the assertion that pins the kind
+		// filter, since HeatEntry.LastRead would happily report it.
+		{Project: "p-1", Path: "a.md", Day: "2026-08-01", Kind: ReadKindHuman, Actor: "alice@x.io", Count: 40, Last: newer},
+		{Project: "p-1", Path: "a.md", Day: "2026-08-01", Kind: ReadKindAgent, Actor: "dev1", Count: 9, Last: newer},
+		// A share read in another project must not leak across.
+		{Project: "p-2", Path: "a.md", Day: "2026-03-02", Kind: ReadKindShare, Actor: "tok/9.9.9.9", Count: 7, Last: newer},
+		// A path with no share reads at all is simply absent from the map.
+		{Project: "p-1", Path: "b.md", Day: "2026-08-01", Kind: ReadKindHuman, Actor: "alice@x.io", Count: 3, Last: newer},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := NewReadLedger(repo, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opens := l.ShareOpens("p-1")
+	if got := opens["a.md"]; got.Count != 3 {
+		t.Fatalf("a.md opens = %d, want 3 (share buckets only, all-time)", got.Count)
+	}
+	if got := opens["a.md"].Last; !got.Equal(old.Add(time.Hour)) {
+		t.Fatalf("a.md last opened = %s, want %s — a newer human read must not move it", got, old.Add(time.Hour))
+	}
+	if _, ok := opens["b.md"]; ok {
+		t.Fatal("a path read only by humans must not appear in the opens map")
+	}
+	if got := l.ShareOpens("p-2")["a.md"].Count; got != 7 {
+		t.Fatalf("p-2 a.md opens = %d, want 7", got)
+	}
+	// Enabled-but-empty is an empty map, not nil: nil is reserved for "reads
+	// are off", which is what the wire format turns into an absent key.
+	if m := l.ShareOpens("p-nothing"); m == nil {
+		t.Fatal("a project with no share reads must yield an empty map, not nil")
+	}
+	// Live recording lands in the same map, debounced to visits.
+	l.Record("p-1", "c.md", ReadKindShare, "tok2/1.1.1.1")
+	l.Record("p-1", "c.md", ReadKindShare, "tok2/1.1.1.1") // same opener, inside the window
+	if got := l.ShareOpens("p-1")["c.md"].Count; got != 1 {
+		t.Fatalf("c.md opens = %d, want 1 — repeat opens inside the debounce window are one visit", got)
+	}
+}
+
 func TestReadLedgerNil(t *testing.T) {
 	var l *ReadLedger
 	l.Record("p-1", "a.md", ReadKindHuman, "x") // must not panic
 	if l.Heat("p-1", "", time.Time{}) != nil {
 		t.Fatal("nil ledger heat should be nil")
+	}
+	if l.ShareOpens("p-1") != nil {
+		t.Fatal("nil ledger share opens should be nil — reads off means absent, not zero")
 	}
 	if err := l.Close(); err != nil {
 		t.Fatal(err)
