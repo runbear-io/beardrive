@@ -228,6 +228,14 @@ button, input, a.btn { font-family: inherit; }
    like the members table. At 186px it stole the room the row's own facts
    (who, when, whether it expires) needed, and they truncated to "no exp…". */
 .shares-table .admin-table th:last-child, .shares-table .admin-table td:last-child { width: 110px; }
+/* …and once the row also carries the link's open count (BEA-76), narrowing
+   the button column stopped being enough: the detail ran to "3 op…" and the
+   receipt — the whole point of showing it — was the part that fell off. So
+   this one cell wraps instead of ellipsizing. Nothing here is a fixed width
+   worth protecting, and a two-line detail on a narrow viewport beats a
+   truncated one at every width. The path keeps its ellipsis: it is a link
+   with a title tooltip, and it is the column that can be arbitrarily long. */
+.shares-table .admin-table td .ai-tag { white-space: normal; overflow: visible; text-overflow: clip; }
 
 /* ---- file-page "this file is public" banner ---- */
 .share-banner {
@@ -392,7 +400,27 @@ button, input, a.btn { font-family: inherit; }
 /* The scroll container owns scrolling and the page gutter — never a width.
    Width and centering belong to .page (one per view), so every route shares
    the same column edges and the gutter never eats into the reading measure. */
-#content { flex: 1; overflow-y: auto; padding: 44px 40px 110px; scroll-behavior: smooth; }
+#content { flex: 1; overflow-y: auto; padding: 44px 40px 110px; scroll-behavior: smooth; scrollbar-gutter: stable; }
+/* #content is the only scroller in the app, so with the platform's overlay
+   scrollbars nothing at rest says a route has more below (that's how Public
+   links went missing on settings). Giving ::-webkit-scrollbar an explicit
+   width turns it into a classic, always-visible bar — which is also what makes
+   scrollbar-gutter mean anything on macOS. Pointer-fine only: touch keeps
+   overlay scrollbars and the mobile layout is untouched. */
+@media (pointer: fine) {
+  #content::-webkit-scrollbar { width: 10px; }
+  #content::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 5px; }
+  #content::-webkit-scrollbar-track { background: transparent; }
+  /* Chromium drops every ::-webkit-scrollbar rule the moment scrollbar-width
+     or scrollbar-color is set on the same element — and the standard
+     properties alone leave macOS's overlay bar, which is invisible at rest and
+     takes no width. So the standard properties are for engines with no webkit
+     pseudo-element (Firefox) only. Setting both is the trap: it silently
+     restores the bug. */
+  @supports not selector(::-webkit-scrollbar) {
+    #content { scrollbar-width: thin; scrollbar-color: var(--border-2) transparent; }
+  }
+}
 .page { width: 100%; max-width: var(--page-app); margin-inline: auto; min-width: 0; }
 .page.read { max-width: var(--page-read); }
 .page.wide { max-width: var(--page-wide); }
@@ -752,6 +780,17 @@ a.ai-main:hover { color: var(--accent); }
 /* Rows inside a card don't repeat the card's own border or note. */
 .hrun-body { border-top: 1px solid var(--border); }
 .hrun-body .hentry:last-child { border-bottom: none; }
+/* "this run read it too" — a quieter badge than the kind pill it follows,
+   because the change is still the headline of the row. */
+.hread { flex: none; padding: 2px 6px; border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; color: var(--text-dim); background: var(--hover); }
+/* What the run read and did NOT change: same two columns as a change row so
+   the eye reads one list, dimmer because nothing moved. */
+.hrun-reads { border-top: 1px solid var(--border); padding: 4px 0 6px; }
+.hrun-reads-head { padding: 6px 14px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); }
+.hrun-read { display: flex; gap: 10px; align-items: center; width: 100%; padding: 5px 14px; border: none; background: none; font: inherit; text-align: left; cursor: pointer; }
+.hrun-read:hover { background: rgba(255,255,255,.015); }
+.hrun-read .hkind { color: var(--text-dim); background: var(--hover); }
+.hrun-foot { padding: 8px 14px 10px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-faint); }
 
 /* ---- restore / remove ---- */
 .hrestore-btn, .hremove-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 2px 8px 2px 5px; border: 1px solid var(--border); border-radius: 5px; background: none; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; }
@@ -1059,6 +1098,20 @@ input[type="checkbox"] { accent-color: var(--accent); }
 /* plain file / binary views */
 pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* long unbreakable lines wrap instead of blowing out the column: .page has min-width: 0 */
+/* CSV/TSV table view. Cells never wrap (white-space: pre keeps a quoted
+   newline as a line break without turning a wide file into a tall one), so
+   the box takes the sideways scroll and the page body never does.
+   Every rule is scoped under .csvbox: the file pane carries .markdown, so
+   the plain `.markdown table/th/td` rules would otherwise out-specify a
+   bare .csvview — including the ≤900px one that turns a table into its own
+   scroller, which is exactly the job .csvbox is here to do. */
+.csvbox { overflow-x: auto; width: fit-content; max-width: 100%; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--code-bg); }
+.csvbox .csvview { display: table; max-width: none; overflow: visible; margin: 0; border-collapse: collapse; font: 12.5px/1.5 var(--mono); font-variant-numeric: tabular-nums; }
+.csvbox .csvview th, .csvbox .csvview td { border-bottom: 1px solid var(--border); padding: 8px 14px; text-align: left; white-space: pre; vertical-align: top; color: #c6cbd3; font-size: 12.5px; }
+.csvbox .csvview th { background: var(--surface); color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; border-bottom-color: var(--border-2); }
+.csvbox .csvview tr:last-child td { border-bottom: none; }
+.csvbox .csvview tbody tr:hover td { background: rgba(255,255,255,.02); }
+.csvnote { color: var(--text-faint); font-size: 12px; margin: 10px 2px 0; }
 .filecard { margin-top: var(--hero-top); text-align: center; color: var(--text-dim); }
 .filecard .name { font-size: 1.2em; color: var(--text); margin-bottom: .3em; }
 .filecard .btn { margin-top: 14px; }

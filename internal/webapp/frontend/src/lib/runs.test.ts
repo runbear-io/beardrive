@@ -129,3 +129,65 @@ test("a run split across two pages groups into one card", () => {
   assert.deepEqual(items[1].run?.entries.map((x) => x.path), ["a.md", "b.md", "c.md"]);
   assert.deepEqual(items[1].run?.idx, [1, 2, 3]); // idx still addresses the flat feed
 });
+
+// ---- grouping on the session id (BEA-98) ----
+
+const es = (path: string, session?: string, note = "claude-code session x", device = "mac-mini"): HistoryEntry => ({
+  time: "2026-07-29T14:02:00Z",
+  kind: "edit",
+  path,
+  note,
+  session,
+  device: { id: device },
+});
+
+test("legacy entries (no session) still group by note + device, unchanged", () => {
+  const items = groupRuns([e("a.md", "session-1"), e("b.md", "session-1")]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].run?.entries.length, 2);
+  assert.equal(items[0].run?.session, undefined);
+});
+
+test("one note, two sessions = two runs — a note cannot merge into someone's card", () => {
+  const items = groupRuns([
+    es("a.md", "sess-1"),
+    es("b.md", "sess-1"),
+    es("c.md", "sess-2"),
+    es("d.md", "sess-2"),
+  ]);
+  assert.equal(items.length, 2);
+  assert.deepEqual(
+    items.map((i) => i.run?.session),
+    ["sess-1", "sess-2"],
+  );
+});
+
+test("one session on two devices is still two runs", () => {
+  const items = groupRuns([
+    es("a.md", "sess-1", "note", "mac-mini"),
+    es("b.md", "sess-1", "note", "mac-mini"),
+    es("c.md", "sess-1", "note", "linux-box"),
+    es("d.md", "sess-1", "note", "linux-box"),
+  ]);
+  assert.equal(items.length, 2);
+});
+
+test("a session-keyed run never merges with a note-keyed one", () => {
+  // The legacy rows carry the same note the session rows do; only the
+  // session-bearing ones may group together.
+  const items = groupRuns([
+    es("a.md", "sess-1"),
+    es("b.md", "sess-1"),
+    e("c.md", "claude-code session x"),
+    e("d.md", "claude-code session x"),
+  ]);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].run?.session, "sess-1");
+  assert.equal(items[1].run?.session, undefined);
+});
+
+test("a session with no note at all still forms a run", () => {
+  const items = groupRuns([es("a.md", "sess-1", ""), es("b.md", "sess-1", "")]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].run?.entries.length, 2);
+});

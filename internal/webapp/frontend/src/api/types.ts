@@ -183,6 +183,10 @@ export interface HistoryEntry {
   author?: string;
   device: DeviceInfo;
   note?: string;
+  // The agent session this change was committed during (hook-set, and unlike
+  // the note not settable by hand). It groups a run card and is the key the
+  // card's reads are fetched with.
+  session?: string;
 }
 
 // POST .../shares (handleShareCreate, shares.go)
@@ -214,6 +218,13 @@ export interface ShareInfo {
   creator?: string;
   created?: string;
   expires?: string;
+  /* Share-link receipts (shareJSON, shares.go). Both keys are ABSENT — not
+     zero — when the hub has read telemetry off, which is why opens must be
+     tested with `=== undefined` and never with a falsy check: 0 is a real,
+     meaningful value ("minted, never opened"). Counted per FILE, not per
+     link, because heat is keyed by path. */
+  opens?: number;
+  last_opened?: string;
 }
 
 // GET/POST /api/admin/policy (handleAdminPolicy, admin.go)

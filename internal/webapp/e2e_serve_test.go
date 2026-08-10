@@ -28,7 +28,9 @@ import (
 )
 
 const (
-	e2eAddr     = "0.0.0.0:8993"
+	e2eAddr = "0.0.0.0:8993"
+	// e2eSession is the agent session the seeded run card belongs to.
+	e2eSession  = "8f21e4"
 	e2eAdmin    = "e2e@example.com"
 	e2eMember   = "member@example.com"
 	e2eSolo     = "solo@example.com"
@@ -102,6 +104,16 @@ func TestE2EServe(t *testing.T) {
 	srv.Reads, err = OpenReadLedger(filepath.Join(state, "reads.json"), 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Per-session read detail, so the seeded run card has both halves of the
+	// story: what the run changed AND what it read (BEA-98).
+	srv.Reads.WithSessions(OpenSessionReadRepo(filepath.Join(state, "sessions.json")), 0)
+	for _, path := range []string{
+		"notes/readme.md",         // read AND rewritten by the run
+		"index.md",                // read, never changed
+		"archive/retired-spec.md", // read, never changed — the hot+stale one
+	} {
+		srv.Reads.RecordSession(p.ID, e2eSession, "seed", path)
 	}
 	srv.Devices, _ = OpenDeviceRegistry(filepath.Join(state, "devices.json"))
 	srv.Devices.Observe(DeviceInfo{ID: "seed", Name: "seed-agent", OS: "linux/amd64"})
@@ -250,11 +262,28 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	// of their path, so neither row offers a restore (BEA-57).
 	put("notes/readme.md", "# Notes\n\nRewritten during the agent run.\n", 90*time.Minute)
 	put("runbook.md", "# Runbook\n\nCreated during the agent run.\n", 90*time.Minute)
-	ops[len(ops)-1].Note = "claude-code session 8f21e4"
-	ops[len(ops)-2].Note = "claude-code session 8f21e4"
+	ops[len(ops)-1].Note = "claude-code session " + e2eSession
+	ops[len(ops)-2].Note = "claude-code session " + e2eSession
+	// The un-forgeable half of the run identity: the note is what a reader
+	// sees, this is what the card groups and joins its reads on.
+	ops[len(ops)-1].Session = e2eSession
+	ops[len(ops)-2].Session = e2eSession
 	// A second version of the same binary, so the history diff has a
 	// predecessor to refuse to diff (the "binary — no diff" path).
 	put("assets/logo.png", png+"\x00trailing", 3*time.Hour)
+	// A file that MOVED: the same blob put at the new path and the old path
+	// deleted, one device, one cycle — the shape the scanner emits for a
+	// rename. The old URL has to keep working (BEA-81).
+	put("old-guide.md", "# Old guide\n\nThis file has been moved.\n", 30*time.Hour)
+	put("archive/moved-guide.md", "# Old guide\n\nThis file has been moved.\n", 5*time.Hour)
+	lam++
+	seq++
+	ops = append(ops, journal.Op{
+		Seq: seq, Lamport: lam, Time: now.Add(-5 * time.Hour).Add(time.Second),
+		Device: "seed", DeviceName: "seed-agent", Author: "alice@x.io",
+		User: "alice@x.io", UserName: "Alice",
+		Kind: journal.KindDelete, Path: "old-guide.md",
+	})
 	// One removed file, so the history feed has a delete row: deletes have no
 	// content, so their rows stay unclickable while every other row is now an
 	// address for its own version.

@@ -37,7 +37,7 @@ classDiagram
     class volume {
         -source Source
         -refresh time.Duration
-        -snap *snapshot
+        -snap *snapshot (files + moves)
         +snapshot(ctx)
         +invalidate()
     }
@@ -59,15 +59,49 @@ classDiagram
         -verify(ctx, sha) re-hash until sealed
         -blobStat(ctx, blob) remote.Object
         -sealed sync.Map sha→proved immutable
+        -jcache map key→cachedJournal
+        -jbytes int64 raw bytes cached
         -loadSourcedOps(ctx) []sourcedOp
+        -cacheJournals(keep, misses, parsed, sizes)
         -appendOp(ctx, op)
     }
     class sourcedOp {
         +Op journal.Op
         +From journal key's device
     }
+    class cachedJournal {
+        +size int64
+        +mod time.Time
+        +bytes int64
+        +ops []journal.Op
+    }
+    note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp rewrites its key with strictly more bytes — so the (Size, Modified) List already reports proves a parse is still current. That is why the cache needs no expiry and no new Backend method: loadSourcedOps still Lists on every request, and fetches only the keys whose size or mtime moved (concurrently, limit 8). History used to re-download and re-parse EVERY journal per page, which is what made it 8-10s and made paging cost more rather than less. Bounded by a per-project raw-byte cap with all-or-nothing eviction"
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
+    class MoveSource {
+        <<interface>>
+        +FilesWithMoves(ctx) files, moveIndex
+    }
+    class moveIndex {
+        <<map path→[]pathEvent>>
+        +buildMoveIndex(sorted ops)
+        +resolveForward(idx, files, p) viewer
+        +resolveShare(idx, files, p, since) /s/
+        +chainSegments(idx, p) []segment
+        +resolveFolder(idx, files, dir) all-or-nothing
+    }
+    class pathEvent {
+        +At the delete that ended it
+        +To ""  = deleted, not moved
+        +ToAt destination's create
+    }
+    class segment {
+        +Path
+        +From, To window it WAS the file
+    }
+    note for moveIndex "There is no rename op — a move is put(new) + delete(old), same device, same blob, one cycle — so the index is DERIVED inside the replay Files already runs and cached with the snapshot. Pairing needs same device, |Δt| ≤ 30s, B's first-ever put, and one-to-one both ways; anything ambiguous stays a plain deletion. Nothing here writes an op: journal.Less and Replay are untouched"
+    note for segment "Time-bounded on purpose: a bare set of paths would make history?path=docs/a.md show the ops of the NEW a.md that took the old address"
+
     class Uploader {
         <<interface>>
         +Upload(ctx, path, r, size, who, note)
@@ -273,17 +307,30 @@ classDiagram
 
     class ReadLedger {
         -repo ReadRepo
-        -retention
-        -byKey, dirty, seen
+        -sessions SessionReadRepo
+        -retention, sessionRetention
+        -byKey, dirty, seen, pendingSess
         +Record(...)
+        +RecordSession(project, session, device, path)
         +Heat(project, prefix, days)
+        +SessionPaths(project, session, device)
+        +WithSessions(repo, days)
+        +ShareOpens(project)
     }
     class ReadStat {
         +Project +Path +Day +Kind +Actor +Count +Last
     }
+    class SessionRead {
+        +Project +Session +Device +Path +Last
+    }
+    note for SessionRead "One row per (session, device, path) — the per-session detail a History run card joins its writes to, on the un-forgeable Op.Session and never on the note. Deliberately OUTSIDE ReadLedger.byKey: that map is loaded whole at boot and full-scanned by Heat on every request, hub-wide, so session cardinality in it would slow the Dashboard for projects that never ran an agent. Device is always the ownsDevice-validated id, never a client field, so a report naming someone else's session can only ever be found under the forger's own device. Its own, much shorter retention (session_retention_days, default 30) DELETES rather than folds — no heat total was ever derived from it"
     class HeatEntry {
         +Human +Agent +Share +Readers +LastRead
     }
+    class ShareOpen {
+        +Count +Last
+    }
+    note for ShareOpen "The receipt on a public link: share-kind buckets only, which is what makes Last mean last OPENED — HeatEntry.LastRead is cross-kind, so a member viewing the file in the hub would otherwise move the date. Counts, never openers: the share actor is token+IP. Keyed by path, so two tokens on one file report the same number. Callers build the map ONCE per project and index it; a per-share call is a full byKey scan per row"
 
     class QuotaProvider {
         <<interface>>
@@ -355,6 +402,11 @@ classDiagram
 
     Source <|.. DirSource
     Source <|.. RemoteSource
+    MoveSource <|.. RemoteSource : optional, like Uploader — DirSource has no journals, so no moves
+    MoveSource ..> moveIndex
+    volume o-- moveIndex : cached with the snapshot
+    moveIndex *-- pathEvent
+    moveIndex ..> segment : chainSegments
     Uploader <|-- DirectUploader
     DirectUploader <|.. RemoteSource
     RemoteSource o-- Backend : Prefixed(Root, projectID)
@@ -383,8 +435,12 @@ classDiagram
     DeviceRegistry ..> DeviceInfo
     DeviceRegistry *-- devKey : (account, id)
     RemoteSource ..> sourcedOp : attribution comes from the journal key
+    RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime
     ReadLedger ..> ReadStat
+    ReadLedger ..> SessionRead
     ReadLedger ..> HeatEntry
+    ReadLedger ..> ShareOpen
+    ShareDB ..> ShareOpen : shares list joins the open count per path
     QuotaProvider <|.. UnlimitedQuota
 ```
 
@@ -413,6 +469,7 @@ classDiagram
         +Shares() ShareRepo
         +Devices() DeviceRepo
         +Reads() ReadRepo
+        +SessionReads() SessionReadRepo
         +Close()
     }
 
@@ -467,7 +524,7 @@ classDiagram
         storable / storableMap
         checkAccount checkToken checkProject
         checkOrg checkInvite checkShare
-        checkDevice checkReadStat
+        checkDevice checkReadStat checkSessionRead
     }
     note for storable "Called at the top of every repo write in BOTH backends. A NUL byte or invalid UTF-8 in a name is accepted by JSON and rejected by Postgres, so the file backend used to persist rows the SQL backend would refuse — the same hub, migrated, would silently lose them. Refusing at one gate makes the two backends agree on what is storable"
     class ReadRepo {
@@ -475,6 +532,11 @@ classDiagram
         +Load() +PutBatch +DeleteBatch
     }
     note for ReadRepo "batch-oriented: one flush = one write"
+    class SessionReadRepo {
+        <<interface>>
+        +PutBatch +ListBySession +PruneBefore
+    }
+    note for SessionReadRepo "read_sessions / sessions.json — never Load()ed whole; queried by (project, session, device) and pruned by date, which is what keeps the boot load and Heat's scan the size they are today"
 
     class fileMetaStore {
         JSON files, atomic rewrite per change
@@ -497,6 +559,7 @@ classDiagram
     MetaStore *-- ShareRepo
     MetaStore *-- DeviceRepo
     MetaStore *-- ReadRepo
+    MetaStore *-- SessionReadRepo
 
     class BuiltinAuth
     class ProjectDB
@@ -511,6 +574,7 @@ classDiagram
     ShareDB o-- ShareRepo
     DeviceRegistry o-- DeviceRepo
     ReadLedger o-- ReadRepo
+    ReadLedger o-- SessionReadRepo
 
     BuiltinAuth *-- versionGate
     ProjectDB *-- versionGate

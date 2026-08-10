@@ -475,6 +475,176 @@ func TestShareDarkThemeIsLast(t *testing.T) {
 	if strings.Contains(body, "#c6cbd3") || strings.Contains(body, "#3a3a44") {
 		t.Error("ad-hoc dark greys survived; use the tw.css tokens")
 	}
+	// A code chip has to read as code: its own colour, not the body's, plus an
+	// edge to give it shape against a background only a shade off the page.
+	if !strings.Contains(block, "code{color:#e4d9c4;box-shadow:inset 0 0 0 1px") {
+		t.Error("dark inline code must have its own colour and edge, else a chip reads as prose")
+	}
+	// ...and a fenced block stays one slab rather than a row of bordered chips.
+	if !strings.Contains(block, "pre code{color:inherit;box-shadow:none}") {
+		t.Error("dark pre code must reset the inline chip's colour and edge")
+	}
+}
+
+// listShares reads the project's share list as the signed-in sharer.
+func listShares(t *testing.T, srv *Server, h http.Handler, project string) []map[string]any {
+	t.Helper()
+	req := jsonReq(t, "GET", "/api/p/"+project+"/shares", nil)
+	authAs(t, srv, req)
+	rec := doHTTP(h, req)
+	if rec.Code != 200 {
+		t.Fatalf("list shares: %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Shares []map[string]any `json:"shares"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Shares
+}
+
+// TestShareOpensOnTheWire: the number was always recorded and always thrown
+// away at the UI layer (BEA-76). It now rides the shares list — as a count,
+// never as an opener.
+func TestShareOpensOnTheWire(t *testing.T) {
+	srv, p, _, _, h := shareHub(t)
+	var err error
+	if srv.Reads, err = OpenReadLedger(filepath.Join(t.TempDir(), "reads.json"), 0); err != nil {
+		t.Fatal(err)
+	}
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/report.html")
+	unopened, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	// A freshly minted link reports zero — not absent. "Minted, never
+	// opened" is a real answer and the UI words it as "not opened yet".
+	byToken := map[string]map[string]any{}
+	for _, s := range listShares(t, srv, h, p.ID) {
+		byToken[s["token"].(string)] = s
+	}
+	if got, ok := byToken[unopened]["opens"]; !ok || got.(float64) != 0 {
+		t.Fatalf("unopened link opens = %v (present %v), want 0", got, ok)
+	}
+	if _, ok := byToken[unopened]["last_opened"]; ok {
+		t.Fatal("a never-opened link must carry no last_opened")
+	}
+
+	// Two hits from one client inside the debounce window are one visit.
+	for i := 0; i < 2; i++ {
+		if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != 200 {
+			t.Fatalf("public fetch %d: %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	byToken = map[string]map[string]any{}
+	for _, s := range listShares(t, srv, h, p.ID) {
+		byToken[s["token"].(string)] = s
+	}
+	if got := byToken[token]["opens"].(float64); got != 1 {
+		t.Fatalf("opens = %v after two hits in the debounce window, want 1", got)
+	}
+	if _, ok := byToken[token]["last_opened"]; !ok {
+		t.Fatal("an opened link must carry last_opened")
+	}
+
+	// The actor is token+"/"+IP — a public credential joined to an IP. It
+	// must not appear anywhere in the response, in any shape.
+	req := jsonReq(t, "GET", "/api/p/"+p.ID+"/shares", nil)
+	authAs(t, srv, req)
+	body := doHTTP(h, req).Body.String()
+	for _, leak := range []string{token + "/", "192.0.2.1", "actor", "openers"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("shares response leaks %q: %s", leak, body)
+		}
+	}
+
+	// Two tokens on one path report the SAME count: heat is keyed by path,
+	// not by token. Documented behavior — asserted so it cannot regress into
+	// a silently wrong per-link number.
+	second := Share{Token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Project: p.ID,
+		Path: "wiki/report.html", Creator: "s@x.io", Created: time.Now().UTC()}
+	srv.Shares.mu.Lock()
+	srv.Shares.byToken[second.Token] = second
+	srv.Shares.mu.Unlock()
+	if err := srv.Shares.repo.Put(second); err != nil {
+		t.Fatal(err)
+	}
+	byToken = map[string]map[string]any{}
+	for _, s := range listShares(t, srv, h, p.ID) {
+		byToken[s["token"].(string)] = s
+	}
+	if a, b := byToken[token]["opens"], byToken[second.Token]["opens"]; a != b {
+		t.Fatalf("two links on one path report %v and %v; heat is keyed by path, so they must match", a, b)
+	}
+
+	// One byKey scan per project per render — never one per share. Three
+	// links are listed below; a per-share implementation would scan 3×.
+	before := srv.Reads.scans.Load()
+	listShares(t, srv, h, p.ID)
+	if got := srv.Reads.scans.Load() - before; got != 1 {
+		t.Fatalf("listing 3 shares performed %d ShareOpens scans, want exactly 1", got)
+	}
+
+	// Reads off: neither key, and no panic on the nil ledger. Absent means
+	// "not measured"; a 0 here would claim nobody has opened the link.
+	srv.Reads = nil
+	for _, s := range listShares(t, srv, h, p.ID) {
+		if _, ok := s["opens"]; ok {
+			t.Fatalf("reads disabled must omit opens entirely: %v", s)
+		}
+		if _, ok := s["last_opened"]; ok {
+			t.Fatalf("reads disabled must omit last_opened entirely: %v", s)
+		}
+	}
+}
+
+// The org-wide audit table is the second caller of shareJSON, and the place
+// the one-scan-per-project rule is easiest to break (it loops projects).
+func TestOrgSharesCarryOpens(t *testing.T) {
+	h, srv, c, p := permHub(t)
+	var err error
+	if srv.Reads, err = OpenReadLedger(filepath.Join(t.TempDir(), "reads.json"), 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"a.md", "b.md", "c.md"} {
+		if _, err := srv.Shares.Create(p.ID, path, "alice@x.io", 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv.Reads.Record(p.ID, "a.md", ReadKindShare, "tok/203.0.113.7")
+	srv.Reads.Record(p.ID, "b.md", ReadKindHuman, "alice@x.io") // not an open
+
+	before := srv.Reads.scans.Load()
+	rec := doAs(t, h, "GET", "/api/orgs/"+p.Org+"/shares", nil, c["alice"])
+	if rec.Code != 200 {
+		t.Fatalf("org shares: %d %s", rec.Code, rec.Body)
+	}
+	if got := srv.Reads.scans.Load() - before; got != 1 {
+		t.Fatalf("org audit over 1 project with 3 shares scanned %d times, want 1", got)
+	}
+	var out struct {
+		Shares []struct {
+			Path  string `json:"path"`
+			Opens *int64 `json:"opens"`
+		} `json:"shares"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Shares) != 3 {
+		t.Fatalf("want 3 org share rows, got %d", len(out.Shares))
+	}
+	for _, s := range out.Shares {
+		if s.Opens == nil {
+			t.Fatalf("%s carries no opens on a reads-enabled hub", s.Path)
+		}
+		want := int64(0)
+		if s.Path == "a.md" {
+			want = 1
+		}
+		if *s.Opens != want {
+			t.Fatalf("%s opens = %d, want %d (a human read is not an open)", s.Path, *s.Opens, want)
+		}
+	}
 }
 
 func jsonReq(t *testing.T, method, url string, body any) *http.Request {
@@ -638,5 +808,60 @@ func TestShareSecretScanFailsClosed(t *testing.T) {
 	}
 	if n := len(srv.Shares.List(p.ID)); n != 0 {
 		t.Fatalf("failed scan minted %d shares, want 0", n)
+	}
+}
+
+// A share token is a promise about ONE file. These three pin the direction
+// it goes when a path changes hands — the opposite of the viewer's, which is
+// an address and always serves whatever lives there now.
+
+func TestShareFollowsMovedFile(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	at := time.Now().Add(time.Minute)
+	f.putAt("dev1", "docs/notes.md", "# Notes\n\nhello **team**", at)
+	f.delAt("dev1", "wiki/notes.md", at.Add(time.Second))
+
+	rec := do(t, h, "GET", "/s/"+token, nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "hello") {
+		t.Fatalf("share after move: %d %s", rec.Code, rec.Body)
+	}
+
+	// ...and keeps following it once an UNRELATED file takes the old address.
+	f.putAt("dev1", "wiki/notes.md", "# Someone else's file", at.Add(time.Hour))
+	rec = do(t, h, "GET", "/s/"+token, nil)
+	if rec.Code != 200 {
+		t.Fatalf("share with a new file at the old path: %d %s", rec.Code, rec.Body)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "Someone else") {
+		t.Fatalf("share served the file that took its old address:\n%s", body)
+	}
+}
+
+func TestShareOfDeletedFileNeverServesItsSuccessor(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	at := time.Now().Add(time.Minute)
+	f.delAt("dev1", "wiki/notes.md", at)
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != 404 {
+		t.Fatalf("share of a deleted file: %d, want 404", rec.Code)
+	}
+	// The leak this closes: something new lands on the address later, and
+	// the public link used to start serving it with no revoke and no signal.
+	f.putAt("dev1", "wiki/notes.md", "# Payroll", at.Add(time.Hour))
+	rec := do(t, h, "GET", "/s/"+token, nil)
+	if rec.Code != 404 {
+		t.Fatalf("share resurrected by an unrelated file: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestShareUnaffectedByAnUnmovedFile(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	_ = f
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != 200 {
+		t.Fatalf("unmoved share: %d %s", rec.Code, rec.Body)
 	}
 }

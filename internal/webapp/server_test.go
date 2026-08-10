@@ -66,7 +66,11 @@ func (f *fakeRemote) append(dev string, op journal.Op) {
 	f.lam++
 	f.seq[dev]++
 	op.Seq, op.Lamport = f.seq[dev], f.lam
-	op.Time = time.Now().UTC()
+	// A caller that set Time keeps it: move pairing and share resolution are
+	// both time-windowed, so those tests have to place ops in time.
+	if op.Time.IsZero() {
+		op.Time = time.Now().UTC()
+	}
 	op.Device, op.DeviceName, op.Author = dev, dev, dev+"@test"
 	if err := journal.Append(filepath.Join(f.dir, "journal", dev+".jsonl"), []journal.Op{op}); err != nil {
 		f.t.Fatal(err)

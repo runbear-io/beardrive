@@ -765,3 +765,68 @@ func sha256hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
+
+// A rename is not an op — the scanner emits a put at the new path and a
+// delete at the old, in one cycle, carrying the same blob. The hub infers
+// moves from exactly that shape (internal/webapp/moves.go), which only stays
+// true while sync keeps producing it. Nothing in the move index touches
+// journal.Less or Replay; this is what pins that.
+func TestRenameConvergesAsPutPlusDelete(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+
+	write(t, a.Folder, "plan.md", "the plan")
+	cycle(t, a)
+	cycle(t, b)
+	if got := read(t, b.Folder, "plan.md"); got != "the plan" {
+		t.Fatalf("b before the rename = %q", got)
+	}
+
+	// The rename, exactly as a person or an editor does it.
+	if err := os.MkdirAll(filepath.Join(a.Folder, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(a.Folder, "plan.md"), filepath.Join(a.Folder, "notes", "plan.md")); err != nil {
+		t.Fatal(err)
+	}
+	res := cycle(t, a)
+	if res.LocalOps != 2 {
+		t.Fatalf("LocalOps = %d, want 2 (the put and the delete)", res.LocalOps)
+	}
+	cycle(t, b)
+
+	if got := read(t, b.Folder, "notes/plan.md"); got != "the plan" {
+		t.Fatalf("b after the rename = %q, want the plan", got)
+	}
+	if _, err := os.Stat(filepath.Join(b.Folder, "plan.md")); !os.IsNotExist(err) {
+		t.Fatalf("the old path survived on b: %v", err)
+	}
+
+	// The two halves the hub pairs on: one device, same blob, same cycle.
+	ops, err := journal.ReadFile(a.Store.JournalPath(a.Device.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var put, del *journal.Op
+	for i := range ops {
+		switch {
+		case ops[i].Kind == journal.KindPut && ops[i].Path == "notes/plan.md":
+			put = &ops[i]
+		case ops[i].Kind == journal.KindDelete && ops[i].Path == "plan.md":
+			del = &ops[i]
+		}
+	}
+	if put == nil || del == nil {
+		t.Fatalf("rename did not journal a put+delete pair: %+v", ops)
+	}
+	if put.Device != del.Device {
+		t.Fatalf("halves on different devices: %q vs %q", put.Device, del.Device)
+	}
+	if want := ops[0].Blob; put.Blob != want {
+		t.Fatalf("the moved file's blob changed: %q, want %q", put.Blob, want)
+	}
+	if d := del.Time.Sub(put.Time); d > 30*time.Second || d < -30*time.Second {
+		t.Fatalf("the halves landed %v apart — wider than the hub's pairing window", d)
+	}
+}

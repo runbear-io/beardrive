@@ -27,8 +27,15 @@ func TestPermRankAndAtLeast(t *testing.T) {
 // permHub builds an org hub where alice owns the org, bob and carol are plain
 // members, and dave is in another org entirely. The project is alice's.
 func permHub(t *testing.T) (h http.Handler, srv *Server, cookies map[string]*http.Cookie, p Project) {
+	h, srv, cookies, p, _ = permHubAt(t)
+	return
+}
+
+// permHubAt is permHub plus the storage root, for tests that seed a journal
+// through newFakeRemoteAt.
+func permHubAt(t *testing.T) (h http.Handler, srv *Server, cookies map[string]*http.Cookie, p Project, root string) {
 	t.Helper()
-	srv, _, _ = newHub(t, true, nil)
+	srv, _, root = newHub(t, true, nil)
 	auth, err := OpenBuiltinAuth(filepath.Join(t.TempDir(), "auth.json"), true, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +82,7 @@ func permHub(t *testing.T) (h http.Handler, srv *Server, cookies map[string]*htt
 			t.Fatal(err)
 		}
 	}
-	return h, srv, cookies, p
+	return h, srv, cookies, p, root
 }
 
 // Nothing changes for an existing hub: with no permission edits, every org
