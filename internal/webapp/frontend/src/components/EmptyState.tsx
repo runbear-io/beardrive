@@ -7,9 +7,9 @@ import { GuideCode, INSTALL_DOC } from "./ConnectGuide";
 // a coding agent and let it do the whole thing. The by-hand route stays a
 // docs link away.
 //
-// The create dialog also opens itself on arrival (HubApp): with no projects
-// there is nothing else on this page to do. This page is what is left when
-// someone closes it, so it must not be a dead end — hence the button.
+// This is the first thing a zero-project account sees — nothing opens over
+// it. Both cards are entry points: the button creates the project here, the
+// paste-prompt hands the whole job to an agent.
 
 export function EmptyState({ onNew, canCreate }: { onNew: () => void; canCreate: boolean }) {
   return (
