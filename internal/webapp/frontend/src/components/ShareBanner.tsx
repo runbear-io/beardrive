@@ -3,7 +3,7 @@ import type { ShareInfo } from "../api/types";
 import { copyText } from "../util";
 import { toast } from "../toast";
 import { Icon } from "./shell";
-import { revokeShare, shareDetail } from "./SharesTable";
+import { OPENS_NOTE, revokeShare, shareDetail } from "./SharesTable";
 
 /* A file that is publicly reachable says so while you are reading it. The
    Share dialog used to be the only place the link — and its Revoke button —
@@ -42,6 +42,9 @@ export function ShareBanner({
       <p className="sb-note">
         <b>Anyone with this link can view this file</b> — no account needed. It always shows the
         latest version until you revoke it.
+        {/* Same gate as the settings table: say nothing about opens on a hub
+            that does not measure them. */}
+        {shares.some((s) => s.opens !== undefined) && <> {OPENS_NOTE}</>}
       </p>
       {shares.map((s) => (
         <div className="sb-link" key={s.token}>
