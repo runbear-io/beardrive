@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { api } from "../api/http";
 import type { ShareInfo } from "../api/types";
-import { copyText } from "../util";
+import { copyText, humanSize } from "../util";
 import { toast } from "../toast";
 import { Icon } from "./shell";
 import { OPENS_NOTE, revokeShare, shareDetail } from "./SharesTable";
@@ -40,8 +42,8 @@ export function ShareBanner({
       </div>
       {/* Same words as the Share dialog: it is what the user already read. */}
       <p className="sb-note">
-        <b>Anyone with this link can view this file</b> — no account needed. It always shows the
-        latest version until you revoke it.
+        <b>Anyone with this link can view this file</b> — no account needed. It shows the version
+        you published; it will not change until you publish again or revoke it.
         {/* Same gate as the settings table: say nothing about opens on a hub
             that does not measure them. */}
         {shares.some((s) => s.opens !== undefined) && <> {OPENS_NOTE}</>}
@@ -51,8 +53,27 @@ export function ShareBanner({
           <span className="sb-url mono" title={s.url}>
             {s.url}
           </span>
-          <span className="sb-meta">{shareDetail(s, false)}</span>
+          <span className="sb-meta">
+            {shareDetail(s, false)}
+            {s.published && (
+              <>
+                {" · published " + new Date(s.published).toLocaleDateString()}
+                {s.size !== undefined && " · " + humanSize(s.size)}
+              </>
+            )}
+          </span>
+          {/* Only when the file has actually moved on: a pin that matches the
+              current version has nothing to publish, and a legacy link (no
+              `published`) has no pin to move. */}
+          {(s.stale || s.gone) && (
+            <span className="sb-meta">
+              {s.gone
+                ? "This file is no longer synced — the link still serves what you published."
+                : "This file has changed since you published it."}
+            </span>
+          )}
           <span className="sb-actions">
+            {canRevoke && s.stale && <PublishButton share={s} onChanged={onChanged} />}
             <Button
               variant="subtle"
               onClick={() =>
@@ -77,5 +98,34 @@ export function ShareBanner({
         </div>
       ))}
     </div>
+  );
+}
+
+/* Publishing is the same authority as Revoke (PermWrite, checked again on the
+   server) and the same route the expiry control already uses — a field on the
+   share, not a new endpoint. It lives here rather than in the Share dialog:
+   the dialog is a transient handoff of a URL, the banner is what stays on the
+   file. */
+function PublishButton({ share, onChanged }: { share: ShareInfo; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Button
+      variant="subtle"
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await api("PATCH", "/api/shares/" + share.token, { publish: true });
+          toast("Published. The link now serves this version.");
+          onChanged();
+        } catch (e) {
+          toast((e as Error).message, true);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      Publish current version
+    </Button>
   );
 }

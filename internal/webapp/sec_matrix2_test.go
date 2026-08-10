@@ -1011,7 +1011,7 @@ func TestSec_Matrix_ReopeningTheStoreResurrectsNoRevocation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sh, err := shares.Create(p.ID, "wiki/secret.md", "alice@x.io", 0)
+			sh, err := shares.Create(p.ID, "wiki/secret.md", "alice@x.io", 0, FileInfo{})
 			if err != nil {
 				t.Fatal(err)
 			}

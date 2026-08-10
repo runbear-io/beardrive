@@ -494,7 +494,7 @@ func TestSec_Share_RevocationMustNotSurviveOnlyInMemory(t *testing.T) {
 	}
 
 	// Control: an ordinary revocation is durable.
-	ok, err := db.Create("p1", "wiki/ok.md", "alice@x.io", 0)
+	ok, err := db.Create("p1", "wiki/ok.md", "alice@x.io", 0, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +508,7 @@ func TestSec_Share_RevocationMustNotSurviveOnlyInMemory(t *testing.T) {
 	}
 
 	// Attack: the store refuses the delete.
-	leaked, err := db.Create("p1", "secret/salaries.md", "alice@x.io", 0)
+	leaked, err := db.Create("p1", "secret/salaries.md", "alice@x.io", 0, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}

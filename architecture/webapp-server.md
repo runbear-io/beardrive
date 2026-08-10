@@ -219,7 +219,8 @@ classDiagram
     class ShareDB {
         -repo ShareRepo
         -byToken
-        +Create +Get +Revoke +SetExpiry
+        +Create +Get +Revoke +SetExpiry +Publish
+        -pin(share, FileInfo) stamps the published version
         -refresh re-reads the store before every decision
     }
     note for ShareDB "A share is now re-checked at READ time, not only at mint time: shareCreatorStillBelongs refuses /s/&lt;token&gt; once its creator has left the project's org, so a link cannot outlive the access that justified it"
@@ -235,7 +236,9 @@ classDiagram
     note for sandboxInline "One helper for every route that returns stored bytes — serveBlob, render, a historical version, the history blob view, and /s/*. Uploaded HTML/SVG/XML is a document a member can author and another member will open on the hub's origin; the sandbox header is what keeps it from acting as the hub. Length is measured from the stream rather than trusting a recorded FileInfo.Size"
     class Share {
         +Token +Project +Path +Creator +Expires
+        +Sha +Size +Time
     }
+    note for Share "Sha/Size/Time are the PUBLISHED version: /s/&lt;token&gt; serves that blob through RemoteSource.OpenBlob, not whatever the path resolves to today, so a link sent to a customer cannot rewrite itself. Create's dedupe branch and PATCH {publish:true} are the two ways the pin moves; an empty Sha (a row written before pinning) still serves latest. Pinning newly depends on blobs being retained forever — a published link is a GC root nothing in the file tree points at"
 
     class DeviceRegistry {
         -repo DeviceRepo

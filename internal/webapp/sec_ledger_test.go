@@ -567,8 +567,13 @@ func TestSec_Share_DeadLinksRecordNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A link whose file has since been deleted from the project. The delete
-	// op goes in its own device's journal — each device writes only its own.
+	// A link whose file has since been deleted from the project. Since
+	// BEA-126 this one is NOT dead: the link is pinned to the version it
+	// published, and outliving a delete or a rename of the path is the point —
+	// nothing about authorization changed, the same bytes the same reader was
+	// already handed are still served. Asserted below, after the ledger check.
+	// The delete op goes in its own device's journal — each device writes only
+	// its own.
 	secledSeedFile(t, h, c["alice"], p.ID, "dev3", "hr/eng/temp.md", "temporary", 2)
 	ghost := secledShare(t, h, c["alice"], p.ID, "hr/eng/temp.md")
 	del := `{"seq":1,"lamport":9,"time":"2026-02-01T00:00:00Z","device":"dev4",` +
@@ -582,7 +587,7 @@ func TestSec_Share_DeadLinksRecordNothing(t *testing.T) {
 		t.Fatalf("seed delete op: %d %s", rec.Code, rec.Body)
 	}
 
-	for _, tok := range []string{revoked, orphan, ghost, "totally-made-up-token"} {
+	for _, tok := range []string{revoked, orphan, "totally-made-up-token"} {
 		rec := secledGet(h, "/s/"+tok, "203.0.113.9:5555", nil)
 		if rec.Code == 200 {
 			t.Fatalf("a dead share link served content: token %s → %d", tok, rec.Code)
@@ -590,6 +595,10 @@ func TestSec_Share_DeadLinksRecordNothing(t *testing.T) {
 	}
 	if got := secledBuckets(srv.Reads); len(got) != 0 {
 		t.Errorf("share links that refused to serve still recorded reads: %+v", got)
+	}
+	// Last, because a link that serves records a read like any other.
+	if rec := secledGet(h, "/s/"+ghost, "203.0.113.9:5555", nil); rec.Code != 200 {
+		t.Fatalf("a published link must survive its path being deleted: %d %s", rec.Code, rec.Body)
 	}
 }
 
@@ -903,7 +912,7 @@ func TestSec_DB_QuestionMarksInValuesDoNotShiftPlaceholders(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sh, err := shares.Create(bad.ID, qPath, qEmail, 0)
+			sh, err := shares.Create(bad.ID, qPath, qEmail, 0, FileInfo{})
 			if err != nil {
 				t.Fatal(err)
 			}

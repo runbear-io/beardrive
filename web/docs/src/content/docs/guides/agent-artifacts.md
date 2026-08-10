@@ -47,8 +47,11 @@ $ bdrive share wiki/report.html
 https://drive.example.com/s/eacc1df3ee6a6ebbdacc535c2796dc30
 ```
 
-Links serve the file's **latest** synced content, which is the right behavior
-for living reports and wiki pages, and live until they expire or you revoke them.
+Links serve the version you **published**, not whatever the file says right
+now — the report you sent a customer will not rewrite itself the next time an
+agent touches it. Re-running `bdrive share` on the same file (or the hub's
+**Publish current version** button) moves the link forward, same URL. Links
+live until they expire or you revoke them.
 
 ```sh
 bdrive share --list                    # every link you've minted

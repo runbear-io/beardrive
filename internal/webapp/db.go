@@ -197,7 +197,7 @@ func checkOrg(o Org) error {
 
 func checkInvite(i OrgInvite) error { return storable(i.Token, i.Org, i.Creator) }
 
-func checkShare(s Share) error { return storable(s.Token, s.Project, s.Path, s.Creator) }
+func checkShare(s Share) error { return storable(s.Token, s.Project, s.Path, s.Creator, s.Sha) }
 
 func checkDevice(d DeviceInfo) error {
 	return storable(d.ID, d.Name, d.OS, d.User, d.IP)

@@ -22,7 +22,7 @@ func gateBody(rec interface{ String() string }) string { return rec.String() }
 // file and the share is only the bait here.
 func gateShare(t *testing.T, srv *Server, project, path string) Share {
 	t.Helper()
-	sh, err := srv.Shares.Create(project, path, "alice@x.io", 0)
+	sh, err := srv.Shares.Create(project, path, "alice@x.io", 0, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestSec_Row3_ShareMutationByOutsider(t *testing.T) {
 // exactly when the row is still there to delete.
 func TestSec_Row3_ExpiredShareRevokableByOutsider(t *testing.T) {
 	h, srv, c, p := permHub(t)
-	sh, err := srv.Shares.Create(p.ID, "x.md", "alice@x.io", time.Hour)
+	sh, err := srv.Shares.Create(p.ID, "x.md", "alice@x.io", time.Hour, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -221,6 +221,16 @@ export interface ShareInfo {
      link, because heat is keyed by path. */
   opens?: number;
   last_opened?: string;
+  /* The published version this link is pinned to (shares.go). Both keys are
+     absent on a link minted before pinning shipped — those serve the file's
+     latest content, and have no version to name. `stale` says the file has
+     moved on since; `gone` says the path is no longer synced (the link still
+     serves the published bytes — that is the point). Only the per-project
+     listing computes them; the org-wide audit has no volume to compare with. */
+  published?: string;
+  size?: number;
+  stale?: boolean;
+  gone?: boolean;
 }
 
 // GET/POST /api/admin/policy (handleAdminPolicy, admin.go)

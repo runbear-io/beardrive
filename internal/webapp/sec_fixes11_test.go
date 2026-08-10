@@ -469,7 +469,7 @@ func TestSec_Share_ASecondHubProcessCannotResurrectARevokedLink(t *testing.T) {
 	}
 
 	// B mints an unrelated share of a different file.
-	if _, err := b.Create(p.ID, "wiki/notes.md", "s@x.io", 0); err != nil {
+	if _, err := b.Create(p.ID, "wiki/notes.md", "s@x.io", 0, FileInfo{}); err != nil {
 		t.Fatal(err)
 	}
 

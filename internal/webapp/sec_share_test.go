@@ -81,7 +81,7 @@ func TestSec_Share_OrgAuditLeaksDeniedProjectTokens(t *testing.T) {
 		map[string]string{"level": PermNone}, c["alice"]); rec.Code != 200 {
 		t.Fatalf("deny bob: %d %s", rec.Code, rec.Body)
 	}
-	sh, err := srv.Shares.Create(p.ID, "secret/salaries.md", "alice@x.io", 0)
+	sh, err := srv.Shares.Create(p.ID, "secret/salaries.md", "alice@x.io", 0, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestSec_Share_ErrorResponsesKeepSandboxCSP(t *testing.T) {
 // and the 200/404 split confirms whether the token ever existed.
 func TestSec_Share_OutsiderCannotRevokeExpiredShare(t *testing.T) {
 	h, srv, c, p := permHub(t)
-	sh, err := srv.Shares.Create(p.ID, "wiki/notes.md", "alice@x.io", time.Millisecond)
+	sh, err := srv.Shares.Create(p.ID, "wiki/notes.md", "alice@x.io", time.Millisecond, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestSec_Share_LiveShareMutationNeedsWrite(t *testing.T) {
 		map[string]string{"level": PermRead}, c["alice"]); rec.Code != 200 {
 		t.Fatalf("demote bob: %d %s", rec.Code, rec.Body)
 	}
-	sh, err := srv.Shares.Create(p.ID, "wiki/notes.md", "alice@x.io", 0)
+	sh, err := srv.Shares.Create(p.ID, "wiki/notes.md", "alice@x.io", 0, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestSec_Share_LiveShareMutationNeedsWrite(t *testing.T) {
 func TestSec_Share_RevokedAndExpiredTokensAreDead(t *testing.T) {
 	srv, p, _, _, h := shareHub(t)
 
-	expiring, err := srv.Shares.Create(p.ID, "wiki/notes.md", "s@x.io", time.Millisecond)
+	expiring, err := srv.Shares.Create(p.ID, "wiki/notes.md", "s@x.io", time.Millisecond, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestSec_Share_RevokedAndExpiredTokensAreDead(t *testing.T) {
 	// Tokens are 128 bits of crypto/rand, hex-encoded, and never repeat.
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		s, err := srv.Shares.Create(p.ID, "wiki/notes.md", "s@x.io", time.Hour)
+		s, err := srv.Shares.Create(p.ID, "wiki/notes.md", "s@x.io", time.Hour, FileInfo{})
 		if err != nil {
 			t.Fatal(err)
 		}

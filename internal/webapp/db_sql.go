@@ -217,7 +217,8 @@ func (s *sqlMetaStore) migrate() error {
 			created TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '', uses INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS shares (
 			token TEXT PRIMARY KEY, project TEXT NOT NULL, path TEXT NOT NULL,
-			creator TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '')`,
+			creator TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '',
+			sha TEXT NOT NULL DEFAULT '', size BIGINT NOT NULL DEFAULT 0, published TEXT NOT NULL DEFAULT '')`,
 		// device_rows replaces the original `devices` table, whose primary key
 		// was the id alone: two accounts naming one device id collapsed into a
 		// single row, so a restart handed the device to whoever wrote last and
@@ -292,6 +293,17 @@ func (s *sqlMetaStore) migrate() error {
 	// and that is the right answer for rows that predate the column.
 	if err := s.addColumns("org_members", map[string]string{
 		"joined": `TEXT NOT NULL DEFAULT ''`,
+	}, map[string]string{}); err != nil {
+		return err
+	}
+	// The published version a share link is pinned to. UNGUARDED, unlike
+	// projects.default_level: the default '' reads as UNPINNED, which is
+	// exactly what a pre-migration row is (it serves latest, as it always
+	// did), so re-adding these columns widens nothing and loses nothing.
+	if err := s.addColumns("shares", map[string]string{
+		"sha":       `TEXT NOT NULL DEFAULT ''`,
+		"size":      `BIGINT NOT NULL DEFAULT 0`,
+		"published": `TEXT NOT NULL DEFAULT ''`,
 	}, map[string]string{}); err != nil {
 		return err
 	}
@@ -770,7 +782,7 @@ type sqlShareRepo struct {
 func (r *sqlShareRepo) Version() (string, error) { return r.s.version(regShares) }
 
 func (r *sqlShareRepo) Load() ([]Share, error) {
-	rows, err := r.s.db.Query(`SELECT token, project, path, creator, created, expires FROM shares`)
+	rows, err := r.s.db.Query(`SELECT token, project, path, creator, created, expires, sha, size, published FROM shares`)
 	if err != nil {
 		return nil, err
 	}
@@ -778,11 +790,12 @@ func (r *sqlShareRepo) Load() ([]Share, error) {
 	var out []Share
 	for rows.Next() {
 		var s Share
-		var created, expires string
-		if err := rows.Scan(&s.Token, &s.Project, &s.Path, &s.Creator, &created, &expires); err != nil {
+		var created, expires, published string
+		if err := rows.Scan(&s.Token, &s.Project, &s.Path, &s.Creator, &created, &expires,
+			&s.Sha, &s.Size, &published); err != nil {
 			return nil, err
 		}
-		s.Created, s.Expires = tdec(created), tdec(expires)
+		s.Created, s.Expires, s.Time = tdec(created), tdec(expires), tdec(published)
 		out = append(out, s)
 	}
 	return out, rows.Err()
@@ -792,10 +805,13 @@ func (r *sqlShareRepo) Put(s Share) error {
 	if err := checkShare(s); err != nil {
 		return err
 	}
-	return r.w.exec(`INSERT INTO shares (token,project,path,creator,created,expires) VALUES (?,?,?,?,?,?)
+	return r.w.exec(`INSERT INTO shares (token,project,path,creator,created,expires,sha,size,published)
+		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(token) DO UPDATE SET project=excluded.project, path=excluded.path,
-		creator=excluded.creator, created=excluded.created, expires=excluded.expires`,
-		s.Token, s.Project, s.Path, s.Creator, tenc(s.Created), tenc(s.Expires))
+		creator=excluded.creator, created=excluded.created, expires=excluded.expires,
+		sha=excluded.sha, size=excluded.size, published=excluded.published`,
+		s.Token, s.Project, s.Path, s.Creator, tenc(s.Created), tenc(s.Expires),
+		s.Sha, s.Size, tenc(s.Time))
 }
 
 func (r *sqlShareRepo) Delete(token string) error {

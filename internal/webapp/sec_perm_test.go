@@ -76,7 +76,7 @@ func secpermReads(id string) []secpermReq {
 // write API (the file need not be synced for the token to exist).
 func secpermShare(t *testing.T, srv *Server, projectID string) Share {
 	t.Helper()
-	sh, err := srv.Shares.Create(projectID, "x.md", "alice@x.io", 0)
+	sh, err := srv.Shares.Create(projectID, "x.md", "alice@x.io", 0, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}

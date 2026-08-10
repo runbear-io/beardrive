@@ -84,7 +84,7 @@ func TestSec_DB_HostileStringsStayDataOnEveryBackend(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sh, err := shares.Create(bad.ID, secdbHostile.sharePath, secdbHostile.email, 0)
+			sh, err := shares.Create(bad.ID, secdbHostile.sharePath, secdbHostile.email, 0, FileInfo{})
 			if err != nil {
 				t.Fatal(err)
 			}

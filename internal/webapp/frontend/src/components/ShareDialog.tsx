@@ -76,8 +76,8 @@ export function ShareDialog({
           <h3>Public link</h3>
         </DialogTitle>
         <p>
-          <b>Anyone with this link can view this file</b> — no account needed. It always shows the
-          latest version until it expires or you revoke it.
+          <b>Anyone with this link can view this file</b> — no account needed. It shows the version
+          you published; it will not change until you publish again or revoke it.
         </p>
         <div className="modal-url">{url}</div>
         <div className="modal-expiry">

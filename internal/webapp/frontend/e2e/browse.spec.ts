@@ -345,6 +345,40 @@ test("public link: the file page says it is shared, and revokes without a reload
   expect((await page.request.get(url)).status()).toBe(404);
 });
 
+// BEA-126: the link is pinned to the version it published, and Publish is
+// how a member with write moves it forward — same token, same URL. Its own
+// file, like the restore tests: publishing is a real write and must not
+// disturb what the rest of the suite reads.
+test("public link: serves the published version until Publish moves it", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const path = "publish-me.md";
+  const url = `/api/p/${pid}/upload/content?path=${path}`;
+  await page.request.put(url, { data: "# Publish me\n\nThe version I sent out.\n" });
+
+  const made = await (
+    await page.request.post(`/api/p/${pid}/shares`, { data: { path } })
+  ).json();
+  const published = await (await page.request.get(made.url)).text();
+  expect(published).toContain("The version I sent out");
+
+  // The file moves on underneath the link — the agent-run case.
+  await page.request.put(url, { data: "# Publish me\n\nRewritten by an agent.\n" });
+  const still = await (await page.request.get(made.url)).text();
+  expect(still).toBe(published);
+  expect(still).not.toContain("Rewritten by an agent");
+
+  await page.goto(`/${pid}/${path}`);
+  const banner = page.locator(".share-banner");
+  await expect(banner).toContainText("This file has changed since you published it.");
+  await banner.locator("button:has-text('Publish current version')").click();
+  await expectToast(page, /Published/);
+  await expect(banner.locator("button:has-text('Publish current version')")).toHaveCount(0);
+
+  expect(await (await page.request.get(made.url)).text()).toContain("Rewritten by an agent");
+  await page.request.delete(`/api/shares/${made.token}`);
+});
+
 test("project settings lists this project's public links and revokes them", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);

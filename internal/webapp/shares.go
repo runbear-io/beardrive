@@ -16,9 +16,15 @@ import (
 
 // Share links make one file publicly readable at /s/<unguessable-token> —
 // no sign-in needed, which is the whole point: "here's the report" is just a
-// URL. A link always serves the file's LATEST synced content (living wiki
-// pages, evolving reports) and lives until revoked, unless created with an
-// expiry. Everything else on the hub stays behind auth.
+// URL. A link is PINNED to the version it was published from and serves those
+// bytes until someone with write access publishes a newer one (clicking Share
+// again, or the banner's Publish button) or revokes it. A doc sent to a
+// customer therefore cannot rewrite itself the next time an agent touches the
+// file. Everything else on the hub stays behind auth.
+//
+// Links minted before pinning shipped carry an empty Sha and keep serving the
+// latest synced content — the only reading that doesn't change the meaning of
+// every URL already in the wild.
 //
 // Shared content renders (HTML as a page, markdown Obsidian-style, PDFs
 // inline) but sandboxed: /s/ responses carry a strict CSP sandbox and never
@@ -33,6 +39,14 @@ type Share struct {
 	Creator string    `json:"creator,omitempty"` // account email
 	Created time.Time `json:"created"`
 	Expires time.Time `json:"expires,omitzero"` // zero = permanent until revoked
+	// Sha/Size/Time are the published version: the blob this link serves, its
+	// size (what quota bills), and when that version was synced. Empty Sha
+	// means unpinned — a row written before pinning shipped — and serves the
+	// latest content, exactly as it always did. All omitempty, so an old
+	// shares.json round-trips byte-identical.
+	Sha  string    `json:"sha,omitempty"`
+	Size int64     `json:"size,omitempty"`
+	Time time.Time `json:"published,omitzero"`
 }
 
 func (s Share) expired() bool {
@@ -104,20 +118,33 @@ func OpenShareDB(path string) (*ShareDB, error) {
 }
 
 // Create returns a share for (project, path), reusing an existing live one
-// so repeated shares of the same file hand out the same URL.
-func (db *ShareDB) Create(project, p, creator string, ttl time.Duration) (Share, error) {
+// so repeated shares of the same file hand out the same URL — and, because a
+// link is pinned, that reuse is what PUBLISHES: the second Share click on a
+// live permanent link moves the pin to fi and keeps the token. fi is the
+// file's current entry, which every caller already holds; a zero fi mints an
+// unpinned (serve-latest) link.
+func (db *ShareDB) Create(project, p, creator string, ttl time.Duration, fi FileInfo) (Share, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.refresh()
-	for _, s := range db.byToken {
-		if s.Project == project && s.Path == p && !s.expired() && s.Expires.IsZero() && ttl == 0 {
+	for _, prev := range db.byToken {
+		if prev.Project == project && prev.Path == p && !prev.expired() && prev.Expires.IsZero() && ttl == 0 {
+			s := pin(prev, fi)
+			db.byToken[s.Token] = s
+			if err := db.repo.Put(s); err != nil {
+				// Restore, don't delete: the row pre-existed, so dropping it
+				// would revoke a live link over a disk hiccup (SetExpiry's
+				// rollback, not Create's).
+				db.byToken[prev.Token] = prev
+				return Share{}, err
+			}
 			return s, nil
 		}
 	}
-	s := Share{
+	s := pin(Share{
 		Token: randHex(16), Project: project, Path: p,
 		Creator: creator, Created: time.Now().UTC(),
-	}
+	}, fi)
 	if ttl > 0 {
 		s.Expires = time.Now().UTC().Add(ttl)
 	}
@@ -127,6 +154,36 @@ func (db *ShareDB) Create(project, p, creator string, ttl time.Duration) (Share,
 		return Share{}, err
 	}
 	return s, nil
+}
+
+// pin stamps the published version onto a share. A zero fi (no blob) leaves
+// the share unpinned rather than pinning it to nothing.
+func pin(s Share, fi FileInfo) Share {
+	if fi.Blob == "" {
+		return s
+	}
+	s.Sha, s.Size, s.Time = fi.Blob, fi.Size, fi.Time
+	return s
+}
+
+// Publish moves a live share's pin to fi, keeping the token — the URL on
+// someone's clipboard keeps working and starts serving the new version. Same
+// shape as SetExpiry, including its rollback.
+func (db *ShareDB) Publish(token string, fi FileInfo) (Share, bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	prev, ok := db.byToken[token]
+	if !ok || prev.expired() {
+		return Share{}, false, nil
+	}
+	s := pin(prev, fi)
+	db.byToken[token] = s
+	if err := db.repo.Put(s); err != nil {
+		db.byToken[token] = prev
+		return Share{}, false, err
+	}
+	return s, true, nil
 }
 
 // Get resolves a live (non-expired) share.
@@ -264,7 +321,8 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	if _, ok := snap.files[p]; !ok {
+	fi, ok := snap.files[p]
+	if !ok {
 		http.Error(w, fmt.Sprintf("%s is not synced to this project yet", p), http.StatusNotFound)
 		return
 	}
@@ -275,7 +333,8 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	sh, err := s.Shares.Create(r.PathValue("project"), p, s.requestUser(r).Email, ttl)
+	// The snapshot entry is already in hand, so pinning costs no extra fetch.
+	sh, err := s.Shares.Create(r.PathValue("project"), p, s.requestUser(r).Email, ttl, fi)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -292,9 +351,24 @@ func (s *Server) handleShareList(v *volume, w http.ResponseWriter, r *http.Reque
 	project := r.PathValue("project")
 	shares := s.Shares.List(project)
 	opens := s.Reads.ShareOpens(project) // once, outside the loop — never per share
+	// This is the only share route holding a *volume, so it is where "the file
+	// moved on since you published" is answered. One snapshot for every share;
+	// a snapshot the remote can't produce just drops the flags.
+	var files map[string]FileInfo
+	if snap, err := v.snapshot(r.Context()); err == nil {
+		files = snap.files
+	}
 	out := make([]map[string]any, 0, len(shares))
 	for _, sh := range shares {
-		out = append(out, shareJSON(r, sh, opens))
+		j := shareJSON(r, sh, opens)
+		if sh.Sha != "" && files != nil {
+			if fi, ok := files[sh.Path]; !ok {
+				j["gone"] = true
+			} else if fi.Blob != sh.Sha {
+				j["stale"] = true
+			}
+		}
+		out = append(out, j)
 	}
 	writeJSON(w, map[string]any{"shares": out})
 }
@@ -322,9 +396,14 @@ func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "no such share", http.StatusNotFound)
 }
 
-// handleShareExpiry sets or clears the expiry on an existing link. Same shape
-// and same authority as revoke — the token stays valid, only its lifetime
-// changes.
+// handleShareExpiry edits an existing link in place: it sets or clears the
+// expiry, or (publish) moves the pin to the file's current version. Same shape
+// and same authority as revoke — the token stays valid either way.
+//
+// Publish is a field here rather than its own route because Create's dedupe —
+// the "clicking Share again republishes" path — only matches PERMANENT links
+// (Expires.IsZero), so a second Share click on an expiring link mints a second
+// token and orphans the pin the reader holds.
 func (s *Server) handleShareExpiry(w http.ResponseWriter, r *http.Request) {
 	if s.Shares == nil {
 		http.Error(w, "sharing is not enabled on this server", http.StatusNotFound)
@@ -332,6 +411,7 @@ func (s *Server) handleShareExpiry(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		ExpiresIn string `json:"expires_in"` // Go duration, "" = permanent
+		Publish   bool   `json:"publish"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
@@ -343,6 +423,12 @@ func (s *Server) handleShareExpiry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requirePerm(w, r, sh.Project, PermWrite) {
+		return
+	}
+	if req.Publish {
+		// Branch and RETURN: an absent expires_in decodes to "", and "" means
+		// permanent, so falling through would silently clear the link's expiry.
+		s.publishShare(w, r, sh)
 		return
 	}
 	var ttl time.Duration
@@ -366,6 +452,38 @@ func (s *Server) handleShareExpiry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, shareJSON(r, updated, nil))
 }
 
+// publishShare moves a link's pin to the file's current version. The caller
+// has already checked PermWrite.
+func (s *Server) publishShare(w http.ResponseWriter, r *http.Request, sh Share) {
+	_, v, err := s.projectVolume(sh.Project)
+	if err != nil {
+		http.Error(w, "no such share", http.StatusNotFound)
+		return
+	}
+	snap, err := v.snapshot(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	// Unlike the serve path, a missing file is fatal here: you cannot publish
+	// what is not synced, and the link keeps serving what it already has.
+	fi, ok := snap.files[sh.Path]
+	if !ok {
+		http.Error(w, fmt.Sprintf("%s is not synced to this project yet", sh.Path), http.StatusNotFound)
+		return
+	}
+	updated, ok, err := s.Shares.Publish(sh.Token, fi)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "no such share", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, shareJSON(r, updated, nil))
+}
+
 // shareJSON renders one link. opens is the project's share-open map from
 // ReadLedger.ShareOpens, built ONCE by the caller and indexed here — passing
 // nil means "not measured" (reads are off, or this is a single-share reply
@@ -381,6 +499,14 @@ func shareJSON(r *http.Request, sh Share, opens map[string]ShareOpen) map[string
 	}
 	if !sh.Expires.IsZero() {
 		out["expires"] = sh.Expires
+	}
+	// The published VERSION, never the sha: a reader only needs to know when
+	// this version went out and whether the file has moved on since (the
+	// stale/gone flags handleShareList adds), and a content hash has no
+	// business in a listing.
+	if sh.Sha != "" {
+		out["published"] = sh.Time
+		out["size"] = sh.Size
 	}
 	if opens != nil {
 		// Keyed by path, not token: heat has no token dimension, so two
@@ -423,8 +549,9 @@ func (s *Server) shareCreatorStillBelongs(sh Share) bool {
 	return s.Dir.Role(org, sh.Creator) != ""
 }
 
-// handleShared serves a share link: public, sandboxed, always the latest
-// synced content.
+// handleShared serves a share link: public, sandboxed, and the version that
+// was published — not whatever the file says right now. A link minted before
+// pinning shipped (empty Sha) still serves the latest synced content.
 func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	// Sandbox everything under /s/ before anything can answer the request:
 	// shared content executes in an opaque origin (scripts allowed — charts in
@@ -453,15 +580,25 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this link does not exist or was revoked", http.StatusNotFound)
 		return
 	}
-	snap, err := v.snapshot(r.Context())
-	if err != nil {
-		http.Error(w, "content temporarily unavailable", http.StatusBadGateway)
-		return
-	}
-	fi, ok := snap.files[sh.Path]
-	if !ok {
-		http.Error(w, "the shared file no longer exists", http.StatusNotFound)
-		return
+	// A pinned link needs no snapshot at all: the blob is named on the share,
+	// and surviving a rename or a delete of the path is half the point of
+	// publishing. Only an unpinned (pre-pinning) link resolves by path.
+	rs, _ := v.source.(*RemoteSource)
+	pinned := sh.Sha != "" && rs != nil
+	var fi FileInfo
+	if pinned {
+		fi = FileInfo{Blob: sh.Sha, Size: sh.Size, Time: sh.Time}
+	} else {
+		snap, err := v.snapshot(r.Context())
+		if err != nil {
+			http.Error(w, "content temporarily unavailable", http.StatusBadGateway)
+			return
+		}
+		var ok bool
+		if fi, ok = snap.files[sh.Path]; !ok {
+			http.Error(w, "the shared file no longer exists", http.StatusNotFound)
+			return
+		}
 	}
 	// A share hit is external consumption. Actor is token+IP: one audience
 	// member reloading is debounced to a visit, distinct visitors still count.
@@ -485,7 +622,21 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	cw := &countingWriter{w: w}
 	defer func() { s.quota().RecordEgress(org, cw.n) }()
 
-	rc, err := v.source.Open(r.Context(), sh.Path, fi)
+	// The published bytes, by content address — the identical call handleBlob
+	// makes (history.go), and OpenBlob validates the sha itself, so a malformed
+	// stored value is a 404 and never a traversal.
+	//
+	// This is the one thing pinning newly DEPENDS on: blobs are retained
+	// forever (remote.Backend has no delete). A published link is a GC root
+	// that nothing in the current file tree points at, so a future collector
+	// that walks the live state and drops unreferenced blobs would break every
+	// public URL on the hub, silently. Any such work has to treat live shares
+	// as roots.
+	open := func() (io.ReadCloser, error) { return rs.OpenBlob(r.Context(), sh.Sha) }
+	if !pinned {
+		open = func() (io.ReadCloser, error) { return v.source.Open(r.Context(), sh.Path, fi) }
+	}
+	rc, err := open()
 	if err != nil {
 		http.Error(w, "content temporarily unavailable", http.StatusBadGateway)
 		return
@@ -524,8 +675,9 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 }
 
 // updatedStamp renders the "how old is this?" line a share page owes its
-// reader — the link promises the latest version, so it has to say when latest
-// was. Zero time (a source that doesn't know) prints nothing rather than 1970.
+// reader — the published version has a date and the page has to show it (for a
+// pinned link that is when it was published, not when the file last moved).
+// Zero time (a source that doesn't know) prints nothing rather than 1970.
 func updatedStamp(t time.Time) string {
 	if t.IsZero() {
 		return ""

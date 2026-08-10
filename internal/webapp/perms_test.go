@@ -138,7 +138,7 @@ func TestReadOnlyMemberRoutes(t *testing.T) {
 	base := "/api/p/" + p.ID + "/"
 	// A live link to re-date: PATCH /api/shares/{token} resolves the token
 	// before the level check, so an unknown one would 404 instead of 403.
-	sh, err := srv.Shares.Create(p.ID, "x.md", "alice@x.io", 0)
+	sh, err := srv.Shares.Create(p.ID, "x.md", "alice@x.io", 0, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +147,9 @@ func TestReadOnlyMemberRoutes(t *testing.T) {
 		body        any
 	}{
 		{"PATCH", "/api/shares/" + sh.Token, map[string]string{"expires_in": "24h"}},
+		// Publishing a new version onto a live public link is the same
+		// authority as revoking it, and rides the same route.
+		{"PATCH", "/api/shares/" + sh.Token, map[string]any{"publish": true}},
 		{"POST", base + "upload/init", map[string]any{"path": "x.md", "sha256": strings.Repeat("a", 64), "size": 1}},
 		{"PUT", base + "upload/content?path=x.md", []byte("hi")},
 		{"POST", base + "upload/commit", map[string]any{"path": "x.md", "sha256": strings.Repeat("a", 64), "size": 1}},
@@ -352,7 +355,7 @@ func TestReadMemberSeesSharesAndGrants(t *testing.T) {
 	if err := srv.Projects.SetPerm(p.ID, "bob@x.io", PermRead); err != nil {
 		t.Fatal(err)
 	}
-	sh, err := srv.Shares.Create(p.ID, "x.md", "alice@x.io", 0)
+	sh, err := srv.Shares.Create(p.ID, "x.md", "alice@x.io", 0, FileInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}

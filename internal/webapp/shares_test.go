@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -111,11 +112,25 @@ func TestShareLinks(t *testing.T) {
 		t.Fatalf("re-share minted a new token: %s vs %s", token2, token)
 	}
 
-	// the link serves the LATEST content after the file changes
+	// THE INVERSION IS THE FEATURE (BEA-126). This used to assert that the
+	// link serves the LATEST content after the file changes. A link is now
+	// pinned to the version it was published from, so a doc sent to a customer
+	// cannot rewrite itself the next time an agent touches the file. Do not
+	// "restore" this assertion.
 	f.put("dev1", "wiki/report.html", "<h1>Q4 update</h1>")
 	rec = do(t, h, "GET", "/s/"+token, nil)
+	if !strings.Contains(rec.Body.String(), "<h1>Q3</h1>") || strings.Contains(rec.Body.String(), "Q4 update") {
+		t.Fatalf("share must serve the PUBLISHED content, got %s", rec.Body)
+	}
+
+	// ...and re-sharing publishes the new version onto the same URL
+	token3, _ := authedShare(t, srv, h, p.ID, "wiki/report.html")
+	if token3 != token {
+		t.Fatalf("publishing minted a new token: %s vs %s", token3, token)
+	}
+	rec = do(t, h, "GET", "/s/"+token, nil)
 	if !strings.Contains(rec.Body.String(), "Q4 update") {
-		t.Fatalf("share must serve latest content, got %s", rec.Body)
+		t.Fatalf("re-share must publish the current version, got %s", rec.Body)
 	}
 
 	// unknown tokens and unsynced paths
@@ -329,7 +344,7 @@ func TestShareListAPIsAreStable(t *testing.T) {
 	// Mint directly: the HTTP route requires a synced file, and this test is
 	// about ordering, not about the mint path.
 	for _, path := range []string{"b.md", "a.md", "c.md"} {
-		if _, err := srv.Shares.Create(p.ID, path, "alice@x.io", 0); err != nil {
+		if _, err := srv.Shares.Create(p.ID, path, "alice@x.io", 0, FileInfo{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -401,15 +416,26 @@ func TestShareLastUpdatedStamp(t *testing.T) {
 		t.Fatal("footer went missing")
 	}
 
-	// re-syncing the file moves the stamp; the token does not change
+	// re-syncing the file does NOT move the stamp — the page shows when the
+	// PUBLISHED version was made, and that is what the reader is looking at.
+	// Publishing (a second Share click) is what moves it; the token does not
+	// change either way.
 	f.putAt("dev1", "wiki/notes.md", "# Notes\n\nhello **team**", when.AddDate(0, 0, 40))
 	rec = do(t, h, "GET", "/s/"+token, nil)
+	if !strings.Contains(rec.Body.String(), "Last updated 14 Mar 2026") {
+		t.Fatalf("stamp must track the published version, got %s", rec.Body)
+	}
+	if tok2, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md"); tok2 != token {
+		t.Fatalf("publishing minted a new token: %s vs %s", tok2, token)
+	}
+	rec = do(t, h, "GET", "/s/"+token, nil)
 	if !strings.Contains(rec.Body.String(), "Last updated 23 Apr 2026") {
-		t.Fatalf("stamp must track the file, got %s", rec.Body)
+		t.Fatalf("publishing must move the stamp, got %s", rec.Body)
 	}
 
 	// zero time: no stamp at all, not a 1970 date
 	f.putAt("dev1", "wiki/notes.md", "# Notes\n\nhello **team**", time.Time{})
+	authedShare(t, srv, h, p.ID, "wiki/notes.md") // publish the zero-timed version
 	rec = do(t, h, "GET", "/s/"+token, nil)
 	if strings.Contains(rec.Body.String(), "Last updated") || strings.Contains(rec.Body.String(), `class="updated"`) {
 		t.Fatalf("zero time must print no stamp, got %s", rec.Body)
@@ -593,7 +619,7 @@ func TestOrgSharesCarryOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"a.md", "b.md", "c.md"} {
-		if _, err := srv.Shares.Create(p.ID, path, "alice@x.io", 0); err != nil {
+		if _, err := srv.Shares.Create(p.ID, path, "alice@x.io", 0, FileInfo{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -666,4 +692,134 @@ func authAs(t *testing.T, srv *Server, req *http.Request) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
+}
+
+// ---- BEA-126: a link serves what you published, not what's live ----
+
+// A share row written before pinning shipped has no sha, and must keep serving
+// the file's latest content — anything else silently changes the meaning of
+// every URL already in the wild.
+func TestShareLegacyRowServesLatest(t *testing.T) {
+	srv, p, sharesPath, f, h := shareHub(t)
+
+	// Straight into the store, the shape the old binary wrote: no sha/size/
+	// published keys at all.
+	legacy := `{"shares":[{"token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project":"` + p.ID +
+		`","path":"wiki/report.html","creator":"s@x.io","created":"2026-01-01T00:00:00Z"}]}` + "\n"
+	if err := os.WriteFile(sharesPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := OpenShareDB(sharesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Shares = db
+	if sh, ok := db.Get("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); !ok || sh.Sha != "" {
+		t.Fatalf("legacy row = %+v, want an unpinned share", sh)
+	}
+	// Membership: this hub has no org model wired, so shareCreatorStillBelongs
+	// passes on Dir == nil — same as the rest of this file's tests.
+	f.put("dev1", "wiki/report.html", "<h1>Q9 latest</h1>")
+	rec := do(t, h, "GET", "/s/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Q9 latest") {
+		t.Fatalf("legacy link must serve latest: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Deleting the shared path does not kill a published link — surviving a delete
+// or a rename is half the point of publishing. Revoke still kills it.
+func TestSharePinnedSurvivesDelete(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	f.del("dev1", "wiki/notes.md")
+	rec := do(t, h, "GET", "/s/"+token, nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<strong>team</strong>") {
+		t.Fatalf("published link must survive a delete: %d %s", rec.Code, rec.Body)
+	}
+	req := jsonReq(t, "DELETE", "/api/shares/"+token, nil)
+	authAs(t, srv, req)
+	if rec := doHTTP(h, req); rec.Code != 200 {
+		t.Fatalf("revoke: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("revoked link: %d, want 404", rec.Code)
+	}
+}
+
+// PATCH {publish:true} moves the pin on the token already handed out — and
+// must not touch the link's expiry on the way past (an absent expires_in
+// decodes to "", which means permanent).
+func TestSharePublishRoute(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	// Put an expiry on it, so publishing has something to preserve.
+	req := jsonReq(t, "PATCH", "/api/shares/"+token, map[string]string{"expires_in": "168h"})
+	authAs(t, srv, req)
+	if rec := doHTTP(h, req); rec.Code != 200 {
+		t.Fatalf("set expiry: %d %s", rec.Code, rec.Body)
+	}
+
+	f.put("dev1", "wiki/notes.md", "# Notes\n\nsecond **draft**")
+	if rec := do(t, h, "GET", "/s/"+token, nil); !strings.Contains(rec.Body.String(), "<strong>team</strong>") {
+		t.Fatalf("still pinned before publish, got %s", rec.Body)
+	}
+	// The list says the file has moved on — that is what lights the button.
+	listReq := jsonReq(t, "GET", "/api/p/"+p.ID+"/shares", nil)
+	authAs(t, srv, listReq)
+	var list struct {
+		Shares []map[string]any `json:"shares"`
+	}
+	mustJSON(t, doHTTP(h, listReq), &list)
+	if len(list.Shares) != 1 || list.Shares[0]["stale"] != true {
+		t.Fatalf("share list must report staleness: %v", list.Shares)
+	}
+
+	req = jsonReq(t, "PATCH", "/api/shares/"+token, map[string]any{"publish": true})
+	authAs(t, srv, req)
+	rec := doHTTP(h, req)
+	if rec.Code != 200 {
+		t.Fatalf("publish: %d %s", rec.Code, rec.Body)
+	}
+	var out map[string]any
+	mustJSON(t, rec, &out)
+	if out["expires"] == nil {
+		t.Fatalf("publish cleared the expiry: %v", out)
+	}
+	if out["sha"] != nil {
+		t.Fatalf("the sha must never leave the server: %v", out)
+	}
+	if rec := do(t, h, "GET", "/s/"+token, nil); !strings.Contains(rec.Body.String(), "<strong>draft</strong>") {
+		t.Fatalf("publish must move the pin, got %s", rec.Body)
+	}
+}
+
+// readQuota records what CheckRead was asked to allow.
+type readQuota struct {
+	UnlimitedQuota
+	sizes []int64
+}
+
+func (q *readQuota) CheckRead(_ string, n int64) error {
+	q.sizes = append(q.sizes, n)
+	return nil
+}
+
+// Quota bills the PUBLISHED size: the current file can be any size at all, and
+// it is not what leaves the hub.
+func TestSharePinnedQuotaUsesPublishedSize(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	const published = "# Notes\n\nhello **team**"
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	q := &readQuota{}
+	srv.Quota = q
+	f.put("dev1", "wiki/notes.md", strings.Repeat("x", 100000))
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != 200 {
+		t.Fatalf("share fetch: %d %s", rec.Code, rec.Body)
+	}
+	if len(q.sizes) != 1 || q.sizes[0] != int64(len(published)) {
+		t.Fatalf("CheckRead sizes = %v, want [%d] (the published size)", q.sizes, len(published))
+	}
 }

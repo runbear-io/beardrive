@@ -17,8 +17,9 @@ import (
 )
 
 // shareCmd mints public URLs for synced files: `bdrive share report.html`
-// prints a link anyone can open — no account needed. Links serve the file's
-// latest synced content and live until revoked.
+// prints a link anyone can open — no account needed. A link is pinned to the
+// version it was published from and lives until revoked; re-running the
+// command publishes the current version onto the same URL.
 func shareCmd() *cobra.Command {
 	var expires time.Duration
 	var list bool
@@ -28,8 +29,11 @@ func shareCmd() *cobra.Command {
 		Short: "Share a synced file publicly by URL",
 		Long: `Create a public link for a file in a bdrive project. Anyone with the URL
 can view it — HTML renders as a page, markdown renders like the viewer,
-PDFs open inline — with no account. The link always serves the file's
-latest synced content and lives until revoked (use --expires to limit it).
+PDFs open inline — with no account. The link serves the version you
+published: it does not change when the file does, so a doc you sent out
+stays what you sent. Re-running this command on the same file publishes
+the current version onto the SAME URL. Links live until revoked (use
+--expires to limit one).
 
 The file must be inside an initialized project and already synced (the
 daemon usually gets it there within seconds of saving).`,

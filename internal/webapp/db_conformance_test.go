@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -195,15 +196,19 @@ func TestMetaStoreConformance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			live, err := shares.Create(p1.ID, "handbook.md", "boss@x.io", 0)
+			// Pinned (published from a version) and legacy (empty sha, serves
+			// latest) rows have to survive a reload on EVERY backend — the
+			// second one is what keeps links minted before pinning working.
+			pinned := FileInfo{Blob: strings.Repeat("a", 64), Size: 4096, Time: time.Unix(1770000000, 0).UTC()}
+			live, err := shares.Create(p1.ID, "handbook.md", "boss@x.io", 0, pinned)
 			if err != nil {
 				t.Fatal(err)
 			}
-			gone, _ := shares.Create(p1.ID, "temp.md", "boss@x.io", time.Hour)
+			gone, _ := shares.Create(p1.ID, "temp.md", "boss@x.io", time.Hour, pinned)
 			if !shares.Revoke(gone.Token) {
 				t.Fatal("revoke should succeed")
 			}
-			dated, _ := shares.Create(p1.ID, "deck.md", "boss@x.io", 0)
+			dated, _ := shares.Create(p1.ID, "deck.md", "boss@x.io", 0, FileInfo{})
 			if _, ok, err := shares.SetExpiry(dated.Token, time.Hour); err != nil || !ok {
 				t.Fatalf("set expiry: %v %v", ok, err)
 			}
@@ -293,13 +298,22 @@ func TestMetaStoreConformance(t *testing.T) {
 			}
 
 			shares2, _ := NewShareDB(st2.Shares())
-			if _, ok := shares2.Get(live.Token); !ok {
+			got, ok := shares2.Get(live.Token)
+			if !ok {
 				t.Fatal("live share lost across reload")
+			}
+			if got.Sha != pinned.Blob || got.Size != pinned.Size || !got.Time.Equal(pinned.Time) {
+				t.Fatalf("published version lost across reload: %+v", got)
+			}
+			// The unpinned row is the one a pre-pinning binary wrote: it must
+			// come back EMPTY, because empty is what makes it serve latest.
+			if got, ok := shares2.Get(dated.Token); !ok || got.Sha != "" || got.Size != 0 || !got.Time.IsZero() {
+				t.Fatalf("legacy (unpinned) share did not survive as unpinned: %+v", got)
 			}
 			if _, ok := shares2.Get(gone.Token); ok {
 				t.Fatal("revoked share came back after reload")
 			}
-			if got, ok := shares2.Get(dated.Token); !ok || got.Expires.IsZero() {
+			if got, ok = shares2.Get(dated.Token); !ok || got.Expires.IsZero() {
 				t.Fatalf("patched expiry lost across reload: %+v", got)
 			}
 
@@ -374,5 +388,68 @@ func TestSQLMigrateAddsPermissionColumns(t *testing.T) {
 			t.Fatalf("grant lost across reopen: %+v", p.Perms)
 		}
 		st.Close()
+	}
+}
+
+// Same story one table over (BEA-126): a hub already running has a shares
+// table without the pin columns, and its rows must come back UNPINNED — empty
+// sha is what makes a pre-pinning link keep serving latest, so an upgrade
+// changes the meaning of no URL already in the wild.
+func TestSQLMigrateAddsSharePinColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the pre-pinning schema, verbatim
+	if _, err := old.Exec(`CREATE TABLE shares (
+		token TEXT PRIMARY KEY, project TEXT NOT NULL, path TEXT NOT NULL,
+		creator TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '',
+		expires TEXT NOT NULL DEFAULT '')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO shares (token,project,path,creator)
+		VALUES ('deadbeef','p-0000abcd','wiki/report.html','boss@x.io')`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	for i := 0; i < 2; i++ { // opening twice re-runs migrate()
+		st, err := OpenSQLStore("sqlite", path)
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		shares, err := NewShareDB(st.Shares())
+		if err != nil {
+			t.Fatalf("load %d: %v", i, err)
+		}
+		sh, ok := shares.Get("deadbeef")
+		if !ok || sh.Path != "wiki/report.html" {
+			t.Fatalf("pre-existing row lost on upgrade: %+v", sh)
+		}
+		if i == 0 {
+			if sh.Sha != "" || sh.Size != 0 || !sh.Time.IsZero() {
+				t.Fatalf("upgraded row = %+v, want unpinned", sh)
+			}
+			// Publishing it once is what proves the new columns are writable
+			// on a migrated table, not just readable.
+			fi := FileInfo{Blob: strings.Repeat("b", 64), Size: 12, Time: time.Unix(1770000000, 0).UTC()}
+			if _, ok, err := shares.Publish("deadbeef", fi); err != nil || !ok {
+				t.Fatalf("publish: %v %v", ok, err)
+			}
+		} else if sh.Sha != strings.Repeat("b", 64) {
+			t.Fatalf("published version lost across the second migrate(): %+v", sh)
+		}
+		st.Close()
+	}
+	// ...and the published version is there after the final reopen.
+	st, err := OpenSQLStore("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	shares, _ := NewShareDB(st.Shares())
+	if sh, ok := shares.Get("deadbeef"); !ok || sh.Sha != strings.Repeat("b", 64) || sh.Size != 12 {
+		t.Fatalf("published version lost across reopen: %+v", sh)
 	}
 }

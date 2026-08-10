@@ -471,12 +471,16 @@ $ bdrive share wiki/report.html
 https://drive.example.com/s/eacc1df3ee6a6ebbdacc535c2796dc30
 ```
 
-Links always serve the file's **latest** synced content (right for wiki
-pages and living reports), and live until revoked — `bdrive share --list`
-and `--revoke <token-or-url>` manage them, `--expires 24h` makes one
-self-destruct. The web UI has a Share button on every file, and its
-dialog can put an expiry on the link it just minted (24 hours, 7 days,
-30 days) without changing the URL you already copied.
+A link is **pinned to the version you published** — the doc you sent a
+customer does not rewrite itself the next time an agent touches the file.
+Re-running `bdrive share` on the same file (or the web UI's **Publish
+current version** button) moves the pin forward and keeps the same URL;
+links live until revoked. `bdrive share --list` and `--revoke
+<token-or-url>` manage them, `--expires 24h` makes one self-destruct. The
+web UI has a Share button on every file, and its dialog can put an expiry
+on the link it just minted (24 hours, 7 days, 30 days) without changing
+the URL you already copied. (Links minted before pinning shipped keep
+serving the latest synced content until you publish them once.)
 
 Shared HTML renders as a real page, markdown renders like the viewer
 (with a small "Shared with BearDrive" footer; raw HTML is served
