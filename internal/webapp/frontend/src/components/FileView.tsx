@@ -16,6 +16,7 @@ import {
   whoChanged,
 } from "../util";
 import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
+import { hasMermaid, renderMermaid } from "../lib/mermaid";
 
 export function FileView(props: {
   apiBase: string;
@@ -151,6 +152,25 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
     [doc, path, apiBase],
   );
 
+  // Diagrams are rendered into a NEW html string and fed back through state,
+  // so the one dangerouslySetInnerHTML below re-mounts with the SVG already
+  // in it — the same reason transformHTML runs before the mount and not after
+  // it. Runs on transformHTML's output, so a diagram's SVG never goes through
+  // the img/link rewriting pass.
+  const [diagrams, setDiagrams] = useState<string | null>(null);
+  useEffect(() => {
+    setDiagrams(null);
+    if (!hasMermaid(html)) return; // no fence: mermaid is never downloaded
+    let cancelled = false;
+    renderMermaid(html).then((out) => {
+      // A slow render of the file we just left must not paint over this one.
+      if (!cancelled) setDiagrams(out);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [html]);
+
   useEffect(() => {
     if (!doc) return;
     const parts: string[] = [];
@@ -176,7 +196,7 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   // classic app assigning innerHTML.
   return (
     <div
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
       onClick={(e) => handleLinkClick(e, path, flatFiles, onOpenFile)}
     />
   );

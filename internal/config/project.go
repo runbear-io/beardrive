@@ -102,6 +102,30 @@ var agentHookConfigs = map[string][]string{
 	".hermes": {"config.yaml"},
 }
 
+// AgentConfigDir reports whether a path segment names an agent's
+// configuration directory — the keys of agentHookConfigs — under the same
+// case and trailing-dot folding ReservedDir explains.
+//
+// It exists for one caller: `bdrive init` refusing such a directory as a
+// MOUNT ROOT. The reserved-path rule only covers segments BELOW a root, so
+// mounting ~/.claude leaves its settings.json a top-level file with no
+// directory segment to match on — along with .credentials.json and every
+// saved session under projects/. Only that direction leaks: a mount that
+// CONTAINS ~/.claude sees .claude/settings.json, reserved at any depth.
+//
+// Exported here rather than spelled as a literal list in cmd/bdrive for the
+// reason agentHookConfigs' own comment gives: a second copy of that list is
+// how .mcp.json drifted out of it once already.
+func AgentConfigDir(name string) bool {
+	name = strings.TrimRight(name, ". ")
+	for dir := range agentHookConfigs {
+		if strings.EqualFold(name, dir) {
+			return true
+		}
+	}
+	return false
+}
+
 // agentHookFiles are the same thing at the folder ROOT, with no agent config
 // directory to key on: `.mcp.json` is Claude Code's project-scoped MCP server
 // definition. Reserved at any depth rather than at the root only, for the

@@ -48,7 +48,7 @@ func secdefModes(t *testing.T, dir string) map[string]os.FileMode {
 // beside it in the same 0755 volume directory at mode 0644.
 func TestSec_Store_ReadSpoolIsNotWorldReadable(t *testing.T) {
 	s, _ := secpkgStore(t)
-	if err := s.LogRead("secret-project/acquisition-plan.md"); err != nil {
+	if err := s.LogRead("secret-project/acquisition-plan.md", ""); err != nil {
 		t.Fatal(err)
 	}
 	found := false
@@ -88,7 +88,7 @@ func TestSec_Store_ReadSpoolSurvivesAHostilePathAsData(t *testing.T) {
 		"tab\there.md",
 	}
 	for _, p := range hostile {
-		if err := s.LogRead(p); err != nil {
+		if err := s.LogRead(p, ""); err != nil {
 			t.Fatalf("LogRead(%q): %v", p, err)
 		}
 	}

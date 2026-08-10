@@ -27,6 +27,12 @@ import (
 // /store/* sync traffic is replication, not reading, and is never counted;
 // history /blob views are spelunking, not consumption, and aren't either.
 //
+// One exception to "never an event log": session reads (SessionRead), the
+// per-session detail behind a History run card. They are a separate table
+// with their own, shorter retention, and they never enter the ledger's
+// in-memory bucket map — see SessionReadRepo for why that separation is the
+// whole point.
+//
 // Privacy: rows are daily aggregation buckets, never an event log. The actor
 // column (account email / device id / share token) exists only to count
 // distinct readers and never appears in an API response — with exactly one
@@ -40,6 +46,15 @@ import (
 // arbitrary string, and never someone else's machine. This route also never
 // registers a device: registering the id it is about to judge is what turned
 // the round-2 check into a one-request speed bump.
+//
+// A session id is identity-adjacent and gets the same ruling, written down
+// before anything serves it: a session id appears ONLY in History responses,
+// on the op that carries it, and as a ?session= filter INPUT. It is never
+// enumerated — no "list sessions" response, no session column in /heat's
+// output, nothing new in ?by=device. That is sound because the id is already
+// visible to every project member inside Op.Note today, so serving it as its
+// own field discloses nothing new, while refusing to enumerate keeps /heat
+// identity-free exactly as documented above.
 
 // Read kinds.
 const (
@@ -69,6 +84,25 @@ func (s ReadStat) key() ReadStatKey {
 	return ReadStatKey{s.Project, s.Path, s.Day, s.Kind, s.Actor}
 }
 
+// SessionRead records that one agent session read one path, from one device.
+// Not a count and not a bucket: the run card asks "did this session read this
+// file?", and one row per (session, device, path) answers it with no
+// aggregation. Device is always the hub-validated device the report arrived
+// from, never anything the client put in the body.
+type SessionRead struct {
+	Project string    `json:"project"`
+	Session string    `json:"session"`
+	Device  string    `json:"device"`
+	Path    string    `json:"path"`
+	Last    time.Time `json:"last"`
+}
+
+type sessionReadKey struct{ Project, Session, Device, Path string }
+
+func (s SessionRead) key() sessionReadKey {
+	return sessionReadKey{s.Project, s.Session, s.Device, s.Path}
+}
+
 // HeatEntry is the per-path aggregate the heat API returns. Counts only —
 // never identities.
 type HeatEntry struct {
@@ -90,6 +124,15 @@ const (
 	// DefaultReadRetentionDays is how long daily buckets keep per-day
 	// resolution before folding into the all-time row.
 	DefaultReadRetentionDays = 400
+	// DefaultSessionRetentionDays is how long per-session read detail is
+	// kept. Much shorter than the bucket retention: this is event-shaped
+	// data whose only consumer is a History run card, and a month covers a
+	// retro. Rows past it are deleted, not folded — the heat totals were
+	// never derived from them, so nothing is lost from any count.
+	DefaultSessionRetentionDays = 30
+	// sessionPruneEvery throttles the retention delete; it rides the same
+	// flush the buckets use rather than owning a goroutine.
+	sessionPruneEvery = time.Hour
 )
 
 // ReadLedger is the in-memory read-telemetry service over a ReadRepo, in the
@@ -100,19 +143,29 @@ type ReadLedger struct {
 	repo      ReadRepo
 	retention time.Duration
 
+	// Session-read detail, optional (nil = off) and deliberately outside
+	// byKey: these rows are never loaded into memory in bulk, so Heat's full
+	// map scan and the boot load are unaffected by session cardinality. If a
+	// future change ever moves them into byKey, Heat (below) is what pays.
+	sessions         SessionReadRepo
+	sessionRetention time.Duration
+
 	// scans counts ShareOpens passes over byKey. Tests assert one per
 	// project per list render — the "never one scan per share" rule is
 	// invisible in the response body, so this is the only thing that can
 	// catch the regression.
 	scans atomic.Int64
 
-	mu         sync.Mutex
-	byKey      map[ReadStatKey]ReadStat
-	dirty      map[ReadStatKey]bool
-	pendingDel []ReadStatKey             // retention deletions awaiting a successful flush
-	seen       map[ReadStatKey]time.Time // debounce; Day field unused ("")
-	lastFlush  time.Time
-	warned     bool
+	mu           sync.Mutex
+	byKey        map[ReadStatKey]ReadStat
+	dirty        map[ReadStatKey]bool
+	pendingDel   []ReadStatKey             // retention deletions awaiting a successful flush
+	seen         map[ReadStatKey]time.Time // debounce; Day field unused ("")
+	pendingSess  map[sessionReadKey]SessionRead
+	lastFlush    time.Time
+	lastSessPrun time.Time
+	warned       bool
+	sessWarned   bool
 }
 
 // NewReadLedger loads the ledger and immediately folds buckets older than the
@@ -153,6 +206,29 @@ func OpenReadLedger(path string, retentionDays int) (*ReadLedger, error) {
 	return NewReadLedger(newFileReadRepo(path), retentionDays)
 }
 
+// OpenSessionReadRepo is the file-backed session-read store, for hubs
+// running without a MetaStore (the historical JSON-files layout).
+func OpenSessionReadRepo(path string) SessionReadRepo { return newFileSessionReadRepo(path) }
+
+// WithSessions turns on per-session read detail (the data behind a History
+// run card). Separate from the constructor so every existing caller — and
+// every backend that has no session repo — keeps working with it off.
+// retentionDays <= 0 means the default.
+func (l *ReadLedger) WithSessions(repo SessionReadRepo, retentionDays int) *ReadLedger {
+	if l == nil || repo == nil {
+		return l
+	}
+	if retentionDays <= 0 {
+		retentionDays = DefaultSessionRetentionDays
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sessions = repo
+	l.sessionRetention = time.Duration(retentionDays) * 24 * time.Hour
+	l.pendingSess = map[sessionReadKey]SessionRead{}
+	return l
+}
+
 // Record counts one read. Nil-safe and never fails: telemetry must not break
 // the page view (or sync cycle) that triggered it.
 func (l *ReadLedger) Record(project, path, kind, actor string) {
@@ -177,6 +253,97 @@ func (l *ReadLedger) Record(project, path, kind, actor string) {
 	l.dirty[key] = true
 	if now.Sub(l.lastFlush) >= readFlushEvery {
 		l.flushLocked()
+	}
+}
+
+// RecordSession notes that one agent session read one path from one device.
+// Nil-safe, off when no session repo is configured, and — like Record —
+// never fails: telemetry must not break the sync cycle that reported it.
+// Unlike Record it is NOT debounced: a row is a fact ("this session read this
+// file"), not a count, so repeats are the same row rewritten.
+func (l *ReadLedger) RecordSession(project, session, device, path string) {
+	if l == nil || project == "" || session == "" || device == "" || path == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.sessions == nil {
+		return
+	}
+	now := time.Now()
+	sr := SessionRead{Project: project, Session: session, Device: device, Path: path, Last: now.UTC()}
+	l.pendingSess[sr.key()] = sr
+	// Same throttle the buckets use. Record's own flush check sits behind its
+	// debounce return, so a report whose buckets are all debounced would
+	// otherwise leave these rows buffered indefinitely.
+	if now.Sub(l.lastFlush) >= readFlushEvery {
+		l.flushLocked()
+	}
+}
+
+// SessionPaths returns the paths one session read from one device, for the
+// History run card. Both the session and the device are required by the
+// caller (handleHeat): a session-only lookup would return rows a member
+// reported under someone else's session id, which pinning to the validated
+// device is what makes harmless.
+func (l *ReadLedger) SessionPaths(project, session, device string) []string {
+	if l == nil || project == "" || session == "" || device == "" {
+		return nil
+	}
+	l.mu.Lock()
+	repo := l.sessions
+	// Flush first, so a card opened seconds after a sync sees that sync's
+	// reads instead of an empty list.
+	if repo != nil {
+		l.flushSessionsLocked()
+	}
+	l.mu.Unlock()
+	if repo == nil {
+		return nil
+	}
+	rows, err := repo.ListBySession(project, session, device)
+	if err != nil {
+		log.Printf("beardrive: session reads lookup failed: %v", err)
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Path)
+	}
+	return out
+}
+
+// flushSessionsLocked persists buffered session rows and, at most hourly,
+// deletes the ones past the session retention. Failures keep the buffer for
+// the next attempt and log once — a read_sessions failure must never affect
+// read_stats, so this is deliberately separate from persistLocked. Callers
+// hold mu.
+func (l *ReadLedger) flushSessionsLocked() {
+	if l.sessions == nil {
+		return
+	}
+	if len(l.pendingSess) > 0 {
+		batch := make([]SessionRead, 0, len(l.pendingSess))
+		for _, sr := range l.pendingSess {
+			batch = append(batch, sr)
+		}
+		if err := l.sessions.PutBatch(batch); err != nil {
+			if !l.sessWarned {
+				l.sessWarned = true
+				log.Printf("beardrive: session read flush failed (will retry): %v", err)
+			}
+		} else {
+			l.sessWarned = false
+			l.pendingSess = map[sessionReadKey]SessionRead{}
+		}
+	}
+	now := time.Now()
+	if now.Sub(l.lastSessPrun) < sessionPruneEvery {
+		return
+	}
+	l.lastSessPrun = now
+	if err := l.sessions.PruneBefore(now.UTC().Add(-l.sessionRetention)); err != nil {
+		log.Printf("beardrive: session read prune failed (will retry): %v", err)
 	}
 }
 
@@ -358,6 +525,7 @@ func (l *ReadLedger) flushLocked() {
 	} else {
 		l.warned = false
 	}
+	l.flushSessionsLocked()
 }
 
 // compactLocked folds daily buckets older than the retention horizon into
@@ -516,6 +684,25 @@ func (s *Server) handleHeat(v *volume, w http.ResponseWriter, r *http.Request) {
 	}
 	_ = v
 	q := r.URL.Query()
+	// ?session=&device= is the run-card join: which paths that agent session
+	// read. Both are required — a session-only query would also return rows a
+	// member reported under someone else's session id, which pinning the row
+	// to the reporting device (handleReadReport) is what makes harmless. This
+	// is a filter INPUT only: nothing here or anywhere else enumerates
+	// sessions, and the response carries paths, no identities and no counts.
+	if session := q.Get("session"); session != "" || q.Get("device") != "" {
+		device := q.Get("device")
+		if session == "" || device == "" {
+			http.Error(w, "session and device must be given together", http.StatusBadRequest)
+			return
+		}
+		paths := s.Reads.SessionPaths(projectID(r), session, device)
+		if paths == nil {
+			paths = []string{} // an empty list, never a null the client must special-case
+		}
+		writeJSON(w, map[string]any{"paths": paths})
+		return
+	}
 	days := 30
 	if raw := q.Get("days"); raw != "" {
 		var err error
@@ -600,6 +787,10 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 	var req struct {
 		Reads []struct {
 			Path string `json:"path"`
+			// Session is the agent session the read happened in — a CLIENT
+			// string, so it is only ever stored alongside the device the hub
+			// validated below, never on its own. See the row write.
+			Session string `json:"session,omitempty"`
 			// Time is accepted for forward compatibility but buckets use
 			// server time: client clocks are unreliable and late flushes are
 			// telemetry noise, not data loss.
@@ -656,6 +847,16 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 			continue // no such file in this project: a read of nothing is not a read
 		}
 		s.Reads.Record(project, e.Path, ReadKindAgent, device)
+		// The session id is the one field here the hub cannot vouch for: it
+		// arrives in the body, so any member could report reads naming a
+		// teammate's session and paint files onto that teammate's run card.
+		// The row is therefore pinned to `device` — the id ownsDevice just
+		// validated — and the query side requires BOTH session and device, so
+		// a forged row can only ever be found under the forger's own device,
+		// which MayActAs guarantees is never someone else's.
+		if sess := trimText(e.Session, 128); sess != "" && journal.SafeText(sess) {
+			s.Reads.RecordSession(project, sess, device, e.Path)
+		}
 		n++
 	}
 	writeJSON(w, map[string]any{"accepted": n})

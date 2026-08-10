@@ -47,6 +47,30 @@ lens — four views:
   spotting an agent that never discovered the folder at all, which usually means
   a missing [root pointer](/guides/shared-agent-memory/).
 
+## One session, read and written
+
+History groups an agent session's changes into a single **run card**. The card
+also shows what that session *read*: files it read before changing them are
+marked, and files it read without touching at all get their own **Read, not
+changed** list underneath.
+
+That's the question the heat map alone can't answer — *when my agent answered,
+what did it actually look at, and was it the current version or the retired
+one?*
+
+Two things worth knowing:
+
+- Reads are shown only for files the project still has. A file a run read and
+  then deleted appears as a change with no read. The card says so on screen.
+- The join is on a session id the sync hook stamps, never on the run's note —
+  the note is free text anyone can set with `bdrive sync --note`, so joining on
+  it would let one person's changes attach to another person's card.
+
+Per-session detail is kept for 30 days by default
+(`reads.session_retention_days`, see [Hub config](/reference/hub-config/));
+after that the run card shows changes only. Read *counts* are unaffected — they
+come from the heat buckets, which have their own, much longer retention.
+
 ## Using it
 
 A few things this surfaces that are otherwise guesswork:
@@ -66,6 +90,13 @@ distinct-reader counts, and last-read times. **Never who read what.**
 `?by=device` adds an agent-only per-device folder breakdown — device identity is
 already public via history. Human email addresses never appear in a heat
 response.
+
+A session id is treated the same way. It appears only in History, on the change
+that carries it, and is accepted as a `?session=<id>&device=<id>` filter
+**input** — both are required. Nothing enumerates sessions: no listing
+endpoint, no session column in heat output, nothing new in `?by=device`. And a
+session's reads are always recorded against the device the hub validated the
+report came from, so nobody can paint files onto a teammate's run card.
 
 Telemetry degrades silently: recording or flushing a read can never fail a
 request or a sync cycle.

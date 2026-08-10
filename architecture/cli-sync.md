@@ -19,6 +19,7 @@ classDiagram
         +Account config.Settings
         +Backend remote.Backend
         +Note string
+        +SessionID string
         +Prune bool
         +OnProgress func
         +Cycle(ctx) Result
@@ -67,9 +68,10 @@ classDiagram
         +ReservedDir(name) .git .bdrive
         +ReservedName(name) .DS_Store, tmp
         +AgentHookConfig(p) bool
+        +AgentConfigDir(name) bool
         +ReservedPath(p) bool
     }
-    note for ReservedPath "Case-and-trailing-dot folded, so `.BDRIVE.` is still reserved. AgentHookConfig names the files an agent EXECUTES (.claude/settings.json, .codex/*, .gemini, .hermes, .mcp.json at any depth) — a synced project must never be able to hand a teammate's agent new hooks. Deliberately its own list, not derived from internal/agenthooks: config imports nothing"
+    note for ReservedPath "Case-and-trailing-dot folded, so `.BDRIVE.` is still reserved. AgentHookConfig names the files an agent EXECUTES (.claude/settings.json, .codex/*, .gemini, .hermes, .mcp.json at any depth) — a synced project must never be able to hand a teammate's agent new hooks. Deliberately its own list, not derived from internal/agenthooks: config imports nothing. AgentConfigDir answers about ONE segment, for init's mount-root gate: the reserved rule only sees segments BELOW a root, so mounting ~/.claude itself leaves settings.json a bare top-level file"
 
     class UnderRoot {
         <<internal/store — one rule>>
@@ -81,12 +83,17 @@ classDiagram
         +walkFolder(folder, filter, fn)
         verdict: vSync vSkipFile vDescend vPruneDir vNested
     }
-    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain and Measure all go through it, so what --explain reports and what init warns about cannot drift from what leaves"
+    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure and SyncedFiles all go through it, so what --explain reports, what init warns about and what bdrive grep searches cannot drift from what leaves"
 
     class Measure {
         +Measure(folder, include) files, bytes
     }
     note for Measure "walk.go — sizes what a FIRST sync would upload, for the oversized-folder warning bdrive init prints (1 GiB / 20k files). Filter-aware on purpose: a 40 GB repo whose bulk is already ignored measures as the few MB that really sync, so the warning fires on the folder nobody meant to share and stays quiet on an ordinary checkout. Advice only — an unreadable subtree is skipped, never fatal"
+
+    class SyncedFiles {
+        +SyncedFiles(folder, include, accepted) paths
+    }
+    note for SyncedFiles "walk.go — the mount-relative paths that sync, in walk order: what bdrive grep searches, so a .bdriveignore rule or a narrowed scope excludes a file from search exactly as it excludes it from sync. Deliberately NOT Explain, which countFiles every pruned dir — a grep in a repo with node_modules/ would walk it in full for a count it discards"
 
     class Explain {
         +Explain(folder, include, accepted) two lists
@@ -107,7 +114,8 @@ classDiagram
         +LoadCache / SaveCache mountID
         +LoadSync / SaveSync
         +SaveNote / LoadNote
-        +PendingReads read spool
+        +LogRead(rel, session) read spool
+        +PendingReads dedup on path+session
         +LogInbound / DrainInbound
         +Lock() flock
     }
@@ -119,9 +127,10 @@ classDiagram
         +Author +User +UserName
         +Kind put or delete
         +Path +Blob +Size +Mode +Note
+        +Session agent session, hook-set
         +Mtime when the file was written
     }
-    note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay"
+    note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay. Session holds the same standing: set only by `bdrive sync --hook` (never by --note, which any member can spell), display/join-only, and the key History run cards group on — a note is forgeable, a session id is not"
     note for Op "Op now owns its own JSON: a Path that is not valid UTF-8 rides as a base64 `path_raw` sidecar and is restored only when the lossy form still matches, so one line can never name two different files on two readers. Less falls through to Kind/Path/Blob/Size/Mode, making the order TOTAL — two ops can no longer tie and replay differently per device. Parse skips an undecodable line and drops an unknown Kind instead of failing the whole journal"
 
     class Backend {
@@ -142,6 +151,8 @@ classDiagram
     Session --> Filter : SkipUp on scan, Skip on materialize
     Session --> walkFolder : scan
     Explain --> walkFolder : same predicate
+    SyncedFiles --> walkFolder : same predicate
+    SyncedFiles --> Filter : own fresh instance
     Measure --> walkFolder : same predicate
     Measure --> Filter : own fresh instance
     Explain --> Filter : own fresh instance
@@ -168,21 +179,22 @@ classDiagram
 
     class Commands {
         init login logout
-        sync stop scope forget status log
+        sync stop scope grep forget status log
         restore url share export import
         web daemon hooks read-log
         resume autostart
     }
     note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"
-    note for Commands "Every peer-authored string status / log / whoami print goes through safeField first — a teammate's file name is attacker-controlled text landing in your terminal, and an escape sequence there rewrites the line above it. login now does PKCE on the loopback callback (no compat arm) and both its client and init's refuse to follow a redirect off the hub's origin with the device token attached"
+    note for Commands "grep searches file CONTENTS in the working folder via syncer.SyncedFiles — LoadProject not ResolveMount (a read must not enroll the device), no session, no flock, and the volume store is opened only if it already exists, so a search creates nothing. Exit 1 on no match is a status, not an error (errNoMatch + SilenceErrors)"
+    note for Commands "Every peer-authored string status / log / whoami print goes through safeField first — a teammate's file name is attacker-controlled text landing in your terminal, and an escape sequence there rewrites the line above it. grep runs BOTH the path and the matched line through it — a matched line is a teammate's file content, the widest version of that surface. login now does PKCE on the loopback callback (no compat arm) and both its client and init's refuse to follow a redirect off the hub's origin with the device token attached"
 
     class Templates {
         <<internal/templates>>
-        go:embed files/docs, files/wiki, files/para
+        go:embed all:files — docs, wiki, para, skills
         List / Get / Names
         WriteTo(dir) skips existing paths
     }
-    note for Templates "init --template <name>: refused with --only and on an unknown name BEFORE any write. The hub seeds at creation (the CLI creates through POST /api/projects), so WriteTo runs only as the fallback for a hub too old to know the field, and in an already-initialized folder — the agent's post-init path. Skipping existing paths is what makes a double-seed a no-op"
+    note for Templates "The embed directive is `all:` — a plain pattern drops dot-prefixed paths silently, and the skills template IS .claude/skills/<name>/SKILL.md. init --template <name>: refused with --only and on an unknown name BEFORE any write. The hub seeds at creation (the CLI creates through POST /api/projects), so WriteTo runs only as the fallback for a hub too old to know the field, and in an already-initialized folder — the agent's post-init path. Skipping existing paths is what makes a double-seed a no-op"
 
     class syncBlocked {
         <<gate>>
@@ -267,6 +279,7 @@ classDiagram
     Commands --> openSession : after the gate
     openSession --> MountRegistry : ResolveMount — self-heal only, never enrolls
     Commands --> Templates : init --template (seed) / init resume (agent's post-init path)
+    Commands ..> ReservedPath : init refuses an AgentConfigDir mount root
     Commands --> startSync : init
     startSync --> MountRegistry : EnrollMount — the only writer
     startSync --> PausedMarker : clears

@@ -90,6 +90,7 @@ type fileMetaStore struct {
 	shares   *fileShareRepo
 	devices  *fileDeviceRepo
 	reads    *fileReadRepo
+	sessions *fileSessionReadRepo
 }
 
 // OpenFileStore builds the file backend over dir, using the historical
@@ -102,16 +103,18 @@ func OpenFileStore(dir string) (MetaStore, error) {
 		shares:   newFileShareRepo(filepath.Join(dir, "shares.json")),
 		devices:  newFileDeviceRepo(filepath.Join(dir, "devices.json")),
 		reads:    newFileReadRepo(filepath.Join(dir, "reads.json")),
+		sessions: newFileSessionReadRepo(filepath.Join(dir, "sessions.json")),
 	}, nil
 }
 
-func (s *fileMetaStore) Accounts() AccountRepo { return s.accounts }
-func (s *fileMetaStore) Projects() ProjectRepo { return s.projects }
-func (s *fileMetaStore) Orgs() OrgRepo         { return s.orgs }
-func (s *fileMetaStore) Shares() ShareRepo     { return s.shares }
-func (s *fileMetaStore) Devices() DeviceRepo   { return s.devices }
-func (s *fileMetaStore) Reads() ReadRepo       { return s.reads }
-func (s *fileMetaStore) Close() error          { return nil }
+func (s *fileMetaStore) Accounts() AccountRepo         { return s.accounts }
+func (s *fileMetaStore) Projects() ProjectRepo         { return s.projects }
+func (s *fileMetaStore) Orgs() OrgRepo                 { return s.orgs }
+func (s *fileMetaStore) Shares() ShareRepo             { return s.shares }
+func (s *fileMetaStore) Devices() DeviceRepo           { return s.devices }
+func (s *fileMetaStore) Reads() ReadRepo               { return s.reads }
+func (s *fileMetaStore) SessionReads() SessionReadRepo { return s.sessions }
+func (s *fileMetaStore) Close() error                  { return nil }
 
 // ---- accounts (auth.json: users + tokens + policy) ----
 
@@ -765,6 +768,109 @@ func (r *fileReadRepo) DeleteBatch(keys []ReadStatKey) error {
 	}
 	for _, k := range keys {
 		delete(r.byKey, k)
+	}
+	return r.write()
+}
+
+// ---- session reads (sessions.json) ----
+
+type fileSessionReadRepo struct {
+	path  string
+	mu    sync.Mutex
+	byKey map[sessionReadKey]SessionRead
+}
+
+func newFileSessionReadRepo(path string) *fileSessionReadRepo {
+	return &fileSessionReadRepo{path: path, byKey: map[sessionReadKey]SessionRead{}}
+}
+
+// reload re-reads before every write, for fileReadRepo.reload's reason: a
+// stale rewrite erases rows another hub process recorded since boot. Callers
+// hold mu.
+func (r *fileSessionReadRepo) reload() error {
+	var f struct {
+		Sessions []SessionRead `json:"sessions"`
+	}
+	if _, err := readJSONFile(r.path, &f); err != nil {
+		return err
+	}
+	r.byKey = map[sessionReadKey]SessionRead{}
+	for _, sr := range f.Sessions {
+		r.byKey[sr.key()] = sr
+	}
+	return nil
+}
+
+func (r *fileSessionReadRepo) write() error {
+	var f struct {
+		Sessions []SessionRead `json:"sessions"`
+	}
+	f.Sessions = make([]SessionRead, 0, len(r.byKey))
+	for _, sr := range r.byKey {
+		f.Sessions = append(f.Sessions, sr)
+	}
+	sort.Slice(f.Sessions, func(i, j int) bool {
+		a, b := f.Sessions[i], f.Sessions[j]
+		if a.Session != b.Session {
+			return a.Session < b.Session
+		}
+		return a.Path < b.Path
+	})
+	data, err := json.Marshal(f) // telemetry: compact beats pretty
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(r.path, append(data, '\n'))
+}
+
+func (r *fileSessionReadRepo) PutBatch(reads []SessionRead) error {
+	for _, sr := range reads {
+		if err := checkSessionRead(sr); err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.reload(); err != nil {
+		return err
+	}
+	for _, sr := range reads {
+		r.byKey[sr.key()] = sr
+	}
+	return r.write()
+}
+
+func (r *fileSessionReadRepo) ListBySession(project, session, device string) ([]SessionRead, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.reload(); err != nil {
+		return nil, err
+	}
+	var out []SessionRead
+	for k, sr := range r.byKey {
+		if k.Project == project && k.Session == session && k.Device == device {
+			out = append(out, sr)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+func (r *fileSessionReadRepo) PruneBefore(t time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.reload(); err != nil {
+		return err
+	}
+	n := 0
+	for k, sr := range r.byKey {
+		if sr.Last.Before(t) {
+			delete(r.byKey, k)
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
 	}
 	return r.write()
 }

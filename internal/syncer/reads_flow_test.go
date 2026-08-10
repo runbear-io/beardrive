@@ -52,9 +52,9 @@ func TestAgentReadReporting(t *testing.T) {
 	write(t, a.Folder, "wiki/a.md", "content")
 
 	// The agent read a.md twice and b.md once before this cycle.
-	a.Store.LogRead("wiki/a.md")
-	a.Store.LogRead("wiki/a.md")
-	a.Store.LogRead("b.md")
+	a.Store.LogRead("wiki/a.md", "")
+	a.Store.LogRead("wiki/a.md", "")
+	a.Store.LogRead("b.md", "")
 	res := cycle(t, a)
 	if !res.Pushed {
 		t.Fatal("cycle should have pushed")
@@ -74,7 +74,7 @@ func TestAgentReadReporting(t *testing.T) {
 
 	// Hub down: the cycle still succeeds and the batch stays queued.
 	hub.setFail(true)
-	a.Store.LogRead("wiki/a.md")
+	a.Store.LogRead("wiki/a.md", "")
 	if res := cycle(t, a); res.Offline {
 		t.Fatal("a failed read report must not mark the cycle offline")
 	}
@@ -93,9 +93,73 @@ func TestAgentReadReporting(t *testing.T) {
 	// queued reads: the cycle runs, the spool just keeps waiting.
 	b := newDevice(t, "devb", sharedRemote(t))
 	write(t, b.Folder, "x.md", "x")
-	b.Store.LogRead("x.md")
+	b.Store.LogRead("x.md", "")
 	cycle(t, b)
 	if evs, err := b.Store.PendingReads(); err != nil || len(evs) != 1 {
 		t.Fatalf("spool on a hubless device = %v, %v; want the read still queued", evs, err)
+	}
+}
+
+// TestSessionCarriesThroughTwoDevices is the multi-device shape of the join:
+// a device syncing under an agent session stamps that session onto every op
+// it commits AND onto every read it reports, its peer converges on ops that
+// carry the id, and a device with no session leaves both empty — so a run
+// card can never claim another device's work.
+func TestSessionCarriesThroughTwoDevices(t *testing.T) {
+	shared := sharedRemote(t)
+	hubA := &readReportingRemote{Backend: shared}
+	hubB := &readReportingRemote{Backend: shared}
+	a := newDevice(t, "deva", hubA)
+	b := newDevice(t, "devb", hubB)
+
+	// Device A works inside an agent session: it reads two files and writes one.
+	a.SessionID = "8f21e4"
+	write(t, a.Folder, "wiki/a.md", "written by the run")
+	a.Store.LogRead("wiki/a.md", "8f21e4")
+	a.Store.LogRead("wiki/reference.md", "8f21e4")
+	cycle(t, a)
+
+	if reports := hubA.all(); len(reports) != 1 || len(reports[0]) != 2 {
+		t.Fatalf("reports = %+v, want one batch of 2", reports)
+	} else {
+		for _, e := range reports[0] {
+			if e.Session != "8f21e4" {
+				t.Fatalf("reported read %+v lost its session", e)
+			}
+		}
+	}
+
+	// Device B, no session at all: its own op carries none, and the read it
+	// reports carries none — nothing of B's can land on A's card.
+	write(t, b.Folder, "wiki/b.md", "written by a human")
+	b.Store.LogRead("wiki/b.md", "")
+	cycle(t, b)
+	if reports := hubB.all(); len(reports) != 1 || reports[0][0].Session != "" {
+		t.Fatalf("sessionless device reported %+v, want an empty session", reports)
+	}
+
+	// Both peers converge, and each op keeps the session of the device that
+	// wrote it — replay does not touch the field.
+	cycle(t, a)
+	cycle(t, b)
+	for _, d := range []*Session{a, b} {
+		ops, err := d.Store.AllOps()
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]string{}
+		for _, op := range ops {
+			seen[op.Path] = op.Session
+		}
+		if seen["wiki/a.md"] != "8f21e4" {
+			t.Errorf("%s sees wiki/a.md session %q, want 8f21e4", d.Device.ID, seen["wiki/a.md"])
+		}
+		if seen["wiki/b.md"] != "" {
+			t.Errorf("%s sees wiki/b.md session %q, want empty", d.Device.ID, seen["wiki/b.md"])
+		}
+	}
+	// Convergence itself: both folders hold both files.
+	if got, want := snapshotDir(t, a.Folder), snapshotDir(t, b.Folder); len(got) != len(want) {
+		t.Fatalf("folders diverged: %v vs %v", got, want)
 	}
 }

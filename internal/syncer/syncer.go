@@ -66,6 +66,14 @@ type Session struct {
 	// `bdrive sync --note` leave context that the daemon's later scans also
 	// stamp. Conflict-copy ops keep their own explanatory note.
 	Note string
+	// SessionID is the agent session every op this cycle commits is stamped
+	// with (journal.Op.Session). Set only by `bdrive sync --hook`, and
+	// deliberately NOT persisted the way Note is (store.SaveNote): the note
+	// is context that outlives the hook turn, the session id is an identity
+	// that must not be attached to changes the daemon commits on its own
+	// later. So a daemon scan after the hook turn carries the note and no
+	// session — the asymmetry is intended.
+	SessionID string
 	// Prune makes this cycle reconcile the hub against the shared ignore
 	// rules: every path the remote still holds that .bdriveignore (or a
 	// builtin never-sync rule) now excludes is journaled as a delete, so it
@@ -435,7 +443,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		if evs, err := s.Store.PendingReads(); err == nil && len(evs) > 0 {
 			reads := make([]remote.ReadEvent, len(evs))
 			for i, e := range evs {
-				reads[i] = remote.ReadEvent{Path: e.Path, Time: e.Time}
+				reads[i] = remote.ReadEvent{Path: e.Path, Session: e.Session, Time: e.Time}
 			}
 			if rr.ReportReads(ctx, reads) == nil {
 				s.Store.ClearPendingReads()
@@ -482,7 +490,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
 			Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
 			User: s.Account.Email, UserName: s.Account.Name,
-			Kind: kind, Path: rel, Note: note,
+			Kind: kind, Path: rel, Note: note, Session: s.SessionID,
 		}
 	}
 

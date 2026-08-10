@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HistoryEntry } from "../api/types";
 import { HistoryRow, NoteText, type RemoveAction, type RestoreAction } from "./HistoryRow";
@@ -203,6 +203,26 @@ function RunGroup({
   const first = run.entries[0];
   const who = whoChanged(first);
   const dev = [first.device.name || first.device.id, first.device.os].filter(Boolean).join(" · ");
+  // What this run READ, joined on the session id its own ops carry — never on
+  // the note, which anyone can set to anything. Both the session and the
+  // device are required by the server, so a card only ever shows reads its
+  // own device reported.
+  const sid = first.session;
+  const did = first.device?.id;
+  const { data: reads } = useQuery({
+    queryKey: ["session-reads", apiBase, sid, did],
+    queryFn: () =>
+      getJSON<{ paths: string[] }>(
+        apiBase + "heat?session=" + encodeURIComponent(sid!) + "&device=" + encodeURIComponent(did!),
+      ),
+    enabled: !!sid && !!did,
+    staleTime: 30_000,
+  });
+  const readPaths = new Set(reads?.paths ?? []);
+  const written = new Set(run.entries.map((e) => e.path));
+  // Read but never written: the half of the run that History could not show
+  // before, and usually the half that answers "what did it look at?".
+  const readOnly = [...readPaths].filter((p) => !written.has(p)).sort();
   const times = run.entries.map((e) => new Date(e.time).getTime());
   const span = fmtSpan(Math.min(...times), Math.max(...times));
   // Distinct paths, not ops: repeat edits to one file must not inflate the
@@ -226,7 +246,8 @@ function RunGroup({
           <NoteText text={run.note} />
         </span>
         <span className="hrun-meta">
-          {n} file{n === 1 ? "" : "s"} · {who}
+          {readPaths.size > 0 ? `read ${readPaths.size} · changed ${n}` : `${n} file${n === 1 ? "" : "s"}`} ·{" "}
+          {who}
           {dev ? " · " + dev : ""}
         </span>
         <span className="hrun-time">{span}</span>
@@ -247,8 +268,26 @@ function RunGroup({
               remove={remove}
               restoreSha={restoreSha(run.idx[k])}
               inRun
+              read={readPaths.has(e.path)}
             />
           ))}
+          {readOnly.length > 0 && (
+            <div className="hrun-reads">
+              <div className="hrun-reads-head">Read, not changed</div>
+              {readOnly.map((p) => (
+                <button key={p} type="button" className="hrun-read" onClick={() => onOpen(p)}>
+                  <span className="hkind">read</span>
+                  <span className="hpath">{p}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {/* Not decoration: reads are recorded only for paths the project
+              still has, so a file this run read and then deleted shows its
+              write with no read. Saying so beats reading as a bug. */}
+          {sid && (
+            <div className="hrun-foot">Reads shown only for files the project still has.</div>
+          )}
         </div>
       )}
     </div>
