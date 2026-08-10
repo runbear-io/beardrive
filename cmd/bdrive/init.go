@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -241,7 +242,7 @@ the folder was renamed or moved.`,
 					installAgentHooks(folder)
 				}
 				if !noAutostart {
-					installAutostart()
+					installAutostart(stdinIsTTY() && !yes)
 				}
 				return startSync(cmd.Context(), folder, proj, foreground, 3*time.Second, 10*time.Second)
 			}
@@ -387,7 +388,7 @@ the folder was renamed or moved.`,
 				installAgentHooks(folder)
 			}
 			if !noAutostart {
-				installAutostart()
+				installAutostart(interactive)
 			}
 			if len(scope) > 0 {
 				dirs := make([]string, len(scope))
@@ -493,7 +494,36 @@ func installAgentHooks(folder string) {
 // Linux without systemd) or an unwritable config dir is not a reason to fail
 // an init that otherwise worked — the folder syncs, it just won't come back by
 // itself.
-func installAutostart() {
+//
+// On macOS the write itself is what users see: the moment anything lands in
+// ~/Library/LaunchAgents, Ventura+ pops "Background Items Added", naming a
+// binary they just installed. Nothing suppresses that notice — SMAppService, a
+// System Settings login item and a real crontab all trigger it (cron also
+// wants Full Disk Access on top) — so the fix is to make it expected rather
+// than to dodge it: say what is about to happen before it happens, and on a
+// TTY ask first. Linux and Windows show nothing, so they are not asked.
+func installAutostart(interactive bool) {
+	if runtime.GOOS == "darwin" && !autostart.Installed() {
+		const notice = `macOS will show a "Background Items Added" notice for it`
+		if interactive {
+			ok := true
+			// An interrupt reads as "no": autostart is a convenience, and the
+			// caller is one step from starting the daemon anyway.
+			//
+			// ponytail: a decline is not remembered, so re-running `bdrive init`
+			// interactively asks again. Persist it in settings.json if that ever
+			// nags — agents and scripts have no TTY and never see the prompt.
+			if err := survey.AskOne(&survey.Confirm{
+				Message: "Restart syncing at login? (" + notice + ")",
+				Default: true,
+			}, &ok); err != nil || !ok {
+				fmt.Println("  login:   autostart skipped — `bdrive autostart install` enables it later")
+				return
+			}
+		} else {
+			fmt.Println("  login:   registering sync to restart at login — " + notice)
+		}
+	}
 	res, err := autostart.Install()
 	if err != nil {
 		if !errors.Is(err, autostart.ErrUnsupported) {
