@@ -22,10 +22,14 @@ test("deep link to a project resolves after reload", async ({ page }) => {
   await expect(page).toHaveURL("/" + pid);
 });
 
-test("unknown project id falls back to a real project", async ({ page }) => {
+// BEA-83 replaced the silent fallback with a not-found page: the sidebar
+// still shows a real project (the fallback chain is unchanged), but the URL
+// you typed stays put and the content pane says the id resolved to nothing.
+test("unknown project id says so instead of swapping projects", async ({ page }) => {
   await login(page);
   await page.goto("/p-00000000");
-  await page.waitForURL(/\/[0-9a-f-]{36}$/);
+  await expect(page.locator("#content .empty")).toContainText("Project not found");
+  await expect(page).toHaveURL("/p-00000000");
   await expect(page.locator("#project-select")).toContainText(/.+/);
 });
 
