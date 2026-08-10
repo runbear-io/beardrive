@@ -567,12 +567,17 @@ footer.bdrive a{color:inherit}
 /* Dark theme LAST: these rules sit at the same specificity as the light ones
    above, so source order is the whole fix — a dark block placed earlier loses
    to every light rule that follows it. Values are the hub's @theme tokens
-   (frontend/src/tw.css), never hand-picked, so the two surfaces agree. */
+   (frontend/src/tw.css), never hand-picked, so the two surfaces agree.
+   Inline code carries its own tint and edge so a chip reads as code and not
+   as prose; the edge is an inset shadow rather than a border because a border
+   would change the chip's box metrics and light mode has to stay untouched. */
 @media (prefers-color-scheme: dark){
 body{background:#0a0b0d;color:#eef0f3}
 a{color:#ffcf85}
 h1,h2,h3{color:#eef0f3}
 pre,code{background:#15171b}
+code{color:#e4d9c4;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07)}
+pre code{color:inherit;box-shadow:none}
 blockquote{border-left-color:rgba(255,255,255,.07);color:#9aa0a9}
 td,th{border-color:rgba(255,255,255,.07)}
 table.frontmatter{background:#15171b;color:#9aa0a9}

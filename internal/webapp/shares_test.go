@@ -471,6 +471,15 @@ func TestShareDarkThemeIsLast(t *testing.T) {
 	if strings.Contains(body, "#c6cbd3") || strings.Contains(body, "#3a3a44") {
 		t.Error("ad-hoc dark greys survived; use the tw.css tokens")
 	}
+	// A code chip has to read as code: its own colour, not the body's, plus an
+	// edge to give it shape against a background only a shade off the page.
+	if !strings.Contains(block, "code{color:#e4d9c4;box-shadow:inset 0 0 0 1px") {
+		t.Error("dark inline code must have its own colour and edge, else a chip reads as prose")
+	}
+	// ...and a fenced block stays one slab rather than a row of bordered chips.
+	if !strings.Contains(block, "pre code{color:inherit;box-shadow:none}") {
+		t.Error("dark pre code must reset the inline chip's colour and edge")
+	}
 }
 
 // listShares reads the project's share list as the signed-in sharer.
