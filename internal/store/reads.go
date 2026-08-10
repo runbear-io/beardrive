@@ -16,8 +16,12 @@ import (
 
 // ReadEvent is one observed read of a synced file (mount-relative path).
 type ReadEvent struct {
-	Path string    `json:"path"`
-	Time time.Time `json:"time"`
+	Path string `json:"path"`
+	// Session is the agent session the read happened in, from the same hook
+	// payload the sync hook stamps journal.Op.Session from. Empty for reads
+	// with no session (a platform that reports none, or an older client).
+	Session string    `json:"session,omitempty"`
+	Time    time.Time `json:"time"`
 }
 
 // readSpoolMax caps the spool: past it new events are dropped rather than
@@ -32,11 +36,11 @@ func (s *Store) readFlushPath() string { return filepath.Join(s.dir, "reads-flus
 
 // LogRead appends one read event to the spool. Single-line O_APPEND writes
 // keep concurrent hook invocations from interleaving.
-func (s *Store) LogRead(rel string) error {
+func (s *Store) LogRead(rel, session string) error {
 	if fi, err := os.Stat(s.readSpoolPath()); err == nil && fi.Size() > readSpoolMax {
 		return nil // spool full: drop, never grow unbounded
 	}
-	line, err := json.Marshal(ReadEvent{Path: rel, Time: time.Now().UTC()})
+	line, err := json.Marshal(ReadEvent{Path: rel, Session: session, Time: time.Now().UTC()})
 	if err != nil {
 		return err
 	}
@@ -50,10 +54,14 @@ func (s *Store) LogRead(rel string) error {
 	return err
 }
 
-// PendingReads returns the queued batch awaiting report, deduplicated by path
-// (latest time wins). The spool is rotated aside first, so events logged
-// after this call land in a fresh spool; the batch survives until
-// ClearPendingReads — a failed report is simply retried next cycle.
+// PendingReads returns the queued batch awaiting report, deduplicated by
+// (path, session) — latest time wins. Not by path alone: two agent sessions
+// on one device between syncs both reading wiki/a.md are two reads by two
+// sessions, and collapsing them would report one, carrying whichever session
+// happened to flush last — one session's reads silently credited to another.
+// The spool is rotated aside first, so events logged after this call land in
+// a fresh spool; the batch survives until ClearPendingReads — a failed report
+// is simply retried next cycle.
 func (s *Store) PendingReads() ([]ReadEvent, error) {
 	if _, err := os.Stat(s.readFlushPath()); os.IsNotExist(err) {
 		if err := os.Rename(s.readSpoolPath(), s.readFlushPath()); err != nil {
@@ -70,8 +78,9 @@ func (s *Store) PendingReads() ([]ReadEvent, error) {
 		}
 		return nil, err
 	}
-	latest := map[string]time.Time{}
-	var order []string
+	type readKey struct{ path, session string }
+	latest := map[readKey]time.Time{}
+	var order []readKey
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -80,19 +89,20 @@ func (s *Store) PendingReads() ([]ReadEvent, error) {
 		if json.Unmarshal(line, &e) != nil || e.Path == "" {
 			continue // torn or corrupt line; drop it
 		}
-		if _, ok := latest[e.Path]; !ok {
-			order = append(order, e.Path)
+		k := readKey{e.Path, e.Session}
+		if _, ok := latest[k]; !ok {
+			order = append(order, k)
 		}
-		if e.Time.After(latest[e.Path]) {
-			latest[e.Path] = e.Time
+		if e.Time.After(latest[k]) {
+			latest[k] = e.Time
 		}
 	}
 	if len(order) > readReportMax {
 		order = order[len(order)-readReportMax:]
 	}
 	out := make([]ReadEvent, 0, len(order))
-	for _, p := range order {
-		out = append(out, ReadEvent{Path: p, Time: latest[p]})
+	for _, k := range order {
+		out = append(out, ReadEvent{Path: k.path, Session: k.session, Time: latest[k]})
 	}
 	return out, nil
 }

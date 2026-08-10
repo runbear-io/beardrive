@@ -28,7 +28,9 @@ import (
 )
 
 const (
-	e2eAddr     = "0.0.0.0:8993"
+	e2eAddr = "0.0.0.0:8993"
+	// e2eSession is the agent session the seeded run card belongs to.
+	e2eSession  = "8f21e4"
 	e2eAdmin    = "e2e@example.com"
 	e2eMember   = "member@example.com"
 	e2eSolo     = "solo@example.com"
@@ -102,6 +104,16 @@ func TestE2EServe(t *testing.T) {
 	srv.Reads, err = OpenReadLedger(filepath.Join(state, "reads.json"), 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Per-session read detail, so the seeded run card has both halves of the
+	// story: what the run changed AND what it read (BEA-98).
+	srv.Reads.WithSessions(OpenSessionReadRepo(filepath.Join(state, "sessions.json")), 0)
+	for _, path := range []string{
+		"notes/readme.md",         // read AND rewritten by the run
+		"index.md",                // read, never changed
+		"archive/retired-spec.md", // read, never changed — the hot+stale one
+	} {
+		srv.Reads.RecordSession(p.ID, e2eSession, "seed", path)
 	}
 	srv.Devices, _ = OpenDeviceRegistry(filepath.Join(state, "devices.json"))
 	srv.Devices.Observe(DeviceInfo{ID: "seed", Name: "seed-agent", OS: "linux/amd64"})
@@ -227,6 +239,9 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	put("guide.md", "# Guide\n\nSecond version of the guide, with more detail.\n", 2*time.Hour)
 	put("notes/readme.md", "# Notes\n\nNested folder content.\n", 24*time.Hour)
 	put("notes/deep/topic.md", "# Topic\n\nDeeply nested file.\n", 24*time.Hour)
+	// The share gate needs something to fire on. Fabricated, AWS-shaped —
+	// not a credential, and the only seeded file that holds one.
+	put("deploy.md", "# Deploy\n\nexport AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n", 24*time.Hour)
 	// Tiny valid PNG (1x1), enough to exercise the binary/download path.
 	png := "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" +
 		"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
@@ -247,8 +262,12 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	// of their path, so neither row offers a restore (BEA-57).
 	put("notes/readme.md", "# Notes\n\nRewritten during the agent run.\n", 90*time.Minute)
 	put("runbook.md", "# Runbook\n\nCreated during the agent run.\n", 90*time.Minute)
-	ops[len(ops)-1].Note = "claude-code session 8f21e4"
-	ops[len(ops)-2].Note = "claude-code session 8f21e4"
+	ops[len(ops)-1].Note = "claude-code session " + e2eSession
+	ops[len(ops)-2].Note = "claude-code session " + e2eSession
+	// The un-forgeable half of the run identity: the note is what a reader
+	// sees, this is what the card groups and joins its reads on.
+	ops[len(ops)-1].Session = e2eSession
+	ops[len(ops)-2].Session = e2eSession
 	// A second version of the same binary, so the history diff has a
 	// predecessor to refuse to diff (the "binary — no diff" path).
 	put("assets/logo.png", png+"\x00trailing", 3*time.Hour)
@@ -269,6 +288,13 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	// content, so their rows stay unclickable while every other row is now an
 	// address for its own version.
 	put("scratch.md", "# Scratch\n\nTemporary.\n", 12*time.Hour)
+	// One good fence and one deliberately broken one on the same page: the
+	// point of the fallback is that a diagram nobody can parse doesn't take
+	// the diagrams around it down with it. Appended LAST on purpose — the
+	// mutations above address ops by index, so an insert anywhere earlier
+	// hands one file's author or note to another file.
+	put("diagram.md", "# Diagram\n\n```mermaid\ngraph TD\n  A[Agent] --> B[Hub]\n  B --> C[Teammate]\n```\n\n"+
+		"Broken one below.\n\n```mermaid\ngraph TD\n  A[[[[ --> ???\n```\n", 24*time.Hour)
 	lam++
 	seq++
 	ops = append(ops, journal.Op{

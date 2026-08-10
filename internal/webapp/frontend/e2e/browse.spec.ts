@@ -220,6 +220,49 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   expect(gone.status()).toBe(404);
 });
 
+// BEA-111: sharing a file that looks like it holds credentials asks first.
+// Cancel mints nothing; Share anyway mints the link it would have.
+test("share on a file holding a key asks before it mints, and Cancel mints nothing", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/deploy.md`);
+
+  // Cancel: the dialog names the finding, and no link exists afterwards.
+  await page.click("#share-btn");
+  const dialog = page.locator(".modal", { hasText: "This file may contain credentials" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("an AWS access key (line 3)");
+  // The copy may only ever claim what was true at mint time.
+  await expect(dialog).toContainText("at the moment you share it");
+  await expect(dialog).toContainText("later changes are never checked");
+  // …and it must never echo the thing it found.
+  await expect(dialog).not.toContainText("AKIA");
+  await dialog.locator("button:has-text('Cancel')").click();
+  await expect(page.locator(".modal-url")).toHaveCount(0);
+  const before = await (await page.request.get(`/api/p/${pid}/shares`)).json();
+  expect(before.shares.filter((s: { path: string }) => s.path === "deploy.md")).toHaveLength(0);
+
+  // Share anyway: the same click, carried through.
+  await page.click("#share-btn");
+  await page.locator(".modal button:has-text('Share anyway')").click();
+  const url = (await page.locator(".modal-url").textContent())!;
+  expect(url).toContain("/s/");
+  const publicRes = await page.request.get(url);
+  expect(publicRes.status()).toBe(200);
+  await page.click(".modal button:has-text('Done')");
+
+  // Already public: a second Share hands back the same link without asking.
+  await page.reload();
+  await page.click("#share-btn");
+  await expect(page.locator(".modal", { hasText: "This file may contain credentials" })).toHaveCount(0);
+  expect(await page.locator(".modal-url").textContent()).toBe(url);
+  await page.click(".modal button:has-text('Done')");
+
+  await page.request.delete(`/api/shares/${url.split("/s/")[1]}`);
+});
+
 // BEA-29: the CLI has had --expires all along; the dialog now offers it on
 // the link you just minted, without changing that link's URL.
 test("share dialog sets an expiry on the link it just minted", async ({ page }) => {
@@ -515,7 +558,8 @@ test("history groups one agent run into a single card", async ({ page }) => {
   const run = page.locator(".hrun");
   await expect(run).toHaveCount(1);
   await expect(run.locator(".hrun-note")).toHaveText("claude-code session 8f21e4");
-  await expect(run.locator(".hrun-meta")).toContainText("2 files");
+  // Both halves of the run, since the seed gives it session reads (BEA-98).
+  await expect(run.locator(".hrun-meta")).toContainText("changed 2");
   await expect(run.locator(".hrun-meta")).toContainText("seed-agent");
   // Both of the run's changes live inside the card...
   await expect(run.locator(".hentry")).toHaveCount(2);
@@ -996,4 +1040,52 @@ test("a wide csv scrolls inside its own box at 390px", async ({ page }) => {
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1),
   ).toBe(false);
+});
+
+test("mermaid: a good fence renders, a broken one keeps its code block", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/diagram.md`);
+  // The valid fence became a diagram...
+  const svg = page.locator("#content .mermaid-diagram svg");
+  await expect(svg).toHaveCount(1);
+  await expect(svg).toContainText("Teammate");
+  // ...and the broken one below it kept today's <pre><code> plus a note. One
+  // bad fence must not take the good one on the same page down with it.
+  await expect(page.locator("#content pre code.language-mermaid")).toHaveCount(1);
+  await expect(page.locator("#content .mermaid-err")).toHaveText("Couldn't render this diagram.");
+});
+
+test("a file with no mermaid fence fetches no mermaid chunk", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  // mermaid.core is the library; the *Diagram-* chunks are its per-grammar
+  // splits. lib/mermaid.ts itself is a static import of the app entry (a few
+  // KB of gate, no mermaid code in it), which is exactly why the gate is a
+  // plain string check and not something that has to load mermaid to answer.
+  const fetched: string[] = [];
+  page.on("request", (r) => /mermaid\.core|Diagram-/.test(r.url()) && fetched.push(r.url()));
+  await page.goto(`/${pid}/guide.md`);
+  await expect(page.locator("#content")).toContainText("Second version");
+  await page.waitForTimeout(500);
+  expect(fetched).toEqual([]);
+});
+
+test("a shared diagram renders on the public page, without one there is no script", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const mint = async (path: string) =>
+    (await (await page.request.post(`/api/p/${pid}/shares`, { data: { path } })).json()).token;
+
+  // Diagram-free share pages stay the zero-JavaScript document they were.
+  const plain = await page.request.get(`/s/${await mint("index.md")}`);
+  expect(await plain.text()).not.toContain("<script");
+
+  await page.goto(`/s/${await mint("diagram.md")}`);
+  const svg = page.locator(".mermaid-diagram svg");
+  await expect(svg).toHaveCount(1);
+  await expect(svg).toContainText("Teammate");
+  await expect(page.locator(".mermaid-err")).toHaveText("Couldn't render this diagram.");
 });

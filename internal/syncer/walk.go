@@ -71,6 +71,38 @@ func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.Dir
 	})
 }
 
+// SyncedFiles lists the mount-relative paths that sync, in walk order. It is
+// the same pure read as Explain — no Session, no volume lock, no network — but
+// without Explain's not-synced accounting, which calls countFiles on every
+// pruned directory: a `bdrive grep` in a repo with node_modules/ would walk
+// node_modules/ in full just to produce a count it throws away.
+//
+// accepted is the ignore text this device has accepted (store.SyncState's
+// IgnoreAccepted; "" when there is none), for the reason Explain documents:
+// the walk applies Filter.SkipUp, and omitting it would list a file a peer's
+// `!` rule points at that the cycle will not actually send.
+//
+// Unreadable entries are skipped rather than failing, as everywhere else in
+// this walk.
+func SyncedFiles(folder string, include []string, accepted string) ([]string, error) {
+	// A fresh filter: addNestedMount mutates it during the walk, so this must
+	// never be shared with a live cycle.
+	filter, err := loadFilter(folder, include)
+	if err != nil {
+		return nil, err
+	}
+	filter.AcceptRules(accepted)
+
+	var out []string
+	err = walkFolder(folder, filter, func(_, rel string, _ fs.DirEntry, v verdict) error {
+		if v == vSync {
+			out = append(out, rel)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // Measure reports what a first sync of this folder would actually upload:
 // the number of files and their total bytes, after the same filter the cycle
 // uses. It exists so `bdrive init` can warn about a folder nobody meant to

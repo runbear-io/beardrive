@@ -44,6 +44,12 @@ type HistoryEntry struct {
 	Author   string        `json:"author,omitempty"` // offline/git fallback identity
 	Device   historyDevice `json:"device"`
 	Note     string        `json:"note,omitempty"`
+	// Session is the agent session the op was committed during (hook-set,
+	// see journal.Op.Session). It is the run card's group key and the only
+	// place a session id is ever served: it is never enumerated, never a
+	// column in /heat's output, and never in ?by=device — it appears here,
+	// on the op that carries it, and is accepted as a ?session= filter INPUT.
+	Session string `json:"session,omitempty"`
 }
 
 // histLess is the display order of the history feed: newest wall-clock time
@@ -263,7 +269,7 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: kinds[i],
 			Path: op.Path, Size: op.Size, Blob: op.Blob,
 			User: op.User, UserName: op.UserName, Author: op.Author,
-			Device: dev, Note: op.Note,
+			Device: dev, Note: op.Note, Session: op.Session,
 		}, op})
 	}
 	// Truncation happens AFTER the sort: cutting during the walk above would

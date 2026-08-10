@@ -2,10 +2,14 @@ package webapp
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -482,6 +486,41 @@ func TestShareDarkThemeIsLast(t *testing.T) {
 	}
 }
 
+// A share page is a zero-JavaScript document, and it stays one unless the
+// document it renders actually has a diagram in it. The tag is the whole cost
+// of the feature for every other share page on the hub, so it is worth a test
+// that it isn't paid — and that the CSP sandbox that makes the tag work at all
+// is unchanged.
+func TestShareMermaidScriptOnlyWhenNeeded(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	f.put("dev1", "wiki/diagram.md", "# D\n\n```mermaid\ngraph TD\n  A --> B\n```\n")
+
+	tag := `<script type="module" src="/share-mermaid.js"></script>`
+
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/diagram.md")
+	rec := do(t, h, "GET", "/s/"+token, nil)
+	body := rec.Body.String()
+	if !strings.Contains(body, tag) {
+		t.Errorf("a document with a mermaid fence must load the script: %s", body)
+	}
+	if strings.Contains(body, "%!") {
+		t.Errorf("format verb leaked into the page: %s", body)
+	}
+	// The tag only works because the page is sandboxed with scripts allowed
+	// and its origin is opaque; adding allow-same-origin to make loading
+	// easier would hand shared content the hub's origin.
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-popups" {
+		t.Errorf("share CSP = %q, want the unchanged sandbox", csp)
+	}
+
+	// wiki/notes.md has no fence: not one byte of mermaid.
+	plain, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+	if b := do(t, h, "GET", "/s/"+plain, nil).Body.String(); strings.Contains(b, "share-mermaid") ||
+		strings.Contains(b, "<script") {
+		t.Errorf("a share page without a diagram must ship no script: %s", b)
+	}
+}
+
 // listShares reads the project's share list as the signed-in sharer.
 func listShares(t *testing.T, srv *Server, h http.Handler, project string) []map[string]any {
 	t.Helper()
@@ -675,6 +714,136 @@ func authAs(t *testing.T, srv *Server, req *http.Request) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
+}
+
+// planted is a fabricated AWS-shaped string. No real credential is involved,
+// here or in the fixtures below.
+const planted = "AKIAIOSFODNN7EXAMPLE"
+
+// postShare mints as a signed-in member and hands back the raw recorder, so a
+// test can look at a non-200.
+func postShare(t *testing.T, srv *Server, h http.Handler, project string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	req := jsonReq(t, "POST", "/api/p/"+project+"/shares", body)
+	authAs(t, srv, req)
+	return doHTTP(h, req)
+}
+
+func decodeFindings(t *testing.T, rec *httptest.ResponseRecorder) []secretFinding {
+	t.Helper()
+	var out struct {
+		Error    string          `json:"error"`
+		Findings []secretFinding `json:"findings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode 409 body %q: %v", rec.Body, err)
+	}
+	if out.Error == "" {
+		t.Fatalf("409 body carries no error message: %s", rec.Body)
+	}
+	return out.Findings
+}
+
+// TestShareSecretScan is the gate: a credential-shaped file does not become a
+// public URL by accident, and does become one on purpose.
+func TestShareSecretScan(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	f.put("dev1", "deploy.md", "# Deploy\n\nrun it\n\nAWS_ACCESS_KEY_ID="+planted+"\n")
+
+	// 1. blocked, and nothing minted
+	rec := postShare(t, srv, h, p.ID, map[string]string{"path": "deploy.md"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("share of a file holding a key: %d %s, want 409", rec.Code, rec.Body)
+	}
+	if got := decodeFindings(t, rec); !reflect.DeepEqual(got, []secretFinding{{"aws_access_key_id", 5}}) {
+		t.Fatalf("findings = %v, want aws_access_key_id on line 5", got)
+	}
+	if n := len(srv.Shares.List(p.ID)); n != 0 {
+		t.Fatalf("409 minted %d shares, want 0", n)
+	}
+
+	// 2. the same request with confirm mints a working link
+	rec = postShare(t, srv, h, p.ID, map[string]any{"path": "deploy.md", "confirm": true})
+	if rec.Code != 200 {
+		t.Fatalf("confirmed share: %d %s", rec.Code, rec.Body)
+	}
+	var out struct{ Token string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if pub := do(t, h, "GET", "/s/"+out.Token, nil); pub.Code != 200 || !strings.Contains(pub.Body.String(), "Deploy") {
+		t.Fatalf("confirmed link does not serve: %d %s", pub.Code, pub.Body)
+	}
+
+	// 3. a path that is already public skips the scan — the content is out
+	//    there, so a second Share click still hands back the same URL.
+	rec = postShare(t, srv, h, p.ID, map[string]string{"path": "deploy.md"})
+	if rec.Code != 200 {
+		t.Fatalf("re-share of an already-public file: %d %s, want 200", rec.Code, rec.Body)
+	}
+
+	// 4. a clean file is unaffected
+	if rec := postShare(t, srv, h, p.ID, map[string]string{"path": "wiki/notes.md"}); rec.Code != 200 {
+		t.Fatalf("clean file: %d %s, want 200", rec.Code, rec.Body)
+	}
+
+	// 5. the boundary is a decision: a key past the first MiB mints silently.
+	f.put("dev1", "big.md", strings.Repeat("filler line\n", 100_000)+planted+"\n")
+	if rec := postShare(t, srv, h, p.ID, map[string]string{"path": "big.md"}); rec.Code != 200 {
+		t.Fatalf("key past the 1 MiB limit: %d %s, want 200 (documented boundary)", rec.Code, rec.Body)
+	}
+}
+
+// TestShareSecretNeverEchoed is the one rule that cannot bend: the matched
+// bytes never leave scanSecrets — not in the body, not in the log.
+func TestShareSecretNeverEchoed(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	f.put("dev1", "creds.md", "key = "+planted+"\n")
+
+	var logs bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	rec := postShare(t, srv, h, p.ID, map[string]string{"path": "creds.md"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("share: %d %s, want 409", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), planted) {
+		t.Errorf("the 409 body echoed the secret: %s", rec.Body)
+	}
+	if strings.Contains(logs.String(), planted) {
+		t.Errorf("the secret reached the log: %s", logs.String())
+	}
+}
+
+// TestShareSecretScanFailsClosed: a blob the hub cannot read mints nothing.
+// A check that skips itself on a storage hiccup is the false confidence this
+// gate exists to remove.
+func TestShareSecretScanFailsClosed(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	f.put("dev1", "gone.md", "harmless")
+	// Drop the blob but keep the journal op: the file is "synced" and unreadable.
+	blobs, err := os.ReadDir(filepath.Join(f.dir, "blobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("harmless"))
+	want := hex.EncodeToString(sum[:])
+	for _, b := range blobs {
+		if b.Name() == want {
+			if err := os.Remove(filepath.Join(f.dir, "blobs", b.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	rec := postShare(t, srv, h, p.ID, map[string]string{"path": "gone.md"})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unreadable blob: %d %s, want 503", rec.Code, rec.Body)
+	}
+	if n := len(srv.Shares.List(p.ID)); n != 0 {
+		t.Fatalf("failed scan minted %d shares, want 0", n)
+	}
 }
 
 // A share token is a promise about ONE file. These three pin the direction

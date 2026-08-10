@@ -146,3 +146,29 @@ func TestFrontendSPAFallback(t *testing.T) {
 		t.Fatalf("/api/bogus: want 404, got %d", rec.Code)
 	}
 }
+
+// Every file the frontend build wrote must actually be IN the binary. A bare
+// `//go:embed static` skips names starting with `_` or `.`, which is how Vite's
+// first `_commonjsHelpers-<hash>.js` chunk went missing: the build passes, the
+// commit looks right, and the running app answers that chunk with index.html
+// until the browser refuses the whole entry over its MIME type. Nothing about
+// that is visible without loading the page, so it is asserted here instead.
+func TestEveryBuiltAssetIsEmbedded(t *testing.T) {
+	built := os.DirFS("static")
+	embedded, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = fs.WalkDir(built, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if _, err := fs.Stat(embedded, p); err != nil {
+			t.Errorf("static/%s is on disk but not in the binary — //go:embed needs the all: prefix for a name like this", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
