@@ -82,12 +82,17 @@ classDiagram
         +walkFolder(folder, filter, fn)
         verdict: vSync vSkipFile vDescend vPruneDir vNested
     }
-    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain and Measure all go through it, so what --explain reports and what init warns about cannot drift from what leaves"
+    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure and SyncedFiles all go through it, so what --explain reports, what init warns about and what bdrive grep searches cannot drift from what leaves"
 
     class Measure {
         +Measure(folder, include) files, bytes
     }
     note for Measure "walk.go — sizes what a FIRST sync would upload, for the oversized-folder warning bdrive init prints (1 GiB / 20k files). Filter-aware on purpose: a 40 GB repo whose bulk is already ignored measures as the few MB that really sync, so the warning fires on the folder nobody meant to share and stays quiet on an ordinary checkout. Advice only — an unreadable subtree is skipped, never fatal"
+
+    class SyncedFiles {
+        +SyncedFiles(folder, include, accepted) paths
+    }
+    note for SyncedFiles "walk.go — the mount-relative paths that sync, in walk order: what bdrive grep searches, so a .bdriveignore rule or a narrowed scope excludes a file from search exactly as it excludes it from sync. Deliberately NOT Explain, which countFiles every pruned dir — a grep in a repo with node_modules/ would walk it in full for a count it discards"
 
     class Explain {
         +Explain(folder, include, accepted) two lists
@@ -143,6 +148,8 @@ classDiagram
     Session --> Filter : SkipUp on scan, Skip on materialize
     Session --> walkFolder : scan
     Explain --> walkFolder : same predicate
+    SyncedFiles --> walkFolder : same predicate
+    SyncedFiles --> Filter : own fresh instance
     Measure --> walkFolder : same predicate
     Measure --> Filter : own fresh instance
     Explain --> Filter : own fresh instance
@@ -169,13 +176,14 @@ classDiagram
 
     class Commands {
         init login logout
-        sync stop scope forget status log
+        sync stop scope grep forget status log
         restore url share export import
         web daemon hooks read-log
         resume autostart
     }
     note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"
-    note for Commands "Every peer-authored string status / log / whoami print goes through safeField first — a teammate's file name is attacker-controlled text landing in your terminal, and an escape sequence there rewrites the line above it. login now does PKCE on the loopback callback (no compat arm) and both its client and init's refuse to follow a redirect off the hub's origin with the device token attached"
+    note for Commands "grep searches file CONTENTS in the working folder via syncer.SyncedFiles — LoadProject not ResolveMount (a read must not enroll the device), no session, no flock, and the volume store is opened only if it already exists, so a search creates nothing. Exit 1 on no match is a status, not an error (errNoMatch + SilenceErrors)"
+    note for Commands "Every peer-authored string status / log / whoami print goes through safeField first — a teammate's file name is attacker-controlled text landing in your terminal, and an escape sequence there rewrites the line above it. grep runs BOTH the path and the matched line through it — a matched line is a teammate's file content, the widest version of that surface. login now does PKCE on the loopback callback (no compat arm) and both its client and init's refuse to follow a redirect off the hub's origin with the device token attached"
 
     class Templates {
         <<internal/templates>>
