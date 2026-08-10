@@ -18,7 +18,10 @@ const KIND_LABEL: Record<string, string> = { add: "added", edit: "edited", delet
 // isn't a hub project), in which case no Restore button is drawn at all —
 // better than one that 403s.
 export type RestoreAction = {
-  onRestore: (path: string, sha: string) => void;
+  // `recreates` = this restore brings a currently-deleted file back, which
+  // nothing in the browser can walk back — so the confirm says so instead of
+  // promising an undo (BEA-129). Only the feed knows it; see `recreates` below.
+  onRestore: (path: string, sha: string, recreates: boolean) => void;
   busy?: string; // path+sha currently in flight
 };
 
@@ -57,6 +60,7 @@ export function HistoryRow({
   restore,
   remove,
   restoreSha,
+  recreates,
   inRun,
   read,
 }: {
@@ -78,6 +82,10 @@ export function HistoryRow({
   // The version this row puts back: its own bytes, or — for a delete — the
   // content it removed. The view computes it, since it needs the whole feed.
   restoreSha?: string;
+  // Whether this restore puts a currently-deleted file back. A row only sees
+  // itself — an older EDIT row of a deleted path re-creates the file just as
+  // much as the DELETED row does — so the view decides it.
+  recreates?: boolean;
   // Inside a run card, where "this run created the file" is a statement we
   // can actually make.
   inRun?: boolean;
@@ -153,7 +161,7 @@ export function HistoryRow({
             title={"Put this version of " + e.path + " back as a new change"}
             onClick={(ev) => {
               ev.stopPropagation();
-              restore!.onRestore(e.path, restoreSha!);
+              restore!.onRestore(e.path, restoreSha!, !!recreates);
             }}
             onKeyDown={(ev) => ev.stopPropagation()}
           >

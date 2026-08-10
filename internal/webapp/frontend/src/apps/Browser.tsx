@@ -268,11 +268,28 @@ export default function Browser(props: {
   /* ---- restore ----
      Putting an old version back is a write, so a read-only member sees no
      Restore button rather than one that 403s. The restore itself is a new
-     change: the tree, the file, and the history feed all move. */
+     change: the tree, the file, and the history feed all move — so it asks
+     first, like every other action here that leaves the browser (BEA-129).
+     The second line is case-aware because the two cases really differ:
+     swapping a live file's content is walk-backable from History, bringing a
+     deleted file back is not — the run card's "undo — remove file" is the
+     only delete control in the web UI, and a restore produces no run card.
+     Non-danger styling on purpose: restore adds content, it takes none away. */
   const [restoring, setRestoring] = useState("");
   const canRestore = hub && !!project && atLeast(project?.perm, "write");
   const onRestore = useCallback(
-    async (p: string, sha: string) => {
+    async (p: string, sha: string, recreates: boolean) => {
+      if (
+        !(await modalConfirm(
+          "Restore this version of " + p + "?",
+          "It syncs to every device as a new change. " +
+            (recreates
+              ? "The file comes back on every device. Removing it again isn't available from History yet."
+              : "You can restore any other version afterwards."),
+          "Restore",
+        ))
+      )
+        return;
       setRestoring(p + sha);
       try {
         await postJSON(apiBase + "restore", { path: p, sha });
