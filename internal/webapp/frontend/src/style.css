@@ -1059,6 +1059,20 @@ input[type="checkbox"] { accent-color: var(--accent); }
 /* plain file / binary views */
 pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* long unbreakable lines wrap instead of blowing out the column: .page has min-width: 0 */
+/* CSV/TSV table view. Cells never wrap (white-space: pre keeps a quoted
+   newline as a line break without turning a wide file into a tall one), so
+   the box takes the sideways scroll and the page body never does.
+   Every rule is scoped under .csvbox: the file pane carries .markdown, so
+   the plain `.markdown table/th/td` rules would otherwise out-specify a
+   bare .csvview — including the ≤900px one that turns a table into its own
+   scroller, which is exactly the job .csvbox is here to do. */
+.csvbox { overflow-x: auto; width: fit-content; max-width: 100%; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--code-bg); }
+.csvbox .csvview { display: table; max-width: none; overflow: visible; margin: 0; border-collapse: collapse; font: 12.5px/1.5 var(--mono); font-variant-numeric: tabular-nums; }
+.csvbox .csvview th, .csvbox .csvview td { border-bottom: 1px solid var(--border); padding: 8px 14px; text-align: left; white-space: pre; vertical-align: top; color: #c6cbd3; font-size: 12.5px; }
+.csvbox .csvview th { background: var(--surface); color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; border-bottom-color: var(--border-2); }
+.csvbox .csvview tr:last-child td { border-bottom: none; }
+.csvbox .csvview tbody tr:hover td { background: rgba(255,255,255,.02); }
+.csvnote { color: var(--text-faint); font-size: 12px; margin: 10px 2px 0; }
 .filecard { margin-top: var(--hero-top); text-align: center; color: var(--text-dim); }
 .filecard .name { font-size: 1.2em; color: var(--text); margin-bottom: .3em; }
 .filecard .btn { margin-top: 14px; }
