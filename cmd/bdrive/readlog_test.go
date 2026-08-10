@@ -135,6 +135,12 @@ func TestReadLogCommand(t *testing.T) {
 	if len(evs) != 1 || evs[0].Path != "wiki/a.md" {
 		t.Fatalf("spool = %+v, want just the in-project read, mount-relative", evs)
 	}
+	// The same session id `bdrive sync --hook` stamps onto the writes, off
+	// the same stdin payload — it is what lets the hub join this read to the
+	// run card that turn produced.
+	if evs[0].Session != "abc" {
+		t.Fatalf("spooled read Session = %q, want the event's session_id", evs[0].Session)
+	}
 }
 
 // read-log fires on every agent tool call in every folder, so it must be

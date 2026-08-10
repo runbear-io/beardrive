@@ -44,6 +44,14 @@ type hookLink struct {
 // mounts.
 func hookSessionID(cmd *cobra.Command) string {
 	data, _ := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 1<<20))
+	return eventSessionID(data)
+}
+
+// eventSessionID is that parse over an already-read payload — `bdrive
+// read-log` consumes the same stdin for its own reasons and tags every read
+// it spools with the same id, which is what lets the hub join a run's reads
+// to its writes.
+func eventSessionID(data []byte) string {
 	var event struct {
 		SessionID string `json:"session_id"`
 	}
@@ -64,6 +72,12 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (string, b
 		if err := sess.Store.SaveNote(note, hookNoteTTL); err == nil {
 			sess.Note = note
 		}
+		// The hook is the ONLY writer of Op.Session — `bdrive sync --note`
+		// cannot reach it, which is what makes a run card's identity
+		// un-forgeable. Unlike the note it is not persisted with a TTL: a
+		// later daemon scan should not credit its own changes to a session
+		// that has moved on.
+		sess.SessionID = sessionID
 	}
 
 	// The pull. Offline is fine — the link formula below is still valid

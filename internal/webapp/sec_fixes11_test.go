@@ -163,6 +163,10 @@ func TestSec_Store_AJournalsAuthorFieldsAreCheckedLikeItsNote(t *testing.T) {
 		{"author", "Alice\x1b[2Kx", "C0 escape in author"},
 		{"user_name", "Bob\u202egnp.exe", "bidi override in user_name"},
 		{"user_name", "Bob\u0085\u009bx", "C1 control in user_name"},
+		// Op.Session (BEA-98) is served by History and rendered next to the
+		// note, so it is the same class of peer-written free text.
+		{"session", "8f21e4\u202ex", "bidi override in session"},
+		{"session", "8f21e4\x1b[2Kx", "C0 escape in session"},
 	} {
 		op := map[string]any{
 			"device": bobDev, "path": "row-" + tc.field + ".md",

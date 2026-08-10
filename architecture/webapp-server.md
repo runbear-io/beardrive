@@ -295,15 +295,23 @@ classDiagram
 
     class ReadLedger {
         -repo ReadRepo
-        -retention
-        -byKey, dirty, seen
+        -sessions SessionReadRepo
+        -retention, sessionRetention
+        -byKey, dirty, seen, pendingSess
         +Record(...)
+        +RecordSession(project, session, device, path)
         +Heat(project, prefix, days)
+        +SessionPaths(project, session, device)
+        +WithSessions(repo, days)
         +ShareOpens(project)
     }
     class ReadStat {
         +Project +Path +Day +Kind +Actor +Count +Last
     }
+    class SessionRead {
+        +Project +Session +Device +Path +Last
+    }
+    note for SessionRead "One row per (session, device, path) — the per-session detail a History run card joins its writes to, on the un-forgeable Op.Session and never on the note. Deliberately OUTSIDE ReadLedger.byKey: that map is loaded whole at boot and full-scanned by Heat on every request, hub-wide, so session cardinality in it would slow the Dashboard for projects that never ran an agent. Device is always the ownsDevice-validated id, never a client field, so a report naming someone else's session can only ever be found under the forger's own device. Its own, much shorter retention (session_retention_days, default 30) DELETES rather than folds — no heat total was ever derived from it"
     class HeatEntry {
         +Human +Agent +Share +Readers +LastRead
     }
@@ -415,6 +423,7 @@ classDiagram
     RemoteSource ..> sourcedOp : attribution comes from the journal key
     RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime
     ReadLedger ..> ReadStat
+    ReadLedger ..> SessionRead
     ReadLedger ..> HeatEntry
     ReadLedger ..> ShareOpen
     ShareDB ..> ShareOpen : shares list joins the open count per path
@@ -446,6 +455,7 @@ classDiagram
         +Shares() ShareRepo
         +Devices() DeviceRepo
         +Reads() ReadRepo
+        +SessionReads() SessionReadRepo
         +Close()
     }
 
@@ -500,7 +510,7 @@ classDiagram
         storable / storableMap
         checkAccount checkToken checkProject
         checkOrg checkInvite checkShare
-        checkDevice checkReadStat
+        checkDevice checkReadStat checkSessionRead
     }
     note for storable "Called at the top of every repo write in BOTH backends. A NUL byte or invalid UTF-8 in a name is accepted by JSON and rejected by Postgres, so the file backend used to persist rows the SQL backend would refuse — the same hub, migrated, would silently lose them. Refusing at one gate makes the two backends agree on what is storable"
     class ReadRepo {
@@ -508,6 +518,11 @@ classDiagram
         +Load() +PutBatch +DeleteBatch
     }
     note for ReadRepo "batch-oriented: one flush = one write"
+    class SessionReadRepo {
+        <<interface>>
+        +PutBatch +ListBySession +PruneBefore
+    }
+    note for SessionReadRepo "read_sessions / sessions.json — never Load()ed whole; queried by (project, session, device) and pruned by date, which is what keeps the boot load and Heat's scan the size they are today"
 
     class fileMetaStore {
         JSON files, atomic rewrite per change
@@ -530,6 +545,7 @@ classDiagram
     MetaStore *-- ShareRepo
     MetaStore *-- DeviceRepo
     MetaStore *-- ReadRepo
+    MetaStore *-- SessionReadRepo
 
     class BuiltinAuth
     class ProjectDB
@@ -544,6 +560,7 @@ classDiagram
     ShareDB o-- ShareRepo
     DeviceRegistry o-- DeviceRepo
     ReadLedger o-- ReadRepo
+    ReadLedger o-- SessionReadRepo
 
     BuiltinAuth *-- versionGate
     ProjectDB *-- versionGate

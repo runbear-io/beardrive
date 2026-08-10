@@ -70,6 +70,12 @@ type webConfig struct {
 	Reads *struct {
 		Enabled       *bool `json:"enabled,omitempty"`        // default true
 		RetentionDays int   `json:"retention_days,omitempty"` // default 400; older days fold into all-time
+		// SessionRetentionDays bounds the per-session read detail behind
+		// History's run cards (which files an agent session read). Default
+		// 30, and deliberately much shorter than RetentionDays: this is
+		// event-shaped rather than aggregate, and rows past it are deleted,
+		// which changes no heat total.
+		SessionRetentionDays int `json:"session_retention_days,omitempty"`
 	} `json:"reads,omitempty"`
 }
 
@@ -380,23 +386,29 @@ credentials); otherwise it is relayed through this server.`,
 					return fmt.Errorf("open share registry: %w", err)
 				}
 				srv.Shares = shares
-				readsOn, retention := true, 0
+				readsOn, retention, sessRetention := true, 0, 0
 				if cfg.Reads != nil {
 					if cfg.Reads.Enabled != nil {
 						readsOn = *cfg.Reads.Enabled
 					}
 					retention = cfg.Reads.RetentionDays
+					sessRetention = cfg.Reads.SessionRetentionDays
 				}
 				if readsOn {
 					var reads *webapp.ReadLedger
+					var sessions webapp.SessionReadRepo
 					if meta != nil {
 						reads, err = webapp.NewReadLedger(meta.Reads(), retention)
+						sessions = meta.SessionReads()
 					} else {
-						reads, err = webapp.OpenReadLedger(filepath.Join(filepath.Dir(projectsDB), "reads.json"), retention)
+						dir := filepath.Dir(projectsDB)
+						reads, err = webapp.OpenReadLedger(filepath.Join(dir, "reads.json"), retention)
+						sessions = webapp.OpenSessionReadRepo(filepath.Join(dir, "sessions.json"))
 					}
 					if err != nil {
 						return fmt.Errorf("open read ledger: %w", err)
 					}
+					reads.WithSessions(sessions, sessRetention)
 					defer reads.Close()
 					srv.Reads = reads
 				}
