@@ -258,6 +258,18 @@ classDiagram
     }
     note for ShareDB "A share is now re-checked at READ time, not only at mint time: shareCreatorStillBelongs refuses /s/&lt;token&gt; once its creator has left the project's org, so a link cannot outlive the access that justified it"
 
+    class secretScan {
+        <<secrets.go>>
+        secretScanLimit = 1 MiB
+        secretRules six anchored regexes
+        +scanSecrets(buf) []secretFinding
+    }
+    class secretFinding {
+        +Rule string
+        +Line int
+    }
+    note for secretScan "Mint-time gate on handleShareCreate: the one place a member turns private bytes into a public URL is the one place the bytes are read first. It returns rule ids and LINE NUMBERS only — the matched text never reaches a response body, a log line, or a metric label, the same rule ReadLedger keeps for actor identity. Bypassed by confirm:true (bdrive share --force, the UI's Share anyway) and by Server.alreadyPublic, since a path that already has a live link is public already. Fails CLOSED: an unreadable blob is 503, not a silent pass"
+
     class sandboxInline {
         <<Server, every bytes-out route>>
         inlineMarkup(ct) / inlineType(ct)
@@ -371,6 +383,8 @@ classDiagram
     reservations *-- grant
     reservations ..> QuotaProvider : CheckWrite(size + outstanding), RecordUsage on landing
     ShareDB ..> QuotaProvider : CheckRead before the stream, RecordEgress after
+    Server ..> secretScan : handleShareCreate scans the first 1 MiB unless confirmed or alreadyPublic
+    secretScan ..> secretFinding
     Server ..> countingWriter : every bytes-out route that bills
     reservations ..> Backend : reconcile — did the blob land
     Server *-- journalDoor : /store/* is the only way a device writes

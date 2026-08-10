@@ -496,6 +496,10 @@ func startTestHub(t *testing.T) *httptest.Server {
 	}
 	srv := &Server{Root: be, Projects: db, Device: webDevice, Upload: UploadConfig{Enabled: true}}
 	srv.Devices, _ = OpenDeviceRegistry(filepath.Join(state, "devices.json"))
+	srv.Shares, err = OpenShareDB(filepath.Join(state, "shares.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	auth, err := OpenBuiltinAuth(filepath.Join(state, "auth.json"), false, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -711,5 +715,70 @@ func TestCLITemplateRefusals(t *testing.T) {
 	}
 	if fileExists(filepath.Join(bad, ".bdrive", "config.json")) {
 		t.Fatal("a refused init still initialized the folder")
+	}
+}
+
+// `bdrive share` refuses a file that looks like it holds credentials, and
+// --force is the way past it. This is the flow BEA-111 exists for: the CLI
+// used to print the URL and nothing else.
+func TestCLIShareSecretGate(t *testing.T) {
+	e := newCLIEnv(t)
+	run := e.run
+
+	work := t.TempDir()
+	// Fabricated, AWS-shaped. Not a credential.
+	const plantedKey = "AKIAIOSFODNN7EXAMPLE"
+	if err := os.WriteFile(filepath.Join(work, "deploy.md"), []byte(
+		"# Deploy\n\nexport AWS_ACCESS_KEY_ID="+plantedKey+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "clean.md"), []byte("# Clean\n\nnothing here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "init", "--name", "share-gate", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer run(work, "stop", work)
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+
+	// A clean file shares as it always did.
+	out, err := run(work, "share", "clean.md")
+	if err != nil || !strings.Contains(out, "/s/") {
+		t.Fatalf("clean file did not share: %v\n%s", err, out)
+	}
+
+	// The planted file is refused, by rule and line, and names the way out.
+	out, err = run(work, "share", "deploy.md")
+	if err == nil {
+		t.Fatalf("share of a file holding a key succeeded:\n%s", out)
+	}
+	for _, want := range []string{"aws_access_key_id", "line 3", "--force", "at the moment you shared it"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("share refusal missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, plantedKey) {
+		t.Fatalf("the CLI echoed the secret back:\n%s", out)
+	}
+	if strings.Contains(out, "/s/") {
+		t.Fatalf("a refused share still printed a URL:\n%s", out)
+	}
+
+	// --force is the override, and the link it mints works.
+	out, err = run(work, "share", "deploy.md", "--force")
+	if err != nil || !strings.Contains(out, "/s/") {
+		t.Fatalf("share --force: %v\n%s", err, out)
+	}
+	link := strings.TrimSpace(strings.SplitN(out, "\n", 2)[0])
+	resp, err := http.Get(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "Deploy") {
+		t.Fatalf("forced link does not serve: %d %s", resp.StatusCode, body)
 	}
 }
