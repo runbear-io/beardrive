@@ -4,8 +4,8 @@ description: Every bdrive serve flag and config-file key.
 ---
 
 `bdrive serve` serves a website — browse folders and files, read markdown rendered
-Obsidian-style (including `[[wikilinks]]`, task lists, and tables), download any
-file. Pointed at a storage root, it becomes a multi-project sync hub.
+Obsidian-style (including `[[wikilinks]]`, task lists, tables, and ```` ```mermaid ````
+diagrams), download any file. Pointed at a storage root, it becomes a multi-project sync hub.
 
 It is read-only unless started with `--upload`.
 

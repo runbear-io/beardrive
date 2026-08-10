@@ -517,7 +517,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(cw, sharedMarkdownShell, html.EscapeString(path.Base(sp)), updatedStamp(fi.Time), body)
+		fmt.Fprintf(cw, sharedMarkdownShell, html.EscapeString(path.Base(sp)), mermaidTag(body), updatedStamp(fi.Time), body)
 	case ".html", ".htm":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.Copy(cw, rc)
@@ -540,8 +540,25 @@ func updatedStamp(t time.Time) string {
 		html.EscapeString(t.Format(time.RFC3339)), html.EscapeString(t.Format("2 Jan 2006")))
 }
 
+// mermaidTag is the share page's only script, and only when the document
+// actually has a diagram in it — a share page without a mermaid fence must
+// stay the byte-for-byte zero-JavaScript document it has always been.
+//
+// The tag is a module: under this page's sandbox CSP the origin is opaque, so
+// the asset responses carry Access-Control-Allow-Origin (server.go) and
+// mermaid keeps its code splitting instead of arriving as one file. The name
+// is fixed and lives outside assets/ because this template cannot know Vite's
+// content hash.
+func mermaidTag(body string) string {
+	if !strings.Contains(body, `class="language-mermaid"`) {
+		return ""
+	}
+	return `<script type="module" src="/share-mermaid.js"></script>`
+}
+
 // sharedMarkdownShell wraps rendered markdown in a minimal readable page.
-// Verbs, in order: title, updated stamp, body.
+// Verbs, in order: title, mermaid script tag (usually empty), updated stamp,
+// body.
 const sharedMarkdownShell = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title>
 <style>
@@ -564,6 +581,9 @@ pre{max-width:100%%}
 footer.bdrive{margin-top:64px;padding-top:14px;border-top:1px solid #d0d7de;font-size:12.5px;color:#57606a}
 footer.bdrive a{color:inherit}
 .updated{font-size:12.5px;color:#57606a;margin-bottom:28px}
+.mermaid-diagram{margin:20px 0;overflow-x:auto}
+.mermaid-diagram svg{max-width:100%%;height:auto}
+.mermaid-err{font-size:12.5px;color:#57606a;margin:-8px 0 20px}
 /* Dark theme LAST: these rules sit at the same specificity as the light ones
    above, so source order is the whole fix — a dark block placed earlier loses
    to every light rule that follows it. Values are the hub's @theme tokens
@@ -579,7 +599,8 @@ table.frontmatter{background:#15171b;color:#9aa0a9}
 table.frontmatter th,table.frontmatter td{border-bottom-color:rgba(255,255,255,.07)}
 table.frontmatter th{color:#868b93}
 footer.bdrive{border-top-color:rgba(255,255,255,.07);color:#868b93}
-.updated{color:#868b93}}
-</style></head><body>%s%s
+.updated{color:#868b93}
+.mermaid-err{color:#868b93}}
+</style>%s</head><body>%s%s
 <footer class="bdrive">Shared with <a href="https://github.com/runbear-io/beardrive" rel="noopener">BearDrive</a> — synced files for AI agent teams</footer>
 </body></html>`

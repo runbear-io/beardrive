@@ -15,6 +15,13 @@ classDiagram
     }
     note for ErrorBoundary "ErrorBoundary.tsx — the app's floor, mounted in main.tsx ABOVE QueryClientProvider so it covers every route. React unmounts the whole tree when a render throws and nothing catches it, and the address bar keeps the URL, so a reload reproduces the blank page: a permanent client-side DoS that another member's CONTENT can reach (a link in a teammate's markdown reaching decodePath, a folder named `constructor` reaching ProjectIcon). Deliberately the smallest thing that works — no reporting, no retry machine, no per-route boundaries"
 
+    class shareMermaid {
+        <<second Vite entry>>
+        src/share-mermaid.ts → static/share-mermaid.js
+        picks DARK/LIGHT from prefers-color-scheme
+    }
+    note for shareMermaid "The only script the server-rendered /s/ share page ever loads, and only when shares.go finds a mermaid fence in the document. Built as a SECOND rollup input with a fixed, unhashed name at the static root — sharedMarkdownShell is a Go const and cannot know a content hash, and server.go marks assets/ immutable for a year, so an unhashed file there would pin a stale bundle in shared caches. Mermaid's own chunks keep their hashed assets/ names, which is why the share page needs the ACAO header: its sandbox origin is opaque"
+
     class App {
         mode from /api/config
     }
@@ -101,8 +108,10 @@ classDiagram
         +heat.ts placeLabels LABEL_MAX (scatter danger-dot labels)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +csv.ts parseDelimited Csv CSV_ROWS
+        +mermaid.ts hasMermaid renderMermaid Palette DARK LIGHT
         +utils.ts
     }
+    note for lib "mermaid.ts is the one exception to 'pure, no React, unit-tested on node': it needs a DOM and a browser-only library, so its coverage is Playwright. html in → html out, so neither caller can be tempted to patch a live subtree. It imports mermaid only when hasMermaid() says a document has a fence — that gate is what keeps a diagram-free page from downloading any of it — and every failure (unparseable fence, render throw, chunk that never loads) returns the untouched &lt;pre&gt;&lt;code&gt; instead of throwing"
     note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it"
     note for lib "csv.ts parses .csv/.tsv for FileView's table view — ~50 lines against RFC 4180, so no papaparse. It NEVER throws: null means 'not a table' (unterminated quote, no delimiter) and the caller falls back to the plain-text preview, which is why the fallback is a type-level guarantee rather than a try/catch someone can forget"
 
@@ -116,8 +125,9 @@ classDiagram
     Browser --> components
     HubApp --> components
     components --> nav : linkProps navigate
-    components --> lib : diffText groupRuns hotPathSplit placeLabels parseDelimited
+    components --> lib : diffText groupRuns hotPathSplit placeLabels parseDelimited renderMermaid
     hooks --> lib : re-exports heat.ts, sniffBytes
+    shareMermaid --> lib : renderMermaid
     hooks --> api
     Browser --> hooks
     HubApp --> hooks
