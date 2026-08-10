@@ -363,6 +363,35 @@ test("project settings lists this project's public links and revokes them", asyn
   await expect(page.locator(".admin-empty", { hasText: "No public links." })).toBeVisible();
 });
 
+// "No public links." before the request lands is a confident no to "is anything
+// of ours public right now?" — the one wrong answer this panel must never give.
+test("public links show a loading row, never a premature 'no', while shares load", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const made = await (
+    await page.request.post(`/api/p/${pid}/shares`, { data: { path: "notes/readme.md" } })
+  ).json();
+
+  await page.route("**/api/p/*/shares", async (route) => {
+    await new Promise((r) => setTimeout(r, 2000));
+    await route.continue();
+  });
+
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator(".admin-empty", { hasText: "Loading…" })).toBeVisible();
+  await expect(page.locator(".admin-empty", { hasText: "No public links." })).toHaveCount(0);
+
+  await expect(page.locator(".admin-item", { hasText: "notes/readme.md" })).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.locator(".admin-empty", { hasText: "Loading…" })).toHaveCount(0);
+
+  await page.unroute("**/api/p/*/shares");
+  await page.request.delete(`/api/shares/${made.token}`);
+});
+
 test("a read-only member sees the public-link banner but cannot revoke", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);

@@ -296,7 +296,7 @@ export function ProjectSettings({
 // there to find one project's links.
 function PublicLinks({ project }: { project: Project }) {
   const qc = useQueryClient();
-  const { data: shares, error } = useShares(project.id);
+  const { data: shares, error, isLoading } = useShares(project.id);
   if (error) return null; // sharing is off on this server, or single-volume mode
   return (
     <Card>
@@ -313,6 +313,7 @@ function PublicLinks({ project }: { project: Project }) {
       <CardContent>
         <SharesTable
           shares={shares || []}
+          loading={isLoading}
           canRevoke={atLeast(project.perm, "write")}
           onChanged={() => qc.invalidateQueries({ queryKey: ["shares", project.id] })}
           empty="No public links."
