@@ -667,3 +667,58 @@ func authAs(t *testing.T, srv *Server, req *http.Request) {
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 }
+
+// A share token is a promise about ONE file. These three pin the direction
+// it goes when a path changes hands — the opposite of the viewer's, which is
+// an address and always serves whatever lives there now.
+
+func TestShareFollowsMovedFile(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	at := time.Now().Add(time.Minute)
+	f.putAt("dev1", "docs/notes.md", "# Notes\n\nhello **team**", at)
+	f.delAt("dev1", "wiki/notes.md", at.Add(time.Second))
+
+	rec := do(t, h, "GET", "/s/"+token, nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "hello") {
+		t.Fatalf("share after move: %d %s", rec.Code, rec.Body)
+	}
+
+	// ...and keeps following it once an UNRELATED file takes the old address.
+	f.putAt("dev1", "wiki/notes.md", "# Someone else's file", at.Add(time.Hour))
+	rec = do(t, h, "GET", "/s/"+token, nil)
+	if rec.Code != 200 {
+		t.Fatalf("share with a new file at the old path: %d %s", rec.Code, rec.Body)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "Someone else") {
+		t.Fatalf("share served the file that took its old address:\n%s", body)
+	}
+}
+
+func TestShareOfDeletedFileNeverServesItsSuccessor(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+
+	at := time.Now().Add(time.Minute)
+	f.delAt("dev1", "wiki/notes.md", at)
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != 404 {
+		t.Fatalf("share of a deleted file: %d, want 404", rec.Code)
+	}
+	// The leak this closes: something new lands on the address later, and
+	// the public link used to start serving it with no revoke and no signal.
+	f.putAt("dev1", "wiki/notes.md", "# Payroll", at.Add(time.Hour))
+	rec := do(t, h, "GET", "/s/"+token, nil)
+	if rec.Code != 404 {
+		t.Fatalf("share resurrected by an unrelated file: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestShareUnaffectedByAnUnmovedFile(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	_ = f
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != 200 {
+		t.Fatalf("unmoved share: %d %s", rec.Code, rec.Body)
+	}
+}

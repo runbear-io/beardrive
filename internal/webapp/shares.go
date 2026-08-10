@@ -458,14 +458,19 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "content temporarily unavailable", http.StatusBadGateway)
 		return
 	}
-	fi, ok := snap.files[sh.Path]
+	// A share token is a promise about ONE file, so it follows that file
+	// when it moves — the opposite of a viewer URL, which is an address and
+	// always serves whatever lives there now. That also closes a leak: a
+	// share used to serve whatever unrelated file later occupied its path.
+	sp, ok := resolveShare(snap.moves, snap.files, sh.Path, sh.Created)
 	if !ok {
 		http.Error(w, "the shared file no longer exists", http.StatusNotFound)
 		return
 	}
+	fi := snap.files[sp]
 	// A share hit is external consumption. Actor is token+IP: one audience
 	// member reloading is debounced to a visit, distinct visitors still count.
-	s.Reads.Record(sh.Project, sh.Path, ReadKindShare, sh.Token+"/"+s.clientIP(r))
+	s.Reads.Record(sh.Project, sp, ReadKindShare, sh.Token+"/"+s.clientIP(r))
 
 	// Share links are the only unauthenticated door to stored bytes, so they
 	// are the only egress a plan actually caps. The per-IP limiter above
@@ -485,7 +490,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	cw := &countingWriter{w: w}
 	defer func() { s.quota().RecordEgress(org, cw.n) }()
 
-	rc, err := v.source.Open(r.Context(), sh.Path, fi)
+	rc, err := v.source.Open(r.Context(), sp, fi)
 	if err != nil {
 		http.Error(w, "content temporarily unavailable", http.StatusBadGateway)
 		return
@@ -493,13 +498,13 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	defer rc.Close()
 
 	if r.URL.Query().Get("download") == "1" {
-		w.Header().Set("Content-Type", contentType(sh.Path))
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(path.Base(sh.Path))))
+		w.Header().Set("Content-Type", contentType(sp))
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(path.Base(sp))))
 		io.Copy(cw, rc)
 		return
 	}
 
-	switch strings.ToLower(path.Ext(sh.Path)) {
+	switch strings.ToLower(path.Ext(sp)) {
 	case ".md", ".markdown":
 		src, err := io.ReadAll(rc)
 		if err != nil {
@@ -512,12 +517,12 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(cw, sharedMarkdownShell, html.EscapeString(path.Base(sh.Path)), updatedStamp(fi.Time), body)
+		fmt.Fprintf(cw, sharedMarkdownShell, html.EscapeString(path.Base(sp)), updatedStamp(fi.Time), body)
 	case ".html", ".htm":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.Copy(cw, rc)
 	default:
-		w.Header().Set("Content-Type", contentType(sh.Path))
+		w.Header().Set("Content-Type", contentType(sp))
 		setContentLength(w, rc) // measured, never the journal's Size field
 		io.Copy(cw, rc)
 	}

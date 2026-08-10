@@ -28,6 +28,12 @@ bdrive url --sync wiki/report.html
 
 With no argument, `bdrive url` gives the project home.
 
+If someone later renames the file or drags it into a folder, the old URL keeps
+working: the hub pairs the rename's two halves in the journal and redirects to
+the file's new home, saying "Moved from …" above the content. A **live** path
+always wins, though — if a brand-new file has since taken the old address, that
+new file is what the URL serves, with no redirect.
+
 :::tip[Agents do this automatically]
 The sync hook `bdrive init` registers injects the project's
 gated-link formula into the agent's context, so a connected agent appends
@@ -49,6 +55,12 @@ https://drive.example.com/s/eacc1df3ee6a6ebbdacc535c2796dc30
 
 Links serve the file's **latest** synced content, which is the right behavior
 for living reports and wiki pages, and live until they expire or you revoke them.
+
+A share link points at one **file**, not at an address — the opposite of an
+internal link. Move or rename the file and the link follows it, even if a new
+file later takes the old path. Delete the file and the link 404s, and stays
+404 forever: nothing that later appears at that path is ever served through a
+link minted for something else.
 
 ```sh
 bdrive share --list                    # every link you've minted

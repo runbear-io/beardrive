@@ -37,7 +37,7 @@ classDiagram
     class volume {
         -source Source
         -refresh time.Duration
-        -snap *snapshot
+        -snap *snapshot (files + moves)
         +snapshot(ctx)
         +invalidate()
     }
@@ -68,6 +68,30 @@ classDiagram
     }
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
+    class MoveSource {
+        <<interface>>
+        +FilesWithMoves(ctx) files, moveIndex
+    }
+    class moveIndex {
+        <<map path→[]pathEvent>>
+        +buildMoveIndex(sorted ops)
+        +resolveForward(idx, files, p) viewer
+        +resolveShare(idx, files, p, since) /s/
+        +chainSegments(idx, p) []segment
+        +resolveFolder(idx, files, dir) all-or-nothing
+    }
+    class pathEvent {
+        +At the delete that ended it
+        +To ""  = deleted, not moved
+        +ToAt destination's create
+    }
+    class segment {
+        +Path
+        +From, To window it WAS the file
+    }
+    note for moveIndex "There is no rename op — a move is put(new) + delete(old), same device, same blob, one cycle — so the index is DERIVED inside the replay Files already runs and cached with the snapshot. Pairing needs same device, |Δt| ≤ 30s, B's first-ever put, and one-to-one both ways; anything ambiguous stays a plain deletion. Nothing here writes an op: journal.Less and Replay are untouched"
+    note for segment "Time-bounded on purpose: a bare set of paths would make history?path=docs/a.md show the ops of the NEW a.md that took the old address"
+
     class Uploader {
         <<interface>>
         +Upload(ctx, path, r, size, who, note)
@@ -346,6 +370,11 @@ classDiagram
 
     Source <|.. DirSource
     Source <|.. RemoteSource
+    MoveSource <|.. RemoteSource : optional, like Uploader — DirSource has no journals, so no moves
+    MoveSource ..> moveIndex
+    volume o-- moveIndex : cached with the snapshot
+    moveIndex *-- pathEvent
+    moveIndex ..> segment : chainSegments
     Uploader <|-- DirectUploader
     DirectUploader <|.. RemoteSource
     RemoteSource o-- Backend : Prefixed(Root, projectID)

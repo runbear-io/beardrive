@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 )
@@ -274,5 +275,72 @@ func TestRestoreNotOnSingleVolume(t *testing.T) {
 	rec := do(t, h, "POST", "/api/restore", map[string]string{"path": "f.md", "sha": shaOf("v1")})
 	if rec.Code < 400 {
 		t.Fatalf("single-volume restore: %d, want no such route", rec.Code)
+	}
+}
+
+// A moved file keeps its past. Without the chain, restore refuses every
+// version written before the move — the file's own history becomes
+// unreachable the moment someone drags it into a folder.
+func TestRestoreReachesVersionsFromBeforeAMove(t *testing.T) {
+	srv, p, root := newHub(t, true, nil)
+	dir := filepath.Join(root, p.ID)
+	f := newFakeRemoteAt(t, dir)
+	at := time.Now().Add(-time.Hour)
+	f.putAt("dev1", "plan.md", "v1", at)
+	f.putAt("dev1", "plan.md", "v2 longer", at.Add(time.Minute))
+	// the move: same device, same blob, one cycle
+	f.putAt("dev1", "notes/plan.md", "v2 longer", at.Add(2*time.Minute))
+	f.delAt("dev1", "plan.md", at.Add(2*time.Minute+time.Second))
+	// an unrelated file later takes the old address
+	f.putAt("dev1", "plan.md", "not the same file", at.Add(time.Hour))
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/"
+
+	rec := do(t, h, "POST", base+"restore",
+		map[string]string{"path": "notes/plan.md", "sha": shaOf("v1")})
+	if rec.Code != 200 {
+		t.Fatalf("restore across a move: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "GET", base+"file?path=notes/plan.md", nil); rec.Body.String() != "v1" {
+		t.Fatalf("file after restore = %q, want v1", rec.Body)
+	}
+	// The successor at the old address is a different file, not an ancestor.
+	rec = do(t, h, "POST", base+"restore",
+		map[string]string{"path": "notes/plan.md", "sha": shaOf("not the same file")})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restore of the successor's blob: %d %s, want 404", rec.Code, rec.Body)
+	}
+}
+
+// The same chain, on the history feed.
+func TestHistoryFollowsAMove(t *testing.T) {
+	srv, p, root := newHub(t, true, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	at := time.Now().Add(-time.Hour)
+	f.putAt("dev1", "plan.md", "v1", at)
+	f.putAt("dev1", "plan.md", "v2", at.Add(time.Minute))
+	f.putAt("dev1", "notes/plan.md", "v2", at.Add(2*time.Minute))
+	f.delAt("dev1", "plan.md", at.Add(2*time.Minute+time.Second))
+	f.putAt("dev1", "plan.md", "unrelated", at.Add(time.Hour))
+	h := srv.Handler()
+	base := "/api/p/" + p.ID + "/"
+
+	entries := historyOf(t, h, base, "notes/plan.md")
+	var blobs []string
+	for _, e := range entries {
+		blobs = append(blobs, e.Blob)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("history = %d entries %v, want 3 (v1, v2, the move)", len(entries), blobs)
+	}
+	seen := map[string]bool{}
+	for _, b := range blobs {
+		seen[b] = true
+	}
+	if !seen[shaOf("v1")] {
+		t.Errorf("the pre-move v1 is missing from the feed: %v", blobs)
+	}
+	if seen[shaOf("unrelated")] {
+		t.Errorf("the unrelated file at the old address leaked in: %v", blobs)
 	}
 }
