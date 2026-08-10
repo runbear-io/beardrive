@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/journal"
@@ -98,6 +99,12 @@ const (
 type ReadLedger struct {
 	repo      ReadRepo
 	retention time.Duration
+
+	// scans counts ShareOpens passes over byKey. Tests assert one per
+	// project per list render — the "never one scan per share" rule is
+	// invisible in the response body, so this is the only thing that can
+	// catch the regression.
+	scans atomic.Int64
 
 	mu         sync.Mutex
 	byKey      map[ReadStatKey]ReadStat
@@ -268,6 +275,51 @@ func (l *ReadLedger) AgentHeat(project string, since time.Time) map[string]map[s
 			out[key.Actor] = m
 		}
 		m[folder] += st.Count
+	}
+	return out
+}
+
+// ShareOpen is share-link consumption for one path: visits, and when.
+type ShareOpen struct {
+	Count int64
+	Last  time.Time
+}
+
+// ShareOpens aggregates share-kind reads per path for one project — the
+// receipt a person who shared something actually wants. All-time, because a
+// link's lifetime is the question a receipt answers.
+//
+// Share buckets only, and that is what makes Last mean *last opened*:
+// HeatEntry.LastRead is cross-kind, so a member viewing the file in the hub
+// would otherwise move the "opened through the link" date.
+//
+// Counts, never identities — the share actor is token+"/"+IP, a public
+// credential joined to an IP, and it must not leave the ledger. There is
+// deliberately no distinct-openers field.
+//
+// One byKey scan per project, never one per share: callers build this map
+// once and index it, because byKey is the full map and a project with 40
+// links would otherwise pay 40 full scans per list render.
+func (l *ReadLedger) ShareOpens(project string) map[string]ShareOpen {
+	if l == nil {
+		return nil // reads disabled: absent, not zero
+	}
+	l.scans.Add(1)
+	out := map[string]ShareOpen{}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for key, st := range l.byKey {
+		if key.Project != project || key.Kind != ReadKindShare {
+			continue
+		}
+		// No day filter: both the daily buckets and the folded Day == ""
+		// all-time row count.
+		e := out[key.Path]
+		e.Count += st.Count
+		if st.Last.After(e.Last) {
+			e.Last = st.Last
+		}
+		out[key.Path] = e
 	}
 	return out
 }
