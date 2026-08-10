@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
 import { useOrgs, usePending, useProjects, useHubRefresh } from "../hooks/useHub";
@@ -42,9 +42,11 @@ export default function HubApp({ config }: { config: ServerConfig }) {
 
   const route = useMemo(() => parseRoute(loc, "hub"), [loc]);
 
-  // Creating a project is asked for from three places — the sidebar's +, the
-  // empty state's button, and the auto-open below — so the dialog and its one
-  // handler live here rather than in any of them.
+  // Creating a project is asked for from two places — the sidebar's + and the
+  // empty state's button — so the dialog and its one handler live here rather
+  // than in either of them. It never opens on its own: it used to on arrival
+  // with zero projects, which covered the empty state's agent paste-prompt
+  // and pointer-blocked its own "New project" button.
   const [creating, setCreating] = useState(false);
   // A read-only hub refuses creation server-side (403), so never offer it.
   const canCreate = config.upload.enabled;
@@ -68,17 +70,6 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       toast("Could not create the project: " + (e as Error).message, true);
     }
   };
-
-  // With no projects at all there is nothing else on the page to do, so the
-  // dialog opens itself. Once per mount, keyed off a ref rather than the
-  // empty state — otherwise closing it would immediately reopen it.
-  const autoOpened = useRef(false);
-  useEffect(() => {
-    if (autoOpened.current || joinToken) return;
-    if (!projects || projects.length > 0 || !canCreate) return;
-    autoOpened.current = true;
-    setCreating(true);
-  }, [projects, canCreate, joinToken]);
 
   const newProjectDialog = creating ? (
     <NewProjectDialog
