@@ -119,6 +119,10 @@ export function HistoryView(props: {
     const sha = entries[i].kind === "delete" ? prevBlob(i) : entries[i].blob;
     return sha && sha === headBlob.get(entries[i].path) ? undefined : sha;
   };
+  // "" is the marker headBlob already uses for a path whose newest op is a
+  // delete — so this restore brings the file back, which nothing in the
+  // browser can walk back afterwards. The confirm copy says so (BEA-129).
+  const recreates = (i: number) => headBlob.get(entries[i].path) === "";
   return (
     <div className="history">
       {bar}
@@ -143,6 +147,7 @@ export function HistoryView(props: {
             apiBase={apiBase}
             prevBlob={prevBlob}
             restoreSha={restoreSha}
+            recreates={recreates}
             restore={restore}
             remove={remove}
           />
@@ -160,6 +165,7 @@ export function HistoryView(props: {
             diff={{ apiBase, prev: prevBlob(item.i) }}
             restore={restore}
             restoreSha={restoreSha(item.i)}
+            recreates={recreates(item.i)}
             /* no `remove`: an add outside a run card isn't attributable to a
                run, so the undo has nothing to claim (follow-up issue). */
           />
@@ -188,6 +194,7 @@ function RunGroup({
   apiBase,
   prevBlob,
   restoreSha,
+  recreates,
   restore,
   remove,
 }: {
@@ -196,6 +203,7 @@ function RunGroup({
   apiBase: string;
   prevBlob: (i: number) => string | undefined;
   restoreSha: (i: number) => string | undefined;
+  recreates: (i: number) => boolean;
   restore?: RestoreAction;
   remove?: RemoveAction;
 }) {
@@ -246,6 +254,7 @@ function RunGroup({
               restore={restore}
               remove={remove}
               restoreSha={restoreSha(run.idx[k])}
+              recreates={recreates(run.idx[k])}
               inRun
             />
           ))}

@@ -567,8 +567,16 @@ test("a file the run created can be undone, and comes back", async ({ page }) =>
   const gone = page.locator('.history > .hentry.delete:has-text("runbook.md")').first();
   await expect(gone).toBeVisible();
 
-  // ...and the delete row puts it back, bytes and all.
+  // ...and the delete row puts it back, bytes and all — after asking, and
+  // saying the one true thing about this branch: History can't take it away
+  // again (BEA-129).
   await gone.locator(".hrestore-btn").click();
+  const rmodal = page.locator(".modal");
+  await expect(rmodal).toContainText("Restore this version of runbook.md?");
+  await expect(rmodal).toContainText("isn't available from History yet");
+  // Restore adds content, so it is not dressed as a destructive action.
+  await expect(rmodal.locator(".danger-btn")).toHaveCount(0);
+  await rmodal.getByRole("button", { name: "Restore" }).click();
   await expectToast(page, /Restored runbook\.md/);
   await page.goto(`/${pid}/runbook.md`);
   await expect(page.locator("#content")).toContainText("Created during the agent run");
@@ -587,7 +595,26 @@ test("restoring an old version brings its content back", async ({ page }) => {
   await page.goto(`/${pid}/history/${path}`);
   const older = page.locator(".hentry.add"); // the first version
   await expect(older).toBeVisible();
+
+  // It reaches every device, so it asks first — and Cancel writes nothing:
+  // no request, no `restoring…`, no new row (BEA-129).
   await older.locator(".hrestore-btn").click();
+  const modal = page.locator(".modal");
+  await expect(modal).toContainText("Restore this version of restore-me.md?");
+  // The file still exists, so this restore IS walk-backable — the copy says so.
+  await expect(modal).toContainText("You can restore any other version afterwards.");
+  await page.keyboard.press("Escape"); // Esc dismisses it too
+  await expect(modal).toHaveCount(0);
+  await older.locator(".hrestore-btn").click();
+  await modal.getByRole("button", { name: "Cancel" }).click();
+  await expect(modal).toHaveCount(0);
+  await expect(page.locator(".history .hentry")).toHaveCount(2);
+  await expect(page.locator(".hrestore-btn").first()).toHaveText(/restore$/);
+  // Asking is still not navigating: the row stayed put through the dialog.
+  await expect(page).toHaveURL(`/${pid}/history/${path}`);
+
+  await older.locator(".hrestore-btn").click();
+  await modal.getByRole("button", { name: "Restore" }).click();
   await expectToast(page, /Restored restore-me\.md/);
   // The restore is itself a change, and the file serves the old bytes again.
   await expect(page.locator(".history .hentry")).toHaveCount(3);
@@ -628,6 +655,7 @@ test("the current version offers no restore", async ({ page }) => {
   const own = page.locator(".history .hentry");
   await expect(own.first().locator(".hrestore-btn")).toHaveCount(0);
   await own.last().locator(".hrestore-btn").click(); // the oldest row: the first version
+  await page.locator(".modal").getByRole("button", { name: "Restore" }).click();
   await expectToast(page, /Restored current-version\.md/);
   await expect(own).toHaveCount(3);
   await expect(own.first().locator(".hrestore-btn")).toHaveCount(0);
