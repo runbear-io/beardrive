@@ -830,3 +830,84 @@ func TestRenameConvergesAsPutPlusDelete(t *testing.T) {
 		t.Fatalf("the halves landed %v apart — wider than the hub's pairing window", d)
 	}
 }
+
+// TestInboundSpool is the test that matters for the turn-start warning: the
+// paths a cycle materializes from a peer are spooled for the next agent turn,
+// this device's own edits never are, and the drain clears.
+func TestInboundSpool(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+
+	// B writes, A pulls: A's spool names the path.
+	write(t, b.Folder, "notes/readme.md", "from b")
+	cycle(t, b)
+	cycle(t, a)
+	evs, err := a.Store.DrainInbound()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || evs[0].Path != "notes/readme.md" || evs[0].Deleted {
+		t.Fatalf("a inbound = %+v, want notes/readme.md written", evs)
+	}
+
+	// A's own edit is not inbound — it is scanned, not materialized.
+	write(t, a.Folder, "local.md", "mine")
+	cycle(t, a)
+	if evs, _ := a.Store.DrainInbound(); len(evs) != 0 {
+		t.Fatalf("a inbound = %+v, want own edits absent", evs)
+	}
+
+	// A peer delete is reported as removed, not as changed.
+	cycle(t, b)
+	os.Remove(filepath.Join(b.Folder, "notes", "readme.md"))
+	cycle(t, b)
+	cycle(t, a)
+	evs, err = a.Store.DrainInbound()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || evs[0].Path != "notes/readme.md" || !evs[0].Deleted {
+		t.Fatalf("a inbound = %+v, want notes/readme.md deleted", evs)
+	}
+
+	// The drain cleared: a quiet cycle reports nothing.
+	cycle(t, a)
+	if evs, _ := a.Store.DrainInbound(); len(evs) != 0 {
+		t.Fatalf("a inbound = %+v, want empty after a quiet cycle", evs)
+	}
+}
+
+// TestInboundSpoolOutlivesItsCycle is the reason this is a spool and not a
+// Result field: in the ordinary case the daemon materializes a peer's change
+// seconds before the turn starts, so the cycle the agent hook runs sees
+// nothing. A second Session on the same volume — which is what the daemon and
+// the hook are — still finds the path waiting.
+func TestInboundSpoolOutlivesItsCycle(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+
+	write(t, b.Folder, "notes/readme.md", "from b")
+	cycle(t, b)
+
+	// The "daemon" cycle materializes it.
+	res := cycle(t, a)
+	if res.Materialized != 1 {
+		t.Fatalf("Materialized = %d, want 1", res.Materialized)
+	}
+
+	// A later, quiet cycle — the hook's — reports nothing itself...
+	later := &Session{Folder: a.Folder, Store: a.Store, Device: a.Device, Backend: be}
+	if res := cycle(t, later); res.Materialized != 0 {
+		t.Fatalf("second cycle Materialized = %d, want 0", res.Materialized)
+	}
+	// ...but the spool still names what arrived.
+	evs, err := later.Store.DrainInbound()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || evs[0].Path != "notes/readme.md" {
+		t.Fatalf("inbound = %+v, want notes/readme.md from the earlier cycle", evs)
+	}
+}

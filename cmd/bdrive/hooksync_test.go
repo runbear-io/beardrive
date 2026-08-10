@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -303,5 +305,141 @@ func TestSyncRefusesUnenrolledAndPaused(t *testing.T) {
 	err = c2.Execute()
 	if err == nil || !strings.Contains(err.Error(), "paused") {
 		t.Fatalf("paused sync error = %v, want a paused message", err)
+	}
+}
+
+// seedInbound pretends an earlier cycle — the daemon's, in the ordinary case
+// — materialized these paths on this mount.
+func seedInbound(t *testing.T, proj config.Project, paths ...string) {
+	t.Helper()
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		deleted := strings.HasPrefix(p, "-")
+		if err := st.LogInbound(strings.TrimPrefix(p, "-"), deleted); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The whole point of the spool: a path materialized by an EARLIER cycle (the
+// daemon's) is still reported by the hook, whose own cycle sees nothing. A
+// Result field would report nothing here.
+func TestSyncHookModeReportsInboundChanges(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	proj := mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+
+	seedInbound(t, proj, "notes/readme.md", "-old.md")
+
+	got := runHook(t, filepath.Join(root, "wiki"))
+	for _, want := range []string{
+		"re-read before editing",
+		"`notes/readme.md`",
+		"`old.md (deleted)`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hook output missing %q:\n%s", want, got)
+		}
+	}
+
+	// The drain cleared: a second run with no peer activity says nothing.
+	if again := runHook(t, filepath.Join(root, "wiki")); strings.Contains(again, "re-read before editing") {
+		t.Errorf("second run repeated the changed list:\n%s", again)
+	}
+}
+
+// Each path carries its own mount's prefix — never another mount's.
+func TestSyncHookModeInboundMultipleMounts(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	a := mountAt(t, root, "projA", "https://hub.example.com/p/p-aaaaaaaa")
+	b := mountAt(t, root, "projB", "https://hub.example.com/p/p-bbbbbbbb")
+	seedInbound(t, a, "notes/a.md")
+	seedInbound(t, b, "notes/b.md")
+
+	got := runHook(t, root)
+	for _, want := range []string{"`projA/notes/a.md`", "`projB/notes/b.md`"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hook output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// A session started inside a mount sees paths relative to its own directory:
+// its subpath is stripped, and a sibling folder's file is not its to re-read.
+func TestSyncHookModeInboundInsideMount(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	proj := mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+	sub := filepath.Join(root, "wiki", "docs", "notes")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedInbound(t, proj, "docs/notes/mine.md", "elsewhere/theirs.md")
+
+	got := runHook(t, sub)
+	if !strings.Contains(got, "`mine.md`") {
+		t.Errorf("path under the session folder not stripped to what the agent sees:\n%s", got)
+	}
+	if strings.Contains(got, "theirs.md") {
+		t.Errorf("path outside the session folder must not be listed:\n%s", got)
+	}
+}
+
+// The first cycle on a fresh mount materializes everything; the turn must not
+// carry the whole project.
+func TestSyncHookModeInboundCap(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	proj := mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+	var paths []string
+	for i := 0; i < hookChangedMax+5; i++ {
+		paths = append(paths, fmt.Sprintf("f%02d.md", i))
+	}
+	seedInbound(t, proj, paths...)
+
+	got := runHook(t, filepath.Join(root, "wiki"))
+	if !strings.Contains(got, "+5 more") {
+		t.Errorf("capped list missing its tail:\n%s", got)
+	}
+	if strings.Contains(got, "f24.md") {
+		t.Errorf("list rendered past the cap:\n%s", got)
+	}
+}
+
+// An unreadable spool leaves the turn intact: exit 0, valid JSON, links still
+// emitted.
+func TestSyncHookModeInboundSpoolUnreadable(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	proj := mountAt(t, root, "wiki", "https://hub.example.com/p/p-12345678")
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the spool should be: every read of it fails.
+	if err := os.MkdirAll(filepath.Join(vdir, "inbound.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runHook(t, filepath.Join(root, "wiki"))
+	if !strings.Contains(got, `"hookSpecificOutput"`) || !strings.Contains(got, "https://hub.example.com/p-12345678") {
+		t.Errorf("unreadable spool broke the turn's context:\n%s", got)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(got), &out); err != nil {
+		t.Fatalf("hook emitted invalid JSON: %v\n%s", err, got)
 	}
 }
