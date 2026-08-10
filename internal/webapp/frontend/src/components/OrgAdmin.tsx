@@ -58,7 +58,7 @@ export function OrgAdmin({
     enabled: owner,
     select: (d) => d.invites || [],
   });
-  const { data: shares } = useQuery({
+  const { data: shares, isLoading: sharesLoading } = useQuery({
     queryKey: ["orgShares", org.id],
     queryFn: () => getJSON<{ shares: ShareInfo[] }>(`/api/orgs/${org.id}/shares`),
     enabled: owner,
@@ -207,7 +207,12 @@ export function OrgAdmin({
             Every live link across this organization's projects. A project's own links are on its
             Settings page, and on the file itself.
           </p>
-          <SharesTable shares={shares || []} onChanged={refreshShares} showProject />
+          <SharesTable
+            shares={shares || []}
+            loading={sharesLoading}
+            onChanged={refreshShares}
+            showProject
+          />
         </>
       )}
     </div>

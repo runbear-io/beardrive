@@ -214,6 +214,13 @@ export interface ShareInfo {
   creator?: string;
   created?: string;
   expires?: string;
+  /* Share-link receipts (shareJSON, shares.go). Both keys are ABSENT — not
+     zero — when the hub has read telemetry off, which is why opens must be
+     tested with `=== undefined` and never with a falsy check: 0 is a real,
+     meaningful value ("minted, never opened"). Counted per FILE, not per
+     link, because heat is keyed by path. */
+  opens?: number;
+  last_opened?: string;
 }
 
 // GET/POST /api/admin/policy (handleAdminPolicy, admin.go)

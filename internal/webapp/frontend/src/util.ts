@@ -2,6 +2,10 @@ export const MD_EXT = /\.(md|markdown)$/i;
 export const IMG_EXT = /\.(png|jpe?g|gif|svg|webp|ico|bmp|avif)$/i;
 export const HTML_EXT = /\.html?$/i;
 export const PDF_EXT = /\.pdf$/i;
+// Checked BEFORE TEXT_EXT (csv is in both): a parse failure falls back to
+// the same plain-text view TEXT_EXT would have given. Delimiter comes from
+// the extension, never from sniffing the bytes.
+export const CSV_EXT = /\.(csv|tsv)$/i;
 export const TEXT_EXT =
   /\.(txt|log|json|ya?ml|toml|csv|go|py|js|ts|jsx|tsx|sh|bash|zsh|rb|rs|c|h|cpp|java|kt|swift|sql|css|xml|ini|conf|env|mod|sum|jsonl)$/i;
 
