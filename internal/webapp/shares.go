@@ -280,7 +280,8 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, shareJSON(r, sh))
+	// No opens: a freshly minted link has nothing to report.
+	writeJSON(w, shareJSON(r, sh, nil))
 }
 
 func (s *Server) handleShareList(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -288,10 +289,12 @@ func (s *Server) handleShareList(v *volume, w http.ResponseWriter, r *http.Reque
 		http.Error(w, "sharing is not enabled on this server", http.StatusNotFound)
 		return
 	}
-	shares := s.Shares.List(r.PathValue("project"))
+	project := r.PathValue("project")
+	shares := s.Shares.List(project)
+	opens := s.Reads.ShareOpens(project) // once, outside the loop — never per share
 	out := make([]map[string]any, 0, len(shares))
 	for _, sh := range shares {
-		out = append(out, shareJSON(r, sh))
+		out = append(out, shareJSON(r, sh, opens))
 	}
 	writeJSON(w, map[string]any{"shares": out})
 }
@@ -359,10 +362,16 @@ func (s *Server) handleShareExpiry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such share", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, shareJSON(r, updated))
+	// Same as create: an expiry edit is not the surface that reports opens.
+	writeJSON(w, shareJSON(r, updated, nil))
 }
 
-func shareJSON(r *http.Request, sh Share) map[string]any {
+// shareJSON renders one link. opens is the project's share-open map from
+// ReadLedger.ShareOpens, built ONCE by the caller and indexed here — passing
+// nil means "not measured" (reads are off, or this is a single-share reply
+// that has nothing to report yet), and then neither receipt key appears.
+// Absent is not zero: `0` would be a lie on a hub with reads disabled.
+func shareJSON(r *http.Request, sh Share, opens map[string]ShareOpen) map[string]any {
 	out := map[string]any{
 		"token": sh.Token, "path": sh.Path, "project": sh.Project,
 		"url": requestBaseURL(r) + "/s/" + sh.Token, "created": sh.Created,
@@ -372,6 +381,16 @@ func shareJSON(r *http.Request, sh Share) map[string]any {
 	}
 	if !sh.Expires.IsZero() {
 		out["expires"] = sh.Expires
+	}
+	if opens != nil {
+		// Keyed by path, not token: heat has no token dimension, so two
+		// links on one file report the same number. Documented, and asserted
+		// in shares_test.go so it can't regress into a silent wrong answer.
+		o := opens[sh.Path]
+		out["opens"] = o.Count
+		if o.Count > 0 {
+			out["last_opened"] = o.Last
+		}
 	}
 	return out
 }

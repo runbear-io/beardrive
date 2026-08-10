@@ -363,6 +363,35 @@ test("project settings lists this project's public links and revokes them", asyn
   await expect(page.locator(".admin-empty", { hasText: "No public links." })).toBeVisible();
 });
 
+// "No public links." before the request lands is a confident no to "is anything
+// of ours public right now?" — the one wrong answer this panel must never give.
+test("public links show a loading row, never a premature 'no', while shares load", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const made = await (
+    await page.request.post(`/api/p/${pid}/shares`, { data: { path: "notes/readme.md" } })
+  ).json();
+
+  await page.route("**/api/p/*/shares", async (route) => {
+    await new Promise((r) => setTimeout(r, 2000));
+    await route.continue();
+  });
+
+  await page.goto(`/${pid}/settings`);
+  await expect(page.locator(".admin-empty", { hasText: "Loading…" })).toBeVisible();
+  await expect(page.locator(".admin-empty", { hasText: "No public links." })).toHaveCount(0);
+
+  await expect(page.locator(".admin-item", { hasText: "notes/readme.md" })).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.locator(".admin-empty", { hasText: "Loading…" })).toHaveCount(0);
+
+  await page.unroute("**/api/p/*/shares");
+  await page.request.delete(`/api/shares/${made.token}`);
+});
+
 test("a read-only member sees the public-link banner but cannot revoke", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
@@ -406,7 +435,8 @@ test("public links: banner and settings table fit a 390px viewport", async ({ pa
   await expect(page.locator(".admin-item", { hasText: "guide.md" })).toBeVisible();
   expect(await sideways()).toBe(false);
   // The table takes its own horizontal scroll rather than widening the page.
-  const box = page.locator(".project-settings .admin-card-table").last();
+  // By class, not by position: People renders through the same AdminTable.
+  const box = page.locator(".project-settings .shares-table");
   expect(await box.evaluate((el) => getComputedStyle(el).overflowX)).toBe("auto");
 
   await page.request.delete(`/api/shares/${made.token}`);
@@ -797,4 +827,127 @@ test("a path that never existed still gets the not-found card", async ({ page })
   await page.goto(`/${pid}/nothing-here.md`);
   await expect(page.locator(".notfound")).toBeVisible();
   await expect(page.locator(".vbanner")).toHaveCount(0);
+});
+
+// BEA-74: .csv/.tsv render as a table, and anything the parser can't make a
+// table of stays the plain-text view it is today.
+
+const SALES_CSV = [
+  `region,rep,quarter,"revenue (usd)",notes`,
+  `EMEA,"Ortiz, Ana",Q1,128400,steady growth in the enterprise segment`,
+  `APAC,"Chen, Wei",Q2,96250,"he said ""ship it"" on Friday"`,
+  `LATAM,"Silva, Joao",Q3,74100,"two lines\nin one cell"`,
+  `NA,"Baker, Sam",Q4,181900`,
+  ``,
+].join("\n");
+
+test("csv renders as a table: quoting, embedded newlines, a ragged row", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=csv/sales.csv`, { data: SALES_CSV });
+
+  await page.goto(`/${pid}/csv/sales.csv`);
+  const table = page.locator("#content table.csvview");
+  await expect(table).toBeVisible();
+  await expect(page.locator("#content pre.plain")).toHaveCount(0);
+  await expect(table.locator("thead th")).toHaveCount(5);
+  await expect(table.locator("thead th").nth(3)).toHaveText("revenue (usd)");
+  await expect(table.locator("tbody tr")).toHaveCount(4);
+  // A quoted comma is one cell, not two.
+  await expect(table.locator("tbody tr").first().locator("td").nth(1)).toHaveText("Ortiz, Ana");
+  // "" is one literal quote.
+  await expect(table.locator("tbody tr").nth(1).locator("td").nth(4)).toHaveText(
+    'he said "ship it" on Friday',
+  );
+  // A newline inside quotes is one cell in one row, not a second row.
+  // textContent, not toHaveText: the latter normalizes away the very
+  // newline this case exists to prove survived.
+  expect(
+    await table
+      .locator("tbody tr")
+      .nth(2)
+      .locator("td")
+      .nth(4)
+      .evaluate((el) => el.textContent),
+  ).toBe("two lines\nin one cell");
+  // The short last row keeps its columns and pads the missing one.
+  const last = table.locator("tbody tr").last().locator("td");
+  await expect(last).toHaveCount(5);
+  await expect(last.nth(3)).toHaveText("181900");
+  await expect(last.nth(4)).toHaveText("");
+});
+
+test("tsv gets the same table, by extension and not by sniffing", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=csv/hosts.tsv`, {
+    data: "host\trole\nalpha\tweb\nbeta\tdb\n",
+  });
+  await page.goto(`/${pid}/csv/hosts.tsv`);
+  await expect(page.locator("#content table.csvview thead th")).toHaveCount(2);
+  await expect(page.locator("#content table.csvview tbody tr")).toHaveCount(2);
+});
+
+test("a csv the parser can't read falls back to today's plain text", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  // Unterminated quote: not something to guess at.
+  await page.request.put(`/api/p/${pid}/upload/content?path=csv/broken.csv`, {
+    data: 'a,b\n"never closed,2\n',
+  });
+  await page.goto(`/${pid}/csv/broken.csv`);
+  await expect(page.locator("#content pre.plain")).toContainText("never closed");
+  await expect(page.locator("#content table.csvview")).toHaveCount(0);
+
+  // No delimiter at all is prose, not a one-column table.
+  await page.request.put(`/api/p/${pid}/upload/content?path=csv/prose.csv`, {
+    data: "just some prose\nover two lines\n",
+  });
+  await page.goto(`/${pid}/csv/prose.csv`);
+  await expect(page.locator("#content pre.plain")).toContainText("just some prose");
+  await expect(page.locator("#content table.csvview")).toHaveCount(0);
+});
+
+test("a past version of a csv is a table too", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const url = `/api/p/${pid}/upload/content?path=csv/versioned.csv`;
+  await page.request.put(url, { data: "a,b\n1,2\n" });
+  await page.request.put(url, { data: "a,b\n3,4\n" });
+  await page.goto(`/${pid}/history/csv/versioned.csv`);
+  const older = page.locator(".hentry.add");
+  await expect(older).toBeVisible();
+  await older.getByRole("button", { name: /^Open .* as of/ }).click();
+  await page.waitForURL(new RegExp(`/${pid}/csv/versioned\\.csv\\?v=[0-9a-f]{64}$`));
+  await expect(page.locator("#content table.csvview tbody")).toContainText("1");
+});
+
+test("a csv past the row cap says how many rows it left out", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const big = "n,sq\n" + Array.from({ length: 5200 }, (_, i) => `${i},${i * i}`).join("\n") + "\n";
+  await page.request.put(`/api/p/${pid}/upload/content?path=csv/big.csv`, { data: big });
+  await page.goto(`/${pid}/csv/big.csv`);
+  await expect(page.locator("#content table.csvview tbody tr")).toHaveCount(4999); // 5,000 incl. header
+  await expect(page.locator("#content .csvnote")).toContainText("showing 5,000 of 5,201 rows");
+});
+
+test("a wide csv scrolls inside its own box at 390px", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const cols = Array.from({ length: 14 }, (_, i) => `column_heading_number_${i}`);
+  const wide = [cols.join(","), cols.map((_, i) => `value-${i}-with-some-length`).join(",")].join(
+    "\n",
+  );
+  await page.request.put(`/api/p/${pid}/upload/content?path=csv/wide.csv`, { data: wide + "\n" });
+  await page.setViewportSize({ width: 390, height: 780 });
+  await page.goto(`/${pid}/csv/wide.csv`);
+  const box = page.locator("#content .csvbox");
+  await expect(box).toBeVisible();
+  expect(await box.evaluate((el) => getComputedStyle(el).overflowX)).toBe("auto");
+  // The box takes the sideways scroll; the page body never does.
+  expect(await box.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1),
+  ).toBe(false);
 });

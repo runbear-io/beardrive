@@ -111,6 +111,35 @@ test("the gutter belongs to the scroll container, not the column", async ({ page
   }
 });
 
+/* BEA-79: Public links was invisible at 1440x900 — below the fold of #content,
+   which is the app's only scroll container, and with overlay scrollbars nothing
+   at rest said there was more. Two halves: the container now takes a real
+   scrollbar (so it consumes width, so it is visible), and the security section
+   sits second instead of fourth. */
+
+test("settings shows Public links high, and #content shows it scrolls", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`http://localhost:8993/${pid}/settings`);
+  await expect(page.locator(".project-settings [data-slot=card-title]")).toHaveText([
+    "General",
+    "Public links",
+    "People",
+    "About",
+    "Danger zone",
+  ]);
+
+  // A classic scrollbar takes layout width; an overlay one doesn't. This is
+  // the affordance — no hover, no scroll event.
+  const bar = await page.evaluate(() => {
+    const c = document.querySelector("#content") as HTMLElement;
+    return { gap: c.offsetWidth - c.clientWidth, overflows: c.scrollHeight > c.clientHeight };
+  });
+  expect(bar.overflows, "settings must overflow at 1440x900").toBe(true);
+  expect(bar.gap, "#content reserves a visible scrollbar").toBeGreaterThan(0);
+});
+
 /* The who/when/how-hot line is what the product is differentiated by, and a
    phone is exactly when you're catching up — but ≤900px used to `display:
    none` it on the file view and ellipsise it to `claude-…` / `Alice <ali…` in

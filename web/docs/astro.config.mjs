@@ -1,7 +1,9 @@
 // @ts-check
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
+import sitemap from "@astrojs/sitemap";
 import llmsTxt from "starlight-llms-txt";
+import { execFileSync } from "node:child_process";
 
 // docs.beardrive.ai — the public product documentation.
 //
@@ -14,6 +16,49 @@ import llmsTxt from "starlight-llms-txt";
 // It lives in the OSS repo because that's what it documents: the CLI, the sync
 // model, self-hosting. "Edit this page" resolves to something an outside
 // contributor can actually open a PR against.
+
+// `lastmod` for the sitemap, from the commit that last touched each page.
+//
+// The tempting shortcut — stamp every URL with the build time — is worse than
+// emitting nothing: a sitemap that reports the whole site changed on every
+// deploy teaches Google to disregard its lastmod entirely, and freshness is
+// most of what a sitemap is for on a docs site.
+//
+// Which is also why the shallow check exists. A CI checkout is depth-1 by
+// default, and there `git log` attributes every file to the one commit it has
+// — the same uniform lie in a different costume. No history, no lastmod.
+// (A host that wants these dates must clone with full history:
+// actions/checkout needs `fetch-depth: 0`.)
+const lastmodBySource = (() => {
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: import.meta.dirname, encoding: "utf8" }).trim();
+  try {
+    if (git("rev-parse", "--is-shallow-repository") === "true") return new Map();
+    // One `git log` for every page rather than one per page. Newest commit
+    // first, so the first time a path appears is its last modification.
+    const log = git("log", "--format=%cI", "--name-only", "--relative", "--", "src/content/docs");
+    const map = new Map();
+    let when = "";
+    for (const line of log.split("\n")) {
+      if (!line) continue;
+      else if (/^\d{4}-\d\d-\d\dT/.test(line)) when = line;
+      else if (!map.has(line)) map.set(line, when);
+    }
+    return map;
+  } catch {
+    return new Map(); // built from a tarball, or no git installed — not fatal
+  }
+})();
+
+/** `/reference/cli/` -> the date on `src/content/docs/reference/cli.md`. */
+function lastmodFor(url) {
+  const slug = new URL(url).pathname.replace(/^\/|\/$/g, "") || "index";
+  for (const ext of [".md", ".mdx"]) {
+    const at = lastmodBySource.get(`src/content/docs/${slug}${ext}`);
+    if (at) return at;
+  }
+}
+
 export default defineConfig({
   site: "https://docs.beardrive.ai",
   // The docs were reorganized around the agent-first path; these URLs were
@@ -26,6 +71,11 @@ export default defineConfig({
     "/manual/skills-and-hooks": "/manual/hooks/",
   },
   integrations: [
+    // Starlight adds @astrojs/sitemap itself, but only when the config hasn't
+    // already — declaring it here replaces that default rather than doubling
+    // it, which is the supported way to reach these options. (Starlight's own
+    // version only sets `i18n`, and this site is single-language.)
+    sitemap({ serialize: (item) => ({ ...item, lastmod: lastmodFor(item.url) }) }),
     starlight({
       title: "BearDrive",
       description:
