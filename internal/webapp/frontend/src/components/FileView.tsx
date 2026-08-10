@@ -4,7 +4,18 @@ import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
 import { useTextAt } from "../hooks/useBlob";
-import { HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, TEXT_EXT, humanSize, joinPath, whoChanged } from "../util";
+import {
+  CSV_EXT,
+  HTML_EXT,
+  IMG_EXT,
+  MD_EXT,
+  PDF_EXT,
+  TEXT_EXT,
+  humanSize,
+  joinPath,
+  whoChanged,
+} from "../util";
+import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
 
 export function FileView(props: {
   apiBase: string;
@@ -51,6 +62,12 @@ export function FileView(props: {
   }
   if (IMG_EXT.test(path)) {
     return <ImgView src={fileURL} alt={path} version={version} onRendered={props.onRendered} />;
+  }
+  // Same component as plain text on purpose: the fallback for a file the
+  // parser can't make a table of is then the very JSX it already renders,
+  // not a second code path to keep in sync.
+  if (CSV_EXT.test(path)) {
+    return <TextView {...props} fileURL={fileURL} delim={/\.tsv$/i.test(path) ? "\t" : ","} />;
   }
   if (TEXT_EXT.test(path)) return <TextView {...props} fileURL={fileURL} />;
   // No extension we recognize: decide on the bytes instead of giving up.
@@ -239,8 +256,8 @@ function LoadError({ version, err }: { version?: string; err: Error }) {
   );
 }
 
-function TextView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
-  const { path, version, fileURL, onRendered } = props;
+function TextView(props: Parameters<typeof FileView>[0] & { fileURL: string; delim?: string }) {
+  const { path, version, fileURL, delim, onRendered } = props;
   const { data, error } = useQuery({
     queryKey: ["text", fileURL],
     queryFn: async () => {
@@ -253,12 +270,58 @@ function TextView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
   useEffect(() => {
     if (data != null) onRendered?.();
   }, [data, onRendered]);
+  // null = not usefully delimited (or no delimiter asked for): fall through
+  // to the plain-text view below.
+  const csv = useMemo(
+    () => (delim && data != null ? parseDelimited(data, delim, CSV_ROWS) : null),
+    [data, delim],
+  );
   if (error) return <LoadError version={version} err={error as Error} />;
   if (data == null) return null;
+  if (csv) return <CsvTable csv={csv} key={path} />;
   return (
     <pre className="plain" key={path}>
       {data}
     </pre>
+  );
+}
+
+/* Plain <table> — no sorting, filtering or search, so @tanstack/react-table
+   would only be weight. Every row is padded to the widest one so a ragged
+   row renders empty trailing cells instead of shifting its neighbours. */
+function CsvTable({ csv }: { csv: Csv }) {
+  const [head, ...body] = csv.rows;
+  const cols = csv.rows.reduce((m, r) => Math.max(m, r.length), 0);
+  const idx = Array.from({ length: cols }, (_, i) => i);
+  return (
+    <>
+      <div className="csvbox">
+        <table className="csvview">
+          <thead>
+            <tr>
+              {idx.map((i) => (
+                <th key={i}>{head[i] ?? ""}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {body.map((r, i) => (
+              <tr key={i}>
+                {idx.map((j) => (
+                  <td key={j}>{r[j] ?? ""}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {csv.truncated > 0 && (
+        <p className="csvnote">
+          showing {csv.rows.length.toLocaleString()} of{" "}
+          {(csv.rows.length + csv.truncated).toLocaleString()} rows — Download for the rest
+        </p>
+      )}
+    </>
   );
 }
 

@@ -26,14 +26,36 @@ export function expiryLabel(expires?: string): string {
   return expires ? "expires " + new Date(expires).toLocaleDateString() : "no expiry";
 }
 
+// The receipt: did anyone actually open this? The server already recorded
+// every /s/<token> hit — this is the only place the number gets read back.
+// `undefined` means the hub has read telemetry off, and then we say nothing
+// at all; `0` is a real answer and gets one. Hence the explicit undefined
+// check — `!s.opens` would collapse "not measured" into "never opened".
+function opensLabel(s: ShareInfo): string | null {
+  if (s.opens === undefined) return null;
+  if (s.opens === 0) return "not opened yet";
+  const n = `${s.opens} open${s.opens === 1 ? "" : "s"}`;
+  return s.last_opened ? `${n} · last opened ${new Date(s.last_opened).toLocaleDateString()}` : n;
+}
+
 export function shareDetail(s: ShareInfo, showProject: boolean): string {
   const bits: string[] = [];
   if (showProject && s.project_name) bits.push(s.project_name);
   if (s.creator) bits.push("by " + s.creator);
   if (s.created) bits.push(new Date(s.created).toLocaleDateString());
   bits.push(expiryLabel(s.expires));
+  const opens = opensLabel(s);
+  if (opens) bits.push(opens);
   return bits.join(" · ");
 }
+
+// The two honesties about the number, worded once per section rather than
+// once per row: opens are debounced VISITS (readDebounce, reads.go), and the
+// count is per FILE not per link (heat is keyed by path), so two tokens on
+// one file report the same number.
+export const OPENS_NOTE =
+  "Opens count how many times a file has been read through a public link. " +
+  "Repeat opens by the same reader within 10 minutes count once.";
 
 export function SharesTable({
   shares,
