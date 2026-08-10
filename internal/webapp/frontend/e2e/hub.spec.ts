@@ -116,17 +116,27 @@ test("the create dialog does not open itself when projects exist", async ({ page
   await expect(page.locator(".modal-input")).toHaveCount(0);
 });
 
-test("new project via the sidebar + modal", async ({ page }) => {
+test("new project via the sidebar + modal seeds the recommended option", async ({ page }) => {
   await login(page);
   await page.click("#projects .nav-add");
   await page.fill(".modal-input", "scratch");
-  // The starting point defaults to an empty project, so this path still
-  // describes exactly what it did before templates existed.
+  // The badged row IS the checked row — asserted as an invariant, not by
+  // name, so reordering the options can't quietly split them apart again.
   await expect(page.locator(".start-points")).toBeVisible();
-  await expect(page.locator(".start-point.on")).toContainText("Empty project");
+  const on = page.locator(".start-point.on");
+  const rec = page.locator(".start-point:has(.sp-rec)");
+  await expect(on).toHaveCount(1);
+  await expect(rec).toHaveCount(1);
+  expect(await on.textContent()).toBe(await rec.textContent());
   await page.click(".modal .pbtn");
   await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("scratch");
+  // Creating without touching the radios seeds that template. Asserted on the
+  // file tree, not #content: a brand-new project's dashboard paints no
+  // treemap cells (#93).
+  for (const name of ["docs", "decisions", "AGENTS.md"]) {
+    await expect(page.locator("#sidebar").getByText(name, { exact: true }).first()).toBeVisible();
+  }
   // Open the switcher: both projects listed; picking one navigates.
   await page.click("#project-select");
   await expect(page.getByRole("option", { name: "wiki" })).toBeVisible();

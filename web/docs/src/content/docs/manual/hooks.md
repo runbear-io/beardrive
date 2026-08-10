@@ -110,6 +110,15 @@ Linux needs systemd as the init system. Without it — Alpine or another
 runit/OpenRC distro, WSL1, a slim container — `bdrive autostart` says so rather
 than writing a unit nothing would read.
 
+On macOS, the moment that file is written you get a **"Background Items Added"**
+notification, and `bdrive` appears in System Settings → General → Login Items.
+That notice is macOS reporting the registration above — every way of starting
+at login triggers it, including Apple's own `SMAppService` and a plain
+`crontab` — so `bdrive init` asks first on a terminal and says what is about to
+happen when it can't ask. Answer no, or run `bdrive autostart uninstall`, and
+the item goes away; sync then resumes on the next `bdrive resume`, `bdrive
+init`, or agent turn instead of at login.
+
 On Windows you may see a console window flicker at logon: bdrive is a console
 program and `resume` exits in milliseconds. Nothing is wrong.
 
