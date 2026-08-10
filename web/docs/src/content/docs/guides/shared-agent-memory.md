@@ -90,6 +90,22 @@ bdrive log wiki    # which areas are alive
 — and, if this device created the project, offer to draft `AGENTS.md` for the
 team.
 
+## Your agent is told what moved
+
+Six people's agents in one folder means an agent can start a turn holding a
+copy of a file a teammate's agent rewrote an hour ago. So it is told: at turn
+start, the sync hook names the files that arrived from teammates since the
+last turn — "changed since your last turn, re-read before editing" — with
+deletions marked.
+
+It is advisory. Nothing blocks, nothing prompts, no write is refused; the
+agent gets the fact and decides. That needs the turn-start hooks `bdrive init`
+registers ([Hooks in detail](/manual/hooks/)) — without them nothing drains
+the list, and the agent hears nothing.
+
+The list is capped, so the first turn after joining a project names some of
+what arrived rather than the whole project.
+
 ## What belongs in shared memory
 
 Good candidates are the things that are expensive to rediscover and cheap to

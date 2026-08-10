@@ -84,7 +84,13 @@ a single JSON object, so the formula carries **every** mount as a `prefix →
 URL` pair — the prefix being the mount's path as the agent sees it from the
 session's folder, or an empty prefix with the session's own subpath baked into
 the URL when the session runs inside the mount; emitting only the first mount
-hung one project's paths on another project's base URL. Then an
+hung one project's paths on another project's base URL. The same context also
+names what teammates changed since the last turn ("re-read before editing"),
+drained from the **inbound spool** (`internal/store/inbound.go`, a near-copy of
+the read spool): `materialize` appends every path it writes or removes, and the
+hook drains it *after* its own cycle — a `Result` field would report nothing,
+because the daemon has usually materialized the peer's change seconds earlier.
+Advisory only: nothing blocks a write. Then an
 async push on PostToolUse Write/Edit, and `bdrive read-log` on
 Read/Grep/Bash for the read heatmap. The inline hook commands
 `internal/agenthooks` writes must stay a fast no-op outside BearDrive folders

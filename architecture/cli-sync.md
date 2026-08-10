@@ -108,9 +108,11 @@ classDiagram
         +LoadSync / SaveSync
         +SaveNote / LoadNote
         +PendingReads read spool
+        +LogInbound / DrainInbound
         +Lock() flock
     }
     note for Store "internal/store — ~/.bdrive/volumes/mount-id: content-addressed blobs, per-device journal copies, state cache, paused marker (free funcs Paused/SetPaused, no flock)"
+    note for Store "inbound.jsonl is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle"
 
     class Op {
         +Seq +Lamport +Time +Device

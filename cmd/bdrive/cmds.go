@@ -105,8 +105,10 @@ list in .bdrive/config.json is never pruned against either.`,
 					if err != nil || !ok || syncBlocked(proj) != "" {
 						continue
 					}
-					if base, ok := runHookSync(cmd, target, sessionID, hookLabel); ok {
-						links = append(links, hookLinkFor(folder, target, base))
+					if h, ok := runHookSync(cmd, target, sessionID, hookLabel); ok {
+						link := hookLinkFor(folder, target, h.base)
+						link.paths = h.paths
+						links = append(links, link)
 					}
 				}
 				emitHookContext(cmd, links)

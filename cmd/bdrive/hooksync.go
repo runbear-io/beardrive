@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 // `bdrive sync --hook <label>` is the agent-hook flavor of sync, run by the
@@ -33,11 +35,18 @@ import (
 const hookNoteTTL = 30 * time.Minute
 
 // hookLink pairs the path prefix an agent writes with the hub URL that
-// prefix maps to.
+// prefix maps to, and carries what this mount pulled in since the last turn.
 type hookLink struct {
 	prefix string // "wiki/", or "" when the hook ran at or inside the mount
 	base   string // https://hub/<project-id>[/<the run folder's subpath>]
+	sub    string // the run folder's mount-relative path, "" at or above the mount
+	paths  []store.InboundEvent
 }
+
+// hookChangedMax caps the changed-file list the turn pays for. Past it the
+// tail is a count — the first cycle on a fresh mount materializes the whole
+// project, and no turn should carry that.
+const hookChangedMax = 20
 
 // hookSessionID reads the platform's event JSON from stdin — once per run,
 // since stdin can only be consumed once and the sync loop may cover several
@@ -51,11 +60,19 @@ func hookSessionID(cmd *cobra.Command) string {
 	return event.SessionID
 }
 
-// runHookSync syncs one mount and reports its hub base URL, if it has one.
-func runHookSync(cmd *cobra.Command, target, sessionID, label string) (string, bool) {
+// hookSync is one mount's contribution to the turn: where its files live on
+// the hub, and which of them moved since the last turn.
+type hookSync struct {
+	base  string
+	paths []store.InboundEvent
+}
+
+// runHookSync syncs one mount and reports its hub base URL, if it has one,
+// plus the peer changes waiting for this turn.
+func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync, bool) {
 	sess, proj, err := openSession(cmd.Context(), target, true)
 	if err != nil {
-		return "", false // not a mount / no session: fast no-op
+		return hookSync{}, false // not a mount / no session: fast no-op
 	}
 	defer closeSession(sess)
 
@@ -69,13 +86,19 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (string, b
 	// The pull. Offline is fine — the link formula below is still valid
 	// for teammates who are online.
 	if _, err := sess.Cycle(cmd.Context()); err != nil {
-		return "", false // never break the turn
+		return hookSync{}, false // never break the turn
 	}
+	// Drained after the cycle, not from its Result: in the ordinary case the
+	// daemon materialized the peer's change seconds ago, so this cycle saw
+	// nothing and the spool is where the record is. Errors are ignored — the
+	// links matter more than the list.
+	paths, _ := sess.Store.DrainInbound()
+
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {
-		return "", false // non-hub remote: nothing to link to
+		return hookSync{}, false // non-hub remote: nothing to link to
 	}
-	return server + "/" + projectID, true
+	return hookSync{base: server + "/" + projectID, paths: paths}, true
 }
 
 // hookLinkFor places one mount relative to the folder the hook ran in.
@@ -100,7 +123,10 @@ func hookLinkFor(folder, target, base string) hookLink {
 		if err != nil {
 			return hookLink{base: base}
 		}
-		return hookLink{base: base + "/" + encodePathSegments(filepath.ToSlash(sub))}
+		return hookLink{
+			base: base + "/" + encodePathSegments(filepath.ToSlash(sub)),
+			sub:  filepath.ToSlash(sub),
+		}
 	default:
 		return hookLink{prefix: rel + "/", base: base}
 	}
@@ -144,6 +170,10 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 				tail, strings.Join(parts, ", "))
 	}
 
+	if changed := hookChanged(links); changed != "" {
+		context += " " + changed
+	}
+
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
 			"hookEventName":     "UserPromptSubmit",
@@ -155,4 +185,58 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 		return
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), string(enc))
+}
+
+// hookChanged renders what teammates' devices pulled in since the last turn:
+// the whole point of the spool, and the only defense an agent has against
+// rewriting a file that moved underneath it. Advisory — nothing blocks.
+//
+// Each path is translated into what the agent sees from the folder the hook
+// ran in, using the same placement hookLinkFor computed for the links: a
+// mount below that folder prepends its prefix, a run inside a mount strips
+// its own subpath (and paths outside it are not the agent's to re-read).
+func hookChanged(links []hookLink) string {
+	var paths []string
+	over := 0
+	for _, l := range links {
+		for _, e := range l.paths {
+			p, ok := hookAgentPath(l, e.Path)
+			if !ok {
+				continue
+			}
+			if len(paths) >= hookChangedMax {
+				over++
+				continue
+			}
+			if e.Deleted {
+				p += " (deleted)"
+			}
+			paths = append(paths, "`"+p+"`")
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	s := "Changed since your last turn by a teammate or another device — re-read before editing: " + strings.Join(paths, ", ")
+	if over > 0 {
+		s += fmt.Sprintf(", +%d more", over)
+	}
+	return s + "."
+}
+
+// hookAgentPath maps one mount-relative spool path to the path an agent
+// writes, reporting false for paths the agent cannot reach from here.
+func hookAgentPath(l hookLink, path string) (string, bool) {
+	switch {
+	case l.prefix != "":
+		return l.prefix + path, true
+	case l.sub != "":
+		// The session runs inside the mount: its own subpath is implicit in
+		// every path it writes, so strip it — and a sibling folder's file is
+		// outside this session's view entirely.
+		rest, ok := strings.CutPrefix(path, l.sub+"/")
+		return rest, ok
+	default:
+		return path, true
+	}
 }

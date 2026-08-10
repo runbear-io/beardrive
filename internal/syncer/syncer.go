@@ -1121,6 +1121,11 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 				continue
 			}
 			pruneEmptyDirs(s.Folder, filepath.Dir(abs))
+			// Tell the next agent turn what vanished under it. Best-effort:
+			// a spool failure must never fail a cycle. Only the branch that
+			// actually unlinked a file logs — the paths below it were already
+			// gone locally, so nothing changed under the agent.
+			_ = s.Store.LogInbound(rel, true)
 		}
 		delete(cache, rel)
 		changed++
@@ -1163,6 +1168,15 @@ func (s *Session) materializeFile(rel string, want journal.FileState, cache map[
 		return false, err
 	}
 	cache[rel] = store.CachedFile{Blob: want.Blob, Size: fi.Size(), Mode: want.Mode, MTimeNS: fi.ModTime().UnixNano()}
+	// Spool it for the next agent turn ("changed since your last turn"). Only
+	// peer content reaches here — a local edit is journaled by the scan and
+	// lands in the cache, so the compare above short-circuits before any
+	// write. Best-effort: a spool failure must never fail a cycle.
+	//
+	// Known trade: the first cycle on a fresh mount materializes the whole
+	// project, so that one turn's list is "everything" — bounded by the
+	// hook's render cap, and cheaper than special-casing an empty cache.
+	_ = s.Store.LogInbound(rel, false)
 	return true, nil
 }
 
