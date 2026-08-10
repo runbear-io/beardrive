@@ -1,0 +1,22 @@
+# docs.beardrive.ai
+#
+# The Sitemap line is why this file exists. robots.txt is the one place a
+# crawler looks without being told, and until this existed the docs sitemap
+# was reachable only by guessing its URL or by submitting it in Search
+# Console — the landing page's sitemap is on a different host and can't
+# point here.
+#
+# Everything is allowed, including every AI crawler. That is the same posture
+# as the landing's robots.txt, which spells each agent out one by one; this
+# file doesn't need to, and the difference is not an oversight. That file
+# carries Disallow rules for the hub's own routes (/api/, /auth/, /s/ — the
+# app shares its origin), and a named user-agent stops reading the `*` group
+# entirely, so each one has to be re-granted access explicitly. Nothing on
+# this host is private, so nothing is disallowed, so one group covers all of
+# them. Add a Disallow here and that stops being true — restore the
+# enumeration if you ever do.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://docs.beardrive.ai/sitemap-index.xml
