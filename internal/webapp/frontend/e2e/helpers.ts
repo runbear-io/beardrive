@@ -31,6 +31,10 @@ export async function login(page: Page, email: string = ADMIN) {
   sessions.set(email, await page.context().cookies());
 }
 
+// Note for anything that scrolls or screenshots a route: the document itself
+// never scrolls — #content is the one scroll container. A full-page screenshot
+// stops at the viewport and window.scrollTo does nothing; scroll #content.
+
 export async function wikiId(page: Page): Promise<string> {
   const out = await (await page.request.get("/api/projects")).json();
   return out.projects.find((p: { name: string }) => p.name === "wiki").id;
