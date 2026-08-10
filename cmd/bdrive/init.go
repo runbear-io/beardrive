@@ -182,6 +182,16 @@ the folder was renamed or moved.`,
 					"this device's credentials and every project's local data, so this is not a "+
 					"project folder", folder, home)
 			}
+			// Same hole one directory over, and the one a user told to "sync
+			// my skills" walks straight into with `bdrive init ~/.claude`.
+			// filepath.Base on the already-absolute folder is the whole
+			// check — no lookup that an unresolvable path could disable.
+			if config.AgentConfigDir(filepath.Base(folder)) {
+				return fmt.Errorf("%s is an agent's configuration directory: the reserved-path rule "+
+					"only covers segments BELOW a mount root, so mounting it makes settings.json, "+
+					".credentials.json and your saved sessions ordinary top-level files that sync "+
+					"to the whole team. Sync %s instead", folder, filepath.Join(folder, "skills"))
+			}
 			if projectID != "" && projectName != "" {
 				return fmt.Errorf("--project and --name are mutually exclusive")
 			}

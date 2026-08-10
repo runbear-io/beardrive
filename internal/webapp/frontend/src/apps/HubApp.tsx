@@ -202,6 +202,25 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       }
     : null;
 
+  // Same rule as orgMissing, for the project id: a deep link to an id that is
+  // not yours is not a landing. `current` still resolves (the fallback chain
+  // above is untouched) — it is what the sidebar shows and where "back" points.
+  const projectMissing = !!route.project && !projects.some((p) => p.id === route.project);
+  const projectPage = projectMissing
+    ? {
+        crumb: "Project",
+        body: (
+          <div className="empty">
+            <h3>Project not found</h3>
+            <p>This project doesn't exist, or you're no longer a member.</p>
+            <p>
+              <a {...linkProps("/" + current.id)}>Back to {current.name}</a>
+            </p>
+          </div>
+        ),
+      }
+    : null;
+
   // Billing is hub-level (the managed deployment's surface), not
   // project-scoped — like the org route it borrows whichever project the
   // sidebar is showing. An OSS hub has no billing block; a hand-typed
@@ -249,35 +268,38 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           }
         : null;
 
-  // Landing ("/") and unknown project ids both resolve to a real project
-  // URL; replace so back/forward never bounces through the redirect. The
-  // org route is not project-scoped, so it is exempt — it borrows whichever
-  // project the sidebar is showing.
-  if (!route.org && !route.billing && route.project !== current.id) {
-    return <Redirect to={"/" + current.id} />;
-  }
+  // Every redirect below rewrites the address bar off `current.id`, so all of
+  // them are wrong for a bogus deep link: /bad-id, /bad-id/insights and
+  // /bad-id/notes/ would each swap in another project and drop the path.
+  // projectMissing renders instead (projectPage above) at the URL as typed.
+  if (!projectMissing) {
+    // Landing ("/") resolves to a real project URL; replace so back/forward
+    // never bounces through the redirect. The org route is not project-scoped,
+    // so it is exempt — it borrows whichever project the sidebar is showing.
+    if (!route.org && !route.billing && route.project !== current.id) {
+      return <Redirect to={"/" + current.id} />;
+    }
 
-  // A renamed view URL (/insights) still resolves; swap it for the current
-  // one so there is one live URL per page. Filters ride along: the hop is a
-  // rename, not a reset, and dropping them would silently widen the feed.
-  if (route.legacyView && route.view) {
-    return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
-  }
+    // A renamed view URL (/insights) still resolves; swap it for the current
+    // one so there is one live URL per page. Filters ride along: the hop is a
+    // rename, not a reset, and dropping them would silently widen the feed.
+    if (route.legacyView && route.view) {
+      return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
+    }
 
-  // /history?path=guide.md resolved to guide.md's feed (the query form is
-  // what the History API teaches); put the canonical path URL in the address
-  // bar. Below the unknown-project redirect for the same reason the trailing
-  // slash one is: normalizing on a bad project id would pin the wrong project.
-  if (route.queryTarget && route.view) {
-    return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
-  }
+    // /history?path=guide.md resolved to guide.md's feed (the query form is
+    // what the History API teaches); put the canonical path URL in the address
+    // bar.
+    if (route.queryTarget && route.view) {
+      return <Redirect to={urlForView(route.view, current.id, route.viewTarget, route.filters)} />;
+    }
 
-  // /notes/ is the same page as /notes — resolve it, then take the slash off
-  // the address bar. After the rewrite the flag is false, so there is no
-  // second hop. Must stay below the unknown-project redirect above, or a bad
-  // project id would be normalized on the path and keep the wrong project.
-  if (route.trailingSlash && route.path) {
-    return <Redirect to={urlForPath(route.path, current.id, route.version)} />;
+    // /notes/ is the same page as /notes — resolve it, then take the slash off
+    // the address bar. After the rewrite the flag is false, so there is no
+    // second hop.
+    if (route.trailingSlash && route.path) {
+      return <Redirect to={urlForPath(route.path, current.id, route.version)} />;
+    }
   }
 
   return (
@@ -339,7 +361,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         ),
         orgBar: accountBar,
       }}
-      panel={activePanel || orgPage || billingPage || routePage}
+      panel={activePanel || orgPage || projectPage || billingPage || routePage}
       onClosePanel={() => setPanel(null)}
       />
       {newProjectDialog}

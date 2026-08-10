@@ -220,6 +220,49 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   expect(gone.status()).toBe(404);
 });
 
+// BEA-111: sharing a file that looks like it holds credentials asks first.
+// Cancel mints nothing; Share anyway mints the link it would have.
+test("share on a file holding a key asks before it mints, and Cancel mints nothing", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/deploy.md`);
+
+  // Cancel: the dialog names the finding, and no link exists afterwards.
+  await page.click("#share-btn");
+  const dialog = page.locator(".modal", { hasText: "This file may contain credentials" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("an AWS access key (line 3)");
+  // The copy may only ever claim what was true at mint time.
+  await expect(dialog).toContainText("at the moment you share it");
+  await expect(dialog).toContainText("later changes are never checked");
+  // …and it must never echo the thing it found.
+  await expect(dialog).not.toContainText("AKIA");
+  await dialog.locator("button:has-text('Cancel')").click();
+  await expect(page.locator(".modal-url")).toHaveCount(0);
+  const before = await (await page.request.get(`/api/p/${pid}/shares`)).json();
+  expect(before.shares.filter((s: { path: string }) => s.path === "deploy.md")).toHaveLength(0);
+
+  // Share anyway: the same click, carried through.
+  await page.click("#share-btn");
+  await page.locator(".modal button:has-text('Share anyway')").click();
+  const url = (await page.locator(".modal-url").textContent())!;
+  expect(url).toContain("/s/");
+  const publicRes = await page.request.get(url);
+  expect(publicRes.status()).toBe(200);
+  await page.click(".modal button:has-text('Done')");
+
+  // Already public: a second Share hands back the same link without asking.
+  await page.reload();
+  await page.click("#share-btn");
+  await expect(page.locator(".modal", { hasText: "This file may contain credentials" })).toHaveCount(0);
+  expect(await page.locator(".modal-url").textContent()).toBe(url);
+  await page.click(".modal button:has-text('Done')");
+
+  await page.request.delete(`/api/shares/${url.split("/s/")[1]}`);
+});
+
 // BEA-29: the CLI has had --expires all along; the dialog now offers it on
 // the link you just minted, without changing that link's URL.
 test("share dialog sets an expiry on the link it just minted", async ({ page }) => {
@@ -515,7 +558,8 @@ test("history groups one agent run into a single card", async ({ page }) => {
   const run = page.locator(".hrun");
   await expect(run).toHaveCount(1);
   await expect(run.locator(".hrun-note")).toHaveText("claude-code session 8f21e4");
-  await expect(run.locator(".hrun-meta")).toContainText("2 files");
+  // Both halves of the run, since the seed gives it session reads (BEA-98).
+  await expect(run.locator(".hrun-meta")).toContainText("changed 2");
   await expect(run.locator(".hrun-meta")).toContainText("seed-agent");
   // Both of the run's changes live inside the card...
   await expect(run.locator(".hentry")).toHaveCount(2);
@@ -806,6 +850,24 @@ test("an old version of an extensionless file previews the same way", async ({ p
   // A bad sha still explains itself rather than previewing nothing.
   await page.goto(`/${pid}/sniff/LICENSE?v=${"0".repeat(64)}`);
   await expect(page.locator("#content .empty")).toContainText("That version isn't available.");
+});
+
+// BEA-83. A deep link to a project id you can't see used to swap in another
+// project and throw the path away, with nothing on screen to say so.
+test("a bogus project deep link says so and keeps the URL", async ({ page }) => {
+  await login(page);
+  await page.goto("/no-such-project-xyz/some/file.md");
+  await expect(page.locator("#content .empty")).toContainText("Project not found");
+  expect(page.url()).toContain("/no-such-project-xyz/some/file.md");
+  await expect(page.locator("#sidebar")).toBeVisible();
+  await page.reload(); // no bounce, no loop
+  await expect(page.locator("#content .empty")).toContainText("Project not found");
+  expect(page.url()).toContain("/no-such-project-xyz/some/file.md");
+  // The two other URL rewrites off current.id must not undo the fix either.
+  await page.goto("/no-such-project-xyz/insights");
+  expect(page.url()).toContain("/no-such-project-xyz/insights");
+  await page.goto("/no-such-project-xyz/notes/");
+  expect(page.url()).toContain("/no-such-project-xyz/notes/");
 });
 
 // BEA-81: an old URL for a file that has since been renamed or dragged into

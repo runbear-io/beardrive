@@ -28,7 +28,16 @@ func TestShippedTemplates(t *testing.T) {
 			if f.Path == "AGENTS.md" {
 				agents = f.Content
 			}
-			haveFileIn[path.Dir(f.Path)] = true
+			// Every ancestor, not just the direct parent: the rule's own
+			// reason is that an empty directory never reaches a teammate, and
+			// an intermediate directory on the way to a file is not empty.
+			// Marking only the parent made the check stricter than its reason
+			// and failed the first template more than one level deep. What it
+			// still catches is a genuinely file-less directory, which is all
+			// it ever claimed to.
+			for d := path.Dir(f.Path); d != "." && d != "/"; d = path.Dir(d) {
+				haveFileIn[d] = true
+			}
 
 			// The same rules cleanUploadPath applies, so the hub can never
 			// reject its own content.
@@ -69,6 +78,32 @@ func TestShippedTemplates(t *testing.T) {
 				t.Errorf("%s: directory %q holds no file, so it never syncs", tpl.Name, dir)
 			}
 		}
+	}
+}
+
+// The skills template is the first one whose payload is a dot-directory, and
+// go:embed drops paths beginning with "." unless the pattern is prefixed
+// `all:` — with no error anywhere. Without this test the template ships with
+// only its AGENTS.md and nothing fails.
+func TestSkillsTemplateShipsItsDotDirectory(t *testing.T) {
+	tpl, err := Get("skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found string
+	for _, f := range tpl.Files {
+		if strings.HasPrefix(f.Path, ".claude/skills/") && strings.HasSuffix(f.Path, "/SKILL.md") {
+			found = f.Path
+		}
+	}
+	if found == "" {
+		var paths []string
+		for _, f := range tpl.Files {
+			paths = append(paths, f.Path)
+		}
+		t.Fatalf("the skills template carries no .claude/skills/<name>/SKILL.md, only %v — "+
+			"check that the embed directive is `//go:embed all:files`; a plain `files` pattern "+
+			"drops dot-prefixed paths silently", paths)
 	}
 }
 

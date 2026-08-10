@@ -59,13 +59,23 @@ classDiagram
         -verify(ctx, sha) re-hash until sealed
         -blobStat(ctx, blob) remote.Object
         -sealed sync.Map sha→proved immutable
+        -jcache map key→cachedJournal
+        -jbytes int64 raw bytes cached
         -loadSourcedOps(ctx) []sourcedOp
+        -cacheJournals(keep, misses, parsed, sizes)
         -appendOp(ctx, op)
     }
     class sourcedOp {
         +Op journal.Op
         +From journal key's device
     }
+    class cachedJournal {
+        +size int64
+        +mod time.Time
+        +bytes int64
+        +ops []journal.Op
+    }
+    note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp rewrites its key with strictly more bytes — so the (Size, Modified) List already reports proves a parse is still current. That is why the cache needs no expiry and no new Backend method: loadSourcedOps still Lists on every request, and fetches only the keys whose size or mtime moved (concurrently, limit 8). History used to re-download and re-parse EVERY journal per page, which is what made it 8-10s and made paging cost more rather than less. Bounded by a per-project raw-byte cap with all-or-nothing eviction"
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
     class MoveSource {
@@ -248,6 +258,18 @@ classDiagram
     }
     note for ShareDB "A share is now re-checked at READ time, not only at mint time: shareCreatorStillBelongs refuses /s/&lt;token&gt; once its creator has left the project's org, so a link cannot outlive the access that justified it"
 
+    class secretScan {
+        <<secrets.go>>
+        secretScanLimit = 1 MiB
+        secretRules six anchored regexes
+        +scanSecrets(buf) []secretFinding
+    }
+    class secretFinding {
+        +Rule string
+        +Line int
+    }
+    note for secretScan "Mint-time gate on handleShareCreate: the one place a member turns private bytes into a public URL is the one place the bytes are read first. It returns rule ids and LINE NUMBERS only — the matched text never reaches a response body, a log line, or a metric label, the same rule ReadLedger keeps for actor identity. Bypassed by confirm:true (bdrive share --force, the UI's Share anyway) and by Server.alreadyPublic, since a path that already has a live link is public already. Fails CLOSED: an unreadable blob is 503, not a silent pass"
+
     class sandboxInline {
         <<Server, every bytes-out route>>
         inlineMarkup(ct) / inlineType(ct)
@@ -293,15 +315,23 @@ classDiagram
 
     class ReadLedger {
         -repo ReadRepo
-        -retention
-        -byKey, dirty, seen
+        -sessions SessionReadRepo
+        -retention, sessionRetention
+        -byKey, dirty, seen, pendingSess
         +Record(...)
+        +RecordSession(project, session, device, path)
         +Heat(project, prefix, days)
+        +SessionPaths(project, session, device)
+        +WithSessions(repo, days)
         +ShareOpens(project)
     }
     class ReadStat {
         +Project +Path +Day +Kind +Actor +Count +Last
     }
+    class SessionRead {
+        +Project +Session +Device +Path +Last
+    }
+    note for SessionRead "One row per (session, device, path) — the per-session detail a History run card joins its writes to, on the un-forgeable Op.Session and never on the note. Deliberately OUTSIDE ReadLedger.byKey: that map is loaded whole at boot and full-scanned by Heat on every request, hub-wide, so session cardinality in it would slow the Dashboard for projects that never ran an agent. Device is always the ownsDevice-validated id, never a client field, so a report naming someone else's session can only ever be found under the forger's own device. Its own, much shorter retention (session_retention_days, default 30) DELETES rather than folds — no heat total was ever derived from it"
     class HeatEntry {
         +Human +Agent +Share +Readers +LastRead
     }
@@ -361,6 +391,8 @@ classDiagram
     reservations *-- grant
     reservations ..> QuotaProvider : CheckWrite(size + outstanding), RecordUsage on landing
     ShareDB ..> QuotaProvider : CheckRead before the stream, RecordEgress after
+    Server ..> secretScan : handleShareCreate scans the first 1 MiB unless confirmed or alreadyPublic
+    secretScan ..> secretFinding
     Server ..> countingWriter : every bytes-out route that bills
     reservations ..> Backend : reconcile — did the blob land
     Server *-- journalDoor : /store/* is the only way a device writes
@@ -412,7 +444,9 @@ classDiagram
     DeviceRegistry ..> DeviceInfo
     DeviceRegistry *-- devKey : (account, id)
     RemoteSource ..> sourcedOp : attribution comes from the journal key
+    RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime
     ReadLedger ..> ReadStat
+    ReadLedger ..> SessionRead
     ReadLedger ..> HeatEntry
     ReadLedger ..> ShareOpen
     ShareDB ..> ShareOpen : shares list joins the open count per path
@@ -444,6 +478,7 @@ classDiagram
         +Shares() ShareRepo
         +Devices() DeviceRepo
         +Reads() ReadRepo
+        +SessionReads() SessionReadRepo
         +Close()
     }
 
@@ -498,7 +533,7 @@ classDiagram
         storable / storableMap
         checkAccount checkToken checkProject
         checkOrg checkInvite checkShare
-        checkDevice checkReadStat
+        checkDevice checkReadStat checkSessionRead
     }
     note for storable "Called at the top of every repo write in BOTH backends. A NUL byte or invalid UTF-8 in a name is accepted by JSON and rejected by Postgres, so the file backend used to persist rows the SQL backend would refuse — the same hub, migrated, would silently lose them. Refusing at one gate makes the two backends agree on what is storable"
     class ReadRepo {
@@ -506,6 +541,11 @@ classDiagram
         +Load() +PutBatch +DeleteBatch
     }
     note for ReadRepo "batch-oriented: one flush = one write"
+    class SessionReadRepo {
+        <<interface>>
+        +PutBatch +ListBySession +PruneBefore
+    }
+    note for SessionReadRepo "read_sessions / sessions.json — never Load()ed whole; queried by (project, session, device) and pruned by date, which is what keeps the boot load and Heat's scan the size they are today"
 
     class fileMetaStore {
         JSON files, atomic rewrite per change
@@ -528,6 +568,7 @@ classDiagram
     MetaStore *-- ShareRepo
     MetaStore *-- DeviceRepo
     MetaStore *-- ReadRepo
+    MetaStore *-- SessionReadRepo
 
     class BuiltinAuth
     class ProjectDB
@@ -542,6 +583,7 @@ classDiagram
     ShareDB o-- ShareRepo
     DeviceRegistry o-- DeviceRepo
     ReadLedger o-- ReadRepo
+    ReadLedger o-- SessionReadRepo
 
     BuiltinAuth *-- versionGate
     ProjectDB *-- versionGate

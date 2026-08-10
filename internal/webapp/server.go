@@ -38,6 +38,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/templates"
@@ -327,7 +329,32 @@ type RemoteSource struct {
 	// sealed holds the blobs this process has verified AND proved immutable.
 	// See verify.
 	sealed sync.Map // sha (string) → struct{}
+
+	jmu    sync.Mutex               // guards jcache and jbytes
+	jcache map[string]cachedJournal // "journal/<dev>.jsonl" → parsed ops
+	jbytes int64                    // raw journal bytes currently cached
 }
+
+// cachedJournal is one journal's parsed ops plus the (size, modified) that
+// proves the parse is still current. See loadSourcedOps.
+type cachedJournal struct {
+	size  int64
+	mod   time.Time
+	bytes int64 // raw bytes this entry stands for, for the ceiling
+	ops   []journal.Op
+}
+
+// journalFetchConcurrency bounds the parallel journal fetches on a cold load.
+// A cache can never help a first request, and that loop is one serial round
+// trip to S3 per device that has ever synced the project.
+const journalFetchConcurrency = 8
+
+// ponytail: a per-project raw-byte cap with all-or-nothing eviction, so the
+// real ceiling is maxCachedJournalBytes x the number of projects a hub has
+// touched since start — s.vols never evicts. Closing it properly means one
+// budget shared across RemoteSources with LRU, or reading only the appended
+// tail of each journal, which makes the cache small in the first place.
+const maxCachedJournalBytes = 64 << 20
 
 // OpenBlob is the one way a blob's bytes leave the hub, and on a hub whose
 // storage can presign it is also the only place left that can tell a content
@@ -464,35 +491,120 @@ type sourcedOp struct {
 	From string
 }
 
+// loadSourcedOps folds every journal on the remote into one slice of ops. It
+// is the funnel every reader goes through — history, folder listings, restore,
+// and the hub's own appendOp — so re-downloading and re-parsing every journal
+// here was the whole cost of a history page, paid again per "load more".
+//
+// Journals only ever GROW: a device appends only to its own (the one-writer
+// invariant) and the hub's appendOp rewrites its key with strictly more bytes.
+// Nothing shrinks or rewrites one in place, so the (Size, Modified) that List
+// already reports proves a parse we still hold is current — no staleness
+// window, no time-based expiry, and no new Backend method. The List is the one
+// round trip every request still pays.
+//
+// No singleflight: two requests that miss the same journal at the same moment
+// both fetch it, which is what every request did before this existed.
 func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) {
 	objs, err := r.Backend.List(ctx, "journal/")
 	if err != nil {
 		return nil, fmt.Errorf("list journals: %w", err)
 	}
-	var all []sourcedOp
+	keep := make([]remote.Object, 0, len(objs))
 	for _, o := range objs {
-		if !strings.HasSuffix(o.Key, ".jsonl") {
+		if strings.HasSuffix(o.Key, ".jsonl") {
+			keep = append(keep, o)
+		}
+	}
+
+	parsed := make([][]journal.Op, len(keep))
+	var misses []int
+	r.jmu.Lock()
+	// Pruning here rather than after the fetch: a journal that VANISHED is a
+	// pass with no misses at all, so a prune on the store path would never see
+	// it and the entry would stay resident for the life of the process.
+	live := make(map[string]bool, len(keep))
+	for i, o := range keep {
+		live[o.Key] = true
+		if c, ok := r.jcache[o.Key]; ok && c.size == o.Size && c.mod.Equal(o.Modified) {
+			parsed[i] = c.ops
 			continue
 		}
-		rc, err := r.Backend.Get(ctx, o.Key)
-		if err != nil {
-			return nil, fmt.Errorf("fetch %s: %w", o.Key, err)
+		misses = append(misses, i)
+	}
+	for k, c := range r.jcache {
+		if !live[k] {
+			r.jbytes -= c.bytes
+			delete(r.jcache, k)
 		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
+	}
+	r.jmu.Unlock()
+
+	if len(misses) > 0 {
+		sizes := make([]int64, len(keep))
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(journalFetchConcurrency)
+		for _, i := range misses {
+			g.Go(func() error {
+				rc, err := r.Backend.Get(gctx, keep[i].Key)
+				if err != nil {
+					return fmt.Errorf("fetch %s: %w", keep[i].Key, err)
+				}
+				data, err := io.ReadAll(rc)
+				rc.Close()
+				if err != nil {
+					return err
+				}
+				sizes[i] = int64(len(data))
+				// A corrupt journal is ignored rather than breaking the view —
+				// and cached as zero ops, or it is re-downloaded on every
+				// request for as long as it stays corrupt.
+				if ops, err := journal.Parse(data); err == nil {
+					parsed[i] = ops
+				}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
 			return nil, err
 		}
-		ops, err := journal.Parse(data)
-		if err != nil {
-			continue // corrupt journal; ignore rather than break the view
-		}
+		r.cacheJournals(keep, misses, parsed, sizes)
+	}
+
+	// A fresh outer slice on every call: handleHistory and Files both sort what
+	// they are handed, and the cached ops must never be the thing they reorder.
+	// journal.Op is all value fields, so appending one copies it.
+	var all []sourcedOp
+	for i, o := range keep {
 		from := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
-		for _, op := range ops {
+		for _, op := range parsed[i] {
 			all = append(all, sourcedOp{Op: op, From: from})
 		}
 	}
 	return all, nil
+}
+
+// cacheJournals records what the fetch pass parsed, and enforces the byte
+// ceiling by dropping everything — a cold pass costs what every pass cost
+// before this cache existed, so the fallback is today's behavior, not an error.
+func (r *RemoteSource) cacheJournals(keep []remote.Object, misses []int, parsed [][]journal.Op, sizes []int64) {
+	r.jmu.Lock()
+	defer r.jmu.Unlock()
+	if r.jcache == nil {
+		r.jcache = make(map[string]cachedJournal, len(keep))
+	}
+	for _, i := range misses {
+		if c, ok := r.jcache[keep[i].Key]; ok {
+			r.jbytes -= c.bytes
+		}
+		r.jcache[keep[i].Key] = cachedJournal{
+			size: keep[i].Size, mod: keep[i].Modified, bytes: sizes[i], ops: parsed[i],
+		}
+		r.jbytes += sizes[i]
+	}
+	if r.jbytes > maxCachedJournalBytes {
+		r.jcache, r.jbytes = nil, 0
+	}
 }
 
 func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
@@ -1299,6 +1411,13 @@ func storageErr(w http.ResponseWriter, code int, msg string, err error) {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+// writeJSONStatus is writeJSON for the answers a client has to read the body
+// of — a 409 whose findings the CLI and the browser both decode.
+func writeJSONStatus(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
 }

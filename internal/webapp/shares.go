@@ -249,6 +249,7 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 	var req struct {
 		Path      string `json:"path"`
 		ExpiresIn string `json:"expires_in,omitempty"` // Go duration, e.g. "168h"
+		Confirm   bool   `json:"confirm,omitempty"`    // share it anyway, secrets and all
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
@@ -275,6 +276,33 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	if !req.Confirm && !s.alreadyPublic(r.PathValue("project"), p) {
+		rc, err := v.source.Open(r.Context(), p, snap.files[p])
+		if err != nil {
+			// Fails CLOSED. The repo's "degrade rather than fail" posture is for
+			// sync cycles; minting is a rare interactive action, and a check
+			// that skips itself on a storage hiccup is exactly the false
+			// confidence this gate exists to remove.
+			storageErr(w, http.StatusServiceUnavailable, "could not read the file to check it for credentials", err)
+			return
+		}
+		// 1 MiB and close: source.Open streams from the object store, so this
+		// aborts the rest of the transfer rather than pulling a 500 MB file
+		// down to look at its first megabyte. Don't "fix" it into a ReadAll.
+		buf, err := io.ReadAll(io.LimitReader(rc, secretScanLimit))
+		rc.Close()
+		if err != nil {
+			storageErr(w, http.StatusServiceUnavailable, "could not read the file to check it for credentials", err)
+			return
+		}
+		if findings := scanSecrets(buf); len(findings) > 0 {
+			writeJSONStatus(w, http.StatusConflict, map[string]any{
+				"error":    "this file looks like it contains credentials",
+				"findings": findings,
+			})
+			return
+		}
+	}
 	sh, err := s.Shares.Create(r.PathValue("project"), p, s.requestUser(r).Email, ttl)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -282,6 +310,28 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 	}
 	// No opens: a freshly minted link has nothing to report.
 	writeJSON(w, shareJSON(r, sh, nil))
+}
+
+// alreadyPublic reports whether this path is already served to anyone with a
+// URL. If it is, minting skips the credential scan: the content is public
+// already, so withholding the link protects nothing and would break the
+// "clicking Share again gives me the same link" behaviour the dialog is built
+// on.
+//
+// It cannot key off ShareDB.Create's reuse branch, which is narrower (that one
+// also requires no expiry on either side), and it has to drop links whose
+// creator left the org — those 404 at /s/ (shareCreatorStillBelongs), so a
+// secrets file whose only link is already dead must not wave through.
+func (s *Server) alreadyPublic(project, p string) bool {
+	if s.Shares == nil {
+		return false
+	}
+	for _, sh := range s.Shares.List(project) { // List already drops expired
+		if sh.Path == p && s.shareCreatorStillBelongs(sh) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleShareList(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -587,12 +637,17 @@ footer.bdrive a{color:inherit}
 /* Dark theme LAST: these rules sit at the same specificity as the light ones
    above, so source order is the whole fix — a dark block placed earlier loses
    to every light rule that follows it. Values are the hub's @theme tokens
-   (frontend/src/tw.css), never hand-picked, so the two surfaces agree. */
+   (frontend/src/tw.css), never hand-picked, so the two surfaces agree.
+   Inline code carries its own tint and edge so a chip reads as code and not
+   as prose; the edge is an inset shadow rather than a border because a border
+   would change the chip's box metrics and light mode has to stay untouched. */
 @media (prefers-color-scheme: dark){
 body{background:#0a0b0d;color:#eef0f3}
 a{color:#ffcf85}
 h1,h2,h3{color:#eef0f3}
 pre,code{background:#15171b}
+code{color:#e4d9c4;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07)}
+pre code{color:inherit;box-shadow:none}
 blockquote{border-left-color:rgba(255,255,255,.07);color:#9aa0a9}
 td,th{border-color:rgba(255,255,255,.07)}
 table.frontmatter{background:#15171b;color:#9aa0a9}

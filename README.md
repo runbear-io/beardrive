@@ -109,6 +109,13 @@ actually read (and which hot ones nobody maintains).
 - **Conflict-safe** — concurrent edits resolve deterministically
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file. Nothing is silently dropped.
+- **Your agent's skills sync too** — `.claude/skills`, `.claude/commands`,
+  `.claude/agents`, `AGENTS.md` and `CLAUDE.md` are ordinary files in the
+  project, so a skill one person writes is on every teammate's disk before
+  their agent's next turn — no export, no registry, no MCP server per client.
+  Agent **hook** configuration never syncs: sharing what an agent *reads* is
+  the product; sharing what it *runs* is not. Start a project from the
+  `skills` template (`bdrive init --template skills`) for the shape.
 - **Selective sync** — a gitignore-style `.bdriveignore` opts files out, and
   `bdrive init . --only wiki,docs` (or the interactive prompt) narrows a mount
   to some of its subfolders by writing those same rules for you.
@@ -229,11 +236,12 @@ hub's own storage, never something a syncing client points at directly:
 |---|---|
 | `bdrive login [server-url]` | Sign this device in (browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — revoke this device's token on the hub and clear it locally (`--forget` also drops the remembered server) |
-| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--template/--yes`) for scripts; `--template docs\|wiki\|para` starts the project from a structure (directories plus the `AGENTS.md` that explains them) instead of an empty folder; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
+| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--template/--yes`) for scripts; `--template docs\|wiki\|para\|skills` starts the project from a structure (directories plus the `AGENTS.md` that explains them) instead of an empty folder; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent; this is what the login agent runs |
 | `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot — a launchd user agent on macOS, a systemd user unit on Linux. `bdrive init` installs it; `--no-autostart` skips it |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes, so no one hand-writes negation syntax. The daemon picks changes up in seconds; `rm` deletes nothing, locally or on the hub. `--explain` lists every path in the folder split into what syncs and what does not, so you can verify what leaves this machine (pure read — no daemon, no lock, no network) |
+| `bdrive grep <pattern> [folder]` | Search the text **inside** the files a project syncs — Go RE2 regexp, or a literal with `-F`; `-i` ignores case, `-l` prints matching paths only, `-n` caps the lines printed (default 200, `0` = all). Output is `path:line: text`. Only files the project actually syncs are searched, so a `.bdriveignore` rule or a narrowed `bdrive scope` excludes a file from search exactly as it excludes it from sync; binary files are skipped. Pure local read — no daemon, no lock, no network, works offline and never blocks a sync in progress. Exit status 0 on match, 1 on none, so it composes in scripts |
 | `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
@@ -418,7 +426,7 @@ subfolders** (e.g. `./wiki`). Every question has a flag (`--name`,
 prompts — it creates-or-joins a project named after the folder, empty, and
 syncs everything.
 
-`--template docs`, `wiki` or `para` starts a **new** project from a
+`--template docs`, `wiki`, `para` or `skills` starts a **new** project from a
 structure rather than an empty folder: a small directory skeleton plus the
 `AGENTS.md` that tells an agent where a new note goes, when something is
 archived, and what a good filename looks like — which is the part that keeps
@@ -432,7 +440,7 @@ joining a project that already exists never restructures it, and
 `--template` is refused together with `--only` (scope rules live in the
 synced `.bdriveignore`, so a scope that left out the template's folders would
 hide them for the whole team). Creating a project in the web UI offers the
-same three starting points. It writes `.bdrive/config.json`, seeds a starter
+same starting points. It writes `.bdrive/config.json`, seeds a starter
 `.bdriveignore` (node_modules, build dirs, caches, `.env*`), and starts the
 daemon — local changes are detected within seconds, and the agent sync
 hooks sync at every turn boundary. Not signed in yet? init runs the login
@@ -485,8 +493,27 @@ carry a strict CSP, never see auth cookies, and sit behind a generous
 per-IP rate limit (`share_rpm`), so a malicious shared file's scripts
 can't touch hub sessions and a scraper can't turn the hub into a CDN.
 Any org member can mint links, and a link is public to whoever has the
-URL — don't share folders that hold secrets, and note a LAN-bound hub
-means LAN-only links.
+URL — note that a LAN-bound hub means LAN-only links.
+
+Before it mints, the hub reads the **first 1 MiB** of the file and refuses
+if it finds credential-shaped strings — an AWS access key, a private key
+block, a GitHub, Slack, GitLab or OpenAI token. It names the rule and the
+line, never the matched text, and nothing is shared:
+
+```
+$ bdrive share deploy.md
+Error: deploy.md looks like it contains credentials (checked at the moment you shared it):
+  line 12   aws_access_key_id
+  line 40   private_key
+Nothing was shared. Re-run with --force if that is intentional.
+```
+
+`--force` shares it anyway (the web UI's Share button asks the same
+question and offers **Share anyway**). Know the two limits: the check runs
+**at the moment you share**, and a link serves the file's latest content
+forever — so a key committed into an already-shared file is never caught —
+and it only reads the first 1 MiB. It shortens the odds; it is not a
+promise that a file is clean.
 
 ### Agent integration
 

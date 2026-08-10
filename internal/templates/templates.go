@@ -32,7 +32,16 @@ import (
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
-//go:embed files
+// all: rather than a plain pattern, because go:embed silently drops paths
+// beginning with "." — and the skills template's whole payload is
+// .claude/skills/<name>/SKILL.md. Without the prefix that template loads only
+// its AGENTS.md, with no error anywhere.
+//
+// The prefix also stops excluding "_"-prefixed files: nothing under files/
+// starts with "_" today, but from here on a stray _scratch.md in a template
+// directory ships into every project created from it.
+//
+//go:embed all:files
 var content embed.FS
 
 // File is one file of a template: a slash-separated path relative to the
@@ -57,6 +66,7 @@ var shipped = []struct{ Name, Title, Blurb string }{
 	{"docs", "Docs + decision records", "docs/, decisions/"},
 	{"wiki", "LLM wiki", "sources/, wiki/, index.md, log.md"},
 	{"para", "PARA", "projects/, areas/, resources/, archives/"},
+	{"skills", "Shared agent skills", ".claude/skills/"},
 }
 
 // List returns every shipped template, recommended first.

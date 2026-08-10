@@ -58,6 +58,7 @@ export function HistoryRow({
   remove,
   restoreSha,
   inRun,
+  read,
 }: {
   entry: HistoryEntry;
   // Its own prop, not something nested in `diff`: the version controls below
@@ -80,6 +81,9 @@ export function HistoryRow({
   // Inside a run card, where "this run created the file" is a statement we
   // can actually make.
   inRun?: boolean;
+  // The run that wrote this row also READ this path. Only ever set inside a
+  // run card, where a session id makes the join possible at all.
+  read?: boolean;
 }) {
   const [noteOpen, setNoteOpen] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
@@ -125,6 +129,13 @@ export function HistoryRow({
     >
       <div className="hline">
         <span className="hkind">{KIND_LABEL[kind] || kind}</span>
+        {/* The run read this file before it wrote it — the whole point of the
+            card, so it sits on the row rather than in a separate list. */}
+        {read && (
+          <span className="hread" title="This run read this file before changing it">
+            read
+          </span>
+        )}
         <span className="hpath">{e.path}</span>
         <span className="htime">{when}</span>
       </div>
