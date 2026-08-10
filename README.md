@@ -109,6 +109,13 @@ actually read (and which hot ones nobody maintains).
 - **Conflict-safe** — concurrent edits resolve deterministically
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file. Nothing is silently dropped.
+- **Your agent's skills sync too** — `.claude/skills`, `.claude/commands`,
+  `.claude/agents`, `AGENTS.md` and `CLAUDE.md` are ordinary files in the
+  project, so a skill one person writes is on every teammate's disk before
+  their agent's next turn — no export, no registry, no MCP server per client.
+  Agent **hook** configuration never syncs: sharing what an agent *reads* is
+  the product; sharing what it *runs* is not. Start a project from the
+  `skills` template (`bdrive init --template skills`) for the shape.
 - **Selective sync** — a gitignore-style `.bdriveignore` opts files out, and
   `bdrive init . --only wiki,docs` (or the interactive prompt) narrows a mount
   to some of its subfolders by writing those same rules for you.
@@ -229,7 +236,7 @@ hub's own storage, never something a syncing client points at directly:
 |---|---|
 | `bdrive login [server-url]` | Sign this device in (browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — revoke this device's token on the hub and clear it locally (`--forget` also drops the remembered server) |
-| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--template/--yes`) for scripts; `--template docs\|wiki\|para` starts the project from a structure (directories plus the `AGENTS.md` that explains them) instead of an empty folder; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
+| `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--template/--yes`) for scripts; `--template docs\|wiki\|para\|skills` starts the project from a structure (directories plus the `AGENTS.md` that explains them) instead of an empty folder; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent; this is what the login agent runs |
 | `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot — a launchd user agent on macOS, a systemd user unit on Linux. `bdrive init` installs it; `--no-autostart` skips it |
 | `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
@@ -419,7 +426,7 @@ subfolders** (e.g. `./wiki`). Every question has a flag (`--name`,
 prompts — it creates-or-joins a project named after the folder, empty, and
 syncs everything.
 
-`--template docs`, `wiki` or `para` starts a **new** project from a
+`--template docs`, `wiki`, `para` or `skills` starts a **new** project from a
 structure rather than an empty folder: a small directory skeleton plus the
 `AGENTS.md` that tells an agent where a new note goes, when something is
 archived, and what a good filename looks like — which is the part that keeps
@@ -433,7 +440,7 @@ joining a project that already exists never restructures it, and
 `--template` is refused together with `--only` (scope rules live in the
 synced `.bdriveignore`, so a scope that left out the template's folders would
 hide them for the whole team). Creating a project in the web UI offers the
-same three starting points. It writes `.bdrive/config.json`, seeds a starter
+same starting points. It writes `.bdrive/config.json`, seeds a starter
 `.bdriveignore` (node_modules, build dirs, caches, `.env*`), and starts the
 daemon — local changes are detected within seconds, and the agent sync
 hooks sync at every turn boundary. Not signed in yet? init runs the login
