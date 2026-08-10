@@ -283,6 +283,14 @@ classDiagram
         +Token +Project +Path +Creator +Expires
     }
 
+    class mermaidTag {
+        &lt;&lt;shares.go, the .md branch&gt;&gt;
+        body contains language-mermaid?
+        → module script tag, else ""
+        sharedMarkdownShell verb 2 of 4
+    }
+    note for mermaidTag "A share page is a zero-JavaScript document and stays one unless the document it renders actually has a diagram — the server already holds the rendered HTML, so it can decide. The tag is a MODULE, which only loads because frontend() now sets Access-Control-Allow-Origin on real assets: under this page's `sandbox allow-scripts` the origin is opaque, so a module and every import() it makes are fetched with Origin: null. The CSP itself is unchanged, and no allow-same-origin was added — the sandbox is what keeps shared content off the hub's origin"
+
     class DeviceRegistry {
         -repo DeviceRepo
         -byKey devKey → row
@@ -432,6 +440,7 @@ classDiagram
     projectPerm ..> Project : Perms + Default
     projectPerm ..> Directory : org role
     ShareDB ..> Share
+    ShareDB ..> mermaidTag : markdown shares only
     DeviceRegistry ..> DeviceInfo
     DeviceRegistry *-- devKey : (account, id)
     RemoteSource ..> sourcedOp : attribution comes from the journal key

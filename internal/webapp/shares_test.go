@@ -486,6 +486,41 @@ func TestShareDarkThemeIsLast(t *testing.T) {
 	}
 }
 
+// A share page is a zero-JavaScript document, and it stays one unless the
+// document it renders actually has a diagram in it. The tag is the whole cost
+// of the feature for every other share page on the hub, so it is worth a test
+// that it isn't paid — and that the CSP sandbox that makes the tag work at all
+// is unchanged.
+func TestShareMermaidScriptOnlyWhenNeeded(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	f.put("dev1", "wiki/diagram.md", "# D\n\n```mermaid\ngraph TD\n  A --> B\n```\n")
+
+	tag := `<script type="module" src="/share-mermaid.js"></script>`
+
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/diagram.md")
+	rec := do(t, h, "GET", "/s/"+token, nil)
+	body := rec.Body.String()
+	if !strings.Contains(body, tag) {
+		t.Errorf("a document with a mermaid fence must load the script: %s", body)
+	}
+	if strings.Contains(body, "%!") {
+		t.Errorf("format verb leaked into the page: %s", body)
+	}
+	// The tag only works because the page is sandboxed with scripts allowed
+	// and its origin is opaque; adding allow-same-origin to make loading
+	// easier would hand shared content the hub's origin.
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-popups" {
+		t.Errorf("share CSP = %q, want the unchanged sandbox", csp)
+	}
+
+	// wiki/notes.md has no fence: not one byte of mermaid.
+	plain, _ := authedShare(t, srv, h, p.ID, "wiki/notes.md")
+	if b := do(t, h, "GET", "/s/"+plain, nil).Body.String(); strings.Contains(b, "share-mermaid") ||
+		strings.Contains(b, "<script") {
+		t.Errorf("a share page without a diagram must ship no script: %s", b)
+	}
+}
+
 // listShares reads the project's share list as the signed-in sharer.
 func listShares(t *testing.T, srv *Server, h http.Handler, project string) []map[string]any {
 	t.Helper()

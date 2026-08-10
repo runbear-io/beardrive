@@ -288,6 +288,13 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	// content, so their rows stay unclickable while every other row is now an
 	// address for its own version.
 	put("scratch.md", "# Scratch\n\nTemporary.\n", 12*time.Hour)
+	// One good fence and one deliberately broken one on the same page: the
+	// point of the fallback is that a diagram nobody can parse doesn't take
+	// the diagrams around it down with it. Appended LAST on purpose — the
+	// mutations above address ops by index, so an insert anywhere earlier
+	// hands one file's author or note to another file.
+	put("diagram.md", "# Diagram\n\n```mermaid\ngraph TD\n  A[Agent] --> B[Hub]\n  B --> C[Teammate]\n```\n\n"+
+		"Broken one below.\n\n```mermaid\ngraph TD\n  A[[[[ --> ???\n```\n", 24*time.Hour)
 	lam++
 	seq++
 	ops = append(ops, journal.Op{

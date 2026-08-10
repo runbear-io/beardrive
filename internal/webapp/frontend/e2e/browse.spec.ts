@@ -1013,3 +1013,51 @@ test("a wide csv scrolls inside its own box at 390px", async ({ page }) => {
     await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1),
   ).toBe(false);
 });
+
+test("mermaid: a good fence renders, a broken one keeps its code block", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/diagram.md`);
+  // The valid fence became a diagram...
+  const svg = page.locator("#content .mermaid-diagram svg");
+  await expect(svg).toHaveCount(1);
+  await expect(svg).toContainText("Teammate");
+  // ...and the broken one below it kept today's <pre><code> plus a note. One
+  // bad fence must not take the good one on the same page down with it.
+  await expect(page.locator("#content pre code.language-mermaid")).toHaveCount(1);
+  await expect(page.locator("#content .mermaid-err")).toHaveText("Couldn't render this diagram.");
+});
+
+test("a file with no mermaid fence fetches no mermaid chunk", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  // mermaid.core is the library; the *Diagram-* chunks are its per-grammar
+  // splits. lib/mermaid.ts itself is a static import of the app entry (a few
+  // KB of gate, no mermaid code in it), which is exactly why the gate is a
+  // plain string check and not something that has to load mermaid to answer.
+  const fetched: string[] = [];
+  page.on("request", (r) => /mermaid\.core|Diagram-/.test(r.url()) && fetched.push(r.url()));
+  await page.goto(`/${pid}/guide.md`);
+  await expect(page.locator("#content")).toContainText("Second version");
+  await page.waitForTimeout(500);
+  expect(fetched).toEqual([]);
+});
+
+test("a shared diagram renders on the public page, without one there is no script", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const mint = async (path: string) =>
+    (await (await page.request.post(`/api/p/${pid}/shares`, { data: { path } })).json()).token;
+
+  // Diagram-free share pages stay the zero-JavaScript document they were.
+  const plain = await page.request.get(`/s/${await mint("index.md")}`);
+  expect(await plain.text()).not.toContain("<script");
+
+  await page.goto(`/s/${await mint("diagram.md")}`);
+  const svg = page.locator(".mermaid-diagram svg");
+  await expect(svg).toHaveCount(1);
+  await expect(svg).toContainText("Teammate");
+  await expect(page.locator(".mermaid-err")).toHaveText("Couldn't render this diagram.");
+});

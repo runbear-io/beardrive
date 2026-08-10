@@ -291,8 +291,8 @@ removal and simply stops tracking the path.
 ## Web server
 
 `bdrive serve` serves a website — browse folders and files, read markdown
-rendered Obsidian-style (including `[[wikilinks]]`, task lists, and
-tables), download any file — and, pointed at a storage root, becomes a
+rendered Obsidian-style (including `[[wikilinks]]`, task lists, tables,
+and ```` ```mermaid ```` diagrams), download any file — and, pointed at a storage root, becomes a
 **multi-project sync hub**. It is read-only unless started with `--upload`.
 
 ```sh

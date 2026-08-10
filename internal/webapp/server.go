@@ -45,7 +45,14 @@ import (
 	"github.com/runbear-io/beardrive/internal/templates"
 )
 
-//go:embed static
+// all:, not a bare `static` — a bare embed silently skips every file whose
+// name begins with `_` or `.`, and Vite names shared chunks after the module
+// they came from (`_commonjsHelpers-<hash>.js` is the first one this build
+// produces). The miss is invisible at build time and total at runtime: the
+// chunk 404s, the SPA fallback answers with index.html, and the browser
+// refuses the whole entry over its MIME type — a blank app, not a degraded one.
+//
+//go:embed all:static
 var staticFiles embed.FS
 
 // Source supplies the file set and content of one volume. Implementations:
@@ -820,6 +827,18 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 					if strings.HasPrefix(upath, "assets/") {
 						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 					}
+					// The /s/ share page runs under `sandbox allow-scripts`, so
+					// its origin is opaque: a module script and every import()
+					// it makes are fetched with `Origin: null` and blocked
+					// without this. That is how share-mermaid.js and mermaid's
+					// chunks reach a share page at all.
+					//
+					// On the real asset ONLY, never on the index.html fallback
+					// below: these files are already public, unauthenticated
+					// and cookie-less, and `*` forbids credentialed requests by
+					// definition, so this grants a cross-origin reader nothing
+					// it could not already fetch in no-cors mode.
+					w.Header().Set("Access-Control-Allow-Origin", "*")
 					files.ServeHTTP(w, r) // a real asset
 					return
 				}
