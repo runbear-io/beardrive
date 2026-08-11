@@ -253,6 +253,12 @@ func statusCmd() *cobra.Command {
 					case store.AccessNone:
 						fmt.Printf("  access:   no access to this project — sync paused\n")
 					}
+					// `status` is the command someone runs when sync is stuck, and
+					// it never talks to the hub — so the refusal it reports is only
+					// as useful as the reason the last cycle recorded with it.
+					if st.AccessReason != "" {
+						fmt.Printf("  reason:   %s\n", safeField(st.AccessReason, 300))
+					}
 				}
 			}
 			return nil

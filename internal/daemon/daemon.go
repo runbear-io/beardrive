@@ -449,7 +449,11 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			lastRemote = time.Now()
 		case res.ReadOnly:
 			if lastAccess != store.AccessReadOnly {
-				log.Printf("read-only on this project, pulling only; local changes stay on this device")
+				if reason := res.Reason(); reason != "" {
+					log.Printf("read-only on this project, pulling only; local changes stay on this device (%s)", reason)
+				} else {
+					log.Printf("read-only on this project, pulling only; local changes stay on this device")
+				}
 				lastAccess = store.AccessReadOnly
 			}
 			lastRemote = time.Now()
@@ -461,7 +465,12 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 			lastRemote = time.Now()
 		default:
-			if lastAccess != store.AccessOK {
+			// "access restored" is a claim about the hub, and a local-only tick
+			// never asked it one. Announcing it there is what made a refused
+			// device alternate between this line and the read-only one every few
+			// seconds: three cheap scan ticks run between remote passes, each
+			// cleared the flag, and the next remote pass set it again.
+			if doRemote && lastAccess != store.AccessOK {
 				log.Printf("access restored; syncing normally")
 				lastAccess = store.AccessOK
 			}

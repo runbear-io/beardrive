@@ -133,9 +133,17 @@ func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string) 
 			// machine's token (DeviceRegistry.Bind), which is a moment the hub
 			// authenticates and the machine cannot forge. So an unowned id is
 			// simply not anybody's to write, and the remedy is to sign in.
+			// "run `bdrive login`" alone sent one user in a circle for an
+			// afternoon: the binding is made by the login request naming its
+			// device, which a CLI older than this gate does not do, so signing in
+			// again succeeded, changed nothing, and every push kept 403ing with
+			// the same sentence. The hub and the CLI deploy separately, so the
+			// skew is the expected state right after this ships — the refusal has
+			// to name the upgrade, not just the command.
 			http.Error(w, "this device is not registered to your account on this hub; "+
-				"run `bdrive login` on this machine (if the id belongs to someone else, "+
-				"delete device.json in your BearDrive home first, or ask a project admin)",
+				"update bdrive, then run `bdrive login` on this machine (an older CLI signs in "+
+				"without registering its device). If the id belongs to someone else, delete "+
+				"device.json in your BearDrive home first, or ask a project admin",
 				http.StatusForbidden)
 			return false
 		}

@@ -179,6 +179,16 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// printReason prints the hub's stated reason under a refusal line. "read-only"
+// is a summary of the STATUS code; the sentence under it is the only thing that
+// tells a device-registration 403 apart from a project the user really is a
+// reader on — and only one of those is fixed by signing in again.
+func printReason(reason string) {
+	if reason != "" {
+		fmt.Printf("                  %s\n", safeField(reason, 300))
+	}
+}
+
 func printCycle(res *syncer.Result) {
 	fmt.Printf("  local changes:  %d\n", res.LocalOps)
 	fmt.Printf("  pulled changes: %d\n", res.PulledOps)
@@ -192,8 +202,10 @@ func printCycle(res *syncer.Result) {
 	switch {
 	case res.NoAccess:
 		fmt.Printf("  remote:         no access — sync paused (ask a project admin for access)\n")
+		printReason(res.Reason())
 	case res.ReadOnly:
 		fmt.Printf("  remote:         read-only (pull only) — local changes stay on this device\n")
+		printReason(res.Reason())
 	case res.Pushed && res.OfflineErr != nil:
 		// Offline is a report, not a gate (see syncer.Result): a content-level
 		// problem with one object no longer withholds this device's push, so

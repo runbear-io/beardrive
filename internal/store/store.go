@@ -246,6 +246,12 @@ type SyncState struct {
 	Lamport   int64  `json:"lamport"`
 	PushedOps int64  `json:"pushed_ops"`       // how many of our own ops the remote has
 	Access    string `json:"access,omitempty"` // "", "read-only", or "no-access"
+	// AccessReason is the hub's own words for the last refusal. Without it every
+	// 403 renders as the same "read-only (pull only)" line, and the hub's most
+	// actionable answer — "this device is not registered to your account on this
+	// hub; run `bdrive login`" — reached nobody: the one state a user cannot
+	// diagnose from the outside was the one the CLI summarized away.
+	AccessReason string `json:"access_reason,omitempty"`
 
 	// IgnoreAccepted is the .bdriveignore text whose scan scope THIS device has
 	// accepted, and IgnorePulled is the text a peer's version last wrote here.

@@ -389,6 +389,14 @@ as being offline (see `bdrive status`):
   pulled, pushed, or written: revoking access never deletes or reverts a
   file on someone's disk. Re-granting resumes on the next tick.
 
+`bdrive status` and `bdrive sync` print the hub's own sentence under either
+one, as `reason:`. Read it: not every refused push is a permissions
+question. `this device is not registered to your account on this hub` means
+this machine's device identity was never bound to your account — update
+`bdrive` and run `bdrive login` here. Project settings will show `write` and
+explain nothing. Both states are recorded only by a cycle that actually
+reached the hub, so the local-only ticks in between never revise the answer.
+
 Public `/s/<token>` share links are **unaffected** by any of this: they are
 anonymous by design and keep serving until revoked, so cutting someone's
 access does not kill links they already minted.

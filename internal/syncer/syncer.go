@@ -119,6 +119,38 @@ type Result struct {
 	AccessErr  error
 }
 
+// accessReason renders a hub refusal as the sentence a person can act on. The
+// hub answers a device-registration 403 with what to DO about it, and every
+// caller used to collapse that into "read-only (pull only)" — the one refusal
+// that is not about project permissions at all, reported as if it were, so the
+// user re-checked their access, saw `write`, and had nowhere left to look.
+//
+// The wrapper chain the CLI itself added ("forbidden: server: 403 Forbidden: ")
+// is dropped; it tells a reader nothing the line does not already say.
+//
+// The remainder is the HUB's text landing in a log file, a terminal and an
+// agent's context, so it passes journal.SafeText — the rule this repo already
+// applies to every other peer-written string it renders — or it does not travel
+// at all. Bounded for the same reason: this is persisted in sync.json and
+// printed on one status line.
+func accessReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if _, rest, ok := strings.Cut(msg, "Forbidden: "); ok && rest != "" {
+		msg = rest
+	}
+	if len([]rune(msg)) > 300 || !journal.SafeText(msg) {
+		return ""
+	}
+	return msg
+}
+
+// Reason is the hub's own words for a ReadOnly or NoAccess answer, empty when
+// the hub gave none. It is what the CLI prints under the summary line.
+func (r *Result) Reason() string { return accessReason(r.AccessErr) }
+
 func (r *Result) Activity() bool {
 	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Pruned > 0 || r.Materialized > 0
 }
@@ -246,13 +278,18 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		pulled, gone, err = s.pull(ctx)
 		switch {
 		case err == nil:
+			if st.Access == store.AccessNone {
+				// The pull that was refused now succeeds, so read access is back.
+				// Whether writes are back is the push leg's to answer below.
+				st.Access, st.AccessReason = store.AccessOK, ""
+			}
 		case errors.Is(err, remote.ErrForbidden):
 			// Access to this project was revoked. Stop here: materializing a
 			// replay we can no longer refresh would look like the hub
 			// reverting the user's files. Nothing is pushed, nothing is
 			// deleted, and the next cycle re-checks.
 			res.NoAccess, res.AccessErr = true, err
-			st.Access = store.AccessNone
+			st.Access, st.AccessReason = store.AccessNone, accessReason(err)
 			return res, s.finish(cache, st)
 		case errors.Is(err, errBlobContent):
 			// Reported — it is the only signal a device ever gets that its hub
@@ -414,6 +451,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		switch err := s.push(ctx, myOps, &st); {
 		case err == nil:
 			res.Pushed = true
+			st.Access, st.AccessReason = store.AccessOK, ""
 		case errors.Is(err, remote.ErrForbidden):
 			// Read-only on this project: pull and materialize already ran, so
 			// pull-only is the steady state. Our own ops stay in the local
@@ -421,6 +459,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 			// attempted once per remote interval (no hot loop, and a re-grant
 			// self-heals).
 			res.ReadOnly, res.AccessErr = true, err
+			st.Access, st.AccessReason = store.AccessReadOnly, accessReason(err)
 		default:
 			res.Offline = true
 			res.OfflineErr = err
@@ -443,10 +482,14 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		}
 	}
 
-	st.Access = store.AccessOK
-	if res.ReadOnly {
-		st.Access = store.AccessReadOnly
-	}
+	// st.Access is NOT recomputed here. Only the leg that actually asked the hub
+	// knows how it answered, so each one records its own verdict above and a
+	// cycle that never asked leaves the last one standing. Resetting it to OK on
+	// every cycle meant the daemon's cheap local-only ticks — three of them
+	// between remote passes — each declared "access restored; syncing normally",
+	// so a device the hub was refusing alternated between the two log lines
+	// forever and `bdrive status` reported healthy sync moments after the push
+	// it had just refused.
 	if err := s.finish(cache, st); err != nil {
 		return nil, err
 	}
