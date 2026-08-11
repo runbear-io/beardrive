@@ -33,7 +33,7 @@ Starting from nothing (no project id, no name), it recommends `shared/` and
 names the new project `shared`.
 
 If the folder turns out to be empty once it is connected, the agent offers one
-more choice: start from a structure, or from scratch. Three are shipped:
+more choice: start from a structure, or from scratch. Four are shipped:
 
 - **Docs + decision records** (`docs/`, `decisions/`) — the boring default, and
   the one to take if you are not sure.

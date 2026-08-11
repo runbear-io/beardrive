@@ -87,4 +87,4 @@ You need a hub to sync through. Two ways to get one:
 GNU AGPL-3.0. Everything in the repository is open source and self-hostable — a
 complete BearDrive server for one organization's deployment, teams included. The
 managed service at beardrive.ai is the same core plus what only makes sense as
-an operated service: hosting, SSO, billing and plan quotas, backups, support.
+an operated service: hosting, billing and plan quotas, backups, support.
