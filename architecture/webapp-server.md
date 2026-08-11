@@ -142,7 +142,9 @@ classDiagram
         +Authenticate(r) User
         +Register(mux)
         +Accounts() []User
+        +UseDeviceBinder(bind)
     }
+    note for AuthProvider "UseDeviceBinder is a PRECONDITION of ownJournal, which refuses a journal write for every provider: the provider must call the hub's binder at every token mint. It was a field on BuiltinAuth wired behind a type assertion, so a managed provider bound nothing and every push 403'd forever. On the interface so a provider that ignores it does not compile. The hub cannot do it instead — Authenticate reports who a request is, never which credential class it used, and a device token must not reach a bind"
     class AccountApprover {
         <<interface>>
         +PendingUsers() +Approve +Deny +SetPolicy +Policy

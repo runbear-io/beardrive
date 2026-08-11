@@ -535,6 +535,12 @@ func (a secapiStubAuth) Authenticate(*http.Request) (User, bool) { return a.user
 func (a secapiStubAuth) Register(*http.ServeMux)                 {}
 func (a secapiStubAuth) Accounts() []User                        { return nil }
 
+// This test is about the identity a provider hands back, not about devices —
+// but a provider that drops the binder is the whole subject of
+// sec_provider_test.go, so the no-op is deliberate and belongs to this fixture
+// only.
+func (a secapiStubAuth) UseDeviceBinder(DeviceBinder) {}
+
 // Every authorization decision on the hub is keyed on the email an
 // AuthProvider hands back. BuiltinAuth happens to guarantee a non-empty,
 // lowercased, unique address; the interface promises none of that, and a

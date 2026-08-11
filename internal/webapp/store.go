@@ -133,6 +133,21 @@ func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string) 
 			// machine's token (DeviceRegistry.Bind), which is a moment the hub
 			// authenticates and the machine cannot forge. So an unowned id is
 			// simply not anybody's to write, and the remedy is to sign in.
+			// A hub that has never bound ANY device is not refusing this
+			// caller — it is refusing everyone, and no amount of signing in
+			// will change it, because its auth provider is not calling the
+			// binder (AuthProvider.UseDeviceBinder). The user-facing text
+			// cannot say that: a brand-new hub also holds no bindings, and
+			// telling its first user the server is broken would be wrong. The
+			// operator is the one who can act, so this goes to the log, once.
+			if s.Devices != nil && !s.Devices.AnyOwned() {
+				s.unboundOnce.Do(func() {
+					log.Printf("beardrive: refused a journal write and NO device is registered on this hub — " +
+						"if this hub uses a custom AuthProvider, it must call the binder handed to " +
+						"UseDeviceBinder at every point it mints a CLI token, or every push from every " +
+						"device will be refused no matter how often anyone signs in")
+				})
+			}
 			// "run `bdrive login`" alone sent one user in a circle for an
 			// afternoon: the binding is made by the login request naming its
 			// device, which a CLI older than this gate does not do, so signing in

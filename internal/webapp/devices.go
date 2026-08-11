@@ -179,12 +179,36 @@ func (r *DeviceRegistry) Observe(d DeviceInfo) {
 	d.ID = canonDeviceID(d.ID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.observeLocked(d)
+	// Telemetry: a row that did not reach disk is logged and retried, never
+	// reported. Bind is the caller that cannot say that — see there.
+	_ = r.observeLocked(d)
+}
+
+// AnyOwned reports whether this hub holds a single device row with an account
+// on it. It is a diagnostic, not a gate: a hub whose auth provider never calls
+// the binder can never answer yes, and that is the one observable difference
+// between "your device is not registered" (fix it by signing in) and "no device
+// on this hub is registered, and none can be" (fix the provider). See
+// Server.ownJournal, which turns a no into a line in the operator's log.
+func (r *DeviceRegistry) AnyOwned() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refresh()
+	for k := range r.byKey {
+		if k.User != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // observeLocked is Observe's body. Callers hold r.mu — Bind needs the claim
-// check and the write to be one critical section.
-func (r *DeviceRegistry) observeLocked(d DeviceInfo) {
+// check and the write to be one critical section. It returns the store's error
+// so a caller for whom persistence is the whole point can refuse.
+func (r *DeviceRegistry) observeLocked(d DeviceInfo) error {
 	k := devKey{d.User, d.ID}
 	if d.User == "" {
 		// A caller claiming no account asserts no identity (auth-less hub, or
@@ -195,6 +219,11 @@ func (r *DeviceRegistry) observeLocked(d DeviceInfo) {
 		}
 	}
 	cur := r.byKey[k]
+	// No User term here, deliberately: k IS {d.User, d.ID}, so a row that
+	// exists under it was stored with that account and an absent one is caught
+	// by cur.ID == "". A binding therefore always counts as a change and always
+	// reaches the store — checked with a panic probe across the whole suite
+	// before this comment replaced the clause that said otherwise.
 	changed := cur.ID == "" || cur.Name != d.Name || cur.OS != d.OS || cur.IP != d.IP
 	if cur.FirstSeen.IsZero() {
 		cur.FirstSeen = time.Now().UTC()
@@ -216,17 +245,20 @@ func (r *DeviceRegistry) observeLocked(d DeviceInfo) {
 	r.byKey[k] = cur
 	r.latest[d.ID] = k
 	if changed || time.Since(r.lastSav[k]) > time.Minute {
-		if err := r.repo.Put(cur); err == nil {
-			r.lastSav[k] = time.Now()
-		} else if !r.warned {
-			// Silently discarded, this made a registry that reports a device
-			// as observed while nothing about it ever reaches disk. Telemetry
-			// still must not fail the request, so it logs once and the next
-			// observation retries.
-			r.warned = true
-			log.Printf("beardrive: device registry write failed (will retry): %v", err)
+		if err := r.repo.Put(cur); err != nil {
+			if !r.warned {
+				// Silently discarded, this made a registry that reports a device
+				// as observed while nothing about it ever reaches disk. Telemetry
+				// still must not fail the request, so it logs once and the next
+				// observation retries.
+				r.warned = true
+				log.Printf("beardrive: device registry write failed (will retry): %v", err)
+			}
+			return err
 		}
+		r.lastSav[k] = time.Now()
 	}
+	return nil
 }
 
 // Get returns the most recently observed row for an id, whoever owns it. It is
@@ -385,7 +417,14 @@ func (r *DeviceRegistry) Bind(user string, d DeviceInfo, visible func(owner stri
 			"delete device.json in your BearDrive home and sign in again to mint a new one", d.ID)
 	}
 	d.User = user
-	r.observeLocked(d)
+	// A binding that did not reach the store is not a binding. Observe may log
+	// and retry — its next call carries the same facts — but this row is the
+	// only evidence that will ever exist for this id, and reporting a claim the
+	// store refused hands back a token whose every push is then refused, with
+	// nothing in the hub to explain why.
+	if err := r.observeLocked(d); err != nil {
+		return fmt.Errorf("could not record this device on the hub, so its changes could not be pushed: %w", err)
+	}
 	return nil
 }
 

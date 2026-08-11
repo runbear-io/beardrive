@@ -55,8 +55,8 @@ type BuiltinAuth struct {
 	// BindDevice, when set, records that a device id belongs to an account, at
 	// the moment a token is minted for it. It is the ONLY way an ownership row
 	// is created for an id that has never synced — see DeviceRegistry.Bind for
-	// why first-claim-on-write could not be. Wired to Server.bindDevice.
-	BindDevice func(email string, r *http.Request) error
+	// why first-claim-on-write could not be. Installed by UseDeviceBinder.
+	BindDevice DeviceBinder
 
 	store AccountRepo
 	ver   versionGate // skips the re-read when the store has not moved
@@ -753,6 +753,11 @@ func (a *BuiltinAuth) Seniority() []string {
 const sessionCookie = "bdrive_session"
 
 func (a *BuiltinAuth) CLILoginPath() string { return "/auth/cli" }
+
+// UseDeviceBinder installs the hub's binding hook. finishLogin — the one place
+// this provider mints a CLI token, reached by all three flows — calls it before
+// it issues anything.
+func (a *BuiltinAuth) UseDeviceBinder(bind DeviceBinder) { a.BindDevice = bind }
 
 func (a *BuiltinAuth) Authenticate(r *http.Request) (User, bool) {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
