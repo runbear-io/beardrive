@@ -35,7 +35,35 @@ type AuthProvider interface {
 	// tasks (the org migration) need it, and both implementations already had
 	// it — declaring it here stops callers reaching for a concrete type.
 	Accounts() []User
+	// UseDeviceBinder hands the provider the hub's device-binding hook. The
+	// provider MUST call it at every point it mints a CLI token, before the
+	// token is handed over, and MUST refuse the login if it returns an error.
+	//
+	// This is on the interface — a breaking change for an out-of-tree provider,
+	// on purpose — because it is a PRECONDITION of a gate the hub enforces for
+	// every provider. store.go's ownJournal refuses a journal write unless the
+	// device id is bound to the caller's account, and DeviceRegistry.Bind is the
+	// only thing that binds. That hook used to be a field on BuiltinAuth, wired
+	// behind `if a, ok := s.Auth.(*BuiltinAuth); ok` — so on a hub running any
+	// other provider nothing ever called it, no device was ever bound, and EVERY
+	// journal push 403'd forever while login, permissions and blob uploads all
+	// looked healthy. A gate whose enabler is wired to one concrete type is a
+	// gate that is enforced further than it can be satisfied; declaring it here
+	// is what makes a provider that ignores it fail to compile instead.
+	//
+	// The hub cannot do this for the provider. Binding must be reachable only
+	// from a completed authentication — a device token that could reach a bind
+	// would let a stolen credential squat a teammate's id — and Authenticate
+	// reports only WHO a request is, never which credential class it presented.
+	// Only the provider knows it is minting, so only the provider can bind.
+	UseDeviceBinder(bind DeviceBinder)
 }
+
+// DeviceBinder records that the device identified by the request's
+// X-Bdrive-Device header belongs to email. It returns an error when the id is
+// already another account's, which a provider must surface as a failed login
+// rather than a token that cannot push.
+type DeviceBinder func(email string, r *http.Request) error
 
 // AccountApprover is the optional half of account administration: signup
 // policy and the approval queue behind /api/admin/*. A provider whose accounts

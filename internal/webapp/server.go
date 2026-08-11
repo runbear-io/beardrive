@@ -120,7 +120,11 @@ type Server struct {
 	// reachable hub lets any client pick its own rate-limit bucket.
 	TrustProxy bool
 
-	xffWarnOnce  sync.Once
+	xffWarnOnce sync.Once
+	// unboundOnce logs, at most once, that this hub refused a journal write
+	// while holding no device binding at all — the signature of a provider that
+	// never calls the binder. See ownJournal.
+	unboundOnce  sync.Once
 	shareLimOnce sync.Once
 	shareLim     *rateLimiter
 	authLimOnce  sync.Once
@@ -668,8 +672,14 @@ func (s *Server) Handler() http.Handler {
 	// A device identity is bound to an account when its token is minted, and
 	// nowhere else. Wired here rather than at startup because the fixtures (and
 	// a hub rebuilt from its repos) assemble Auth and Devices independently.
-	if a, ok := s.Auth.(*BuiltinAuth); ok && a.BindDevice == nil {
-		a.BindDevice = s.bindDevice
+	//
+	// EVERY provider, not `if a, ok := s.Auth.(*BuiltinAuth); ok`. ownJournal
+	// refuses a journal write for any provider, and the type assertion meant a
+	// hub running a managed provider enforced a gate nothing could ever satisfy:
+	// no device bound, every push 403 forever, while login and permissions read
+	// perfectly healthy. See AuthProvider.UseDeviceBinder.
+	if s.Auth != nil {
+		s.Auth.UseDeviceBinder(s.bindDevice)
 	}
 
 	// Volume resolution per route family: fixed single volume, or by
