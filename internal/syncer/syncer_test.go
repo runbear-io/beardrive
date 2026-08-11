@@ -491,6 +491,98 @@ func TestReadOnlyDevicePullsOnly(t *testing.T) {
 	}
 }
 
+// refusingPush is a hub that answers every push with a real 403 body. The one
+// that matters is the device-registration refusal: it is not about project
+// permissions at all, so the user who checks their permissions finds `write`
+// and has nowhere left to look — the hub's sentence is the only thing that
+// points at the fix.
+type refusingPush struct {
+	remote.Backend
+	msg string
+}
+
+func (p refusingPush) Put(ctx context.Context, key string, r io.Reader, size int64) error {
+	return fmt.Errorf("%w: server: 403 Forbidden: %s", remote.ErrForbidden, p.msg)
+}
+
+// A refused device must stay refused in its own records until the hub says
+// otherwise — and it must be able to say WHY.
+//
+// Both halves come from one report: a mount whose journal pushes 403'd on every
+// remote pass, while `bdrive status` said access was fine and the daemon log
+// alternated "read-only on this project" / "access restored; syncing normally"
+// every few seconds. The cycle recomputed access from scratch at the end of
+// every pass, including the cheap local-only ones the daemon runs three of
+// between remote passes, so the hub's answer was overwritten by a cycle that
+// never asked it anything. And the answer itself — "this device is not
+// registered to your account on this hub; run `bdrive login`" — was summarized
+// into "read-only (pull only)" and lost.
+func TestRefusedPushKeepsItsVerdictAndItsReason(t *testing.T) {
+	const refusal = "this device is not registered to your account on this hub; run `bdrive login` on this machine"
+	be := sharedRemote(t)
+	b := newDevice(t, "devb", refusingPush{Backend: be, msg: refusal})
+
+	write(t, b.Folder, "mine.md", "local only")
+	res, err := b.Cycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.ReadOnly {
+		t.Fatalf("a refused push should report ReadOnly: %+v", res)
+	}
+	if res.Reason() != refusal {
+		t.Fatalf("Result.Reason() = %q, want the hub's own sentence %q", res.Reason(), refusal)
+	}
+	st, err := b.Store.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Access != store.AccessReadOnly || st.AccessReason != refusal {
+		t.Fatalf("persisted access = %q/%q, want read-only + the hub's reason", st.Access, st.AccessReason)
+	}
+
+	// The daemon's local-only tick: same session, no backend at all. It learns
+	// nothing about the hub, so it must not clear the hub's last answer.
+	b.Backend = nil
+	write(t, b.Folder, "second.md", "still local")
+	if res := cycle(t, b); res.ReadOnly {
+		t.Fatalf("a cycle with no remote leg cannot discover a refusal: %+v", res)
+	}
+	st, _ = b.Store.LoadSync()
+	if st.Access != store.AccessReadOnly || st.AccessReason != refusal {
+		t.Fatalf("a local-only tick reset access to %q/%q — `bdrive status` reports healthy "+
+			"sync moments after the push the hub refused, and the daemon logs "+
+			"\"access restored\" between every pair of remote passes", st.Access, st.AccessReason)
+	}
+
+	// Only the hub clears it: a push that lands does, and takes the stale
+	// reason with it.
+	b.Backend = be
+	if res := cycle(t, b); !res.Pushed {
+		t.Fatalf("re-granted device did not push: %+v", res)
+	}
+	if st, _ := b.Store.LoadSync(); st.Access != store.AccessOK || st.AccessReason != "" {
+		t.Fatalf("after a successful push, access = %q/%q, want cleared", st.Access, st.AccessReason)
+	}
+}
+
+// A hub message that could repaint the terminal it lands in is dropped rather
+// than rendered: it reaches a log file, `bdrive status`, and an agent's context
+// verbatim, and the hub is the one string source here nobody local vouches for.
+func TestAccessReasonRefusesTerminalControls(t *testing.T) {
+	esc := fmt.Errorf("%w: server: 403 Forbidden: nope\x1b[2Kaccess restored", remote.ErrForbidden)
+	if got := accessReason(esc); got != "" {
+		t.Errorf("accessReason kept a control sequence: %q", got)
+	}
+	long := fmt.Errorf("%w: server: 403 Forbidden: %s", remote.ErrForbidden, strings.Repeat("x", 400))
+	if got := accessReason(long); got != "" {
+		t.Errorf("accessReason kept a %d-rune message", len([]rune(got)))
+	}
+	if got := accessReason(nil); got != "" {
+		t.Errorf("accessReason(nil) = %q", got)
+	}
+}
+
 // A device whose access is revoked entirely pauses: the cycle reports
 // NoAccess (not Offline), the working folder is left byte-for-byte alone —
 // revoking access must never look like the hub deleting someone's files — and

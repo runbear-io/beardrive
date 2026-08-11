@@ -206,19 +206,30 @@ touches your files:
 ```
   pending:  3 local change(s) not yet pushed
   access:   read-only (pull only) — 3 local change(s) stay on this device
+  reason:   this device is not registered to your account on this hub; update bdrive, then run `bdrive login` on this machine
 ```
 
-- **`read-only (pull only)`** — you have `read` on the project. The daemon keeps
-  pulling teammates' changes; your own edits stay journaled locally, never
-  pushed and never dropped. They go out if you are granted `write` again.
+- **`read-only (pull only)`** — the hub refused this device's push. Usually you
+  have `read` on the project: the daemon keeps pulling teammates' changes, your
+  own edits stay journaled locally, never pushed and never dropped, and they go
+  out if you are granted `write` again.
 - **`no access to this project — sync paused`** — your access was revoked.
   Nothing is pulled, pushed, or written; the working folder is left exactly as
   it is. Re-granting resumes on the next tick with no manual step.
 
+Always read the `reason:` line under them — it is the hub's own sentence, and
+not every refusal is about project permissions. The common non-permission one
+is `this device is not registered to your account on this hub`: your device
+identity was never bound to your account, which is fixed by updating `bdrive`
+and running `bdrive login` on that machine, not in Project settings. Checking
+your permissions there will show `write` and tell you nothing.
+
 `bdrive sync` shows the same two as `remote: read-only (pull only)` /
-`remote: no access — sync paused`, and the daemon logs each once on
-transition rather than on every tick. Both are permission answers: they are
-fixed in the hub's Project settings → People, not on the device. See
+`remote: no access — sync paused` with the reason on the line below, and the
+daemon logs each once on transition rather than on every tick — including the
+cheap local-only ticks between remote passes, which never ask the hub anything
+and so never revise its last answer. For the permission answers, the fix is in
+the hub's Project settings → People; see
 [Project permissions](/concepts/permissions/).
 
 ### `bdrive login` and switching hubs

@@ -37,8 +37,10 @@ classDiagram
         +Conflicts +Pruned +Materialized
         +Pushed +Offline +OfflineErr
         +ReadOnly +NoAccess +AccessErr
+        +Reason() string
     }
     note for Result "Offline / ReadOnly / NoAccess are three different answers: unreachable (retry all), push refused (pull-only), pull refused (pause, touch nothing)"
+    note for Result "Reason() is accessReason(AccessErr): the hub's own sentence for a refusal, minus the wrapper chain, dropped unless it passes journal.SafeText. 'read-only' summarizes the STATUS CODE — the sentence is the only thing that tells a device-registration 403 from a project the user really is a reader on"
 
     class Filter {
         +Skip(rel) bool
@@ -52,8 +54,10 @@ classDiagram
 
     class SyncState {
         +Lamport +PushedOps +Access
+        +AccessReason
         +IgnoreAccepted +IgnorePulled
     }
+    note for SyncState "Access/AccessReason are written ONLY by the leg that asked the hub — pull clears no-access, push records read-only or clears it. A cycle with no remote leg leaves the last answer standing, so the daemon's local-only ticks stop alternating 'read-only' / 'access restored' and bdrive status stops reporting healthy sync moments after a refused push"
     note for SyncState "store — IgnoreAccepted is the .bdriveignore scope THIS device consented to; IgnorePulled is the text a peer's version last wrote here. The pair is what tells a locally authored rule change from one that arrived over the wire. vouchedFloor seeds it once on upgrade: keep every exclusion, drop each `!` that no already-materialized path vouches for"
 
     class SafePath {
