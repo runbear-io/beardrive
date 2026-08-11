@@ -73,7 +73,7 @@ A dedicated folder with no enclosing repository needs only the synced
 `AGENTS.md`. At the mount root, every platform loads it at session start.
 :::
 
-`/beardrive:install` offers to write both files, each as its own consent. Never
+Ask your agent to write them and it will offer each as its own consent. Never
 write either silently into someone's repository.
 
 ## The orientation ritual
