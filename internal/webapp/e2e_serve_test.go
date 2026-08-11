@@ -234,7 +234,10 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 			Size: int64(len(content)), Mode: 0o644,
 		})
 	}
-	put("index.md", "# Wiki\n\nStart at the [[guide]] or browse [notes](notes/readme.md).\n", 72*time.Hour)
+	// The dangling [[nowhere]] is deliberate: the frontend has to render a
+	// wikilink with no matching file as an unresolved anchor, not as a dead
+	// "wiki:" href (BEA-136).
+	put("index.md", "# Wiki\n\nStart at the [[guide]] or browse [notes](notes/readme.md). Nothing at [[nowhere]].\n", 72*time.Hour)
 	put("guide.md", "# Guide\n\nFirst version of the guide.\n", 48*time.Hour)
 	put("guide.md", "# Guide\n\nSecond version of the guide, with more detail.\n", 2*time.Hour)
 	put("notes/readme.md", "# Notes\n\nNested folder content.\n", 24*time.Hour)

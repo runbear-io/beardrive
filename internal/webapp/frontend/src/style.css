@@ -1049,6 +1049,10 @@ a.ai-main:hover { color: var(--accent); }
 .markdown strong { color: var(--text); font-weight: 620; }
 .markdown a { color: var(--accent-bright); text-decoration: none; border-bottom: 1px solid rgba(245,166,35,.28); }
 .markdown a:hover { border-bottom-color: var(--accent); }
+/* A wikilink pointing at nothing. Without an href it loses link styling
+   entirely, and a broken cross-reference silently reading as prose is worse
+   than the dead URL this replaced. */
+.markdown a.wiki-missing { color: var(--text-faint); border-bottom: none; text-decoration: underline dotted; cursor: help; }
 .markdown ul, .markdown ol { margin: 0 0 1em; padding-left: 1.4em; }
 .markdown li { margin-bottom: .4em; }
 .markdown li::marker { color: var(--text-ghost); }

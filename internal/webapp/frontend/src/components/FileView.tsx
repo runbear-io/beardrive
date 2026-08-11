@@ -13,8 +13,10 @@ import {
   TEXT_EXT,
   humanSize,
   joinPath,
+  resolveWiki,
   whoChanged,
 } from "../util";
+import { urlForPath } from "../router";
 import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
 import { hasMermaid, renderMermaid } from "../lib/mermaid";
 
@@ -25,6 +27,8 @@ export function FileView(props: {
   version?: string;
   heatMap: HeatMap | null;
   flatFiles: Node[];
+  // Hub mode only; absent in volume mode, where file URLs are "/<path>".
+  projectId?: string;
   onOpenFile: (path: string) => void;
   onMeta: (meta: string) => void;
   onRendered?: () => void;
@@ -130,7 +134,8 @@ function FileCard(props: {
 }
 
 function MarkdownView(props: Parameters<typeof FileView>[0]) {
-  const { apiBase, path, version, heatMap, flatFiles, onOpenFile, onMeta, onRendered } = props;
+  const { apiBase, path, version, heatMap, flatFiles, projectId, onOpenFile, onMeta, onRendered } =
+    props;
   const { data: doc, error } = useQuery({
     queryKey: ["render", apiBase, path, version || ""],
     queryFn: () =>
@@ -148,8 +153,8 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   // update, silently discarding post-commit DOM patches. Link navigation
   // is delegated on the container for the same reason.
   const html = useMemo(
-    () => (doc ? transformHTML(doc.html, path, apiBase) : ""),
-    [doc, path, apiBase],
+    () => (doc ? transformHTML(doc.html, path, apiBase, flatFiles, projectId) : ""),
+    [doc, path, apiBase, flatFiles, projectId],
   );
 
   // Diagrams are rendered into a NEW html string and fed back through state,
@@ -197,27 +202,30 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   return (
     <div
       dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
-      onClick={(e) => handleLinkClick(e, path, flatFiles, onOpenFile)}
+      onClick={(e) => handleLinkClick(e, path, onOpenFile)}
     />
   );
 }
 
-/* Delegated click handling for rendered-markdown links: wiki: targets
-   resolve by basename, relative links resolve against the current file's
-   folder, everything else keeps its native behavior. */
-function handleLinkClick(
-  e: React.MouseEvent,
-  p: string,
-  flatFiles: Node[],
-  openFile: (path: string) => void,
-) {
+/* Delegated click handling for rendered-markdown links: wikilinks (already
+   carrying a real in-app href, see transformHTML) and relative links route
+   in-app on a plain click, everything else keeps its native behavior. */
+function handleLinkClick(e: React.MouseEvent, p: string, openFile: (path: string) => void) {
   const a = (e.target as HTMLElement).closest("a");
   if (!a || !(e.currentTarget as HTMLElement).contains(a)) return;
+  // Same rule as nav.ts:linkProps — a modified or non-primary click belongs
+  // to the browser (new tab, new window, download), which is the entire
+  // point of these anchors carrying real URLs.
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
   const href = a.getAttribute("href") || "";
   const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
-  if (href.startsWith("wiki:")) {
+  // data-wiki, not "any root-absolute href": an author's own [x](/somewhere)
+  // keeps its native behavior instead of quietly becoming an SPA route, and
+  // the target path is read back directly instead of re-parsed out of a URL.
+  const wiki = a.getAttribute("data-wiki");
+  if (wiki !== null) {
     e.preventDefault();
-    openWikilink(decodeURIComponent(href.slice(5)), flatFiles, openFile);
+    openFile(wiki);
   } else if (!/^([a-z]+:|\/|#)/i.test(href)) {
     e.preventDefault();
     openFile(joinPath(dir, decodeURIComponent(href)));
@@ -225,8 +233,15 @@ function handleLinkClick(
 }
 
 /* String-level rewrite of the server's HTML: relative image sources point
-   at the file API, external links open in a new tab. */
-function transformHTML(html: string, p: string, apiBase: string): string {
+   at the file API, external links open in a new tab, and wikilinks get the
+   real in-app URL of their target. */
+function transformHTML(
+  html: string,
+  p: string,
+  apiBase: string,
+  files: Node[],
+  projectId?: string,
+): string {
   const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
   const fileURL = (path: string) => apiBase + "file?path=" + encodeURIComponent(path);
   const parsed = new DOMParser().parseFromString(html, "text/html");
@@ -242,6 +257,25 @@ function transformHTML(html: string, p: string, apiBase: string): string {
   }
   for (const a of parsed.querySelectorAll("a")) {
     const href = a.getAttribute("href") || "";
+    // The server has no file tree, so it leaves [[target]] as the marker
+    // href="wiki:<target>" (markdown.go). Resolving it HERE — before the
+    // mount — is what makes the anchor an ordinary link: copy-link,
+    // middle-click and open-in-new-tab all read the attribute, and only a
+    // plain click ever reaches the handler above.
+    if (href.startsWith("wiki:")) {
+      const hit = resolveWiki(decodeURIComponent(href.slice(5)), files);
+      if (hit) {
+        a.setAttribute("href", urlForPath(hit.path, projectId));
+        a.setAttribute("data-wiki", hit.path);
+      } else {
+        // No file matches: an unusable "wiki:" string must not survive the
+        // mount, so the anchor loses its href and says why on hover.
+        a.removeAttribute("href");
+        a.classList.add("wiki-missing");
+        a.setAttribute("title", "No file matches this wikilink");
+      }
+      continue;
+    }
     // goldmark's data: allowance exists for IMAGES and is applied to <a> as
     // well, so a rendered document can mount a link whose target is an
     // attacker-authored document. Browsers refuse a top-level data:
@@ -343,15 +377,4 @@ function CsvTable({ csv }: { csv: Csv }) {
       )}
     </>
   );
-}
-
-function openWikilink(target: string, flatFiles: Node[], openFile: (path: string) => void) {
-  const want = target.toLowerCase();
-  const hit =
-    flatFiles.find((f) => f.path.toLowerCase() === want || f.path.toLowerCase() === want + ".md") ||
-    flatFiles.find((f) => {
-      const n = f.name.toLowerCase();
-      return n === want || n === want + ".md";
-    });
-  if (hit) openFile(hit.path);
 }

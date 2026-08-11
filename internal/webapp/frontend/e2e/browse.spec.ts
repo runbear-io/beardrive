@@ -32,9 +32,33 @@ test("wikilink navigates to the target file", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/index.md`);
-  await page.click('#content a:has-text("guide")');
+  const link = page.locator('#content a:has-text("guide")');
+  // BEA-136: the href itself, not just the click. Copy-link-address,
+  // middle-click and open-in-new-tab all read this attribute, and it used to
+  // be the unresolvable string "wiki:guide".
+  await expect(link).toHaveAttribute("href", `/${pid}/guide.md`);
+  await page.evaluate(() => ((window as Window & { __spa?: number }).__spa = 1));
+  await link.click();
   await page.waitForURL(`/${pid}/guide.md`);
   await expect(page.locator("#content")).toContainText("Second version");
+  // Still the same document: a plain click must SPA-route, not reload.
+  expect(await page.evaluate(() => (window as Window & { __spa?: number }).__spa)).toBe(1);
+});
+
+// BEA-136: everything the rendered anchor has to get right besides the click.
+test("wikilinks: modified click is the browser's, a dangling one has no href", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/index.md`);
+  // A cmd/ctrl-click belongs to the browser (new tab), so THIS page stays put.
+  await page.locator('#content a:has-text("guide")').click({ modifiers: ["ControlOrMeta"] });
+  await page.waitForTimeout(300);
+  expect(new URL(page.url()).pathname).toBe(`/${pid}/index.md`);
+  // [[nowhere]] matches no file: unresolved, and no dead href to copy.
+  const missing = page.locator("#content a.wiki-missing");
+  await expect(missing).toHaveText("nowhere");
+  expect(await missing.getAttribute("href")).toBeNull();
+  expect(await page.locator("#content").innerHTML()).not.toContain("wiki:");
 });
 
 test("folder listing: counts, change feed, heat dot on a read file", async ({ page }) => {
