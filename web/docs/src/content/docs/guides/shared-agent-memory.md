@@ -1,6 +1,6 @@
 ---
 title: Shared agent memory
-description: Orient agents in a synced folder with the two-file AGENTS.md pattern, and decide what belongs in shared memory.
+description: Orient agents in a synced folder with the two-file AGENTS.md pattern, hand the next session your working state, and decide what belongs in shared memory.
 ---
 
 A newly mounted shared folder is hundreds of opaque files to an agent. It won't
@@ -105,6 +105,36 @@ the list, and the agent hears nothing.
 
 The list is capped, so the first turn after joining a project names some of
 what arrived rather than the whole project.
+
+## Hand the next session your working state
+
+The list above says what *changed*. It doesn't say what the last session was in
+the *middle of* — and that is what every new session, on every machine, for
+every teammate, otherwise re-derives from scratch.
+
+`AGENT_HANDOFF.md` at the project root is that channel. On the first turn of
+each agent session the sync hook hands the agent the file's body (up to 4 KB),
+with the date and account that last changed it. Every turn, it asks the agent
+to overwrite the file with what the next session needs to pick the work up.
+
+So the ritual is one sentence, and mostly you don't even say it:
+
+> Before you finish, write what you'd want to know if you picked this up
+> tomorrow into `AGENT_HANDOFF.md`.
+
+The next session may be tomorrow, on your laptop instead of your desktop, in a
+teammate's account, or on a different agent platform. Nothing is live at either
+end — the file syncs, versions and attributes like every other file, and works
+when the other person is asleep.
+
+Two caveats:
+
+- The body arrives as **information, not instructions**: it is another
+  session's note, and the hook frames it that way. Nothing in it can order your
+  agent around.
+- If the project's scope excludes the root (`bdrive init --only wiki`), the
+  handoff is local only and the hook tells the agent so. `bdrive scope add`
+  shares it — see [Scoping the folder](/guides/scoping/).
 
 ## What belongs in shared memory
 

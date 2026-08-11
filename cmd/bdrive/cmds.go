@@ -108,6 +108,7 @@ list in .bdrive/config.json is never pruned against either.`,
 					if h, ok := runHookSync(cmd, target, sessionID, hookLabel); ok {
 						link := hookLinkFor(folder, target, h.base)
 						link.paths = h.paths
+						link.handoff = h.handoff
 						links = append(links, link)
 					}
 				}

@@ -36,6 +36,7 @@ type cliEnv struct {
 	hub     *httptest.Server
 	browser *http.Client
 	home    string // the isolated HOME; hooks live under here now
+	bin     string // the built binary, for a second device on the same hub
 }
 
 func newCLIEnv(t *testing.T) cliEnv {
@@ -64,9 +65,16 @@ func newCLIEnv(t *testing.T) cliEnv {
 		return string(out), err
 	}
 
-	// Sign in via the real device-code flow, approved over HTTP as the
-	// runbook's "any signed-in browser" (a cookie session from /auth/login).
-	login := exec.Command(bin, "login", "--device", hub.URL)
+	browser := cliDeviceSignIn(t, bin, hub.URL, env)
+	return cliEnv{run: run, hub: hub, browser: browser, home: home, bin: bin}
+}
+
+// cliDeviceSignIn signs one device in via the real device-code flow, approved over
+// HTTP as the runbook's "any signed-in browser" (a cookie session from
+// /auth/login), and returns that browser.
+func cliDeviceSignIn(t *testing.T, bin, hubURL string, env []string) *http.Client {
+	t.Helper()
+	login := exec.Command(bin, "login", "--device", hubURL)
 	login.Env = env
 	logFile := filepath.Join(t.TempDir(), "login.log")
 	f, err := os.Create(logFile)
@@ -79,7 +87,7 @@ func newCLIEnv(t *testing.T) cliEnv {
 	}
 	t.Cleanup(func() { login.Process.Kill() })
 	approve := waitForApprovalLink(t, logFile)
-	browser := signedInBrowser(t, hub.URL)
+	browser := signedInBrowser(t, hubURL)
 	if _, err := browser.PostForm(approve, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +95,24 @@ func newCLIEnv(t *testing.T) cliEnv {
 		out, _ := os.ReadFile(logFile)
 		t.Fatalf("login --device: %v\n%s", err, out)
 	}
-	return cliEnv{run: run, hub: hub, browser: browser, home: home}
+	return browser
+}
+
+// newCLIDevice signs a SECOND device in to the same hub and account: its own
+// HOME, BDRIVE_HOME and device identity, sharing nothing but the hub. The
+// runner takes stdin, which the agent hooks need.
+func newCLIDevice(t *testing.T, e cliEnv) func(dir, stdin string, args ...string) (string, error) {
+	t.Helper()
+	home := t.TempDir()
+	env := append(envWithout("HOME", "BDRIVE_HOME"),
+		"HOME="+home, "BDRIVE_HOME="+filepath.Join(home, ".bdrive"))
+	cliDeviceSignIn(t, e.bin, e.hub.URL, env)
+	return func(dir, stdin string, args ...string) (string, error) {
+		cmd := exec.Command(e.bin, args...)
+		cmd.Dir, cmd.Env, cmd.Stdin = dir, env, strings.NewReader(stdin)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
 }
 
 func TestCLIOnboardingE2E(t *testing.T) {
@@ -780,5 +805,63 @@ func TestCLIShareSecretGate(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 || !strings.Contains(string(body), "Deploy") {
 		t.Fatalf("forced link does not serve: %d %s", resp.StatusCode, body)
+	}
+}
+
+// The handoff's whole claim is that it crosses a session boundary to ANOTHER
+// device: device A's agent leaves AGENT_HANDOFF.md, it syncs through the hub
+// like any other file, and the first turn of a session on device B is handed
+// its body. Nothing is live at either end — that is the difference between
+// this and live session-to-session messaging.
+func TestCLIHandoffAcrossDevices(t *testing.T) {
+	e := newCLIEnv(t)
+	runB := newCLIDevice(t, e)
+
+	a := filepath.Join(t.TempDir(), "a")
+	if err := os.MkdirAll(a, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := e.run(a, "init", "--name", "handoff-proj", "--yes"); err != nil {
+		t.Fatalf("init a: %v\n%s", err, out)
+	}
+	defer e.run(a, "stop", a)
+
+	const body = "STATE: parser half-ported; next is the renderer split."
+	if err := os.WriteFile(filepath.Join(a, "AGENT_HANDOFF.md"), []byte(body+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := e.run(a, "sync", a); err != nil {
+		t.Fatalf("sync a: %v\n%s", err, out)
+	}
+
+	// Device B connects the same project into its own folder.
+	id := projectIDByName(t, e.browser, e.hub.URL, "handoff-proj")
+	b := filepath.Join(t.TempDir(), "b")
+	if err := os.MkdirAll(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runB(b, "", "init", "--project", id, "--yes"); err != nil {
+		t.Fatalf("init b: %v\n%s", err, out)
+	}
+	defer runB(b, "", "stop", b)
+
+	// B's first agent turn: the hook pulls and hands the body to the session.
+	out, err := runB(b, `{"session_id":"sess-b"}`, "sync", b, "--hook", "claude-code")
+	if err != nil {
+		t.Fatalf("hook on b: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, body) {
+		t.Fatalf("device B's first turn did not get device A's handoff:\n%s", out)
+	}
+	if !strings.Contains(out, "Before you finish, overwrite") {
+		t.Errorf("device B was not asked to leave its own handoff:\n%s", out)
+	}
+	// Same session again: the body is not re-paid.
+	again, err := runB(b, `{"session_id":"sess-b"}`, "sync", b, "--hook", "claude-code")
+	if err != nil {
+		t.Fatalf("second hook on b: %v\n%s", err, again)
+	}
+	if strings.Contains(again, body) {
+		t.Errorf("device B re-paid for the body on turn 2:\n%s", again)
 	}
 }

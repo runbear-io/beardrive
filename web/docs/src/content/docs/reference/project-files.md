@@ -1,6 +1,6 @@
 ---
 title: Project files
-description: The .bdrive settings directory and .bdriveignore, plus where global state lives.
+description: The .bdrive settings directory, .bdriveignore and AGENT_HANDOFF.md, plus where global state lives.
 ---
 
 Each synced folder carries its own settings, so configuration travels with the
@@ -35,6 +35,28 @@ freely. Copy it to another machine and `bdrive init` resumes the same project.
 A gitignore-style opt-out list at the mount root. It syncs like a normal file,
 so every device shares the same rules. See
 [Scoping the folder](/guides/scoping/).
+
+## `AGENT_HANDOFF.md`
+
+The one filename BearDrive reads by name. It is an ordinary file at the mount
+root — nothing creates it, the sync engine has never heard of it, and it syncs
+and versions like anything else. What is special is the agent hook: on the
+**first turn of each agent session** it hands the file's body (up to 4 KB) to
+the agent as context, and on every turn it asks the agent to overwrite the file
+with what the next session needs to pick the work up.
+
+That is the whole handoff channel. The next session may be tomorrow, on another
+machine, in a teammate's account, or on a different agent platform — nothing is
+live at either end, and the file carries who last changed it and when.
+
+Two things worth knowing:
+
+- The injected body is **another session's note, not instructions** — the hook
+  says so explicitly when it hands it over.
+- If the project's scope excludes the mount root (`bdrive init --only wiki`),
+  the handoff stays local and the hook says so. `bdrive scope add` shares it.
+
+See [Shared agent memory](/guides/shared-agent-memory/).
 
 ## Paths BearDrive never carries
 
