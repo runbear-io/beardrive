@@ -4,6 +4,45 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## v0.15.0 — 2026-08-11
+
+**Upgrade if your pushes are being refused.** Hubs running the journal
+ownership gate require a device id to be bound to its account, and that
+binding is made by the login request naming its device — something a CLI
+older than this release does not do. The symptom is a sync that pulls
+normally while every push 403s with "this device is not registered to your
+account on this hub", surviving any number of re-logins. Update, then run
+`bdrive login` on that machine; pending local changes are journaled and go
+out on the next cycle (#112, #146).
+
+- **`bdrive grep`** — search the text inside the files a project syncs,
+  without materializing them (BEA-99).
+- **Agents see what changed before they overwrite it**: the sync hook
+  reports teammates' changes into the session (BEA-127), and the hub tracks
+  what each agent session *read*, not just what it changed (BEA-98).
+- **Hub rendering**: mermaid fences render as diagrams in the viewer and on
+  share pages (BEA-91); `.csv`/`.tsv` render as a table instead of a wall
+  of monospace (BEA-74).
+- **Sharing is harder to do by accident**: the hub refuses to share a file
+  that looks like it holds credentials (BEA-111), share links follow a
+  moved file and old URLs redirect (BEA-81), and a link reports how many
+  times it has been opened (BEA-76).
+- **Honest degraded sync** — a refused push keeps its verdict instead of
+  being cleared by the daemon's local-only ticks, and `bdrive status`,
+  `bdrive sync` and the daemon log print the hub's own reason for the
+  refusal rather than a generic "read-only" (BEA-403, #146).
+- **Restore asks before it syncs to every device** (BEA-129); history stops
+  re-downloading every journal on each view (BEA-85); `/history?path=` shows
+  that file rather than the whole project (BEA-64).
+- **Agent hooks**: agent skills sync, and `~/.claude` is refused as a mount
+  root (BEA-117); macOS asks before it pops "Background Items Added" at
+  init (#139).
+- 318 security hardening fixes across hub, sync, CLI and SPA (#112), and
+  launch pricing guardrails — egress caps, ignore defaults, storage
+  tiering (#114).
+
+<!-- v0.12.0–v0.14.0 shipped without changelog entries. -->
+
 ## v0.11.0 — 2026-07-27
 
 - **`bdrive forget` + `bdrive sync --prune`** — take an already-synced path
