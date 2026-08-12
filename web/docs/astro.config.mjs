@@ -69,6 +69,19 @@ export default defineConfig({
     "/start/quickstart": "/manual/setup-by-hand/",
     "/guides/connect-an-agent": "/start/setup/",
     "/manual/skills-and-hooks": "/manual/hooks/",
+    // Use cases moved to the marketing site, which already published the same
+    // six pages at the same slugs. They were live and indexed here for a
+    // month, so every one of them keeps a redirect — off-site, which is
+    // exactly what a page that is no longer documentation should do.
+    "/use-cases/team-artifacts": "https://beardrive.ai/use-cases/team-artifacts",
+    "/use-cases/team-wiki": "https://beardrive.ai/use-cases/team-wiki",
+    "/use-cases/business-context": "https://beardrive.ai/use-cases/business-context",
+    "/use-cases/company-brain": "https://beardrive.ai/use-cases/company-brain",
+    "/use-cases/personal-wiki": "https://beardrive.ai/use-cases/personal-wiki",
+    "/use-cases/multi-device": "https://beardrive.ai/use-cases/multi-device",
+    // The one with no counterpart over there yet — land on the index rather
+    // than a 404 someone else's deploy has to fix.
+    "/use-cases/shared-skills": "https://beardrive.ai/use-cases/",
   },
   integrations: [
     // Starlight adds @astrojs/sitemap itself, but only when the config hasn't
@@ -81,6 +94,9 @@ export default defineConfig({
       description:
         "Google Drive for AI agents. One shared folder your whole team's agents read and write — real files, synced in seconds, with history, provenance, and share links.",
       logo: { src: "./src/assets/bear.svg", alt: "BearDrive" },
+      // The logo is the way back to beardrive.ai. Starlight always points it
+      // at the docs root, so the link lives in a component override.
+      components: { SiteTitle: "./src/components/SiteTitle.astro" },
       customCss: ["./src/styles/tokens.gen.css", "./src/styles/custom.css"],
       social: [
         {
@@ -136,22 +152,6 @@ export default defineConfig({
           ],
         },
         {
-          // Job-shaped titles, persona named in the description (which is also
-          // the search snippet and the llms.txt line). These pages ROUTE — the
-          // moment one starts teaching a feature, it links to the guide that
-          // owns it instead.
-          label: "Use cases",
-          items: [
-            { label: "Share work across your team's agents", slug: "use-cases/team-artifacts" },
-            { label: "Keep a wiki your agents maintain", slug: "use-cases/team-wiki" },
-            { label: "Give your coding agents the business context", slug: "use-cases/business-context" },
-            { label: "Turn a personal brain into a company brain", slug: "use-cases/company-brain" },
-            { label: "Run a personal wiki, publish part of it", slug: "use-cases/personal-wiki" },
-            { label: "Carry one context across agents and devices", slug: "use-cases/multi-device" },
-            { label: "Give every agent on the team the same skills", slug: "use-cases/shared-skills" },
-          ],
-        },
-        {
           label: "Self-hosting",
           items: [
             { label: "Run a hub", slug: "self-hosting/run-a-hub" },
@@ -173,6 +173,16 @@ export default defineConfig({
           items: [
             { label: "How sync works", slug: "concepts/how-it-works" },
             { label: "Project permissions", slug: "concepts/permissions" },
+          ],
+        },
+        // Off-site, and last on purpose: the sidebar order is the recommended
+        // path, so nothing that leaves the docs belongs above the docs.
+        {
+          label: "More",
+          items: [
+            { label: "Use cases", link: "https://beardrive.ai/use-cases/" },
+            { label: "Blog", link: "https://beardrive.ai/blog/" },
+            { label: "GitHub", link: "https://github.com/runbear-io/beardrive" },
           ],
         },
       ],

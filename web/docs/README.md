@@ -102,15 +102,26 @@ recommended path is agent-first:
 - **Manual setup (optional)** — the CLI route: install, set up by hand, skills
   and hooks in detail. Same destination, more steps; one click away, never on
   the critical path.
-- **Use cases** — job-shaped titles ("Share work across your team's agents"),
-  persona named in the first line and in the `description`. These pages ROUTE:
-  who it's for, what you get, the one setup difference, links out. The moment
-  one starts teaching a feature, it links to the guide that owns it instead.
 - **Self-hosting**, **Reference**, **Concepts** — unchanged in intent.
+- **More** — off-site links (use cases, blog, GitHub), last because the order
+  is the recommended path and nothing that leaves the docs belongs above them.
 
 Keep new onboarding content out of Manual. If a page teaches someone how to get
 started, it belongs in Start here and should say what to ask an agent, not what
 to type.
+
+Job-shaped "use case" pages — written for someone deciding, not someone
+building — live on the marketing site (`beardrive.ai/use-cases`), which owns
+that audience and already had its own copy of all of them. The docs used to
+carry a parallel set; they were deleted and each URL redirects to its
+counterpart there.
+
+The header logo links to `beardrive.ai`, not the docs index. Starlight always
+points it at the docs root and exposes no option for it, so that link lives in
+`src/components/SiteTitle.astro` — Starlight's own component with one changed
+`href`, registered through `components:` in `astro.config.mjs`. If a Starlight
+upgrade restyles the header, that file is the first thing to re-diff against
+`node_modules/@astrojs/starlight/components/SiteTitle.astro`.
 
 ## Deploying
 
