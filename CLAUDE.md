@@ -23,7 +23,7 @@ npm run e2e        # Playwright suite against the seeded e2e hub (starts itself 
 ./check-dist.sh    # verify committed static/ matches frontend/src (run before releases)
 ```
 
-There is no Makefile, linter config, or CI config in-repo. Releases run `goreleaser release` on a tagged commit (see `.goreleaser.yaml`); the version is injected via `-ldflags "-X main.version=..."` into `cmd/bdrive/main.go`. The frontend's built assets are **committed** (go:embed needs them in the module), so `go build` and `go install` never require Node — but a release tag must not ship a stale `internal/webapp/static`: run `frontend/check-dist.sh` first.
+There is no Makefile or linter config in-repo. CI is three GitHub Actions workflows: `ci.yml` (build/vet/test on Linux and macOS), `bump-cloud.yml` (pins the new OSS commit in the private cloud repo), and `docs.yml` (builds `web/docs` on PRs, deploys it to the `beardrive-docs` Cloudflare Pages project — docs.beardrive.ai — on pushes to main; see `web/docs/README.md`). Releases run `goreleaser release` on a tagged commit (see `.goreleaser.yaml`); the version is injected via `-ldflags "-X main.version=..."` into `cmd/bdrive/main.go`. The frontend's built assets are **committed** (go:embed needs them in the module), so `go build` and `go install` never require Node — but a release tag must not ship a stale `internal/webapp/static`: run `frontend/check-dist.sh` first.
 
 When testing the CLI manually, set `BDRIVE_HOME=/some/tmp/dir` to relocate all beardrive state (device identity, mount registry, volume stores) away from the real `~/.bdrive`.
 
