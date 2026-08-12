@@ -118,6 +118,16 @@ the folder question in this conversation.** There is no exception — not for an
 empty folder, not for a non-repo, not for a non-interactive session. If
 you cannot ask, end your turn with the question instead of proceeding.
 
+**A location phrase in the request is not an answer.** "Set up BearDrive in
+this folder", "set this up here", "sync this project" all name *where your
+session is running* — the only place it could be — not which folder syncs.
+They are the start of this conversation, not the end of it. The question is
+answered only once the user has picked between your named recommendation and
+the alternatives you listed, in a message of their own. Treating "in this
+folder" as consent is the single most common way this step goes wrong, and it
+lands the user on the one outcome this section says never to recommend: the
+whole folder, mounted bare, chosen by you.
+
 Run init BEFORE the git handoff: init can refuse (e.g. this device already
 syncs that project somewhere else), and a refusal after you have already
 rewritten `.gitignore` and unstaged files leaves the repo half-changed. If
@@ -160,10 +170,24 @@ committed). Re-running `bdrive init --yes` later is always safe. To change
 the scope later use `bdrive scope add/rm <dir>`, never hand-edit
 `.bdrive/config.json`.
 
-**If the folder is empty after init — ask once.** Init has already pulled the
-project, so an empty folder *now* means there is genuinely nothing to build on.
-(If the project was created from a template in the browser, its files are
-already here — say nothing.) Ask: start from a structure, or from scratch?
+## 4. Offer a starting structure — **ask first**
+
+This was the last paragraph of step 3 and agents dropped it: a decision the
+user makes is not a footnote to the command before it. It is a step, and it
+runs every time the condition below holds.
+
+**Check whether the folder is empty, now that init has run.** Init has already
+pulled the project, so an empty folder *now* means there is genuinely nothing
+to build on. (If the project was created from a template in the browser, its
+files are already here — say nothing.)
+
+**Empty means no synced content, not an empty `ls -a`.** `bdrive init` just
+wrote `.bdrive/` and seeded `.bdriveignore`, so the folder is *never* literally
+empty when you look — and `.git/`, `.gitignore` and other dotfiles do not count
+either. A folder holding only those is empty for this step. Do not let the
+files init itself created talk you out of asking.
+
+Ask: start from a structure, or from scratch?
 
 > On Claude Code use `AskUserQuestion`, header "Starting point", in this
 > order: **Docs + decision records** — `docs/`, `decisions/` — labelled
@@ -182,12 +206,16 @@ pick, run one command in the same folder:
 bdrive init --template docs --yes
 ```
 
+That is a second `bdrive init` on purpose — in an already-initialized folder it
+only writes the structure and lets the normal cycle push it. Existing paths are
+never overwritten.
+
 **A folder with files in it skips this entirely.** Never offer to restructure
 someone's existing notes, and never ask before init — before init you cannot
 know whether the project already has a structure, which is how you end up with
 two copies.
 
-## 4. Confirm the sync hooks
+## 5. Confirm the sync hooks
 
 `bdrive init` already did this — do not run a separate hooks command. It
 registers turn-boundary hooks (pull before every turn, push right after
@@ -206,7 +234,7 @@ Only if a platform the user works with is missing from init's output: run
 `bdrive hooks install --agent <name>`. `bdrive hooks` shows the status table,
 `bdrive hooks uninstall` removes them again.
 
-## 5. Verify, then show the payoff
+## 6. Verify, then show the payoff
 
 Init printed the project's hub link and a sync summary — use them rather
 than running more commands. Summarize what was set up and hand the user that
@@ -217,7 +245,7 @@ fully public URLs.
 Only if something looked wrong in init's output: `bdrive status` shows the
 daemon and pending count, and `bdrive url <file>` links a specific file.
 
-## 6. Point the repo's agents at the folder — **ask first**
+## 7. Point the repo's agents at the folder — **ask first**
 
 If the synced folder sits inside a code repo (or any folder that already has a
 root `AGENTS.md` / `CLAUDE.md`), agents working from the repo root won't read
