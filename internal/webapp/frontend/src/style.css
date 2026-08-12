@@ -128,6 +128,19 @@ button, input, a.btn { font-family: inherit; }
   letter-spacing: .01em; line-height: 1;
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* Beta pill. Subtle on purpose: it sits beside the wordmark forever until it
+   doesn't, so it reads as a footnote to the brand, not a second logo. Honey
+   at low alpha rather than the solid accent — the accent is spent on the mark
+   two elements to the left. */
+#vault-beta {
+  flex: none;
+  font-size: 10px; font-weight: 600; line-height: 1;
+  letter-spacing: .06em; text-transform: uppercase;
+  color: var(--accent-bright);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 999px; padding: 3px 6px;
+}
 .vault-actions { display: flex; align-items: center; gap: 4px; }
 #vault #signout, .icon-btn2 {
   width: 28px; height: 28px; border-radius: 6px;
