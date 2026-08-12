@@ -109,6 +109,11 @@ actually read (and which hot ones nobody maintains).
 - **Conflict-safe** — concurrent edits resolve deterministically
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file. Nothing is silently dropped.
+  Connecting a folder is not a concurrent edit: on the first sync, files the
+  project already has (its `.bdriveignore`, `AGENTS.md`, anything a checkout
+  brought along) keep the project's version — no conflict copies. Your copy is
+  journaled as a superseded version, so `bdrive restore --list <path>` still
+  has it.
 - **Your agent's skills sync too** — `.claude/skills`, `.claude/commands`,
   `.claude/agents`, `AGENTS.md` and `CLAUDE.md` are ordinary files in the
   project, so a skill one person writes is on every teammate's disk before

@@ -195,6 +195,9 @@ func printCycle(res *syncer.Result) {
 	if res.Conflicts > 0 {
 		fmt.Printf("  conflicts:      %d (preserved as *.bdrive-conflict-* files)\n", res.Conflicts)
 	}
+	if res.Adopted > 0 {
+		fmt.Printf("  adopted:        %d file(s) replaced by the project's version (yours: `bdrive restore --list <path>`)\n", res.Adopted)
+	}
 	if res.Pruned > 0 {
 		fmt.Printf("  pruned:         %d path(s) removed from the hub (kept on disk)\n", res.Pruned)
 	}

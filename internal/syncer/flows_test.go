@@ -116,8 +116,11 @@ func TestConnectWithIdenticalLocalContent(t *testing.T) {
 	}
 }
 
-// Same story with a stale divergent copy: nothing is silently lost — the
-// devices converge on one version and the other survives as a conflict copy.
+// Same story with a stale divergent copy. Joining is an adoption, not a merge:
+// the project's version wins on every device — even though the joiner's copy is
+// the later write — and no conflict copy is made. The joiner's content is not
+// lost, it is journaled (and pushed) as a superseded version, which is what
+// `bdrive restore` reads.
 func TestConnectWithDivergentLocalContent(t *testing.T) {
 	be := sharedRemote(t)
 	a := newDevice(t, "deva", be)
@@ -127,23 +130,86 @@ func TestConnectWithDivergentLocalContent(t *testing.T) {
 	b := newDevice(t, "devb", be)
 	time.Sleep(10 * time.Millisecond)
 	write(t, b.Folder, "docs/guide.md", "stale local version")
-	cycle(t, b)
+	if res := cycle(t, b); res.Adopted != 1 {
+		t.Fatalf("Adopted = %d, want 1", res.Adopted)
+	}
 	cycle(t, a)
 	cycle(t, b)
 
-	av, bv := read(t, a.Folder, "docs/guide.md"), read(t, b.Folder, "docs/guide.md")
-	if av != bv {
-		t.Fatalf("devices diverged: %q vs %q", av, bv)
-	}
-	survived := map[string]bool{av: true}
 	for _, s := range []*Session{a, b} {
-		for _, p := range conflictFiles(t, s.Folder) {
-			rel, _ := filepath.Rel(s.Folder, p)
-			survived[read(t, s.Folder, rel)] = true
+		if got := read(t, s.Folder, "docs/guide.md"); got != "hub version" {
+			t.Fatalf("%s guide.md = %q, want the project's version", s.Device.ID, got)
+		}
+		if c := conflictFiles(t, s.Folder); len(c) != 0 {
+			t.Fatalf("%s: joining made conflict copies: %v", s.Device.ID, c)
 		}
 	}
-	if !survived["hub version"] || !survived["stale local version"] {
-		t.Fatalf("a version was silently lost; surviving: %v", survived)
+	// The superseded content is still in history, on both devices.
+	for _, s := range []*Session{a, b} {
+		ops, err := s.Store.AllOps()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, op := range ops {
+			if op.Path == "docs/guide.md" && s.Store.HasBlob(op.Blob) {
+				if body, err := os.ReadFile(s.Store.BlobPath(op.Blob)); err == nil && string(body) == "stale local version" {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s: the joiner's version is not recoverable from history", s.Device.ID)
+		}
+	}
+}
+
+// The reported connect experience: a folder that already holds a .bdriveignore
+// (`bdrive init` seeds one) and an agent-written AGENTS.md joins a project that
+// has its own versions of both. Neither may fork into a
+// `.bdriveignore.bdrive-conflict-<device>-<time>` file, and neither may have the
+// joiner's copy overwrite the team's. A real concurrent edit AFTER the join
+// still conflict-copies — that is a different situation and keeps its old
+// behavior.
+func TestConnectDoesNotForkIgnoreAndAgentsFiles(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	write(t, a.Folder, ".bdriveignore", "node_modules/\n*.log\n")
+	write(t, a.Folder, "AGENTS.md", "team instructions\n")
+	cycle(t, a)
+
+	b := newDevice(t, "devb", be)
+	time.Sleep(10 * time.Millisecond)
+	write(t, b.Folder, ".bdriveignore", "# BearDrive starter\n.DS_Store\n")
+	write(t, b.Folder, "AGENTS.md", "notes my agent wrote here\n")
+	res := cycle(t, b)
+	if res.Adopted != 2 {
+		t.Fatalf("Adopted = %d, want 2 (.bdriveignore and AGENTS.md)", res.Adopted)
+	}
+	if res.Conflicts != 0 {
+		t.Fatalf("connecting made %d conflict copies, want 0", res.Conflicts)
+	}
+	cycle(t, a)
+	cycle(t, b)
+
+	for _, s := range []*Session{a, b} {
+		if c := conflictFiles(t, s.Folder); len(c) != 0 {
+			t.Fatalf("%s: connecting littered the folder: %v", s.Device.ID, c)
+		}
+		if got := read(t, s.Folder, "AGENTS.md"); got != "team instructions\n" {
+			t.Fatalf("%s AGENTS.md = %q, want the team's version", s.Device.ID, got)
+		}
+		if got := read(t, s.Folder, ".bdriveignore"); got != "node_modules/\n*.log\n" {
+			t.Fatalf("%s .bdriveignore = %q, want the team's version", s.Device.ID, got)
+		}
+	}
+
+	// Now a genuine concurrent edit between two devices that share the project.
+	write(t, a.Folder, "AGENTS.md", "a's edit\n")
+	write(t, b.Folder, "AGENTS.md", "b's edit\n")
+	cycle(t, a)
+	if res := cycle(t, b); res.Conflicts != 1 {
+		t.Fatalf("a real concurrent edit made %d conflict copies, want 1", res.Conflicts)
 	}
 }
 
