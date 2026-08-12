@@ -162,16 +162,26 @@ func TestSec_SyncPeer_HostileDeviceNameCannotBreakTheConflictCopy(t *testing.T) 
 	be := sharedRemote(t)
 	victim := newDevice(t, "victim", be)
 
+	// The victim syncs the project once first. A collision on a device's very
+	// first cycle is a JOIN, which Cycle step 1b resolves in the project's
+	// favour with no copy at all; the conflict copy this test is about is the
+	// ordinary concurrent edit between two devices that already share a project.
+	const warm = "already shared"
+	warmOp := secjrnOp(1, "warm.md", secjrnBlob(t, be, warm), len(warm))
+	secjrnPush(t, be, "attacker", []journal.Op{warmOp})
+	if _, err := secpeerCycle(t, victim); err != nil {
+		t.Fatal(err)
+	}
+
 	const theirs = "the peer's version"
 	blob := secjrnBlob(t, be, theirs)
-	op := secjrnOp(1, "shared.md", blob, len(theirs))
-	op.Lamport = 1
+	op := secjrnOp(2, "shared.md", blob, len(theirs))
+	op.Lamport = 2
 	op.Time = time.Now().UTC().Add(-time.Hour) // loses last-writer-wins to the victim
 	op.DeviceName = strings.Repeat("A", 300)   // lands verbatim in a filename
-	secjrnPush(t, be, "attacker", []journal.Op{op})
+	secjrnPush(t, be, "attacker", []journal.Op{warmOp, op})
 
-	// The victim edits the same file before its first sync: an ordinary
-	// concurrent edit, and exactly what makes a conflict copy.
+	// An ordinary concurrent edit, and exactly what makes a conflict copy.
 	const mine = "the victim's version"
 	write(t, victim.Folder, "shared.md", mine)
 
