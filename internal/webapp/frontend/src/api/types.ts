@@ -245,3 +245,15 @@ export interface UploadPlan {
   method?: string;
   headers?: Record<string, string>;
 }
+
+// POST .../undo-run (handleUndoRun, undorun.go). The same shape answers a
+// `preview: true` call and the real one, so the dialog and the result read
+// from one type — and the plan the dialog showed is recomputed server-side
+// before anything is written.
+export interface UndoPlan {
+  ok: boolean;
+  undone: { path: string; action: "restore" | "remove" }[];
+  skipped: string[]; // already at their pre-run content: nothing to write
+  changed_after: string[]; // someone landed a change on this path after the run
+  refused: string[]; // a path the hub's own upload door would refuse
+}

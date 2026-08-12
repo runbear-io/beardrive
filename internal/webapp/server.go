@@ -759,6 +759,9 @@ func (s *Server) Handler() http.Handler {
 	// writes to that same journal, so it lives here too.
 	mux.HandleFunc("POST /api/p/{project}/restore", proj(PermWrite, s.handleRestore))
 	mux.HandleFunc("POST /api/p/{project}/remove", proj(PermWrite, s.handleRemove))
+	// The run-wide form of the two above: one journal write that puts every
+	// path an agent run touched back where it was.
+	mux.HandleFunc("POST /api/p/{project}/undo-run", proj(PermWrite, s.handleUndoRun))
 	mux.HandleFunc("GET /api/p/{project}/heat", proj(PermRead, s.handleHeat))
 	mux.HandleFunc("POST /api/p/{project}/reads", proj(PermRead, s.handleReadReport))
 	mux.HandleFunc("POST /api/p/{project}/shares", proj(PermWrite, s.handleShareCreate))
