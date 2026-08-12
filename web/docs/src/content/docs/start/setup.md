@@ -15,22 +15,35 @@ Start the agent — Claude Code, Cowork, Codex, Gemini CLI, Hermes — in the fo
 you want synced, and paste:
 
 ```
-Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to
-sync (the project is named "<project-name>").
+Follow beardrive.ai/setup to set up BearDrive. Ask me which folder to sync.
 ```
 
-The agent fetches that page and works through it — install the CLI, sign in
-(it prints a link you approve in the browser), connect the project, register
-the sync hooks. You copy one
-thing; the agent handles every deviation — already installed, no Homebrew,
-browser sign-in, wrong folder. On BearDrive Cloud, drop `on <hub-url>` —
-sign-in defaults to beardrive.ai.
+`beardrive.ai/setup` redirects to
+[INSTALL_FOR_AGENTS.md](https://github.com/runbear-io/beardrive/blob/main/INSTALL_FOR_AGENTS.md),
+the runbook the agent actually follows. It fetches that page and works through
+it — install the CLI, sign in (it prints a link you approve in the browser),
+create the project, register the sync hooks. You copy one thing; the agent
+handles every deviation — already installed, no Homebrew, browser sign-in,
+wrong folder. The instructions live at that URL rather than inside the prompt,
+so they never go stale in someone's copy.
 
-The project name is in the prompt because the agent recommends a folder of
-the same name — so `handbook` on the hub is `handbook/` on everyone's disk.
-Starting from nothing (no project id, no name), it recommends `shared/` and
-names the new project `shared`.
+**"Ask me which folder to sync" is doing real work — keep it.** Without it,
+an agent reads the rest of the sentence as permission to decide for you, and
+the usual guess is *this whole folder*, which is the one answer the runbook
+tells it never to recommend. With it, the agent stops and offers you a named
+recommendation first. Starting from nothing it suggests creating `shared/`
+and names the new project `shared`; if it finds a folder that already looks
+like notes, it suggests that one instead.
+
+**Self-hosting?** Say where: `Follow beardrive.ai/setup to set up BearDrive on
+https://hub.example.com. Ask me which folder to sync.` On BearDrive Cloud
+there is nothing to add — sign-in defaults to beardrive.ai.
+
+**Joining a project a teammate already made?** Use the pre-filled paste from
+that project's home page in the hub (see the tip below) rather than this one.
+It carries the project's id and name, so the agent joins the existing project
+instead of creating a new one — and recommends a folder named after it, so
+`handbook` on the hub is `handbook/` on everyone's disk.
 
 If the folder turns out to be empty once it is connected, the agent offers one
 more choice: start from a structure, or from scratch. Four are shipped:
@@ -59,8 +72,10 @@ The hooks step is the durable part: once they are registered, every later
 session in every folder syncs automatically, with nothing to remember.
 
 :::tip[Don't retype this for teammates]
-A project's home page in the hub shows this same paste with your hub URL and
-project id already filled in. Send people there.
+A project's home page in the hub shows a paste with your hub URL and project
+id already filled in. Send people there rather than asking them to assemble
+one — it is the difference between a teammate joining your project and a
+teammate creating a second one beside it.
 :::
 
 ## What your agent just set up

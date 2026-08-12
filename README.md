@@ -133,22 +133,27 @@ No terminal needed: start any agent (Claude Code, Codex, Gemini CLI, Hermes)
 in the folder you want synced and give it one paste:
 
 ```
-Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to
-sync (the project is named "<project-name>").
+Follow beardrive.ai/setup to set up BearDrive. Ask me which folder to sync.
 ```
 
-Joining a teammate's project? They can copy that paste with the hub URL and
-project id already filled in from the project's home page in the web UI.
-Starting fresh, drop the trailing sentence — the agent recommends `shared/`
-and names the new project `shared`.
+Keep the second sentence. Without it an agent reads the first as permission to
+decide for you, and the usual guess is *this whole folder* — the one answer the
+runbook tells it never to recommend. With it, you get a named recommendation to
+accept or override: `shared/` from a standing start, or a notes folder it
+already found.
 
-The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
-it: install the CLI, then one `bdrive init` — which signs in (an approval link
-when there is no local browser), registers the sync hooks, and prints the
-project link. The instructions live at that URL rather than inside the prompt
-so they never go stale in someone's copy, and the agent handles every
-deviation (already installed, no Homebrew, sign-in, wrong folder).
+Self-hosting? Say where: `… to set up BearDrive on https://hub.example.com.`
+Joining a teammate's project? Use the paste on that project's home page in the
+web UI instead — it carries the hub URL and project id, so the agent joins the
+project rather than creating a second one beside it.
+
+`beardrive.ai/setup` redirects to [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md),
+which the agent fetches and follows: install the CLI, then one `bdrive init` —
+which signs in (an approval link when there is no local browser), registers the
+sync hooks, and prints the project link. The instructions live at that URL
+rather than inside the prompt so they never go stale in someone's copy, and the
+agent handles every deviation (already installed, no Homebrew, sign-in, wrong
+folder).
 
 Those hooks are the whole integration, and `bdrive init` registers them in
 each platform's user config (`~/.claude/settings.json` and friends), once per
