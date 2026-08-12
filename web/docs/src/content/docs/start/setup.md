@@ -46,7 +46,7 @@ more choice: start from a structure, or from scratch. Four are shipped:
   actionable something is, with explicit archiving.
 - **Shared agent skills** (`.claude/skills/`) — a skill library the whole
   team's agents load, kept current by syncing. See
-  [Give every agent on the team the same skills](/use-cases/shared-skills/).
+  [Give every agent on the team the same skills](https://beardrive.ai/use-cases/).
 
 Each is a small skeleton plus an `AGENTS.md` telling every agent on the team
 where a new file goes, when something is archived or superseded, and what a good
