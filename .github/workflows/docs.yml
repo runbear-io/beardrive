@@ -1,0 +1,72 @@
+# Builds web/docs on every PR that touches it, and deploys to Cloudflare Pages
+# (project `beardrive-docs`, custom domain docs.beardrive.ai) on push to main.
+#
+# Deliberately NOT the Pages Git integration: that clones shallow, and the
+# sitemap's <lastmod> comes from each page's commit date, so a depth-1 checkout
+# silently drops every lastmod. Hence `fetch-depth: 0` below.
+#
+# Needs two secrets: CLOUDFLARE_API_TOKEN (an account API token with
+# "Cloudflare Pages: Edit") and CLOUDFLARE_ACCOUNT_ID.
+name: docs
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/docs/**"
+      # The palette is generated from the hub frontend's tokens, so a change
+      # there changes the built docs too.
+      - "internal/webapp/frontend/src/tw.css"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "web/docs/**"
+      - "internal/webapp/frontend/src/tw.css"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # sitemap <lastmod> comes from commit dates
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/docs/package-lock.json
+
+      # The build reads ../../internal/webapp/frontend/src/tw.css, so the whole
+      # repo has to be checked out — not just this subdirectory.
+      - run: npm ci
+        working-directory: web/docs
+      - run: npm run build
+        working-directory: web/docs
+
+      - name: Deploy to Cloudflare Pages
+        if: github.event_name != 'pull_request'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: >
+          npx --yes wrangler@4 pages deploy dist
+          --project-name=beardrive-docs
+          --branch=main
+          --commit-dirty=true
+        working-directory: web/docs
+
+      # Same checks Search Console runs: robots.txt -> index -> every URL 200s.
+      # Reports, never blocks: half of what it checks (a managed robots.txt
+      # shadowing ours, cache propagation) is Cloudflare's call, not this
+      # repo's, and a good deploy must not go red over it. Read the step.
+      - name: Verify what production actually serves
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        run: npm run check:sitemap https://docs.beardrive.ai
+        working-directory: web/docs

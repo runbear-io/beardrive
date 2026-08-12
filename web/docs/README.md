@@ -117,6 +117,19 @@ to type.
 Static output in `dist/`. Any static host works; build command `npm run build`,
 output directory `dist`, project root `web/docs`.
 
+Today that host is **Cloudflare Pages**, project `beardrive-docs`
+(`docs.beardrive.ai`), deployed by `.github/workflows/docs.yml` on every push to
+`main` that touches `web/docs/**` or the token source. It needs two repository
+secrets: `CLOUDFLARE_API_TOKEN` (an account token with *Cloudflare Pages: Edit*)
+and `CLOUDFLARE_ACCOUNT_ID`.
+
+Not the Pages **Git integration**, deliberately: it clones shallow, which costs
+every `<lastmod>` (see "Checkout depth"), and it would build the docs on commits
+that cannot change them. The Pages project is a direct-upload project — nothing
+deploys it but this workflow. That is also the failure mode to watch for: when
+deploys were manual, they simply stopped, and the site sat three weeks stale
+while every check that only runs *during* a deploy stayed green.
+
 ### Redirects
 
 The docs were reorganized around the agent-first path, so three old URLs moved:
