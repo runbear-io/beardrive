@@ -403,6 +403,15 @@ export default function Browser(props: {
                 content and will be left alone.
               </div>
             )}
+            {/* Never silently drop a category: a path the hub's own upload
+                door refuses is left out of the undo, and a dialog that
+                listed only what it WILL do would read as "all of it". */}
+            {plan.refused.length > 0 && (
+              <div>
+                {plan.refused.length} path{plan.refused.length === 1 ? "" : "s"} can't be written by
+                the hub and will be left alone: {plan.refused.join(", ")}.
+              </div>
+            )}
           </>,
           "Undo run",
           true,
