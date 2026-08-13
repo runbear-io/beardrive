@@ -310,7 +310,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	blocked := false
 	var pulled, gone []journal.Op
 	if s.Backend != nil {
-		pulled, gone, err = s.pull(ctx)
+		pulled, gone, err = s.pull(ctx, cache)
 		switch {
 		case err == nil:
 			if st.Access == store.AccessNone {
@@ -726,9 +726,9 @@ func sizeBound(size int64) int64 {
 // stated property only while the party serving the bytes was a PEER, whose
 // numbers a separate hub had at least stored; when the peer IS the hub there is
 // no second party at all, and one listing entry or one journal line sized the
-// device's allocation and its disk. A journal is JSONL text (32 MiB is ~500k
-// ops) and a blob this size is already far past what a synced project of notes
-// and documents holds.
+// device's allocation and its disk. A journal is JSONL text (100 MiB is well
+// over a million ops) and a blob this size is already far past what a synced
+// project of notes and documents holds.
 //
 // It is a read CEILING, never an up-front refusal on the declared size: op.Size
 // is a peer's integer with no relation to the object it names, so refusing on it
@@ -739,8 +739,10 @@ func sizeBound(size int64) int64 {
 // ponytail: an absolute constant, mirroring `bdrive import`'s maxImportBlob
 // (256 << 20, raisable with --max-blob). A file larger than this does not
 // materialize on receiving devices — if that becomes a real workload, this
-// wants the same kind of knob, not a bigger constant.
-const maxPullBytes = 32 << 20
+// wants the same kind of knob, not a bigger constant. Raised from 32 MiB with
+// delta sync: large files were the reason chunking shipped, and a ceiling
+// below the files it was built for made it dead weight.
+const maxPullBytes = 100 << 20
 
 func pullBound(size int64) int64 { return min(sizeBound(size), maxPullBytes) }
 
@@ -849,7 +851,10 @@ func withdrawn(have, applied []journal.Op) []journal.Op {
 // pull fetches journals that grew on the remote and any blobs we are missing
 // for the new ops. It returns the ops we had not seen before, and any op a
 // peer withdrew from a journal we had already applied (see withdrawn).
-func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) {
+// cache is the mount's materialization state, read only for the delta basis:
+// cache[path].Blob is the version of a file this device currently holds, and
+// its chunks source a chunked pull locally (fetchChunked).
+func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) ([]journal.Op, []journal.Op, error) {
 	objs, err := s.Backend.List(ctx, "journal/")
 	if err != nil {
 		return nil, nil, err
@@ -1009,6 +1014,43 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) 
 	for _, op := range newOps {
 		if op.Kind != journal.KindPut || op.Blob == "" || s.Store.HasBlob(op.Blob) {
 			continue
+		}
+		// Large files: try the manifest first, sourcing unchanged chunks from
+		// the version of this path we already hold. EVERY failure falls
+		// through to the whole-blob path, not just errNoManifest: the whole
+		// blob is independently hash-verified, so there is nothing to lose by
+		// trying it — and not falling through let one member-written manifest
+		// (the only object in the key space that is neither content-addressed
+		// nor hash-checked at ingest) permanently deny a file whose correct
+		// whole blob was sitting right there. A hash contradiction is still
+		// remembered as the one signal worth surfacing (errBlobContent).
+		if op.Size > chunkThreshold {
+			var basis string
+			if c, ok := cache[op.Path]; ok {
+				basis = c.Blob
+			}
+			cerr := s.fetchChunked(ctx, op, basis)
+			if cerr == nil {
+				continue
+			}
+			// Fall through to the whole blob only when one actually EXISTS
+			// (Exists never triggers hub reassembly). When it does, the
+			// fallthrough is unconditional — the whole blob is independently
+			// hash-verified, so a poisoned manifest cannot deny it. When it
+			// does not — the normal chunked-only case — a transient chunk
+			// failure retries chunks next cycle instead of asking the hub to
+			// reassemble and re-download the entire file every tick.
+			//
+			// A chunked-path hash contradiction is recorded ONLY when no
+			// fallback can land the file: when the whole blob arrives fine,
+			// "blob corrupt on remote" would page an operator about a file
+			// that just converged.
+			if ok, eerr := s.Backend.Exists(ctx, "blobs/"+op.Blob); eerr != nil || !ok {
+				if errors.Is(cerr, errBlobContent) && bad == nil {
+					bad = cerr
+				}
+				continue
+			}
 		}
 		rc, err := s.Backend.Get(ctx, "blobs/"+op.Blob)
 		if err != nil {
@@ -1485,6 +1527,18 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 	g.SetLimit(pushConcurrency)
 	for _, j := range jobs {
 		g.Go(func() error {
+			// Large files move as chunks + a manifest (chunks.go); the whole
+			// blob is never uploaded for them. Everything else is unchanged.
+			if j.size > chunkThreshold {
+				n, err := s.pushChunked(gctx, j.blob)
+				if err != nil {
+					return err
+				}
+				atomic.AddInt64(&done, 1)
+				atomic.AddInt64(&bytesDone, n)
+				report()
+				return nil
+			}
 			f, err := s.Store.OpenBlob(j.blob)
 			if err != nil {
 				return err

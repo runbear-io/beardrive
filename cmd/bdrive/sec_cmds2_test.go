@@ -391,7 +391,7 @@ func TestSec_Import_ABoundedArchiveCannotSpoolUnboundedBytesToDisk(t *testing.T)
 			}
 		}
 	}()
-	_, _, _, ierr := importStore(context.Background(), spooled, tr, nil)
+	_, _, _, ierr := importStore(context.Background(), spooled, tr, nil, false)
 	close(stop)
 	<-watched
 	peakBytes := peak.Load()

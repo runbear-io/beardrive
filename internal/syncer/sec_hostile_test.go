@@ -219,9 +219,9 @@ func TestSec_HostileHub_OneUnusableListedKeyCannotHideEveryPeer(t *testing.T) {
 // the daemon buffers") is not met when the hub is the peer: there is no absolute
 // ceiling anywhere on the path, so one listing entry sizes the allocation.
 func TestSec_HostileHub_ADeclaredJournalSizeCannotChooseTheDeviceAllocation(t *testing.T) {
-	const declared = 512 << 20 // what the hub says the journal is
-	const willing = 72 << 20   // how much it is prepared to actually write here
-	const ceiling = 64 << 20   // an absolute cap this device ought to have
+	const declared = 512 << 20         // what the hub says the journal is
+	const willing = 2*maxPullBytes + (40 << 20) // more than the generous ceiling: proves truncation
+	const ceiling = 2 * maxPullBytes // twice the cap is generous: transport buffering, not the bound, owns the slack
 
 	_, hostile := sechostPeer(t, map[string]string{"notes/real.md": "hi"})
 	hostile.onList = func(objs []remote.Object) []remote.Object {
@@ -254,8 +254,8 @@ func TestSec_HostileHub_ADeclaredJournalSizeCannotChooseTheDeviceAllocation(t *t
 // bytes to the user's disk as it names — on every cycle, for every op.
 func TestSec_HostileHub_ADeclaredBlobSizeCannotFillTheDisk(t *testing.T) {
 	const declared = 512 << 20
-	const willing = 72 << 20
-	const ceiling = 64 << 20
+	const willing = 2*maxPullBytes + (40 << 20)
+	const ceiling = 2 * maxPullBytes
 
 	_, hostile := sechostPeer(t, map[string]string{"notes/real.md": "small file, honestly"})
 	hostile.onBody = func(key string, body []byte, w http.ResponseWriter) bool {

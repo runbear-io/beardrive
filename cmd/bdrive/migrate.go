@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 )
 
@@ -34,6 +35,12 @@ const manifestName = "beardrive-export.json"
 var (
 	blobKeyRe    = regexp.MustCompile(`^blobs/[0-9a-f]{64}$`)
 	journalKeyRe = regexp.MustCompile(`^journal/[A-Za-z0-9._-]+\.jsonl$`)
+	// Delta-sync key classes (docs/delta-sync-prd.md). A chunk key is its own
+	// content hash, checked on import exactly like a blob; a manifest key is
+	// the whole file's sha, verifiable only by reassembly, so it is carried
+	// verbatim like a journal.
+	chunkKeyRe    = regexp.MustCompile(`^chunks/[0-9a-f]{64}$`)
+	manifestKeyRe = regexp.MustCompile(`^manifests/[0-9a-f]{64}$`)
 )
 
 type exportManifest struct {
@@ -102,6 +109,7 @@ bdrive import.`,
 
 func importCmd() *cobra.Command {
 	var name string
+	var allowIncomplete bool
 	c := &cobra.Command{
 		Use:   "import <archive.tar.gz>",
 		Short: "Import an exported project into the hub you're logged into",
@@ -159,7 +167,7 @@ bdrive init --project <id>.`,
 			} else if len(existing) > 0 {
 				return fmt.Errorf("project %q (%s) on %s already has content — import needs an empty project (pass --name to create a fresh one)", p.Name, p.ID, settings.Server)
 			}
-			blobs, journals, size, err := importStore(cmd.Context(), be, tr, first)
+			blobs, journals, size, err := importStore(cmd.Context(), be, tr, first, allowIncomplete)
 			if err != nil {
 				return err
 			}
@@ -174,6 +182,8 @@ bdrive init --project <id>.`,
 		},
 	}
 	c.Flags().StringVar(&name, "name", "", "project name on the target hub (default: name from the archive)")
+	c.Flags().BoolVar(&allowIncomplete, "allow-incomplete", false,
+		"import even when the journal references content the archive does not hold (missing files are listed and stay missing)")
 	c.Flags().Int64Var(&maxImportBlob, "max-blob", maxImportBlob, "largest single file (bytes) an archive member may spool to disk")
 	return c
 }
@@ -190,7 +200,7 @@ func exportStore(ctx context.Context, be remote.Backend, w io.Writer, man export
 	if err := writeTarFile(tw, manifestName, mb); err != nil {
 		return 0, 0, 0, err
 	}
-	for _, prefix := range []string{"journal/", "blobs/"} {
+	for _, prefix := range []string{"journal/", "blobs/", "chunks/", "manifests/"} {
 		objs, err := be.List(ctx, prefix)
 		if err != nil {
 			return blobs, journals, size, fmt.Errorf("list %s: %w", prefix, err)
@@ -200,7 +210,8 @@ func exportStore(ctx context.Context, be remote.Backend, w io.Writer, man export
 			// file the export's own advice tells the user to pass around.
 			// `bdrive import` refuses a member outside the store layout;
 			// `tar xzf` does not. Same allowlist, applied on the way out.
-			if !journalKeyRe.MatchString(o.Key) && !blobKeyRe.MatchString(o.Key) {
+			if !journalKeyRe.MatchString(o.Key) && !blobKeyRe.MatchString(o.Key) &&
+				!chunkKeyRe.MatchString(o.Key) && !manifestKeyRe.MatchString(o.Key) {
 				continue
 			}
 			rc, err := be.Get(ctx, o.Key)
@@ -255,7 +266,18 @@ func readManifest(tr *tar.Reader) (exportManifest, *tar.Header, error) {
 // importStore uploads every archive entry to the backend, verifying blob
 // content against its content-addressed key. first, when non-nil, is an
 // already-read header to process before advancing the reader.
-func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *tar.Header) (blobs, journals int, size int64, err error) {
+func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *tar.Header, allowIncomplete bool) (blobs, journals int, size int64, err error) {
+	// Every blob a journal references must resolve to content in this same
+	// archive — blobs/<sha> or manifests/<sha>. A pre-delta `bdrive export`
+	// run against a delta-sync hub enumerates only journal/ and blobs/, so
+	// its archive silently omits every chunked large file while looking
+	// complete; importing it succeeded and the files were just gone on the
+	// destination. Import is the anti-lock-in door — it refuses loudly
+	// instead.
+	content := map[string]bool{}      // sha → present as blobs/ or manifests/
+	referenced := map[string]string{} // sha → a path that references it
+	chunks := map[string]bool{}       // chunk sha → present in the archive
+	manChunks := map[string][]string{} // manifest sha → chunk shas it names
 	hdr := first
 	for {
 		if hdr == nil {
@@ -272,12 +294,62 @@ func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *
 		case key == manifestName || hdr.Typeflag == tar.TypeDir:
 			// skip
 		case journalKeyRe.MatchString(key):
-			if err := be.Put(ctx, key, tr, hdr.Size); err != nil {
+			// Spooled rather than streamed so the ops can be read: the
+			// archive-completeness check below needs every Op.Blob.
+			jtmp, n, _, err := spoolBlob(tr)
+			if err != nil {
+				return blobs, journals, size, err
+			}
+			if ops, err := readJournalOps(jtmp); err == nil {
+				for _, op := range ops {
+					if op.Kind == journal.KindPut && op.Blob != "" {
+						referenced[op.Blob] = op.Path
+					}
+				}
+			}
+			err = be.Put(ctx, key, jtmp, n)
+			jtmp.Close()
+			os.Remove(jtmp.Name())
+			if err != nil {
 				return blobs, journals, size, fmt.Errorf("put %s: %w", key, err)
 			}
 			journals++
 			size += hdr.Size
-		case blobKeyRe.MatchString(key):
+		case manifestKeyRe.MatchString(key):
+			// A manifest's key is the whole file's sha — only reassembly can
+			// verify the CONTENT, so it travels verbatim — but the chunks it
+			// names must be in this same archive, checked after the loop
+			// (tar member order is not ours to assume).
+			mtmp, n, _, err := spoolBlob(tr)
+			if err != nil {
+				return blobs, journals, size, err
+			}
+			var man struct {
+				Chunks []struct {
+					H string `json:"h"`
+				} `json:"chunks"`
+			}
+			sha := strings.TrimPrefix(key, "manifests/")
+			if derr := json.NewDecoder(mtmp).Decode(&man); derr == nil {
+				for _, c := range man.Chunks {
+					manChunks[sha] = append(manChunks[sha], c.H)
+				}
+			}
+			if _, err := mtmp.Seek(0, io.SeekStart); err != nil {
+				mtmp.Close()
+				os.Remove(mtmp.Name())
+				return blobs, journals, size, err
+			}
+			err = be.Put(ctx, key, mtmp, n)
+			mtmp.Close()
+			os.Remove(mtmp.Name())
+			if err != nil {
+				return blobs, journals, size, fmt.Errorf("put %s: %w", key, err)
+			}
+			content[sha] = true
+			blobs++
+			size += hdr.Size
+		case blobKeyRe.MatchString(key), chunkKeyRe.MatchString(key):
 			// Spool first, store second: hashing while streaming into Put
 			// notices the mismatch only after the object is already in the
 			// target store, under a content address promising different
@@ -288,7 +360,7 @@ func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *
 			if err != nil {
 				return blobs, journals, size, err
 			}
-			if got != strings.TrimPrefix(key, "blobs/") {
+			if got != key[strings.IndexByte(key, '/')+1:] {
 				tmp.Close()
 				os.Remove(tmp.Name())
 				return blobs, journals, size, fmt.Errorf("corrupt archive: %s has content hash %s", key, got)
@@ -298,6 +370,11 @@ func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *
 			os.Remove(tmp.Name())
 			if err != nil {
 				return blobs, journals, size, fmt.Errorf("put %s: %w", key, err)
+			}
+			if strings.HasPrefix(key, "blobs/") {
+				content[strings.TrimPrefix(key, "blobs/")] = true
+			} else {
+				chunks[strings.TrimPrefix(key, "chunks/")] = true
 			}
 			blobs++
 			size += hdr.Size
@@ -309,7 +386,52 @@ func importStore(ctx context.Context, be remote.Backend, tr *tar.Reader, first *
 	if journals == 0 {
 		return blobs, journals, size, fmt.Errorf("archive contains no journals — nothing to import")
 	}
+	// A manifest in the archive must bring its chunks along — a manifest
+	// whose chunks are absent is exactly as incomplete as a missing blob,
+	// just one indirection deeper.
+	for sha, named := range manChunks {
+		for _, h := range named {
+			if !chunks[h] {
+				if allowIncomplete {
+					fmt.Fprintf(os.Stderr, "warning: manifest %.12s… names chunk %.12s… the archive does not hold\n", sha, h)
+					continue
+				}
+				return blobs, journals, size, fmt.Errorf(
+					"incomplete archive: manifest %.12s… names chunk %.12s… but the archive holds no content for it — "+
+						"re-export with a current bdrive, or pass --allow-incomplete (missing files stay missing)", sha, h)
+			}
+		}
+	}
+	for sha, path := range referenced {
+		if !content[sha] {
+			if allowIncomplete {
+				fmt.Fprintf(os.Stderr, "warning: archive holds no content for %q (blob %.12s…) — imported without it\n", path, sha)
+				continue
+			}
+			// One dangling reference — an old export against a newer hub, or
+			// one forged journal line — must not permanently close the
+			// anti-lock-in door: the refusal names the escape hatch.
+			return blobs, journals, size, fmt.Errorf(
+				"incomplete archive: the journal names %q (blob %.12s…) but the archive holds no content for it — "+
+					"if this was exported by an older bdrive against a newer hub, re-export with a current bdrive, "+
+					"or pass --allow-incomplete to import anyway (missing files stay missing)", path, sha)
+		}
+	}
 	return blobs, journals, size, nil
+}
+
+// readJournalOps parses the ops in a spooled journal body the way every
+// device does (journal.Parse), leaving the file rewound for the store.
+func readJournalOps(f *os.File) ([]journal.Op, error) {
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	ops, _ := journal.Parse(b)
+	return ops, nil
 }
 
 // maxImportBlob bounds what a single archive member may write to local disk.

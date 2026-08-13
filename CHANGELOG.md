@@ -4,6 +4,31 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## Unreleased
+
+**Deploy hubs before clients.** A hub older than this release refuses the
+chunk keys a new client pushes for large files (sync degrades to
+offline-retry until the hub upgrades; nothing is lost). And a *client* older
+than this release cannot pull files between 32 and 100 MiB — it caps reads
+at its old 32 MiB ceiling, fails the content check, and reports "blob
+corrupt on remote" every cycle even though the hub is healthy. Upgrade the
+hub first, then clients promptly if your projects hold large files.
+
+- **Delta sync** — files larger than 4 MiB move as content-defined chunks:
+  a small edit to a 20 MiB file now transfers ~2 MB instead of ~21 MB, in
+  both directions. Chunk boundaries come from a rolling hash, so insertions
+  anywhere in the file stay cheap. Local storage keeps files whole; the hub
+  reassembles whole blobs on demand, so older clients and every hub read
+  surface (viewer, history, shares, downloads) work unchanged.
+- The per-file sync ceiling rises from 32 MiB to 100 MiB — files up to
+  100 MiB now materialize on every device.
+- `bdrive import` refuses an archive whose journals reference content the
+  archive does not hold (what an old `bdrive export` produces against a
+  newer hub, silently missing large files); `--allow-incomplete` overrides.
+- Hub hardening around the new key classes: manifests are write-once, must
+  name only chunks the store holds, and reassembly is bounded (256 MiB) —
+  a project member cannot poison, re-point, or amplify large-file storage.
+
 ## v0.15.0 — 2026-08-11
 
 **Upgrade if your pushes are being refused.** Hubs running the journal
