@@ -14,6 +14,12 @@ import (
 // rather than a field on Result because the daemon usually materializes the
 // peer's change seconds before the turn starts, so the hook's own cycle
 // reports nothing: the record has to outlive the cycle that made it.
+//
+// syncer.Result.Inbound carries the same events and is NOT a duplicate to be
+// deleted. The post_sync hook fires from the cycle that materialized, so it
+// wants the batch in-process; DrainInbound is destructive and single-consumer,
+// so a second drainer would silently empty the agent hook's context about half
+// the time. Different lifetimes, different consumers — keep both.
 
 // InboundEvent is one path a cycle wrote or removed on a peer's behalf
 // (mount-relative).

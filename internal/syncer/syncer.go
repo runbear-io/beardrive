@@ -92,6 +92,21 @@ type Session struct {
 	// be invoked concurrently from upload workers, so it must be safe to call
 	// from multiple goroutines.
 	OnProgress func(Progress)
+
+	// inbound accumulates this cycle's materialized peer paths, for
+	// Result.Inbound. Reset at the top of every cycle — a Session is reused
+	// across cycles by the daemon and by the tests.
+	inbound []store.InboundEvent
+}
+
+// logInbound records one materialized peer path both ways: on this cycle's
+// Result (for the post_sync hook, which fires from the cycle that did the
+// work) and on the store's spool (for `bdrive sync --hook`, which runs in a
+// later process). Both consumers want the same event; neither may consume the
+// other's copy.
+func (s *Session) logInbound(rel string, deleted bool) {
+	s.inbound = append(s.inbound, store.InboundEvent{Path: rel, Deleted: deleted, Time: time.Now().UTC()})
+	_ = s.Store.LogInbound(rel, deleted) // best-effort: never fails a cycle
 }
 
 func (s *Session) mountID() string {
@@ -124,6 +139,12 @@ type Result struct {
 	Pruned       int  // paths removed from the hub by --prune (kept on disk)
 	Materialized int  // files written/removed in the working folder
 	Pushed       bool // own journal/blobs uploaded
+	// Inbound names the paths this cycle materialized on a peer's behalf —
+	// the same events the inbound spool queues, carried out of the cycle that
+	// made them so the post_sync hook can hand them to a local command. It
+	// does NOT replace the spool: see the comment in internal/store/inbound.go
+	// for why the two coexist.
+	Inbound []store.InboundEvent
 	// Offline reports that the remote leg of this cycle had a problem worth
 	// telling the user about — usually "unreachable", but also "the hub served
 	// bytes that are not their content address", which is the only signal that
@@ -215,14 +236,28 @@ func tickLamport(cur int64) int64 {
 	return cur + 1
 }
 
-// Cycle runs one full scan/sync/materialize pass under the volume lock.
+// Cycle runs one full scan/sync/materialize pass under the volume lock, then
+// fires the folder's post_sync hook — after the lock is released, so a hook
+// that itself runs a bdrive command starts working immediately instead of
+// blocking on the flock the cycle that spawned it is still holding (a long
+// push can hold it for a while). Splitting the body out is what makes that
+// ordering a property of the code: no call site has to remember it.
 func (s *Session) Cycle(ctx context.Context) (*Result, error) {
+	res, err := s.cycleLocked(ctx)
+	if err == nil && res != nil {
+		s.firePostSync(res)
+	}
+	return res, err
+}
+
+func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	unlock, err := s.Store.Lock()
 	if err != nil {
 		return nil, fmt.Errorf("lock volume: %w", err)
 	}
 	defer unlock()
 
+	s.inbound = nil
 	res := &Result{}
 	cache, err := s.Store.LoadCache(s.mountID())
 	if err != nil {
@@ -523,6 +558,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("materialize: %w", err)
 	}
 	res.Materialized += n
+	res.Inbound = s.inbound
 
 	// 5. Push our blobs and journal.
 	if s.Backend != nil && !blocked && int64(len(myOps)) > st.PushedOps {
@@ -1300,7 +1336,7 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 			// a spool failure must never fail a cycle. Only the branch that
 			// actually unlinked a file logs — the paths below it were already
 			// gone locally, so nothing changed under the agent.
-			_ = s.Store.LogInbound(rel, true)
+			s.logInbound(rel, true)
 		}
 		delete(cache, rel)
 		changed++
@@ -1351,7 +1387,7 @@ func (s *Session) materializeFile(rel string, want journal.FileState, cache map[
 	// Known trade: the first cycle on a fresh mount materializes the whole
 	// project, so that one turn's list is "everything" — bounded by the
 	// hook's render cap, and cheaper than special-casing an empty cache.
-	_ = s.Store.LogInbound(rel, false)
+	s.logInbound(rel, false)
 	return true, nil
 }
 

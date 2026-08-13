@@ -36,6 +36,7 @@ type cliEnv struct {
 	hub     *httptest.Server
 	browser *http.Client
 	home    string // the isolated HOME; hooks live under here now
+	bin     string // the real binary, for tests that need a bdrive to run
 }
 
 func newCLIEnv(t *testing.T) cliEnv {
@@ -107,7 +108,7 @@ func newCLIEnvBin(t *testing.T, hub *httptest.Server, bin string) cliEnv {
 		out, _ := os.ReadFile(logFile)
 		t.Fatalf("login --device: %v\n%s", err, out)
 	}
-	return cliEnv{run: run, hub: hub, browser: browser, home: home}
+	return cliEnv{run: run, hub: hub, browser: browser, home: home, bin: bin}
 }
 
 func TestCLIOnboardingE2E(t *testing.T) {
