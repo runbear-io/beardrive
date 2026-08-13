@@ -1096,3 +1096,34 @@ func TestSecretClearsWhenFixed(t *testing.T) {
 		t.Fatalf("findings = %+v, want empty once the file is gone", found)
 	}
 }
+
+// The check must ride the branch that already reads the file, never add a pass
+// of its own: an unchanged file is not re-read, so the daemon's 3-second tick
+// costs nothing on a quiet folder. Clearing the record by hand and cycling is
+// the direct test — a scan that re-read unchanged files would put it back.
+func TestSecretScanSkipsUnchangedFiles(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 1 {
+		t.Fatalf("findings = %+v, want deploy.md flagged", found)
+	}
+	if err := a.Store.SaveSecrets(a.mountID(), map[string][]secrets.Finding{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cycle(t, a) // nothing changed on disk
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 0 {
+		t.Fatalf("findings = %+v — an unchanged file was read again", found)
+	}
+	// Touching it back into the changed branch does report it again.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(a.Folder, "deploy.md"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 1 {
+		t.Fatalf("findings = %+v, want the touched file flagged again", found)
+	}
+}
