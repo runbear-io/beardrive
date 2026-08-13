@@ -547,26 +547,33 @@ func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops 
 // refused unparseable bodies since round 6. A backend that cannot answer fails
 // the push closed: the client degrades to Offline and retries next cycle, which
 // is the posture everywhere else on this path.
-func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops []journal.Op) (bool, error) {
+//
+// storedMax is the highest Seq the hub already holds, returned because this is
+// the only place that parses the stored journal and analytics needs it to tell
+// this cycle's new ops from the whole history the body repeats (countOps). It
+// is 0 for a first push and for a stored journal that would not parse — the
+// latter over-counts one push, which is the right price for not reading the
+// object twice.
+func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops []journal.Op) (ok bool, storedMax int64, err error) {
 	switch have, err := be.Exists(ctx, key); {
 	case err != nil:
-		return false, err
+		return false, 0, err
 	case !have:
-		return true, nil
+		return true, 0, nil
 	}
 	rc, err := be.Get(ctx, key)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	defer rc.Close()
 	data, err := io.ReadAll(rc)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	stored, err := journal.Parse(data)
 	if err != nil {
 		log.Printf("beardrive: %s is not parseable, its ops cannot be protected from a rewrite: %v", key, err)
-		return true, nil
+		return true, 0, nil
 	}
 	seen := make(map[int64]bool, len(ops))
 	for _, op := range ops {
@@ -574,10 +581,13 @@ func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops 
 	}
 	for _, op := range stored {
 		if !seen[op.Seq] {
-			return false, nil
+			return false, 0, nil
+		}
+		if op.Seq > storedMax {
+			storedMax = op.Seq
 		}
 	}
-	return true, nil
+	return true, storedMax, nil
 }
 
 // storePutBody hands back the plaintext of a PUT body, inflating it when the
@@ -698,8 +708,11 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	var storedMax int64
 	if strings.HasPrefix(key, "journal/") {
-		switch ok, err := journalKeepsItsOps(r.Context(), rs.Backend, key, ops); {
+		var ok bool
+		var err error
+		switch ok, storedMax, err = journalKeepsItsOps(r.Context(), rs.Backend, key, ops); {
 		case err != nil:
 			storageErr(w, http.StatusBadGateway, "could not read the stored journal", err)
 			return
@@ -795,6 +808,8 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	s.quota().RecordUsage(org, size)
 	if strings.HasPrefix(key, "journal/") {
 		v.invalidate() // new ops should show in the viewer immediately
+		puts, deletes := countOps(ops, storedMax)
+		s.captureChange(r, "sync", puts, deletes)
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
