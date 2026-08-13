@@ -121,7 +121,7 @@ classDiagram
         ownJournal(key) whose journal is this
         journalOps(key, spooled) parse + validate
         opsNameTheirAuthor(ops) whose name
-        journalKeepsItsOps(ctx, be, key, ops)
+        journalKeepsItsOps(ctx, be, key, ops) ok + storedMax
     }
     note for journalDoor "store.go — the invariant &quot;each device writes only its own journal&quot; is now ENFORCED here, not assumed. The key must be journal/&lt;canonical device id&gt;.jsonl for the device in the request header, that device must already be owned by the caller (DeviceRegistry.OwnerOf) or the caller must be a project admin (the recovery arm) — the old first-writer-claims arm is gone. Every op must pass journal.SafePath + config.ReservedPath on its Path and journal.SafeText on Note/Author/UserName, must name its own owner's account, and the upload must keep every Seq the stored journal already had: append-only, 409 on truncation. Bodies are spooled first, and a blob PUT must hash to the key it claims"
 
@@ -380,6 +380,14 @@ classDiagram
     }
     note for AnalyticsConfig "Third managed-deployment seam beside Quota and Billing, but a value rather than an interface — there is nothing to implement, only a project to name. Emitted as /api/config `analytics` when Key is set; empty means the frontend loads no tracker and contacts nobody, which is what a self-hosted hub gets. Endpoint() is exported because the cloud module renders its own loader from the same value."
 
+    class productAnalytics {
+        <<Server, analytics.go>>
+        capture(email, event, props) one POST, own goroutine
+        captureChange(r, source, puts, deletes) files_changed
+        countOps(ops, storedMax) new ops only
+    }
+    note for productAnalytics "The events the browser cannot see: a device syncing through /store/* never loads a page, so an agent editing files all day is invisible to the frontend's tracker. Every write door — sync, upload, remove, restore — funnels through captureChange so the file-change count is ONE event rather than a per-route set that silently misses whichever route someone forgets, and distinct_id is the same email analytics.ts identifies with so a person is not counted twice. No SDK: posthog-go would ship a tracker inside every self-hoster's binary, and capture is one JSON POST to Endpoint() + /i/v0/e/ that does nothing at all when Key is empty. Telemetry never fails a request — the POST is a goroutine and its error is a single log line. countOps needs journalDoor's storedMax because a device PUTs its WHOLE journal every cycle: counting the body would re-report the device's entire history every ten seconds. Blob PUTs are deliberately not change events, since content-addressed storage skips a blob it already holds."
+
     Server o-- "0..1" Source : single-volume mode
     Server o-- "0..1" Backend : Root (hub mode)
     Server o-- ProjectDB
@@ -407,6 +415,9 @@ classDiagram
     OrgDB ..> BuiltinAuth : seniorityLister, for the heir
     BuiltinAuth ..> DeviceRegistry : Bind at token issuance
     Server *-- AnalyticsConfig
+    Server *-- productAnalytics : every write door emits files_changed
+    productAnalytics ..> AnalyticsConfig : Key gates it, Endpoint() addresses it
+    journalDoor ..> productAnalytics : storedMax tells this cycle's ops from the whole history
     Server *-- volume : per project, cached
     volume o-- Source
 

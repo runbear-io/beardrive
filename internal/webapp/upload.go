@@ -473,6 +473,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	}
 	s.quota().RecordUsage(org, size)
 	v.invalidate()
+	s.captureChange(r, "browser", 1, 0)
 	writeJSON(w, map[string]any{"ok": true, "path": p})
 }
 
@@ -528,5 +529,6 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 		s.quota().RecordUsage(org, size)
 	}
 	v.invalidate()
+	s.captureChange(r, "browser", 1, 0)
 	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
 }

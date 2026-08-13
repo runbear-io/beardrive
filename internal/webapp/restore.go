@@ -98,5 +98,9 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	s.quota().RecordUsage(org, 0)
 	v.invalidate()
+	// A restore writes a put op like any other edit, so it belongs in the same
+	// count. The frontend's `file_restored` says which BUTTON was pressed; this
+	// says a file changed.
+	s.captureChange(r, "browser", 1, 0)
 	writeJSON(w, map[string]any{"ok": true, "blob": req.SHA, "size": found.Size})
 }
