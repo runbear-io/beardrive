@@ -258,7 +258,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
-| `bdrive status [folder]` | Projects, daemon state, pending changes |
+| `bdrive status [folder]` | Projects, daemon state, pending changes, and any synced files that looked like they held credentials when they last changed |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the file was written (ops recorded before this was tracked, and deletes, show their sync time instead) |
 | `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change (`--list` shows the versions; no version = the previous one). Nothing is erased and it syncs everywhere like any edit. To un-create a file a run *created*, use **undo — remove file** on that row in the hub's History view |
 | `bdrive export [folder]` | Export the whole project — every device's journal, all blobs, full history — from its hub to a portable `.tar.gz` (`-o` names the file) |
@@ -521,8 +521,8 @@ line, never the matched text, and nothing is shared:
 ```
 $ bdrive share deploy.md
 Error: deploy.md looks like it contains credentials (checked at the moment you shared it):
-  line 12   aws_access_key_id
-  line 40   private_key
+  line 12   an AWS access key (aws_access_key_id)
+  line 40   a private key (private_key)
 Nothing was shared. Re-run with --force if that is intentional.
 ```
 
@@ -532,6 +532,25 @@ question and offers **Share anyway**). Know the two limits: the check runs
 forever — so a key committed into an already-shared file is never caught —
 and it only reads the first 1 MiB. It shortens the odds; it is not a
 promise that a file is clean.
+
+The same six rules also run **on every file as it syncs**, which is the path
+every file takes rather than the rare one. They only ever warn: the change is
+journaled and pushed exactly as it would be otherwise, and the finding shows up
+in `bdrive status` and in the agent's context at the start of its next turn.
+
+```
+$ bdrive status
+  secrets: 1 file(s) looked like they contain credentials when they last changed
+             deploy.md:12  an AWS access key
+```
+
+Nothing is blocked, held, or un-pushed — a false positive costs a line of text,
+never a stalled file. Fixing the file is the whole remedy: the next sync cycle
+reads it again and the line goes away, with no command and no flag. Same limits
+as above — a file is checked **when it changes**, and only its first 1 MiB, so
+this never says a file is clean. It runs on the device that made the change:
+a file another device synced before its version had this check stays unflagged
+until it next changes here.
 
 ### Agent integration
 

@@ -24,7 +24,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: it also reports the files teammates changed since the agent's last turn |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each detected agent platform's user config — once per machine, covering every folder. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection. `uninstall` removes only BearDrive's own hook entries |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
-| `bdrive status [folder]` | Projects, daemon state, pending changes |
+| `bdrive status [folder]` | Projects, daemon state, pending changes, and any synced files that looked like they held credentials when they last changed |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the file was written (ops recorded before this was tracked, and deletes, show their sync time instead) |
 | `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change. No version restores the previous one; `--list` shows the versions with their short hashes |
 | `bdrive export [folder]` | Export the whole project — all devices' history and content — to a portable `.tar.gz` (`-o` names the file) |
@@ -199,9 +199,10 @@ version wins and the path comes back. Run `--prune` again once they have synced.
 
 ### `bdrive status` — and the two degraded access states
 
-Alongside `pending`, `status` prints an `access:` line whenever the hub is
-refusing this device. Neither is the same as being offline, and neither ever
-touches your files:
+Alongside `pending`, `status` prints a `secrets:` block naming any synced file
+that looked like it held a credential when it last changed, and an `access:`
+line whenever the hub is refusing this device. Neither access state is the same
+as being offline, and neither ever touches your files:
 
 ```
   pending:  3 local change(s) not yet pushed
@@ -223,6 +224,29 @@ is `this device is not registered to your account on this hub`: your device
 identity was never bound to your account, which is fixed by updating `bdrive`
 and running `bdrive login` on that machine, not in Project settings. Checking
 your permissions there will show `write` and tell you nothing.
+
+### The credential warning
+
+The six rules `bdrive share` checks at mint time also run on **every file as it
+syncs** — the path every file takes, rather than the rare one:
+
+```
+  secrets: 1 file(s) looked like they contain credentials when they last changed
+             deploy.md:12  an AWS access key
+```
+
+It **only ever warns**. The change is journaled and pushed exactly as it would
+be otherwise; the finding appears here and in an agent's context at the start
+of its next turn. Nothing is held, blocked, or un-pushed — a false positive
+costs one line of text, never a stalled file.
+
+Fixing the file is the whole remedy: the next cycle reads it again and the line
+goes away, with no command and no flag. Three limits worth knowing: a file is
+checked **when it changes** (so this never says a file is clean), only its
+first 1 MiB is read, and the check runs on the device that made the change — a
+file synced from elsewhere is not flagged here until it next changes here.
+Rule names and line numbers only; the matched text is never printed, logged, or
+stored.
 
 `bdrive sync` shows the same two as `remote: read-only (pull only)` /
 `remote: no access — sync paused` with the reason on the line below, and the
