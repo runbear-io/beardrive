@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,26 @@ func validStoreKey(key string) bool {
 	return blobKeyRe.MatchString(key) || journalKeyRe.MatchString(key) ||
 		chunkKeyRe.MatchString(key) || manifestKeyRe.MatchString(key)
 }
+
+// storeAcceptEncoding is what handleStoreSign tells a client this hub will
+// inflate on a relayed PUT. A hub older than this answers without the field,
+// and the client sends raw — which is the whole mixed-fleet story for the push
+// leg (the pull leg needs no negotiation at all, see remote/compress.go).
+var storeAcceptEncoding = []string{"gzip"}
+
+// maxInflatedPut bounds what one compressed PUT may write to the hub's disk.
+//
+// spool() is unbounded, which is safe exactly as long as a byte on the wire
+// costs a byte on disk. Content-Encoding breaks that: a 1 MB body can inflate
+// to an arbitrary write, and it lands BEFORE CheckWrite can refuse it, because
+// nothing knows the size until the inflate is done. The bound applies only when
+// the body declares an encoding, so no honest raw push that works today can
+// start failing.
+//
+// ponytail: 256 MiB, mirroring maxImportBlob on the archive path — a precedent,
+// not a measurement. A real workload that hits it wants a server-side knob, not
+// a bigger constant.
+const maxInflatedPut = 256 << 20
 
 // storeSource returns the volume's RemoteSource; only real beardrive
 // remotes have a store to expose.
@@ -197,7 +218,25 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
 		return
 	}
-	writeJSON(w, map[string]any{"objects": objs})
+	writeStoreJSON(w, r, map[string]any{"objects": objs})
+}
+
+// writeStoreJSON is writeJSON that compresses when the caller accepts it. The
+// listing is the first call of every sync cycle on every device, it is JSON,
+// and it is highly repetitive — one key per blob — so it is compressed without
+// probing. Only this route uses it: writeJSON serves the whole browser API and
+// is out of this change's scope, and handleStoreExists answers one boolean,
+// which is smaller than a gzip header.
+func writeStoreJSON(w http.ResponseWriter, r *http.Request, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	if !remote.AcceptsGzip(r) {
+		json.NewEncoder(w).Encode(v)
+		return
+	}
+	w.Header().Set("Content-Encoding", "gzip")
+	gz := gzip.NewWriter(w)
+	defer gz.Close()
+	json.NewEncoder(gz).Encode(v)
 }
 
 func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -226,6 +265,17 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer rc.Close()
+	// Compression is decided before a single header is written, because
+	// Content-Encoding cannot be added after the first Write.
+	var src io.Reader = rc
+	gzipOK := false
+	if remote.AcceptsGzip(r) {
+		src, gzipOK, err = remote.Compressible(rc)
+		if err != nil {
+			storageErr(w, http.StatusBadGateway, "could not read the object", err)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	// The sync proxy is a stored-bytes door like the other two: a
 	// cookie-authenticated GET whose URL one member can hand another, answering
@@ -234,8 +284,20 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	// Recorded, never checked. This is a device syncing: refusing it here
 	// surfaces as ErrForbidden, which the syncer reads as "access is gone —
 	// pause and touch nothing". Sync must not break over a bill.
+	//
+	// The counter wraps the SOCKET and gzip writes into it, never the other way
+	// round: RecordEgress is a bandwidth meter, so it has to report what left
+	// the machine. Inverted, it silently bills plaintext for every compressed
+	// response and no test fails.
 	cw := &countingWriter{w: w}
-	io.Copy(cw, rc)
+	if gzipOK {
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(cw)
+		io.Copy(gz, src)
+		gz.Close()
+	} else {
+		io.Copy(cw, src)
+	}
 	s.quota().RecordEgress(s.orgOf(r.PathValue("project")), cw.n)
 }
 
@@ -316,7 +378,7 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 			return
 		}
 		if exists, err := rs.Backend.Exists(r.Context(), req.Key); err == nil && exists {
-			writeJSON(w, map[string]any{"mode": "direct", "exists": true})
+			writeJSON(w, map[string]any{"mode": "direct", "exists": true, "accept_encoding": storeAcceptEncoding})
 			return
 		}
 		if signer, ok := rs.Backend.(remote.PutSigner); ok {
@@ -335,13 +397,14 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 				writeJSON(w, map[string]any{
 					"mode": "direct", "url": signed.URL, "method": signed.Method,
 					"headers": signed.Headers, "expires": signed.Expires.UTC(),
+					"accept_encoding": storeAcceptEncoding,
 				})
 				return
 			}
 			s.claimGrant(project, req.Key) // nothing was granted: give it back
 		}
 	}
-	writeJSON(w, map[string]any{"mode": "server"})
+	writeJSON(w, map[string]any{"mode": "server", "accept_encoding": storeAcceptEncoding})
 }
 
 // journalOps reads the operations a spooled journal body carries, exactly the
@@ -517,6 +580,32 @@ func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops 
 	return true, nil
 }
 
+// storePutBody hands back the plaintext of a PUT body, inflating it when the
+// client declared an encoding, and reports whether it did. The reader it
+// returns is capped one byte past maxInflatedPut so a bomb can never write more
+// than that to disk before the caller measures it and refuses.
+//
+// It answers the client itself on the two ways this can be the client's fault:
+// an encoding this hub does not implement, and a body that says gzip and is
+// not one (gzip.NewReader reads the header eagerly, so that is caught here
+// rather than halfway through a spool).
+func storePutBody(w http.ResponseWriter, r *http.Request) (io.Reader, bool, bool) {
+	enc := strings.TrimSpace(r.Header.Get("Content-Encoding"))
+	if enc == "" {
+		return r.Body, false, true
+	}
+	if !strings.EqualFold(enc, "gzip") {
+		http.Error(w, "unsupported Content-Encoding "+enc, http.StatusUnsupportedMediaType)
+		return nil, false, false
+	}
+	gz, err := gzip.NewReader(r.Body)
+	if err != nil {
+		http.Error(w, "body declares Content-Encoding: gzip but is not gzip", http.StatusBadRequest)
+		return nil, false, false
+	}
+	return io.LimitReader(gz, maxInflatedPut+1), true, true
+}
+
 func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Request) {
 	rs := storeSource(v, w)
 	if rs == nil {
@@ -536,13 +625,32 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	// (Content-Length is -1 on any chunked request, which made every unsized
 	// put free), and how many ops a journal write actually authors.
 	// Cost: one temp file per put on the hub's busiest write path.
-	tmp, size, sum, err := spool(r.Body)
+	//
+	// Inflating sits ABOVE the spool, because every single thing this handler
+	// goes on to be sure of is a property of the plaintext: the sha a blob key
+	// promises, the ops journalOps counts, the size CheckWrite bills, and the
+	// append-only check. Nothing below this line knows compression happened.
+	body, inflated, ok := storePutBody(w, r)
+	if !ok {
+		return
+	}
+	tmp, size, sum, err := spool(body)
 	if err != nil {
+		if inflated {
+			// A gzip stream that truncates or fails its CRC is the client's
+			// body, not the hub's storage; 502 would blame the wrong machine.
+			http.Error(w, "could not decompress the body", http.StatusBadRequest)
+			return
+		}
 		storageErr(w, http.StatusBadGateway, "could not store the object", err)
 		return
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
+	if inflated && size > maxInflatedPut {
+		http.Error(w, "compressed body inflates past this hub's limit", http.StatusRequestEntityTooLarge)
+		return
+	}
 	// Blobs and chunks are content-addressed: the key IS the content's hash.
 	// Manifests are not — their key is the whole FILE's sha, which the hub
 	// cannot check without reading every chunk; readers verify by reassembly.
