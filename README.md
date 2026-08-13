@@ -288,8 +288,33 @@ the project:
 ```jsonc
 // .bdrive/config.json
 { "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4" }
+  "remote": "https://drive.example.com/p/7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4",
+  "post_sync": "qmd update && qmd embed" }
 ```
+
+### `post_sync` — run something when teammates' changes land
+
+Optional. A shell command run **on this device** after a cycle applies changes
+from the hub, so a local search index, cache or notifier can stop polling. The
+applied batch arrives as JSON on stdin:
+
+```json
+{ "project": "m-5a10b713", "folder": "/Users/you/notes",
+  "changed": [ { "path": "wiki/onboarding.md", "op": "write" },
+               { "path": "notes/retired.md",   "op": "delete" } ] }
+```
+
+Once per cycle that applied at least one path (an initial sync of 400 files is
+one invocation), inbound only — a cycle that just commits and pushes your own
+edits fires nothing — and never blocking: the command is spawned detached, and
+a hook that hangs, exits non-zero or does not exist is logged and forgotten.
+`bdrive restore` also counts as inbound, since it writes an older version back
+into the folder.
+
+It lives in `.bdrive/config.json` and only there. That directory never syncs,
+so no hub and no teammate can put a command on your machine — but note that
+`.bdrive/` does travel with a folder you copy by hand, so a folder copied from
+a teammate brings their `post_sync` with it.
 
 Opting out is non-destructive: when a pattern starts matching an
 already-synced file, the file stops syncing but is deleted nowhere — which

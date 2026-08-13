@@ -186,6 +186,14 @@ type Project struct {
 	// matching one of these patterns (gitignore-style, same syntax as
 	// .bdriveignore) are scanned and materialized.
 	Include []string `json:"include,omitempty"`
+	// PostSync is a shell command run on THIS device after a cycle applies a
+	// teammate's changes, with the applied batch as JSON on stdin — the event
+	// a local index, cache or notifier can hang off instead of polling.
+	//
+	// It lives here, and only here, on purpose: .bdrive is in ReservedDirs and
+	// never syncs, so no hub response and no peer's journal can put a command
+	// on someone else's machine.
+	PostSync string `json:"post_sync,omitempty"`
 }
 
 // mountIDRe is the shape of a mount identity. The id is read verbatim from a
