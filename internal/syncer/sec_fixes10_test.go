@@ -44,8 +44,8 @@ import (
 // gone wrong, which makes "the hub decides how much of your disk this costs"
 // the wrong answer here specifically.
 func TestSec_HostileHub_ARestoreCannotBeSizedByTheHub(t *testing.T) {
-	const willing = 72 << 20 // what the hub is prepared to write
-	const ceiling = 64 << 20 // maxPullBytes is 32<<20; twice that is generous
+	const willing = 2*maxPullBytes + (40 << 20) // more than the generous ceiling: proves truncation
+	const ceiling = 2 * maxPullBytes // twice the cap is generous: transport buffering, not the bound, owns the slack
 
 	_, hostile := sechostPeer(t, map[string]string{"notes/real.md": "small file, honestly"})
 	hostile.onBody = func(key string, body []byte, w http.ResponseWriter) bool {

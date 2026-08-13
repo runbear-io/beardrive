@@ -112,7 +112,7 @@ func TestSec_Migrate_ArchiveEntryCannotEscapeTheStorePrefix(t *testing.T) {
 			hdr := *h
 			r := secpkgTar(t, true, secpkgEntry(t, &hdr, "planted"))
 			tr, first := secpkgReadArchive(t, r)
-			_, _, _, _ = importStore(ctx, be, tr, first)
+			_, _, _, _ = importStore(ctx, be, tr, first, false)
 
 			for _, p := range secpkgFilesUnder(t, root) {
 				rel, err := filepath.Rel(filepath.Join(root, "store"), p)
@@ -157,7 +157,7 @@ func TestSec_Migrate_CorruptBlobNeverLandsInTheTargetStore(t *testing.T) {
 		secpkgEntry(t, &tar.Header{Name: key, Mode: 0o644}, "SUBSTITUTED CONTENT"),
 	)
 	tr, first := secpkgReadArchive(t, r)
-	if _, _, _, err := importStore(ctx, be, tr, first); err == nil {
+	if _, _, _, err := importStore(ctx, be, tr, first, false); err == nil {
 		t.Fatal("importStore accepted a blob whose content does not match its key")
 	}
 

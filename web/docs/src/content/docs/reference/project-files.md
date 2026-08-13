@@ -91,3 +91,11 @@ Nothing is keyed by folder path, which is why moves and renames are free.
 ```
 
 Also here for a running project: `daemon.pid` and `daemon.log`.
+
+The hub's storage adds two key classes the local store never holds: files
+larger than 4 MiB travel as content-defined `chunks/<sha256>` pieces plus a
+`manifests/<sha256>` chunk list keyed by the whole file's hash (delta sync —
+a small edit to a large file uploads roughly one chunk, not the file). Local
+blobs stay whole; chunking exists only on the wire and in the hub's store,
+and the hub reassembles a whole blob on demand for any client that asks for
+`blobs/<sha256>`, so older clients keep working unchanged.

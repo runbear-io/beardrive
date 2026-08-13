@@ -1,8 +1,10 @@
 package webapp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,10 +31,18 @@ import (
 var (
 	blobKeyRe    = regexp.MustCompile(`^blobs/[0-9a-f]{64}$`)
 	journalKeyRe = regexp.MustCompile(`^journal/` + deviceIDPattern + `\.jsonl$`)
+	// Delta sync (docs/delta-sync-prd.md): a chunk is one content-defined
+	// piece of a large file, keyed by its own sha256; a manifest is the chunk
+	// list for the whole file with that sha256 — so Op.Blob alone locates it
+	// and the journal format never changes. Both are immutable and never
+	// deleted, exactly like blobs.
+	chunkKeyRe    = regexp.MustCompile(`^chunks/[0-9a-f]{64}$`)
+	manifestKeyRe = regexp.MustCompile(`^manifests/[0-9a-f]{64}$`)
 )
 
 func validStoreKey(key string) bool {
-	return blobKeyRe.MatchString(key) || journalKeyRe.MatchString(key)
+	return blobKeyRe.MatchString(key) || journalKeyRe.MatchString(key) ||
+		chunkKeyRe.MatchString(key) || manifestKeyRe.MatchString(key)
 }
 
 // storeSource returns the volume's RemoteSource; only real beardrive
@@ -173,8 +183,9 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 	}
 	s.refreshDevice(r)
 	prefix := r.URL.Query().Get("prefix")
-	if prefix != "" && prefix != "journal/" && prefix != "blobs/" &&
-		!strings.HasPrefix(prefix, "journal/") && !strings.HasPrefix(prefix, "blobs/") {
+	if prefix != "" &&
+		!strings.HasPrefix(prefix, "journal/") && !strings.HasPrefix(prefix, "blobs/") &&
+		!strings.HasPrefix(prefix, "chunks/") && !strings.HasPrefix(prefix, "manifests/") {
 		http.Error(w, fmt.Sprintf("invalid prefix %q", prefix), http.StatusBadRequest)
 		return
 	}
@@ -289,10 +300,17 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	// Only blobs are presigned. They are content-addressed and immutable, so
-	// a leaked URL can at worst re-upload identical bytes. Journals are
-	// mutable state and always flow through the server.
-	if blob, isBlob := strings.CutPrefix(req.Key, "blobs/"); isBlob {
+	// Only blobs and chunks are presigned. They are content-addressed and
+	// immutable, so a leaked URL can at worst re-upload identical bytes.
+	// Journals are mutable state and always flow through the server — and so
+	// do manifests: their key is the whole FILE's sha, not their own content
+	// hash, so a presigned manifest write would be an unexamined claim about
+	// bytes the hub never saw.
+	blob, isBlob := strings.CutPrefix(req.Key, "blobs/")
+	if !isBlob {
+		blob, isBlob = strings.CutPrefix(req.Key, "chunks/")
+	}
+	if isBlob {
 		if !sizeFitsContentAddress(blob, req.Size) {
 			http.Error(w, "declared size does not match the content address", http.StatusForbidden)
 			return
@@ -525,7 +543,14 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
+	// Blobs and chunks are content-addressed: the key IS the content's hash.
+	// Manifests are not — their key is the whole FILE's sha, which the hub
+	// cannot check without reading every chunk; readers verify by reassembly.
 	if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob && blob != sum {
+		http.Error(w, "content does not hash to its key", http.StatusBadRequest)
+		return
+	}
+	if chunk, isChunk := strings.CutPrefix(key, "chunks/"); isChunk && chunk != sum {
 		http.Error(w, "content does not hash to its key", http.StatusBadRequest)
 		return
 	}
@@ -573,6 +598,82 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		case !ok:
 			http.Error(w, "a journal is append-only; this body drops ops the hub already holds",
 				http.StatusConflict)
+			return
+		}
+	}
+	// A manifest is the one member-writable object that is neither
+	// content-addressed nor hash-checkable at ingest, so it is WRITE-ONCE:
+	// overwriting one was the only way a member could re-point an existing
+	// file's chunk list after the fact. Re-putting identical bytes stays a
+	// no-op — the retry after an interrupted push (chunks and manifest up,
+	// journal not yet) must keep working.
+	if strings.HasPrefix(key, "manifests/") {
+		// Every chunk a manifest names must already be in the store. This is
+		// what makes "a manifest exists ⟹ its chunks exist" an INVARIANT
+		// rather than an honest-client convention: the manifest key is the
+		// one member-writable object that is not content-addressed, and a
+		// member who can read a file can publish its true chunk hashes
+		// without uploading a byte — poisoning the slot under a whole-pushed
+		// blob so a later honest push skips chunks that do not exist. The
+		// honest client writes chunks before the manifest, so this always
+		// passes for it; a refusal falls back to a whole-blob push on the
+		// client (pushChunked), so even a race costs one full upload, never
+		// a wedge.
+		var man struct {
+			Chunks []struct {
+				H string `json:"h"`
+			} `json:"chunks"`
+		}
+		if err := json.NewDecoder(io.LimitReader(tmp, 8<<20)).Decode(&man); err != nil {
+			http.Error(w, "unreadable manifest body", http.StatusBadRequest)
+			return
+		}
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			storageErr(w, http.StatusBadGateway, "could not store the object", err)
+			return
+		}
+		for _, c := range man.Chunks {
+			if !blobRe.MatchString(c.H) {
+				http.Error(w, "manifest names an invalid chunk", http.StatusBadRequest)
+				return
+			}
+			ok, err := rs.Backend.Exists(r.Context(), "chunks/"+c.H)
+			if err != nil {
+				storageErr(w, http.StatusBadGateway, "could not verify the manifest's chunks", err)
+				return
+			}
+			if !ok {
+				http.Error(w, "manifest names a chunk the store does not hold", http.StatusBadRequest)
+				return
+			}
+		}
+		// Exists first, then Get: `if Get succeeds, compare` fails OPEN on a
+		// transient storage error — exactly the flakiness that must not
+		// reopen the overwrite door this guard exists to close.
+		exists, eerr := rs.Backend.Exists(r.Context(), key)
+		if eerr != nil {
+			storageErr(w, http.StatusBadGateway, "could not check the stored manifest", eerr)
+			return
+		}
+		if exists {
+			rc, gerr := rs.Backend.Get(r.Context(), key)
+			if gerr != nil {
+				storageErr(w, http.StatusBadGateway, "could not read the stored manifest", gerr)
+				return
+			}
+			stored, rerr := io.ReadAll(io.LimitReader(rc, 8<<20))
+			rc.Close()
+			fresh, ferr := io.ReadAll(tmp)
+			if _, serr := tmp.Seek(0, io.SeekStart); rerr != nil || ferr != nil || serr != nil {
+				storageErr(w, http.StatusBadGateway, "could not compare the stored manifest", errors.Join(rerr, ferr, serr))
+				return
+			}
+			if !bytes.Equal(stored, fresh) {
+				http.Error(w, "a manifest is write-once; this key already holds a different one",
+					http.StatusConflict)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true})
 			return
 		}
 	}

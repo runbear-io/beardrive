@@ -179,7 +179,7 @@ func TestSec_Pull_AHubChosenJournalKeyCannotEscapeTheVolumeDir(t *testing.T) {
 
 	// pull's error is not the assertion: the filesystem is. A hostile key that
 	// merely fails to be written is still a hub choosing a path on this disk.
-	newOps, _, perr := victim.pull(context.Background())
+	newOps, _, perr := victim.pull(context.Background(), nil)
 	if len(newOps) == 0 {
 		t.Fatalf("control: the ordinary journal in the same listing was not pulled (%v), so nothing is proven", perr)
 	}

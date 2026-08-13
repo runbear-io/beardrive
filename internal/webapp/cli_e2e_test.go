@@ -48,13 +48,23 @@ func newCLIEnv(t *testing.T) cliEnv {
 // nil starts a throwaway hub, which is the single-device default.
 func newCLIEnvOn(t *testing.T, hub *httptest.Server) cliEnv {
 	t.Helper()
+	return newCLIEnvBin(t, hub, "")
+}
+
+// newCLIEnvBin is newCLIEnvOn with an explicit binary — the delta-sync E2E
+// rows drive a binary built from the pre-change commit against the same hub
+// as a current one. Empty means build the current tree.
+func newCLIEnvBin(t *testing.T, hub *httptest.Server, bin string) cliEnv {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("builds and execs the bdrive binary; skipped with -short")
 	}
-	bin := filepath.Join(t.TempDir(), "bdrive")
-	build := exec.Command("go", "build", "-o", bin, "github.com/runbear-io/beardrive/cmd/bdrive")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
+	if bin == "" {
+		bin = filepath.Join(t.TempDir(), "bdrive")
+		build := exec.Command("go", "build", "-o", bin, "github.com/runbear-io/beardrive/cmd/bdrive")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("go build: %v\n%s", err, out)
+		}
 	}
 
 	if hub == nil {

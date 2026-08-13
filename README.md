@@ -262,7 +262,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the file was written (ops recorded before this was tracked, and deletes, show their sync time instead) |
 | `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change (`--list` shows the versions; no version = the previous one). Nothing is erased and it syncs everywhere like any edit. To un-create a file a run *created*, use **undo — remove file** on that row in the hub's History view |
 | `bdrive export [folder]` | Export the whole project — every device's journal, all blobs, full history — from its hub to a portable `.tar.gz` (`-o` names the file) |
-| `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (always a NEW project; `--name` overrides the archive's); history and authorship carry over. Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
+| `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (always a NEW project; `--name` overrides the archive's); history and authorship carry over. Refuses an archive whose journals reference content it doesn't hold (`--allow-incomplete` overrides). Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
 | `bdrive serve [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
 | `bdrive whoami` | Signed-in account and device identity used in change tracking |
 | `bdrive version` | Print the version (also `bdrive --version`) |
@@ -626,6 +626,15 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
   devices' journals and any blobs it's missing. Since each device writes
   only its own journal, there are no concurrent writers per object and any
   dumb object store suffices.
+- Files **larger than 4 MiB move as content-defined chunks** (delta sync):
+  the remote holds `chunks/<sha256>` pieces plus a `manifests/<sha256>`
+  chunk list keyed by the whole file's hash, and a push uploads only the
+  chunks the store doesn't already hold — a small edit to a large file
+  transfers roughly one chunk (~1 MiB), not the file. Chunk boundaries are
+  chosen by a rolling hash, so insertions don't shift them. The local blob
+  store keeps files whole; chunking exists only on the wire and in the
+  remote. Older clients are unaffected: the hub reassembles whole blobs on
+  demand for anything that asks for `blobs/<sha256>`.
 - The folder's state is a deterministic **replay** of all journals ordered
   by `(lamport, time, device)` — every device converges to the same view.
   Concurrent edits keep the last writer at the path; the loser is preserved

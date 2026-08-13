@@ -12,6 +12,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/mattn/go-isatty v0.0.20
+	github.com/restic/chunker v0.5.0
 	github.com/spf13/cobra v1.10.2
 	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.52.0
