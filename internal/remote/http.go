@@ -2,6 +2,7 @@ package remote
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -165,6 +166,13 @@ func refuseOffOriginRedirect(req *http.Request, via []*http.Request) error {
 // do sends the request with this device's credential attached, plus the
 // identity headers the server's device registry records for history (name,
 // OS; the server observes the IP itself).
+//
+// It deliberately does NOT set Accept-Encoding. net/http adds `gzip` itself
+// whenever the caller has not, and transparently inflates the response — which
+// is the entire pull half of transport compression, free and backward
+// compatible. Setting the header here turns that off silently: the hub would
+// still answer `Content-Encoding: gzip`, nothing would inflate it, and every
+// blob would fail its sha check while looking like a corrupt hub.
 func (b *httpBackend) do(req *http.Request) (*http.Response, error) {
 	if b.token != "" {
 		req.Header.Set("Authorization", "Bearer "+b.token)
@@ -354,7 +362,7 @@ func (b *httpBackend) Put(ctx context.Context, key string, r io.Reader, size int
 		// No usable destination: relay through the hub, which already holds
 		// this device's credential and is the party it chose to trust.
 	}
-	return b.putViaServer(ctx, key, r, size)
+	return b.putViaServer(ctx, plan, key, r, size)
 }
 
 // directTargetOK decides whether this device will hand a file's bytes to the
@@ -389,6 +397,23 @@ type putPlan struct {
 	URL     string            `json:"url"`
 	Method  string            `json:"method"`
 	Headers map[string]string `json:"headers"`
+	// AcceptEncoding is what the hub will accept on the relayed PUT body.
+	// Push cannot be unilateral the way pull is: a gzipped body posted to a
+	// hub that does not inflate is stored verbatim under the sha256 of its
+	// PLAINTEXT — a 400 for a blob, and a silently mis-stored journal. So the
+	// client compresses only when the hub says so, and an older hub says
+	// nothing at all (absent field → nil → raw). sign() runs before every
+	// single put, so this costs no extra round trip and needs no config flag.
+	AcceptEncoding []string `json:"accept_encoding"`
+}
+
+func (p putPlan) acceptsGzip() bool {
+	for _, enc := range p.AcceptEncoding {
+		if strings.EqualFold(strings.TrimSpace(enc), "gzip") {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *httpBackend) sign(ctx context.Context, key string, size int64) (putPlan, error) {
@@ -444,7 +469,34 @@ func (b *httpBackend) putDirect(ctx context.Context, plan putPlan, r io.Reader, 
 	return nil
 }
 
-func (b *httpBackend) putViaServer(ctx context.Context, key string, r io.Reader, size int64) error {
+// putViaServer relays the bytes through the hub, gzipping them when the hub
+// advertised that it inflates (plan.AcceptEncoding) and the content is worth
+// compressing. putDirect deliberately stays raw: a presigned upload lands in
+// the object store under the sha256 of the plaintext, with no hub in the path
+// to inflate it, so compressing that leg would corrupt content addressing at
+// rest.
+func (b *httpBackend) putViaServer(ctx context.Context, plan putPlan, key string, r io.Reader, size int64) error {
+	gzipped := false
+	if plan.acceptsGzip() {
+		probed, worth, err := Compressible(r)
+		if err != nil {
+			return err
+		}
+		r, gzipped = probed, worth
+	}
+	if gzipped {
+		pr, pw := io.Pipe()
+		src := r
+		go func() {
+			gz := gzip.NewWriter(pw)
+			_, err := io.Copy(gz, src)
+			if cerr := gz.Close(); err == nil {
+				err = cerr
+			}
+			pw.CloseWithError(err)
+		}()
+		r = pr
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
 		b.endpoint("object", url.Values{"key": {key}}), r)
 	if err != nil {
@@ -452,6 +504,14 @@ func (b *httpBackend) putViaServer(ctx context.Context, key string, r io.Reader,
 	}
 	nameJournalDevice(req, key)
 	req.ContentLength = size
+	if gzipped {
+		req.Header.Set("Content-Encoding", "gzip")
+		// The compressed length is not knowable without compressing twice, so
+		// the request goes out chunked. The hub's spool() already treats a -1
+		// length as the normal case — it is why it measures the body instead of
+		// believing a header.
+		req.ContentLength = -1
+	}
 	resp, err := b.do(req)
 	if err != nil {
 		return err

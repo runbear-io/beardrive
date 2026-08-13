@@ -125,7 +125,7 @@ classDiagram
         opsNameTheirAuthor(ops) whose name
         journalKeepsItsOps(ctx, be, key, ops)
     }
-    note for journalDoor "store.go — the invariant &quot;each device writes only its own journal&quot; is now ENFORCED here, not assumed. The key must be journal/&lt;canonical device id&gt;.jsonl for the device in the request header, that device must already be owned by the caller (DeviceRegistry.OwnerOf) or the caller must be a project admin (the recovery arm) — the old first-writer-claims arm is gone. Every op must pass journal.SafePath + config.ReservedPath on its Path and journal.SafeText on Note/Author/UserName, must name its own owner's account, and the upload must keep every Seq the stored journal already had: append-only, 409 on truncation. Bodies are spooled first, and a blob PUT must hash to the key it claims"
+    note for journalDoor "store.go — the invariant &quot;each device writes only its own journal&quot; is now ENFORCED here, not assumed. The key must be journal/&lt;canonical device id&gt;.jsonl for the device in the request header, that device must already be owned by the caller (DeviceRegistry.OwnerOf) or the caller must be a project admin (the recovery arm) — the old first-writer-claims arm is gone. Every op must pass journal.SafePath + config.ReservedPath on its Path and journal.SafeText on Note/Author/UserName, must name its own owner's account, and the upload must keep every Seq the stored journal already had: append-only, 409 on truncation. Bodies are spooled first, and a blob PUT must hash to the key it claims. A Content-Encoding: gzip body is inflated ABOVE the spool — the sha, the op count and the billed size are all properties of the plaintext, so nothing below that line knows compression happened — and the inflate is bounded (maxInflatedPut, 256 MiB, only when an encoding was declared), because compression severs the one-wire-byte-one-disk-byte relationship that made spool safe unbounded"
     note for journalDoor "Delta sync grew the key space: validStoreKey also accepts chunks/&lt;sha256&gt; (content-addressed, PUT must hash to its key, presigned like blobs incl. refuse-existing) and manifests/&lt;sha256&gt; (keyed by the whole FILE's sha — not its own content hash — so it is never presigned and gets two ingest gates instead: every chunk it names must already EXIST in the store, and the key is WRITE-ONCE — an identical re-put is a 200 no-op so an interrupted push can retry, a different body 409s. Together these make &quot;a manifest exists ⟹ its chunks exist&quot; an invariant every consumer can lean on: the client's push skip-proof, reassemble, and bdrive import)"
 
     class Backend {
@@ -138,6 +138,14 @@ classDiagram
     }
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
     note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too. Object carries Modified (S3 LastModified, GCS Updated, file mtime; zero where the backend has none) — RemoteSource.verify reads it to decide when a blob can no longer be rewritten by a presigned URL"
+
+    class wireCodec {
+        <<internal/remote, compress.go>>
+        +Compressible(r) (rejoined, worth, err)
+        +AcceptsGzip(req) bool
+        putPlan.AcceptEncoding []string
+    }
+    note for wireCodec "Transport compression, and TRANSPORT ONLY: content addressing, the storage layout and the journal format are all over the UNCOMPRESSED bytes. One probe helper serves both legs — it gzips the first 64 KiB and keeps the compressed form only if the sample shrank, so already-compressed content (JPEG, zip, weights) passes through untouched; the reader it returns is the stream REJOINED, since a probe that eats bytes corrupts every transfer. The two legs are not symmetric. PULL needs no negotiation: net/http sends Accept-Encoding: gzip itself and inflates transparently, so devices built before this get it free — which is why httpBackend.do must never set that header. PUSH cannot be unilateral, because an old hub would store the gzip bytes under the sha256 of the plaintext, so the client compresses only when sign() advertised accept_encoding (absent on an old hub → raw). putDirect stays raw: a presigned upload has no hub in the path to inflate it"
 
     class AuthProvider {
         <<interface>>
@@ -360,7 +368,7 @@ classDiagram
         +Write(p) n
         +n int64
     }
-    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file"
+    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file. It wraps the SOCKET and gzip writes INTO it, never the reverse — RecordEgress is a bandwidth meter, so a compressed response must report its compressed size, and getting that backwards bills plaintext while nothing fails"
 
     class grant {
         +project +org +key
@@ -399,6 +407,8 @@ classDiagram
     Server ..> secretScan : handleShareCreate scans the first 1 MiB unless confirmed or alreadyPublic
     secretScan ..> secretFinding
     Server ..> countingWriter : every bytes-out route that bills
+    Server ..> wireCodec : gzip on /store/ GET+list, inflate above spool on PUT
+    Backend ..> wireCodec : httpBackend gzips a relayed PUT when sign() allows
     reservations ..> Backend : reconcile — did the blob land
     Server *-- journalDoor : /store/* is the only way a device writes
     journalDoor ..> DeviceRegistry : OwnerOf gates the journal key
