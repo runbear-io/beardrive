@@ -124,3 +124,64 @@ func TestPushSkipsIncompressibleContent(t *testing.T) {
 		t.Fatalf("wire carried %d bytes for a %d-byte payload", gotLen, len(payload))
 	}
 }
+
+// The presigned leg must stay raw even when the hub advertises gzip on the
+// same sign() response. A direct upload goes to the object store under the
+// sha256 of the PLAINTEXT with no hub in the path to inflate it, so a stray
+// compression here would corrupt content addressing at rest — the one failure
+// in this change that storage would keep forever rather than reject.
+//
+// Not reachable through any hub fixture in the tree: they all run on file://
+// storage, which implements no PutSigner, so every plan is mode:"server".
+// Managed hubs are S3/GCS-backed, which makes this the production path.
+func TestPresignedUploadIsNeverCompressed(t *testing.T) {
+	payload := strings.Repeat("# highly compressible markdown\n", 2000)
+
+	var gotBody []byte
+	var gotEncoding string
+	var relayed bool
+	// One origin serving both roles: directTargetOK refuses a presign target
+	// that is neither https nor the hub's own origin, so a second httptest
+	// server would be declined and silently relayed instead — which would pass
+	// this test while proving nothing about putDirect.
+	var hub *httptest.Server
+	hub = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/store/sign"):
+			w.Header().Set("Content-Type", "application/json")
+			// The hub advertises gzip — it does on every sign answer — AND
+			// hands back a presigned destination. The client must honor the
+			// second and ignore the first.
+			w.Write([]byte(`{"mode":"direct","exists":false,"accept_encoding":["gzip"],"url":"` +
+				hub.URL + `/presigned-blob","method":"PUT"}`))
+		case r.URL.Path == "/presigned-blob":
+			gotEncoding = r.Header.Get("Content-Encoding")
+			gotBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			relayed = true
+			http.Error(w, "relayed through the hub", http.StatusNotFound)
+		}
+	}))
+	defer hub.Close()
+
+	be, err := Open(context.Background(), hub.URL+"/p/p-0123abcd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.Close()
+	if err := be.Put(context.Background(), "blobs/"+strings.Repeat("c", 64),
+		strings.NewReader(payload), int64(len(payload))); err != nil {
+		t.Fatal(err)
+	}
+	if relayed {
+		t.Fatal("the upload was relayed through the hub; putDirect was never exercised")
+	}
+	if gotEncoding != "" {
+		t.Fatalf("presigned upload carried Content-Encoding %q — the object store has no hub to inflate it", gotEncoding)
+	}
+	if string(gotBody) != payload {
+		t.Fatalf("presigned upload sent %d bytes, want the %d-byte plaintext the key is the hash of",
+			len(gotBody), len(payload))
+	}
+}
