@@ -59,11 +59,23 @@ func buildOldBinary(t *testing.T) string {
 			return
 		}
 		root := strings.TrimSpace(string(rootOut))
-		arch := exec.Command("git", "-C", root, "archive", "--format=tar", oldBinRef)
-		tarBytes, err := arch.Output()
+		archive := func() ([]byte, error) {
+			return exec.Command("git", "-C", root, "archive", "--format=tar", oldBinRef).Output()
+		}
+		tarBytes, err := archive()
 		if err != nil {
-			oldBinErr = fmt.Errorf("git archive %s: %w", oldBinRef, err)
-			return
+			// CI checkouts are shallow (actions/checkout fetch-depth 1), so
+			// the pinned pre-delta commit is usually absent there. Fetch just
+			// that commit and retry — one object, no workflow change, and a
+			// full local clone never takes this path.
+			if fout, ferr := exec.Command("git", "-C", root, "fetch", "--depth=1", "origin", oldBinRef).CombinedOutput(); ferr != nil {
+				oldBinErr = fmt.Errorf("git archive %s failed and the commit could not be fetched (shallow clone without network?): %v\n%s", oldBinRef, ferr, fout)
+				return
+			}
+			if tarBytes, err = archive(); err != nil {
+				oldBinErr = fmt.Errorf("git archive %s after fetch: %w", oldBinRef, err)
+				return
+			}
 		}
 		tr := tar.NewReader(bytes.NewReader(tarBytes))
 		for {
