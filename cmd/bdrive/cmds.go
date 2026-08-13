@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -11,6 +13,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/daemon"
 	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
@@ -108,6 +111,7 @@ list in .bdrive/config.json is never pruned against either.`,
 					if h, ok := runHookSync(cmd, target, sessionID, hookLabel); ok {
 						link := hookLinkFor(folder, target, h.base)
 						link.paths = h.paths
+						link.secrets = h.secrets
 						links = append(links, link)
 					}
 				}
@@ -241,6 +245,11 @@ func statusCmd() *cobra.Command {
 					}
 					fmt.Printf("  files:    %d (%s)\n", len(cache), humanBytes(total))
 				}
+				// Read, never scanned: `status` runs no cycle, so what it
+				// reports is what the last cycle that read those bytes found.
+				if found, err := sess.Store.LoadSecrets(id); err == nil {
+					printSecrets(found)
+				}
 				st, err := sess.Store.LoadSync()
 				myOps, err2 := sess.Store.DeviceOps(dev.ID)
 				if err == nil && err2 == nil {
@@ -346,6 +355,33 @@ func logCmd() *cobra.Command {
 //
 // So: no C0 or DEL, one entry is one line, and each part is bounded — 50 rows
 // of log is also owned by one 40 KB entry that scrolls the rest away.
+// statusSecretsMax caps the block: a folder that trips the rules everywhere
+// would otherwise bury the rest of `status` under its own output.
+const statusSecretsMax = 20
+
+// printSecrets renders what the last cycle that read these files found. The
+// wording is the same contract the share gate has: each file was checked WHEN
+// IT CHANGED, which says nothing about a file that has not. Rule id and line
+// only — the matched bytes never leave internal/secrets.
+func printSecrets(found map[string][]secrets.Finding) {
+	if len(found) == 0 {
+		return
+	}
+	paths := slices.Sorted(maps.Keys(found))
+	fmt.Printf("  secrets: %d file(s) looked like they contain credentials when they last changed\n", len(paths))
+	for i, rel := range paths {
+		if i == statusSecretsMax {
+			fmt.Printf("             +%d more\n", len(paths)-i)
+			break
+		}
+		for _, f := range found[rel] {
+			// The path is a project member's string reaching a terminal,
+			// exactly like the rows above.
+			fmt.Printf("             %s:%d  %s\n", safeField(rel, 160), f.Line, secrets.Label(f.Rule))
+		}
+	}
+}
+
 func safeField(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
 		switch {

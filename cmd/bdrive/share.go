@@ -144,9 +144,10 @@ func secretsFound(rel string, resp *http.Response) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s looks like it contains credentials (checked at the moment you shared it):\n", rel)
 	for _, f := range out.Findings {
-		// secrets.Label, not the bare id: the web dialog has always said "an
-		// AWS access key" here while the terminal said "aws_access_key_id".
-		fmt.Fprintf(&b, "  line %-4d %s\n", f.Line, secrets.Label(f.Rule))
+		// Both: the web dialog has always said "an AWS access key" while the
+		// terminal said "aws_access_key_id", and the id is what someone greps
+		// for or quotes in a report.
+		fmt.Fprintf(&b, "  line %-4d %s (%s)\n", f.Line, secrets.Label(f.Rule), f.Rule)
 	}
 	b.WriteString("Nothing was shared. Re-run with --force if that is intentional.")
 	return fmt.Errorf("%s", b.String())

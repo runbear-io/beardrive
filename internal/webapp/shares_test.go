@@ -757,7 +757,7 @@ func TestShareSecretScan(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("share of a file holding a key: %d %s, want 409", rec.Code, rec.Body)
 	}
-	if got := decodeFindings(t, rec); !reflect.DeepEqual(got, []secrets.Finding{{"aws_access_key_id", 5}}) {
+	if got := decodeFindings(t, rec); !reflect.DeepEqual(got, []secrets.Finding{{Rule: "aws_access_key_id", Line: 5}}) {
 		t.Fatalf("findings = %v, want aws_access_key_id on line 5", got)
 	}
 	if n := len(srv.Shares.List(p.ID)); n != 0 {
