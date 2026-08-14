@@ -380,11 +380,53 @@ test("public link: the file page says it is shared, and revokes without a reload
   await expect(banner).toContainText("no expiry");
   expect((await page.request.get(url)).status()).toBe(200);
 
-  // Revoking from the file page kills the link and updates in place.
-  await banner.locator(".ai-del").click();
+  // Revoking from the file page kills the link and updates in place. Queried
+  // by its accessible name (BEA-100), so the aria-label can't regress into a
+  // control only a CSS selector can find.
+  await page.getByRole("button", { name: /revoke/i }).click();
   await page.click(".modal .danger-btn");
   await expectToast(page, "Share revoked");
   await expect(banner).toHaveCount(0);
+  expect((await page.request.get(url)).status()).toBe(404);
+});
+
+// BEA-100: a persona reported the file page's Revoke as unreachable by its
+// accessible name. It is reachable — except while the Share dialog is open,
+// because Radix's modal aria-hides the rest of the page, leaving the banner's
+// button in the DOM and out of the accessibility tree. Both states are pinned
+// here so the recorded repro can't go stale, and so the answer stays a
+// sentence in the dialog rather than a second destructive control (BEA-32).
+test("revoke answers to its accessible name, and the open dialog says where it lives", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const minted = await page.request.post(`/api/p/${pid}/shares`, { data: { path: "guide.md" } });
+  const url = (await minted.json()).url as string;
+  await page.goto(`/${pid}/guide.md`);
+  const revoke = page.getByRole("button", { name: /revoke/i });
+
+  // Dialog closed: the banner's Revoke answers to the query that timed out.
+  await expect(page.locator(".share-banner")).toBeVisible();
+  await expect(revoke).toHaveCount(1);
+
+  // Dialog open: same query, nothing to find — the banner is still rendered,
+  // its ancestor is aria-hidden. The dialog names where Revoke lives instead
+  // of growing one of its own.
+  await page.click("#share-btn");
+  await page.waitForSelector(".modal-url");
+  await expect(page.locator(".share-banner")).toHaveCount(1);
+  await expect(page.locator("#main")).toHaveAttribute("aria-hidden", "true");
+  await expect(revoke).toHaveCount(0);
+  await expect(page.locator(".modal .ai-del")).toHaveCount(0);
+  await expect(page.locator(".modal")).toContainText("Publicly shared");
+
+  // Closed again: reachable, and it still revokes end to end.
+  await page.click(".modal button:has-text('Done')");
+  await revoke.click();
+  await page.click(".modal .danger-btn");
+  await expectToast(page, "Share revoked");
+  await expect(page.locator(".share-banner")).toHaveCount(0);
   expect((await page.request.get(url)).status()).toBe(404);
 });
 

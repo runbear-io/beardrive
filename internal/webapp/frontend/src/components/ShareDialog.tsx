@@ -78,6 +78,12 @@ export function ShareDialog({
         <p>
           <b>Anyone with this link can view this file</b> — no account needed. It always shows the
           latest version until it expires or you revoke it.
+          {/* BEA-100: the one thing a user opens this dialog for and cannot do
+              here. Radix aria-hides the page behind an open modal, so the
+              banner's Revoke is unreachable — to assistive tech and to the
+              user — until this closes. A sentence, not a second button. */}{" "}
+          To revoke it, close this — <b>Revoke</b> is on the file itself, in the “Publicly shared”
+          banner.
         </p>
         <div className="modal-url">{url}</div>
         <div className="modal-expiry">
