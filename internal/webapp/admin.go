@@ -1,9 +1,15 @@
 package webapp
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
+
+	"github.com/runbear-io/beardrive/internal/remote"
 )
 
 // Administration surfaces: project lifecycle (rename/delete by the owning
@@ -38,15 +44,97 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// handleProjectDelete removes a project from the registry. Project admins
-// only. Storage (blobs, journals) is intentionally left in place.
+// handleProjectDelete removes a project from the registry and purges its
+// storage prefix (blobs, journals). Project admins only.
 func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("project")
 	if _, ok := s.project(w, r, id, PermAdmin); !ok {
 		return
 	}
-	if err := s.Projects.Delete(id); err != nil {
+	if err := s.deleteProject(r.Context(), id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// deleteProject retires the project id, revokes its share links, drops its
+// cached volume, and purges its objects from the storage root. The registry
+// delete is the operation; the purge is best effort — a storage error after
+// the id is retired leaves orphaned objects (the pre-purge status quo), never
+// a half-deleted project.
+func (s *Server) deleteProject(ctx context.Context, id string) error {
+	if err := s.Projects.Delete(id); err != nil {
+		return err
+	}
+	if s.Shares != nil {
+		for _, sh := range s.Shares.List(id) {
+			s.Shares.Revoke(sh.Token)
+		}
+	}
+	s.volsMu.Lock()
+	delete(s.vols, id)
+	s.volsMu.Unlock()
+	if err := s.purgeStorage(ctx, id); err != nil {
+		log.Printf("project %s deleted but storage purge failed (objects remain): %v", id, err)
+	}
+	return nil
+}
+
+// purgeStorage deletes every object under the project's storage prefix. A
+// Root without the delete capability keeps the old behavior: the id is
+// retired, the objects stay for out-of-band cleanup.
+func (s *Server) purgeStorage(ctx context.Context, id string) error {
+	d, ok := s.Root.(remote.Deleter)
+	if !ok {
+		return nil
+	}
+	objs, err := s.Root.List(ctx, id+"/")
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, o := range objs {
+		// List answers by string prefix, so "p-abc/" can surface a sibling
+		// like "p-abcd/x" on some backends — never delete outside the id.
+		if !strings.HasPrefix(o.Key, id+"/") {
+			continue
+		}
+		if err := d.Delete(ctx, o.Key); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// handleOrgDelete deletes an organization: every project it owns (registry
+// and storage, via deleteProject) and then the org itself. Owners only. The
+// org row goes first — it settles that this directory owns its orgs at all
+// (ErrManagedElsewhere) before anything irreversible touches storage.
+func (s *Server) handleOrgDelete(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("org")
+	if _, ok := s.requireOwner(w, r, orgID); !ok {
+		return
+	}
+	if err := s.Dir.Delete(orgID); err != nil {
+		s.writeDirErr(w, orgID, err)
+		return
+	}
+	var failed []string
+	if s.Projects != nil {
+		for _, p := range s.Projects.List() {
+			if p.Org != orgID {
+				continue
+			}
+			if err := s.deleteProject(r.Context(), p.ID); err != nil {
+				log.Printf("org %s deleted but project %s was not: %v", orgID, p.ID, err)
+				failed = append(failed, p.ID)
+			}
+		}
+	}
+	if len(failed) > 0 {
+		http.Error(w, fmt.Sprintf("organization deleted, but these projects were not: %s",
+			strings.Join(failed, ", ")), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})

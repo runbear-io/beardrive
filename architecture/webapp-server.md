@@ -136,6 +136,11 @@ classDiagram
         <<interface>>
         +SignPut(ctx, key, size, ttl)
     }
+    class Deleter {
+        <<interface>>
+        +Delete(ctx, key)
+    }
+    note for Deleter "internal/remote — the optional delete capability in the PutSigner mold, implemented by localBackend, s3Backend and gcsBackend. Deleting a missing key is not an error. httpBackend deliberately does NOT implement it: sync clients never delete remote objects — only the hub purges, and only its own root"
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
     note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too. Object carries Modified (S3 LastModified, GCS Updated, file mtime; zero where the backend has none) — RemoteSource.verify reads it to decide when a blob can no longer be rewritten by a presigned URL"
 
@@ -197,7 +202,7 @@ classDiagram
         <<interface>>
         +Role(org, email)
         +Get +OrgsFor +ListInvites +ValidInvite +ManageURL
-        +Create +Rename +AddMember +SetRole +RemoveMember
+        +Create +Rename +Delete +AddMember +SetRole +RemoveMember
         +CreateInvite +RevokeInvite +Redeem
     }
     class LocalDirectory {
@@ -208,6 +213,7 @@ classDiagram
         -byID, invites
         -seniority func() []string
         +EvictMember(org, email)
+        +Delete(orgID) org row first, then its invites
         +SetSeniority(f)
         -heir(o) promotes an owner
         -refresh re-reads the store before every decision
@@ -226,6 +232,12 @@ classDiagram
     class OrgInvite {
         +Token +Org +Creator +Expires +Uses
     }
+    class deleteCascade {
+        <<Server, admin.go>>
+        deleteProject: registry, shares, cached volume, storage purge
+        handleOrgDelete: Dir.Delete first, then each project
+    }
+    note for deleteCascade "Deleting a project retires the registry row FIRST (a storage error after that leaves orphaned objects, never a half-deleted project), then revokes its share links, evicts the cached volume, and purges the storage prefix through remote.Deleter — best effort, logged, with a HasPrefix guard so a p-abc/ purge can never touch p-abcd/. Org delete drops the org row before touching storage, so ErrManagedElsewhere from an external directory refuses the whole thing while everything is still intact"
 
     class ProjectDB {
         -repo ProjectRepo
@@ -445,6 +457,12 @@ classDiagram
     DirectUploader <|.. RemoteSource
     RemoteSource o-- Backend : Prefixed(Root, projectID)
     Backend <|-- PutSigner : optional capability
+    Backend <|-- Deleter : optional capability
+    Server *-- deleteCascade : DELETE project / org routes
+    deleteCascade ..> ProjectDB : Delete
+    deleteCascade ..> ShareDB : Revoke
+    deleteCascade ..> Directory : Delete
+    deleteCascade ..> Deleter : purge prefix
 
     AuthProvider <|.. BuiltinAuth
     AccountApprover <|.. BuiltinAuth
