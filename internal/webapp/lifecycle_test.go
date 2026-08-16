@@ -112,11 +112,31 @@ func TestProjectLifecycle(t *testing.T) {
 		t.Fatalf("rejected updates mutated the project: %+v", got)
 	}
 
-	if err := db.Delete(p.ID); err != nil {
+	if err := db.Delete(p.ID, "boss@x.io"); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := db.Get(p.ID); ok {
 		t.Fatal("deleted project still present")
+	}
+	// The tombstone is queryable and says who deleted it, when.
+	ts, ok := db.GetDeleted(p.ID)
+	if !ok || ts.DeletedBy != "boss@x.io" || ts.Deleted.IsZero() {
+		t.Fatalf("tombstone: %+v (ok=%v)", ts, ok)
+	}
+	if got := db.ListDeleted(); len(got) != 1 || got[0].ID != p.ID {
+		t.Fatalf("ListDeleted = %+v", got)
+	}
+	// Deleting twice is refused; mutating a tombstone is refused.
+	if err := db.Delete(p.ID, "boss@x.io"); err == nil {
+		t.Fatal("double delete must be refused")
+	}
+	if err := db.Rename(p.ID, "revived"); err == nil {
+		t.Fatal("renaming a tombstone must be refused")
+	}
+	// The name is free again: a new project by the old name gets a fresh id.
+	again, created, err := db.GetOrCreate("handbook", "o-1")
+	if err != nil || !created || again.ID == p.ID {
+		t.Fatalf("name reuse after delete: %+v created=%v err=%v", again, created, err)
 	}
 }
 
@@ -201,6 +221,34 @@ func TestDeletePurgesStorage(t *testing.T) {
 	}
 	if _, err := os.Stat(wikiDir); !os.IsNotExist(err) {
 		t.Fatalf("deleted project's storage still on disk: %v", err)
+	}
+
+	// The tombstone is queryable: gone from the live list, present in
+	// ?deleted=1 for a member of its org, invisible to an outsider.
+	deletedList := func(c *http.Cookie) []Project {
+		t.Helper()
+		rec := doAs(t, h, "GET", "/api/projects?deleted=1", nil, c)
+		if rec.Code != 200 {
+			t.Fatalf("deleted list: %d %s", rec.Code, rec.Body)
+		}
+		var out struct {
+			Projects []Project `json:"projects"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Projects
+	}
+	rec := doAs(t, h, "GET", "/api/projects", nil, alice)
+	if strings.Contains(rec.Body.String(), wiki.ID) {
+		t.Fatalf("deleted project still in the live list: %s", rec.Body)
+	}
+	got := deletedList(alice)
+	if len(got) != 1 || got[0].ID != wiki.ID || got[0].DeletedBy != "alice@x.io" || got[0].Deleted.IsZero() {
+		t.Fatalf("alice's deleted list = %+v", got)
+	}
+	if got := deletedList(bob); len(got) != 0 {
+		t.Fatalf("bob sees another org's tombstones: %+v", got)
 	}
 	for _, dir := range []string{docsDir, bobsDir} {
 		if _, err := os.Stat(dir); err != nil {

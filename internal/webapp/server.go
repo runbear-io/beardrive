@@ -1042,12 +1042,24 @@ func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this server does not host projects", http.StatusNotFound)
 		return
 	}
+	// ?deleted=1 lists tombstones instead: who deleted what, when. The same
+	// permission resolver gates each row — a tombstone is visible to exactly
+	// whoever could see the project alive — plus hub admins, who are the only
+	// audience left once a whole org (and with it every membership the
+	// resolver could consult) is gone.
+	rows, admin := s.Projects.List, false
+	if r.URL.Query().Get("deleted") != "" {
+		rows = s.Projects.ListDeleted
+		// The bypass exists ONLY here: a live project's visibility is its
+		// members', hub admin or not.
+		admin = s.requestUser(r).Admin
+	}
 	// Each row carries the caller's own level, so the frontend can hide write
 	// affordances without a second fetch per project on every render.
 	visible := []projectView{}
-	for _, p := range s.Projects.List() {
+	for _, p := range rows() {
 		perm := s.projectPermOf(r, p)
-		if !atLeast(perm, PermRead) {
+		if !atLeast(perm, PermRead) && !admin {
 			continue
 		}
 		visible = append(visible, projectJSON(p, perm))

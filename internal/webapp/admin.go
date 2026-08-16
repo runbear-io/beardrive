@@ -51,22 +51,27 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.project(w, r, id, PermAdmin); !ok {
 		return
 	}
-	if err := s.deleteProject(r.Context(), id); err != nil {
+	if err := s.deleteProject(r.Context(), id, s.requestUser(r).Email); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// deleteProject retires the project id, revokes its share links, drops its
-// cached volume, and purges its objects from the storage root. The registry
-// delete is the operation; the purge is best effort — a storage error after
-// the id is retired leaves orphaned objects (the pre-purge status quo), never
-// a half-deleted project.
-func (s *Server) deleteProject(ctx context.Context, id string) error {
-	if err := s.Projects.Delete(id); err != nil {
+// deleteProject tombstones the project (the registry row stays, marked
+// deleted-by-whom-when — the audit record, queryable via /api/projects
+// ?deleted=1), revokes its share links, drops its cached volume, and purges
+// its objects from the storage root. The tombstone write is the operation;
+// the purge is best effort — a storage error after the row is tombstoned
+// leaves orphaned objects (the pre-purge status quo), never a half-deleted
+// project. `by` is the deleting account's email.
+func (s *Server) deleteProject(ctx context.Context, id, by string) error {
+	p, _ := s.Projects.Get(id)
+	if err := s.Projects.Delete(id, by); err != nil {
 		return err
 	}
+	log.Printf("audit: project deleted id=%s org=%s by=%s", id, p.Org, by)
+	s.capture(by, "project_deleted", map[string]any{"project": id, "org": p.Org})
 	if s.Shares != nil {
 		for _, sh := range s.Shares.List(id) {
 			s.Shares.Revoke(sh.Token)
@@ -113,25 +118,31 @@ func (s *Server) purgeStorage(ctx context.Context, id string) error {
 // (ErrManagedElsewhere) before anything irreversible touches storage.
 func (s *Server) handleOrgDelete(w http.ResponseWriter, r *http.Request) {
 	orgID := r.PathValue("org")
-	if _, ok := s.requireOwner(w, r, orgID); !ok {
+	by, ok := s.requireOwner(w, r, orgID)
+	if !ok {
 		return
 	}
 	if err := s.Dir.Delete(orgID); err != nil {
 		s.writeDirErr(w, orgID, err)
 		return
 	}
+	deleted := 0
 	var failed []string
 	if s.Projects != nil {
 		for _, p := range s.Projects.List() {
 			if p.Org != orgID {
 				continue
 			}
-			if err := s.deleteProject(r.Context(), p.ID); err != nil {
+			if err := s.deleteProject(r.Context(), p.ID, by); err != nil {
 				log.Printf("org %s deleted but project %s was not: %v", orgID, p.ID, err)
 				failed = append(failed, p.ID)
+				continue
 			}
+			deleted++
 		}
 	}
+	log.Printf("audit: org deleted id=%s by=%s projects=%d", orgID, by, deleted)
+	s.capture(by, "org_deleted", map[string]any{"org": orgID, "projects": deleted})
 	if len(failed) > 0 {
 		http.Error(w, fmt.Sprintf("organization deleted, but these projects were not: %s",
 			strings.Join(failed, ", ")), http.StatusInternalServerError)

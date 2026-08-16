@@ -234,15 +234,18 @@ classDiagram
     }
     class deleteCascade {
         <<Server, admin.go>>
-        deleteProject: registry, shares, cached volume, storage purge
+        deleteProject: tombstone, shares, cached volume, storage purge
         handleOrgDelete: Dir.Delete first, then each project
+        audit log line + PostHog capture per delete
     }
-    note for deleteCascade "Deleting a project retires the registry row FIRST (a storage error after that leaves orphaned objects, never a half-deleted project), then revokes its share links, evicts the cached volume, and purges the storage prefix through remote.Deleter — best effort, logged, with a HasPrefix guard so a p-abc/ purge can never touch p-abcd/. Org delete drops the org row before touching storage, so ErrManagedElsewhere from an external directory refuses the whole thing while everything is still intact"
+    note for deleteCascade "Deleting a project TOMBSTONES the registry row FIRST — Project.Deleted/DeletedBy stay behind as the audit record, queryable via GET /api/projects?deleted=1 (same permission resolver as the live list, so a tombstone is visible to exactly whoever could see the project alive; hub admins additionally see tombstones of deleted orgs) — then revokes its share links, evicts the cached volume, and purges the storage prefix through remote.Deleter — best effort, logged, with a HasPrefix guard so a p-abc/ purge can never touch p-abcd/. Every live-project read path (Get, List, GetOrCreate name match, Update) skips tombstones, so the name is immediately reusable and no content route answers for one. Each delete also writes an `audit:` log line and a PostHog project_deleted / org_deleted event through Server.capture (a no-op unless analytics is configured). Org delete drops the org row before touching storage, so ErrManagedElsewhere from an external directory refuses the whole thing while everything is still intact. ProjectRepo.Delete (the hard remove) is now uncalled — a future tombstone purge would be its caller"
 
     class ProjectDB {
         -repo ProjectRepo
         -byID
         +Get +Create +Update +Rename +List
+        +Delete tombstones, never removes
+        +GetDeleted +ListDeleted
         +SetCreator +SetDefault +SetTemplate
         +SetPerm +ClearPerm
         -refresh re-reads the store on reads AND mutators
@@ -254,6 +257,7 @@ classDiagram
         +Template string
         +Default string
         +Perms map email→level
+        +Deleted time, +DeletedBy email — tombstone
     }
     class seedTemplate {
         <<Server method>>
