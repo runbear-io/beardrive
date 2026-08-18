@@ -92,6 +92,11 @@ Use --force to share anyway.`,
 			if resp.StatusCode == http.StatusNotFound {
 				return fmt.Errorf("%s (if you just saved it, wait a few seconds for the daemon or run `bdrive sync`)", strings.TrimSpace(readBody(resp)))
 			}
+			// The server writes this one as a sentence to be read (e.g. "share
+			// links are per-file"); httpBodyError would prefix "400 Bad Request: ".
+			if resp.StatusCode == http.StatusBadRequest {
+				return fmt.Errorf("%s", strings.TrimSpace(readBody(resp)))
+			}
 			// Before the generic fallthrough: httpBodyError would print the raw
 			// JSON, and this is the one status the user can act on.
 			if resp.StatusCode == http.StatusConflict {
