@@ -862,6 +862,75 @@ func TestCLITemplateRefusals(t *testing.T) {
 	}
 }
 
+// The same six rules, on the path every file takes. `bdrive status` names a
+// synced file that looked like it held a credential when it last changed —
+// and the file synced anyway, which is the posture: warn, never block.
+func TestCLISecretsWarnOnSync(t *testing.T) {
+	e := newCLIEnv(t)
+	run := e.run
+
+	work := t.TempDir()
+	// Fabricated, AWS-shaped. Not a credential.
+	const plantedKey = "AKIAIOSFODNN7EXAMPLE"
+	if err := os.WriteFile(filepath.Join(work, "clean.md"), []byte("# Clean\n\nnothing here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "init", "--name", "secret-warn", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer run(work, "stop", work)
+
+	// Nothing planted yet: the block is absent entirely, not empty.
+	out, err := run(work, "status", work)
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "secrets:") {
+		t.Fatalf("status names credentials with none found:\n%s", out)
+	}
+
+	if err := os.WriteFile(filepath.Join(work, "deploy.md"), []byte(
+		"# Deploy\n\nexport AWS_ACCESS_KEY_ID="+plantedKey+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	out, err = run(work, "status", work)
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	for _, want := range []string{"secrets:", "deploy.md:3", "an AWS access key", "when they last changed"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, plantedKey) {
+		t.Fatalf("status echoed the key back:\n%s", out)
+	}
+
+	// It synced anyway — warn, never hold. The hub has the file.
+	if out, err := run(work, "share", "deploy.md", "--force"); err != nil || !strings.Contains(out, "/s/") {
+		t.Fatalf("the flagged file did not reach the hub: %v\n%s", err, out)
+	}
+
+	// Fixing the file is the whole remedy: no command, no flag.
+	if err := os.WriteFile(filepath.Join(work, "deploy.md"), []byte(
+		"# Deploy\n\nread AWS_ACCESS_KEY_ID from the environment\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	out, err = run(work, "status", work)
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "secrets:") {
+		t.Fatalf("the warning outlived the credential:\n%s", out)
+	}
+}
+
 // `bdrive share` refuses a file that looks like it holds credentials, and
 // --force is the way past it. This is the flow BEA-111 exists for: the CLI
 // used to print the URL and nothing else.
