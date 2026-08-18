@@ -926,3 +926,70 @@ func TestCLIShareSecretGate(t *testing.T) {
 		t.Fatalf("forced link does not serve: %d %s", resp.StatusCode, body)
 	}
 }
+
+// TestCLIStatusReportsUnscannedWork is BEA-106: with the daemon stopped,
+// `status` answered from the state cache and the journal — neither of which
+// has seen an edit nobody scanned — and reported the folder clean. A wrong
+// "you're clean" is worse than no answer, so status now walks the folder
+// read-only and reports that drift on its own line.
+func TestCLIStatusReportsUnscannedWork(t *testing.T) {
+	e := newCLIEnv(t)
+	run := e.run
+
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "index.md"), []byte("# Index\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(work, "init", "--name", "status-drift", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer run(work, "stop", work)
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	if out, err := run(work, "stop", work); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out)
+	}
+
+	// Clean and stopped: the line is present and reads zero.
+	out, err := run(work, "status")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "local:    0 change(s) not yet scanned") {
+		t.Fatalf("clean status missing a zeroed local line:\n%s", out)
+	}
+
+	// Now the reported case: edit with no daemon to scan it.
+	if err := os.WriteFile(filepath.Join(work, "index.md"), []byte("# Index\n\nappended by hand\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(work, "status")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "local:    1 change(s) not yet scanned (0 new, 1 edited, 0 removed)") {
+		t.Fatalf("status did not report the unscanned edit:\n%s", out)
+	}
+	// And it stays distinct from `pending`, which is still legitimately zero.
+	if !strings.Contains(out, "pending:  0 local change(s) not yet pushed") {
+		t.Fatalf("status conflated drift with pending:\n%s", out)
+	}
+
+	// status is a pure read: the edit is still uncommitted afterwards, so the
+	// sync that follows is the one that journals it. (`stop` paused this
+	// folder, so resuming it is `init` again.)
+	if out, err := run(work, "init", "--yes"); err != nil {
+		t.Fatalf("init resume: %v\n%s", err, out)
+	}
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	out, err = run(work, "status")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "local:    0 change(s) not yet scanned") {
+		t.Fatalf("drift did not clear after a sync:\n%s", out)
+	}
+}

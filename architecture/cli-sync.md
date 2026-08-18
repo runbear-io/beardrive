@@ -98,7 +98,7 @@ classDiagram
         +walkFolder(folder, filter, fn)
         verdict: vSync vSkipFile vDescend vPruneDir vNested
     }
-    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure and SyncedFiles all go through it, so what --explain reports, what init warns about and what bdrive grep searches cannot drift from what leaves"
+    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure, SyncedFiles and Drift all go through it, so what --explain reports, what init warns about, what bdrive grep searches and what status calls unscanned cannot drift from what leaves"
 
     class Measure {
         +Measure(folder, include) files, bytes
@@ -109,6 +109,11 @@ classDiagram
         +SyncedFiles(folder, include, accepted) paths
     }
     note for SyncedFiles "walk.go — the mount-relative paths that sync, in walk order: what bdrive grep searches, so a .bdriveignore rule or a narrowed scope excludes a file from search exactly as it excludes it from sync. Deliberately NOT Explain, which countFiles every pruned dir — a grep in a repo with node_modules/ would walk it in full for a count it discards"
+
+    class Drift {
+        +Drift(folder, include, accepted, cache) added, modified, removed
+    }
+    note for Drift "drift.go — the `local:` line in bdrive status: what is on disk that the state cache has not seen, using the scan's own size+mtime compare. Pure read like its siblings, and load-bearing that it stays one: status is what someone runs when sync is stuck, so it stores no blob, mints no op, rewrites no cache — it does not even mutate the cache map it is handed, which status prints `files:` from"
 
     class Explain {
         +Explain(folder, include, accepted) two lists
@@ -174,6 +179,8 @@ classDiagram
     Session --> Filter : SkipUp on scan, Skip on materialize
     Session --> walkFolder : scan
     Explain --> walkFolder : same predicate
+    Drift --> walkFolder : same predicate
+    Drift --> Filter : own fresh instance
     SyncedFiles --> walkFolder : same predicate
     SyncedFiles --> Filter : own fresh instance
     Measure --> walkFolder : same predicate

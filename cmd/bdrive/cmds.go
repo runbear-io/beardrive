@@ -203,8 +203,10 @@ func statusCmd() *cobra.Command {
 				}
 				first = false
 				folder := mi.Path
+				var include []string
 				if proj, ok, err := config.LoadProject(folder); err == nil && ok {
 					mi.Volume, mi.Remote = proj.Volume, proj.Remote // folder config wins
+					include = proj.Include
 				} else {
 					fmt.Printf("%s\n  (folder missing — moved or deleted; run `bdrive init` at its new location)\n", folder)
 					continue
@@ -233,8 +235,8 @@ func statusCmd() *cobra.Command {
 				if err != nil {
 					continue
 				}
-				cache, err := sess.Store.LoadCache(id)
-				if err == nil {
+				cache, cacheErr := sess.Store.LoadCache(id)
+				if cacheErr == nil {
 					var total int64
 					for _, c := range cache {
 						total += c.Size
@@ -249,6 +251,18 @@ func statusCmd() *cobra.Command {
 						pending = 0
 					}
 					fmt.Printf("  pending:  %d local change(s) not yet pushed\n", pending)
+					// `pending` counts what the journal holds; it says nothing
+					// about the folder, so with the daemon stopped an edit
+					// nobody has scanned yet is in neither. Drift is that
+					// second, separate state — a read-only walk, no ops, no
+					// journal, no hub. It degrades to no line rather than
+					// failing the command.
+					if cacheErr == nil {
+						if added, modified, gone, dErr := syncer.Drift(folder, include, st.IgnoreAccepted, cache); dErr == nil {
+							fmt.Printf("  local:    %d change(s) not yet scanned (%d new, %d edited, %d removed)\n",
+								added+modified+gone, added, modified, gone)
+						}
+					}
 					switch st.Access {
 					case store.AccessReadOnly:
 						fmt.Printf("  access:   read-only (pull only) — %d local change(s) stay on this device\n", pending)
