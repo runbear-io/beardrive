@@ -309,8 +309,13 @@ export function VaultHeader(props: {
   onHome?: () => void; // hub: the project name doubles as a home link
   showSignout?: boolean; // volume mode: sign-out stays in the header (no account bar)
   search?: boolean; // icon-only ⌘K search trigger beside the brand
+  /* BearDrive is pre-1.0 and says so next to its own wordmark. Callers pass
+     this only when the lockup IS the BearDrive brand — a hub that set its own
+     `brand` is labelling somebody else's product, and "Acme Docs Beta" is a
+     claim we have no business making for them. */
+  beta?: boolean;
 }) {
-  const { name, onHome, showSignout, search } = props;
+  const { name, onHome, showSignout, search, beta } = props;
   return (
     <header id="vault">
       <span id="vault-badge">
@@ -331,6 +336,7 @@ export function VaultHeader(props: {
       >
         {name}
       </span>
+      {beta && <span id="vault-beta">Beta</span>}
       <div className="vault-actions">
         {search && (
           <Tooltip delayDuration={150}>

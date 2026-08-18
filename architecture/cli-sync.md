@@ -23,22 +23,33 @@ classDiagram
         +Prune bool
         +OnProgress func
         +Cycle(ctx) Result
+        -cycleLocked(ctx) Result
+        -firePostSync(res)
+        -logInbound(rel, deleted)
         +Restore(ctx, path, sha) error
+        -pushChunked(ctx, blob) bytes
+        -fetchChunked(ctx, op, basis) error
+        -chunkSpans(blob) []span
     }
     note for Session "syncer also exposes LogEntries (causal order, what bdrive restore walks) plus DisplayTime / SortForDisplay — the newest-first-by-clock order bdrive log prints"
     note for Session "Restore writes a historical blob back into the working folder as an ordinary edit (fetching it from the hub when this device never held it) — the next Cycle journals it like any other change; it takes no lock and appends to no journal itself"
-    note for Session "internal/syncer — scan → commit local ops → pull peer journals → re-assert withdrawn ops → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
+    note for Session "internal/syncer — scan → commit local ops → pull peer journals → adopt on join → re-assert withdrawn ops → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
     note for Session "pull returns TWO lists: newly seen ops, and `gone` — ops a peer deleted from a journal this device had already applied. A peer cannot un-say what we already hold: stillHold re-signs each still-held put into OUR journal (reassertNote). Pull resumes at a byte offset by prefix-matching the local journal copy, so a peer's growing journal is read once"
     note for Session "Bounds and hardening applied throughout: sizeBound/pullBound cap a fetch against the op's declared size, maxPeerJournals caps how many peers one cycle reads, absorbLamport/tickLamport refuse an absurd peer clock and saturate instead of wrapping, safeMode masks a materialized file to 0777 &^ 0022 (no setuid/setgid, no group/other write), and safeDevice + os.SameFile keep a peer's device id from naming this device's own journal file"
+    note for Session "Cycle is now a thin wrapper: cycleLocked does today's work under the volume flock, then firePostSync spawns the folder's post_sync command AFTER the lock drops, so a hook that runs a bdrive command starts working instead of blocking on the flock the cycle still holds. Splitting the body out is what makes that a property of the code rather than a rule every call site remembers"
+    note for Session "logInbound records each materialized peer path BOTH ways — onto Result.Inbound for the post_sync hook (same process as the cycle) and onto the store's inbound spool for bdrive sync --hook (a later process). DrainInbound is destructive and single-consumer: the hook must never drain it"
     note for Session "Prune (bdrive forget / sync --prune, never the daemon) journals a delete for every replayed path the SHARED ignore rules exclude — the include scope is per-device and must never prune it"
 
     class Result {
         +LocalOps +PulledOps
-        +Conflicts +Pruned +Materialized
+        +Conflicts +Adopted +Pruned +Materialized
+        +Inbound []store.InboundEvent
         +Pushed +Offline +OfflineErr
         +ReadOnly +NoAccess +AccessErr
         +Reason() string
     }
+    note for Result "Adopted counts the paths a JOINING device gave to the project (Cycle step 1b). A first cycle is a join, not an edit: a local file at a path the project already holds is demoted to lamport 0 (adoptNote), so the project's version wins on every device and no conflict copy is made — the local content stays journaled and pushed, which is what bdrive restore reads"
+    note for Result "Inbound names the paths this cycle applied on a peer's behalf — what firePostSync hands the post_sync command as JSON on stdin. Empty on a scan-and-push cycle, which is why a local-edit-only cycle fires nothing"
     note for Result "Offline / ReadOnly / NoAccess are three different answers: unreachable (retry all), push refused (pull-only), pull refused (pause, touch nothing)"
     note for Result "Reason() is accessReason(AccessErr): the hub's own sentence for a refusal, minus the wrapper chain, dropped unless it passes journal.SafeText. 'read-only' summarizes the STATUS CODE — the sentence is the only thing that tells a device-registration 403 from a project the user really is a reader on"
 
@@ -124,7 +135,7 @@ classDiagram
         +Lock() flock
     }
     note for Store "internal/store — ~/.bdrive/volumes/mount-id: content-addressed blobs, per-device journal copies, state cache, paused marker (free funcs Paused/SetPaused, no flock)"
-    note for Store "inbound.jsonl is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle"
+    note for Store "inbound.jsonl is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle. Result.Inbound now carries the SAME events for the post_sync hook and is not a duplicate to delete: that consumer fires from the cycle itself, and a second drainer would silently empty the agent hook's context"
 
     class Op {
         +Seq +Lamport +Time +Device
@@ -136,6 +147,13 @@ classDiagram
     }
     note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay. Session holds the same standing: set only by `bdrive sync --hook` (never by --note, which any member can spell), display/join-only, and the key History run cards group on — a note is forgeable, a session id is not"
     note for Op "Op now owns its own JSON: a Path that is not valid UTF-8 rides as a base64 `path_raw` sidecar and is restored only when the lossy form still matches, so one line can never name two different files on two readers. Less falls through to Kind/Path/Blob/Size/Mode, making the order TOTAL — two ops can no longer tie and replay differently per device. Parse skips an undecodable line and drops an unknown Kind instead of failing the whole journal"
+
+    class Manifest {
+        +V int
+        +Size int64
+        +Chunks []chunkRef h, n
+    }
+    note for Manifest "chunks.go — delta sync. Files over chunkThreshold (4 MiB) push as content-defined chunks (restic/chunker, fixed Rabin polynomial, 256K/1M/4M) under chunks/sha256 plus this manifest under manifests/file-sha — keyed by Op.Blob, so the JOURNAL FORMAT IS UNTOUCHED. pushChunked skips a chunk only when the remote CONFIRMS holding it (one Exists per chunk): three cheaper proxies — local basis, manifest existence, stored manifest content — each proved false or forgeable, and the code comment records why. A refused manifest (write-once 409, ingest 400) falls back to pushing the whole blob, so chunker parameters are not load-bearing. fetchChunked assembles from the manifest, sourcing unchanged chunks from the basis blob already in the local store (cache[path].Blob), verifying the whole against Op.Blob via PutBlobReader; any failure falls through to the whole-blob path, gated on Exists so a transient chunk blip does not trigger hub reassembly every tick. Local blobs stay whole — chunking exists only on the wire and in the remote"
 
     class Backend {
         <<interface>>
@@ -152,6 +170,7 @@ classDiagram
 
     Session --> Store : volume state
     Session --> Backend : pull and push
+    Session --> Manifest : chunked push and pull, files over 4 MiB
     Session --> Filter : SkipUp on scan, Skip on materialize
     Session --> walkFolder : scan
     Explain --> walkFolder : same predicate
@@ -222,8 +241,10 @@ classDiagram
         +ID stable mount id
         +Volume +Remote
         +Include legacy, read-only
+        +PostSync local hook command
     }
     note for Project ".bdrive/config.json — travels with the folder (git clone, copy); presence alone is NOT consent to sync"
+    note for Project "PostSync is a shell command this device runs after a cycle applies peers' changes. It lives here and ONLY here: .bdrive is in ReservedDirs and never syncs, so no hub and no teammate can put a command on someone else's machine. The daemon re-reads this file every tick, so an edit takes effect without a restart"
 
     class MountRegistry {
         mounts.json

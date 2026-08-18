@@ -50,6 +50,15 @@ Concurrent edits keep the last writer at the path. The loser is preserved as a
 `name.bdrive-conflict-<device>-<time>` file by the device that detects the
 overlap. Nothing is silently dropped.
 
+**Joining is an adoption, not a merge.** On a device's first sync of a project,
+a local file at a path the project already holds is not a concurrent edit — it
+is a folder that happened to contain the same path (a checkout of the same
+docs, an agent-written `AGENTS.md`, the `.bdriveignore` `bdrive init` seeds).
+The project's version wins on every device and no conflict copy is made. Your
+copy is still journaled and pushed as a superseded version of that path, so
+`bdrive restore --list <path>` can bring it back. `bdrive sync` reports these as
+`adopted`.
+
 ## The daemon
 
 A per-mount daemon scans the folder every few seconds and exchanges with the

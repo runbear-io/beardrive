@@ -36,20 +36,41 @@ type cliEnv struct {
 	hub     *httptest.Server
 	browser *http.Client
 	home    string // the isolated HOME; hooks live under here now
+	bin     string // the real binary, for tests that need a bdrive to run
 }
 
 func newCLIEnv(t *testing.T) cliEnv {
 	t.Helper()
+	return newCLIEnvOn(t, nil)
+}
+
+// newCLIEnvOn is newCLIEnv against an existing hub, so a test can put two
+// DEVICES (separate BDRIVE_HOMEs, separate device identities) on one project.
+// nil starts a throwaway hub, which is the single-device default.
+func newCLIEnvOn(t *testing.T, hub *httptest.Server) cliEnv {
+	t.Helper()
+	return newCLIEnvBin(t, hub, "")
+}
+
+// newCLIEnvBin is newCLIEnvOn with an explicit binary — the delta-sync E2E
+// rows drive a binary built from the pre-change commit against the same hub
+// as a current one. Empty means build the current tree.
+func newCLIEnvBin(t *testing.T, hub *httptest.Server, bin string) cliEnv {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("builds and execs the bdrive binary; skipped with -short")
 	}
-	bin := filepath.Join(t.TempDir(), "bdrive")
-	build := exec.Command("go", "build", "-o", bin, "github.com/runbear-io/beardrive/cmd/bdrive")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
+	if bin == "" {
+		bin = filepath.Join(t.TempDir(), "bdrive")
+		build := exec.Command("go", "build", "-o", bin, "github.com/runbear-io/beardrive/cmd/bdrive")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("go build: %v\n%s", err, out)
+		}
 	}
 
-	hub := startTestHub(t)
+	if hub == nil {
+		hub = startTestHub(t)
+	}
 
 	// Isolate the CLI completely: fresh BDRIVE_HOME and a fresh HOME, so
 	// agent-platform detection can't see or touch the real ~/.codex etc.
@@ -87,7 +108,7 @@ func newCLIEnv(t *testing.T) cliEnv {
 		out, _ := os.ReadFile(logFile)
 		t.Fatalf("login --device: %v\n%s", err, out)
 	}
-	return cliEnv{run: run, hub: hub, browser: browser, home: home}
+	return cliEnv{run: run, hub: hub, browser: browser, home: home, bin: bin}
 }
 
 func TestCLIOnboardingE2E(t *testing.T) {
@@ -280,6 +301,129 @@ func TestCLISiblingProjectMounts(t *testing.T) {
 	if !pathsB["adr.md"] || pathsB["brand.md"] {
 		t.Fatalf("project-b content wrong: %v", pathsB)
 	}
+}
+
+// Connecting a second device to an existing project, over a real hub, with the
+// files that actually collide in practice: the `.bdriveignore` init seeds and an
+// AGENTS.md an agent wrote in the folder before it was ever synced. Neither may
+// fork into a `.bdriveignore.bdrive-conflict-<device>-<time>` file, and the
+// joiner's copy may not replace the team's. The superseded content stays
+// reachable through `bdrive restore --list`.
+func TestCLIConnectAdoptsProjectVersions(t *testing.T) {
+	hub := startTestHub(t)
+	first := newCLIEnvOn(t, hub)
+
+	const teamAgents = "# Team instructions\nask before editing docs/\n"
+	owner := filepath.Join(t.TempDir(), "team")
+	if err := os.MkdirAll(owner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(owner, "AGENTS.md"), []byte(teamAgents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := first.run(owner, "init", "--name", "join-e2e", "--yes"); err != nil {
+		t.Fatalf("init owner: %v\n%s", err, out)
+	}
+	defer first.run(owner, "stop", owner)
+
+	// The team's ignore rules: the seeded file plus a line of their own, so the
+	// joiner's freshly seeded copy really does differ.
+	teamIgnore, err := os.ReadFile(filepath.Join(owner, ".bdriveignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	teamIgnore = append(teamIgnore, []byte("\n# team rules\nscratch/\n")...)
+	if err := os.WriteFile(filepath.Join(owner, ".bdriveignore"), teamIgnore, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := first.run(owner, "sync"); err != nil {
+		t.Fatalf("owner sync: %v\n%s", err, out)
+	}
+
+	// A second device, its own HOME and device identity, joining the same
+	// project from a folder that already holds its own AGENTS.md.
+	second := newCLIEnvOn(t, hub)
+	joiner := filepath.Join(t.TempDir(), "joined")
+	if err := os.MkdirAll(joiner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const localAgents = "notes my agent wrote in this folder\n"
+	if err := os.WriteFile(filepath.Join(joiner, "AGENTS.md"), []byte(localAgents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id := projectIDByName(t, first.browser, hub.URL, "join-e2e")
+	out, err := second.run(joiner, "init", "--project", id, "--yes")
+	if err != nil {
+		t.Fatalf("init joiner: %v\n%s", err, out)
+	}
+	defer second.run(joiner, "stop", joiner)
+	if !strings.Contains(out, "adopted:") {
+		t.Fatalf("init did not report adopting the project's versions:\n%s", out)
+	}
+
+	// Let both devices settle, then look at every folder involved.
+	if out, err := second.run(joiner, "sync"); err != nil {
+		t.Fatalf("joiner sync: %v\n%s", err, out)
+	}
+	if out, err := first.run(owner, "sync"); err != nil {
+		t.Fatalf("owner sync back: %v\n%s", err, out)
+	}
+	for name, folder := range map[string]string{"joiner": joiner, "owner": owner} {
+		if c := conflictCopiesUnder(t, folder); len(c) != 0 {
+			t.Errorf("%s folder has conflict copies after a plain connect: %v", name, c)
+		}
+		if got := readFile(t, filepath.Join(folder, "AGENTS.md")); got != teamAgents {
+			t.Errorf("%s AGENTS.md = %q, want the team's version", name, got)
+		}
+		if got := readFile(t, filepath.Join(folder, ".bdriveignore")); got != string(teamIgnore) {
+			t.Errorf("%s .bdriveignore = %q, want the team's version", name, got)
+		}
+	}
+
+	// Nothing was dropped: the joiner's own version is a superseded version of
+	// that path, which is exactly what `bdrive restore --list` reads.
+	versions, err := second.run(joiner, "restore", "AGENTS.md", "--list")
+	if err != nil {
+		t.Fatalf("restore --list: %v\n%s", err, versions)
+	}
+	var older string // the one version that is not the current content
+	for _, line := range strings.Split(versions, "\n") {
+		if m := restoreIDRe.FindStringSubmatch(line); m != nil && !strings.HasPrefix(strings.TrimSpace(line), "*") {
+			older = m[1]
+		}
+	}
+	if older == "" {
+		t.Fatalf("the joiner's pre-join AGENTS.md is not in history:\n%s", versions)
+	}
+	if out, err := second.run(joiner, "restore", "AGENTS.md", older); err != nil {
+		t.Fatalf("restore %s: %v\n%s", older, err, out)
+	}
+	if got := readFile(t, filepath.Join(joiner, "AGENTS.md")); got != localAgents {
+		t.Errorf("restored AGENTS.md = %q, want the joiner's pre-join content", got)
+	}
+}
+
+var restoreIDRe = regexp.MustCompile(`\b([0-9a-f]{8})\b`)
+
+func conflictCopiesUnder(t *testing.T, folder string) []string {
+	t.Helper()
+	var out []string
+	filepath.WalkDir(folder, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.Contains(d.Name(), ".bdrive-conflict-") {
+			out = append(out, p)
+		}
+		return nil
+	})
+	return out
+}
+
+func readFile(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read %s: %v", p, err)
+	}
+	return string(b)
 }
 
 // One project mounted from two folders on the SAME device. The remote journal

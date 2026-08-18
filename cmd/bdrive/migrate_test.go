@@ -73,7 +73,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 
 	dst := openFileBackend(t)
-	blobs, journals, _, err = importStore(ctx, dst, tr, first)
+	blobs, journals, _, err = importStore(ctx, dst, tr, first, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestImportRejectsCorruptBlob(t *testing.T) {
 	gz.Close()
 
 	dst := openFileBackend(t)
-	if _, _, _, err := importStore(context.Background(), dst, openTar(t, buf.Bytes()), nil); err == nil || !strings.Contains(err.Error(), "corrupt") {
+	if _, _, _, err := importStore(context.Background(), dst, openTar(t, buf.Bytes()), nil, false); err == nil || !strings.Contains(err.Error(), "corrupt") {
 		t.Fatalf("err = %v, want corrupt-archive error", err)
 	}
 }
@@ -122,7 +122,7 @@ func TestImportRejectsForeignEntries(t *testing.T) {
 	gz.Close()
 
 	dst := openFileBackend(t)
-	if _, _, _, err := importStore(context.Background(), dst, openTar(t, buf.Bytes()), nil); err == nil || !strings.Contains(err.Error(), "unexpected entry") {
+	if _, _, _, err := importStore(context.Background(), dst, openTar(t, buf.Bytes()), nil, false); err == nil || !strings.Contains(err.Error(), "unexpected entry") {
 		t.Fatalf("err = %v, want unexpected-entry error", err)
 	}
 }
@@ -137,7 +137,7 @@ func TestImportRequiresJournals(t *testing.T) {
 	gz.Close()
 
 	dst := openFileBackend(t)
-	if _, _, _, err := importStore(context.Background(), dst, openTar(t, buf.Bytes()), nil); err == nil || !strings.Contains(err.Error(), "no journals") {
+	if _, _, _, err := importStore(context.Background(), dst, openTar(t, buf.Bytes()), nil, false); err == nil || !strings.Contains(err.Error(), "no journals") {
 		t.Fatalf("err = %v, want no-journals error", err)
 	}
 }

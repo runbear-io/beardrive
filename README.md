@@ -109,6 +109,11 @@ actually read (and which hot ones nobody maintains).
 - **Conflict-safe** — concurrent edits resolve deterministically
   (last-writer-wins), and the losing version is preserved as a
   `name.bdrive-conflict-<device>-<time>` file. Nothing is silently dropped.
+  Connecting a folder is not a concurrent edit: on the first sync, files the
+  project already has (its `.bdriveignore`, `AGENTS.md`, anything a checkout
+  brought along) keep the project's version — no conflict copies. Your copy is
+  journaled as a superseded version, so `bdrive restore --list <path>` still
+  has it.
 - **Your agent's skills sync too** — `.claude/skills`, `.claude/commands`,
   `.claude/agents`, `AGENTS.md` and `CLAUDE.md` are ordinary files in the
   project, so a skill one person writes is on every teammate's disk before
@@ -133,22 +138,27 @@ No terminal needed: start any agent (Claude Code, Codex, Gemini CLI, Hermes)
 in the folder you want synced and give it one paste:
 
 ```
-Follow https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md
-to set up BearDrive project <project-id> on <hub-url>. Ask me which folder to
-sync (the project is named "<project-name>").
+Follow beardrive.ai/setup to set up BearDrive. Ask me which folder to sync.
 ```
 
-Joining a teammate's project? They can copy that paste with the hub URL and
-project id already filled in from the project's home page in the web UI.
-Starting fresh, drop the trailing sentence — the agent recommends `shared/`
-and names the new project `shared`.
+Keep the second sentence. Without it an agent reads the first as permission to
+decide for you, and the usual guess is *this whole folder* — the one answer the
+runbook tells it never to recommend. With it, you get a named recommendation to
+accept or override: `shared/` from a standing start, or a notes folder it
+already found.
 
-The agent fetches [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) and follows
-it: install the CLI, then one `bdrive init` — which signs in (an approval link
-when there is no local browser), registers the sync hooks, and prints the
-project link. The instructions live at that URL rather than inside the prompt
-so they never go stale in someone's copy, and the agent handles every
-deviation (already installed, no Homebrew, sign-in, wrong folder).
+Self-hosting? Say where: `… to set up BearDrive on https://hub.example.com.`
+Joining a teammate's project? Use the paste on that project's home page in the
+web UI instead — it carries the hub URL and project id, so the agent joins the
+project rather than creating a second one beside it.
+
+`beardrive.ai/setup` redirects to [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md),
+which the agent fetches and follows: install the CLI, then one `bdrive init` —
+which signs in (an approval link when there is no local browser), registers the
+sync hooks, and prints the project link. The instructions live at that URL
+rather than inside the prompt so they never go stale in someone's copy, and the
+agent handles every deviation (already installed, no Homebrew, sign-in, wrong
+folder).
 
 Those hooks are the whole integration, and `bdrive init` registers them in
 each platform's user config (`~/.claude/settings.json` and friends), once per
@@ -250,9 +260,9 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the file was written (ops recorded before this was tracked, and deletes, show their sync time instead) |
-| `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change (`--list` shows the versions; no version = the previous one). Nothing is erased and it syncs everywhere like any edit. To un-create a file a run *created*, use **undo — remove file** on that row in the hub's History view |
+| `bdrive restore <file> [version]` | Put an earlier version of a file back, as a new change (`--list` shows the versions; no version = the previous one). Nothing is erased and it syncs everywhere like any edit. To un-create a file a run *created*, use **undo — remove file** on that row in the hub's History view — or **undo this run** in the run card's header to put back every file that run touched at once |
 | `bdrive export [folder]` | Export the whole project — every device's journal, all blobs, full history — from its hub to a portable `.tar.gz` (`-o` names the file) |
-| `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (always a NEW project; `--name` overrides the archive's); history and authorship carry over. Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
+| `bdrive import <archive>` | Import an export archive as a new project on the hub you're logged into (always a NEW project; `--name` overrides the archive's); history and authorship carry over. Refuses an archive whose journals reference content it doesn't hold (`--allow-incomplete` overrides). Move projects between hubs — cloud → self-hosted or back — with `export` + `login` + `import` |
 | `bdrive serve [folder \| storage-root-url]` | Web server: viewer (rendered markdown, downloads, history), uploads, multi-project sync hub (`bdrive web` is a deprecated alias) |
 | `bdrive whoami` | Signed-in account and device identity used in change tracking |
 | `bdrive version` | Print the version (also `bdrive --version`) |
@@ -278,8 +288,33 @@ the project:
 ```jsonc
 // .bdrive/config.json
 { "id": "m-5a10b713", "volume": "notes",
-  "remote": "https://drive.example.com/p/7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4" }
+  "remote": "https://drive.example.com/p/7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4",
+  "post_sync": "qmd update && qmd embed" }
 ```
+
+### `post_sync` — run something when teammates' changes land
+
+Optional. A shell command run **on this device** after a cycle applies changes
+from the hub, so a local search index, cache or notifier can stop polling. The
+applied batch arrives as JSON on stdin:
+
+```json
+{ "project": "m-5a10b713", "folder": "/Users/you/notes",
+  "changed": [ { "path": "wiki/onboarding.md", "op": "write" },
+               { "path": "notes/retired.md",   "op": "delete" } ] }
+```
+
+Once per cycle that applied at least one path (an initial sync of 400 files is
+one invocation), inbound only — a cycle that just commits and pushes your own
+edits fires nothing — and never blocking: the command is spawned detached, and
+a hook that hangs, exits non-zero or does not exist is logged and forgotten.
+`bdrive restore` also counts as inbound, since it writes an older version back
+into the folder.
+
+It lives in `.bdrive/config.json` and only there. That directory never syncs,
+so no hub and no teammate can put a command on your machine — but note that
+`.bdrive/` does travel with a folder you copy by hand, so a folder copied from
+a teammate brings their `post_sync` with it.
 
 Opting out is non-destructive: when a pattern starts matching an
 already-synced file, the file stops syncing but is deleted nowhere — which
@@ -616,6 +651,15 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
   devices' journals and any blobs it's missing. Since each device writes
   only its own journal, there are no concurrent writers per object and any
   dumb object store suffices.
+- Files **larger than 4 MiB move as content-defined chunks** (delta sync):
+  the remote holds `chunks/<sha256>` pieces plus a `manifests/<sha256>`
+  chunk list keyed by the whole file's hash, and a push uploads only the
+  chunks the store doesn't already hold — a small edit to a large file
+  transfers roughly one chunk (~1 MiB), not the file. Chunk boundaries are
+  chosen by a rolling hash, so insertions don't shift them. The local blob
+  store keeps files whole; chunking exists only on the wire and in the
+  remote. Older clients are unaffected: the hub reassembles whole blobs on
+  demand for anything that asks for `blobs/<sha256>`.
 - The folder's state is a deterministic **replay** of all journals ordered
   by `(lamport, time, device)` — every device converges to the same view.
   Concurrent edits keep the last writer at the path; the loser is preserved

@@ -264,7 +264,11 @@ creates a NEW project (it never joins an existing one by name — pass `--name`
 if the archive's name is taken), and the destination hub needs uploads
 enabled. A single file in the archive may spool at most 256 MiB to local disk
 during import; `--max-blob` raises that if the project really holds a bigger
-file. Shares,
+file. Import refuses an archive whose journals reference content the archive
+does not hold — the shape a pre-delta-sync `bdrive export` produces against a
+newer hub, where large files live as chunks the old binary doesn't know to
+collect; re-export with a current `bdrive`, or pass `--allow-incomplete` to
+import anyway (the missing files are listed and stay missing). Shares,
 invite links, and read-heat stay behind (they belong to the hub, not the
 project store). Step-by-step walkthrough:
 [Migrate between hubs](/reference/migration/).

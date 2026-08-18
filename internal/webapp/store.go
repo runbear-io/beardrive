@@ -1,8 +1,11 @@
 package webapp
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,11 +32,39 @@ import (
 var (
 	blobKeyRe    = regexp.MustCompile(`^blobs/[0-9a-f]{64}$`)
 	journalKeyRe = regexp.MustCompile(`^journal/` + deviceIDPattern + `\.jsonl$`)
+	// Delta sync (docs/delta-sync-prd.md): a chunk is one content-defined
+	// piece of a large file, keyed by its own sha256; a manifest is the chunk
+	// list for the whole file with that sha256 — so Op.Blob alone locates it
+	// and the journal format never changes. Both are immutable and never
+	// deleted, exactly like blobs.
+	chunkKeyRe    = regexp.MustCompile(`^chunks/[0-9a-f]{64}$`)
+	manifestKeyRe = regexp.MustCompile(`^manifests/[0-9a-f]{64}$`)
 )
 
 func validStoreKey(key string) bool {
-	return blobKeyRe.MatchString(key) || journalKeyRe.MatchString(key)
+	return blobKeyRe.MatchString(key) || journalKeyRe.MatchString(key) ||
+		chunkKeyRe.MatchString(key) || manifestKeyRe.MatchString(key)
 }
+
+// storeAcceptEncoding is what handleStoreSign tells a client this hub will
+// inflate on a relayed PUT. A hub older than this answers without the field,
+// and the client sends raw — which is the whole mixed-fleet story for the push
+// leg (the pull leg needs no negotiation at all, see remote/compress.go).
+var storeAcceptEncoding = []string{"gzip"}
+
+// maxInflatedPut bounds what one compressed PUT may write to the hub's disk.
+//
+// spool() is unbounded, which is safe exactly as long as a byte on the wire
+// costs a byte on disk. Content-Encoding breaks that: a 1 MB body can inflate
+// to an arbitrary write, and it lands BEFORE CheckWrite can refuse it, because
+// nothing knows the size until the inflate is done. The bound applies only when
+// the body declares an encoding, so no honest raw push that works today can
+// start failing.
+//
+// ponytail: 256 MiB, mirroring maxImportBlob on the archive path — a precedent,
+// not a measurement. A real workload that hits it wants a server-side knob, not
+// a bigger constant.
+const maxInflatedPut = 256 << 20
 
 // storeSource returns the volume's RemoteSource; only real beardrive
 // remotes have a store to expose.
@@ -173,8 +204,9 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 	}
 	s.refreshDevice(r)
 	prefix := r.URL.Query().Get("prefix")
-	if prefix != "" && prefix != "journal/" && prefix != "blobs/" &&
-		!strings.HasPrefix(prefix, "journal/") && !strings.HasPrefix(prefix, "blobs/") {
+	if prefix != "" &&
+		!strings.HasPrefix(prefix, "journal/") && !strings.HasPrefix(prefix, "blobs/") &&
+		!strings.HasPrefix(prefix, "chunks/") && !strings.HasPrefix(prefix, "manifests/") {
 		http.Error(w, fmt.Sprintf("invalid prefix %q", prefix), http.StatusBadRequest)
 		return
 	}
@@ -186,7 +218,25 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
 		return
 	}
-	writeJSON(w, map[string]any{"objects": objs})
+	writeStoreJSON(w, r, map[string]any{"objects": objs})
+}
+
+// writeStoreJSON is writeJSON that compresses when the caller accepts it. The
+// listing is the first call of every sync cycle on every device, it is JSON,
+// and it is highly repetitive — one key per blob — so it is compressed without
+// probing. Only this route uses it: writeJSON serves the whole browser API and
+// is out of this change's scope, and handleStoreExists answers one boolean,
+// which is smaller than a gzip header.
+func writeStoreJSON(w http.ResponseWriter, r *http.Request, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	if !remote.AcceptsGzip(r) {
+		json.NewEncoder(w).Encode(v)
+		return
+	}
+	w.Header().Set("Content-Encoding", "gzip")
+	gz := gzip.NewWriter(w)
+	defer gz.Close()
+	json.NewEncoder(gz).Encode(v)
 }
 
 func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -215,6 +265,17 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer rc.Close()
+	// Compression is decided before a single header is written, because
+	// Content-Encoding cannot be added after the first Write.
+	var src io.Reader = rc
+	gzipOK := false
+	if remote.AcceptsGzip(r) {
+		src, gzipOK, err = remote.Compressible(rc)
+		if err != nil {
+			storageErr(w, http.StatusBadGateway, "could not read the object", err)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	// The sync proxy is a stored-bytes door like the other two: a
 	// cookie-authenticated GET whose URL one member can hand another, answering
@@ -223,8 +284,20 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	// Recorded, never checked. This is a device syncing: refusing it here
 	// surfaces as ErrForbidden, which the syncer reads as "access is gone —
 	// pause and touch nothing". Sync must not break over a bill.
+	//
+	// The counter wraps the SOCKET and gzip writes into it, never the other way
+	// round: RecordEgress is a bandwidth meter, so it has to report what left
+	// the machine. Inverted, it silently bills plaintext for every compressed
+	// response and no test fails.
 	cw := &countingWriter{w: w}
-	io.Copy(cw, rc)
+	if gzipOK {
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(cw)
+		io.Copy(gz, src)
+		gz.Close()
+	} else {
+		io.Copy(cw, src)
+	}
 	s.quota().RecordEgress(s.orgOf(r.PathValue("project")), cw.n)
 }
 
@@ -289,16 +362,23 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	// Only blobs are presigned. They are content-addressed and immutable, so
-	// a leaked URL can at worst re-upload identical bytes. Journals are
-	// mutable state and always flow through the server.
-	if blob, isBlob := strings.CutPrefix(req.Key, "blobs/"); isBlob {
+	// Only blobs and chunks are presigned. They are content-addressed and
+	// immutable, so a leaked URL can at worst re-upload identical bytes.
+	// Journals are mutable state and always flow through the server — and so
+	// do manifests: their key is the whole FILE's sha, not their own content
+	// hash, so a presigned manifest write would be an unexamined claim about
+	// bytes the hub never saw.
+	blob, isBlob := strings.CutPrefix(req.Key, "blobs/")
+	if !isBlob {
+		blob, isBlob = strings.CutPrefix(req.Key, "chunks/")
+	}
+	if isBlob {
 		if !sizeFitsContentAddress(blob, req.Size) {
 			http.Error(w, "declared size does not match the content address", http.StatusForbidden)
 			return
 		}
 		if exists, err := rs.Backend.Exists(r.Context(), req.Key); err == nil && exists {
-			writeJSON(w, map[string]any{"mode": "direct", "exists": true})
+			writeJSON(w, map[string]any{"mode": "direct", "exists": true, "accept_encoding": storeAcceptEncoding})
 			return
 		}
 		if signer, ok := rs.Backend.(remote.PutSigner); ok {
@@ -317,13 +397,14 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 				writeJSON(w, map[string]any{
 					"mode": "direct", "url": signed.URL, "method": signed.Method,
 					"headers": signed.Headers, "expires": signed.Expires.UTC(),
+					"accept_encoding": storeAcceptEncoding,
 				})
 				return
 			}
 			s.claimGrant(project, req.Key) // nothing was granted: give it back
 		}
 	}
-	writeJSON(w, map[string]any{"mode": "server"})
+	writeJSON(w, map[string]any{"mode": "server", "accept_encoding": storeAcceptEncoding})
 }
 
 // journalOps reads the operations a spooled journal body carries, exactly the
@@ -466,26 +547,33 @@ func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops 
 // refused unparseable bodies since round 6. A backend that cannot answer fails
 // the push closed: the client degrades to Offline and retries next cycle, which
 // is the posture everywhere else on this path.
-func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops []journal.Op) (bool, error) {
+//
+// storedMax is the highest Seq the hub already holds, returned because this is
+// the only place that parses the stored journal and analytics needs it to tell
+// this cycle's new ops from the whole history the body repeats (countOps). It
+// is 0 for a first push and for a stored journal that would not parse — the
+// latter over-counts one push, which is the right price for not reading the
+// object twice.
+func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops []journal.Op) (ok bool, storedMax int64, err error) {
 	switch have, err := be.Exists(ctx, key); {
 	case err != nil:
-		return false, err
+		return false, 0, err
 	case !have:
-		return true, nil
+		return true, 0, nil
 	}
 	rc, err := be.Get(ctx, key)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	defer rc.Close()
 	data, err := io.ReadAll(rc)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	stored, err := journal.Parse(data)
 	if err != nil {
 		log.Printf("beardrive: %s is not parseable, its ops cannot be protected from a rewrite: %v", key, err)
-		return true, nil
+		return true, 0, nil
 	}
 	seen := make(map[int64]bool, len(ops))
 	for _, op := range ops {
@@ -493,10 +581,39 @@ func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops 
 	}
 	for _, op := range stored {
 		if !seen[op.Seq] {
-			return false, nil
+			return false, 0, nil
+		}
+		if op.Seq > storedMax {
+			storedMax = op.Seq
 		}
 	}
-	return true, nil
+	return true, storedMax, nil
+}
+
+// storePutBody hands back the plaintext of a PUT body, inflating it when the
+// client declared an encoding, and reports whether it did. The reader it
+// returns is capped one byte past maxInflatedPut so a bomb can never write more
+// than that to disk before the caller measures it and refuses.
+//
+// It answers the client itself on the two ways this can be the client's fault:
+// an encoding this hub does not implement, and a body that says gzip and is
+// not one (gzip.NewReader reads the header eagerly, so that is caught here
+// rather than halfway through a spool).
+func storePutBody(w http.ResponseWriter, r *http.Request) (io.Reader, bool, bool) {
+	enc := strings.TrimSpace(r.Header.Get("Content-Encoding"))
+	if enc == "" {
+		return r.Body, false, true
+	}
+	if !strings.EqualFold(enc, "gzip") {
+		http.Error(w, "unsupported Content-Encoding "+enc, http.StatusUnsupportedMediaType)
+		return nil, false, false
+	}
+	gz, err := gzip.NewReader(r.Body)
+	if err != nil {
+		http.Error(w, "body declares Content-Encoding: gzip but is not gzip", http.StatusBadRequest)
+		return nil, false, false
+	}
+	return io.LimitReader(gz, maxInflatedPut+1), true, true
 }
 
 func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -518,14 +635,40 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	// (Content-Length is -1 on any chunked request, which made every unsized
 	// put free), and how many ops a journal write actually authors.
 	// Cost: one temp file per put on the hub's busiest write path.
-	tmp, size, sum, err := spool(r.Body)
+	//
+	// Inflating sits ABOVE the spool, because every single thing this handler
+	// goes on to be sure of is a property of the plaintext: the sha a blob key
+	// promises, the ops journalOps counts, the size CheckWrite bills, and the
+	// append-only check. Nothing below this line knows compression happened.
+	body, inflated, ok := storePutBody(w, r)
+	if !ok {
+		return
+	}
+	tmp, size, sum, err := spool(body)
 	if err != nil {
+		if inflated {
+			// A gzip stream that truncates or fails its CRC is the client's
+			// body, not the hub's storage; 502 would blame the wrong machine.
+			http.Error(w, "could not decompress the body", http.StatusBadRequest)
+			return
+		}
 		storageErr(w, http.StatusBadGateway, "could not store the object", err)
 		return
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
+	if inflated && size > maxInflatedPut {
+		http.Error(w, "compressed body inflates past this hub's limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	// Blobs and chunks are content-addressed: the key IS the content's hash.
+	// Manifests are not — their key is the whole FILE's sha, which the hub
+	// cannot check without reading every chunk; readers verify by reassembly.
 	if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob && blob != sum {
+		http.Error(w, "content does not hash to its key", http.StatusBadRequest)
+		return
+	}
+	if chunk, isChunk := strings.CutPrefix(key, "chunks/"); isChunk && chunk != sum {
 		http.Error(w, "content does not hash to its key", http.StatusBadRequest)
 		return
 	}
@@ -565,14 +708,93 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	var storedMax int64
 	if strings.HasPrefix(key, "journal/") {
-		switch ok, err := journalKeepsItsOps(r.Context(), rs.Backend, key, ops); {
+		var ok bool
+		var err error
+		switch ok, storedMax, err = journalKeepsItsOps(r.Context(), rs.Backend, key, ops); {
 		case err != nil:
 			storageErr(w, http.StatusBadGateway, "could not read the stored journal", err)
 			return
 		case !ok:
 			http.Error(w, "a journal is append-only; this body drops ops the hub already holds",
 				http.StatusConflict)
+			return
+		}
+	}
+	// A manifest is the one member-writable object that is neither
+	// content-addressed nor hash-checkable at ingest, so it is WRITE-ONCE:
+	// overwriting one was the only way a member could re-point an existing
+	// file's chunk list after the fact. Re-putting identical bytes stays a
+	// no-op — the retry after an interrupted push (chunks and manifest up,
+	// journal not yet) must keep working.
+	if strings.HasPrefix(key, "manifests/") {
+		// Every chunk a manifest names must already be in the store. This is
+		// what makes "a manifest exists ⟹ its chunks exist" an INVARIANT
+		// rather than an honest-client convention: the manifest key is the
+		// one member-writable object that is not content-addressed, and a
+		// member who can read a file can publish its true chunk hashes
+		// without uploading a byte — poisoning the slot under a whole-pushed
+		// blob so a later honest push skips chunks that do not exist. The
+		// honest client writes chunks before the manifest, so this always
+		// passes for it; a refusal falls back to a whole-blob push on the
+		// client (pushChunked), so even a race costs one full upload, never
+		// a wedge.
+		var man struct {
+			Chunks []struct {
+				H string `json:"h"`
+			} `json:"chunks"`
+		}
+		if err := json.NewDecoder(io.LimitReader(tmp, 8<<20)).Decode(&man); err != nil {
+			http.Error(w, "unreadable manifest body", http.StatusBadRequest)
+			return
+		}
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			storageErr(w, http.StatusBadGateway, "could not store the object", err)
+			return
+		}
+		for _, c := range man.Chunks {
+			if !blobRe.MatchString(c.H) {
+				http.Error(w, "manifest names an invalid chunk", http.StatusBadRequest)
+				return
+			}
+			ok, err := rs.Backend.Exists(r.Context(), "chunks/"+c.H)
+			if err != nil {
+				storageErr(w, http.StatusBadGateway, "could not verify the manifest's chunks", err)
+				return
+			}
+			if !ok {
+				http.Error(w, "manifest names a chunk the store does not hold", http.StatusBadRequest)
+				return
+			}
+		}
+		// Exists first, then Get: `if Get succeeds, compare` fails OPEN on a
+		// transient storage error — exactly the flakiness that must not
+		// reopen the overwrite door this guard exists to close.
+		exists, eerr := rs.Backend.Exists(r.Context(), key)
+		if eerr != nil {
+			storageErr(w, http.StatusBadGateway, "could not check the stored manifest", eerr)
+			return
+		}
+		if exists {
+			rc, gerr := rs.Backend.Get(r.Context(), key)
+			if gerr != nil {
+				storageErr(w, http.StatusBadGateway, "could not read the stored manifest", gerr)
+				return
+			}
+			stored, rerr := io.ReadAll(io.LimitReader(rc, 8<<20))
+			rc.Close()
+			fresh, ferr := io.ReadAll(tmp)
+			if _, serr := tmp.Seek(0, io.SeekStart); rerr != nil || ferr != nil || serr != nil {
+				storageErr(w, http.StatusBadGateway, "could not compare the stored manifest", errors.Join(rerr, ferr, serr))
+				return
+			}
+			if !bytes.Equal(stored, fresh) {
+				http.Error(w, "a manifest is write-once; this key already holds a different one",
+					http.StatusConflict)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true})
 			return
 		}
 	}
@@ -586,6 +808,8 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	s.quota().RecordUsage(org, size)
 	if strings.HasPrefix(key, "journal/") {
 		v.invalidate() // new ops should show in the viewer immediately
+		puts, deletes := countOps(ops, storedMax)
+		s.captureChange(r, "sync", puts, deletes)
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
