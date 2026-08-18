@@ -602,6 +602,7 @@ export default function Browser(props: {
             version={version}
             heatMap={heatMap}
             flatFiles={flatFiles}
+            projectId={project?.id}
             onOpenFile={openPath}
             onMeta={setMeta}
             onRendered={onRendered}
