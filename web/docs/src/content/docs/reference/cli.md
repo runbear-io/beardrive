@@ -18,6 +18,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes. Run from the mount root; the daemon picks changes up in seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub |
 | `bdrive scope --explain` | List every path in the folder, split into what syncs and what does not, with counts — the verifiable answer to "what leaves this machine". Pure read: no daemon, no lock, no network |
 | `bdrive grep <pattern> [folder]` | Search the text **inside** the files a project syncs. `pattern` is a Go RE2 regexp, or a literal string with `-F`. `-i` ignores case, `-l` prints matching paths only, `-n` caps the lines printed (default 200, `0` = all). Pure read: no daemon, no lock, no network |
+| `bdrive stale [folder]` | Find synced markdown that links to a file written **after** the doc itself — staleness by what moved, not by the calendar. `-l` prints outgrown paths only, `-n` caps the docs printed (default 50, `0` = all). Pure read: no daemon, no lock, no network. Exit status is 0 whether or not anything is stale |
 | `bdrive forget <path>...` | Stop syncing a path and remove it from the hub. Adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file. `--list`, `--revoke`, `--expires` (the hub's Share dialog can also set an expiry on an existing link). Refuses a file whose first 1 MiB holds credential-shaped strings — `--force` shares it anyway |
@@ -154,6 +155,49 @@ This searches *this* folder. Searching contents across a whole hub, or from the
 browser, is not built yet — the ⌘K palette covers file names, projects and
 actions.
 :::
+
+### `bdrive stale` — find the docs your code has outgrown
+
+A doc does not go stale because a month passed. It goes stale when the thing it
+describes moves. `bdrive stale` reads that directly: it scans synced markdown
+for references to other synced files, and reports every doc that links to
+something written *after* the doc itself.
+
+```sh
+bdrive stale
+# docs/architecture.md    3 files newer   (oldest gap 41d)
+#   internal/syncer/syncer.go    41d newer
+#   internal/store/store.go      41d newer
+#   docs/hub-config.md           40d newer
+# archive/retired-spec.md 1 file newer    (oldest gap 6d)
+#   cmd/bdrive/init.go            6d newer
+#
+# 2 outgrown docs, 4 stale references
+
+bdrive stale -l       # outgrown paths only, one per line
+bdrive stale -n 5     # the five worst
+```
+
+Markdown inline links, Obsidian `[[wikilinks]]` and bare path-shaped tokens all
+count as references. **Resolution is the filter**: anything that does not land
+on a file this project actually syncs — a URL, a `../` escape out of the mount,
+a path that no longer exists — is silently ignored, so a `.bdriveignore` rule
+or a narrowed `bdrive scope` excludes a file here exactly as it excludes it from
+sync.
+
+:::note[The dates come from the journal, not the filesystem]
+Materialize writes a teammate's file with *this* device's mtime, so on a machine
+that just cloned a project every file's mtime is within seconds of every other.
+Comparing mtimes would report nothing on exactly the machine that most needs the
+answer. `bdrive stale` uses the same write times `bdrive log` prints, which are
+identical on every device and available offline.
+:::
+
+**Exit status is 0 whether or not anything is stale.** Unlike `bdrive grep`,
+this is advisory output, not a gate — grep's "1 means nothing found" convention
+would invert here and fail on a clean project. Read heat, a badge on the hub's
+file view, and injecting the flag into an agent's session context are not built
+yet; this ships the signal.
 
 ### `bdrive forget` and `bdrive sync --prune` — cleaning up the hub
 
