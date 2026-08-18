@@ -241,9 +241,28 @@ on the hub".
 If a teammate edits the file between your prune and their next sync, their
 version wins and the path comes back. Run `--prune` again once they have synced.
 
-### `bdrive status` — and the two degraded access states
+### `bdrive status` — the two change counts, and the two degraded access states
 
-Alongside `pending`, `status` prints a `secrets:` block naming any synced file
+`status` reports local work in two counts, because they are two different
+states and a change can be in either or both:
+
+```
+  pending:  0 local change(s) not yet pushed
+  local:    1 change(s) not yet scanned (0 new, 1 edited, 0 removed)
+```
+
+- **`pending`** — journalled by a sync cycle, not yet accepted by the hub.
+- **`local`** — sitting in the working folder, not yet scanned by any cycle.
+  This is what a stopped daemon leaves behind: edit a file with `bdrive stop`
+  in effect and nothing has looked at the folder, so `pending` is honestly
+  zero while the change is right there. The next sync picks it up.
+
+The `local` count is a read-only walk of the folder — the same filter the
+cycle uses, so a `.bdriveignore`d path never counts — and it commits no ops,
+writes no journal, and contacts no hub. `status` describes; it never changes
+what it is describing.
+
+Alongside those, `status` prints a `secrets:` block naming any synced file
 that looked like it held a credential when it last changed, and an `access:`
 line whenever the hub is refusing this device. Neither access state is the same
 as being offline, and neither ever touches your files:
