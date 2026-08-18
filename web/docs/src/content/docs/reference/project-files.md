@@ -30,6 +30,42 @@ It is **never synced** and holds **no credentials**; the session token stays in
 Because everything is keyed by the mount id, the folder can be renamed or moved
 freely. Copy it to another machine and `bdrive init` resumes the same project.
 
+### `post_sync`
+
+An optional shell command run **on this device** after a sync applies changes
+from the hub — the event a local search index, cache or notifier can hang off
+instead of polling.
+
+```jsonc
+// .bdrive/config.json
+{ "id": "m-5a10b713", "volume": "notes",
+  "remote": "https://drive.example.com/p/7f3a2c91-…",
+  "post_sync": "qmd update && qmd embed" }
+```
+
+The applied batch arrives as JSON on stdin, with the command's working
+directory set to the folder:
+
+```json
+{ "project": "m-5a10b713", "folder": "/Users/you/notes",
+  "changed": [ { "path": "wiki/onboarding.md", "op": "write" },
+               { "path": "notes/retired.md",   "op": "delete" } ] }
+```
+
+- **Once per cycle** that applied at least one path — an initial sync of 400
+  files is one invocation, not 400.
+- **Inbound only.** A cycle that only commits and pushes your own edits fires
+  nothing. (`bdrive restore` does count: it writes an older version back into
+  the folder.)
+- **Never blocks sync.** The command is spawned detached; one that hangs, exits
+  non-zero or does not exist is logged to `daemon.log` and forgotten.
+- **Off unless set.** No `post_sync` key, no new behavior.
+
+This is local configuration and nothing else can set it: `.bdrive/` never syncs,
+so no hub response and no teammate's change can put a command on your machine.
+The one path in is your own hands — `.bdrive/` travels with a folder, so a
+folder you copy from a teammate brings their `post_sync` along with it.
+
 ## `.bdriveignore`
 
 A gitignore-style opt-out list at the mount root. It syncs like a normal file,
@@ -91,3 +127,11 @@ Nothing is keyed by folder path, which is why moves and renames are free.
 ```
 
 Also here for a running project: `daemon.pid` and `daemon.log`.
+
+The hub's storage adds two key classes the local store never holds: files
+larger than 4 MiB travel as content-defined `chunks/<sha256>` pieces plus a
+`manifests/<sha256>` chunk list keyed by the whole file's hash (delta sync —
+a small edit to a large file uploads roughly one chunk, not the file). Local
+blobs stay whole; chunking exists only on the wire and in the hub's store,
+and the hub reassembles a whole blob on demand for any client that asks for
+`blobs/<sha256>`, so older clients keep working unchanged.

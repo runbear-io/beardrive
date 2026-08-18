@@ -31,6 +31,7 @@ import (
 	"maps"
 	"mime"
 	"net/http"
+	"os"
 	"path"
 	"slices"
 	"sort"
@@ -386,10 +387,121 @@ func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser,
 	if !blobRe.MatchString(sha) {
 		return nil, fmt.Errorf("invalid content reference")
 	}
-	if err := r.verify(ctx, sha); err != nil {
+	if err := r.verify(ctx, sha); err == nil {
+		if rc, err := r.Backend.Get(ctx, "blobs/"+sha); err == nil {
+			return rc, nil
+		}
+	}
+	// No whole blob (or one that fails verification): the content may exist
+	// only as chunks + a manifest (delta sync, docs/delta-sync-prd.md).
+	// Reassembly is hash-verified against the sha requested, so this arm is
+	// exactly as strong as verify — including when blobs/<sha> holds bytes
+	// that do NOT hash to sha, where the backfill below heals it.
+	return r.reassemble(ctx, sha)
+}
+
+// maxReassembleBytes caps what one reassembly may spool. It mirrors `bdrive
+// import`'s maxImportBlob (256 << 20): comfortably above the device-side
+// materialization ceiling (syncer's maxPullBytes, 100 MiB), so nothing a
+// device can hold is refused here, while a hostile manifest cannot spool
+// gigabytes through the temp dir per read. The spool lands in os.TempDir —
+// on a tmpfs deployment that is RAM, so this constant is also the per-request
+// memory bound; set TMPDIR to disk if that matters.
+const maxReassembleBytes = 256 << 20
+
+// reassemble serves a blob that exists only as chunks: fetch the manifest
+// keyed by the file's sha, concatenate its chunks into a spool while hashing,
+// refuse the lot unless the result hashes to the sha requested, then backfill
+// blobs/<sha> so the next read is a plain Get. The spool is unavoidable — the
+// promise "bytes hash to the key" cannot be made about a stream whose response
+// has already started — and self-limiting: upgraded clients fetch chunks and
+// verify locally, so only legacy readers ever pay it, once per blob.
+func (r *RemoteSource) reassemble(ctx context.Context, sha string) (io.ReadCloser, error) {
+	mrc, err := r.Backend.Get(ctx, "manifests/"+sha)
+	if err != nil {
+		return nil, err // no manifest either: the object genuinely is not there
+	}
+	var man struct {
+		Chunks []struct {
+			H string `json:"h"`
+			N int64  `json:"n"`
+		} `json:"chunks"`
+	}
+	derr := json.NewDecoder(io.LimitReader(mrc, 8<<20)).Decode(&man)
+	mrc.Close()
+	if derr != nil {
+		return nil, fmt.Errorf("unreadable manifest for %s: %w", sha, derr)
+	}
+	// A manifest is member-written and cannot be hash-checked at ingest, so
+	// its declared total is the one number a hostile member controls: listing
+	// one real 4 MiB chunk 100k times would spool ~400 GB through the temp
+	// dir (RAM, on a tmpfs deployment) per legacy read. The sum is enforced
+	// here and the per-chunk copy below verifies declared == actual, so the
+	// declared total IS the spool bound. An honest manifest past the cap is
+	// refused the same way — the hub will not assemble what a device would
+	// not accept either (the client's own ceiling is maxPullBytes).
+	var declared int64
+	for _, c := range man.Chunks {
+		if c.N < 0 || declared > maxReassembleBytes-c.N {
+			return nil, fmt.Errorf("manifest for %s declares more than %d bytes", sha, int64(maxReassembleBytes))
+		}
+		declared += c.N
+	}
+	tmp, err := os.CreateTemp("", ".bdrive-reassemble-*")
+	if err != nil {
 		return nil, err
 	}
-	return r.Backend.Get(ctx, "blobs/"+sha)
+	os.Remove(tmp.Name()) // serve from the fd; nothing to clean up on any path
+	h := sha256.New()
+	w := io.MultiWriter(tmp, h)
+	for _, c := range man.Chunks {
+		if !blobRe.MatchString(c.H) {
+			tmp.Close()
+			return nil, fmt.Errorf("manifest for %s names an invalid chunk", sha)
+		}
+		crc, err := r.Backend.Get(ctx, "chunks/"+c.H)
+		if err != nil {
+			tmp.Close()
+			return nil, err
+		}
+		// Bounded by the DECLARED size, which the cap above already summed —
+		// a stored object longer than its manifest entry (a replayed presign)
+		// must not turn the cap into fiction. Short or long, the mismatch
+		// fails here; equal-but-wrong bytes fail the whole-file hash below.
+		n, cerr := io.Copy(w, io.LimitReader(crc, c.N+1))
+		crc.Close()
+		if cerr != nil {
+			tmp.Close()
+			return nil, cerr
+		}
+		if n != c.N {
+			tmp.Close()
+			return nil, fmt.Errorf("chunk %s of %s is not its declared size", c.H[:12], sha)
+		}
+	}
+	if hex.EncodeToString(h.Sum(nil)) != sha {
+		tmp.Close()
+		return nil, fmt.Errorf("manifest for %s does not reassemble to its key", sha)
+	}
+	size, err := tmp.Seek(0, io.SeekEnd)
+	if err == nil {
+		_, err = tmp.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	// Backfill so the next read is a plain blobs/ Get. Best-effort: a failed
+	// write must never fail the read that triggered it. The object is fresh,
+	// so verify will re-hash it until it seals — same as any new upload.
+	if err := r.Backend.Put(ctx, "blobs/"+sha, tmp, size); err != nil {
+		log.Printf("beardrive: backfill of reassembled blob %s failed: %v", sha, err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	return tmp, nil
 }
 
 // verify re-hashes a stored blob, unless this process has already proved that
@@ -759,6 +871,9 @@ func (s *Server) Handler() http.Handler {
 	// writes to that same journal, so it lives here too.
 	mux.HandleFunc("POST /api/p/{project}/restore", proj(PermWrite, s.handleRestore))
 	mux.HandleFunc("POST /api/p/{project}/remove", proj(PermWrite, s.handleRemove))
+	// The run-wide form of the two above: one journal write that puts every
+	// path an agent run touched back where it was.
+	mux.HandleFunc("POST /api/p/{project}/undo-run", proj(PermWrite, s.handleUndoRun))
 	mux.HandleFunc("GET /api/p/{project}/heat", proj(PermRead, s.handleHeat))
 	mux.HandleFunc("POST /api/p/{project}/reads", proj(PermRead, s.handleReadReport))
 	mux.HandleFunc("POST /api/p/{project}/shares", proj(PermWrite, s.handleShareCreate))

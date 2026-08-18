@@ -56,6 +56,7 @@ classDiagram
         +PresignTTL time.Duration
         +Remove(ctx, path, who, note)
         +OpenBlob(ctx, sha)
+        -reassemble(ctx, sha) chunked fallback
         -verify(ctx, sha) re-hash until sealed
         -blobStat(ctx, blob) remote.Object
         -sealed sync.Map sha→proved immutable
@@ -64,6 +65,7 @@ classDiagram
         -loadSourcedOps(ctx) []sourcedOp
         -cacheJournals(keep, misses, parsed, sizes)
         -appendOp(ctx, op)
+        -appendOps(ctx, ops) ONE read-modify-write
     }
     class sourcedOp {
         +Op journal.Op
@@ -78,6 +80,7 @@ classDiagram
     note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp rewrites its key with strictly more bytes — so the (Size, Modified) List already reports proves a parse is still current. That is why the cache needs no expiry and no new Backend method: loadSourcedOps still Lists on every request, and fetches only the keys whose size or mtime moved (concurrently, limit 8). History used to re-download and re-parse EVERY journal per page, which is what made it 8-10s and made paging cost more rather than less. Bounded by a per-project raw-byte cap with all-or-nothing eviction"
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
+    note for RemoteSource "reassemble is delta sync's whole backward-compatibility story: when blobs/sha is absent (or fails verify), the manifest under manifests/sha names content-defined chunks that concatenate to the blob — spool, hash-verify against the sha requested, BACKFILL blobs/sha (best-effort; a failed write never fails the read), serve. Old clients ask for whole blobs and never learn anything changed; a hostile whole blob that fails verify is HEALED by the backfill when an honest manifest exists. Bounded by maxReassembleBytes (256 MiB) on the manifest's DECLARED sum, with each chunk's copy capped at its declared size — a member-written manifest is the one non-content-addressed object in the key space, so an amplified or oversized one is refused before it can spool"
     class MoveSource {
         <<interface>>
         +FilesWithMoves(ctx) files, moveIndex
@@ -114,16 +117,26 @@ classDiagram
     }
     note for DirectUploader "BlobSize replaced HasBlob: in direct mode the server never sees the bytes, so the CALLER's declared size was the only number it had to quota-check and journal — and the caller picks it. Size now comes from storage, and the commit journals and charges that"
     note for DirectUploader "Commit's note is &quot;&quot; for an upload and &quot;restore &lt;path&gt;@&lt;sha8&gt;&quot; for POST /api/p/{id}/restore — which is the upload commit minus the upload: find the historical op for (path, sha), journal a NEW put at its blob. Never rewrites a journal."
-    note for RemoteSource "Every write ends at appendOp: stamp Seq/Lamport/Time + this server's Identity, append ONE op to journal/&lt;own-device&gt;.jsonl. Commit does that for a put; Remove (POST /api/p/{id}/remove, restore's gates + a snapshot existence check) does it for a delete — the only server path that takes a file away, and itself undone by restoring the DELETED row."
+    note for RemoteSource "Every write ends at appendOps: stamp Seq/Lamport/Time + this server's Identity across the batch, append N ops to journal/&lt;own-device&gt;.jsonl in ONE read-modify-write (appendOp is the single-op call). Commit does that for a put; Remove (POST /api/p/{id}/remove, restore's gates + a snapshot existence check) does it for a delete — the only server path that takes a file away, and itself undone by restoring the DELETED row. The batch is not an optimization: ONE Put of ONE object either lands or it does not, which is the whole atomicity argument for undoRunDoor — a loop of appendOp there would leave half a run reverted with nothing to report it."
+
+    class undoRunDoor {
+        <<Server, POST /api/p/id/undo-run>>
+        planUndo(sourced, undoSel) undoPlan
+        undoSel Device From-journal, Session xor Note
+        undoPlan Ops, Actions, Skipped, After, Refused
+        preview plan only, no write, no quota
+    }
+    note for undoRunDoor "The run-wide form of restore+remove: for every path the run touched, the op that puts it back — a put at the pre-run blob, or a delete for a file the run created. Selection is by sourcedOp.From (the journal, which /store gates), NEVER op.Device, and the note form additionally requires Session == &quot;&quot; because runs.ts can never file a session-carrying op under a note-keyed card. Append-only: the run's own ops are never touched. Same PermWrite + CheckWrite(org,0) gates as its two siblings; the undo's ops carry a note naming the run, so the undo is itself a run card you can undo."
 
     class journalDoor {
         <<Server, /api/p/id/store/*>>
         ownJournal(key) whose journal is this
         journalOps(key, spooled) parse + validate
         opsNameTheirAuthor(ops) whose name
-        journalKeepsItsOps(ctx, be, key, ops)
+        journalKeepsItsOps(ctx, be, key, ops) ok + storedMax
     }
-    note for journalDoor "store.go — the invariant &quot;each device writes only its own journal&quot; is now ENFORCED here, not assumed. The key must be journal/&lt;canonical device id&gt;.jsonl for the device in the request header, that device must already be owned by the caller (DeviceRegistry.OwnerOf) or the caller must be a project admin (the recovery arm) — the old first-writer-claims arm is gone. Every op must pass journal.SafePath + config.ReservedPath on its Path and journal.SafeText on Note/Author/UserName, must name its own owner's account, and the upload must keep every Seq the stored journal already had: append-only, 409 on truncation. Bodies are spooled first, and a blob PUT must hash to the key it claims"
+    note for journalDoor "store.go — the invariant &quot;each device writes only its own journal&quot; is now ENFORCED here, not assumed. The key must be journal/&lt;canonical device id&gt;.jsonl for the device in the request header, that device must already be owned by the caller (DeviceRegistry.OwnerOf) or the caller must be a project admin (the recovery arm) — the old first-writer-claims arm is gone. Every op must pass journal.SafePath + config.ReservedPath on its Path and journal.SafeText on Note/Author/UserName, must name its own owner's account, and the upload must keep every Seq the stored journal already had: append-only, 409 on truncation. Bodies are spooled first, and a blob PUT must hash to the key it claims. A Content-Encoding: gzip body is inflated ABOVE the spool — the sha, the op count and the billed size are all properties of the plaintext, so nothing below that line knows compression happened — and the inflate is bounded (maxInflatedPut, 256 MiB, only when an encoding was declared), because compression severs the one-wire-byte-one-disk-byte relationship that made spool safe unbounded"
+    note for journalDoor "Delta sync grew the key space: validStoreKey also accepts chunks/&lt;sha256&gt; (content-addressed, PUT must hash to its key, presigned like blobs incl. refuse-existing) and manifests/&lt;sha256&gt; (keyed by the whole FILE's sha — not its own content hash — so it is never presigned and gets two ingest gates instead: every chunk it names must already EXIST in the store, and the key is WRITE-ONCE — an identical re-put is a 200 no-op so an interrupted push can retry, a different body 409s. Together these make &quot;a manifest exists ⟹ its chunks exist&quot; an invariant every consumer can lean on: the client's push skip-proof, reassemble, and bdrive import)"
 
     class Backend {
         <<interface>>
@@ -135,6 +148,14 @@ classDiagram
     }
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
     note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too. Object carries Modified (S3 LastModified, GCS Updated, file mtime; zero where the backend has none) — RemoteSource.verify reads it to decide when a blob can no longer be rewritten by a presigned URL"
+
+    class wireCodec {
+        <<internal/remote, compress.go>>
+        +Compressible(r) (rejoined, worth, err)
+        +AcceptsGzip(req) bool
+        putPlan.AcceptEncoding []string
+    }
+    note for wireCodec "Transport compression, and TRANSPORT ONLY: content addressing, the storage layout and the journal format are all over the UNCOMPRESSED bytes. One probe helper serves both legs — it gzips the first 64 KiB and keeps the compressed form only if the sample shrank, so already-compressed content (JPEG, zip, weights) passes through untouched; the reader it returns is the stream REJOINED, since a probe that eats bytes corrupts every transfer. The two legs are not symmetric. PULL needs no negotiation: net/http sends Accept-Encoding: gzip itself and inflates transparently, so devices built before this get it free — which is why httpBackend.do must never set that header. PUSH cannot be unilateral, because an old hub would store the gzip bytes under the sha256 of the plaintext, so the client compresses only when sign() advertised accept_encoding (absent on an old hub → raw). putDirect stays raw: a presigned upload has no hub in the path to inflate it"
 
     class AuthProvider {
         <<interface>>
@@ -357,7 +378,7 @@ classDiagram
         +Write(p) n
         +n int64
     }
-    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file"
+    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file. It wraps the SOCKET and gzip writes INTO it, never the reverse — RecordEgress is a bandwidth meter, so a compressed response must report its compressed size, and getting that backwards bills plaintext while nothing fails"
 
     class grant {
         +project +org +key
@@ -380,6 +401,14 @@ classDiagram
     }
     note for AnalyticsConfig "Third managed-deployment seam beside Quota and Billing, but a value rather than an interface — there is nothing to implement, only a project to name. Emitted as /api/config `analytics` when Key is set; empty means the frontend loads no tracker and contacts nobody, which is what a self-hosted hub gets. Endpoint() is exported because the cloud module renders its own loader from the same value."
 
+    class productAnalytics {
+        <<Server, analytics.go>>
+        capture(email, event, props) one POST, own goroutine
+        captureChange(r, source, puts, deletes) files_changed
+        countOps(ops, storedMax) new ops only
+    }
+    note for productAnalytics "The events the browser cannot see: a device syncing through /store/* never loads a page, so an agent editing files all day is invisible to the frontend's tracker. Every write door — sync, upload, remove, restore — funnels through captureChange so the file-change count is ONE event rather than a per-route set that silently misses whichever route someone forgets, and distinct_id is the same email analytics.ts identifies with so a person is not counted twice. No SDK: posthog-go would ship a tracker inside every self-hoster's binary, and capture is one JSON POST to Endpoint() + /i/v0/e/ that does nothing at all when Key is empty. Telemetry never fails a request — the POST is a goroutine and its error is a single log line. countOps needs journalDoor's storedMax because a device PUTs its WHOLE journal every cycle: counting the body would re-report the device's entire history every ten seconds. Blob PUTs are deliberately not change events, since content-addressed storage skips a blob it already holds."
+
     Server o-- "0..1" Source : single-volume mode
     Server o-- "0..1" Backend : Root (hub mode)
     Server o-- ProjectDB
@@ -396,6 +425,8 @@ classDiagram
     Server ..> secretScan : handleShareCreate scans the first 1 MiB unless confirmed or alreadyPublic
     secretScan ..> secretFinding
     Server ..> countingWriter : every bytes-out route that bills
+    Server ..> wireCodec : gzip on /store/ GET+list, inflate above spool on PUT
+    Backend ..> wireCodec : httpBackend gzips a relayed PUT when sign() allows
     reservations ..> Backend : reconcile — did the blob land
     Server *-- journalDoor : /store/* is the only way a device writes
     journalDoor ..> DeviceRegistry : OwnerOf gates the journal key
@@ -407,6 +438,9 @@ classDiagram
     OrgDB ..> BuiltinAuth : seniorityLister, for the heir
     BuiltinAuth ..> DeviceRegistry : Bind at token issuance
     Server *-- AnalyticsConfig
+    Server *-- productAnalytics : every write door emits files_changed
+    productAnalytics ..> AnalyticsConfig : Key gates it, Endpoint() addresses it
+    journalDoor ..> productAnalytics : storedMax tells this cycle's ops from the whole history
     Server *-- volume : per project, cached
     volume o-- Source
 
@@ -446,6 +480,8 @@ classDiagram
     DeviceRegistry ..> DeviceInfo
     DeviceRegistry *-- devKey : (account, id)
     RemoteSource ..> sourcedOp : attribution comes from the journal key
+    undoRunDoor ..> sourcedOp : selects a run by the journal it was read from
+    undoRunDoor ..> RemoteSource : appendOps — the whole run in one Put
     RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime
     ReadLedger ..> ReadStat
     ReadLedger ..> SessionRead

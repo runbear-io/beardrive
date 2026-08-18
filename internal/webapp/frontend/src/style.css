@@ -128,6 +128,19 @@ button, input, a.btn { font-family: inherit; }
   letter-spacing: .01em; line-height: 1;
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* Beta pill. Subtle on purpose: it sits beside the wordmark forever until it
+   doesn't, so it reads as a footnote to the brand, not a second logo. Honey
+   at low alpha rather than the solid accent — the accent is spent on the mark
+   two elements to the left. */
+#vault-beta {
+  flex: none;
+  font-size: 10px; font-weight: 600; line-height: 1;
+  letter-spacing: .06em; text-transform: uppercase;
+  color: var(--accent-bright);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 999px; padding: 3px 6px;
+}
 .vault-actions { display: flex; align-items: center; gap: 4px; }
 #vault #signout, .icon-btn2 {
   width: 28px; height: 28px; border-radius: 6px;
@@ -772,11 +785,32 @@ a.ai-main:hover { color: var(--accent); }
 .hrun-toggle { display: flex; flex: none; padding: 2px; border: none; border-radius: 4px; background: none; color: var(--text-faint); cursor: pointer; }
 .hrun-toggle:hover { color: var(--text); background: var(--hover); }
 .hrun-toggle .ico { width: 13px; height: 13px; }
-.hrun-note { font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
+/* The run's identity is the one thing in this header that must stay
+   readable: with the undo button added, a header that shrinks everything
+   proportionally truncated "claude-code session 8f21e4" down to
+   "claude-code session …" — the note and the meta are not equally
+   disposable. The note holds its size (still capped at 46%) and the meta,
+   which every row inside the card repeats anyway, absorbs the shrink. */
+.hrun-note { flex-shrink: 0; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
 .hrun-note a { color: var(--accent-bright); text-decoration: none; }
 .hrun-note a:hover { text-decoration: underline; }
-.hrun-meta { color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrun-meta { min-width: 0; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hrun-time { margin-left: auto; flex: none; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+/* The card's one action. Styled like the per-row verbs it generalizes, and
+   destructive on hover like remove: an undo takes content away. */
+.hrun-undo { display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 2px 8px 2px 5px; border: 1px solid var(--border); border-radius: 5px; background: none; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; }
+.hrun-undo:hover { color: var(--del); border-color: rgba(242, 109, 109, .38); background: var(--hover); }
+.hrun-undo:disabled { opacity: .5; cursor: default; }
+.hrun-undo .ico { width: 12px; height: 12px; }
+/* The confirm's file list: one row per path, action right-aligned, and the
+   paths scroll rather than growing the dialog past the viewport. */
+.undo-list { margin: 10px 0; max-height: 40vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.undo-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 9px; font-size: 12.5px; }
+.undo-row + .undo-row { border-top: 1px solid var(--border); }
+.undo-row .undo-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.undo-row .undo-what { margin-left: auto; flex: none; color: var(--text-faint); font-size: 11.5px; }
+.undo-row .undo-after { flex: none; color: var(--del); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+.undo-warn { color: var(--del); }
 /* Rows inside a card don't repeat the card's own border or note. */
 .hrun-body { border-top: 1px solid var(--border); }
 .hrun-body .hentry:last-child { border-bottom: none; }
@@ -957,8 +991,14 @@ a.ai-main:hover { color: var(--accent); }
      the two fields the row exists to carry. Let it wrap instead; `order: 1`
      drops the meta below the note while the time stays on the first row. */
   .hrun-head { flex-wrap: wrap; row-gap: 4px; }
-  .hrun-note { max-width: none; white-space: normal; overflow: visible; }
+  /* flex-shrink comes back here: the desktop rule pins the note's size so
+     the undo button can't truncate the run's identity, but a wrapping header
+     that also refuses to shrink pushes a long note past the card edge. */
+  .hrun-note { flex-shrink: 1; max-width: none; white-space: normal; overflow: visible; }
   .hrun-meta { order: 1; flex: 1 1 100%; white-space: normal; overflow: visible; }
+  /* The header's own action wraps onto the meta line rather than squeezing
+     the time out of the row. */
+  .hrun-undo { order: 2; margin-left: auto; min-height: 32px; }
   .ai-btn, .ai-del { height: auto; min-height: 44px; padding: 0 12px; }
   /* react-table renders rows as `display: table-row`, which makes every
      flex rule above inert and lets the last column (Remove) fall outside
@@ -1072,7 +1112,11 @@ a.ai-main:hover { color: var(--accent); }
    diagrams would otherwise be a wall of red. */
 .markdown .mermaid-diagram { margin: 1.3em 0; overflow-x: auto; }
 .markdown .mermaid-diagram svg { max-width: 100%; height: auto; }
-.markdown .mermaid-err { margin: -.9em 0 1.3em; font-size: 12px; color: var(--text-faint); }
+.markdown .mermaid-err { margin: -.9em 0 .4em; font-size: 12px; color: var(--text-faint); }
+/* The parser's own message under the note. `white-space: pre` is load-bearing:
+   the caret marker only lines up in a monospace, non-wrapping box. The height
+   cap keeps a pathological message from pushing the document off the page. */
+.markdown .mermaid-err-detail { margin: 0 0 1.3em; font: 11.5px/1.5 var(--mono); color: var(--text-faint); white-space: pre; overflow: auto; max-height: 12em; }
 /* Frontmatter key/value table (server-rendered from a doc's YAML header). */
 .markdown table.frontmatter { margin: 0 0 1.8em; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; border-collapse: separate; border-spacing: 0; }
 .markdown table.frontmatter th { text-transform: none; letter-spacing: 0; font-size: 11.5px; color: var(--text-faint); font-weight: 600; text-align: left; white-space: nowrap; vertical-align: top; padding: 6px 14px 6px 12px; border-bottom: 1px solid var(--border); }

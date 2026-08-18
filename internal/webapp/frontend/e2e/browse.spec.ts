@@ -1078,6 +1078,22 @@ test("mermaid: a good fence renders, a broken one keeps its code block", async (
   // bad fence must not take the good one on the same page down with it.
   await expect(page.locator("#content pre code.language-mermaid")).toHaveCount(1);
   await expect(page.locator("#content .mermaid-err")).toHaveText("Couldn't render this diagram.");
+  // ...with the parser's own message under it, so the author can fix the fence.
+  const detail = page.locator("#content .mermaid-err-detail");
+  await expect(detail).toHaveCount(1);
+  // Structure, not wording: mermaid is a ^ range and its expected-token list
+  // is the library's, so pinning the exact string would make a minor bump red.
+  await expect(detail).toContainText(/line \d+/i);
+  // The message quotes the author's source, and this string is mounted through
+  // dangerouslySetInnerHTML: the tag has to arrive as text and stay inert.
+  await expect(detail).toContainText("<img onerror=x>");
+  await expect(page.locator("#content img")).toHaveCount(0);
+  // A long expected-token list scrolls inside its own box; the page does not.
+  expect(await detail.evaluate((el) => getComputedStyle(el).overflowX)).not.toBe("visible");
+  expect(await detail.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1),
+  ).toBe(false);
 });
 
 test("a file with no mermaid fence fetches no mermaid chunk", async ({ page }) => {
@@ -1112,4 +1128,13 @@ test("a shared diagram renders on the public page, without one there is no scrip
   await expect(svg).toHaveCount(1);
   await expect(svg).toContainText("Teammate");
   await expect(page.locator(".mermaid-err")).toHaveText("Couldn't render this diagram.");
+  // The diagnostics ride along on the share page too — share-mermaid.ts needs
+  // no change of its own, which is exactly what asserting it here proves. The
+  // share shell has its own inline CSS, so this also catches a rule that only
+  // ever landed in the app's stylesheet.
+  const detail = page.locator(".mermaid-err-detail");
+  await expect(detail).toContainText(/line \d+/i);
+  await expect(detail).toContainText("<img onerror=x>");
+  await expect(page.locator("img")).toHaveCount(0);
+  expect(await detail.evaluate((el) => getComputedStyle(el).whiteSpace)).toBe("pre");
 });

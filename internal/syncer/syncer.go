@@ -8,6 +8,12 @@
 // state can overwrite the working folder. Concurrent edits resolve
 // deterministically last-writer-wins; the losing local version is preserved
 // as a "<name>.bdrive-conflict-<device>-<time>" file that syncs like any other.
+//
+// The exception is a device's FIRST cycle on a volume, which is a join rather
+// than an edit: a local file at a path the project already holds is adopted —
+// the project's version wins everywhere and no conflict copy is made — while
+// the local content is still journaled (below every clock the project can hold)
+// so history keeps it. See step 1b in Cycle.
 package syncer
 
 import (
@@ -86,6 +92,21 @@ type Session struct {
 	// be invoked concurrently from upload workers, so it must be safe to call
 	// from multiple goroutines.
 	OnProgress func(Progress)
+
+	// inbound accumulates this cycle's materialized peer paths, for
+	// Result.Inbound. Reset at the top of every cycle — a Session is reused
+	// across cycles by the daemon and by the tests.
+	inbound []store.InboundEvent
+}
+
+// logInbound records one materialized peer path both ways: on this cycle's
+// Result (for the post_sync hook, which fires from the cycle that did the
+// work) and on the store's spool (for `bdrive sync --hook`, which runs in a
+// later process). Both consumers want the same event; neither may consume the
+// other's copy.
+func (s *Session) logInbound(rel string, deleted bool) {
+	s.inbound = append(s.inbound, store.InboundEvent{Path: rel, Deleted: deleted, Time: time.Now().UTC()})
+	_ = s.Store.LogInbound(rel, deleted) // best-effort: never fails a cycle
 }
 
 func (s *Session) mountID() string {
@@ -107,12 +128,23 @@ func (s *Session) mountID() string {
 // cycle does nothing at all and leaves the working folder alone. Regaining
 // access self-heals on a later cycle with no manual step.
 type Result struct {
-	LocalOps     int  // local changes committed to the journal
-	PulledOps    int  // ops received from other devices
-	Conflicts    int  // conflict copies created
+	LocalOps  int // local changes committed to the journal
+	PulledOps int // ops received from other devices
+	Conflicts int // conflict copies created
+	// Adopted counts paths where this folder's own content gave way to the
+	// project's on join (step 1b). Not a conflict and not an error — the
+	// superseded content stays in history — but the user asked for none of it,
+	// so it is worth a line.
+	Adopted      int
 	Pruned       int  // paths removed from the hub by --prune (kept on disk)
 	Materialized int  // files written/removed in the working folder
 	Pushed       bool // own journal/blobs uploaded
+	// Inbound names the paths this cycle materialized on a peer's behalf —
+	// the same events the inbound spool queues, carried out of the cycle that
+	// made them so the post_sync hook can hand them to a local command. It
+	// does NOT replace the spool: see the comment in internal/store/inbound.go
+	// for why the two coexist.
+	Inbound []store.InboundEvent
 	// Offline reports that the remote leg of this cycle had a problem worth
 	// telling the user about — usually "unreachable", but also "the hub served
 	// bytes that are not their content address", which is the only signal that
@@ -160,7 +192,7 @@ func accessReason(err error) string {
 func (r *Result) Reason() string { return accessReason(r.AccessErr) }
 
 func (r *Result) Activity() bool {
-	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Pruned > 0 || r.Materialized > 0
+	return r.LocalOps > 0 || r.PulledOps > 0 || r.Conflicts > 0 || r.Adopted > 0 || r.Pruned > 0 || r.Materialized > 0
 }
 
 // The builtin exclusions (.bdrive — the mount's local identity, syncing it
@@ -204,14 +236,28 @@ func tickLamport(cur int64) int64 {
 	return cur + 1
 }
 
-// Cycle runs one full scan/sync/materialize pass under the volume lock.
+// Cycle runs one full scan/sync/materialize pass under the volume lock, then
+// fires the folder's post_sync hook — after the lock is released, so a hook
+// that itself runs a bdrive command starts working immediately instead of
+// blocking on the flock the cycle that spawned it is still holding (a long
+// push can hold it for a while). Splitting the body out is what makes that
+// ordering a property of the code: no call site has to remember it.
 func (s *Session) Cycle(ctx context.Context) (*Result, error) {
+	res, err := s.cycleLocked(ctx)
+	if err == nil && res != nil {
+		s.firePostSync(res)
+	}
+	return res, err
+}
+
+func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	unlock, err := s.Store.Lock()
 	if err != nil {
 		return nil, fmt.Errorf("lock volume: %w", err)
 	}
 	defer unlock()
 
+	s.inbound = nil
 	res := &Result{}
 	cache, err := s.Store.LoadCache(s.mountID())
 	if err != nil {
@@ -229,6 +275,9 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// This device has never contributed to this volume: it is JOINING a project,
+	// not editing one. Step 1b is what that changes.
+	joining := st.Lamport == 0 && st.PushedOps == 0
 	filter, err := loadFilter(s.Folder, proj.Include)
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
@@ -247,8 +296,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		// has already synced is an upgrade, not a new joiner: seed the pair from
 		// what this mount is demonstrably syncing already (vouchedFloor) instead
 		// of taking the file's word for it.
-		if st.IgnoreAccepted == "" && st.IgnorePulled == "" && text != "" &&
-			(st.Lamport > 0 || st.PushedOps > 0) {
+		if st.IgnoreAccepted == "" && st.IgnorePulled == "" && text != "" && !joining {
 			synced := make([]string, 0, len(cache))
 			for rel := range cache {
 				synced = append(synced, rel)
@@ -265,12 +313,26 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
-	if len(localOps) > 0 {
+	commitLocal := func() error {
+		if len(localOps) == 0 {
+			return nil
+		}
 		if err := s.Store.AppendOps(s.Device.ID, localOps); err != nil {
-			return nil, fmt.Errorf("append journal: %w", err)
+			return fmt.Errorf("append journal: %w", err)
 		}
 		myOps = append(myOps, localOps...)
 		res.LocalOps = len(localOps)
+		localOps = nil
+		return nil
+	}
+	if !joining {
+		// The normal path: journal local edits before the pull, so nothing
+		// remote can overwrite an edit that was never captured (see the package
+		// doc). A joining device holds its ops back for the length of the pull
+		// only — long enough to learn which paths the project already has.
+		if err := commitLocal(); err != nil {
+			return nil, err
+		}
 	}
 
 	// 2. Pull journals + blobs from other devices.
@@ -283,7 +345,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 	blocked := false
 	var pulled, gone []journal.Op
 	if s.Backend != nil {
-		pulled, gone, err = s.pull(ctx)
+		pulled, gone, err = s.pull(ctx, cache)
 		switch {
 		case err == nil:
 			if st.Access == store.AccessNone {
@@ -298,6 +360,12 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 			// deleted, and the next cycle re-checks.
 			res.NoAccess, res.AccessErr = true, err
 			st.Access, st.AccessReason = store.AccessNone, accessReason(err)
+			// The scan already claimed these files in the state cache, which
+			// finish is about to persist — journal them or the next scan sees
+			// nothing changed and this folder's content is never captured.
+			if cerr := commitLocal(); cerr != nil {
+				return nil, cerr
+			}
 			return res, s.finish(cache, st)
 		case errors.Is(err, errBlobContent):
 			// Reported — it is the only signal a device ever gets that its hub
@@ -317,6 +385,43 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		for _, op := range pulled {
 			st.Lamport = absorbLamport(st.Lamport, op.Lamport)
 		}
+	}
+
+	// 1b. Adoption. A device joining a project it has never synced is not
+	// editing that project's files: it is bringing a folder that happens to
+	// hold some of the same paths — a git checkout of the same docs, an
+	// agent-written AGENTS.md, the .bdriveignore `bdrive init` seeds. Treating
+	// those as concurrent edits forked every one of them: whichever side's
+	// clock sorted higher won, and the other landed beside it as a
+	// `.bdrive-conflict-<device>-<time>` file. So connecting a folder littered
+	// it with copies of files nobody had edited, and half the time the joiner's
+	// stale copy is what won — replacing the team's version for everyone.
+	//
+	// The project's version wins instead, deterministically: the local op is
+	// demoted under every op the project can hold (scan's clock starts at 1, so
+	// lamport 0 loses to all of them on every device). It is still journaled and
+	// pushed, so nothing is lost — the folder's content at join time is in
+	// History and `bdrive restore` brings it back — it just never materializes.
+	if joining && len(localOps) > 0 && len(pulled) > 0 {
+		theirs := map[string]journal.Op{}
+		for _, op := range pulled {
+			if prev, ok := theirs[op.Path]; !ok || journal.Less(prev, op) {
+				theirs[op.Path] = op
+			}
+		}
+		for i, op := range localOps {
+			// Only a path the project actually HOLDS is adopted. Where its
+			// last op is a delete there is no version to adopt, so the local
+			// file is this device's own and keeps its clock.
+			if t, ok := theirs[op.Path]; ok && t.Kind == journal.KindPut {
+				localOps[i].Lamport = 0
+				localOps[i].Note = adoptNote
+				res.Adopted++
+			}
+		}
+	}
+	if err := commitLocal(); err != nil {
+		return nil, err
 	}
 
 	// 3. Preserve losing local edits as conflict copies.
@@ -453,6 +558,7 @@ func (s *Session) Cycle(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("materialize: %w", err)
 	}
 	res.Materialized += n
+	res.Inbound = s.inbound
 
 	// 5. Push our blobs and journal.
 	if s.Backend != nil && !blocked && int64(len(myOps)) > st.PushedOps {
@@ -656,9 +762,9 @@ func sizeBound(size int64) int64 {
 // stated property only while the party serving the bytes was a PEER, whose
 // numbers a separate hub had at least stored; when the peer IS the hub there is
 // no second party at all, and one listing entry or one journal line sized the
-// device's allocation and its disk. A journal is JSONL text (32 MiB is ~500k
-// ops) and a blob this size is already far past what a synced project of notes
-// and documents holds.
+// device's allocation and its disk. A journal is JSONL text (100 MiB is well
+// over a million ops) and a blob this size is already far past what a synced
+// project of notes and documents holds.
 //
 // It is a read CEILING, never an up-front refusal on the declared size: op.Size
 // is a peer's integer with no relation to the object it names, so refusing on it
@@ -669,8 +775,10 @@ func sizeBound(size int64) int64 {
 // ponytail: an absolute constant, mirroring `bdrive import`'s maxImportBlob
 // (256 << 20, raisable with --max-blob). A file larger than this does not
 // materialize on receiving devices — if that becomes a real workload, this
-// wants the same kind of knob, not a bigger constant.
-const maxPullBytes = 32 << 20
+// wants the same kind of knob, not a bigger constant. Raised from 32 MiB with
+// delta sync: large files were the reason chunking shipped, and a ceiling
+// below the files it was built for made it dead weight.
+const maxPullBytes = 100 << 20
 
 func pullBound(size int64) int64 { return min(sizeBound(size), maxPullBytes) }
 
@@ -682,6 +790,13 @@ const maxPeerJournals = 512
 // It is the only thing that distinguishes such an op from a local edit once it
 // is in this device's journal, and conflictCopies depends on that distinction.
 const reassertNote = "re-asserted: the device that published it withdrew it"
+
+// adoptNote marks a local op demoted by the adoption step (1b): content this
+// folder already held at a path the project it just joined also holds. Like
+// reassertNote it is what tells conflictCopies the op is not a local edit — an
+// adopted op is a loser by construction, so preserving it as a conflict copy is
+// exactly the litter adoption exists to remove.
+const adoptNote = "kept as history: the project's version of this path was adopted on join"
 
 // errBlobContent marks "a blob's bytes are not its content address" — a
 // statement about ONE object, never about whether the hub is reachable.
@@ -772,7 +887,10 @@ func withdrawn(have, applied []journal.Op) []journal.Op {
 // pull fetches journals that grew on the remote and any blobs we are missing
 // for the new ops. It returns the ops we had not seen before, and any op a
 // peer withdrew from a journal we had already applied (see withdrawn).
-func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) {
+// cache is the mount's materialization state, read only for the delta basis:
+// cache[path].Blob is the version of a file this device currently holds, and
+// its chunks source a chunked pull locally (fetchChunked).
+func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) ([]journal.Op, []journal.Op, error) {
 	objs, err := s.Backend.List(ctx, "journal/")
 	if err != nil {
 		return nil, nil, err
@@ -933,6 +1051,43 @@ func (s *Session) pull(ctx context.Context) ([]journal.Op, []journal.Op, error) 
 		if op.Kind != journal.KindPut || op.Blob == "" || s.Store.HasBlob(op.Blob) {
 			continue
 		}
+		// Large files: try the manifest first, sourcing unchanged chunks from
+		// the version of this path we already hold. EVERY failure falls
+		// through to the whole-blob path, not just errNoManifest: the whole
+		// blob is independently hash-verified, so there is nothing to lose by
+		// trying it — and not falling through let one member-written manifest
+		// (the only object in the key space that is neither content-addressed
+		// nor hash-checked at ingest) permanently deny a file whose correct
+		// whole blob was sitting right there. A hash contradiction is still
+		// remembered as the one signal worth surfacing (errBlobContent).
+		if op.Size > chunkThreshold {
+			var basis string
+			if c, ok := cache[op.Path]; ok {
+				basis = c.Blob
+			}
+			cerr := s.fetchChunked(ctx, op, basis)
+			if cerr == nil {
+				continue
+			}
+			// Fall through to the whole blob only when one actually EXISTS
+			// (Exists never triggers hub reassembly). When it does, the
+			// fallthrough is unconditional — the whole blob is independently
+			// hash-verified, so a poisoned manifest cannot deny it. When it
+			// does not — the normal chunked-only case — a transient chunk
+			// failure retries chunks next cycle instead of asking the hub to
+			// reassemble and re-download the entire file every tick.
+			//
+			// A chunked-path hash contradiction is recorded ONLY when no
+			// fallback can land the file: when the whole blob arrives fine,
+			// "blob corrupt on remote" would page an operator about a file
+			// that just converged.
+			if ok, eerr := s.Backend.Exists(ctx, "blobs/"+op.Blob); eerr != nil || !ok {
+				if errors.Is(cerr, errBlobContent) && bad == nil {
+					bad = cerr
+				}
+				continue
+			}
+		}
 		rc, err := s.Backend.Get(ctx, "blobs/"+op.Blob)
 		if err != nil {
 			continue
@@ -997,7 +1152,12 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 	}
 	unpushed := map[string]journal.Op{}
 	for _, op := range myOps[pushed:] {
-		if op.Note == reassertNote {
+		// adoptNote: the same reasoning one step removed — an adopted op was
+		// demoted precisely because the project's version wins, so it is a
+		// losing unpushed local op by construction and would conflict-copy
+		// every path a joining folder shares with the project. That is the
+		// litter step 1b exists to remove.
+		if op.Note == reassertNote || op.Note == adoptNote {
 			// A re-asserted op is not an edit this device made — it restates a
 			// peer's op that the peer withdrew, carrying that op's original
 			// (and therefore usually losing) clock. Round 9 kept it out of the
@@ -1176,7 +1336,7 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 			// a spool failure must never fail a cycle. Only the branch that
 			// actually unlinked a file logs — the paths below it were already
 			// gone locally, so nothing changed under the agent.
-			_ = s.Store.LogInbound(rel, true)
+			s.logInbound(rel, true)
 		}
 		delete(cache, rel)
 		changed++
@@ -1227,7 +1387,7 @@ func (s *Session) materializeFile(rel string, want journal.FileState, cache map[
 	// Known trade: the first cycle on a fresh mount materializes the whole
 	// project, so that one turn's list is "everything" — bounded by the
 	// hook's render cap, and cheaper than special-casing an empty cache.
-	_ = s.Store.LogInbound(rel, false)
+	s.logInbound(rel, false)
 	return true, nil
 }
 
@@ -1403,6 +1563,18 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 	g.SetLimit(pushConcurrency)
 	for _, j := range jobs {
 		g.Go(func() error {
+			// Large files move as chunks + a manifest (chunks.go); the whole
+			// blob is never uploaded for them. Everything else is unchanged.
+			if j.size > chunkThreshold {
+				n, err := s.pushChunked(gctx, j.blob)
+				if err != nil {
+					return err
+				}
+				atomic.AddInt64(&done, 1)
+				atomic.AddInt64(&bytesDone, n)
+				report()
+				return nil
+			}
 			f, err := s.Store.OpenBlob(j.blob)
 			if err != nil {
 				return err

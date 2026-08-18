@@ -122,7 +122,22 @@ export default function HubApp({ config }: { config: ServerConfig }) {
 
   // Top of the sidebar is the brand; project and account actions live in
   // their own sections below (PropelAuth-style layout).
-  const vault = <VaultHeader name={brand} onHome={() => navigate("/")} search={!!current} />;
+  // The Beta pill labels the BEARDRIVE wordmark, so it keys on what the
+  // lockup actually says rather than on whether `brand` was configured. A hub
+  // that set its own brand is labelling somebody else's product, and "Acme
+  // Docs Beta" is a claim we have no business making for them — but the
+  // managed hub and every default self-host DO reach here with "BearDrive",
+  // and a `!config.brand` test would have missed the ones that set it
+  // explicitly (CLOUD_BRAND defaults to "BearDrive", so BuiltinAuth hubs send
+  // the string rather than an empty field).
+  const vault = (
+    <VaultHeader
+      name={brand}
+      onHome={() => navigate("/")}
+      search={!!current}
+      beta={brand === "BearDrive"}
+    />
+  );
 
   const accountBar = config.me ? (
     <AccountBar
@@ -393,7 +408,7 @@ function JoinInvite({ token, onDone }: { token: string; onDone: (orgId: string |
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
   return (
-    <AppShell vault={<VaultHeader name="BearDrive" />} topbar={<Topbar />}>
+    <AppShell vault={<VaultHeader name="BearDrive" beta />} topbar={<Topbar />}>
       <Page>
         <div className="empty">Joining…</div>
       </Page>

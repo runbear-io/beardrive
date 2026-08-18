@@ -633,7 +633,9 @@ footer.bdrive a{color:inherit}
 .updated{font-size:12.5px;color:#57606a;margin-bottom:28px}
 .mermaid-diagram{margin:20px 0;overflow-x:auto}
 .mermaid-diagram svg{max-width:100%%;height:auto}
-.mermaid-err{font-size:12.5px;color:#57606a;margin:-8px 0 20px}
+.mermaid-err{font-size:12.5px;color:#57606a;margin:-8px 0 4px}
+.mermaid-err-detail{font:11.5px/1.5 ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;color:#57606a;
+margin:0 0 20px;white-space:pre;overflow:auto;max-height:12em}
 /* Dark theme LAST: these rules sit at the same specificity as the light ones
    above, so source order is the whole fix — a dark block placed earlier loses
    to every light rule that follows it. Values are the hub's @theme tokens
@@ -655,7 +657,7 @@ table.frontmatter th,table.frontmatter td{border-bottom-color:rgba(255,255,255,.
 table.frontmatter th{color:#868b93}
 footer.bdrive{border-top-color:rgba(255,255,255,.07);color:#868b93}
 .updated{color:#868b93}
-.mermaid-err{color:#868b93}}
+.mermaid-err,.mermaid-err-detail{color:#868b93}}
 </style>%s</head><body>%s%s
 <footer class="bdrive">Shared with <a href="https://github.com/runbear-io/beardrive" rel="noopener">BearDrive</a> — synced files for AI agent teams</footer>
 </body></html>`

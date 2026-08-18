@@ -66,6 +66,26 @@ Two things worth knowing:
   the note is free text anyone can set with `bdrive sync --note`, so joining on
   it would let one person's changes attach to another person's card.
 
+### Undoing a whole run
+
+The card's header carries **Undo this run**: one click puts back every file
+that run touched. A file it edited returns to the content it had just before
+the run; a file it created is removed. The confirm lists every path with what
+will happen to it before anything is written, so you can read the whole thing
+and cancel.
+
+Two things it says out loud, because they are the ones that can surprise you:
+
+- **A file someone changed after the run is reverted too**, and the confirm
+  counts them. That is the same last-writer-wins rule the rest of BearDrive
+  follows, but it is worth seeing before you click.
+- **A file already holding its pre-run content is skipped**, not written —
+  reported as skipped rather than as a failure.
+
+Nothing is erased. The undo is new changes appended to history like any other,
+written in a single batch, so it is itself a run card you can undo. Undoing
+needs write access on the project; a read-only member sees no button.
+
 Per-session detail is kept for 30 days by default
 (`reads.session_retention_days`, see [Hub config](/reference/hub-config/));
 after that the run card shows changes only. Read *counts* are unaffected — they

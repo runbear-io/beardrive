@@ -80,5 +80,6 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 	}
 	s.quota().RecordUsage(org, 0)
 	v.invalidate()
+	s.captureChange(r, "browser", 0, 1)
 	writeJSON(w, map[string]any{"ok": true, "path": p})
 }

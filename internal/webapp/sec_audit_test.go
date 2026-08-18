@@ -317,8 +317,17 @@ func TestSec_Audit_OpBlobIsRefusedBeforeItReachesStorage(t *testing.T) {
 	if _, err := rs.OpenBlob(context.Background(), good); err == nil {
 		t.Fatal("control: the spy backend must fail the fetch")
 	}
-	if asked := be.asked(); len(asked) != 1 || asked[0] != "blobs/"+good {
-		t.Fatalf("control: a valid sha was not fetched as blobs/<sha>: %v", asked)
+	// A valid sha may ask for blobs/<sha> and — since delta sync — fall back
+	// to manifests/<sha> when the blob is absent. Every key asked must be one
+	// of those two exact spellings; anything else is the guard leaking.
+	asked := be.asked()
+	if len(asked) == 0 || asked[0] != "blobs/"+good {
+		t.Fatalf("control: a valid sha was not fetched as blobs/<sha> first: %v", asked)
+	}
+	for _, k := range asked {
+		if k != "blobs/"+good && k != "manifests/"+good {
+			t.Fatalf("control: a valid sha asked storage for %q", k)
+		}
 	}
 
 	for _, bad := range []string{

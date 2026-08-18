@@ -9,6 +9,17 @@ import { groupRuns, runFileCount, type Run } from "../lib/runs";
 import { HistoryFilters, authorsOf } from "./HistoryFilters";
 import { historyFilterQuery, hasHistoryFilters, type HistoryFilters as Filters } from "../router";
 
+// Undoing a WHOLE run — the run-wide form of restore/remove, and the only
+// action the card header carries. Absent when the viewer can't write, like
+// its two per-row siblings, so a read-only member never sees a button that
+// 403s. The card hands over the run itself, not a file list: which paths are
+// reverted is worked out server-side, because this window is paged and
+// filtered and a client-computed list is wrong exactly when the run is old.
+export type UndoRunAction = {
+  onUndoRun: (run: Run) => void;
+  busy?: string; // the session (or note) currently in flight
+};
+
 /* ---- history ----
    Every change ever made, straight from the journals: who (account), when,
    from which device (name, OS, IP as the server saw it). The route stores
@@ -30,12 +41,13 @@ export function HistoryView(props: {
   onRendered?: () => void;
   restore?: RestoreAction;
   remove?: RemoveAction;
+  undoRun?: UndoRunAction;
   // Reader filters, straight from the URL. Applied server-side, so they
   // narrow the whole feed and not just the loaded page.
   filters?: Filters;
   onFilters?: (f: Filters) => void;
 }) {
-  const { apiBase, target, isFolder, onMeta, onRendered, restore, remove, filters } = props;
+  const { apiBase, target, isFolder, onMeta, onRendered, restore, remove, undoRun, filters } = props;
   const q = !target
     ? { prefix: "" }
     : isFolder(target)
@@ -150,6 +162,7 @@ export function HistoryView(props: {
             recreates={recreates}
             restore={restore}
             remove={remove}
+            undoRun={undoRun}
           />
         ) : (
           <HistoryRow
@@ -197,6 +210,7 @@ function RunGroup({
   recreates,
   restore,
   remove,
+  undoRun,
 }: {
   run: Run;
   onOpen: (path: string, version?: string) => void;
@@ -206,6 +220,7 @@ function RunGroup({
   recreates: (i: number) => boolean;
   restore?: RestoreAction;
   remove?: RemoveAction;
+  undoRun?: UndoRunAction;
 }) {
   const [open, setOpen] = useState(true);
   const first = run.entries[0];
@@ -236,6 +251,7 @@ function RunGroup({
   // Distinct paths, not ops: repeat edits to one file must not inflate the
   // one number that sizes a run (BEA-39). Every op is still a row below.
   const n = runFileCount(run);
+  const undoing = !!undoRun?.busy && undoRun.busy === (run.session || run.note);
   return (
     <div className={"hrun" + (open ? " open" : "")}>
       <div className="hrun-head">
@@ -259,6 +275,22 @@ function RunGroup({
           {dev ? " · " + dev : ""}
         </span>
         <span className="hrun-time">{span}</span>
+        {/* The one action the header carries. Every row inside the card
+            already has its own; this is the verb the card was grouped for —
+            reverting a run file by file and hoping you got them all is what
+            it replaces. onUndoRun confirms before anything is written. */}
+        {undoRun && (
+          <button
+            type="button"
+            className="hrun-undo"
+            disabled={undoing}
+            title="Put every file this run touched back the way it was"
+            onClick={() => undoRun.onUndoRun(run)}
+          >
+            <Icon name="hist" />
+            {undoing ? "undoing…" : "undo this run"}
+          </button>
+        )}
       </div>
       {open && (
         <div className="hrun-body">

@@ -293,11 +293,16 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 	put("scratch.md", "# Scratch\n\nTemporary.\n", 12*time.Hour)
 	// One good fence and one deliberately broken one on the same page: the
 	// point of the fallback is that a diagram nobody can parse doesn't take
-	// the diagrams around it down with it. Appended LAST on purpose — the
+	// the diagrams around it down with it. The markup inside the broken fence
+	// is there so the parser quotes it into its own message — the diagnostic
+	// is inserted as text, and this is what proves it. The tag is short on
+	// purpose: the parser's window is 20 characters of preceding source, and a
+	// tag truncated by it would leave no start tag for an innerHTML bug to
+	// mount, so the test would pass either way. Appended LAST on purpose — the
 	// mutations above address ops by index, so an insert anywhere earlier
 	// hands one file's author or note to another file.
 	put("diagram.md", "# Diagram\n\n```mermaid\ngraph TD\n  A[Agent] --> B[Hub]\n  B --> C[Teammate]\n```\n\n"+
-		"Broken one below.\n\n```mermaid\ngraph TD\n  A[[[[ --> ???\n```\n", 24*time.Hour)
+		"Broken one below.\n\n```mermaid\ngraph TD\n  A[<img onerror=x>[[[[ --> ???\n```\n", 24*time.Hour)
 	lam++
 	seq++
 	ops = append(ops, journal.Op{
