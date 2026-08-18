@@ -282,15 +282,18 @@ classDiagram
     note for ShareDB "A share is now re-checked at READ time, not only at mint time: shareCreatorStillBelongs refuses /s/&lt;token&gt; once its creator has left the project's org, so a link cannot outlive the access that justified it"
 
     class secretScan {
-        <<secrets.go>>
-        secretScanLimit = 1 MiB
+        <<internal/secrets>>
+        +ScanLimit = 1 MiB
         secretRules six anchored regexes
-        +scanSecrets(buf) []secretFinding
+        +Scan(buf) []Finding
+        +Label(rule) human words
     }
     class secretFinding {
+        <<secrets.Finding>>
         +Rule string
         +Line int
     }
+    note for secretScan "No longer a webapp file: internal/secrets is stdlib-only so internal/syncer can run the SAME rules on the path every file takes (the sync scan, warn-only — see cli-sync.md). The rule ids are a wire contract, keyed off by Browser.tsx's SECRET_LABELS and now by Label, whose test asserts it covers every rule"
     note for secretScan "Mint-time gate on handleShareCreate: the one place a member turns private bytes into a public URL is the one place the bytes are read first. It returns rule ids and LINE NUMBERS only — the matched text never reaches a response body, a log line, or a metric label, the same rule ReadLedger keeps for actor identity. Bypassed by confirm:true (bdrive share --force, the UI's Share anyway) and by Server.alreadyPublic, since a path that already has a live link is public already. Fails CLOSED: an unreadable blob is 503, not a silent pass"
 
     class sandboxInline {

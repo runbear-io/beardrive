@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/runbear-io/beardrive/internal/secrets"
 )
 
 // Share links make one file publicly readable at /s/<unguessable-token> —
@@ -289,13 +291,13 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 		// 1 MiB and close: source.Open streams from the object store, so this
 		// aborts the rest of the transfer rather than pulling a 500 MB file
 		// down to look at its first megabyte. Don't "fix" it into a ReadAll.
-		buf, err := io.ReadAll(io.LimitReader(rc, secretScanLimit))
+		buf, err := io.ReadAll(io.LimitReader(rc, secrets.ScanLimit))
 		rc.Close()
 		if err != nil {
 			storageErr(w, http.StatusServiceUnavailable, "could not read the file to check it for credentials", err)
 			return
 		}
-		if findings := scanSecrets(buf); len(findings) > 0 {
+		if findings := secrets.Scan(buf); len(findings) > 0 {
 			writeJSONStatus(w, http.StatusConflict, map[string]any{
 				"error":    "this file looks like it contains credentials",
 				"findings": findings,

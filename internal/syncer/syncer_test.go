@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -1001,5 +1003,127 @@ func TestInboundSpoolOutlivesItsCycle(t *testing.T) {
 	}
 	if len(evs) != 1 || evs[0].Path != "notes/readme.md" {
 		t.Fatalf("inbound = %+v, want notes/readme.md from the earlier cycle", evs)
+	}
+}
+
+// A fabricated, structurally-valid-looking AWS key. Not a real credential.
+const testAWSKey = "AKIAIOSFODNN7EXAMPLE"
+
+// TestSecretWarnsButStillSyncs is the whole posture of the credential check in
+// one test: the file with the key in it converges exactly as any other file
+// does — journaled, pushed, materialized on the peer — and the ONLY difference
+// is a record on the writing device naming the path, the rule and the line.
+// A regression that makes this hold the op fails here, not in production.
+func TestSecretWarnsButStillSyncs(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+
+	write(t, a.Folder, "deploy.md", "# Deploy\n\nrun it\n\nexport AWS_ACCESS_KEY_ID="+testAWSKey+"\n")
+	res := cycle(t, a)
+	if res.LocalOps != 1 {
+		t.Fatalf("LocalOps = %d, want the op journaled anyway (warn, never hold)", res.LocalOps)
+	}
+	if !res.Pushed {
+		t.Fatalf("Pushed = false, want the blob pushed anyway")
+	}
+	cycle(t, b)
+	if got := read(t, b.Folder, "deploy.md"); !strings.Contains(got, testAWSKey) {
+		t.Fatalf("peer content = %q, want the file to have synced normally", got)
+	}
+
+	found, err := a.Store.LoadSecrets(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []secrets.Finding{{Rule: "aws_access_key_id", Line: 5}}
+	if !reflect.DeepEqual(found["deploy.md"], want) {
+		t.Fatalf("findings = %+v, want %+v for deploy.md", found, want)
+	}
+
+	// The record names the rule and the line and never the matched bytes —
+	// the same contract the share-time 409 has always had.
+	raw, err := os.ReadFile(filepath.Join(a.Store.Dir(), "secrets-"+a.mountID()+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), testAWSKey) {
+		t.Fatalf("the persisted record echoes the key: %s", raw)
+	}
+
+	// The peer that only RECEIVED the file records nothing: v1 warns the
+	// device that wrote the credential, and materialize is not a scan.
+	if found, _ := b.Store.LoadSecrets(b.mountID()); len(found) != 0 {
+		t.Fatalf("peer findings = %+v, want none (the writing device only)", found)
+	}
+}
+
+// TestSecretClearsWhenFixed is the reason the record is merged per path rather
+// than rewritten whole. Nearly every cycle scans zero changed files, so a
+// whole-set rewrite erases the warning seconds after it appears — here the
+// quiet cycle must leave it standing, and only editing the key out clears it.
+func TestSecretClearsWhenFixed(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+
+	// A quiet cycle: nothing changed, so nothing was scanned.
+	cycle(t, a)
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found["deploy.md"]) == 0 {
+		t.Fatalf("the warning vanished on a quiet cycle: %+v", found)
+	}
+
+	// Fixing the file is the whole remedy: no command, no flag.
+	write(t, a.Folder, "deploy.md", "key = read it from the environment\n")
+	cycle(t, a)
+	found, err := a.Store.LoadSecrets(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("findings = %+v, want empty once the key is gone", found)
+	}
+
+	// And a deleted file takes its warning with it.
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+	if err := os.Remove(filepath.Join(a.Folder, "deploy.md")); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 0 {
+		t.Fatalf("findings = %+v, want empty once the file is gone", found)
+	}
+}
+
+// The check must ride the branch that already reads the file, never add a pass
+// of its own: an unchanged file is not re-read, so the daemon's 3-second tick
+// costs nothing on a quiet folder. Clearing the record by hand and cycling is
+// the direct test — a scan that re-read unchanged files would put it back.
+func TestSecretScanSkipsUnchangedFiles(t *testing.T) {
+	a := newDevice(t, "deva", sharedRemote(t))
+
+	write(t, a.Folder, "deploy.md", "key = "+testAWSKey+"\n")
+	cycle(t, a)
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 1 {
+		t.Fatalf("findings = %+v, want deploy.md flagged", found)
+	}
+	if err := a.Store.SaveSecrets(a.mountID(), map[string][]secrets.Finding{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cycle(t, a) // nothing changed on disk
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 0 {
+		t.Fatalf("findings = %+v — an unchanged file was read again", found)
+	}
+	// Touching it back into the changed branch does report it again.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(a.Folder, "deploy.md"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	if found, _ := a.Store.LoadSecrets(a.mountID()); len(found) != 1 {
+		t.Fatalf("findings = %+v, want the touched file flagged again", found)
 	}
 }

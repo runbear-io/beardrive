@@ -132,10 +132,22 @@ classDiagram
         +LogRead(rel, session) read spool
         +PendingReads dedup on path+session
         +LogInbound / DrainInbound
+        +LoadSecrets / SaveSecrets mountID
         +Lock() flock
     }
+    note for Store "secrets-mount-id.json is the credential-finding record: what `bdrive status` prints and what the agent hook appends a sentence about. Like the inbound spool it outlives the cycle that wrote it — the daemon scans the write seconds before the turn starts — but unlike it, it is STATE and is never drained: a finding stands until the file changes without it"
     note for Store "internal/store — ~/.bdrive/volumes/mount-id: content-addressed blobs, per-device journal copies, state cache, paused marker (free funcs Paused/SetPaused, no flock)"
     note for Store "inbound.jsonl is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle. Result.Inbound now carries the SAME events for the post_sync hook and is not a duplicate to delete: that consumer fires from the cycle itself, and a second drainer would silently empty the agent hook's context"
+
+    class secretLog {
+        <<syncer/secrets.go>>
+        found map path to Findings
+        dirty bool
+        +scanBlob(store, rel, sum)
+        +set / drop per path
+    }
+    note for secretLog "internal/secrets' six rules, run on the path EVERY file takes. Only on the branches that just called PutBlobFile — the cheap size+mtime path never re-reads a file — and it reads the BLOB, i.e. the exact bytes that were hashed and journaled, so a line number can never describe content no op captured"
+    note for secretLog "WARN ONLY: the op is journaled and pushed exactly as before. Holding it would strand the file behind a false positive and break the cycle's degrade-to-offline posture. Merged PER PATH into secrets-mount-id.json and written in finish only when dirty — nearly every cycle scans zero files, so a whole-set rewrite would erase the warning seconds after it appeared. A save error is logged, never returned: advisory telemetry gets no veto over convergence"
 
     class Op {
         +Seq +Lamport +Time +Device
@@ -181,6 +193,8 @@ classDiagram
     Explain --> Filter : own fresh instance
     Explain ..> Entry : not-synced lines
     walkFolder --> Filter : SkipUp / PruneDir / addNestedMount
+    Session --> secretLog : scan flags, finish persists
+    secretLog --> Store : reads the blob, writes secrets-mount-id.json
     Session ..> Op : commits, replays
     Session --> Result
     Store o-- Op : journal files
