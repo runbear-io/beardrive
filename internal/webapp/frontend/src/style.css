@@ -1177,6 +1177,18 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .vbanner .vb-actions { flex: none; display: flex; gap: 8px; }
 .vbanner .vb-actions .ai-btn { display: inline-flex; align-items: center; text-decoration: none; }
 
+/* Credential badge on the file view (BEA-147) — the share gate's finding on
+   the path every file takes. Same strip geometry as .vbanner above; the red
+   family rather than the accent, because accent+glow already means "you are
+   looking at an old version" and the two strips can appear together. The hue
+   is .meta-stale's (#e07070, style.css:385), which is the warning colour this
+   same view already speaks. */
+.sbadge { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; padding: 11px 14px; border: 1px solid rgba(242,109,109,.32); border-radius: var(--r-card); background: rgba(242,109,109,.08); }
+.sbadge .sb-icon { flex: none; display: flex; color: #e07070; }
+.sbadge .sb-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; line-height: 1.45; }
+.sbadge .sb-text b { color: #e07070; font-weight: 600; }
+.sbadge .sb-text span { color: var(--text-dim); }
+
 /* plain file / binary views */
 pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* long unbreakable lines wrap instead of blowing out the column: .page has min-width: 0 */

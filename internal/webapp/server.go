@@ -43,6 +43,7 @@ import (
 
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/templates"
 )
 
@@ -1413,7 +1414,31 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 	if fi.UserName != "" {
 		doc["user_name"] = fi.UserName
 	}
+	if f := renderFindings(src); len(f) > 0 {
+		doc["findings"] = f
+	}
 	writeJSON(w, doc)
+}
+
+// renderFindings is the share gate's credential scan on the path every file
+// takes. The gate could name the rule and the line well enough to refuse to
+// publish a file while the viewer rendered the same key as ordinary prose
+// (BEA-147), so the render response carries the finding too — advisory only,
+// nothing is blocked and nothing is redacted, since a member who can open the
+// file could already read the key.
+//
+// Rule ids and line numbers only. The matched text must never reach a
+// response body; see the doc comment on secrets.Scan.
+//
+// The cap is a slice rather than the LimitReader the two streaming callers
+// use: the render path already holds the whole file, because that is what
+// RenderMarkdown needs. Same ScanLimit either way, so the badge and the share
+// dialog can never disagree about the same file.
+func renderFindings(src []byte) []secrets.Finding {
+	if len(src) > secrets.ScanLimit {
+		src = src[:secrets.ScanLimit]
+	}
+	return secrets.Scan(src)
 }
 
 // renderVersion renders one exact past version by content hash — the
@@ -1446,9 +1471,16 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, fmt.Sprintf("render: %v", err), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{
+	doc := map[string]any{
 		"path": r.URL.Query().Get("path"), "html": html, "size": len(src),
-	})
+	}
+	// The history view goes through this same endpoint, so scanning here too
+	// is what stops the badge vanishing the moment you click into history on
+	// the very file it was warning about.
+	if f := renderFindings(src); len(f) > 0 {
+		doc["findings"] = f
+	}
+	writeJSON(w, doc)
 }
 
 // inlineMarkup reports whether a Content-Type names something the browser
