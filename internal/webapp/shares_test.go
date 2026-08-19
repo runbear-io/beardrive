@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/runbear-io/beardrive/internal/secrets"
 )
 
 func httptestNewRequestBody(method, url string, data []byte) *http.Request {
@@ -729,11 +731,11 @@ func postShare(t *testing.T, srv *Server, h http.Handler, project string, body a
 	return doHTTP(h, req)
 }
 
-func decodeFindings(t *testing.T, rec *httptest.ResponseRecorder) []secretFinding {
+func decodeFindings(t *testing.T, rec *httptest.ResponseRecorder) []secrets.Finding {
 	t.Helper()
 	var out struct {
-		Error    string          `json:"error"`
-		Findings []secretFinding `json:"findings"`
+		Error    string            `json:"error"`
+		Findings []secrets.Finding `json:"findings"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode 409 body %q: %v", rec.Body, err)
@@ -755,7 +757,7 @@ func TestShareSecretScan(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("share of a file holding a key: %d %s, want 409", rec.Code, rec.Body)
 	}
-	if got := decodeFindings(t, rec); !reflect.DeepEqual(got, []secretFinding{{"aws_access_key_id", 5}}) {
+	if got := decodeFindings(t, rec); !reflect.DeepEqual(got, []secrets.Finding{{Rule: "aws_access_key_id", Line: 5}}) {
 		t.Fatalf("findings = %v, want aws_access_key_id on line 5", got)
 	}
 	if n := len(srv.Shares.List(p.ID)); n != 0 {
@@ -795,7 +797,7 @@ func TestShareSecretScan(t *testing.T) {
 }
 
 // TestShareSecretNeverEchoed is the one rule that cannot bend: the matched
-// bytes never leave scanSecrets — not in the body, not in the log.
+// bytes never leave secrets.Scan — not in the body, not in the log.
 func TestShareSecretNeverEchoed(t *testing.T) {
 	srv, p, _, f, h := shareHub(t)
 	f.put("dev1", "creds.md", "key = "+planted+"\n")

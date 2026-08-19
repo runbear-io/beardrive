@@ -9,7 +9,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
 import { getJSON, postJSON } from "../api/http";
-import type { Project, ServerConfig } from "../api/types";
+import type { Project, ServerConfig, UndoPlan } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { useShares } from "../hooks/useHub";
 import { urlForPath, urlForView, type Route } from "../router";
@@ -30,6 +30,7 @@ import { Palette, type PaletteItem } from "../components/Palette";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
+import type { Run } from "../lib/runs";
 import { VersionBanner } from "../components/VersionBanner";
 
 // The hub's six share-time credential rules, in words. Only one caller
@@ -201,7 +202,7 @@ export default function Browser(props: {
   );
 
   /* ---- topbar state + actions ---- */
-  const [meta, setMeta] = useState("");
+  const [meta, setMeta] = useState<ReactNode>("");
   const [share, setShare] = useState<{ url: string; copied: boolean } | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -340,6 +341,98 @@ export default function Browser(props: {
     [apiBase, qc],
   );
 
+  /* ---- undo a whole agent run ----
+     The run-wide form of the two above, and the reason the feed groups runs
+     at all: reverting a bad run used to mean clicking file by file and hoping
+     you got them all.
+
+     Two calls, both to the same endpoint. The first (`preview: true`) writes
+     nothing and asks the SERVER which paths the run touched and what would
+     happen to each — the loaded window is paged and filterable, so a list
+     computed from what is on screen is wrong exactly when the run is old or
+     filtered. The second does it, recomputing the plan server-side rather
+     than trusting the one the dialog showed; an op that lands between the two
+     makes the confirm one op stale, never the write wrong.
+
+     The warning block is the one thing here that can burn someone: a path a
+     teammate changed AFTER the run is reverted too. That is the model
+     (last-writer-wins, and per-row restore already behaves this way), so the
+     dialog says it out loud instead of the undo being a surprise. */
+  const [undoingRun, setUndoingRun] = useState("");
+  const onUndoRun = useCallback(
+    async (run: Run) => {
+      const id = run.session || run.note;
+      const sel = run.session
+        ? { session: run.session, device: run.entries[0]?.device?.id }
+        : { note: run.note, device: run.entries[0]?.device?.id };
+      setUndoingRun(id);
+      try {
+        const plan = await postJSON<UndoPlan>(apiBase + "undo-run", { ...sel, preview: true });
+        const after = new Set(plan.changed_after);
+        if (!plan.undone.length) {
+          toast("Nothing to undo — every file this run touched already holds its pre-run content.");
+          return;
+        }
+        const ok = await modalConfirm(
+          "Undo this run?",
+          <>
+            <div>
+              {run.note || id} — {plan.undone.length} file
+              {plan.undone.length === 1 ? "" : "s"}
+            </div>
+            <div className="undo-list">
+              {plan.undone.map((a) => (
+                <div className="undo-row" key={a.path}>
+                  <span className="undo-path">{a.path}</span>
+                  {after.has(a.path) && <span className="undo-after">changed after this run</span>}
+                  <span className="undo-what">
+                    {a.action === "remove" ? "remove (the run created it)" : "restore to pre-run version"}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {after.size > 0 && (
+              <div className="undo-warn">
+                {after.size} file{after.size === 1 ? " was" : "s were"} changed by someone else after
+                this run. Undoing overwrites {after.size === 1 ? "that change" : "those changes"} too.
+              </div>
+            )}
+            {plan.skipped.length > 0 && (
+              <div>
+                {plan.skipped.length} already hold{plan.skipped.length === 1 ? "s" : ""} its pre-run
+                content and will be left alone.
+              </div>
+            )}
+            {/* Never silently drop a category: a path the hub's own upload
+                door refuses is left out of the undo, and a dialog that
+                listed only what it WILL do would read as "all of it". */}
+            {plan.refused.length > 0 && (
+              <div>
+                {plan.refused.length} path{plan.refused.length === 1 ? "" : "s"} can't be written by
+                the hub and will be left alone: {plan.refused.join(", ")}.
+              </div>
+            )}
+          </>,
+          "Undo run",
+          true,
+        );
+        if (!ok) return;
+        const done = await postJSON<UndoPlan>(apiBase + "undo-run", sel);
+        qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        qc.invalidateQueries({ queryKey: ["render", apiBase] });
+        qc.invalidateQueries({ queryKey: ["text"] });
+        const skipped = done.skipped.length ? `, skipped ${done.skipped.length} (already current)` : "";
+        toast(`Undid ${done.undone.length} file${done.undone.length === 1 ? "" : "s"}${skipped}.`);
+      } catch (err) {
+        toast("Undo failed: " + (err as Error).message, true);
+      } finally {
+        setUndoingRun("");
+      }
+    },
+    [apiBase, qc],
+  );
+
   const historyNow = useCallback(() => {
     if (!path) return openHistory("");
     openHistory(isDir ? path + "/" : path);
@@ -446,6 +539,7 @@ export default function Browser(props: {
         onRendered={onRendered}
         restore={canRestore ? { onRestore, busy: restoring } : undefined}
         remove={canRestore ? { onRemove, busy: removing } : undefined}
+        undoRun={canRestore ? { onUndoRun, busy: undoingRun } : undefined}
         filters={route.filters}
         /* push, not replace: a filter is a navigation, and Back undoes it */
         onFilters={(f) => navigate(urlForView("history", project?.id, route.viewTarget || "", f))}
@@ -508,6 +602,7 @@ export default function Browser(props: {
             version={version}
             heatMap={heatMap}
             flatFiles={flatFiles}
+            projectId={project?.id}
             onOpenFile={openPath}
             onMeta={setMeta}
             onRendered={onRendered}

@@ -65,6 +65,7 @@ classDiagram
         -loadSourcedOps(ctx) []sourcedOp
         -cacheJournals(keep, misses, parsed, sizes)
         -appendOp(ctx, op)
+        -appendOps(ctx, ops) ONE read-modify-write
     }
     class sourcedOp {
         +Op journal.Op
@@ -116,7 +117,16 @@ classDiagram
     }
     note for DirectUploader "BlobSize replaced HasBlob: in direct mode the server never sees the bytes, so the CALLER's declared size was the only number it had to quota-check and journal — and the caller picks it. Size now comes from storage, and the commit journals and charges that"
     note for DirectUploader "Commit's note is &quot;&quot; for an upload and &quot;restore &lt;path&gt;@&lt;sha8&gt;&quot; for POST /api/p/{id}/restore — which is the upload commit minus the upload: find the historical op for (path, sha), journal a NEW put at its blob. Never rewrites a journal."
-    note for RemoteSource "Every write ends at appendOp: stamp Seq/Lamport/Time + this server's Identity, append ONE op to journal/&lt;own-device&gt;.jsonl. Commit does that for a put; Remove (POST /api/p/{id}/remove, restore's gates + a snapshot existence check) does it for a delete — the only server path that takes a file away, and itself undone by restoring the DELETED row."
+    note for RemoteSource "Every write ends at appendOps: stamp Seq/Lamport/Time + this server's Identity across the batch, append N ops to journal/&lt;own-device&gt;.jsonl in ONE read-modify-write (appendOp is the single-op call). Commit does that for a put; Remove (POST /api/p/{id}/remove, restore's gates + a snapshot existence check) does it for a delete — the only server path that takes a file away, and itself undone by restoring the DELETED row. The batch is not an optimization: ONE Put of ONE object either lands or it does not, which is the whole atomicity argument for undoRunDoor — a loop of appendOp there would leave half a run reverted with nothing to report it."
+
+    class undoRunDoor {
+        <<Server, POST /api/p/id/undo-run>>
+        planUndo(sourced, undoSel) undoPlan
+        undoSel Device From-journal, Session xor Note
+        undoPlan Ops, Actions, Skipped, After, Refused
+        preview plan only, no write, no quota
+    }
+    note for undoRunDoor "The run-wide form of restore+remove: for every path the run touched, the op that puts it back — a put at the pre-run blob, or a delete for a file the run created. Selection is by sourcedOp.From (the journal, which /store gates), NEVER op.Device, and the note form additionally requires Session == &quot;&quot; because runs.ts can never file a session-carrying op under a note-keyed card. Append-only: the run's own ops are never touched. Same PermWrite + CheckWrite(org,0) gates as its two siblings; the undo's ops carry a note naming the run, so the undo is itself a run card you can undo."
 
     class journalDoor {
         <<Server, /api/p/id/store/*>>
@@ -272,15 +282,18 @@ classDiagram
     note for ShareDB "A share is now re-checked at READ time, not only at mint time: shareCreatorStillBelongs refuses /s/&lt;token&gt; once its creator has left the project's org, so a link cannot outlive the access that justified it"
 
     class secretScan {
-        <<secrets.go>>
-        secretScanLimit = 1 MiB
+        <<internal/secrets>>
+        +ScanLimit = 1 MiB
         secretRules six anchored regexes
-        +scanSecrets(buf) []secretFinding
+        +Scan(buf) []Finding
+        +Label(rule) human words
     }
     class secretFinding {
+        <<secrets.Finding>>
         +Rule string
         +Line int
     }
+    note for secretScan "No longer a webapp file: internal/secrets is stdlib-only so internal/syncer can run the SAME rules on the path every file takes (the sync scan, warn-only — see cli-sync.md). The rule ids are a wire contract, keyed off by Browser.tsx's SECRET_LABELS and now by Label, whose test asserts it covers every rule"
     note for secretScan "Mint-time gate on handleShareCreate: the one place a member turns private bytes into a public URL is the one place the bytes are read first. It returns rule ids and LINE NUMBERS only — the matched text never reaches a response body, a log line, or a metric label, the same rule ReadLedger keeps for actor identity. Bypassed by confirm:true (bdrive share --force, the UI's Share anyway) and by Server.alreadyPublic, since a path that already has a live link is public already. Fails CLOSED: an unreadable blob is 503, not a silent pass"
 
     class sandboxInline {
@@ -470,6 +483,8 @@ classDiagram
     DeviceRegistry ..> DeviceInfo
     DeviceRegistry *-- devKey : (account, id)
     RemoteSource ..> sourcedOp : attribution comes from the journal key
+    undoRunDoor ..> sourcedOp : selects a run by the journal it was read from
+    undoRunDoor ..> RemoteSource : appendOps — the whole run in one Put
     RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime
     ReadLedger ..> ReadStat
     ReadLedger ..> SessionRead
