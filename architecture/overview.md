@@ -47,7 +47,7 @@ flowchart LR
     srv --> store
     srv --> meta
     eng -->|"scan: warn, never hold"| sec
-    srv -->|"share mint: refuse"| sec
+    srv -->|"share mint: refuse · markdown render: badge"| sec
     cli -->|"init --template: seed locally"| tpl
     srv -->|"POST /api/projects template:<br/>seed as ops under the hub's device"| tpl
     fe -->|/api/config, /api/projects, viewer APIs| srv
