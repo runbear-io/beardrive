@@ -439,6 +439,31 @@ func TestShareLastUpdatedStamp(t *testing.T) {
 	}
 }
 
+// The share page keeps the frontmatter TABLE at the top of the document.
+// The viewer moved its frontmatter into a side panel (BEA-154) by calling
+// RenderMarkdownPairs; shares.go stayed on RenderMarkdown deliberately, and
+// nothing else would fail if someone later "tidied" it onto the pairs path —
+// which would silently change every public link ever minted.
+func TestShareKeepsFrontmatterTable(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	f.put("dev1", "wiki/props.md", "---\ntitle: Q3\nowner: snow\n---\n\n# Q3\n")
+	token, _ := authedShare(t, srv, h, p.ID, "wiki/props.md")
+	body := do(t, h, "GET", "/s/"+token, nil).Body.String()
+	for _, want := range []string{
+		`<table class="frontmatter"><tbody>`,
+		`<th scope="row">title</th><td>Q3</td>`,
+		`<th scope="row">owner</th><td>snow</td>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("share page lost %q:\n%s", want, body)
+		}
+	}
+	// ...and above the document, where it has always been.
+	if strings.Index(body, `class="frontmatter"`) > strings.Index(body, "<h1") {
+		t.Error("frontmatter table no longer precedes the body")
+	}
+}
+
 // TestShareDarkThemeIsLast: the share page is the surface strangers see first,
 // so in dark mode it must not show white slabs. Every dark rule sits at the
 // same specificity as the light one it overrides, which makes SOURCE ORDER the

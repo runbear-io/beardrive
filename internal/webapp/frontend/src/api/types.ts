@@ -146,10 +146,22 @@ export interface Node {
   children?: Node[];
 }
 
+// One key/value row of a document's YAML frontmatter, in author order.
+// `value` is plain text, never markup — the panel renders it as a text node,
+// so escaping is React's job and not a rule anyone has to remember. `code`
+// marks the nested values that read as compact YAML.
+export interface FrontmatterPair {
+  key: string;
+  value: string;
+  code?: boolean;
+}
+
 // GET .../render (handleRender, server.go)
 export interface RenderDoc {
   path: string;
   html: string;
+  // Absent when the document has none: no field, no panel.
+  frontmatter?: FrontmatterPair[];
   size: number;
   time?: string;
   user?: string;

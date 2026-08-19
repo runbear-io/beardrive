@@ -1203,3 +1203,95 @@ test("read counts disclose that your own views count", async ({ page }) => {
     "Includes your own views. Repeat opens by the same reader inside 10 minutes count once.",
   );
 });
+
+/* BEA-154: a doc's YAML frontmatter used to be a table pinned to the top of
+   the reading column, pushing the document below the fold. It is a panel
+   beside the prose now — a rail on a wide window, a closed disclosure on a
+   phone — and the reading column starts with the document. */
+test("frontmatter is a side panel, not a slab on top of the document", async ({ page }) => {
+  // Wide enough for the rail: the breakpoint is arithmetic (style.css), and
+  // the default 1280 viewport is deliberately below it.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const pid = await wikiId(page);
+  // Seeded at runtime so no other spec's file counts move.
+  const put = async (path: string, body: string) => {
+    const r = await page.request.put(
+      `/api/p/${pid}/upload/content?path=${encodeURIComponent(path)}`,
+      { data: body },
+    );
+    expect(r.ok(), `seeding ${path}: ${r.status()}`).toBeTruthy();
+  };
+  await put(
+    "meta/props.md",
+    "---\ntitle: Q3 findings\nstatus: draft\ntags: [churn, revenue]\nmeta:\n  reviewed: true\n---\n\n# Q3 findings\n\nBody text.\n",
+  );
+
+  await page.goto(`/${pid}/meta/props.md`);
+  const panel = page.locator("#content .fmpanel");
+  await expect(panel).toBeVisible();
+  // The document leads: the h1 is the first thing in the prose column, and
+  // no frontmatter table survives inside the rendered markdown.
+  await expect(page.locator("#content h1")).toHaveText("Q3 findings");
+  await expect(page.locator("#content table.frontmatter")).toHaveCount(0);
+  expect(
+    await page.evaluate(() => {
+      const h1 = document.querySelector("#content h1") as HTMLElement;
+      return h1.getBoundingClientRect().top;
+    }),
+  ).toBeLessThan(
+    await panel.evaluate((el) => el.getBoundingClientRect().bottom),
+  );
+  // Same keys, author order, nested value still compact YAML in <code>.
+  await expect(panel.locator("dt")).toHaveText(["title", "status", "tags", "meta"]);
+  await expect(panel.locator("dd").nth(2)).toHaveText("churn, revenue");
+  await expect(panel.locator("dd code")).toHaveText("reviewed: true");
+  // A rail, not a squeezed column: the prose keeps its 768px measure and the
+  // panel sits to its right.
+  const geom = await page.evaluate(() => {
+    const prose = document.querySelector("#content .markdown > div:not(.fmpanel)") as HTMLElement;
+    const p = document.querySelector(".fmpanel") as HTMLElement;
+    return { prose: prose.getBoundingClientRect(), panel: p.getBoundingClientRect() };
+  });
+  expect(Math.round(geom.prose.width), "prose measure unchanged").toBe(768);
+  expect(geom.panel.left, "panel is to the right of the prose").toBeGreaterThanOrEqual(
+    geom.prose.right,
+  );
+
+  // Collapsing is remembered — across a different file, and across a reload.
+  await panel.locator("summary").click();
+  await expect(panel).not.toHaveAttribute("open", /.*/);
+  await page.goto(`/${pid}/index.md`);
+  await expect(page.locator("#content .fmpanel")).toHaveCount(0); // no frontmatter, no panel
+  await page.goto(`/${pid}/meta/props.md`);
+  await expect(page.locator("#content .fmpanel")).not.toHaveAttribute("open", /.*/);
+  await page.reload();
+  await expect(page.locator("#content .fmpanel")).not.toHaveAttribute("open", /.*/);
+});
+
+test("frontmatter panel on a phone: closed disclosure above the body", async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await ctx.newPage();
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=meta/phone.md`, {
+    data: "---\ntitle: Q3\nowner: snow\n---\n\n# Q3\n\nBody.\n",
+  });
+  await page.goto(`/${pid}/meta/phone.md`);
+  const panel = page.locator("#content .fmpanel");
+  await expect(panel).toBeVisible();
+  // No stored choice yet: a phone has no room for a rail, so it opens closed
+  // and sits above the body rather than beside it.
+  await expect(panel).not.toHaveAttribute("open", /.*/);
+  const m = await page.evaluate(() => {
+    const p = document.querySelector(".fmpanel") as HTMLElement;
+    const h1 = document.querySelector("#content h1") as HTMLElement;
+    return {
+      above: p.getBoundingClientRect().bottom <= h1.getBoundingClientRect().top,
+      overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    };
+  });
+  expect(m.above, "390px: panel sits above the body").toBe(true);
+  expect(m.overflow, "390px: horizontal page scroll").toBe(false);
+  await ctx.close();
+});
