@@ -996,6 +996,57 @@ func TestCLIShareSecretGate(t *testing.T) {
 	}
 }
 
+// bdrive share <folder> used to say the folder wasn't synced yet, so users went
+// looking for a sync fault that wasn't there — and the CLI bolted a "run bdrive
+// sync" hint onto it. Folders now get the real answer, hint-free.
+func TestCLIShareFolder(t *testing.T) {
+	e := newCLIEnv(t)
+	run := e.run
+
+	work := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(work, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"notes/readme.md", "notes/zeta.md"} {
+		if err := os.WriteFile(filepath.Join(work, filepath.FromSlash(f)), []byte("# "+f+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := run(work, "init", "--name", "share-folder", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer run(work, "stop", work)
+	if out, err := run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+
+	out, err := run(work, "share", "notes")
+	if err == nil {
+		t.Fatalf("share of a folder succeeded:\n%s", out)
+	}
+	for _, want := range []string{"per-file", "notes/readme.md"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("folder error missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"wait a few seconds", "not synced", "400 Bad Request"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("folder error should not contain %q:\n%s", unwanted, out)
+		}
+	}
+
+	// A path that really is missing keeps the sync-timing diagnosis and its hint.
+	out, err = run(work, "share", "missing.md")
+	if err == nil {
+		t.Fatalf("share of a missing file succeeded:\n%s", out)
+	}
+	for _, want := range []string{"not synced to this project yet", "wait a few seconds"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing-file error missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestCLIStatusReportsUnscannedWork is BEA-106: with the daemon stopped,
 // `status` answered from the state cache and the journal — neither of which
 // has seen an edit nobody scanned — and reported the folder clean. A wrong
