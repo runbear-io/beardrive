@@ -467,7 +467,12 @@ export default function Browser(props: {
         props.onClosePanel?.();
         navigate(to);
       };
-      add("folder", "Go to project root", "action", go("/" + pid));
+      // Labelled with the project's name and tagged `project`, so typing the
+      // name of the project you are IN finds it: the switcher loop below
+      // rightly excludes the current project, which left nothing carrying its
+      // name while the palette copy promised project search (BEA-105). One row,
+      // not two — still the first, still unconditional, so BEA-52 holds.
+      add("folder", project.name + " — project root", "project", go("/" + pid));
       add("dashboard", "Dashboard", "action", go(urlForView("dashboard", pid)));
       add("terminal", "Installation", "action", go(urlForView("install", pid)));
       add("gear", "Settings", "action", go(urlForView("settings", pid)));
