@@ -54,6 +54,7 @@ classDiagram
         +historyFilterQuery(filters) / hasHistoryFilters
         +urlForPath(path, projectId, version)
         +urlForView(view, projectId, target, filters) / encodePath / decodePath
+        +projectByName(projects, seg) id, only when exactly one name matches
     }
     class nav {
         +navigate(url)
@@ -62,6 +63,7 @@ classDiagram
         +Redirect
     }
     note for router "Two lookups on peer-authored path segments are now prototype-safe and one is throw-safe: legacyView() goes through Object.hasOwn, because LEGACY_VIEWS['constructor'] is truthy and turned a folder of that name into a view whose name was a FUNCTION; decodePath falls back to the raw segment instead of letting decodeURIComponent throw URIError out of a useMemo during render. Same shape as ProjectIcon's PROJECT_ICONS lookup in shell.tsx"
+    note for router "projectByName is what makes /wiki reach the project called wiki: the id never appears in the UI as something to copy, so a hand-typed first segment is the NAME the sidebar shows. It decodes the segment (route.project is the still-encoded slice) and returns an id only on EXACTLY one case-insensitive match — ProjectDB names are scoped per organization, so a viewer in two orgs can hold two projects named wiki and guessing between them is worse than the not-found page (BEA-140)"
     note for nav "nav.ts + router.ts — deliberately NOT a router library (react-router v7 startTransition left stale views); History-API path routing, slashes literal, every user-facing page owns a URL path. A version is not a view route (the first segment after the project id is reserved for view names) — it rides as ?v=, so useLocationPath must snapshot the search too or the URL changes and nothing re-renders"
 
     class api {
@@ -88,7 +90,7 @@ classDiagram
 
     class components {
         FileView FolderListing FileTree
-        HistoryView HistoryRow HistoryFilters DiffView VersionBanner
+        HistoryView HistoryRow HistoryFilters DiffView VersionBanner ConflictBanner
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
@@ -110,6 +112,7 @@ classDiagram
         +heat.ts orphanPaths (reads whose file left the tree)
         +heat.ts placeLabels LABEL_MAX (scatter danger-dot labels)
         +heat.ts HOT_READS STALE_DAYS isDanger daysSince agoLabel staleNote
+        +conflict.ts parseConflict Conflict
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +csv.ts parseDelimited Csv CSV_ROWS
         +secrets.ts SecretFinding secretsMessage secretsBadge
@@ -119,6 +122,7 @@ classDiagram
     note for lib "mermaid.ts is the one exception to 'pure, no React, unit-tested on node': it needs a DOM and a browser-only library, so its coverage is Playwright. html in → html out, so neither caller can be tempted to patch a live subtree. It imports mermaid only when hasMermaid() says a document has a fence — that gate is what keeps a diagram-free page from downloading any of it — and every failure (unparseable fence, render throw, chunk that never loads) returns the untouched &lt;pre&gt;&lt;code&gt; instead of throwing"
     note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it. HEAT_DISCLOSURE sits beside that arithmetic for the same reason: a member's own views count toward the number, and four surfaces printing their own copy of that promise is four promises that can drift (BEA-61). The constant is NOT re-exported through useBrowse — surfaces import it straight from lib/heat, and a unit test asserts src/ holds exactly one copy of the sentence. The hot-and-stale VERDICT joined the totals for the same reason (BEA-119): HOT_READS/STALE_DAYS/isDanger were private to Insights.tsx, so the Dashboard was the only screen that could say a doc was hot and unmaintained — the file page and the folder listing showed the ingredients and no verdict. isDanger takes (reads, days) rather than a heat entry because only the Dashboard has a reader lens: it passes its lens-filtered count, the other two pass heatTotal. staleNote returns a STRING (empty when not flagged) so the badge stays pure and survives whichever component owns the meta line"
     note for lib "secrets.ts is the six credential rules in words, mirroring internal/secrets' Label map. It lived in Browser.tsx under a comment saying one caller did not justify a file; BEA-147 gave it a second one, and the two callers are the two surfaces that report the SAME finding — the share dialog that refuses to mint, and FileView's badge that only warns. One map is what makes 'wording consistent with the share dialog' mechanical rather than a copy-editing promise"
+    note for lib "conflict.ts recognises a conflict copy from its NAME alone — syncer.conflictName is a pure function of the path, so the device and the moment come out of the string with no server route, no journal field and no request. The regex is an ANCHORED suffix and a strictly narrower match of the Go convention (sanitize's character class, clip's 32), and every mismatch — truncated suffix, impossible date — is null rather than a throw, so a stray filename can never break a listing. Two callers: FolderListing marks the row, ConflictBanner explains the file (BEA-128)"
     note for lib "csv.ts parses .csv/.tsv for FileView's table view — ~50 lines against RFC 4180, so no papaparse. It NEVER throws: null means 'not a table' (unterminated quote, no delimiter) and the caller falls back to the plain-text preview, which is why the fallback is a type-level guarantee rather than a try/catch someone can forget"
 
     ErrorBoundary --> App : wraps the whole tree
@@ -128,10 +132,11 @@ classDiagram
     VolumeApp --> Browser
     HubApp --> router
     Browser --> router
+    Browser --> lib : parseConflict
     Browser --> components
     HubApp --> components
     components --> nav : linkProps navigate
-    components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid secretsBadge
+    components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid parseConflict secretsBadge
     Browser --> lib : secretsMessage (the share dialog's half of lib/secrets)
     hooks --> lib : re-exports heat.ts, sniffBytes
     shareMermaid --> lib : renderMermaid

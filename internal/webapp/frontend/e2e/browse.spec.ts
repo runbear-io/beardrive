@@ -177,6 +177,27 @@ test("palette (⌘K) fuzzy-jumps to a file", async ({ page }) => {
   await expect(page.locator("#content h1")).toHaveText("Topic");
 });
 
+// BEA-105: the switcher excludes the project you're in, so typing its own name
+// used to match nothing while the palette copy promised project search. The
+// root row carries the name now — one row, kind `project`, same destination.
+test("palette finds the project you are inside by name", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  await page.waitForSelector("#sidebar");
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  // with no query typed, at least one PROJECT row is on screen
+  expect(await page.locator("#palette [cmdk-item] .pkind", { hasText: "project" }).count()).toBeGreaterThan(0);
+
+  await page.fill("#palette input", "wiki");
+  const rows = page.locator("#palette [cmdk-item]", { hasText: "wiki" });
+  await expect(rows).toHaveCount(1); // exactly one, no duplicate root action
+  await expect(rows.first().locator(".pkind")).toHaveText("project");
+  await page.keyboard.press("Enter");
+  await page.waitForURL(`/${pid}`);
+});
+
 // BEA-52: on a path that doesn't resolve the tree entries are gone and the
 // switcher lists only other projects, so the palette used to offer no way
 // back. cmdk owns the list's id (it overwrites ours), hence [cmdk-list].
@@ -187,7 +208,7 @@ test("palette on a dead route still offers the way back", async ({ page }) => {
   await expect(page.locator(".notfound")).toBeVisible();
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.locator("#palette")).toBeVisible();
-  for (const label of ["Go to project root", "Dashboard", "Installation", "Settings"]) {
+  for (const label of ["project root", "Dashboard", "Installation", "Settings"]) {
     await expect(page.locator("#palette [cmdk-list]")).toContainText(label);
   }
   // exactly one whole-project history entry, no duplicate

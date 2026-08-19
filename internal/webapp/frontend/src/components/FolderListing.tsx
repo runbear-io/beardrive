@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { HeatMap, Node } from "../api/types";
 import { heatFor, heatLevel, heatText, useFolderHistory } from "../hooks/useBrowse";
+import { parseConflict } from "../lib/conflict";
 import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
 import { humanSize } from "../util";
 import { Icon } from "./shell";
@@ -58,6 +59,7 @@ export function FolderListing(props: {
             }
             const he = heatFor(heatMap, c.path, !!c.dir);
             if (he) meta = heatText(he) + (meta ? " · " + meta : "");
+            const conflict = c.dir ? null : parseConflict(c.path);
             // Files only: a folder's heat is a subtree sum and it has no one
             // mtime to be stale against, which is also why the Dashboard
             // plots files only (BEA-119).
@@ -81,6 +83,19 @@ export function FolderListing(props: {
                   <Icon name={c.dir ? "folder" : "doc"} />
                 </span>
                 <span className="dl-name">{c.name}</span>
+                {conflict && (
+                  /* The one thing a strangely-named file needs at a glance:
+                     that beardrive put it there on purpose. The page itself
+                     explains what it is — same reasoning as the heat dot
+                     below, the label has to travel without hover. */
+                  <span
+                    className="dl-conflict"
+                    aria-label={"Conflict copy: a concurrent edit from " + (conflict.device || "another device") + " that beardrive preserved instead of dropping."}
+                    title={"A concurrent edit from " + (conflict.device || "another device") + " that beardrive preserved instead of dropping."}
+                  >
+                    conflict copy
+                  </span>
+                )}
                 {stale && (
                   /* Same reasoning as the dot below: the glyph carries a real
                      aria-label, because title= needs a hover that touch and
