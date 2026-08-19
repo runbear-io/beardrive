@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { HeatMap, Node } from "../api/types";
 import { heatFor, heatLevel, heatText, useFolderHistory } from "../hooks/useBrowse";
+import { parseConflict } from "../lib/conflict";
 import { HEAT_DISCLOSURE } from "../lib/heat";
 import { humanSize } from "../util";
 import { Icon } from "./shell";
@@ -58,6 +59,7 @@ export function FolderListing(props: {
             }
             const he = heatFor(heatMap, c.path, !!c.dir);
             if (he) meta = heatText(he) + (meta ? " · " + meta : "");
+            const conflict = c.dir ? null : parseConflict(c.path);
             return (
               <div
                 key={c.path}
@@ -77,6 +79,19 @@ export function FolderListing(props: {
                   <Icon name={c.dir ? "folder" : "doc"} />
                 </span>
                 <span className="dl-name">{c.name}</span>
+                {conflict && (
+                  /* The one thing a strangely-named file needs at a glance:
+                     that beardrive put it there on purpose. The page itself
+                     explains what it is — same reasoning as the heat dot
+                     below, the label has to travel without hover. */
+                  <span
+                    className="dl-conflict"
+                    aria-label={"Conflict copy: a concurrent edit from " + (conflict.device || "another device") + " that beardrive preserved instead of dropping."}
+                    title={"A concurrent edit from " + (conflict.device || "another device") + " that beardrive preserved instead of dropping."}
+                  >
+                    conflict copy
+                  </span>
+                )}
                 {he && (
                   /* title= needs hover, which touch never gives and screen
                      readers never see — the dot carries its own name. */
