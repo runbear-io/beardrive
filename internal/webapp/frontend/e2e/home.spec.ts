@@ -350,6 +350,13 @@ test("project settings: a member sees no danger zone and cannot edit", async ({ 
   await expect(page.locator("#ps-desc")).toBeDisabled();
   await expect(page.locator("#ps-icon-btn")).toBeDisabled();
   await expect(page.locator("#ps-save")).toHaveCount(0);
+  // The way out is a trust answer, so it is not owner-only: a member reading
+  // About sees the export fact and the docs link.
+  await expect(page.locator(".ps-export")).toContainText("bdrive export");
+  await expect(page.locator(".ps-export a")).toHaveAttribute(
+    "href",
+    "https://docs.beardrive.ai/reference/migration/",
+  );
 });
 
 test("project settings: icon + description save, and show in nav and dashboard", async ({
