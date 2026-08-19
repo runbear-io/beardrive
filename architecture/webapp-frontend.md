@@ -39,6 +39,7 @@ classDiagram
         folder listing, file view
         per-view routes
         +moved: /resolve?path= on a tree miss only
+        +scroll restoration: contentRef, memo, goal from lib/scroll
     }
     note for Browser "A missing path is decided from /tree alone — the file is never fetched — so the X-Bdrive-Canonical-Path header /file answers with would never reach the browser, and a moved FOLDER has no content fetch to hang a header on. The not-found branch asks GET /resolve?path= instead, then replaceState-navigates to the destination and prints one Moved from … line above it (BEA-81)"
 
@@ -110,12 +111,14 @@ classDiagram
         +heat.ts placeLabels LABEL_MAX (scatter danger-dot labels)
         +heat.ts HOT_READS STALE_DAYS isDanger daysSince agoLabel staleNote
         +sniff.ts sniffBytes BlobText MAX_BYTES
+        +scroll.ts Goal armGoal applyGoal noteScroll MAX_APPLY
         +csv.ts parseDelimited Csv CSV_ROWS
         +mermaid.ts hasMermaid renderMermaid Palette DARK LIGHT
         +utils.ts
     }
     note for lib "mermaid.ts is the one exception to 'pure, no React, unit-tested on node': it needs a DOM and a browser-only library, so its coverage is Playwright. html in → html out, so neither caller can be tempted to patch a live subtree. It imports mermaid only when hasMermaid() says a document has a fence — that gate is what keeps a diagram-free page from downloading any of it — and every failure (unparseable fence, render throw, chunk that never loads) returns the untouched &lt;pre&gt;&lt;code&gt; instead of throwing"
     note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it. HEAT_DISCLOSURE sits beside that arithmetic for the same reason: a member's own views count toward the number, and four surfaces printing their own copy of that promise is four promises that can drift (BEA-61). The constant is NOT re-exported through useBrowse — surfaces import it straight from lib/heat, and a unit test asserts src/ holds exactly one copy of the sentence. The hot-and-stale VERDICT joined the totals for the same reason (BEA-119): HOT_READS/STALE_DAYS/isDanger were private to Insights.tsx, so the Dashboard was the only screen that could say a doc was hot and unmaintained — the file page and the folder listing showed the ingredients and no verdict. isDanger takes (reads, days) rather than a heat entry because only the Dashboard has a reader lens: it passes its lens-filtered count, the other two pass heatTotal. staleNote returns a STRING (empty when not flagged) so the badge stays pure and survives whichever component owns the meta line"
+    note for lib "scroll.ts is the per-route scroll goal, lifted out of Browser.tsx so it can be tested at all — the frontend suite is node --test over pure TS with no jsdom. A route change arms a goal (0 on a fresh navigation, the memoized offset on POP) and views re-apply it up to MAX_APPLY times as content grows after first paint; noteScroll RETIRES it the moment the reader scrolls, which is the choke point that stops any onRendered caller — a metadata refresh, a poll, anything added later — from moving a reader mid-read (BEA-155). Two clauses in that guard are load-bearing and each has its own test: scrollTo fires a scroll event of its own, so movement is measured against the goal and never against zero, and a page shorter than the last one makes the browser CLAMP the carried-over offset to the bottom, which is either the old page arriving or a goal that does not fit yet"
     note for lib "csv.ts parses .csv/.tsv for FileView's table view — ~50 lines against RFC 4180, so no papaparse. It NEVER throws: null means 'not a table' (unterminated quote, no delimiter) and the caller falls back to the plain-text preview, which is why the fallback is a type-level guarantee rather than a try/catch someone can forget"
 
     ErrorBoundary --> App : wraps the whole tree
@@ -129,6 +132,7 @@ classDiagram
     HubApp --> components
     components --> nav : linkProps navigate
     components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid
+    Browser --> lib : armGoal applyGoal noteScroll
     hooks --> lib : re-exports heat.ts, sniffBytes
     shareMermaid --> lib : renderMermaid
     hooks --> api
