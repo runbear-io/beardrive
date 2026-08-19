@@ -74,16 +74,22 @@ list in .bdrive/config.json is never pruned against either.`,
 					return err
 				}
 				defer closeSession(sess)
-				if cmd.Flags().Changed("note") {
-					// Persist the note so the daemon's own scans stamp it too —
-					// history then links every change from this working session
-					// to its context, not just the ones this invocation catches.
-					// An explicit empty --note clears it. Expires after --note-ttl.
-					if err := sess.Store.SaveNote(note, noteTTL); err != nil {
-						return err
-					}
-					sess.Note = note
+				// Persist the note so the daemon's own scans stamp it too —
+				// history then links every change from this working session
+				// to its context, not just the ones this invocation catches.
+				// Expires after --note-ttl. Unconditional because an explicit
+				// `bdrive sync` is a human act: whatever note the last agent
+				// session left stops applying here, and empty text clears
+				// (SaveNote -> ClearNote), so one call both sets and clears.
+				// Clearing the *store* is what leaves this cycle unstamped —
+				// scan falls back to LoadNote whenever Session.Note is empty.
+				// The --hook branch below has its own SaveNote and keeps the
+				// TTL, which is what the TTL is for: the daemon's own scans
+				// inside an agent session.
+				if err := sess.Store.SaveNote(note, noteTTL); err != nil {
+					return err
 				}
+				sess.Note = note
 				sess.Prune = prune
 				sess.OnProgress = progressReporter()
 				res, err := sess.Cycle(cmd.Context())

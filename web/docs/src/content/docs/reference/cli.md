@@ -22,7 +22,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive forget <path>...` | Stop syncing a path and remove it from the hub. Adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file. `--list`, `--revoke`, `--expires` (the hub's Share dialog can also set an expiry on an existing link). Refuses a file whose first 1 MiB holds credential-shaped strings — `--force` shares it anyway |
-| `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: it also reports the files teammates changed since the agent's last turn |
+| `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it, and a plain `bdrive sync` with no `--note` clears it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: it also reports the files teammates changed since the agent's last turn |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each detected agent platform's user config — once per machine, covering every folder. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection. `uninstall` removes only BearDrive's own hook entries |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes, and any synced files that looked like they held credentials when they last changed |
@@ -94,6 +94,11 @@ tunable on `bdrive daemon run`, not on init.
 Stamps session context — an agent session id, say — onto changes. It shows up in
 `bdrive log` and hub history, and keeps applying to daemon-committed changes
 until `--note-ttl` expires.
+
+A plain `bdrive sync` with no `--note` **clears** the note: an explicit sync is a
+human act, so the edit you just made by hand is not filed under the last agent
+session. Hook- and daemon-driven syncs are unaffected and keep the note until the
+TTL expires — that is what the TTL is for.
 
 ### `bdrive restore` — undoing a change
 
