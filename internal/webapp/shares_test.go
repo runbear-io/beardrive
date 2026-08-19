@@ -583,12 +583,85 @@ func TestShareOpensOnTheWire(t *testing.T) {
 		t.Fatal("an opened link must carry last_opened")
 	}
 
-	// The actor is token+"/"+IP — a public credential joined to an IP. It
-	// must not appear anywhere in the response, in any shape.
+	// opens reads one link's count and last_opened back off the WIRE rather
+	// than out of the ledger, because the wire is what the panel shows.
+	opens := func(tok string) (float64, time.Time) {
+		t.Helper()
+		for _, sh := range listShares(t, srv, h, p.ID) {
+			if sh["token"] != tok {
+				continue
+			}
+			last, _ := sh["last_opened"].(string)
+			if last == "" {
+				return sh["opens"].(float64), time.Time{}
+			}
+			ts, err := time.Parse(time.RFC3339, last)
+			if err != nil {
+				t.Fatalf("last_opened %q: %v", last, err)
+			}
+			return sh["opens"].(float64), ts
+		}
+		t.Fatalf("link %s missing from the list", tok)
+		return 0, time.Time{}
+	}
+	// The debounce collapses reloads; it does not cap a link. Only the clock
+	// is under test, so it is moved rather than waited on.
+	ageDebounce := func() {
+		srv.Reads.mu.Lock()
+		defer srv.Reads.mu.Unlock()
+		for k, v := range srv.Reads.seen {
+			srv.Reads.seen[k] = v.Add(-readDebounce - time.Minute)
+		}
+	}
+	ageDebounce()
+	if rec := do(t, h, "GET", "/s/"+token, nil); rec.Code != 200 {
+		t.Fatalf("public fetch past the window: %d %s", rec.Code, rec.Body)
+	}
+	if got, _ := opens(token); got != 2 {
+		t.Fatalf("opens = %v after a reload past the debounce window, want 2", got)
+	}
+
+	// Three readers, ONE network, seconds apart: distinct browsers are
+	// distinct actors, so the count moves and last_opened follows the newest
+	// hit. token+"/"+IP alone made a whole office one reader (BEA-151) —
+	// httptest hands every request the same 192.0.2.1, which is exactly the
+	// NAT the personas were sitting behind.
+	uas := []string{
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) Safari/605.1",
+		"Mozilla/5.0 (X11; Linux x86_64) Firefox/128.0",
+		"Mozilla/5.0 (Windows NT 10.0; Win64) Chrome/126.0.0.0",
+	}
+	var afterFirst time.Time
+	for i, ua := range uas {
+		req := jsonReq(t, "GET", "/s/"+unopened, nil)
+		req.Header.Set("User-Agent", ua)
+		if rec := doHTTP(h, req); rec.Code != 200 {
+			t.Fatalf("reader %d: %d %s", i, rec.Code, rec.Body)
+		}
+		if i == 0 {
+			_, afterFirst = opens(unopened)
+		}
+	}
+	got, afterThird := opens(unopened)
+	if got != 3 {
+		t.Fatalf("three readers on one network reported %v opens, want 3 — distinct browsers are distinct readers", got)
+	}
+	if !afterThird.After(afterFirst) {
+		t.Fatalf("last_opened stuck at %s after two later readers; it must follow the newest open", afterFirst)
+	}
+
+	// The actor is token+"/"+IP+"/"+UA hash — a public credential joined to a
+	// network and a browser. No part of it may appear anywhere in the
+	// response, in any shape; a hash is not an exemption.
 	req := jsonReq(t, "GET", "/api/p/"+p.ID+"/shares", nil)
 	authAs(t, srv, req)
 	body := doHTTP(h, req).Body.String()
-	for _, leak := range []string{token + "/", "192.0.2.1", "actor", "openers"} {
+	leaks := []string{token + "/", unopened + "/", "192.0.2.1", "actor", "openers"}
+	for _, ua := range append(uas, "") {
+		sum := sha256.Sum256([]byte(ua))
+		leaks = append(leaks, hex.EncodeToString(sum[:8]))
+	}
+	for _, leak := range leaks {
 		if strings.Contains(body, leak) {
 			t.Fatalf("shares response leaks %q: %s", leak, body)
 		}
