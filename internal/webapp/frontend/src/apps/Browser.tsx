@@ -171,12 +171,6 @@ export default function Browser(props: {
   const contentRef = useRef<HTMLElement>(null);
   const memo = useRef(new Map<string, number>());
   const scrollGoal = useRef<Goal>(armGoal("", 0));
-  useEffect(() => {
-    scrollGoal.current = armGoal(
-      routeKey,
-      currentNavType() === "POP" ? (memo.current.get(routeKey) ?? 0) : 0,
-    );
-  }, [routeKey]);
   const onRendered = useCallback(() => {
     const c = contentRef.current;
     if (!c) return;
@@ -186,6 +180,20 @@ export default function Browser(props: {
     // events that noteScroll would read as the reader taking over.
     if (top !== null) c.scrollTo({ top, behavior: "instant" });
   }, [routeKey]);
+  useEffect(() => {
+    scrollGoal.current = armGoal(
+      routeKey,
+      currentNavType() === "POP" ? (memo.current.get(routeKey) ?? 0) : 0,
+    );
+    // Apply once right here. Views call onRendered from their own effects,
+    // and React runs CHILD effects before the parent's — so this route's
+    // onRendered has already fired, against the goal of the route we just
+    // LEFT, and was discarded on the key check. Without this the new goal
+    // would sit armed and never applied, which is why Back landed at the
+    // top instead of the remembered offset. Later onRendered calls still
+    // cover content that grows after first paint.
+    onRendered();
+  }, [routeKey, onRendered]);
   const onScroll = useCallback(() => {
     const c = contentRef.current;
     if (!c) return;
