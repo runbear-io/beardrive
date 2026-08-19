@@ -244,6 +244,29 @@ test("share mints a public link that serves the file, revoke kills it", async ({
   expect(gone.status()).toBe(404);
 });
 
+// BEA-147: the same finding the share dialog names, on the path every file
+// takes — the viewer used to render the key as ordinary prose.
+test("a file holding a key carries a badge in the file view", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/deploy.md`);
+
+  const badge = page.locator(".sbadge");
+  await expect(badge).toBeVisible();
+  // Same rule, same line, same words as the share dialog's modal below.
+  await expect(badge).toContainText("an AWS access key (line 3)");
+  // Advisory: the file still renders in full, nothing is redacted.
+  await expect(page.locator("#content h1")).toHaveText("Deploy");
+  await expect(page.locator("#content")).toContainText("AWS_ACCESS_KEY_ID");
+  // The badge itself must never echo the thing it found.
+  await expect(badge).not.toContainText("AKIA");
+
+  // A clean file gets no badge at all.
+  await page.goto(`/${pid}/index.md`);
+  await expect(page.locator("#content h1")).toHaveText("Wiki");
+  await expect(page.locator(".sbadge")).toHaveCount(0);
+});
+
 // BEA-111: sharing a file that looks like it holds credentials asks first.
 // Cancel mints nothing; Share anyway mints the link it would have.
 test("share on a file holding a key asks before it mints, and Cancel mints nothing", async ({

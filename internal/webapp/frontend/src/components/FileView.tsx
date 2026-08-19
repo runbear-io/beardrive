@@ -20,6 +20,8 @@ import {
 import { urlForPath } from "../router";
 import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
 import { hasMermaid, renderMermaid } from "../lib/mermaid";
+import { secretsBadge, type SecretFinding } from "../lib/secrets";
+import { Icon } from "./shell";
 
 export function FileView(props: {
   apiBase: string;
@@ -235,10 +237,36 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   // Server-rendered, server-sanitized markdown — same trust model as the
   // classic app assigning innerHTML.
   return (
-    <div
-      dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
-      onClick={(e) => handleLinkClick(e, path, onOpenFile)}
-    />
+    <>
+      <SecretBadge findings={doc.findings} />
+      <div
+        dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
+        onClick={(e) => handleLinkClick(e, path, onOpenFile)}
+      />
+    </>
+  );
+}
+
+/* The share gate could already name the rule and the line well enough to
+   refuse to publish this file, while the file view rendered the same key as
+   ordinary prose (BEA-147). Advisory only, in VersionBanner's shape: a strip
+   above the content, role="status", no actions. Nothing is blocked and
+   nothing is redacted — a reader who can open the file could already read
+   the key, and the point is that they now know it is in there. */
+function SecretBadge({ findings }: { findings?: SecretFinding[] }) {
+  if (!findings?.length) return null;
+  return (
+    <div className="sbadge" role="status">
+      <span className="sb-icon">
+        <Icon name="shield" />
+      </span>
+      <div className="sb-text">
+        <b>{secretsBadge(findings)}</b>
+        <span>
+          Checked when this page loaded. Sharing the file asks you to confirm first.
+        </span>
+      </div>
+    </div>
   );
 }
 

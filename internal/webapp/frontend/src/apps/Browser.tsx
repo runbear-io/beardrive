@@ -32,33 +32,7 @@ import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
 import type { Run } from "../lib/runs";
 import { VersionBanner } from "../components/VersionBanner";
-
-// The hub's six share-time credential rules, in words. Only one caller
-// (shareNow), so it lives here rather than in its own file.
-const SECRET_LABELS: Record<string, string> = {
-  aws_access_key_id: "an AWS access key",
-  openai_api_key: "an OpenAI API key",
-  github_pat: "a GitHub token",
-  slack_token: "a Slack token",
-  private_key: "a private key",
-  gitlab_pat: "a GitLab token",
-};
-
-// secretsMessage phrases the 409 for the confirm dialog. The second sentence
-// is not decoration: a link always serves the file's LATEST content, so the
-// copy may only ever claim what was true at the moment of sharing — never
-// that the file is clean.
-function secretsMessage(findings: { rule: string; line: number }[] = []): string {
-  const parts = findings.map((f) => `${SECRET_LABELS[f.rule] ?? f.rule} (line ${f.line})`);
-  const what =
-    parts.length > 1
-      ? parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1]
-      : parts[0] || "something credential-shaped";
-  return (
-    `BearDrive found ${what} in this file. The check covers the file at the moment you share it — ` +
-    `a link always serves the file's latest content, so later changes are never checked. Share anyway?`
-  );
-}
+import { secretsMessage } from "../lib/secrets";
 
 // The browsing surface shared by hub projects and single-volume mode: the
 // file tree, folder listings, file views, and every topbar action. Sidebar
