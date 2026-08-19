@@ -902,3 +902,48 @@ func TestShareUnaffectedByAnUnmovedFile(t *testing.T) {
 		t.Fatalf("unmoved share: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// A folder is never a key in the files map, so a fully synced folder used to
+// 404 as "not synced yet" and send the user off to fix a sync fault that
+// wasn't there.
+func TestShareFolderIsNotASyncProblem(t *testing.T) {
+	srv, p, _, _, h := shareHub(t)
+
+	// wiki/ is fully synced; sharing it is a per-file problem, not a timing one
+	req := jsonReq(t, "POST", "/api/p/"+p.ID+"/shares", map[string]string{"path": "wiki"})
+	authAs(t, srv, req)
+	rec := doHTTP(h, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("share of a folder: %d, want 400", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "per-file") {
+		t.Fatalf("folder error must say share links are per-file, got %q", body)
+	}
+	// names a file inside, and the SMALLEST one so repeat calls agree
+	if !strings.Contains(body, "wiki/notes.md") {
+		t.Fatalf("folder error must name a file inside it, got %q", body)
+	}
+	if strings.Contains(body, "not synced") {
+		t.Fatalf("folder error must not blame sync, got %q", body)
+	}
+	if n := len(srv.Shares.List(p.ID)); n != 0 {
+		t.Fatalf("folder share minted %d links, want 0", n)
+	}
+
+	// a path that really is unknown keeps today's answer
+	req = jsonReq(t, "POST", "/api/p/"+p.ID+"/shares", map[string]string{"path": "never-synced.md"})
+	authAs(t, srv, req)
+	if rec := doHTTP(h, req); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "not synced to this project yet") {
+		t.Fatalf("unknown path: %d %s, want 404 not-synced", rec.Code, rec.Body)
+	}
+
+	// "wik" is a PREFIX of wiki/report.html but is not a folder: still unknown.
+	// A bare HasPrefix(k, p) would call it a folder — the same wrong-diagnosis
+	// class of bug this fix is about.
+	req = jsonReq(t, "POST", "/api/p/"+p.ID+"/shares", map[string]string{"path": "wik"})
+	authAs(t, srv, req)
+	if rec := doHTTP(h, req); rec.Code != http.StatusNotFound {
+		t.Fatalf("prefix-of-a-file path: %d, want 404", rec.Code)
+	}
+}

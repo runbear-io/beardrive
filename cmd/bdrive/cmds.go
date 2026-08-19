@@ -74,16 +74,22 @@ list in .bdrive/config.json is never pruned against either.`,
 					return err
 				}
 				defer closeSession(sess)
-				if cmd.Flags().Changed("note") {
-					// Persist the note so the daemon's own scans stamp it too —
-					// history then links every change from this working session
-					// to its context, not just the ones this invocation catches.
-					// An explicit empty --note clears it. Expires after --note-ttl.
-					if err := sess.Store.SaveNote(note, noteTTL); err != nil {
-						return err
-					}
-					sess.Note = note
+				// Persist the note so the daemon's own scans stamp it too —
+				// history then links every change from this working session
+				// to its context, not just the ones this invocation catches.
+				// Expires after --note-ttl. Unconditional because an explicit
+				// `bdrive sync` is a human act: whatever note the last agent
+				// session left stops applying here, and empty text clears
+				// (SaveNote -> ClearNote), so one call both sets and clears.
+				// Clearing the *store* is what leaves this cycle unstamped —
+				// scan falls back to LoadNote whenever Session.Note is empty.
+				// The --hook branch below has its own SaveNote and keeps the
+				// TTL, which is what the TTL is for: the daemon's own scans
+				// inside an agent session.
+				if err := sess.Store.SaveNote(note, noteTTL); err != nil {
+					return err
 				}
+				sess.Note = note
 				sess.Prune = prune
 				sess.OnProgress = progressReporter()
 				res, err := sess.Cycle(cmd.Context())
@@ -291,6 +297,10 @@ func statusCmd() *cobra.Command {
 	}
 }
 
+// writeGap is how far a file's write time must lag the moment it was journaled
+// before `bdrive log` prints both.
+const writeGap = time.Minute
+
 func logCmd() *cobra.Command {
 	var limit int
 	var pathFilter string
@@ -323,7 +333,8 @@ func logCmd() *cobra.Command {
 				return nil
 			}
 			for _, op := range entries {
-				when := syncer.DisplayTime(op).Local().Format("2006-01-02 15:04:05")
+				commit := syncer.CommitTime(op)
+				when := commit.Local().Format("2006-01-02 15:04:05")
 				kind := op.Kind
 				if kind == journal.KindPut {
 					kind = "put   "
@@ -343,6 +354,17 @@ func logCmd() *cobra.Command {
 					safeField(op.Path, 160), safeField(who, 64), safeField(op.DeviceName, 64))
 				if op.Kind == journal.KindPut {
 					line += fmt.Sprintf("  (%s)", humanBytes(op.Size))
+				}
+				// The first column is when the change was journaled, so the
+				// rows read monotonically. The file's own write time still
+				// matters — but the daemon scans every 3s and a hook sync is
+				// prompt, so a sub-minute gap is just scan latency and would be
+				// noise on every row. A larger gap means the file genuinely
+				// predates its arrival here — a rename, or an old document
+				// added today — and that is the case the reader has to see.
+				// Deletes have no file left to stat, so they never carry it.
+				if written := syncer.DisplayTime(op); commit.Sub(written) >= writeGap {
+					line += fmt.Sprintf("  (written %s)", written.Local().Format("2006-01-02 15:04:05"))
 				}
 				if note := safeField(op.Note, 200); note != "" {
 					line += "  [" + note + "]"

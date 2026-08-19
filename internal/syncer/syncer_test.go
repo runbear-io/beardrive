@@ -682,10 +682,16 @@ func touch(t *testing.T, folder, rel string, when time.Time) {
 	}
 }
 
-// TestLogDisplayOrder builds exactly the skew that made `bdrive log`
-// unreadable: device B commits after pulling A, so B's op carries the HIGHER
-// lamport, while B's file was written hours EARLIER on the wall clock. Causal
-// order and clock order disagree — the display sort must follow the clock.
+// TestLogDisplayOrder builds the skew that made `bdrive log` unreadable:
+// device B commits after pulling A, so B's op carries the HIGHER lamport,
+// while B's file was written hours EARLIER on the wall clock.
+//
+// The display sort follows the commit clock: early.md was written two hours
+// ago but only ARRIVED in the project on B's cycle, and "what changed" means
+// what arrived. Its own write time still reaches the reader — `bdrive log`
+// prints it alongside — but it is not what orders the list. Before BEA-112
+// the write time was the sort key, which is how the two halves of one rename
+// landed a minute apart.
 func TestLogDisplayOrder(t *testing.T) {
 	be := sharedRemote(t)
 	a, b := newDevice(t, "deva", be), newDevice(t, "devb", be)
@@ -712,8 +718,12 @@ func TestLogDisplayOrder(t *testing.T) {
 	}
 
 	SortForDisplay(entries)
-	if entries[0].Path != "late.md" {
-		t.Fatalf("display order should lead with the newest file late.md, got %q", entries[0].Path)
+	if entries[0].Path != "early.md" {
+		t.Fatalf("display order should lead with the most recently journaled file early.md, got %q", entries[0].Path)
+	}
+	// Its write time is two hours old and still available to print.
+	if gap := entries[0].Time.Sub(DisplayTime(entries[0])); gap < time.Hour {
+		t.Fatalf("early.md's write time was lost: commit %v, display %v", entries[0].Time, DisplayTime(entries[0]))
 	}
 	assertNonIncreasing(t, entries)
 }
@@ -780,7 +790,10 @@ func TestSortForDisplayFallsBackToTime(t *testing.T) {
 	}
 	SortForDisplay(ops)
 
-	want := []string{"legacy-new.md", "gone.md", "fresh.md", "legacy-old.md"}
+	// Ordered by commit time. legacy ops and deletes carry no mtime, and the
+	// point of the fallback is that they sort on their commit time like
+	// everything else rather than sinking to the bottom as zero-time rows.
+	want := []string{"fresh.md", "legacy-new.md", "gone.md", "legacy-old.md"}
 	for i, w := range want {
 		if ops[i].Path != w {
 			t.Fatalf("order[%d] = %q, want %q (full: %v)", i, ops[i].Path, w, paths(ops))
@@ -797,12 +810,16 @@ func paths(ops []journal.Op) []string {
 	return out
 }
 
+// assertNonIncreasing pins BEA-40's guarantee on the key the display sort now
+// uses: `bdrive log` reads strictly newest-first by commit time, the column it
+// prints. DisplayTime is deliberately not monotone down the list — an old file
+// journaled today belongs at the top wearing its old write time.
 func assertNonIncreasing(t *testing.T, ops []journal.Op) {
 	t.Helper()
 	for i := 1; i < len(ops); i++ {
-		if DisplayTime(ops[i]).After(DisplayTime(ops[i-1])) {
+		if CommitTime(ops[i]).After(CommitTime(ops[i-1])) {
 			t.Fatalf("display order not newest-first at %d: %v then %v",
-				i, DisplayTime(ops[i-1]), DisplayTime(ops[i]))
+				i, CommitTime(ops[i-1]), CommitTime(ops[i]))
 		}
 	}
 }
