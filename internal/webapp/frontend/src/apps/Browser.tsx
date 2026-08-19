@@ -32,6 +32,8 @@ import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
 import type { Run } from "../lib/runs";
 import { VersionBanner } from "../components/VersionBanner";
+import { ConflictBanner } from "../components/ConflictBanner";
+import { parseConflict } from "../lib/conflict";
 
 // The hub's six share-time credential rules, in words. Only one caller
 // (shareNow), so it lives here rather than in its own file.
@@ -591,6 +593,7 @@ export default function Browser(props: {
       // A PDF page is unreadable squeezed into the 768px reading column.
       pageWidth = HTML_EXT.test(path) || PDF_EXT.test(path) ? "wide" : "read";
       pageClass = "markdown";
+      const conflict = parseConflict(path);
       view = (
         <>
           {version && (
@@ -599,6 +602,16 @@ export default function Browser(props: {
               path={path}
               version={version}
               onViewCurrent={() => openPath(path)}
+            />
+          )}
+          {conflict && (
+            <ConflictBanner
+              conflict={conflict}
+              originalHref={
+                flatFiles.some((f) => f.path === conflict.original)
+                  ? () => openPath(conflict.original)
+                  : undefined
+              }
             />
           )}
           <FileView
