@@ -168,3 +168,53 @@ export function placeLabels(
   }
   return out;
 }
+
+/* ---- hot and stale ----
+   The Dashboard's danger quadrant, hoisted out of Insights.tsx so the file
+   page and the folder listing can print the same verdict beside the same
+   numbers. The warning was reaching only the one screen nobody opens before
+   trusting a doc (BEA-119).
+
+   The predicate takes (reads, days) rather than a heat entry because only
+   the Dashboard has a reader lens: it passes its lens-filtered count, while
+   the file and folder views pass heatTotal — which is what the Dashboard's
+   default "all" lens shows. Passing an entry here would quietly hand the
+   Dashboard a different number than it plots. */
+
+export const HOT_READS = 3; // ≥ this many reads/30d = hot
+export const STALE_DAYS = 30; // ≥ this many days since last write = stale
+
+export const isDanger = (reads: number, days: number) => reads >= HOT_READS && days >= STALE_DAYS;
+
+/* Days since an ISO timestamp, or null when there is none to measure from.
+   Null rather than 0: a file with no mtime is unknown, not brand new, and 0
+   would read as "changed today" on every surface that prints this. */
+export function daysSince(time: string | undefined, now: number = Date.now()): number | null {
+  if (!time) return null;
+  const t = new Date(time).getTime();
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, (now - t) / 86400000);
+}
+
+/* "5 days ago" / "2 months ago" / "1 year ago", via Intl — no dependency.
+   numeric:"always", not "auto": "auto" says "last year", which reads as a
+   calendar year rather than an elapsed one inside "last changed …". Locale
+   is pinned to "en" because every other string on these surfaces is, and an
+   unpinned one would make the unit tests depend on the host. */
+export function agoLabel(days: number): string {
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "always" });
+  if (days < 30) return rtf.format(-Math.round(days), "day");
+  if (days < 365) return rtf.format(-Math.round(days / 30), "month");
+  return rtf.format(-Math.round(days / 365), "year");
+}
+
+/* "stale · last changed 7 months ago" for a flagged file, "" for anything
+   else — no heat row (telemetry off), no mtime, cold, or fresh. Returning a
+   string rather than a boolean keeps the badge pure, so it survives whichever
+   component ends up owning the meta line. Callers add the ⚠ glyph in markup,
+   where it can carry its own aria-label. */
+export function staleNote(e: HeatEntry | null, time: string | undefined): string {
+  const days = daysSince(time);
+  if (!e || days === null || !isDanger(heatTotal(e), days)) return "";
+  return `stale · last changed ${agoLabel(days)}`;
+}

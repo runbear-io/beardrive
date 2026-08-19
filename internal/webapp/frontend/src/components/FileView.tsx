@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
-import { HEAT_DISCLOSURE } from "../lib/heat";
+import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
 import { useTextAt } from "../hooks/useBlob";
 import {
   CSV_EXT,
@@ -180,6 +180,15 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   useEffect(() => {
     if (!doc) return;
     const parts: string[] = [];
+    // Read counts belong to the path, not to one version — showing them
+    // beside content the banner just called historical reads as if they
+    // counted views of these bytes.
+    const he = version ? null : heatMap && heatMap[doc.path];
+    // The Dashboard's danger verdict, on the screen the document is actually
+    // read (BEA-119). It leads the line rather than trailing it because #meta
+    // is nowrap + ellipsis (style.css:381) — a warning appended after the
+    // author and the timestamp is the first thing a narrow window eats.
+    const stale = staleNote(he || null, doc.time);
     // Guard on the raw fields, not on whoChanged's result: it answers
     // "unknown" rather than "" , and plain-folder mode (no identity at
     // all) has always printed nothing here.
@@ -187,23 +196,32 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
       parts.push(whoChanged(doc) + (doc.device ? " on " + doc.device : ""));
     }
     if (doc.time) parts.push(new Date(doc.time).toLocaleString());
-    // Read counts belong to the path, not to one version — showing them
-    // beside content the banner just called historical reads as if they
-    // counted views of these bytes.
-    const he = version ? null : heatMap && heatMap[doc.path];
     // The count says what is in it, but #meta is nowrap + ellipsis
     // (style.css:381) — visible text appended here is the first thing a
     // narrow window truncates away, so the disclosure rides along as hover
     // text and a screen-reader-only span instead.
     const heat = he && heatTotal(he) ? heatText(he) + " / 30d" : "";
+    const warn = stale ? (
+      <span className="meta-stale" title={stale}>
+        <span aria-hidden="true">⚠ </span>
+        {stale}
+      </span>
+    ) : null;
     onMeta(
       heat ? (
         <>
+          {warn}
+          {warn ? " · " : ""}
           {parts.length ? parts.join(" · ") + " · " : ""}
           <span title={HEAT_DISCLOSURE}>
             {heat}
             <span className="sr-only"> — {HEAT_DISCLOSURE}</span>
           </span>
+        </>
+      ) : warn ? (
+        <>
+          {warn}
+          {parts.length ? " · " + parts.join(" · ") : ""}
         </>
       ) : (
         parts.join(" · ")
