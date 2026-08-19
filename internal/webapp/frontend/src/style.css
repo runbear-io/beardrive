@@ -1128,12 +1128,37 @@ a.ai-main:hover { color: var(--accent); }
    the caret marker only lines up in a monospace, non-wrapping box. The height
    cap keeps a pathological message from pushing the document off the page. */
 .markdown .mermaid-err-detail { margin: 0 0 1.3em; font: 11.5px/1.5 var(--mono); color: var(--text-faint); white-space: pre; overflow: auto; max-height: 12em; }
-/* Frontmatter key/value table (server-rendered from a doc's YAML header). */
-.markdown table.frontmatter { margin: 0 0 1.8em; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; border-collapse: separate; border-spacing: 0; }
-.markdown table.frontmatter th { text-transform: none; letter-spacing: 0; font-size: 11.5px; color: var(--text-faint); font-weight: 600; text-align: left; white-space: nowrap; vertical-align: top; padding: 6px 14px 6px 12px; border-bottom: 1px solid var(--border); }
-.markdown table.frontmatter td { color: var(--text-dim); padding: 6px 12px 6px 0; border-bottom: 1px solid var(--border); }
-.markdown table.frontmatter tr:last-child th, .markdown table.frontmatter tr:last-child td { border-bottom: none; }
-.markdown table.frontmatter code { white-space: pre-wrap; font-size: 11px; }
+/* Frontmatter panel — the doc's YAML header beside the prose instead of on
+   top of it. The viewer's /api/render hands the pairs over as data; the
+   share page keeps the old table and inlines its own CSS (shares.go), which
+   is why no `table.frontmatter` rule lives here any more. */
+.fmpanel { margin: 0 0 1.8em; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.fmpanel > summary { list-style: none; cursor: pointer; padding: 7px 12px; color: var(--text-faint); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; user-select: none; display: flex; align-items: center; gap: 6px; }
+.fmpanel > summary::-webkit-details-marker { display: none; }
+/* The caret is the only open/closed signal, so it is drawn rather than
+   inherited: the default marker is hidden above to keep the row on one line. */
+.fmpanel > summary::before { content: ""; width: 0; height: 0; border: 4px solid transparent; border-left-color: currentColor; transition: transform .12s ease; }
+.fmpanel[open] > summary::before { transform: rotate(90deg) translateX(-1px); }
+.fmpanel > summary:hover { color: var(--text-dim); }
+.fmpanel > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+.fmpanel dl { margin: 0; padding: 0 12px 4px; border-top: 1px solid var(--border); }
+.fmpanel dl > div { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.fmpanel dl > div:last-child { border-bottom: none; }
+.fmpanel dt { flex: 0 0 auto; max-width: 40%; color: var(--text-faint); font-size: 11.5px; font-weight: 600; overflow-wrap: anywhere; }
+.fmpanel dd { margin: 0; min-width: 0; color: var(--text-dim); overflow-wrap: anywhere; }
+.fmpanel code { white-space: pre-wrap; font: 11px/1.5 var(--mono); color: #e4d9c4; }
+/* Wide enough for a rail, and the number is arithmetic rather than taste:
+   768 (prose) + 28 (gap) + 240 (rail) = 1036 of column, plus 265 of sidebar,
+   80 of #content padding and ~10 of scrollbar gutter = 1391. A 1280 laptop
+   is NOT wide enough — asking for the rail there costs the prose 110px of
+   measure, which is the squeeze this panel exists to avoid. Below the
+   breakpoint none of this applies and the <details> renders where it sits in
+   the DOM: above the body, closed. Keep FM_RAIL in util.ts in step. */
+@media (min-width: 1400px) {
+  .page.read:has(.fmpanel) { max-width: calc(var(--page-read) + 268px); display: grid; grid-template-columns: minmax(0, var(--page-read)) 240px; column-gap: 28px; align-items: start; }
+  .page.read:has(.fmpanel) > * { grid-column: 1; min-width: 0; }
+  .page.read:has(.fmpanel) > .fmpanel { grid-column: 2; grid-row: 1; position: sticky; top: 0; margin: 0; }
+}
 .markdown .admin input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .admin input[aria-invalid="true"]:focus-visible { outline-color: var(--del); }
 [role="dialog"] input[aria-invalid="true"] { border-color: var(--del); }

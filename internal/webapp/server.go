@@ -1396,7 +1396,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	html, err := RenderMarkdown(src)
+	pairs, html, err := RenderMarkdownPairs(src)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("render: %v", err), http.StatusInternalServerError)
 		return
@@ -1404,6 +1404,12 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 	doc := map[string]any{
 		"path": p, "html": html,
 		"size": fi.Size, "time": fi.Time, "author": fi.Author, "device": fi.Device,
+	}
+	// Frontmatter travels as data, not as a table baked into html — the
+	// viewer lays it out in a side panel. Omitted when the document has
+	// none, so the client shows no panel rather than an empty one.
+	if len(pairs) > 0 {
+		doc["frontmatter"] = pairs
 	}
 	// Omitted rather than sent empty, so a journal from before accounts
 	// existed still renders its Author instead of a blank attribution.
@@ -1441,14 +1447,18 @@ func (s *Server) renderVersion(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	html, err := RenderMarkdown(src)
+	pairs, html, err := RenderMarkdownPairs(src)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("render: %v", err), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{
+	doc := map[string]any{
 		"path": r.URL.Query().Get("path"), "html": html, "size": len(src),
-	})
+	}
+	if len(pairs) > 0 {
+		doc["frontmatter"] = pairs
+	}
+	writeJSON(w, doc)
 }
 
 // inlineMarkup reports whether a Content-Type names something the browser

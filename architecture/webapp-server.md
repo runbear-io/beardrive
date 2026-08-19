@@ -309,6 +309,18 @@ classDiagram
         +Token +Project +Path +Creator +Expires
     }
 
+    class markdownRender {
+        &lt;&lt;markdown.go&gt;&gt;
+        frontmatterPairs(src) pairs + body
+        RenderMarkdown → table + body HTML
+        RenderMarkdownPairs → pairs + body HTML
+        yamlValue(node) text + code flag
+    }
+    class FrontmatterPair {
+        +Key +Value +Code
+    }
+    note for markdownRender "One parse, two surfaces. The share page is the reason the split exists: RenderMarkdown still bakes the key/value TABLE into its HTML, because every /s/ link ever minted serves that output, while the viewer takes RenderMarkdownPairs and gets the frontmatter as DATA so it can hang it beside the prose instead of on top of it (BEA-154). Values cross the wire as literal text plus a code flag, never pre-escaped markup — the panel is a React text node, so escaping is the client's by construction; the table escapes on its way out. shares_test pins the table, because nothing else would fail if someone later tidied shares.go onto the pairs path"
+
     class mermaidTag {
         &lt;&lt;shares.go, the .md branch&gt;&gt;
         body contains language-mermaid?
@@ -480,6 +492,9 @@ classDiagram
     projectPerm ..> Directory : org role
     ShareDB ..> Share
     ShareDB ..> mermaidTag : markdown shares only
+    ShareDB ..> markdownRender : RenderMarkdown (table stays)
+    Server ..> markdownRender : RenderMarkdownPairs (viewer)
+    markdownRender ..> FrontmatterPair
     DeviceRegistry ..> DeviceInfo
     DeviceRegistry *-- devKey : (account, id)
     RemoteSource ..> sourcedOp : attribution comes from the journal key

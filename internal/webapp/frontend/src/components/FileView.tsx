@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
-import type { HeatMap, Node, RenderDoc } from "../api/types";
+import type { FrontmatterPair, HeatMap, Node, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
 import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
 import { useTextAt } from "../hooks/useBlob";
@@ -12,8 +12,10 @@ import {
   MD_EXT,
   PDF_EXT,
   TEXT_EXT,
+  fmPanelOpen,
   humanSize,
   joinPath,
+  rememberFmPanel,
   resolveWiki,
   whoChanged,
 } from "../util";
@@ -232,13 +234,54 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
 
   if (error) return <LoadError version={version} err={error as Error} />;
   if (!doc) return null;
+  // The panel is a SIBLING of the prose, not a wrapper around it: that is
+  // what lets plain CSS hang it in the right margin (style.css, .page.read)
+  // without a third column in AppShell or new props through Browser.
   // Server-rendered, server-sanitized markdown — same trust model as the
   // classic app assigning innerHTML.
   return (
-    <div
-      dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
-      onClick={(e) => handleLinkClick(e, path, onOpenFile)}
-    />
+    <>
+      {doc.frontmatter?.length ? <FrontmatterPanel pairs={doc.frontmatter} /> : null}
+      <div
+        dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
+        onClick={(e) => handleLinkClick(e, path, onOpenFile)}
+      />
+    </>
+  );
+}
+
+/* A document's YAML frontmatter, beside the prose instead of on top of it.
+   Native <details>, so the disclosure, its keyboard handling and its a11y
+   semantics come from the element rather than from us — and values are
+   ordinary React text children, which is what makes "a value containing
+   markup renders as text" true by construction rather than by a rule. */
+function FrontmatterPanel({ pairs }: { pairs: FrontmatterPair[] }) {
+  const [open, setOpen] = useState(fmPanelOpen);
+  return (
+    <details className="fmpanel" open={open}>
+      {/* The click, not the element's own `toggle` event: `toggle` is
+          dispatched asynchronously, so collapsing the panel and immediately
+          opening another file lost the preference — the navigation started
+          before the handler ran. A summary click is also what Enter and
+          Space produce, so the keyboard path is the same one. */}
+      <summary
+        onClick={(e) => {
+          e.preventDefault();
+          setOpen(!open);
+          rememberFmPanel(!open); // every file and every reload, until changed
+        }}
+      >
+        Properties
+      </summary>
+      <dl>
+        {pairs.map((p) => (
+          <div key={p.key}>
+            <dt>{p.key}</dt>
+            <dd>{p.code ? <code>{p.value}</code> : p.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
   );
 }
 
