@@ -112,6 +112,11 @@ func TestE2EServe(t *testing.T) {
 		"notes/readme.md",         // read AND rewritten by the run
 		"index.md",                // read, never changed
 		"archive/retired-spec.md", // read, never changed — the hot+stale one
+		// Read by the run, then deleted by the seed: the run card has to keep
+		// it and label it "no longer in the project", the way the Dashboard
+		// already does with its heat row (BEA-152). Drop this and the label
+		// has nothing to render against.
+		"scratch.md",
 	} {
 		srv.Reads.RecordSession(p.ID, e2eSession, "seed", path)
 	}
