@@ -515,6 +515,7 @@ export default function Browser(props: {
         apiBase={apiBase}
         target={route.viewTarget || ""}
         isFolder={isFolderFn}
+        flatFiles={flatFiles}
         onOpen={openPath}
         onMeta={setMeta}
         onRendered={onRendered}

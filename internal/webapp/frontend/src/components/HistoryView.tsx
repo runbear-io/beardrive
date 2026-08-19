@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
-import type { HistoryEntry } from "../api/types";
+import type { HistoryEntry, Node } from "../api/types";
 import { HistoryRow, NoteText, type RemoveAction, type RestoreAction } from "./HistoryRow";
 import { Icon } from "./shell";
 import { whoChanged } from "../util";
@@ -36,6 +36,9 @@ export function HistoryView(props: {
   apiBase: string;
   target: string; // "" = whole project
   isFolder: (p: string) => boolean;
+  // Every file the project still has, so a run card can mark a path it read
+  // that has since been deleted — the same label the Dashboard uses.
+  flatFiles: Node[];
   onOpen: (path: string, version?: string) => void;
   onMeta: (meta: string) => void;
   onRendered?: () => void;
@@ -48,6 +51,9 @@ export function HistoryView(props: {
   onFilters?: (f: Filters) => void;
 }) {
   const { apiBase, target, isFolder, onMeta, onRendered, restore, remove, undoRun, filters } = props;
+  // One set for the whole feed, not one per card: every run card asks the
+  // same question of the same tree.
+  const known = useMemo(() => new Set(props.flatFiles.map((f) => f.path)), [props.flatFiles]);
   const q = !target
     ? { prefix: "" }
     : isFolder(target)
@@ -170,6 +176,7 @@ export function HistoryView(props: {
           <RunGroup
             key={"g" + n}
             run={item.run}
+            known={known}
             onOpen={props.onOpen}
             apiBase={apiBase}
             prevBlob={prevBlob}
@@ -218,6 +225,7 @@ export function HistoryView(props: {
 
 function RunGroup({
   run,
+  known,
   onOpen,
   apiBase,
   prevBlob,
@@ -228,6 +236,7 @@ function RunGroup({
   undoRun,
 }: {
   run: Run;
+  known: Set<string>;
   onOpen: (path: string, version?: string) => void;
   apiBase: string;
   prevBlob: (i: number) => string | undefined;
@@ -334,15 +343,24 @@ function RunGroup({
                 <button key={p} type="button" className="hrun-read" onClick={() => onOpen(p)}>
                   <span className="hkind">read</span>
                   <span className="hpath">{p}</span>
+                  {/* Word for word what the Dashboard says about the same
+                      file (Insights.tsx) — two surfaces reading one ledger
+                      must not each invent their own vocabulary for it. */}
+                  {!known.has(p) && <span className="in-hp-gone">· no longer in the project</span>}
                 </button>
               ))}
             </div>
           )}
-          {/* Not decoration: reads are recorded only for paths the project
-              still has, so a file this run read and then deleted shows its
-              write with no read. Saying so beats reading as a bug. */}
+          {/* Not decoration: this card is one session on one device, so its
+              read count is smaller than the project's totals for the same
+              files — and that gap read as a bug. Reads of a deleted file are
+              kept and labelled, never dropped: the ledger records what the
+              agent did, and an audit surface reports it. */}
           {sid && (
-            <div className="hrun-foot">Reads shown only for files the project still has.</div>
+            <div className="hrun-foot">
+              Reads shown are what this device reported for this session — a narrower set than the
+              project's read totals.
+            </div>
           )}
         </div>
       )}
