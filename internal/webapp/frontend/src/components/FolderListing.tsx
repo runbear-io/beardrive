@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import type { HeatMap, Node } from "../api/types";
 import { heatFor, heatLevel, heatText, useFolderHistory } from "../hooks/useBrowse";
-import { HEAT_DISCLOSURE } from "../lib/heat";
+import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
 import { humanSize } from "../util";
 import { Icon } from "./shell";
 import { HistoryRow } from "./HistoryRow";
@@ -58,6 +58,10 @@ export function FolderListing(props: {
             }
             const he = heatFor(heatMap, c.path, !!c.dir);
             if (he) meta = heatText(he) + (meta ? " · " + meta : "");
+            // Files only: a folder's heat is a subtree sum and it has no one
+            // mtime to be stale against, which is also why the Dashboard
+            // plots files only (BEA-119).
+            const stale = c.dir ? "" : staleNote(he, c.time);
             return (
               <div
                 key={c.path}
@@ -77,6 +81,19 @@ export function FolderListing(props: {
                   <Icon name={c.dir ? "folder" : "doc"} />
                 </span>
                 <span className="dl-name">{c.name}</span>
+                {stale && (
+                  /* Same reasoning as the dot below: the glyph carries a real
+                     aria-label, because title= needs a hover that touch and
+                     screen readers never give. */
+                  <span
+                    className="stalemark"
+                    role="img"
+                    aria-label={"Warning: " + stale}
+                    title={"Read often, but " + stale}
+                  >
+                    ⚠
+                  </span>
+                )}
                 {he && (
                   /* title= needs hover, which touch never gives and screen
                      readers never see — the dot carries its own name. */
