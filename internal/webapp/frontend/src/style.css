@@ -240,7 +240,17 @@ button, input, a.btn { font-family: inherit; }
 /* The shares table's actions column holds one button, not a select plus one
    like the members table. At 186px it stole the room the row's own facts
    (who, when, whether it expires) needed, and they truncated to "no exp…". */
-.shares-table .admin-table th:last-child, .shares-table .admin-table td:last-child { width: 110px; }
+/* …and once it also carried a copy control beside Revoke (BEA-130) the
+   track had to grow again — by one icon button, not back to the 186px that
+   caused the starvation above. The detail cell survives it because it wraps
+   now (next rule) instead of ellipsizing, so the cost of the extra 40px is a
+   word folding onto a second line rather than a fact disappearing. */
+.shares-table .admin-table th:last-child, .shares-table .admin-table td:last-child { width: 150px; }
+/* Right-aligned by the td; this only puts a gap between the two controls and
+   centres the icon in its button. */
+.share-acts { display: inline-flex; align-items: center; gap: 6px; }
+.share-acts .ai-btn { display: inline-flex; align-items: center; justify-content: center; padding: 0 8px; }
+.share-acts .ai-btn .ico { width: 15px; height: 15px; }
 /* …and once the row also carries the link's open count (BEA-76), narrowing
    the button column stopped being enough: the detail ran to "3 op…" and the
    receipt — the whole point of showing it — was the part that fell off. So
@@ -520,6 +530,9 @@ button, input, a.btn { font-family: inherit; }
 .ps-facts { display: grid; grid-template-columns: auto 1fr; gap: 8px 20px; margin: 0; font-size: 13px; }
 .ps-facts dt { color: var(--text-faint); }
 .ps-facts dd { margin: 0; color: var(--text-dim); }
+.ps-export { margin: 16px 0 0; max-width: 62ch; }
+.ps-export code { font-size: 12px; padding: 1px 5px; border-radius: 4px; background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+.ps-export a { color: var(--accent-bright); text-decoration: none; }
 
 /* ---- admin panels ---- */
 /* width comes from .page (app) — see #content */
@@ -633,6 +646,10 @@ a.ai-main:hover { color: var(--accent); }
 }
 .dl-meta { flex: none; font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 /* read-heat dot: intensity grows with 30-day reads (heatLevel in app.js) */
+/* Conflict copy marker in the file listing: a preserved concurrent edit is
+   an ordinary file with an alarming name, so the row says so before the
+   reader has to guess from the suffix. */
+.dl-conflict { flex: none; font-size: 10.5px; line-height: 1; letter-spacing: .02em; text-transform: uppercase; padding: 3px 6px; border-radius: 999px; border: 1px solid var(--accent-dim); background: var(--glow); color: var(--accent-bright); white-space: nowrap; }
 .heatdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .heatdot.lvl1 { opacity: .3; }
 .heatdot.lvl2 { opacity: .55; }
@@ -1159,6 +1176,18 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .vbanner .vb-text span { color: var(--text-dim); }
 .vbanner .vb-actions { flex: none; display: flex; gap: 8px; }
 .vbanner .vb-actions .ai-btn { display: inline-flex; align-items: center; text-decoration: none; }
+
+/* Credential badge on the file view (BEA-147) — the share gate's finding on
+   the path every file takes. Same strip geometry as .vbanner above; the red
+   family rather than the accent, because accent+glow already means "you are
+   looking at an old version" and the two strips can appear together. The hue
+   is .meta-stale's (#e07070, style.css:385), which is the warning colour this
+   same view already speaks. */
+.sbadge { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; padding: 11px 14px; border: 1px solid rgba(242,109,109,.32); border-radius: var(--r-card); background: rgba(242,109,109,.08); }
+.sbadge .sb-icon { flex: none; display: flex; color: #e07070; }
+.sbadge .sb-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; line-height: 1.45; }
+.sbadge .sb-text b { color: #e07070; font-weight: 600; }
+.sbadge .sb-text span { color: var(--text-dim); }
 
 /* plain file / binary views */
 pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; }
