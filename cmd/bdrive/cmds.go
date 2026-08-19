@@ -291,6 +291,10 @@ func statusCmd() *cobra.Command {
 	}
 }
 
+// writeGap is how far a file's write time must lag the moment it was journaled
+// before `bdrive log` prints both.
+const writeGap = time.Minute
+
 func logCmd() *cobra.Command {
 	var limit int
 	var pathFilter string
@@ -323,7 +327,8 @@ func logCmd() *cobra.Command {
 				return nil
 			}
 			for _, op := range entries {
-				when := syncer.DisplayTime(op).Local().Format("2006-01-02 15:04:05")
+				commit := syncer.CommitTime(op)
+				when := commit.Local().Format("2006-01-02 15:04:05")
 				kind := op.Kind
 				if kind == journal.KindPut {
 					kind = "put   "
@@ -343,6 +348,17 @@ func logCmd() *cobra.Command {
 					safeField(op.Path, 160), safeField(who, 64), safeField(op.DeviceName, 64))
 				if op.Kind == journal.KindPut {
 					line += fmt.Sprintf("  (%s)", humanBytes(op.Size))
+				}
+				// The first column is when the change was journaled, so the
+				// rows read monotonically. The file's own write time still
+				// matters — but the daemon scans every 3s and a hook sync is
+				// prompt, so a sub-minute gap is just scan latency and would be
+				// noise on every row. A larger gap means the file genuinely
+				// predates its arrival here — a rename, or an old document
+				// added today — and that is the case the reader has to see.
+				// Deletes have no file left to stat, so they never carry it.
+				if written := syncer.DisplayTime(op); commit.Sub(written) >= writeGap {
+					line += fmt.Sprintf("  (written %s)", written.Local().Format("2006-01-02 15:04:05"))
 				}
 				if note := safeField(op.Note, 200); note != "" {
 					line += "  [" + note + "]"
