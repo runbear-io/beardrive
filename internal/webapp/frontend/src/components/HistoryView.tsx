@@ -69,7 +69,7 @@ export function HistoryView(props: {
   // into one array — groupRuns and prevBlob both work over the whole window,
   // so a run straddling a page boundary becomes one card when its second page
   // lands, and the oldest loaded row shows no diff base rather than a wrong one.
-  const { data, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+  const { data, error, isPending, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
     queryKey: ["history", apiBase, qs],
     queryFn: ({ pageParam }) =>
       getJSON<{ entries: HistoryEntry[]; next_cursor?: string }>(
@@ -106,7 +106,22 @@ export function HistoryView(props: {
       onChange={props.onFilters}
     />
   );
-  if (!data) return bar ? <div className="history">{bar}</div> : null;
+  // Nothing loaded yet. The filters are in the query key, so every keystroke
+  // in the path box drops `data` back to undefined — returning a bare filter
+  // bar here made a pending request pixel-identical to "nothing matched", and
+  // a reader twice concluded a file had no history when it had three entries
+  // (BEA-131). The shell always renders so the bar stays interactive, and the
+  // loading row is the same `.empty` one-liner the empty state uses, so the
+  // section doesn't jump when the response lands. Not while `error`: failures
+  // already report through onMeta above, and a permanent spinner would hide
+  // them.
+  if (!data)
+    return (
+      <div className="history">
+        {bar}
+        {isPending && !error && <div className="empty">Loading…</div>}
+      </div>
+    );
   // Entries arrive newest-first, so a row's predecessor is the next entry
   // below it on the same path that still has content. This keeps scanning the
   // flat list, never a group: it is a per-path lookup, and grouping must not

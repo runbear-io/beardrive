@@ -293,8 +293,15 @@ classDiagram
         +Rule string
         +Line int
     }
-    note for secretScan "No longer a webapp file: internal/secrets is stdlib-only so internal/syncer can run the SAME rules on the path every file takes (the sync scan, warn-only — see cli-sync.md). The rule ids are a wire contract, keyed off by Browser.tsx's SECRET_LABELS and now by Label, whose test asserts it covers every rule"
+    class renderFindings {
+        <<Server, server.go>>
+        +renderFindings(src) []Finding
+        caps at ScanLimit, then Scan
+        findings on the render response, omitted when empty
+    }
+    note for secretScan "No longer a webapp file: internal/secrets is stdlib-only so internal/syncer can run the SAME rules on the path every file takes (the sync scan, warn-only — see cli-sync.md). The rule ids are a wire contract, keyed off by lib/secrets.ts's SECRET_LABELS and by Label, whose test asserts it covers every rule"
     note for secretScan "Mint-time gate on handleShareCreate: the one place a member turns private bytes into a public URL is the one place the bytes are read first. It returns rule ids and LINE NUMBERS only — the matched text never reaches a response body, a log line, or a metric label, the same rule ReadLedger keeps for actor identity. Bypassed by confirm:true (bdrive share --force, the UI's Share anyway) and by Server.alreadyPublic, since a path that already has a live link is public already. Fails CLOSED: an unreadable blob is 503, not a silent pass"
+    note for renderFindings "The SECOND caller, and the reason the gate is no longer the only one (BEA-147): minting is the rarest path in the product, so a hub that could name an AWS key on line 3 well enough to refuse to publish a file rendered that same key to every member as prose. handleRender and renderVersion already hold the bytes RenderMarkdown needs, so the cap is a slice rather than the LimitReader the two streaming callers use — same ScanLimit, so the badge and the share dialog can never disagree about one file. Advisory: findings ride along on the render response (omitted when empty), nothing is blocked and nothing is redacted, because a member who can open the file could already read the key"
 
     class sandboxInline {
         <<Server, every bytes-out route>>
@@ -364,7 +371,7 @@ classDiagram
     class ShareOpen {
         +Count +Last
     }
-    note for ShareOpen "The receipt on a public link: share-kind buckets only, which is what makes Last mean last OPENED — HeatEntry.LastRead is cross-kind, so a member viewing the file in the hub would otherwise move the date. Counts, never openers: the share actor is token+IP. Keyed by path, so two tokens on one file report the same number. Callers build the map ONCE per project and index it; a per-share call is a full byKey scan per row"
+    note for ShareOpen "The receipt on a public link: share-kind buckets only, which is what makes Last mean last OPENED — HeatEntry.LastRead is cross-kind, so a member viewing the file in the hub would otherwise move the date. Counts, never openers: the share actor is token+IP+UA hash (token+IP alone folded a whole office into one reader, BEA-151 — the browser component is a heuristic that raises the floor, never identity, and is hashed because Record persists the actor). Keyed by path, so two tokens on one file report the same number. Callers build the map ONCE per project and index it; a per-share call is a full byKey scan per row"
 
     class QuotaProvider {
         <<interface>>
@@ -426,6 +433,8 @@ classDiagram
     reservations ..> QuotaProvider : CheckWrite(size + outstanding), RecordUsage on landing
     ShareDB ..> QuotaProvider : CheckRead before the stream, RecordEgress after
     Server ..> secretScan : handleShareCreate scans the first 1 MiB unless confirmed or alreadyPublic
+    Server ..> renderFindings : handleRender + renderVersion, every markdown view
+    renderFindings ..> secretScan
     secretScan ..> secretFinding
     Server ..> countingWriter : every bytes-out route that bills
     Server ..> wireCodec : gzip on /store/ GET+list, inflate above spool on PUT
