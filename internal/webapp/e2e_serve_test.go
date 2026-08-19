@@ -112,6 +112,11 @@ func TestE2EServe(t *testing.T) {
 		"notes/readme.md",         // read AND rewritten by the run
 		"index.md",                // read, never changed
 		"archive/retired-spec.md", // read, never changed — the hot+stale one
+		// Read by the run, then deleted by the seed: the run card has to keep
+		// it and label it "no longer in the project", the way the Dashboard
+		// already does with its heat row (BEA-152). Drop this and the label
+		// has nothing to render against.
+		"scratch.md",
 	} {
 		srv.Reads.RecordSession(p.ID, e2eSession, "seed", path)
 	}
@@ -311,6 +316,16 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 		User: "alice@x.io", UserName: "Alice",
 		Kind: journal.KindDelete, Path: "scratch.md",
 	})
+	// A conflict copy of guide.md, named exactly the way syncer.conflictName
+	// writes one. The suffix is the whole contract the hub reads a conflict
+	// out of (BEA-128), so the timestamp is a fixed literal: a relative one
+	// would make the banner's text move under the assertion.
+	// Under archive/ on purpose: notes/ is where two other specs pin an exact
+	// file count and measure every row's width on a 360px phone, and a 53-
+	// character filename is not what those are about.
+	put("archive/old-runbook.md.bdrive-conflict-mira-laptop-20260814T060945Z",
+		"# Old runbook\n\nMira's version, written at the same time as the other one.\n", 2*time.Hour)
+	ops[len(ops)-1].Note = "conflict copy of archive/old-runbook.md"
 	if err := journal.Append(filepath.Join(prefix, "journal", "seed.jsonl"), ops); err != nil {
 		t.Fatal(err)
 	}

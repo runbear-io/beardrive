@@ -3,6 +3,8 @@
 // The API is deliberately storage-blind: nothing here ever names a bucket,
 // remote URL, or credential, and heat responses carry no actor identities.
 
+import type { SecretFinding } from "../lib/secrets";
+
 // GET /api/config (handleConfig, server.go)
 export interface ServerConfig {
   mode: "volume" | "hub";
@@ -144,16 +146,32 @@ export interface Node {
   children?: Node[];
 }
 
+// One key/value row of a document's YAML frontmatter, in author order.
+// `value` is plain text, never markup — the panel renders it as a text node,
+// so escaping is React's job and not a rule anyone has to remember. `code`
+// marks the nested values that read as compact YAML.
+export interface FrontmatterPair {
+  key: string;
+  value: string;
+  code?: boolean;
+}
+
 // GET .../render (handleRender, server.go)
 export interface RenderDoc {
   path: string;
   html: string;
+  // Absent when the document has none: no field, no panel.
+  frontmatter?: FrontmatterPair[];
   size: number;
   time?: string;
   user?: string;
   user_name?: string;
   author?: string;
   device?: string;
+  // The share gate's credential scan, run on the render path too (BEA-147).
+  // Omitted by the server when the file is clean, so a truthiness test is
+  // the whole check. Rule ids and line numbers only — never the matched text.
+  findings?: SecretFinding[];
 }
 
 // GET .../heat (handleHeat, reads.go) — counts only, never who.

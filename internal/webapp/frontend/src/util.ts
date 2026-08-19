@@ -83,6 +83,32 @@ export function rememberProject(id: string) {
   }
 }
 
+/* Whether the frontmatter panel is expanded, remembered for this browser
+   the same way and with the same caveats as lastProject above. Unset (the
+   first visit) is not "closed": the rail only exists on a wide window, so
+   the default follows the width — expanded on desktop, a closed disclosure
+   on a phone. */
+const FM_PANEL = "bdrive.fmPanel";
+export const FM_RAIL = "(min-width: 1400px)"; // must match style.css
+
+export function fmPanelOpen(): boolean {
+  try {
+    const v = localStorage.getItem(FM_PANEL);
+    if (v !== null) return v === "1";
+  } catch {
+    /* fall through to the width default */
+  }
+  return window.matchMedia(FM_RAIL).matches;
+}
+
+export function rememberFmPanel(open: boolean) {
+  try {
+    localStorage.setItem(FM_PANEL, open ? "1" : "0");
+  } catch {
+    /* preference only */
+  }
+}
+
 /* Who made a change, as history renders it everywhere: the account, with
    the display name in front when the server knows one, falling back to the
    git/OS identity of an offline device. */
