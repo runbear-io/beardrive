@@ -520,6 +520,9 @@ button, input, a.btn { font-family: inherit; }
 .ps-facts { display: grid; grid-template-columns: auto 1fr; gap: 8px 20px; margin: 0; font-size: 13px; }
 .ps-facts dt { color: var(--text-faint); }
 .ps-facts dd { margin: 0; color: var(--text-dim); }
+.ps-export { margin: 16px 0 0; max-width: 62ch; }
+.ps-export code { font-size: 12px; padding: 1px 5px; border-radius: 4px; background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+.ps-export a { color: var(--accent-bright); text-decoration: none; }
 
 /* ---- admin panels ---- */
 /* width comes from .page (app) — see #content */
