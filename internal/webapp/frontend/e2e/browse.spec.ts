@@ -32,9 +32,33 @@ test("wikilink navigates to the target file", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/index.md`);
-  await page.click('#content a:has-text("guide")');
+  const link = page.locator('#content a:has-text("guide")');
+  // BEA-136: the href itself, not just the click. Copy-link-address,
+  // middle-click and open-in-new-tab all read this attribute, and it used to
+  // be the unresolvable string "wiki:guide".
+  await expect(link).toHaveAttribute("href", `/${pid}/guide.md`);
+  await page.evaluate(() => ((window as Window & { __spa?: number }).__spa = 1));
+  await link.click();
   await page.waitForURL(`/${pid}/guide.md`);
   await expect(page.locator("#content")).toContainText("Second version");
+  // Still the same document: a plain click must SPA-route, not reload.
+  expect(await page.evaluate(() => (window as Window & { __spa?: number }).__spa)).toBe(1);
+});
+
+// BEA-136: everything the rendered anchor has to get right besides the click.
+test("wikilinks: modified click is the browser's, a dangling one has no href", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/index.md`);
+  // A cmd/ctrl-click belongs to the browser (new tab), so THIS page stays put.
+  await page.locator('#content a:has-text("guide")').click({ modifiers: ["ControlOrMeta"] });
+  await page.waitForTimeout(300);
+  expect(new URL(page.url()).pathname).toBe(`/${pid}/index.md`);
+  // [[nowhere]] matches no file: unresolved, and no dead href to copy.
+  const missing = page.locator("#content a.wiki-missing");
+  await expect(missing).toHaveText("nowhere");
+  expect(await missing.getAttribute("href")).toBeNull();
+  expect(await page.locator("#content").innerHTML()).not.toContain("wiki:");
 });
 
 test("folder listing: counts, change feed, heat dot on a read file", async ({ page }) => {
@@ -1075,6 +1099,22 @@ test("mermaid: a good fence renders, a broken one keeps its code block", async (
   // bad fence must not take the good one on the same page down with it.
   await expect(page.locator("#content pre code.language-mermaid")).toHaveCount(1);
   await expect(page.locator("#content .mermaid-err")).toHaveText("Couldn't render this diagram.");
+  // ...with the parser's own message under it, so the author can fix the fence.
+  const detail = page.locator("#content .mermaid-err-detail");
+  await expect(detail).toHaveCount(1);
+  // Structure, not wording: mermaid is a ^ range and its expected-token list
+  // is the library's, so pinning the exact string would make a minor bump red.
+  await expect(detail).toContainText(/line \d+/i);
+  // The message quotes the author's source, and this string is mounted through
+  // dangerouslySetInnerHTML: the tag has to arrive as text and stay inert.
+  await expect(detail).toContainText("<img onerror=x>");
+  await expect(page.locator("#content img")).toHaveCount(0);
+  // A long expected-token list scrolls inside its own box; the page does not.
+  expect(await detail.evaluate((el) => getComputedStyle(el).overflowX)).not.toBe("visible");
+  expect(await detail.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1),
+  ).toBe(false);
 });
 
 test("a file with no mermaid fence fetches no mermaid chunk", async ({ page }) => {
@@ -1109,4 +1149,34 @@ test("a shared diagram renders on the public page, without one there is no scrip
   await expect(svg).toHaveCount(1);
   await expect(svg).toContainText("Teammate");
   await expect(page.locator(".mermaid-err")).toHaveText("Couldn't render this diagram.");
+  // The diagnostics ride along on the share page too — share-mermaid.ts needs
+  // no change of its own, which is exactly what asserting it here proves. The
+  // share shell has its own inline CSS, so this also catches a rule that only
+  // ever landed in the app's stylesheet.
+  const detail = page.locator(".mermaid-err-detail");
+  await expect(detail).toContainText(/line \d+/i);
+  await expect(detail).toContainText("<img onerror=x>");
+  await expect(page.locator("img")).toHaveCount(0);
+  expect(await detail.evaluate((el) => getComputedStyle(el).whiteSpace)).toBe("pre");
+});
+
+/* BEA-61: a read count that doesn't say your own views are in it reads as
+   other people's interest. Every surface printing one discloses it — the file
+   header can't do it visibly (#meta is nowrap + ellipsis), so it does it by
+   hover text and a screen-reader span. */
+test("read counts disclose that your own views count", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+
+  await page.goto(`/${pid}/index.md`);
+  const heat = page.locator("#meta span[title]");
+  await expect(heat).toContainText("/ 30d");
+  await expect(heat).toHaveAttribute("title", /Includes your own views\./);
+  await expect(heat.locator(".sr-only")).toContainText("10 minutes count once");
+
+  // The folder page says it once, out loud, for the summary and every row.
+  await page.goto(`/${pid}/notes`);
+  await expect(page.locator(".dl-heatnote")).toHaveText(
+    "Includes your own views. Repeat opens by the same reader inside 10 minutes count once.",
+  );
 });

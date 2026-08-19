@@ -32,6 +32,21 @@ export function joinPath(dir: string, rel: string): string {
   return out.join("/");
 }
 
+/* Obsidian-style wikilink target -> file. Exact path first, then basename;
+   ".md" is optional on both; everything case-insensitive. The rules are the
+   product decision, so they live in one place and get tested without a
+   browser (node --test has no DOM, so this cannot live in FileView). */
+export function resolveWiki(target: string, files: { path: string; name: string }[]) {
+  const want = target.toLowerCase();
+  return (
+    files.find((f) => f.path.toLowerCase() === want || f.path.toLowerCase() === want + ".md") ||
+    files.find((f) => {
+      const n = f.name.toLowerCase();
+      return n === want || n === want + ".md";
+    })
+  );
+}
+
 /* clipboard copy that never throws on a non-HTTPS origin (where
    navigator.clipboard is undefined). Returns true on success. */
 export async function copyText(text: string): Promise<boolean> {

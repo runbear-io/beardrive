@@ -379,6 +379,10 @@ button, input, a.btn { font-family: inherit; }
 #crumb .crumb-seg:hover { color: var(--accent-bright); }
 #crumb .crumb-sep { color: var(--text-ghost); margin: 0 5px; }
 #meta { flex: 1; min-width: 0; font-size: 12px; color: var(--text-faint); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The Dashboard's hot+stale verdict, carried onto the file's own page. Same
+   red as the danger quadrant (.in-pt.danger) on purpose — one verdict, one
+   colour, whichever screen you meet it on. */
+.meta-stale { color: #e07070; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px; flex: none;
@@ -593,6 +597,11 @@ a.ai-main:hover { color: var(--accent); }
 .dl-title-icon { display: flex; color: var(--accent); }
 .dl-title-icon .ico { width: 20px; height: 20px; }
 .dl-sub { color: var(--text-faint); font-size: 12.5px; margin: 0 0 18px; }
+/* The read-count disclosure, printed under the folder's summary line: the
+   summary's voice one notch quieter, sitting close enough that the two read as
+   one block. Deliberately NOT .dl-sub — that class means "the summary line" to
+   every other reader of this page, tests included. */
+.dl-heatnote { color: var(--text-faint); font-size: 12px; opacity: .8; margin: -14px 0 18px; }
 .dl-items { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; background: var(--bg-side); }
 .dl-row { display: flex; align-items: center; gap: 11px; padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
 .dl-row:last-child { border-bottom: none; }
@@ -629,6 +638,8 @@ a.ai-main:hover { color: var(--accent); }
 .heatdot.lvl2 { opacity: .55; }
 .heatdot.lvl3 { opacity: .8; }
 .heatdot.lvl4 { opacity: 1; box-shadow: 0 0 6px rgba(245, 166, 35, .55); }
+/* Hot + stale, beside the heat dot that shows the "hot" half. */
+.stalemark { flex: none; font-size: 11px; line-height: 1; color: #e07070; }
 .dl-empty { padding: 24px 14px; color: var(--text-faint); font-size: 13px; border: 1px dashed var(--border); border-radius: var(--r-card); text-align: center; }
 .dl-h3 { margin: 28px 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); font-weight: 600; }
 .dl-hlist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); overflow: hidden; max-width: none; }
@@ -1089,6 +1100,10 @@ a.ai-main:hover { color: var(--accent); }
 .markdown strong { color: var(--text); font-weight: 620; }
 .markdown a { color: var(--accent-bright); text-decoration: none; border-bottom: 1px solid rgba(245,166,35,.28); }
 .markdown a:hover { border-bottom-color: var(--accent); }
+/* A wikilink pointing at nothing. Without an href it loses link styling
+   entirely, and a broken cross-reference silently reading as prose is worse
+   than the dead URL this replaced. */
+.markdown a.wiki-missing { color: var(--text-faint); border-bottom: none; text-decoration: underline dotted; cursor: help; }
 .markdown ul, .markdown ol { margin: 0 0 1em; padding-left: 1.4em; }
 .markdown li { margin-bottom: .4em; }
 .markdown li::marker { color: var(--text-ghost); }
@@ -1108,7 +1123,11 @@ a.ai-main:hover { color: var(--accent); }
    diagrams would otherwise be a wall of red. */
 .markdown .mermaid-diagram { margin: 1.3em 0; overflow-x: auto; }
 .markdown .mermaid-diagram svg { max-width: 100%; height: auto; }
-.markdown .mermaid-err { margin: -.9em 0 1.3em; font-size: 12px; color: var(--text-faint); }
+.markdown .mermaid-err { margin: -.9em 0 .4em; font-size: 12px; color: var(--text-faint); }
+/* The parser's own message under the note. `white-space: pre` is load-bearing:
+   the caret marker only lines up in a monospace, non-wrapping box. The height
+   cap keeps a pathological message from pushing the document off the page. */
+.markdown .mermaid-err-detail { margin: 0 0 1.3em; font: 11.5px/1.5 var(--mono); color: var(--text-faint); white-space: pre; overflow: auto; max-height: 12em; }
 /* Frontmatter key/value table (server-rendered from a doc's YAML header). */
 .markdown table.frontmatter { margin: 0 0 1.8em; font-size: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; border-collapse: separate; border-spacing: 0; }
 .markdown table.frontmatter th { text-transform: none; letter-spacing: 0; font-size: 11.5px; color: var(--text-faint); font-weight: 600; text-align: left; white-space: nowrap; vertical-align: top; padding: 6px 14px 6px 12px; border-bottom: 1px solid var(--border); }

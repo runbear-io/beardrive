@@ -202,7 +202,7 @@ export default function Browser(props: {
   );
 
   /* ---- topbar state + actions ---- */
-  const [meta, setMeta] = useState("");
+  const [meta, setMeta] = useState<ReactNode>("");
   const [share, setShare] = useState<{ url: string; copied: boolean } | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -607,6 +607,7 @@ export default function Browser(props: {
             version={version}
             heatMap={heatMap}
             flatFiles={flatFiles}
+            projectId={project?.id}
             onOpenFile={openPath}
             onMeta={setMeta}
             onRendered={onRendered}
