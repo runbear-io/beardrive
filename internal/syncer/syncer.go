@@ -649,11 +649,18 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 	if note == "" {
 		note = s.Store.LoadNote()
 	}
+	// One scan is one commit: every op it produces carries the same Time. Op
+	// order inside the batch is already carried by Lamport and Seq, which
+	// journal.Less consults first and second — so replay is unaffected — while
+	// a shared Time is what lets `bdrive log` recognise a batch and order it by
+	// the files' own write times (SortForDisplay). Stamping each op separately
+	// made a rename's two halves two different instants, which is the bug.
+	committed := time.Now().UTC()
 	nextOp := func(kind, rel string) journal.Op {
 		st.Lamport = tickLamport(st.Lamport)
 		seqBase++
 		return journal.Op{
-			Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
+			Seq: seqBase, Lamport: st.Lamport, Time: committed,
 			Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
 			User: s.Account.Email, UserName: s.Account.Name,
 			Kind: kind, Path: rel, Note: note, Session: s.SessionID,
@@ -1700,16 +1707,39 @@ func DisplayTime(op journal.Op) time.Time {
 	return op.Time
 }
 
-// SortForDisplay orders ops newest-first by DisplayTime — the timestamp the
-// user actually sees, so the list reads as a timeline. Ties fall back to
-// reversed journal.Less to stay deterministic. This is deliberately NOT the
-// replay order: LogEntries keeps returning causal order because
-// bdrive restore walks it to find a file's previous version.
+// CommitTime is when a change entered the project, which is the question
+// `bdrive log` answers. It is not DisplayTime: `mv` preserves mtime, so the put
+// half of a rename carries the original file's write time and sorts away from
+// the delete half of the same rename — a file that appeared seconds ago lands
+// below the fold.
+//
+// Same clamp as DisplayTime, for the same reason: Op.Time is a peer's JSON, and
+// the one clock a peer does not own is this machine's. An op we cannot date
+// sorts last rather than first, which is the direction that cannot be aimed.
+func CommitTime(op journal.Op) time.Time {
+	if op.Time.After(time.Now()) {
+		return time.Time{}
+	}
+	return op.Time
+}
+
+// SortForDisplay orders ops newest-first by CommitTime — when the change
+// entered the project — so the two halves of a rename sit together and an old
+// file added today sorts by when it arrived. DisplayTime breaks ties and is
+// load-bearing: everything from one scan shares a commit second, and the files'
+// own write times are the only thing that orders it inside that second. Ties
+// beyond that fall back to reversed journal.Less to stay deterministic. This is
+// deliberately NOT the replay order: LogEntries keeps returning causal order
+// because bdrive restore walks it to find a file's previous version.
 func SortForDisplay(ops []journal.Op) {
 	sort.SliceStable(ops, func(i, j int) bool {
-		ti, tj := DisplayTime(ops[i]), DisplayTime(ops[j])
+		ti, tj := CommitTime(ops[i]), CommitTime(ops[j])
 		if !ti.Equal(tj) {
 			return ti.After(tj)
+		}
+		di, dj := DisplayTime(ops[i]), DisplayTime(ops[j])
+		if !di.Equal(dj) {
+			return di.After(dj)
 		}
 		return journal.Less(ops[j], ops[i])
 	})
