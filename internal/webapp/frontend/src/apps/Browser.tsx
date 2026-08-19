@@ -32,6 +32,8 @@ import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
 import type { Run } from "../lib/runs";
 import { VersionBanner } from "../components/VersionBanner";
+import { ConflictBanner } from "../components/ConflictBanner";
+import { parseConflict } from "../lib/conflict";
 
 // The hub's six share-time credential rules, in words. Only one caller
 // (shareNow), so it lives here rather than in its own file.
@@ -467,7 +469,12 @@ export default function Browser(props: {
         props.onClosePanel?.();
         navigate(to);
       };
-      add("folder", "Go to project root", "action", go("/" + pid));
+      // Labelled with the project's name and tagged `project`, so typing the
+      // name of the project you are IN finds it: the switcher loop below
+      // rightly excludes the current project, which left nothing carrying its
+      // name while the palette copy promised project search (BEA-105). One row,
+      // not two — still the first, still unconditional, so BEA-52 holds.
+      add("folder", project.name + " — project root", "project", go("/" + pid));
       add("dashboard", "Dashboard", "action", go(urlForView("dashboard", pid)));
       add("terminal", "Installation", "action", go(urlForView("install", pid)));
       add("gear", "Settings", "action", go(urlForView("settings", pid)));
@@ -586,6 +593,7 @@ export default function Browser(props: {
       // A PDF page is unreadable squeezed into the 768px reading column.
       pageWidth = HTML_EXT.test(path) || PDF_EXT.test(path) ? "wide" : "read";
       pageClass = "markdown";
+      const conflict = parseConflict(path);
       view = (
         <>
           {version && (
@@ -594,6 +602,16 @@ export default function Browser(props: {
               path={path}
               version={version}
               onViewCurrent={() => openPath(path)}
+            />
+          )}
+          {conflict && (
+            <ConflictBanner
+              conflict={conflict}
+              originalHref={
+                flatFiles.some((f) => f.path === conflict.original)
+                  ? () => openPath(conflict.original)
+                  : undefined
+              }
             />
           )}
           <FileView

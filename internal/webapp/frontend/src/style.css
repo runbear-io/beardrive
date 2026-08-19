@@ -643,6 +643,10 @@ a.ai-main:hover { color: var(--accent); }
 }
 .dl-meta { flex: none; font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 /* read-heat dot: intensity grows with 30-day reads (heatLevel in app.js) */
+/* Conflict copy marker in the file listing: a preserved concurrent edit is
+   an ordinary file with an alarming name, so the row says so before the
+   reader has to guess from the suffix. */
+.dl-conflict { flex: none; font-size: 10.5px; line-height: 1; letter-spacing: .02em; text-transform: uppercase; padding: 3px 6px; border-radius: 999px; border: 1px solid var(--accent-dim); background: var(--glow); color: var(--accent-bright); white-space: nowrap; }
 .heatdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .heatdot.lvl1 { opacity: .3; }
 .heatdot.lvl2 { opacity: .55; }
