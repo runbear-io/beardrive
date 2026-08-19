@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
+import { HEAT_DISCLOSURE } from "../lib/heat";
 import { useTextAt } from "../hooks/useBlob";
 import {
   CSV_EXT,
@@ -30,7 +31,7 @@ export function FileView(props: {
   // Hub mode only; absent in volume mode, where file URLs are "/<path>".
   projectId?: string;
   onOpenFile: (path: string) => void;
-  onMeta: (meta: string) => void;
+  onMeta: (meta: ReactNode) => void;
   onRendered?: () => void;
 }) {
   const { apiBase, path, version, onMeta } = props;
@@ -190,8 +191,24 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
     // beside content the banner just called historical reads as if they
     // counted views of these bytes.
     const he = version ? null : heatMap && heatMap[doc.path];
-    if (he && heatTotal(he)) parts.push(heatText(he) + " / 30d");
-    onMeta(parts.join(" · "));
+    // The count says what is in it, but #meta is nowrap + ellipsis
+    // (style.css:381) — visible text appended here is the first thing a
+    // narrow window truncates away, so the disclosure rides along as hover
+    // text and a screen-reader-only span instead.
+    const heat = he && heatTotal(he) ? heatText(he) + " / 30d" : "";
+    onMeta(
+      heat ? (
+        <>
+          {parts.length ? parts.join(" · ") + " · " : ""}
+          <span title={HEAT_DISCLOSURE}>
+            {heat}
+            <span className="sr-only"> — {HEAT_DISCLOSURE}</span>
+          </span>
+        </>
+      ) : (
+        parts.join(" · ")
+      ),
+    );
     onRendered?.();
   }, [doc, version, heatMap, onMeta, onRendered]);
 

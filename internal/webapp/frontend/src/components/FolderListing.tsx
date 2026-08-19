@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { HeatMap, Node } from "../api/types";
 import { heatFor, heatLevel, heatText, useFolderHistory } from "../hooks/useBrowse";
+import { HEAT_DISCLOSURE } from "../lib/heat";
 import { humanSize } from "../util";
 import { Icon } from "./shell";
 import { HistoryRow } from "./HistoryRow";
@@ -25,6 +26,11 @@ export function FolderListing(props: {
   if (files) counts.push(files + (files === 1 ? " file" : " files"));
   const folderHeat = heatFor(heatMap, node.path, true);
   if (folderHeat) counts.push(heatText(folderHeat) + " in 30 days");
+  // One sentence per page covers the summary count and every row count at
+  // once; a full disclosure repeated down fifty dense rows would not fit and
+  // would not be read. The rows keep it on the dot for anyone who meets a row
+  // on its own (hover, screen reader).
+  const anyHeat = !!folderHeat || kids.some((c) => heatFor(heatMap, c.path, !!c.dir));
 
   return (
     <div className="dirlist">
@@ -35,6 +41,7 @@ export function FolderListing(props: {
         <span>{node.name}</span>
       </h1>
       <p className="dl-sub">{counts.join(" · ") || "Empty folder"}</p>
+      {anyHeat && <p className="dl-heatnote">{HEAT_DISCLOSURE}</p>}
       {kids.length === 0 ? (
         <div className="dl-empty">Nothing in this folder yet.</div>
       ) : (
@@ -76,8 +83,8 @@ export function FolderListing(props: {
                   <span
                     className={"heatdot lvl" + heatLevel(he)}
                     role="img"
-                    aria-label={heatText(he) + " in 30 days"}
-                    title={heatText(he) + " in 30 days"}
+                    aria-label={heatText(he) + " in 30 days. " + HEAT_DISCLOSURE}
+                    title={heatText(he) + " in 30 days. " + HEAT_DISCLOSURE}
                   />
                 )}
                 <span className="dl-meta">{meta}</span>

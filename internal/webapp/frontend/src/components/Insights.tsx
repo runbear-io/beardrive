@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node } from "../api/types";
 import { heatTotal, hotPathSplit } from "../hooks/useBrowse";
-import { ageRange, ageSpanLabel, isFlatRange, orphanPaths, placeLabels } from "../lib/heat";
+import { HEAT_DISCLOSURE, ageRange, ageSpanLabel, isFlatRange, orphanPaths, placeLabels } from "../lib/heat";
 import { linkProps } from "../nav";
 
 /* ---- the project Dashboard: the read×write matrix ----
@@ -188,8 +188,9 @@ export function Insights(props: {
       <h1 className="in-title">Knowledge insights{scope ? <span className="in-scope"> · {scope}</span> : null}</h1>
       <p className="dl-sub">
         {scope
-          ? `Reads over the last 30 days × freshness, for ${scope} and everything in it.`
-          : "Reads over the last 30 days × how long since each file changed. Hot but stale knowledge — read a lot, maintained by nobody — is the danger zone."}
+          ? `Reads over the last 30 days × freshness, for ${scope} and everything in it. ${HEAT_DISCLOSURE}`
+          : "Reads over the last 30 days × how long since each file changed. Hot but stale knowledge — read a lot, maintained by nobody — is the danger zone. " +
+            HEAT_DISCLOSURE}
       </p>
       <div className="in-lens">
         {LENS_ORDER.map((l) => (

@@ -42,6 +42,14 @@ export function heatText(e: HeatEntry): string {
   return s + " (" + parts.join(", ") + ")";
 }
 
+/* Every surface that prints a read count prints this beside it. Defined here,
+   next to the arithmetic, so four components cannot drift into four different
+   promises about what the number counts. A member browsing their own project
+   is a reader like any other — the count says so rather than quietly
+   including them. */
+export const HEAT_DISCLOSURE =
+  "Includes your own views. Repeat opens by the same reader inside 10 minutes count once.";
+
 /* Dot intensity 1–4, log-ish steps: 1–2, 3–9, 10–29, 30+ reads. */
 export function heatLevel(e: HeatEntry): number {
   const total = heatTotal(e);

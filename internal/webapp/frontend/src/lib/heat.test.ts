@@ -6,6 +6,9 @@ import assert from "node:assert/strict";
 import { heatFor, heatLevel, heatText, heatTotal, hotPathSplit } from "./heat.ts";
 import { ageRange, ageSpanLabel, isFlatRange, FLAT_AGE_SPREAD, orphanPaths } from "./heat.ts";
 import { placeLabels, LABEL_MAX } from "./heat.ts";
+import { HEAT_DISCLOSURE } from "./heat.ts";
+import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { HeatMap } from "../api/types.ts";
 
 // One fixture, read by both surfaces: the file header (heatText/heatTotal) and
@@ -182,4 +185,32 @@ test("placeLabels: stacks upward when downward would leave the frame", () => {
   const ys = out.map((l) => l.y).sort((a, b) => a - b);
   assert.ok(ys.every((y) => y >= BOUNDS.top && y <= BOUNDS.bottom), `out of frame: ${ys}`);
   for (let i = 1; i < ys.length; i++) assert.ok(ys[i] - ys[i - 1] >= 11, `overlap: ${ys}`);
+});
+
+test("HEAT_DISCLOSURE says both facts", () => {
+  assert.match(HEAT_DISCLOSURE, /own views/i);
+  assert.match(HEAT_DISCLOSURE, /10 minutes/);
+});
+
+// "Defined once" is the acceptance criterion, and it is the one thing no
+// browser test can see: four surfaces each rendering their own copy would
+// pass every e2e assertion right up until they drifted apart.
+test("HEAT_DISCLOSURE is the only copy of the sentence", () => {
+  const dir = new URL("..", import.meta.url); // src/
+  const files: string[] = [];
+  const walk = (d: URL) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.name === "node_modules") continue;
+      const u = new URL(e.name + (e.isDirectory() ? "/" : ""), d);
+      e.isDirectory() ? walk(u) : /\.(ts|tsx|css)$/.test(e.name) && files.push(fileURLToPath(u));
+    }
+  };
+  walk(dir);
+  const needle = HEAT_DISCLOSURE.slice(0, 30);
+  const hits = files.filter((f) => readFileSync(f, "utf8").includes(needle));
+  assert.deepEqual(
+    hits.map((f) => f.replace(/.*\/src\//, "src/")),
+    ["src/lib/heat.ts"],
+    "the disclosure must live only in lib/heat.ts",
+  );
 });
