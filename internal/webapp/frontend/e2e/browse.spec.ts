@@ -1138,3 +1138,24 @@ test("a shared diagram renders on the public page, without one there is no scrip
   await expect(page.locator("img")).toHaveCount(0);
   expect(await detail.evaluate((el) => getComputedStyle(el).whiteSpace)).toBe("pre");
 });
+
+/* BEA-61: a read count that doesn't say your own views are in it reads as
+   other people's interest. Every surface printing one discloses it — the file
+   header can't do it visibly (#meta is nowrap + ellipsis), so it does it by
+   hover text and a screen-reader span. */
+test("read counts disclose that your own views count", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+
+  await page.goto(`/${pid}/index.md`);
+  const heat = page.locator("#meta span[title]");
+  await expect(heat).toContainText("/ 30d");
+  await expect(heat).toHaveAttribute("title", /Includes your own views\./);
+  await expect(heat.locator(".sr-only")).toContainText("10 minutes count once");
+
+  // The folder page says it once, out loud, for the summary and every row.
+  await page.goto(`/${pid}/notes`);
+  await expect(page.locator(".dl-heatnote")).toHaveText(
+    "Includes your own views. Repeat opens by the same reader inside 10 minutes count once.",
+  );
+});

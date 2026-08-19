@@ -20,6 +20,12 @@ Hubs track it.
 Sync replication never counts as a read, and neither does viewing a blob in
 history. Only genuine consumption.
 
+That includes your own: a member opening a file in the hub records a human
+read under their own account, so on a small or new project an author checking
+their own page can be a real share of the count. Repeat opens by the same
+reader inside 10 minutes count once. Every surface that prints a read count
+says so beside it.
+
 Agent reads require the hooks from [Set up with your agent](/start/setup/) —
 registered once per machine, in the agent's own user config, so every device
 whose agents you want counted needs its own `bdrive init` (or `bdrive hooks

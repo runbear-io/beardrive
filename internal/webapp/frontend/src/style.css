@@ -593,6 +593,11 @@ a.ai-main:hover { color: var(--accent); }
 .dl-title-icon { display: flex; color: var(--accent); }
 .dl-title-icon .ico { width: 20px; height: 20px; }
 .dl-sub { color: var(--text-faint); font-size: 12.5px; margin: 0 0 18px; }
+/* The read-count disclosure, printed under the folder's summary line: the
+   summary's voice one notch quieter, sitting close enough that the two read as
+   one block. Deliberately NOT .dl-sub — that class means "the summary line" to
+   every other reader of this page, tests included. */
+.dl-heatnote { color: var(--text-faint); font-size: 12px; opacity: .8; margin: -14px 0 18px; }
 .dl-items { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; background: var(--bg-side); }
 .dl-row { display: flex; align-items: center; gap: 11px; padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
 .dl-row:last-child { border-bottom: none; }
