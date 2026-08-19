@@ -104,6 +104,7 @@ classDiagram
         +diff.ts splitLines lcsDiff diffText
         +runs.ts groupRuns runFileCount
         +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
+        +heat.ts HEAT_DISCLOSURE (what the count includes, said once)
         +heat.ts ageRange isFlatRange ageSpanLabel (treemap scale)
         +heat.ts orphanPaths (reads whose file left the tree)
         +heat.ts placeLabels LABEL_MAX (scatter danger-dot labels)
@@ -113,7 +114,7 @@ classDiagram
         +utils.ts
     }
     note for lib "mermaid.ts is the one exception to 'pure, no React, unit-tested on node': it needs a DOM and a browser-only library, so its coverage is Playwright. html in → html out, so neither caller can be tempted to patch a live subtree. It imports mermaid only when hasMermaid() says a document has a fence — that gate is what keeps a diagram-free page from downloading any of it — and every failure (unparseable fence, render throw, chunk that never loads) returns the untouched &lt;pre&gt;&lt;code&gt; instead of throwing"
-    note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it"
+    note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it. HEAT_DISCLOSURE sits beside that arithmetic for the same reason: a member's own views count toward the number, and four surfaces printing their own copy of that promise is four promises that can drift (BEA-61). The constant is NOT re-exported through useBrowse — surfaces import it straight from lib/heat, and a unit test asserts src/ holds exactly one copy of the sentence"
     note for lib "csv.ts parses .csv/.tsv for FileView's table view — ~50 lines against RFC 4180, so no papaparse. It NEVER throws: null means 'not a table' (unterminated quote, no delimiter) and the caller falls back to the plain-text preview, which is why the fallback is a type-level guarantee rather than a try/catch someone can forget"
 
     ErrorBoundary --> App : wraps the whole tree
