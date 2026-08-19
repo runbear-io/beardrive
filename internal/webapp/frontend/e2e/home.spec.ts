@@ -461,3 +461,27 @@ test("a read-only member: no Share, no danger zone, People is read-only", async 
   ).toBeDisabled();
   await expect(page.locator(".ps-people button", { hasText: "+ Add" })).toHaveCount(0);
 });
+
+// BEA-130: reading back a link you can already see is not a write, so the
+// copy control is NOT gated on revoke rights — the file page's banner
+// already prints the whole URL to this same member.
+test("a read-only member can copy a public link but not revoke it", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const made = await (
+    await page.request.post(`/api/p/${pid}/shares`, { data: { path: "index.md" } })
+  ).json();
+
+  await page.context().clearCookies();
+  await login(page, READER);
+  await page.goto(`/${pid}/settings`);
+  const row = page.locator(".shares-table .admin-item", { hasText: "index.md" });
+  await expect(row).toBeVisible();
+  await row.locator("button[aria-label='Copy the public link to index.md']").click();
+  await expectToast(page, "Copied.");
+  await expect(row.locator(".ai-del")).toHaveCount(0);
+
+  await page.context().clearCookies();
+  await login(page);
+  await page.request.delete(`/api/shares/${made.token}`);
+});
