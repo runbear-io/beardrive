@@ -231,8 +231,17 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
         parts.join(" · ")
       ),
     );
-    onRendered?.();
-  }, [doc, version, heatMap, onMeta, onRendered]);
+  }, [doc, version, heatMap, onMeta]);
+
+  // Rendered content, and nothing else, counts as "rendered" — the scroll
+  // restorer re-applies its goal on this call, and a read-count refresh
+  // (heatMap, polled every 60s) used to ride along on the meta effect above
+  // and yank the reader back to the top mid-read (BEA-155). html and diagrams
+  // are exactly what the mounted subtree is made of; a diagram landing late
+  // now reports itself too, which is the case the retries were written for.
+  useEffect(() => {
+    if (html) onRendered?.();
+  }, [html, diagrams, onRendered]);
 
   if (error) return <LoadError version={version} err={error as Error} />;
   if (!doc) return null;

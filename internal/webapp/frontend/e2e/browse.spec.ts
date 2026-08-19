@@ -1204,6 +1204,57 @@ test("read counts disclose that your own views count", async ({ page }) => {
   );
 });
 
+/* BEA-155: the scroll restorer. Reading a file is never interrupted by a
+   background refresh — the read-count poll used to call onRendered through
+   MarkdownView's meta effect, and the restorer read that as "content landed"
+   and re-applied scrollTo(0) mid-read. The retire-on-user-scroll rule that
+   fixes it is unit-tested in src/lib/scroll.test.ts (its trigger is a 60s
+   poll, longer than this suite's timeout); these two cover the paths a
+   refactor of the restorer breaks. Scroll #content — the document itself
+   never scrolls (helpers.ts). */
+const LONG_DOC =
+  "# Long read\n\n" + Array.from({ length: 200 }, (_, i) => `Paragraph ${i} of the long read.`).join("\n\n");
+
+test("a fresh navigation lands at the top of the new file", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=scroll/long.md`, { data: LONG_DOC });
+
+  await page.goto(`/${pid}/scroll/long.md`);
+  await expect(page.locator("#content h1")).toHaveText("Long read");
+  const content = page.locator("#content");
+  await content.evaluate((el) => el.scrollTo({ top: 1200, behavior: "instant" }));
+  expect(await content.evaluate((el) => el.scrollTop)).toBeGreaterThan(1000);
+
+  // #content persists across routes, so its carried-over offset must be reset.
+  await page.click('#tree .row[data-path="index.md"]');
+  await page.waitForURL(`/${pid}/index.md`);
+  await expect(page.locator("#content h1")).toHaveText("Wiki");
+  await expect
+    .poll(() => content.evaluate((el) => el.scrollTop), { timeout: 5000 })
+    .toBeLessThanOrEqual(2);
+});
+
+test("back returns to the remembered offset, not to the top", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.request.put(`/api/p/${pid}/upload/content?path=scroll/long.md`, { data: LONG_DOC });
+
+  await page.goto(`/${pid}/scroll/long.md`);
+  await expect(page.locator("#content h1")).toHaveText("Long read");
+  const content = page.locator("#content");
+  await content.evaluate((el) => el.scrollTo({ top: 1200, behavior: "instant" }));
+
+  await page.click('#tree .row[data-path="index.md"]');
+  await page.waitForURL(`/${pid}/index.md`);
+  await page.goBack();
+  await page.waitForURL(`/${pid}/scroll/long.md`);
+  await expect(page.locator("#content h1")).toHaveText("Long read");
+  await expect
+    .poll(() => content.evaluate((el) => el.scrollTop), { timeout: 5000 })
+    .toBeGreaterThan(1000);
+});
+
 /* BEA-154: a doc's YAML frontmatter used to be a table pinned to the top of
    the reading column, pushing the document below the fold. It is a panel
    beside the prose now — a rail on a wide window, a closed disclosure on a

@@ -31,6 +31,7 @@ import { ConnectGuide } from "../components/ConnectGuide";
 import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
 import type { Run } from "../lib/runs";
+import { armGoal, applyGoal, noteScroll, type Goal } from "../lib/scroll";
 import { VersionBanner } from "../components/VersionBanner";
 import { secretsMessage } from "../lib/secrets";
 import { ConflictBanner } from "../components/ConflictBanner";
@@ -138,28 +139,42 @@ export default function Browser(props: {
   }, []);
 
   /* ---- per-route scroll restoration ----
-     Back/forward returns to where the reader was; fresh navigations start
-     at the top. Views call onRendered when their content lands (and again
-     when async sections grow), and we re-apply the target until it fits. */
+     Back/forward returns the reader to where they were; fresh navigations
+     start at the top. Views call onRendered when their content lands (and
+     again when async sections grow), and we re-apply the target until it
+     fits — until the reader scrolls, which retires the goal for good. The
+     state machine itself lives in lib/scroll, where it can be tested. */
   const contentRef = useRef<HTMLElement>(null);
   const memo = useRef(new Map<string, number>());
-  const scrollGoal = useRef({ key: "", want: 0, attempts: 0 });
-  useEffect(() => {
-    scrollGoal.current = {
-      key: routeKey,
-      want: currentNavType() === "POP" ? (memo.current.get(routeKey) ?? 0) : 0,
-      attempts: 0,
-    };
-  }, [routeKey]);
+  const scrollGoal = useRef<Goal>(armGoal("", 0));
   const onRendered = useCallback(() => {
     const c = contentRef.current;
-    const g = scrollGoal.current;
-    if (!c || g.key !== routeKey || g.attempts >= 3) return;
-    g.attempts++;
-    c.scrollTo({ top: g.want, behavior: "instant" });
+    if (!c) return;
+    const top = applyGoal(scrollGoal.current, routeKey);
+    // "instant" is load-bearing: #content carries scroll-behavior: smooth
+    // (style.css), and an animated restore would fire intermediate scroll
+    // events that noteScroll would read as the reader taking over.
+    if (top !== null) c.scrollTo({ top, behavior: "instant" });
   }, [routeKey]);
+  useEffect(() => {
+    scrollGoal.current = armGoal(
+      routeKey,
+      currentNavType() === "POP" ? (memo.current.get(routeKey) ?? 0) : 0,
+    );
+    // Apply once right here. Views call onRendered from their own effects,
+    // and React runs CHILD effects before the parent's — so this route's
+    // onRendered has already fired, against the goal of the route we just
+    // LEFT, and was discarded on the key check. Without this the new goal
+    // would sit armed and never applied, which is why Back landed at the
+    // top instead of the remembered offset. Later onRendered calls still
+    // cover content that grows after first paint.
+    onRendered();
+  }, [routeKey, onRendered]);
   const onScroll = useCallback(() => {
-    if (contentRef.current) memo.current.set(routeKey, contentRef.current.scrollTop);
+    const c = contentRef.current;
+    if (!c) return;
+    memo.current.set(routeKey, c.scrollTop);
+    noteScroll(scrollGoal.current, routeKey, c.scrollTop, c.scrollHeight - c.clientHeight);
   }, [routeKey]);
 
   /* ---- navigation ---- */
