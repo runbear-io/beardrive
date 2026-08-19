@@ -523,8 +523,10 @@ $ bdrive share wiki/report.html
 https://drive.example.com/s/eacc1df3ee6a6ebbdacc535c2796dc30
 ```
 
-Links always serve the file's **latest** synced content (right for wiki
-pages and living reports), and live until revoked — `bdrive share --list`
+Links are **per-file** — there is no folder link, and `bdrive share` on a
+folder says so and names a file inside it to share instead. Links always
+serve the file's **latest** synced content (right for wiki pages and
+living reports), and live until revoked — `bdrive share --list`
 and `--revoke <token-or-url>` manage them, `--expires 24h` makes one
 self-destruct. The web UI has a Share button on every file, and its
 dialog can put an expiry on the link it just minted (24 hours, 7 days,
