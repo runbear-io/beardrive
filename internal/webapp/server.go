@@ -906,8 +906,9 @@ func (s *Server) Handler() http.Handler {
 
 // frontend serves the embedded single-page app. Real asset files (app.js,
 // style.css) are served directly; every other GET that isn't an API, auth,
-// or share route returns index.html, so client-side routes like
-// /<project-id>/<path> and /join/<token> survive a deep link or refresh.
+// or share route — or, on a hub, a root-level path shaped like a file —
+// returns index.html, so client-side routes like /<project-id>/<path> and
+// /join/<token> survive a deep link or refresh.
 func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 	files := http.FileServerFS(static)
 	index, _ := fs.ReadFile(static, "index.html")
@@ -969,6 +970,21 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 					return
 				}
 			}
+		}
+		// No embedded asset matched, so a root-level dotted path is a request
+		// for a file that does not exist, not a client route: in hub mode the
+		// first segment is a project id (projectIDRe: UUID or p-xxxxxxxx) or a
+		// reserved word (orgs/, billing/, join/), none of which contain a dot.
+		// Answering the shell made /llms.txt, /robots.txt and every mistyped
+		// root file look like they exist — a soft 200 of login HTML to any
+		// crawler probing a conventional path. Deeper dots (/<id>/notes/a.md)
+		// are real client routes and untouched. index.html is excluded because
+		// the asset block above skips it deliberately and it must keep
+		// answering the shell.
+		if s.Root != nil && upath != "index.html" &&
+			!strings.Contains(upath, "/") && strings.Contains(upath, ".") {
+			http.NotFound(w, r)
+			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(index)
