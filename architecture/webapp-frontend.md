@@ -54,6 +54,7 @@ classDiagram
         +historyFilterQuery(filters) / hasHistoryFilters
         +urlForPath(path, projectId, version)
         +urlForView(view, projectId, target, filters) / encodePath / decodePath
+        +projectByName(projects, seg) id, only when exactly one name matches
     }
     class nav {
         +navigate(url)
@@ -62,6 +63,7 @@ classDiagram
         +Redirect
     }
     note for router "Two lookups on peer-authored path segments are now prototype-safe and one is throw-safe: legacyView() goes through Object.hasOwn, because LEGACY_VIEWS['constructor'] is truthy and turned a folder of that name into a view whose name was a FUNCTION; decodePath falls back to the raw segment instead of letting decodeURIComponent throw URIError out of a useMemo during render. Same shape as ProjectIcon's PROJECT_ICONS lookup in shell.tsx"
+    note for router "projectByName is what makes /wiki reach the project called wiki: the id never appears in the UI as something to copy, so a hand-typed first segment is the NAME the sidebar shows. It decodes the segment (route.project is the still-encoded slice) and returns an id only on EXACTLY one case-insensitive match — ProjectDB names are scoped per organization, so a viewer in two orgs can hold two projects named wiki and guessing between them is worse than the not-found page (BEA-140)"
     note for nav "nav.ts + router.ts — deliberately NOT a router library (react-router v7 startTransition left stale views); History-API path routing, slashes literal, every user-facing page owns a URL path. A version is not a view route (the first segment after the project id is reserved for view names) — it rides as ?v=, so useLocationPath must snapshot the search too or the URL changes and nothing re-renders"
 
     class api {
