@@ -364,7 +364,7 @@ classDiagram
     class ShareOpen {
         +Count +Last
     }
-    note for ShareOpen "The receipt on a public link: share-kind buckets only, which is what makes Last mean last OPENED — HeatEntry.LastRead is cross-kind, so a member viewing the file in the hub would otherwise move the date. Counts, never openers: the share actor is token+IP. Keyed by path, so two tokens on one file report the same number. Callers build the map ONCE per project and index it; a per-share call is a full byKey scan per row"
+    note for ShareOpen "The receipt on a public link: share-kind buckets only, which is what makes Last mean last OPENED — HeatEntry.LastRead is cross-kind, so a member viewing the file in the hub would otherwise move the date. Counts, never openers: the share actor is token+IP+UA hash (token+IP alone folded a whole office into one reader, BEA-151 — the browser component is a heuristic that raises the floor, never identity, and is hashed because Record persists the actor). Keyed by path, so two tokens on one file report the same number. Callers build the map ONCE per project and index it; a per-share call is a full byKey scan per row"
 
     class QuotaProvider {
         <<interface>>

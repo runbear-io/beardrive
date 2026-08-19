@@ -1,6 +1,8 @@
 package webapp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -477,6 +479,21 @@ func (s *Server) shareCreatorStillBelongs(sh Share) bool {
 
 // handleShared serves a share link: public, sandboxed, always the latest
 // synced content.
+// shareActor identifies one reader of a link well enough to debounce their
+// own reloads without folding a whole office into a single visit: token+IP
+// alone made every browser behind one NAT the same reader (BEA-151).
+//
+// The User-Agent is HASHED, never stored raw — Record persists the actor into
+// the read buckets and out through ReadRepo, and a raw User-Agent there is a
+// fingerprint sitting in storage indefinitely. Truncated because this only
+// ever needs to GROUP, never to identify, and it must not leave the ledger
+// either way. token+"/"+IP stays the prefix so the existing leak assertions
+// keep covering the wider key.
+func (s *Server) shareActor(r *http.Request, token string) string {
+	sum := sha256.Sum256([]byte(r.UserAgent()))
+	return token + "/" + s.clientIP(r) + "/" + hex.EncodeToString(sum[:8])
+}
+
 func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	// Sandbox everything under /s/ before anything can answer the request:
 	// shared content executes in an opaque origin (scripts allowed — charts in
@@ -520,9 +537,9 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fi := snap.files[sp]
-	// A share hit is external consumption. Actor is token+IP: one audience
-	// member reloading is debounced to a visit, distinct visitors still count.
-	s.Reads.Record(sh.Project, sp, ReadKindShare, sh.Token+"/"+s.clientIP(r))
+	// A share hit is external consumption: one audience member reloading is
+	// debounced to a visit, distinct visitors still count.
+	s.Reads.Record(sh.Project, sp, ReadKindShare, s.shareActor(r, sh.Token))
 
 	// Share links are the only unauthenticated door to stored bytes, so they
 	// are the only egress a plan actually caps. The per-IP limiter above
