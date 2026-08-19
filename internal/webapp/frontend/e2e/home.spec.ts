@@ -51,6 +51,12 @@ test("guide: manual fallback has the full command list and the docs link", async
   expect(manual).toContain(`bdrive init --project ${pid}`);
   expect(manual).not.toContain("bdrive hooks install"); // init registers hooks itself
   await expect(page.locator('.gd-manual a[href="https://docs.beardrive.ai/manual/install/"]')).toHaveCount(1);
+  // BEA-142: the prose above those three commands must not claim there is one,
+  // nor hand `init` the sign-in step `bdrive login` is doing right beneath it.
+  const desc = page.locator(".gd-manual", { hasText: "Or run it yourself" }).locator(".gd-desc").first();
+  await expect(desc).not.toContainText("One command");
+  await expect(desc).not.toContainText("signs this device in");
+  await expect(desc).toContainText("registers the sync hooks and starts syncing");
 });
 
 test("home embeds the dashboard below the guide, for members too", async ({ page, browser }) => {
