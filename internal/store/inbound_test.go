@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInboundSpool(t *testing.T) {
@@ -14,14 +15,14 @@ func TestInboundSpool(t *testing.T) {
 		t.Fatalf("empty spool = %v, %v", evs, err)
 	}
 
-	if err := s.LogInbound("wiki/a.md", false); err != nil {
+	if err := s.LogInbound(InboundEvent{Path: "wiki/a.md", Deleted: false, Time: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.LogInbound("b.md", false); err != nil {
+	if err := s.LogInbound(InboundEvent{Path: "b.md", Deleted: false, Time: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	// A path written and then removed reports as deleted: latest wins.
-	if err := s.LogInbound("b.md", true); err != nil {
+	if err := s.LogInbound(InboundEvent{Path: "b.md", Deleted: true, Time: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	evs, err := s.DrainInbound()
@@ -47,14 +48,14 @@ func TestInboundSpool(t *testing.T) {
 
 func TestInboundSpoolSurvivesCorruptLines(t *testing.T) {
 	s := openTestStore(t)
-	s.LogInbound("good.md", false)
+	s.LogInbound(InboundEvent{Path: "good.md", Deleted: false, Time: time.Now().UTC()})
 	f, err := os.OpenFile(s.inboundSpoolPath(), os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.WriteString(`{"path": "torn`) // a torn write
 	f.Close()
-	s.LogInbound("also-good.md", false)
+	s.LogInbound(InboundEvent{Path: "also-good.md", Deleted: false, Time: time.Now().UTC()})
 	evs, err := s.DrainInbound()
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +71,7 @@ func TestInboundSpoolCap(t *testing.T) {
 	s := openTestStore(t)
 	long := strings.Repeat("d", 1024)
 	for i := 0; i < 1100; i++ { // ~1.1 MB of events
-		if err := s.LogInbound(long+"/"+string(rune('a'+i%26))+".md", false); err != nil {
+		if err := s.LogInbound(InboundEvent{Path: long + "/" + string(rune('a'+i%26)) + ".md", Deleted: false, Time: time.Now().UTC()}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -87,7 +88,7 @@ func TestInboundSpoolCap(t *testing.T) {
 // folder, never synced.
 func TestInboundSpoolPermissions(t *testing.T) {
 	s := openTestStore(t)
-	if err := s.LogInbound("a.md", false); err != nil {
+	if err := s.LogInbound(InboundEvent{Path: "a.md", Deleted: false, Time: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(s.inboundSpoolPath())
@@ -108,7 +109,7 @@ func TestInboundSpoolUnreadableRecovers(t *testing.T) {
 	if _, err := s.DrainInbound(); err == nil {
 		t.Fatal("unreadable spool should report its error")
 	}
-	if err := s.LogInbound("a.md", false); err != nil {
+	if err := s.LogInbound(InboundEvent{Path: "a.md", Deleted: false, Time: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	evs, err := s.DrainInbound()

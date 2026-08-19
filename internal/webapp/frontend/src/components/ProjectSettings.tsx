@@ -33,6 +33,22 @@ import type { Org, PermLevel, Project, ProjectPerms } from "../api/types";
 
 const MAX_DESC = 280;
 
+// Mirrors the server's allowlist (checkWebhookURL, projects.go) so a typo
+// never round-trips. The server is the authority — this only saves a round
+// trip and explains the rule where it is typed.
+const WEBHOOK_HOSTS = ["hooks.slack.com", ".webhook.office.com", ".logic.azure.com"];
+function webhookOK(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:") return false;
+  const host = u.hostname.toLowerCase();
+  return WEBHOOK_HOSTS.some((h) => (h.startsWith(".") ? host.endsWith(h) : host === h));
+}
+
 // Mirrors the server's rules (projects.go) so a typo never round-trips.
 const schema = z.object({
   name: z
@@ -42,6 +58,10 @@ const schema = z.object({
     .max(120, "Keep the name under 120 characters."),
   description: z.string().max(MAX_DESC, `Keep the description under ${MAX_DESC} characters.`),
   icon: z.string(),
+  webhook: z
+    .string()
+    .trim()
+    .refine((v) => v === "" || webhookOK(v), "Paste a Slack or Teams incoming-webhook https:// URL."),
 });
 type Values = z.infer<typeof schema>;
 
@@ -65,6 +85,9 @@ export function ProjectSettings({
       name: project.name,
       description: project.description ?? "",
       icon: project.icon ?? "",
+      // Always blank: the server never sends the URL back, so there is
+      // nothing to seed and a placeholder would read as a stored value.
+      webhook: "",
     },
   });
   // Switching projects (or a refresh bringing new values) re-seeds the form,
@@ -74,6 +97,7 @@ export function ProjectSettings({
       name: project.name,
       description: project.description ?? "",
       icon: project.icon ?? "",
+      webhook: "",
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id, project.name, project.description, project.icon]);
@@ -89,11 +113,14 @@ export function ProjectSettings({
     if (dirty.name) body.name = values.name.trim();
     if (dirty.description) body.description = values.description;
     if (dirty.icon) body.icon = values.icon;
+    if (dirty.webhook) body.webhook = values.webhook.trim();
     if (Object.keys(body).length === 0) return;
     try {
       await api("PATCH", "/api/projects/" + project.id, body);
       toast("Saved.");
-      form.reset({ ...values, name: values.name.trim() }); // clean, keeps what was typed
+      // webhook back to blank, not to what was typed: the field shows state,
+      // not content, and leaving the URL on screen is a credential on screen.
+      form.reset({ ...values, name: values.name.trim(), webhook: "" });
       await refresh(); // nav mark + dashboard header update without a reload
     } catch (e) {
       toast((e as Error).message, true); // form left alone, so nothing is lost
@@ -110,7 +137,7 @@ export function ProjectSettings({
       <Card>
         <CardHeader>
           <CardTitle>General</CardTitle>
-          <CardDescription>Name, description and icon for this project.</CardDescription>
+          <CardDescription>Name, description, icon and notifications for this project.</CardDescription>
         </CardHeader>
         <Separator />
         <CardContent>
@@ -200,6 +227,60 @@ export function ProjectSettings({
                 </span>
               </div>
             </div>
+
+            {/* Admin-only, and the whole surface this feature has: no nav
+                entry, no prompt, no empty state. A solo user never opens it. */}
+            {mayEdit && (
+              <div className="ps-field">
+                <Label htmlFor="ps-webhook">
+                  Change notifications <span className="ps-opt">(optional)</span>
+                  {project.webhook_set && <span className="ps-chip">On</span>}
+                </Label>
+                <Input
+                  id="ps-webhook"
+                  type="url"
+                  placeholder={
+                    project.webhook_set
+                      ? "Paste a new URL to replace the current one"
+                      : "https://hooks.slack.com/services/…"
+                  }
+                  aria-invalid={!!form.formState.errors.webhook}
+                  aria-describedby="ps-webhook-help"
+                  {...form.register("webhook")}
+                />
+                <div className="ps-meta">
+                  {form.formState.errors.webhook ? (
+                    <span role="alert" className="field-err">
+                      {form.formState.errors.webhook.message}
+                    </span>
+                  ) : (
+                    <span id="ps-webhook-help" className="ps-opt">
+                      {project.webhook_set
+                        ? "Changes post to your channel. The saved URL is never shown again."
+                        : "Post every change to a Slack or Teams channel."}
+                    </span>
+                  )}
+                  {project.webhook_set && (
+                    <Button
+                      id="ps-webhook-clear"
+                      type="button"
+                      variant="subtle"
+                      onClick={async () => {
+                        try {
+                          await api("PATCH", "/api/projects/" + project.id, { webhook: "" });
+                          toast("Notifications off.");
+                          await refresh();
+                        } catch (e) {
+                          toast((e as Error).message, true);
+                        }
+                      }}
+                    >
+                      Turn off
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
 
             {mayEdit && (
               <>

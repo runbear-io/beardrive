@@ -301,9 +301,21 @@ applied batch arrives as JSON on stdin:
 
 ```json
 { "project": "m-5a10b713", "folder": "/Users/you/notes",
-  "changed": [ { "path": "wiki/onboarding.md", "op": "write" },
-               { "path": "notes/retired.md",   "op": "delete" } ] }
+  "changed": [ { "path": "wiki/onboarding.md", "op": "write",
+                 "user": "Dana Kim", "note": "claude session 41f2" },
+               { "path": "notes/retired.md",   "op": "delete",
+                 "user": "Sam Ito" } ] }
 ```
+
+`user` is who committed the change — the signed-in account's name, falling
+back to its email and then to the device's git/OS identity, the same order
+`bdrive log` prints. `note` carries the agent session when an agent wrote it,
+so a recipe can post *"Dana Kim's Claude updated …"* rather than *"1 file
+changed"*. Both are omitted when unknown, so a hook written before they
+existed keeps working unchanged. Note that `note` is user-settable
+(`bdrive sync --note`) and display-only: it names an agent, it never proves
+one. There is a ready-made Slack/Teams recipe in
+[the docs](https://docs.beardrive.ai/guides/slack-notifications/).
 
 Once per cycle that applied at least one path (an initial sync of 400 files is
 one invocation), inbound only — a cycle that just commits and pushes your own

@@ -98,6 +98,10 @@ type Session struct {
 	// Result.Inbound. Reset at the top of every cycle — a Session is reused
 	// across cycles by the daemon and by the tests.
 	inbound []store.InboundEvent
+	// attrib is this cycle's winning op per path (journal.LastOps), so every
+	// materialized path can name who committed it. Reset alongside inbound;
+	// filled once the merged journal is read, before anything materializes.
+	attrib map[string]journal.Op
 }
 
 // logInbound records one materialized peer path both ways: on this cycle's
@@ -106,8 +110,20 @@ type Session struct {
 // later process). Both consumers want the same event; neither may consume the
 // other's copy.
 func (s *Session) logInbound(rel string, deleted bool) {
-	s.inbound = append(s.inbound, store.InboundEvent{Path: rel, Deleted: deleted, Time: time.Now().UTC()})
-	_ = s.Store.LogInbound(rel, deleted) // best-effort: never fails a cycle
+	e := store.InboundEvent{Path: rel, Deleted: deleted, Time: time.Now().UTC()}
+	// Name the author, the way `bdrive log` prints it (cmd/bdrive/cmds.go).
+	// Deletes get it too: LastOps keeps delete ops, which Replay throws away.
+	if op, ok := s.attrib[rel]; ok {
+		e.User, e.Note = op.UserName, op.Note
+		if e.User == "" {
+			e.User = op.User
+		}
+		if e.User == "" {
+			e.User = op.Author
+		}
+	}
+	s.inbound = append(s.inbound, e)
+	_ = s.Store.LogInbound(e) // best-effort: never fails a cycle
 }
 
 func (s *Session) mountID() string {
@@ -258,7 +274,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	}
 	defer unlock()
 
-	s.inbound = nil
+	s.inbound, s.attrib = nil, nil
 	res := &Result{}
 	cache, err := s.Store.LoadCache(s.mountID())
 	if err != nil {
@@ -495,6 +511,10 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("read journals: %w", err)
 	}
 	target := journal.Replay(all)
+	// Attribution for everything materialized below — including the
+	// .bdriveignore write a few lines down, which is why this sits above it
+	// rather than beside the delete loop.
+	s.attrib = journal.LastOps(all)
 
 	// The ignore rules sync like any other file, so a peer can receive the new
 	// .bdriveignore and the delete ops it justifies in the same batch. The

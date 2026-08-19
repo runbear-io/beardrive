@@ -48,9 +48,29 @@ directory set to the folder:
 
 ```json
 { "project": "m-5a10b713", "folder": "/Users/you/notes",
-  "changed": [ { "path": "wiki/onboarding.md", "op": "write" },
-               { "path": "notes/retired.md",   "op": "delete" } ] }
+  "changed": [ { "path": "wiki/onboarding.md", "op": "write",
+                 "user": "Dana Kim", "note": "claude session 41f2" },
+               { "path": "notes/retired.md",   "op": "delete",
+                 "user": "Sam Ito" } ] }
 ```
+
+Each changed entry carries:
+
+- `path` — mount-relative, slash-separated.
+- `op` — `write` or `delete`. Deletes carry the same fields as writes.
+- `user` — who committed the change: the signed-in account's display name,
+  falling back to its email and then to the device's git/OS identity. That is
+  the same precedence `bdrive log` prints.
+- `note` — the committing op's note. The agent sync hook stamps
+  `"<platform> session <id>"` (`claude`, `codex`, `gemini`, `hermes`), which is
+  what lets a recipe write *"Dana Kim's Claude updated …"*. **`note` is
+  user-settable** (`bdrive sync --note "…"`) **and display-only — it names an
+  agent, it never proves one.**
+
+`user` and `note` are omitted when unknown, so a hook written against the
+earlier `path`/`op` payload keeps working unchanged. For a worked Slack and
+Teams recipe, see [Tell Slack what your agents
+changed](/guides/slack-notifications/).
 
 - **Once per cycle** that applied at least one path — an initial sync of 400
   files is one invocation, not 400.

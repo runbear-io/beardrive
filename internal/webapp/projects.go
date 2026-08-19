@@ -3,6 +3,7 @@ package webapp
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -38,6 +39,14 @@ type Project struct {
 	Default string `json:"default,omitempty"`
 	// Perms are the explicit grants, lowercase email → level.
 	Perms map[string]string `json:"perms,omitempty"`
+	// Webhook is an incoming-webhook URL notified when the hub journals a
+	// change to this project (notify.go). Empty — the default — means the
+	// project produces no notifications and no outbound requests at all.
+	//
+	// It is a credential: anyone holding it can post into the team's channel.
+	// It never leaves the server — projectJSON zeroes it and reports
+	// `webhook_set` instead, the same treatment share tokens get.
+	Webhook string `json:"webhook,omitempty"`
 }
 
 // level is the project's effective default level for org members.
@@ -284,8 +293,8 @@ func (db *ProjectDB) GetOrCreate(name, org string) (Project, bool, error) {
 // that "absent" (nil, leave alone) is distinguishable from "present and
 // empty" (clear it) — the whole point of a partial update. One lock, one
 // repo write, whatever the caller changed.
-func (db *ProjectDB) Update(id string, name, description, icon *string) error {
-	var newName, newDesc, newIcon string
+func (db *ProjectDB) Update(id string, name, description, icon, webhook *string) error {
+	var newName, newDesc, newIcon, newHook string
 	if name != nil {
 		newName = trimText(projectLabel(*name), maxNameLen+1)
 		if newName == "" {
@@ -305,6 +314,12 @@ func (db *ProjectDB) Update(id string, name, description, icon *string) error {
 		newIcon = strings.TrimSpace(*icon)
 		if newIcon != "" && !iconRe.MatchString(newIcon) {
 			return fmt.Errorf("invalid icon name %q", newIcon)
+		}
+	}
+	if webhook != nil {
+		var err error
+		if newHook, err = checkWebhookURL(*webhook); err != nil {
+			return err
 		}
 	}
 
@@ -330,12 +345,54 @@ func (db *ProjectDB) Update(id string, name, description, icon *string) error {
 	if icon != nil {
 		next.Icon = newIcon
 	}
+	if webhook != nil {
+		next.Webhook = newHook
+	}
 	return db.put(p, next)
+}
+
+// maxWebhookLen bounds what an admin can store; real incoming-webhook URLs
+// are well under 200 bytes.
+const maxWebhookLen = 512
+
+// webhookHosts is the allowlist. An admin-supplied URL the hub then fetches
+// is an SSRF primitive — it reaches whatever the hub can reach, including a
+// cloud metadata endpoint — and a host check closes that completely for three
+// lines. Slack, the retired-O365 replacement for Teams (Power Automate
+// Workflows) and the legacy Teams connector host are what the feature is for;
+// widening to a generic webhook is a later change behind a real egress policy.
+var webhookHosts = []string{"hooks.slack.com", ".webhook.office.com", ".logic.azure.com"}
+
+// checkWebhookURL normalizes and validates an incoming-webhook URL. The empty
+// string is valid and means "clear it".
+func checkWebhookURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if len(raw) > maxWebhookLen {
+		return "", fmt.Errorf("webhook URL must be at most %d characters", maxWebhookLen)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("webhook URL is not a URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return "", fmt.Errorf("webhook URL must use https, not %q", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, allowed := range webhookHosts {
+		if host == allowed || (strings.HasPrefix(allowed, ".") && strings.HasSuffix(host, allowed)) {
+			return raw, nil
+		}
+	}
+	return "", fmt.Errorf("webhook host %q is not a Slack or Teams incoming-webhook host "+
+		"(allowed: hooks.slack.com, *.webhook.office.com, *.logic.azure.com)", host)
 }
 
 // Rename changes a project's display name (its id and storage are permanent).
 func (db *ProjectDB) Rename(id, name string) error {
-	return db.Update(id, &name, nil, nil)
+	return db.Update(id, &name, nil, nil, nil)
 }
 
 // Delete removes a project from the registry. Its storage prefix (blobs,

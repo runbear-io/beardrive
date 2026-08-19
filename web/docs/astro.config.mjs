@@ -139,6 +139,7 @@ export default defineConfig({
             { label: "Artifacts and links", slug: "guides/agent-artifacts" },
             { label: "What agents read", slug: "guides/what-agents-read" },
             { label: "Scoping the folder", slug: "guides/scoping" },
+            { label: "Notify Slack or Teams", slug: "guides/slack-notifications" },
           ],
         },
         {

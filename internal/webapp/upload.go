@@ -245,7 +245,15 @@ func (r *RemoteSource) appendOps(ctx context.Context, ops []journal.Op) error {
 		return err
 	}
 	data := append(existing, line...)
-	return r.Backend.Put(ctx, key, strings.NewReader(string(data)), int64(len(data)))
+	if err := r.Backend.Put(ctx, key, strings.NewReader(string(data)), int64(len(data))); err != nil {
+		return err
+	}
+	// Only a stored journal is a change. OnCommit must not block — see its
+	// doc on RemoteSource.
+	if r.OnCommit != nil {
+		r.OnCommit(ops)
+	}
+	return nil
 }
 
 var errBlobMissing = fmt.Errorf("content not uploaded yet")

@@ -403,7 +403,7 @@ func TestReadMemberSeesSharesAndGrants(t *testing.T) {
 func TestProjectListCarriesWholeProject(t *testing.T) {
 	h, srv, c, p := permHub(t)
 	desc, icon := "everything support needs", "book-open"
-	if err := srv.Projects.Update(p.ID, nil, &desc, &icon); err != nil {
+	if err := srv.Projects.Update(p.ID, nil, &desc, &icon, nil); err != nil {
 		t.Fatal(err)
 	}
 	rec := doAs(t, h, "GET", "/api/projects", nil, c["alice"])

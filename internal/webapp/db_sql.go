@@ -295,6 +295,11 @@ func (s *sqlMetaStore) migrate() error {
 		"creator":       `TEXT NOT NULL DEFAULT ''`,
 		"default_level": `TEXT NOT NULL DEFAULT ''`,
 		"template":      `TEXT NOT NULL DEFAULT ''`,
+		// Unguarded on purpose, unlike default_level above: empty means "no
+		// webhook", so a rollback or a half-applied migration fails CLOSED —
+		// the project stops notifying. The opposite of the default_level
+		// hazard, and the safe direction for an outbound credential.
+		"webhook": `TEXT NOT NULL DEFAULT ''`,
 	}, map[string]string{
 		"default_level": "it silently re-opens every restricted project to its whole organization",
 	}); err != nil {
@@ -507,7 +512,7 @@ func (r *sqlProjectRepo) Version() (string, error) { return r.s.version(regProje
 
 func (r *sqlProjectRepo) Load() ([]Project, error) {
 	rows, err := r.s.db.Query(
-		`SELECT id, name, org, created, description, icon, creator, default_level, template FROM projects`)
+		`SELECT id, name, org, created, description, icon, creator, default_level, template, webhook FROM projects`)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +522,7 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 		var p Project
 		var created string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Org, &created,
-			&p.Description, &p.Icon, &p.Creator, &p.Default, &p.Template); err != nil {
+			&p.Description, &p.Icon, &p.Creator, &p.Default, &p.Template, &p.Webhook); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -567,12 +572,13 @@ func (r *sqlProjectRepo) Put(p Project) error {
 	}
 	return r.s.inTx(regProjects, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(r.s.q(
-			`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
-			VALUES (?,?,?,?,?,?,?,?,?)
+			`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template,webhook)
+			VALUES (?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
 			description=excluded.description, icon=excluded.icon,
-			creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`),
-			p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template); err != nil {
+			creator=excluded.creator, default_level=excluded.default_level, template=excluded.template,
+			webhook=excluded.webhook`),
+			p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template, p.Webhook); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), p.ID); err != nil {
@@ -594,12 +600,13 @@ func (r *sqlProjectRepo) PutMeta(p Project) error {
 	if err := checkProject(p); err != nil {
 		return err
 	}
-	return r.w.exec(`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
-		VALUES (?,?,?,?,?,?,?,?,?)
+	return r.w.exec(`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template,webhook)
+		VALUES (?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
 		description=excluded.description, icon=excluded.icon,
-		creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`,
-		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template)
+		creator=excluded.creator, default_level=excluded.default_level, template=excluded.template,
+		webhook=excluded.webhook`,
+		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template, p.Webhook)
 }
 
 // PutPerm writes one grant row. An empty level removes it.

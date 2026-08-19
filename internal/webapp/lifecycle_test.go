@@ -68,7 +68,7 @@ func TestProjectLifecycle(t *testing.T) {
 
 	// Partial update: only the fields you pass move.
 	ptr := func(s string) *string { return &s }
-	if err := db.Update(p.ID, nil, ptr("the team handbook"), ptr("book-open")); err != nil {
+	if err := db.Update(p.ID, nil, ptr("the team handbook"), ptr("book-open"), nil); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := db.Get(p.ID)
@@ -76,14 +76,14 @@ func TestProjectLifecycle(t *testing.T) {
 		t.Fatalf("update: %+v", got)
 	}
 	// icon-only update leaves name and description alone
-	if err := db.Update(p.ID, nil, nil, ptr("users")); err != nil {
+	if err := db.Update(p.ID, nil, nil, ptr("users"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = db.Get(p.ID); got.Name != "handbook" || got.Description != "the team handbook" || got.Icon != "users" {
 		t.Fatalf("icon-only update: %+v", got)
 	}
 	// present-and-empty clears; absent does not
-	if err := db.Update(p.ID, nil, ptr(""), ptr("")); err != nil {
+	if err := db.Update(p.ID, nil, ptr(""), ptr(""), nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = db.Get(p.ID); got.Description != "" || got.Icon != "" || got.Name != "handbook" {
@@ -91,18 +91,20 @@ func TestProjectLifecycle(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		what             string
-		name, desc, icon *string
+		what                      string
+		name, desc, icon, webhook *string
 	}{
-		{"empty name", ptr("  "), nil, nil},
-		{"name over 120", ptr(strings.Repeat("x", 121)), nil, nil},
-		{"sibling collision", ptr("docs"), nil, nil},
-		{"description over 280", nil, ptr(strings.Repeat("d", 281)), nil},
-		{"icon uppercase", nil, nil, ptr("Folder")},
-		{"icon with space", nil, nil, ptr("a b")},
-		{"icon over 32", nil, nil, ptr(strings.Repeat("a", 33))},
+		{"empty name", ptr("  "), nil, nil, nil},
+		{"name over 120", ptr(strings.Repeat("x", 121)), nil, nil, nil},
+		{"sibling collision", ptr("docs"), nil, nil, nil},
+		{"description over 280", nil, ptr(strings.Repeat("d", 281)), nil, nil},
+		{"icon uppercase", nil, nil, ptr("Folder"), nil},
+		{"icon with space", nil, nil, ptr("a b"), nil},
+		{"icon over 32", nil, nil, ptr(strings.Repeat("a", 33)), nil},
+		{"webhook not https", nil, nil, nil, ptr("http://hooks.slack.com/services/x")},
+		{"webhook off-allowlist", nil, nil, nil, ptr("https://evil.example.com/x")},
 	} {
-		if err := db.Update(p.ID, tc.name, tc.desc, tc.icon); err == nil {
+		if err := db.Update(p.ID, tc.name, tc.desc, tc.icon, tc.webhook); err == nil {
 			t.Fatalf("%s: expected an error", tc.what)
 		}
 	}

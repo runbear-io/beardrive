@@ -140,7 +140,8 @@ func TestMetaStoreConformance(t *testing.T) {
 				t.Fatal(err)
 			}
 			desc, icon := "everything support needs", "book-open"
-			if err := projects.Update(p1.ID, nil, &desc, &icon); err != nil {
+			hook := "https://hooks.slack.com/services/T0/B0/conformance"
+			if err := projects.Update(p1.ID, nil, &desc, &icon, &hook); err != nil {
 				t.Fatal(err)
 			}
 			p2, _, _ := projects.GetOrCreate("scratch", "o-1")
@@ -281,6 +282,12 @@ func TestMetaStoreConformance(t *testing.T) {
 			}
 			if hb.Creator != "boss@x.io" || hb.Default != PermNone {
 				t.Fatalf("creator/default lost across reload: %+v", hb)
+			}
+			// The webhook is the field a SQL backend drops silently: PutMeta
+			// names its columns one by one, so a column the schema lacks is
+			// simply not written — green on the file backend, gone on Postgres.
+			if hb.Webhook != "https://hooks.slack.com/services/T0/B0/conformance" {
+				t.Fatalf("webhook did not survive a reopen: %q", hb.Webhook)
 			}
 			if hb.Template != "para" {
 				t.Fatalf("template lost across reload: %+v", hb)

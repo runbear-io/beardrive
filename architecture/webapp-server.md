@@ -54,6 +54,7 @@ classDiagram
         +Backend remote.Backend
         +Device Identity
         +PresignTTL time.Duration
+        +OnCommit func([]journal.Op)
         +Remove(ctx, path, who, note)
         +OpenBlob(ctx, sha)
         -reassemble(ctx, sha) chunked fallback
@@ -252,6 +253,7 @@ classDiagram
         +Template string
         +Default string
         +Perms map email→level
+        +Webhook string notify endpoint
     }
     class seedTemplate {
         <<Server method>>
@@ -261,6 +263,7 @@ classDiagram
         skips paths that already exist
         CheckWrite / RecordUsage
     }
+    note for Project "Webhook is a CREDENTIAL and never leaves the server: projectJSON zeroes it beside Perms/Default and reports webhook_set instead, which is what keeps the &quot;never leaves&quot; rule true for a projectView that embeds Project precisely so new fields DO reach the client. PermAdmin to set or clear (handleProjectUpdate), https + a Slack/Teams host allowlist at set time — a URL the hub then fetches on an admin&#39;s say-so is an SSRF primitive — and empty (the default) means the project makes no outbound requests at all. It persists through the existing ProjectRepo.Put, which for the SQL backend means a `webhook` column in addColumns and in all three column-naming statements: PutMeta names columns one by one, so a missing column is a SILENT drop that is green on the file backend and lost on Postgres."
     note for Project "Default == &quot;&quot; means write — the historical behavior, so an upgraded hub needs no migration. SetPerm/ClearPerm refuse to drop the last explicit admin."
 
     class projectPerm {
@@ -412,6 +415,15 @@ classDiagram
     }
     note for productAnalytics "The events the browser cannot see: a device syncing through /store/* never loads a page, so an agent editing files all day is invisible to the frontend's tracker. Every write door — sync, upload, remove, restore — funnels through captureChange so the file-change count is ONE event rather than a per-route set that silently misses whichever route someone forgets, and distinct_id is the same email analytics.ts identifies with so a person is not counted twice. No SDK: posthog-go would ship a tracker inside every self-hoster's binary, and capture is one JSON POST to Endpoint() + /i/v0/e/ that does nothing at all when Key is empty. Telemetry never fails a request — the POST is a goroutine and its error is a single log line. countOps needs journalDoor's storedMax because a device PUTs its WHOLE journal every cycle: counting the body would re-report the device's entire history every ten seconds. Blob PUTs are deliberately not change events, since content-addressed storage skips a blob it already holds."
 
+    class changeNotifier {
+        <<Server, notify.go>>
+        notifyProject(id, ops) AFTER the response
+        notifyText(ops) pure, table-testable
+        newOps(ops, storedMax) new ops only
+        notifyClient 10s · notifyWarnOnce
+    }
+    note for changeNotifier "Modeled on productAnalytics line for line, for the same one reason: it must never fail a request. Respond first, notify second — a synchronous POST turns a slow Slack into a 502 on a device push, and the client RETRIES a 502, which re-fires the webhook. Bounded client, own goroutine, log once, no retry queue. It fires from BOTH places an op is born: journalDoor after writeJSON, and RemoteSource.OnCommit at the end of appendOps — which is the single funnel for upload, remove, restore AND undo-run, so one field covers a write path a per-handler wiring would have missed. newOps reuses countOps' storedMax filter for the same reason countOps needs it: a device PUTs its whole journal every cycle, so notifying on the body posts the project's entire history to the channel every ten seconds, per device. The copy is the feature — every line names an actor (UserName → User → Author) and Op.Note&#39;s `&lt;platform&gt; session &lt;id&gt;` turns it into `Dana&#39;s Claude updated path`; the note is user-settable and display-only, so it names an agent and never proves one."
+
     Server o-- "0..1" Source : single-volume mode
     Server o-- "0..1" Backend : Root (hub mode)
     Server o-- ProjectDB
@@ -444,6 +456,10 @@ classDiagram
     Server *-- productAnalytics : every write door emits files_changed
     productAnalytics ..> AnalyticsConfig : Key gates it, Endpoint() addresses it
     journalDoor ..> productAnalytics : storedMax tells this cycle's ops from the whole history
+    Server *-- changeNotifier : fires when Project.Webhook is set
+    journalDoor ..> changeNotifier : after writeJSON, never before
+    RemoteSource ..> changeNotifier : OnCommit — the hub's own writes count too
+    changeNotifier ..> Project : reads Webhook, or does nothing at all
     Server *-- volume : per project, cached
     volume o-- Source
 

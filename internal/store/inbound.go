@@ -27,6 +27,13 @@ type InboundEvent struct {
 	Path    string    `json:"path"`
 	Deleted bool      `json:"deleted,omitempty"`
 	Time    time.Time `json:"time"`
+	// User is who committed the winning op, resolved the way `bdrive log`
+	// prints it (UserName -> User -> Author). Note is that op's note, which
+	// the agent hook stamps "<platform> session <id>". Both display-only and
+	// both omitempty, so a consumer written against the older shape is
+	// unaffected.
+	User string `json:"user,omitempty"`
+	Note string `json:"note,omitempty"`
 }
 
 // inboundSpoolMax caps the spool: a machine with no agent hooks never drains,
@@ -39,13 +46,16 @@ const inboundDrainMax = 4096
 func (s *Store) inboundSpoolPath() string { return filepath.Join(s.dir, "inbound.jsonl") }
 func (s *Store) inboundDrainPath() string { return filepath.Join(s.dir, "inbound-draining.jsonl") }
 
-// LogInbound appends one materialized path to the spool. Single-line O_APPEND
-// writes keep the daemon and a concurrent CLI cycle from interleaving.
-func (s *Store) LogInbound(rel string, deleted bool) error {
+// LogInbound appends one materialized event to the spool. Single-line
+// O_APPEND writes keep the daemon and a concurrent CLI cycle from
+// interleaving. It takes the whole event rather than its fields so the spool
+// and syncer.Result.Inbound cannot drift: the caller builds one value and
+// both consumers see it.
+func (s *Store) LogInbound(e InboundEvent) error {
 	if fi, err := os.Stat(s.inboundSpoolPath()); err == nil && fi.Size() > inboundSpoolMax {
 		return nil // spool full: drop, never grow unbounded
 	}
-	line, err := json.Marshal(InboundEvent{Path: rel, Deleted: deleted, Time: time.Now().UTC()})
+	line, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}

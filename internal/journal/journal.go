@@ -394,3 +394,22 @@ func Append(path string, ops []Op) error {
 	_, err = f.Write(data)
 	return err
 }
+
+// LastOps returns the winning op per path under the same total order Replay
+// folds with — deletes included, which is the half Replay cannot give you
+// (it drops a deleted path from the state entirely). Display/attribution
+// only: nothing here feeds Less or Replay, so the determinism invariant is
+// untouched.
+//
+// A max-scan rather than a sort: Less is a total order, so keeping the
+// greatest op per path agrees with Replay by construction and costs O(n)
+// instead of another sort of every op in the volume, per cycle.
+func LastOps(ops []Op) map[string]Op {
+	last := make(map[string]Op, len(ops))
+	for _, op := range ops {
+		if prev, ok := last[op.Path]; !ok || Less(prev, op) {
+			last[op.Path] = op
+		}
+	}
+	return last
+}

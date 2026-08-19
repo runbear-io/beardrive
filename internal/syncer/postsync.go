@@ -20,6 +20,13 @@ type postSyncPayload struct {
 type postSyncChanged struct {
 	Path string `json:"path"`
 	Op   string `json:"op"` // "write" | "delete"
+	// User is who committed the change, resolved UserName -> User -> Author
+	// the way `bdrive log` prints it; Note is that op's note, which the agent
+	// hook stamps "<platform> session <id>" so a recipe can render
+	// "Dana's Claude updated <path>". Both omitempty: a hook written against
+	// the older path/op payload is unaffected.
+	User string `json:"user,omitempty"`
+	Note string `json:"note,omitempty"`
 }
 
 // firePostSync runs the folder's post_sync command once, for a cycle that
@@ -45,7 +52,7 @@ func (s *Session) firePostSync(res *Result) {
 		if e.Deleted {
 			op = "delete"
 		}
-		payload.Changed = append(payload.Changed, postSyncChanged{Path: e.Path, Op: op})
+		payload.Changed = append(payload.Changed, postSyncChanged{Path: e.Path, Op: op, User: e.User, Note: e.Note})
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

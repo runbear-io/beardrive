@@ -12,11 +12,12 @@ import (
 // operable — an admin can offboard, clean up, and audit — without editing
 // JSON files on the server by hand.
 
-// handleProjectUpdate edits a project's name, description and icon. Project
-// admins (and, implicitly, the owners of its org) only. It's a partial update:
-// every field is a pointer, so only the keys actually present in the body
-// change — {"description":""} clears the description, omitting the key leaves
-// it alone.
+// handleProjectUpdate edits a project's name, description, icon and
+// notification webhook. Project admins (and, implicitly, the owners of its
+// org) only. It's a partial update: every field is a pointer, so only the
+// keys actually present in the body change — {"description":""} clears the
+// description, omitting the key leaves it alone. {"webhook":""} clears the
+// webhook, which is how notifications are turned back off.
 func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("project")
 	if _, ok := s.project(w, r, id, PermAdmin); !ok {
@@ -26,12 +27,13 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		Name        *string `json:"name"`
 		Description *string `json:"description"`
 		Icon        *string `json:"icon"`
+		Webhook     *string `json:"webhook"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.Projects.Update(id, req.Name, req.Description, req.Icon); err != nil {
+	if err := s.Projects.Update(id, req.Name, req.Description, req.Icon, req.Webhook); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

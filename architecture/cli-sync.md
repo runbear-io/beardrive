@@ -37,6 +37,7 @@ classDiagram
     note for Session "pull returns TWO lists: newly seen ops, and `gone` — ops a peer deleted from a journal this device had already applied. A peer cannot un-say what we already hold: stillHold re-signs each still-held put into OUR journal (reassertNote). Pull resumes at a byte offset by prefix-matching the local journal copy, so a peer's growing journal is read once"
     note for Session "Bounds and hardening applied throughout: sizeBound/pullBound cap a fetch against the op's declared size, maxPeerJournals caps how many peers one cycle reads, absorbLamport/tickLamport refuse an absurd peer clock and saturate instead of wrapping, safeMode masks a materialized file to 0777 &^ 0022 (no setuid/setgid, no group/other write), and safeDevice + os.SameFile keep a peer's device id from naming this device's own journal file"
     note for Session "Cycle is now a thin wrapper: cycleLocked does today's work under the volume flock, then firePostSync spawns the folder's post_sync command AFTER the lock drops, so a hook that runs a bdrive command starts working instead of blocking on the flock the cycle still holds. Splitting the body out is what makes that a property of the code rather than a rule every call site remembers"
+    note for Session "attrib is journal.LastOps(all) — the winning op per path, deletes INCLUDED, taken once per cycle right after Replay and before anything materializes (the .bdriveignore write included). Replay throws deletes away and FileState carries no author, so this is the only thing that can name who a materialized change came from; logInbound reads it to stamp User/Note on every event"
     note for Session "logInbound records each materialized peer path BOTH ways — onto Result.Inbound for the post_sync hook (same process as the cycle) and onto the store's inbound spool for bdrive sync --hook (a later process). DrainInbound is destructive and single-consumer: the hook must never drain it"
     note for Session "Prune (bdrive forget / sync --prune, never the daemon) journals a delete for every replayed path the SHARED ignore rules exclude — the include scope is per-device and must never prune it"
 
@@ -49,7 +50,7 @@ classDiagram
         +Reason() string
     }
     note for Result "Adopted counts the paths a JOINING device gave to the project (Cycle step 1b). A first cycle is a join, not an edit: a local file at a path the project already holds is demoted to lamport 0 (adoptNote), so the project's version wins on every device and no conflict copy is made — the local content stays journaled and pushed, which is what bdrive restore reads"
-    note for Result "Inbound names the paths this cycle applied on a peer's behalf — what firePostSync hands the post_sync command as JSON on stdin. Empty on a scan-and-push cycle, which is why a local-edit-only cycle fires nothing"
+    note for Result "Inbound names the paths this cycle applied on a peer's behalf — what firePostSync hands the post_sync command as JSON on stdin. Empty on a scan-and-push cycle, which is why a local-edit-only cycle fires nothing. Each event now also carries User and Note, so a recipe can post `Dana's Claude updated path` rather than `1 file changed` — the payload constraint was the whole reason that copy was impossible"
     note for Result "Offline / ReadOnly / NoAccess are three different answers: unreachable (retry all), push refused (pull-only), pull refused (pause, touch nothing)"
     note for Result "Reason() is accessReason(AccessErr): the hub's own sentence for a refusal, minus the wrapper chain, dropped unless it passes journal.SafeText. 'read-only' summarizes the STATUS CODE — the sentence is the only thing that tells a device-registration 403 from a project the user really is a reader on"
 
@@ -136,7 +137,7 @@ classDiagram
         +SaveNote / LoadNote
         +LogRead(rel, session) read spool
         +PendingReads dedup on path+session
-        +LogInbound / DrainInbound
+        +LogInbound(InboundEvent) / DrainInbound
         +LoadSecrets / SaveSecrets mountID
         +Lock() flock
     }
@@ -162,6 +163,11 @@ classDiagram
         +Session agent session, hook-set
         +Mtime when the file was written
     }
+    class LastOps {
+        <<journal, func>>
+        +LastOps(ops) map path to Op
+    }
+    note for LastOps "The winning op per path under the SAME total order Replay folds with, deletes included — a max-scan, not a sort, so it agrees with Replay by construction and costs O(n) rather than a third sort per cycle. Display/attribution only: Less, Replay and FileState are untouched, so the determinism invariant is not in play. Replay cannot answer this — it drops a deleted path entirely, and FileState is {Blob,Size,Mode} with no author in it"
     note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay. Session holds the same standing: set only by `bdrive sync --hook` (never by --note, which any member can spell), display/join-only, and the key History run cards group on — a note is forgeable, a session id is not"
     note for Op "Op now owns its own JSON: a Path that is not valid UTF-8 rides as a base64 `path_raw` sidecar and is restored only when the lossy form still matches, so one line can never name two different files on two readers. Less falls through to Kind/Path/Blob/Size/Mode, making the order TOTAL — two ops can no longer tie and replay differently per device. Parse skips an undecodable line and drops an unknown Kind instead of failing the whole journal"
 
@@ -203,6 +209,7 @@ classDiagram
     Session --> secretLog : scan flags, finish persists
     secretLog --> Store : reads the blob, writes secrets-mount-id.json
     Session ..> Op : commits, replays
+    Session ..> LastOps : attrib — who committed each materialized path
     Session --> Result
     Store o-- Op : journal files
     Store *-- SyncState : sync.json

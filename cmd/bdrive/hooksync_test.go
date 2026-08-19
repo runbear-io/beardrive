@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/secrets"
@@ -323,7 +324,7 @@ func seedInbound(t *testing.T, proj config.Project, paths ...string) {
 	}
 	for _, p := range paths {
 		deleted := strings.HasPrefix(p, "-")
-		if err := st.LogInbound(strings.TrimPrefix(p, "-"), deleted); err != nil {
+		if err := st.LogInbound(store.InboundEvent{Path: strings.TrimPrefix(p, "-"), Deleted: deleted, Time: time.Now().UTC()}); err != nil {
 			t.Fatal(err)
 		}
 	}

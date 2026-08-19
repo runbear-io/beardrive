@@ -241,3 +241,81 @@ func TestPostSyncLeavesInboundSpool(t *testing.T) {
 		t.Fatalf("inbound spool = %v, want wiki/page.md still queued for the agent hook", evs)
 	}
 }
+
+// TestPostSyncPayloadNamesTheAuthor is the whole point of the payload
+// change: a recipe hung off post_sync must be able to write "Dana's Claude
+// updated <path>" rather than "1 file changed". Two devices through a shared
+// remote — B commits with a signed-in account and a session note, A's cycle
+// materializes and fires the hook.
+func TestPostSyncPayloadNamesTheAuthor(t *testing.T) {
+	rem := sharedRemote(t)
+	a, b := newDevice(t, "deva", rem), newDevice(t, "devb", rem)
+	b.Account = config.Settings{Email: "dana@example.com", Name: "Dana Kim"}
+	b.Note = "claude session 41f2"
+
+	marker := filepath.Join(t.TempDir(), "marker.json")
+	postSync(t, a.Folder, "cat >> "+marker)
+
+	write(t, b.Folder, "shared/findings/eu-checkout.md", "we are dropping Redis")
+	cycle(t, b)
+
+	cycle(t, a)
+	got := batch(t, waitForFile(t, marker, 5*time.Second))
+	if len(got.Changed) != 1 {
+		t.Fatalf("batch = %+v, want one path", got.Changed)
+	}
+	if c := got.Changed[0]; c.User != "Dana Kim" || c.Note != "claude session 41f2" {
+		t.Fatalf("changed[0] = %+v, want user Dana Kim / note claude session 41f2", c)
+	}
+}
+
+// A delete carries the same attribution — journal.Replay drops the path, so
+// this is the case that would silently ship blank without journal.LastOps.
+func TestPostSyncDeletesCarryTheAuthor(t *testing.T) {
+	rem := sharedRemote(t)
+	a, b := newDevice(t, "deva", rem), newDevice(t, "devb", rem)
+	b.Account = config.Settings{Email: "sam@example.com", Name: "Sam Ito"}
+
+	write(t, b.Folder, "runbook.md", "v1")
+	cycle(t, b)
+	cycle(t, a) // A has the file
+
+	marker := filepath.Join(t.TempDir(), "marker.json")
+	postSync(t, a.Folder, "cat >> "+marker)
+
+	if err := os.Remove(filepath.Join(b.Folder, "runbook.md")); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, b)
+
+	cycle(t, a)
+	got := batch(t, waitForFile(t, marker, 5*time.Second))
+	if len(got.Changed) != 1 || got.Changed[0].Op != "delete" {
+		t.Fatalf("batch = %+v, want one delete", got.Changed)
+	}
+	if got.Changed[0].User != "Sam Ito" {
+		t.Fatalf("delete user = %q, want Sam Ito", got.Changed[0].User)
+	}
+}
+
+// With no signed-in account the payload falls back to Device.Author, the same
+// precedence `bdrive log` prints.
+func TestPostSyncFallsBackToAuthor(t *testing.T) {
+	rem := sharedRemote(t)
+	a, b := newDevice(t, "deva", rem), newDevice(t, "devb", rem)
+
+	marker := filepath.Join(t.TempDir(), "marker.json")
+	postSync(t, a.Folder, "cat >> "+marker)
+
+	write(t, b.Folder, "notes.md", "hi")
+	cycle(t, b)
+
+	cycle(t, a)
+	got := batch(t, waitForFile(t, marker, 5*time.Second))
+	if len(got.Changed) != 1 || got.Changed[0].User != "devb@test" {
+		t.Fatalf("batch = %+v, want user devb@test from Device.Author", got.Changed)
+	}
+	if got.Changed[0].Note != "" {
+		t.Fatalf("note = %q, want empty for a plain daemon push", got.Changed[0].Note)
+	}
+}

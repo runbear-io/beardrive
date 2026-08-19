@@ -128,3 +128,42 @@ func TestMtimeIsAdditive(t *testing.T) {
 		t.Fatalf("Mtime should be zero, got %v", got[1].Mtime)
 	}
 }
+
+// TestLastOpsAgreesWithReplay pins LastOps to Replay: every path Replay keeps
+// must resolve to an op with the same blob, and a deleted path — which Replay
+// drops — must resolve to its delete op.
+func TestLastOpsAgreesWithReplay(t *testing.T) {
+	base := time.Unix(1700000000, 0).UTC()
+	ops := []Op{
+		{Seq: 1, Lamport: 1, Time: base, Device: "a", Kind: KindPut, Path: "keep.md", Blob: "aaa"},
+		{Seq: 2, Lamport: 5, Time: base.Add(time.Second), Device: "a", Kind: KindPut, Path: "keep.md", Blob: "bbb", UserName: "Dana Kim"},
+		{Seq: 1, Lamport: 2, Time: base, Device: "b", Kind: KindPut, Path: "gone.md", Blob: "ccc"},
+		{Seq: 2, Lamport: 6, Time: base.Add(2 * time.Second), Device: "b", Kind: KindDelete, Path: "gone.md", UserName: "Sam Ito"},
+		{Seq: 3, Lamport: 3, Time: base, Device: "b", Kind: KindPut, Path: "other.md", Blob: "ddd"},
+	}
+	// Shuffled input must not change the answer.
+	shuffled := []Op{ops[3], ops[0], ops[4], ops[2], ops[1]}
+
+	state := Replay(shuffled)
+	last := LastOps(shuffled)
+
+	for path, fs := range state {
+		op, ok := last[path]
+		if !ok {
+			t.Fatalf("LastOps missing %q that Replay kept", path)
+		}
+		if op.Kind != KindPut || op.Blob != fs.Blob {
+			t.Fatalf("LastOps[%q] = %+v, want the put with blob %q", path, op, fs.Blob)
+		}
+	}
+	if _, ok := state["gone.md"]; ok {
+		t.Fatal("Replay kept a deleted path")
+	}
+	del, ok := last["gone.md"]
+	if !ok || del.Kind != KindDelete || del.UserName != "Sam Ito" {
+		t.Fatalf("LastOps[gone.md] = %+v, want Sam Ito's delete", del)
+	}
+	if got := last["keep.md"].UserName; got != "Dana Kim" {
+		t.Fatalf("LastOps[keep.md].UserName = %q, want Dana Kim", got)
+	}
+}

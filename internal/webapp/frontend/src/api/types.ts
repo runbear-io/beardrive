@@ -77,6 +77,12 @@ export interface Project {
   // server-side. A project you cannot read never appears in the list at all,
   // so this is always read or better here.
   perm?: PermLevel;
+  /**
+   * Whether a change-notification webhook is configured. The URL itself is a
+   * credential and never leaves the server (projectJSON, server.go), so this
+   * is state to render — there is no value to round-trip.
+   */
+  webhook_set?: boolean;
 }
 
 // GET /api/p/{id}/permissions (handleProjectPerms, perms.go)

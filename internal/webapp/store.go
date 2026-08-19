@@ -709,6 +709,7 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var storedMax int64
+	var fresh []journal.Op // ops the hub had not seen, notified after the response
 	if strings.HasPrefix(key, "journal/") {
 		var ok bool
 		var err error
@@ -810,6 +811,23 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		v.invalidate() // new ops should show in the viewer immediately
 		puts, deletes := countOps(ops, storedMax)
 		s.captureChange(r, "sync", puts, deletes)
+		fresh = newOps(ops, storedMax)
 	}
 	writeJSON(w, map[string]any{"ok": true})
+	// AFTER the response, never before: a synchronous POST to a slow endpoint
+	// would 502 this push, and the client retries a 502.
+	s.notifyProject(project, fresh)
+}
+
+// newOps is countOps' filter, kept: a device PUTs its WHOLE journal every
+// cycle, so notifying on `ops` rather than the ops above storedMax posts the
+// project's entire history to the channel every ten seconds, per device.
+func newOps(ops []journal.Op, storedMax int64) []journal.Op {
+	var out []journal.Op
+	for _, op := range ops {
+		if op.Seq > storedMax {
+			out = append(out, op)
+		}
+	}
+	return out
 }

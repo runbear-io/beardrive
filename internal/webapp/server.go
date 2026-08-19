@@ -306,6 +306,9 @@ func (s *Server) projectVolume(id string) (Project, *volume, error) {
 				// The real TTL the presign doors hand out, so verify seals a
 				// blob no earlier than the last URL for it can expire.
 				PresignTTL: s.Upload.ttl(),
+				// The hub notifies about its own writes too, or "the hub tells
+				// you" is false for everyone who never leaves the browser.
+				OnCommit: func(ops []journal.Op) { s.notifyProject(id, ops) },
 			},
 			refresh: s.Refresh,
 		}
@@ -329,6 +332,15 @@ type RemoteSource struct {
 	// the server's real UploadConfig.ttl(), or a longer configured TTL would
 	// seal an object that can still change.
 	PresignTTL time.Duration
+	// OnCommit, when set, is called with the ops a successful appendOps just
+	// journaled — the hub telling itself about its own writes. appendOps is
+	// the single funnel for browser uploads, removes, restores and run undo,
+	// so this one field covers every hub-side write path; hanging the call
+	// off each handler instead would miss whichever one is added next.
+	//
+	// It is called after the journal is stored, and must not block: the
+	// notifier it feeds returns immediately.
+	OnCommit func([]journal.Op)
 
 	upmu sync.Mutex // serializes read-modify-write of our own journal
 	// sealed holds the blobs this process has verified AND proved immutable.
@@ -1065,13 +1077,21 @@ func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 type projectView struct {
 	Project
 	Perm string `json:"perm"`
+	// WebhookSet reports whether notifications are configured without ever
+	// naming the endpoint — the URL is a credential, so it is state the UI
+	// renders, not content it round-trips.
+	WebhookSet bool `json:"webhook_set,omitempty"`
 }
 
 func projectJSON(p Project, perm string) projectView {
 	// The grant list and the default belong to /api/p/{id}/permissions, which
 	// has its own gate; they'd be noise on every row of every project list.
-	p.Perms, p.Default = nil, ""
-	return projectView{p, perm}
+	// The webhook URL is a credential and leaves the server for nobody, admin
+	// included — projectView embeds Project precisely so new fields reach the
+	// client, so a field that must not must be zeroed HERE.
+	set := p.Webhook != ""
+	p.Perms, p.Default, p.Webhook = nil, "", ""
+	return projectView{p, perm, set}
 }
 
 func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
