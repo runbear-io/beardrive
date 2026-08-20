@@ -144,6 +144,15 @@ export function HistoryRow({
             read
           </span>
         )}
+        {/* An agent session claimed this change. Positive claim only — a row
+            with no chip asserts nothing, because an absent session can also
+            mean the daemon committed an agent's write before the hook ran.
+            Inside a run card the card header says it once instead. */}
+        {!inRun && e.session && (
+          <span className="hagent" title="Changed during an agent run">
+            agent
+          </span>
+        )}
         <span className="hpath">{e.path}</span>
         <span className="htime">{when}</span>
       </div>

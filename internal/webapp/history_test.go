@@ -72,6 +72,24 @@ func (f *fakeRemote) putFull(dev, user, path, content string, at time.Time) {
 	writeFileT(f.t, p, data)
 }
 
+// sessionize stamps the last op on dev's journal with an agent session id —
+// which, in production, only `bdrive sync --hook` ever sets. It is the whole
+// signal behind ?by=agent, so a filter test needs a way to plant it.
+func (f *fakeRemote) sessionize(dev, session string) {
+	f.t.Helper()
+	p := filepath.Join(f.dir, "journal", dev+".jsonl")
+	ops, err := journal.ReadFile(p)
+	if err != nil || len(ops) == 0 {
+		f.t.Fatal(err)
+	}
+	ops[len(ops)-1].Session = session
+	data, err := journal.Marshal(ops)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	writeFileT(f.t, p, data)
+}
+
 func writeFileT(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -428,7 +446,9 @@ func TestHistoryPagingAcrossLamportAndTime(t *testing.T) {
 
 // seedFiltered builds a feed with two authors, three days and paths that
 // differ in case, so every filter has something to include and something to
-// leave out.
+// leave out. Two of the four ops carry an agent session — one per author —
+// so ?by=agent and ?by=unattributed are both non-empty and neither maps onto
+// a single author.
 func seedFiltered(t *testing.T) (http.Handler, string) {
 	t.Helper()
 	srv, p, root := newHub(t, false, nil)
@@ -436,7 +456,9 @@ func seedFiltered(t *testing.T) (http.Handler, string) {
 	day := func(d, h int) time.Time { return time.Date(2026, 7, d, h, 30, 0, 0, time.UTC) }
 	f.putFull("dev1", "mira@acme.io", "docs/Runbook.md", "v1", day(1, 9))
 	f.putFull("dev1", "mira@acme.io", "docs/runbook-old.md", "v1", day(15, 12))
+	f.sessionize("dev1", "sess-mira")
 	f.putFull("dev2", "ken@acme.io", "docs/plan.md", "p1", day(31, 23))
+	f.sessionize("dev2", "sess-ken")
 	f.putFull("dev2", "ken@acme.io", "notes/runbook.md", "n1", day(15, 0))
 	return srv.Handler(), "/api/p/" + p.ID + "/"
 }
@@ -491,8 +513,18 @@ func TestHistoryFilters(t *testing.T) {
 		{"until=2026-07-01T09:30:00Z", []string{"docs/Runbook.md"}},
 		// since > until means nothing, not an error
 		{"since=2026-07-31&until=2026-07-01", []string{}},
+		// agent runs vs unattributed: disjoint, and their union is the feed.
+		// The complement is never called "human" — an empty Session means the
+		// daemon may simply have beaten the hook.
+		{"by=agent", []string{"docs/plan.md", "docs/runbook-old.md"}},
+		{"by=unattributed", []string{"notes/runbook.md", "docs/Runbook.md"}},
+		{"by=", []string{"docs/plan.md", "docs/runbook-old.md", "notes/runbook.md", "docs/Runbook.md"}},
 		// composed with each other…
 		{"q=runbook&user=mira@acme.io", []string{"docs/runbook-old.md", "docs/Runbook.md"}},
+		{"by=agent&user=mira@acme.io", []string{"docs/runbook-old.md"}},
+		{"by=agent&q=runbook", []string{"docs/runbook-old.md"}},
+		{"by=unattributed&user=ken@acme.io", []string{"notes/runbook.md"}},
+		{"by=agent&prefix=notes/", []string{}},
 		{"q=runbook&user=mira@acme.io&since=2026-07-10&until=2026-07-20", []string{"docs/runbook-old.md"}},
 		// …and with the existing prefix/path scoping
 		{"prefix=docs/&q=runbook", []string{"docs/runbook-old.md", "docs/Runbook.md"}},
@@ -511,36 +543,46 @@ func TestHistoryFilters(t *testing.T) {
 // after the skip and this test loses entries.
 func TestHistoryFilterPaging(t *testing.T) {
 	h, base := seedFiltered(t)
-	filter := "q=runbook"
-	want, next := histPaths(t, h, base+"history?"+filter)
-	if len(want) != 3 || next != "" {
-		t.Fatalf("unpaged filtered feed = %v (next %q)", want, next)
-	}
-	var got []string
-	cursor := ""
-	for pages := 0; ; pages++ {
-		if pages > len(want) {
-			t.Fatalf("paging did not terminate: %v", got)
+	for _, c := range []struct {
+		filter string
+		n      int
+		count  int
+	}{
+		{"q=runbook", 2, 3},
+		{"by=agent", 1, 2}, // one entry per page walks the whole agent feed
+	} {
+		want, next := histPaths(t, h, base+"history?"+c.filter)
+		if len(want) != c.count || next != "" {
+			t.Fatalf("?%s unpaged = %v (next %q)", c.filter, want, next)
 		}
-		page, next := histPaths(t, h, base+"history?"+filter+"&n=2"+cursorArg(cursor))
-		if len(page) == 0 {
-			t.Fatalf("empty page %d", pages)
+		var got []string
+		cursor := ""
+		for pages := 0; ; pages++ {
+			if pages > len(want) {
+				t.Fatalf("?%s paging did not terminate: %v", c.filter, got)
+			}
+			page, next := histPaths(t, h, fmt.Sprintf("%shistory?%s&n=%d%s", base, c.filter, c.n, cursorArg(cursor)))
+			if len(page) == 0 {
+				t.Fatalf("?%s empty page %d", c.filter, pages)
+			}
+			got = append(got, page...)
+			if next == "" {
+				break
+			}
+			cursor = next
 		}
-		got = append(got, page...)
-		if next == "" {
-			break
+		if !slices.Equal(got, want) {
+			t.Fatalf("?%s paged = %v, want %v", c.filter, got, want)
 		}
-		cursor = next
-	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("paged filtered = %v, want %v", got, want)
 	}
 }
 
-// A date we can't parse is a 400, not a silently unfiltered feed.
+// A filter value we can't parse is a 400, not a silently unfiltered feed.
+// `by=human` is in here on purpose: there is no such class, because an empty
+// Session cannot tell a person's edit from the daemon beating the hook.
 func TestHistoryBadDateRange(t *testing.T) {
 	h, base := seedFiltered(t)
-	for _, q := range []string{"since=yesterday", "until=2026-13-45", "since=2026-07-01&until=soon", "since="} {
+	for _, q := range []string{"since=yesterday", "until=2026-13-45", "since=2026-07-01&until=soon", "since=", "by=garbage", "by=human"} {
 		rec := do(t, h, "GET", base+"history?"+q, nil)
 		if q == "since=" { // an empty value is "no filter", like every other param
 			if rec.Code != 200 {

@@ -118,10 +118,16 @@ versions in between stay in the history, the restore itself shows up in
 teammate like any other edit — so you can restore away from a restore. The hub
 has the same button on every history row.
 
-The hub's History view narrows the feed by path substring, author and date
-range (dates are UTC days, inclusive at both ends). The filters live in the
-URL — `<project>/history?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31`
+The hub's History view narrows the feed by path substring, author, date range
+(dates are UTC days, inclusive at both ends), and whether an agent run claimed
+the change (`by=agent`, or `by=unattributed` for everything else). The filters
+live in the URL —
+`<project>/history?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31&by=agent`
 — so a narrowed feed is a link you can send, and it survives reload and Back.
+`by=agent` is a positive claim and nothing else is: a change with no agent
+session may still be an agent's, because the sync daemon often commits the
+write before the agent's hook runs — which is why the other class is called
+*unattributed* rather than *human*.
 Filtering happens on the server, so paging through a filtered feed shows every
 match, not just the ones on the first page.
 

@@ -137,11 +137,17 @@ func parseHistTime(s string, end bool) (time.Time, bool) {
 // newest first by wall-clock time, at most ?n= entries (default 100).
 //
 // Reader filters — ?q= (case-insensitive substring of the path), ?user=
-// (exact account), ?since=/?until= (UTC bounds, inclusive at both ends) —
-// compose with each other and with path/prefix. They are applied in the same
-// walk as path/prefix, i.e. BEFORE the sort and the cursor skip, so
-// next_cursor keeps meaning "the next matching entry" and paging under a
-// filter needs no new machinery.
+// (exact account), ?since=/?until= (UTC bounds, inclusive at both ends),
+// ?by= (agent|unattributed) — compose with each other and with path/prefix.
+// They are applied in the same walk as path/prefix, i.e. BEFORE the sort and
+// the cursor skip, so next_cursor keeps meaning "the next matching entry" and
+// paging under a filter needs no new machinery.
+//
+// ?by= FILTERS, it does not group — note the wart that /heat's ?by=device
+// means "group by". agent is Session != "", which only `bdrive sync --hook`
+// ever sets, so it is a positive claim that is always true. The complement is
+// "unattributed", NOT "human": the daemon usually commits an agent's write
+// before the hook's cycle runs, so an empty Session is absence of evidence.
 //
 // Paging: the response carries next_cursor when more entries exist, and
 // ?cursor= resumes just past the entry it was minted from — so history older
@@ -174,6 +180,11 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	needle := strings.ToLower(q.Get("q")) // lowered once, not per op
 	user := q.Get("user")
+	by := q.Get("by")
+	if by != "" && by != "agent" && by != "unattributed" {
+		http.Error(w, "invalid by", http.StatusBadRequest)
+		return
+	}
 	var since, until time.Time
 	// since > until is not an error: it means "nothing", which is what it returns.
 	for _, b := range []struct {
@@ -246,6 +257,10 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		case needle != "" && !strings.Contains(strings.ToLower(op.Path), needle):
 			continue
 		case user != "" && op.User != user:
+			continue
+		case by == "agent" && op.Session == "":
+			continue
+		case by == "unattributed" && op.Session != "":
 			continue
 		case !since.IsZero() && op.Time.Before(since):
 			continue
