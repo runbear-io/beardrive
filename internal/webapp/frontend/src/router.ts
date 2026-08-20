@@ -68,8 +68,14 @@ export interface HistoryFilters {
   user?: string; // exact account
   since?: string; // YYYY-MM-DD (UTC), inclusive
   until?: string; // YYYY-MM-DD (UTC), inclusive
+  // "agent" (the op carries an agent session) or "unattributed" (it doesn't —
+  // which is NOT the same as "a human did it"). Typed `string`, not that
+  // union, for the same reason `since` is not typed YYYY-MM-DD: the URL is
+  // user input, the parse loop below writes a bare string, and the server is
+  // the one validator (it 400s anything else).
+  by?: string;
 }
-export const HISTORY_FILTER_KEYS = ["q", "user", "since", "until"] as const;
+export const HISTORY_FILTER_KEYS = ["q", "user", "since", "until", "by"] as const;
 
 export function hasHistoryFilters(f?: HistoryFilters): boolean {
   return !!f && HISTORY_FILTER_KEYS.some((k) => !!f[k]);
@@ -115,7 +121,7 @@ export interface Route {
   // not a property of the project — a teammate connecting next week has their
   // own answer, and would be told the wrong thing by a persisted flag.
   connect?: string;
-  // History feed filters (?q=&user=&since=&until=). Only ever set on the
+  // History feed filters (?q=&user=&since=&until=&by=). Only ever set on the
   // history view; absent when nothing is filtered.
   filters?: HistoryFilters;
   // The history target arrived as ?path=/?prefix= rather than as a path

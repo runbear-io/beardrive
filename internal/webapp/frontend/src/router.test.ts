@@ -1,7 +1,7 @@
 // Run with `npm test` (node's built-in runner; node ≥ 23 strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseRoute, projectByName, urlForView, historyFilterQuery } from "./router.ts";
+import { parseRoute, projectByName, urlForView, historyFilterQuery, hasHistoryFilters } from "./router.ts";
 
 // A trailing slash is what a browser hands you when you copy a folder URL,
 // so /notes/ has to be the same page as /notes.
@@ -72,7 +72,10 @@ test("odd characters round-trip", () => {
 // History filters live in the URL, so a narrowed feed is linkable and comes
 // back on reload and Back. Round-trip: parse → build → same URL.
 test("history filters round-trip through the URL", () => {
-  const r = parseRoute("/p-1/history/notes?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31", "hub");
+  const r = parseRoute(
+    "/p-1/history/notes?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31&by=agent",
+    "hub",
+  );
   assert.equal(r.view, "history");
   assert.equal(r.viewTarget, "notes");
   assert.deepEqual(r.filters, {
@@ -80,11 +83,24 @@ test("history filters round-trip through the URL", () => {
     user: "mira@acme.io",
     since: "2026-07-01",
     until: "2026-07-31",
+    by: "agent",
   });
   assert.equal(
     urlForView("history", "p-1", "notes", r.filters),
-    "/p-1/history/notes?q=runbook&user=mira%40acme.io&since=2026-07-01&until=2026-07-31",
+    "/p-1/history/notes?q=runbook&user=mira%40acme.io&since=2026-07-01&until=2026-07-31&by=agent",
   );
+});
+
+// BEA-157: ?by= is a filter like any other — it alone is enough to make a
+// feed "filtered", so a bare ?by=agent link round-trips and shows Clear.
+test("?by= rides the URL on its own", () => {
+  const r = parseRoute("/p-1/history?by=agent", "hub");
+  assert.deepEqual(r.filters, { by: "agent" });
+  assert.equal(hasHistoryFilters(r.filters), true);
+  assert.equal(historyFilterQuery({ by: "unattributed" }), "?by=unattributed");
+  assert.equal(urlForView("history", "p-1", "", r.filters), "/p-1/history?by=agent");
+  // and it is not invented where it wasn't asked for
+  assert.equal(parseRoute("/p-1/history", "hub").filters, undefined);
 });
 
 // An unfiltered feed keeps the bare URL it has always had — no empty ?q=.

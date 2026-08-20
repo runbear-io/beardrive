@@ -770,6 +770,11 @@ a.ai-main:hover { color: var(--accent); }
 .hf-search input { height: 30px; padding-left: 29px; font-size: 12.5px; border-radius: var(--r-ctl); background: var(--surface); }
 .hf-search input::-webkit-search-cancel-button { filter: invert(.6); }
 .hf-user { height: 30px; max-width: 190px; padding: 0 8px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; }
+/* Who changed it: All / Agent runs / Unattributed. Reuses the Dashboard's
+   lens pills — same visual language, already themed — but not its .in-lens
+   wrapper, whose bottom margin is wrong inside this flex row. */
+.hf-by { display: flex; align-items: center; gap: 6px; }
+.hf-by .in-lens-btn { height: 30px; padding: 0 12px; }
 .hf-dates { display: flex; align-items: center; gap: 6px; }
 .hf-lbl { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-ghost); }
 .hf-date { width: 140px; height: 30px; font-size: 12.5px; border-radius: var(--r-ctl); background: var(--surface); }
@@ -845,6 +850,9 @@ a.ai-main:hover { color: var(--accent); }
 /* "this run read it too" — a quieter badge than the kind pill it follows,
    because the change is still the headline of the row. */
 .hread { flex: none; padding: 2px 6px; border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; color: var(--text-dim); background: var(--hover); }
+/* "an agent run claimed this change" — the accent, because unlike .hread it
+   is a claim about who, and it is the only class the feed will assert. */
+.hagent { flex: none; padding: 2px 6px; border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; color: var(--accent); background: var(--hover); }
 /* What the run read and did NOT change: same two columns as a change row so
    the eye reads one list, dimmer because nothing moved. */
 .hrun-reads { border-top: 1px solid var(--border); padding: 4px 0 6px; }
@@ -1013,6 +1021,8 @@ a.ai-main:hover { color: var(--accent); }
      them costs nothing but a second row. */
   .hf-search input, .hf-user, .hf-date, .hf-clear { height: 44px; }
   .hf-dates { flex: 1 1 100%; }
+  .hf-by { flex: 1 1 100%; }
+  .hf-by .in-lens-btn { height: auto; }
   .hf-date { flex: 1; width: auto; min-width: 0; }
   /* The desktop run header ellipsises the note at 46% and the meta at
      whatever is left, which on a phone clips to `claude-…` / `Alice <ali…` —

@@ -6,11 +6,17 @@ import { hasHistoryFilters, type HistoryFilters as Filters } from "../router";
 /* ---- history filters ----
    The whole feed is one flat scroll, and agents write far more than people
    do — so a month-old project is unreadable without a way to narrow it.
-   Every filter is applied SERVER-side (?q=/?user=/?since=/?until=), never
-   over the loaded page: filtering what happens to be on screen would lie
-   about everything below the fold and break paging. State lives in the URL,
-   so a narrowed feed is linkable and Back undoes a filter like any other
-   navigation.
+   Every filter is applied SERVER-side (?q=/?user=/?since=/?until=/?by=),
+   never over the loaded page: filtering what happens to be on screen would
+   lie about everything below the fold and break paging. State lives in the
+   URL, so a narrowed feed is linkable and Back undoes a filter like any
+   other navigation.
+
+   The by= segment is two classes, not three: "Agent runs" is every change an
+   agent session claimed, and the other button is "Unattributed" — NOT
+   "Human". The daemon usually commits an agent's write before the hook's
+   cycle runs, so a change with no session may well be an agent's; the UI
+   says only what it knows.
 
    Dates are bare YYYY-MM-DD and the server reads them as UTC days — the
    label says so, because a native date input speaks the reader's local
@@ -90,6 +96,23 @@ export function HistoryFilters(props: {
           aria-label="To date (UTC)"
           onChange={(e) => set("until", e.target.value)}
         />
+      </span>
+      <span className="hf-by" role="group" aria-label="Filter by who changed it">
+        {[
+          ["", "All"],
+          ["agent", "Agent runs"],
+          ["unattributed", "Unattributed"],
+        ].map(([v, label]) => (
+          <button
+            key={v}
+            type="button"
+            className={"in-lens-btn" + ((filters?.by ?? "") === v ? " active" : "")}
+            aria-pressed={(filters?.by ?? "") === v}
+            onClick={() => set("by", v)}
+          >
+            {label}
+          </button>
+        ))}
       </span>
       {active && (
         <button type="button" className="hf-clear" onClick={() => onChange({})}>

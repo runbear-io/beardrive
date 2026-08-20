@@ -174,3 +174,50 @@ test("a filter change shows a loading row, never a premature 'no matches'", asyn
   await expect(page.locator(".history .empty")).toHaveCount(0);
   await page.unroute(stall);
 });
+
+// BEA-157: the hub already knew which changes an agent run claimed
+// (Op.Session) and rendered it nowhere. The segment filters server-side like
+// every other filter, and the badge is a positive claim only — the second
+// button is "Unattributed", never "Human", because an empty session can also
+// mean the daemon committed an agent's write before the hook ran.
+test("the agent-run segment filters the feed, badges only agent work, and lands in the URL", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/history`);
+  await expect(page.locator(rows).first()).toBeVisible();
+  const seg = page.locator(".hf-by");
+  await expect(seg.getByRole("button")).toHaveText(["All", "Agent runs", "Unattributed"]);
+  // The one thing this UI must never say.
+  await expect(page.locator(".hfilters")).not.toContainText("Human");
+
+  // The seeded run card is the project's only agent-claimed work.
+  await seg.getByRole("button", { name: "Agent runs" }).click();
+  await page.waitForURL(`/${pid}/history?by=agent`);
+  await expect(page.locator(".hrun-head")).toHaveCount(1);
+  await expect(page.locator(".hrun-head .hagent")).toHaveText("agent");
+  // Once on the card header, never repeated on the rows inside it.
+  await expect(page.locator(".hrun-body .hagent")).toHaveCount(0);
+  const agentPaths = await page.locator(`${rows} .hpath`).allTextContents();
+  expect(agentPaths.length).toBeGreaterThan(0);
+
+  // Deep link + reload: the selection is URL state, not component state.
+  await page.reload();
+  await expect(seg.getByRole("button", { name: "Agent runs" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(`${rows} .hpath`)).toHaveCount(agentPaths.length);
+
+  // The complement is disjoint — per OP, not per path: the suite rewrites
+  // some of these same files unattributed later on, so the honest assertion
+  // is that nothing agent-claimed survives, not that no path repeats.
+  await seg.getByRole("button", { name: "Unattributed" }).click();
+  await page.waitForURL(`/${pid}/history?by=unattributed`);
+  await expect(page.locator(rows).first()).toBeVisible();
+  await expect(page.locator(".hagent")).toHaveCount(0);
+  await expect(page.locator(".hrun-head", { hasText: "8f21e4" })).toHaveCount(0);
+
+  // Back undoes it, and All clears it back to the bare URL.
+  await page.goBack();
+  await expect(page).toHaveURL(`/${pid}/history?by=agent`);
+  await seg.getByRole("button", { name: "All" }).click();
+  await page.waitForURL(`/${pid}/history`);
+  await expect(page.locator(".hrun-head .hagent")).toHaveCount(1);
+});

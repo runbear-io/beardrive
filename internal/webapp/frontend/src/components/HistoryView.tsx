@@ -288,6 +288,14 @@ function RunGroup({
         >
           <Icon name={open ? "chevd" : "chev"} />
         </button>
+        {/* Gated on the session, never on "is a card": groupRuns keys a card
+            on a session id OR on a note, and a note-keyed card carries no
+            agent claim at all (see lib/runs.ts). */}
+        {run.session && (
+          <span className="hagent" title="Changed during an agent run">
+            agent
+          </span>
+        )}
         {/* The note is a link when the agent left one — clicking it opens the
             session, so it can't live inside the collapse button. */}
         <span className="hrun-note">
