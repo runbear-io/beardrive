@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
-import type { HeatMap, Node, RenderDoc } from "../api/types";
+import type { FrontmatterPair, HeatMap, Node, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
 import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
 import { fileURLFor, useTextAt } from "../hooks/useBlob";
@@ -12,14 +12,18 @@ import {
   MD_EXT,
   PDF_EXT,
   TEXT_EXT,
+  fmPanelOpen,
   humanSize,
   joinPath,
+  rememberFmPanel,
   resolveWiki,
   whoChanged,
 } from "../util";
 import { urlForPath } from "../router";
 import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
 import { hasMermaid, renderMermaid } from "../lib/mermaid";
+import { secretsBadge, type SecretFinding } from "../lib/secrets";
+import { Icon } from "./shell";
 
 export function FileView(props: {
   apiBase: string;
@@ -222,18 +226,92 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
         parts.join(" · ")
       ),
     );
-    onRendered?.();
-  }, [doc, version, heatMap, onMeta, onRendered]);
+  }, [doc, version, heatMap, onMeta]);
+
+  // Rendered content, and nothing else, counts as "rendered" — the scroll
+  // restorer re-applies its goal on this call, and a read-count refresh
+  // (heatMap, polled every 60s) used to ride along on the meta effect above
+  // and yank the reader back to the top mid-read (BEA-155). html and diagrams
+  // are exactly what the mounted subtree is made of; a diagram landing late
+  // now reports itself too, which is the case the retries were written for.
+  useEffect(() => {
+    if (html) onRendered?.();
+  }, [html, diagrams, onRendered]);
 
   if (error) return <LoadError version={version} err={error as Error} />;
   if (!doc) return null;
+  // The panel is a SIBLING of the prose, not a wrapper around it: that is
+  // what lets plain CSS hang it in the right margin (style.css, .page.read)
+  // without a third column in AppShell or new props through Browser.
   // Server-rendered, server-sanitized markdown — same trust model as the
   // classic app assigning innerHTML.
   return (
-    <div
-      dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
-      onClick={(e) => handleLinkClick(e, path, onOpenFile)}
-    />
+    <>
+      <SecretBadge findings={doc.findings} />
+      {doc.frontmatter?.length ? <FrontmatterPanel pairs={doc.frontmatter} /> : null}
+      <div
+        dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
+        onClick={(e) => handleLinkClick(e, path, onOpenFile)}
+      />
+    </>
+  );
+}
+
+/* A document's YAML frontmatter, beside the prose instead of on top of it.
+   Native <details>, so the disclosure, its keyboard handling and its a11y
+   semantics come from the element rather than from us — and values are
+   ordinary React text children, which is what makes "a value containing
+   markup renders as text" true by construction rather than by a rule. */
+function FrontmatterPanel({ pairs }: { pairs: FrontmatterPair[] }) {
+  const [open, setOpen] = useState(fmPanelOpen);
+  return (
+    <details className="fmpanel" open={open}>
+      {/* The click, not the element's own `toggle` event: `toggle` is
+          dispatched asynchronously, so collapsing the panel and immediately
+          opening another file lost the preference — the navigation started
+          before the handler ran. A summary click is also what Enter and
+          Space produce, so the keyboard path is the same one. */}
+      <summary
+        onClick={(e) => {
+          e.preventDefault();
+          setOpen(!open);
+          rememberFmPanel(!open); // every file and every reload, until changed
+        }}
+      >
+        Properties
+      </summary>
+      <dl>
+        {pairs.map((p) => (
+          <div key={p.key}>
+            <dt>{p.key}</dt>
+            <dd>{p.code ? <code>{p.value}</code> : p.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
+/* The share gate could already name the rule and the line well enough to
+   refuse to publish this file, while the file view rendered the same key as
+   ordinary prose (BEA-147). Advisory only, in VersionBanner's shape: a strip
+   above the content, role="status", no actions. Nothing is blocked and
+   nothing is redacted — a reader who can open the file could already read
+   the key, and the point is that they now know it is in there. */
+function SecretBadge({ findings }: { findings?: SecretFinding[] }) {
+  if (!findings?.length) return null;
+  return (
+    <div className="sbadge" role="status">
+      <span className="sb-icon">
+        <Icon name="shield" />
+      </span>
+      <div className="sb-text">
+        <b>{secretsBadge(findings)}</b>
+        <span>
+          Checked when this page loaded. Sharing the file asks you to confirm first.
+        </span>
+      </div>
+    </div>
   );
 }
 
