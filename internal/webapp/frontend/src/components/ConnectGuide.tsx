@@ -14,7 +14,18 @@ import { projColor } from "./ProjectNav";
 
 export const INSTALL_DOC = "https://raw.githubusercontent.com/runbear-io/beardrive/main/INSTALL_FOR_AGENTS.md";
 
-export function ConnectGuide({ project, existing }: { project: Project; existing?: boolean }) {
+export function ConnectGuide({
+  project,
+  existing,
+  uploads,
+}: {
+  project: Project;
+  existing?: boolean;
+  // The hub accepts writes. Gated, because a read-only hub answers the curl
+  // below with 403 — advertising a call that always fails is worse than not
+  // mentioning the door at all.
+  uploads?: boolean;
+}) {
   const origin = window.location.origin;
   // When the creator said they already have a folder, say so in the prompt.
   // Without it an agent reads an empty project and proposes creating a new
@@ -34,6 +45,16 @@ export function ConnectGuide({ project, existing }: { project: Project; existing
     ask +
     project.name +
     '").';
+  // The no-install door: one PUT with a device token, hub origin and project
+  // id already filled in. Documented at guides/http-api.
+  const curl =
+    'curl -H "Authorization: Bearer $TOKEN" \\\n' +
+    "     -T notes.md \\\n" +
+    '     "' +
+    origin +
+    "/api/p/" +
+    project.id +
+    '/upload/content?path=notes.md"';
   const manual =
     "brew install runbear-io/tap/beardrive" +
     "\nbdrive login " +
@@ -101,6 +122,22 @@ export function ConnectGuide({ project, existing }: { project: Project; existing
             </a>
           </p>
         </details>
+        {uploads && (
+          <details className="gd-manual">
+            <summary>Or write files with no install</summary>
+            <p className="gd-desc">
+              For a CI job or a throwaway sandbox that writes once and disappears: one PUT with a
+              device token, no CLI and no daemon. The change is attributed to the token owner's
+              account.
+            </p>
+            <GuideCode code={curl} />
+            <p className="gd-desc">
+              <a href="https://docs.beardrive.ai/guides/http-api/" target="_blank" rel="noreferrer">
+                How to get a $TOKEN →
+              </a>
+            </p>
+          </details>
+        )}
       </div>
     </div>
   );

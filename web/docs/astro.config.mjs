@@ -138,6 +138,7 @@ export default defineConfig({
             { label: "Shared agent memory", slug: "guides/shared-agent-memory" },
             { label: "Artifacts and links", slug: "guides/agent-artifacts" },
             { label: "What agents read", slug: "guides/what-agents-read" },
+            { label: "Write files over HTTP", slug: "guides/http-api" },
             { label: "Scoping the folder", slug: "guides/scoping" },
           ],
         },

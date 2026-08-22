@@ -221,6 +221,18 @@ bdrive status
 bdrive stop
 ```
 
+No machine to install on? A CI job or a throwaway agent sandbox can write
+straight to the hub with one `curl` — no CLI, no daemon, no device
+registration:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" -T notes.md \
+     "$HUB/api/p/$PROJECT/upload/content?path=notes.md"
+```
+
+See [Write files over HTTP](https://docs.beardrive.ai/guides/http-api/) for
+how to mint `$TOKEN` and read files back.
+
 Renaming or moving a project folder is safe: state is keyed by a stable
 project id, never the path. The daemon notices the move, steps aside, and
 the next `bdrive init` (or any bdrive command) at the new location resumes
@@ -330,6 +342,9 @@ removal and simply stops tracking the path.
 rendered Obsidian-style (including `[[wikilinks]]`, task lists, tables,
 and ```` ```mermaid ```` diagrams), download any file — and, pointed at a storage root, becomes a
 **multi-project sync hub**. It is read-only unless started with `--upload`.
+With `--upload` it also accepts writes over plain HTTP, which is how a CI job
+or an ephemeral sandbox persists a file without installing anything — see
+[Write files over HTTP](https://docs.beardrive.ai/guides/http-api/).
 
 ```sh
 bdrive serve                              # serve the current directory (viewer)

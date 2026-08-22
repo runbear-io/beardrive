@@ -35,8 +35,25 @@ test("guide: one paste for every agent, one line of prose, details collapsed", a
   await expect(page.locator(".gd-manual > summary")).toHaveText([
     "What exactly happens",
     "Or run it yourself",
+    "Or write files with no install",
   ]);
   await expect(page.locator(".gd-manual[open]")).toHaveCount(0);
+});
+
+// BEA-166: the no-install door (PUT .../upload/content) is real and shipped;
+// the only thing missing was that nothing told anyone. The snippet carries
+// this hub's origin and this project's id so it is paste-and-run, and it is
+// gated on the hub accepting writes — the seeded harness runs with uploads on.
+test("guide: the curl door is offered, filled in, and behind the docs link", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.waitForSelector(".guide");
+  const block = page.locator(".gd-manual", { hasText: "Or write files with no install" });
+  // textContent, not innerText: the block is collapsed, so nothing is rendered.
+  const curl = (await block.locator(".gd-code code").textContent()) ?? "";
+  expect(curl).toContain('Authorization: Bearer $TOKEN');
+  expect(curl).toContain(`http://localhost:8993/api/p/${pid}/upload/content?path=notes.md`);
+  await expect(block.locator('a[href="https://docs.beardrive.ai/guides/http-api/"]')).toHaveCount(1);
 });
 
 test("guide: manual fallback has the full command list and the docs link", async ({ page }) => {
