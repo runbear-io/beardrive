@@ -117,10 +117,17 @@ actually read (and which hot ones nobody maintains).
 - **Your agent's skills sync too** — `.claude/skills`, `.claude/commands`,
   `.claude/agents`, `AGENTS.md` and `CLAUDE.md` are ordinary files in the
   project, so a skill one person writes is on every teammate's disk before
-  their agent's next turn — no export, no registry, no MCP server per client.
-  Agent **hook** configuration never syncs: sharing what an agent *reads* is
-  the product; sharing what it *runs* is not. Start a project from the
+  their agent's next turn — no export step, no registry, and nothing to
+  install per client. Agent **hook** configuration never syncs: sharing what
+  an agent *reads* is the product; sharing what it *runs* is not. Start a project from the
   `skills` template (`bdrive init --template skills`) for the shape.
+- **Agents that can't mount can still read** — a hub project answers MCP at
+  `POST /api/p/<project-id>/mcp` (bearer token, three read-only tools:
+  `list_files`, `read_file`, `file_history`), so an agent in CI, a cloud
+  sandbox, or on a laptop that never ran `bdrive init` reads the project with
+  no daemon and no clone. MCP is the read path for agents that cannot mount;
+  hooks remain the write path. Matching is on file *names* — there is no
+  hub-side content search (`bdrive grep` does that locally).
 - **Selective sync** — a gitignore-style `.bdriveignore` opts files out, and
   `bdrive init . --only wiki,docs` (or the interactive prompt) narrows a mount
   to some of its subfolders by writing those same rules for you.

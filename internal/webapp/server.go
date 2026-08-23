@@ -846,6 +846,13 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(PermWrite, s.handleUploadCommit))
 	}
 
+	// Hub only, and deliberately NOT in the prefix loop above: that loop also
+	// mounts the /api/ single-volume family, and single-volume mode is the
+	// auth-free plain-folder viewer. proj() delivers everything the endpoint
+	// needs — 404 for an unknown project, 403/404 indistinguishably for a
+	// non-member, and the project id in the context that recordRead reads.
+	mux.HandleFunc("POST /api/p/{project}/mcp", proj(PermRead, s.handleMCP))
+
 	mux.HandleFunc("GET /api/orgs", s.handleOrgList)
 	mux.HandleFunc("PATCH /api/orgs/{org}", s.handleOrgRename)
 	mux.HandleFunc("POST /api/orgs/{org}/invites", s.handleInviteCreate)
@@ -1335,7 +1342,7 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	setCanonical(w, r, p)
 	// Count the read before the ETag check: a 304 render is still a person
 	// reading the file, and skipping it would undercount the hottest pages.
-	s.recordRead(r, p)
+	s.recordRead(r, p, ReadKindHuman, "")
 	etag := `"` + fi.Blob + `"`
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -1401,7 +1408,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 		return
 	}
 	setCanonical(w, r, p)
-	s.recordRead(r, p)
+	s.recordRead(r, p, ReadKindHuman, "")
 	rc, err := v.source.Open(r.Context(), p, fi)
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)

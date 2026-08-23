@@ -385,6 +385,27 @@ classDiagram
     }
     note for ShareOpen "The receipt on a public link: share-kind buckets only, which is what makes Last mean last OPENED — HeatEntry.LastRead is cross-kind, so a member viewing the file in the hub would otherwise move the date. Counts, never openers: the share actor is token+IP+UA hash (token+IP alone folded a whole office into one reader, BEA-151 — the browser component is a heuristic that raises the floor, never identity, and is hashed because Record persists the actor). Keyed by path, so two tokens on one file report the same number. Callers build the map ONCE per project and index it; a per-share call is a full byKey scan per row"
 
+    class mcpEndpoint {
+        <<mcp.go>>
+        POST /api/p/PROJECT/mcp — hub only
+        +handleMCP(v, w, r) one JSON-RPC 2.0 object
+        -mcpTools() list_files, read_file, file_history
+        -mcpListFiles(prefix, limit) flat, off the snapshot
+        -mcpReadFile(path) lookup then Source.Open
+        -mcpFileHistory(path, limit) captured handleHistory
+        -withQuery(r, values) body params to the query helpers read
+        maxMCPBody 64 KiB, maxMCPRead 1 MiB
+        mcpActor constant, unregistrable as a device id
+    }
+    note for mcpEndpoint "MCP is the read path for agents that cannot mount; hooks remain the write path. Three read-only tools, each an envelope over a handler that already exists — no write tool, no content search (the descriptions say NAMES; there is no hub-side index), no OAuth, no SSE leg, text only. Auth and permission are entirely upstream: authGate 401s, proj(PermRead) answers 403/404 indistinguishably, both BEFORE the handler runs, so a non-member gets the same status as any other project route and no JSON-RPC body — a second check here would only be a way for the two to disagree. Deliberately NOT in the single/proj prefix loop, which would mount it on the auth-free single-volume viewer. read_file caps TWICE: FileInfo.Size is a claim off a journal op, so the reader is limited too. It books the read against the path lookup RETURNED, so heat does not split across a rename"
+    class capture {
+        <<mcp.go>>
+        +hdr http.Header
+        +code int
+        +buf bytes.Buffer
+    }
+    note for capture "A ResponseWriter that keeps what it was handed. handleHistory has no extractable aggregator — the walk, sort, cursor and JSON write are one body — and splitting it to serve a second caller is the bigger change. Non-200 becomes a JSON-RPC error carrying the captured text: handleHistory writes plain-text HTTP errors, which must never be emitted as tool OUTPUT where an agent would read them as the file history"
+
     class QuotaProvider {
         <<interface>>
         +CheckWrite(org, bytes)
@@ -452,6 +473,7 @@ classDiagram
     Server ..> wireCodec : gzip on /store/ GET+list, inflate above spool on PUT
     Backend ..> wireCodec : httpBackend gzips a relayed PUT when sign() allows
     reservations ..> Backend : reconcile — did the blob land
+    Server *-- mcpEndpoint : hub projects only, behind proj(PermRead)
     Server *-- journalDoor : /store/* is the only way a device writes
     journalDoor ..> DeviceRegistry : OwnerOf gates the journal key
     Server *-- sandboxInline : every bytes-out route
@@ -510,6 +532,9 @@ classDiagram
     undoRunDoor ..> sourcedOp : selects a run by the journal it was read from
     undoRunDoor ..> RemoteSource : appendOps — the whole run in one Put
     RemoteSource *-- cachedJournal : parsed ops, keyed on size+mtime
+    mcpEndpoint ..> volume : snapshot + lookup — the same view the viewer serves
+    mcpEndpoint ..> ReadLedger : read_file only, ReadKindAgent under mcpActor
+    mcpEndpoint *-- capture : wraps handleHistory rather than refactoring it
     ReadLedger ..> ReadStat
     ReadLedger ..> SessionRead
     ReadLedger ..> HeatEntry
