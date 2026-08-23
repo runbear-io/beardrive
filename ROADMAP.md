@@ -31,7 +31,8 @@ are deliberately scoped for outside contributors.
   browser and across projects. Searching *contents* already works locally today
   (`bdrive grep`, over the files a project syncs); what is still exploring is
   doing it hub-side, which needs a content index the storage layer has no home
-  for yet.
+  for yet. The MCP endpoint is *not* this: its `list_files` matches file names,
+  same as the palette.
 - **Webhooks / notifications** — "a file changed in `reports/`" pushed to
   Slack or similar (hub-side).
 

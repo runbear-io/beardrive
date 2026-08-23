@@ -654,9 +654,16 @@ func projectID(r *http.Request) string {
 	return id
 }
 
-// recordRead counts a human read of path for the request's project. No-op
-// outside hub mode (no project id) or when read tracking is off.
-func (s *Server) recordRead(r *http.Request, path string) {
+// recordRead counts a read of path for the request's project. No-op outside
+// hub mode (no project id) or when read tracking is off.
+//
+// kind and actor are the caller's, because the caller is the only thing that
+// knows them: a viewer request is a human read by the signed-in account
+// (actor "", resolved from the session here), while an MCP tool call is agent
+// traffic under a constant that carries no identity. Hardcoding the human
+// kind here booked every non-viewer read as a person reading a file, which
+// corrupts the heat map and the Dashboard quadrant invisibly.
+func (s *Server) recordRead(r *http.Request, path, kind, actor string) {
 	if s.Reads == nil {
 		return
 	}
@@ -664,11 +671,13 @@ func (s *Server) recordRead(r *http.Request, path string) {
 	if project == "" {
 		return
 	}
-	actor := s.requestUser(r).Email
 	if actor == "" {
-		actor = "anonymous"
+		actor = s.requestUser(r).Email
+		if actor == "" {
+			actor = "anonymous"
+		}
 	}
-	s.Reads.Record(project, path, ReadKindHuman, actor)
+	s.Reads.Record(project, path, kind, actor)
 }
 
 // handleHeat serves per-path read aggregates: ?prefix= bounds to a folder,
