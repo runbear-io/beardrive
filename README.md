@@ -567,6 +567,29 @@ content, and is the link agents should drop in their replies when they
 create an artifact in the shared folder (`--sync` pushes first so a
 just-created file resolves immediately).
 
+**The same URL answers an agent with the file.** A browser gets the
+viewer; a request whose `Accept` names no `text/html` (an agent, `curl`,
+most HTTP libraries) gets the file's own bytes and content type, plus an
+`X-Bdrive-Provenance` header naming the newest change behind it:
+
+```console
+$ curl -H "Authorization: Bearer $BDRIVE_TOKEN" \
+    https://drive.example.com/1a2b3c4d-.../wiki/report.md
+# Q3 report
+...
+```
+```
+X-Bdrive-Provenance: path="wiki/report.md"; sha="9f86d0…"; modified="2026-09-04T18:22:10Z"; by="alice@example.com"; device="alice-laptop"
+```
+
+Same link, negotiated representation — nothing about the human URL
+changes. The text branch is gated exactly like `/api/p/<id>/file`: no
+credentials is **401**, a project you aren't a member of is **403**, a
+missing file or project is **404**. It counts as an *agent* read on the
+heat map, never a human one. View routes (`/<id>/history`,
+`/<id>/dashboard`, …) stay pages for every `Accept`, and public
+`/s/<token>` links are unchanged — they always render.
+
 For people **outside** the hub, any synced file can instead be shared
 with a public link — hand someone the URL and they see the file, no
 account needed:

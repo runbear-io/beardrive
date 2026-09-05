@@ -364,6 +364,7 @@ func seccfgRaw(t *testing.T, h http.Handler, target string) *httptest.ResponseRe
 	}
 	req.URL = u
 	req.RequestURI = target
+	req.Header.Set("Accept", "text/html,*/*;q=0.8") // a browser navigation
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
