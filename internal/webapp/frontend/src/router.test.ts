@@ -1,7 +1,14 @@
 // Run with `npm test` (node's built-in runner; node ≥ 23 strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseRoute, projectByName, urlForView, historyFilterQuery } from "./router.ts";
+import {
+  parseRoute,
+  projectByName,
+  urlForPath,
+  urlForView,
+  withoutFull,
+  historyFilterQuery,
+} from "./router.ts";
 
 // A trailing slash is what a browser hands you when you copy a folder URL,
 // so /notes/ has to be the same page as /notes.
@@ -211,4 +218,81 @@ test("two projects with one name resolve to neither", () => {
 // resolve only if some project is literally named that string.
 test("an id-shaped segment matches nothing unless a project is named it", () => {
   assert.equal(projectByName(PROJECTS, "4c400e3f"), undefined);
+});
+
+/* ---- fullscreen (?full=1) ----
+   A file page with the chrome hidden is the same page, so `full` rides as a
+   query param beside ?v= rather than as a view route. */
+
+test("full is parsed off a file URL and composes with a version", () => {
+  assert.equal(parseRoute("/p-1/guide.md?full=1", "hub").full, true);
+  assert.equal(parseRoute("/p-1/guide.md", "hub").full, undefined);
+
+  const both = parseRoute("/p-1/guide.md?v=abc123&full=1", "hub");
+  assert.equal(both.path, "guide.md");
+  assert.equal(both.version, "abc123");
+  assert.equal(both.full, true);
+
+  // Presence, not value: the flag has no second state worth parsing.
+  assert.equal(parseRoute("/p-1/guide.md?full", "hub").full, true);
+  assert.equal(parseRoute("/notes/a.md?full=1", "volume").full, true);
+});
+
+// Assert on the parse of the built URL, not on its literal text: param order
+// is not part of the contract, and pinning it would break on a reorder that
+// changes nothing.
+test("urlForPath round-trips full, alone and beside a version", () => {
+  const plain = parseRoute(urlForPath("guide.md", "p-1", undefined, true), "hub");
+  assert.equal(plain.project, "p-1");
+  assert.equal(plain.path, "guide.md");
+  assert.equal(plain.full, true);
+  assert.equal(plain.version, undefined);
+
+  const pinned = parseRoute(urlForPath("guide.md", "p-1", "abc123", true), "hub");
+  assert.equal(pinned.version, "abc123");
+  assert.equal(pinned.full, true);
+
+  // Volume mode is in scope: no project id, same flag.
+  const vol = parseRoute(urlForPath("notes/a.md", undefined, undefined, true), "volume");
+  assert.equal(vol.path, "notes/a.md");
+  assert.equal(vol.full, true);
+
+  // Not asked for, not emitted — the URL of a file nobody put in fullscreen
+  // is the one it has always had.
+  assert.equal(urlForPath("guide.md", "p-1"), "/p-1/guide.md");
+});
+
+// The redirects that rebuild a file URL (project-by-name, trailing slash,
+// moved file) must carry the flag, or entering fullscreen on exactly the URLs
+// people paste bounces straight back out.
+test("full survives the normalizations that rewrite a file URL", () => {
+  const slash = parseRoute("/p-1/notes/?v=abc123&full=1", "hub");
+  assert.equal(slash.trailingSlash, true);
+  assert.equal(slash.full, true);
+  assert.equal(parseRoute(urlForPath(slash.path, "p-1", slash.version, slash.full), "hub").full, true);
+
+  // A legacy view and a query-form history target both resolve to view
+  // routes, where fullscreen does not apply — the flag parses, and the view
+  // simply ignores it.
+  assert.equal(parseRoute("/p-1/insights?full=1", "hub").view, "dashboard");
+  assert.equal(parseRoute("/p-1/history?path=guide.md&full=1", "hub").viewTarget, "guide.md");
+});
+
+// The scroll memo keys on this: entering and leaving fullscreen must land in
+// the same slot, or the reader is thrown to the top of the document.
+test("withoutFull strips only full, and is a no-op without it", () => {
+  assert.equal(withoutFull("/p-1/guide.md?full=1"), "/p-1/guide.md");
+  assert.equal(withoutFull("/p-1/guide.md?v=abc123&full=1"), "/p-1/guide.md?v=abc123");
+  assert.equal(withoutFull("/p-1/guide.md?full=1&v=abc123"), "/p-1/guide.md?v=abc123");
+
+  // Idempotent, and byte-for-byte untouched when there is no full to strip.
+  for (const u of ["/p-1/guide.md", "/p-1/guide.md?v=abc123", "/p-1/history?q=a%20b", "/"]) {
+    assert.equal(withoutFull(u), u);
+    assert.equal(withoutFull(withoutFull(u)), u);
+  }
+  // Entering fullscreen must not change the key.
+  assert.equal(
+    withoutFull(urlForPath("guide.md", "p-1", "abc123", true)),
+    urlForPath("guide.md", "p-1", "abc123"),
+  );
 });

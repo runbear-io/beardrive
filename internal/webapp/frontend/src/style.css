@@ -1266,6 +1266,48 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .filecard .name { font-size: 1.2em; color: var(--text); margin-bottom: .3em; }
 .filecard .btn { margin-top: 14px; }
 
+/* ---- fullscreen (?full=1) ----
+   The file page with the app chrome hidden, so a wide table, a diagram, a
+   rendered HTML file or a PDF gets the window instead of a letterbox.
+
+   `display: none`, never a transform: it takes the hidden controls out of the
+   tab order and the accessibility tree together (the lesson syncSidebarInert
+   encodes for the off-canvas sidebar). And the chrome is HIDDEN, not
+   unmounted — #content stays the same element, so it keeps its scrollTop and
+   the reader does not move when they toggle. */
+body.full-view #sidebar,
+body.full-view #topbar,
+body.full-view #sb-backdrop { display: none; }
+/* Room at the top for the Exit control, which floats over the content. */
+body.full-view #content { padding-top: 58px; }
+/* Non-prose renderers take the window; markdown keeps its measure (.read). */
+body.full-view .page.bleed { max-width: none; }
+body.full-view #content:has(.page.bleed) { padding: 58px 14px 14px; }
+/* The 150px below is the chrome allowance; with no chrome there is none. */
+body.full-view .htmlview,
+body.full-view .pdfview { height: calc(100vh - 72px); }
+
+/* Always visible, never a hover reveal, and painted OVER the HTML sandbox and
+   the browser's PDF viewer: both swallow every key event, so once focus is
+   inside one this button is the only way out. */
+#exit-full {
+  position: fixed; z-index: 80; top: 12px; right: 16px;
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 32px; padding: 0 11px; border-radius: var(--r-ctl);
+  border: 1px solid var(--border-2); background: var(--bg-raise); color: var(--text);
+  font-size: 12.5px; font-family: inherit; cursor: pointer;
+  box-shadow: 0 8px 24px -8px rgba(0,0,0,.7);
+}
+#exit-full:hover { background: var(--hover); border-color: var(--accent); }
+#exit-full kbd {
+  font: inherit; font-size: 10.5px; color: var(--text-faint);
+  border: 1px solid var(--border-2); border-radius: 4px; padding: 1px 4px;
+}
+@media (max-width: 900px) {
+  #exit-full { top: 8px; right: 8px; height: 40px; }
+  #exit-full .lbl { display: none; }
+}
+
 /* ---- Share dialog (components/ShareDialog.tsx) ----
    Wider than the 460px house modal: it carries two sections and a row of
    email + level + button, which the narrow width wraps into a column. */
@@ -1468,8 +1510,12 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
     --accent-bright: #8a5a00;
     --glow: transparent;
   }
+  /* #exit-full is fullscreen's own chrome (BEA-195) — it floats OVER the
+     content, so printing a file that is open fullscreen would stamp the Exit
+     button onto the page. Its reserved strip goes with it. */
   #sidebar, #sb-backdrop, #topbar, #palette, .modal, #more-menu, #presence,
-  [data-slot="dialog-overlay"], [data-sonner-toaster] { display: none !important; }
+  #exit-full, [data-slot="dialog-overlay"], [data-sonner-toaster] { display: none !important; }
+  body.full-view #content, body.full-view #content:has(.page.bleed) { padding: 0; }
   html, body { height: auto; }
   body { display: block; background: #fff; }
   #main { display: block; }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
@@ -11,13 +11,13 @@ import { PresenceBar } from "../components/PresenceBar";
 import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
 import { useFolders, useShares } from "../hooks/useHub";
 import { ruleFor } from "../lib/folders";
-import { urlForPath, urlForView, type Route } from "../router";
+import { urlForPath, urlForView, withoutFull, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { HTML_EXT, IMG_EXT, PDF_EXT, copyText } from "../util";
+import { HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, copyText } from "../util";
 import { toast } from "../toast";
 import { modalConfirm } from "../modal";
 import { onSearchRequest } from "../search";
-import { AppShell, Icon, Page, Topbar, closeSidebarOnMobile, type PageWidth } from "../components/shell";
+import { AppShell, Icon, Page, Topbar, closeSidebarOnMobile, syncSidebarInert, type PageWidth } from "../components/shell";
 import { FileTree, ancestorsOf } from "../components/FileTree";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
@@ -53,7 +53,12 @@ export default function Browser(props: {
   onClosePanel?: () => void; // panels are not routes: same-path navigation needs an explicit close
 }) {
   const { config, apiBase, route, hub, project } = props;
-  const routeKey = useLocationPath(); // scroll memo key, one slot per URL
+  // Scroll memo key, one slot per URL — with `full` stripped, because
+  // entering and leaving fullscreen is the SAME page. useLocationPath is
+  // pathname+search, so without this a ?full=1 push looked like a fresh route
+  // and armed a goal of 0: the reader was thrown to the top of the document
+  // the moment they asked for more of it.
+  const routeKey = withoutFull(useLocationPath());
   const qc = useQueryClient();
 
   const { tree, flatFiles, dirIndex, loaded } = useTree(apiBase, !hub || !!project);
@@ -116,8 +121,8 @@ export default function Browser(props: {
   useEffect(() => {
     if (!isMissing || !moved?.to) return;
     setMovedFrom({ from: path, to: moved.to });
-    navigate(urlForPath(moved.to, project?.id), { replace: true });
-  }, [isMissing, moved, path, project?.id]);
+    navigate(urlForPath(moved.to, project?.id, undefined, route.full), { replace: true });
+  }, [isMissing, moved, path, project?.id, route.full]);
 
   /* ---- tree expansion ---- */
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -255,7 +260,79 @@ export default function Browser(props: {
     let h = 0;
     for (let i = 0; i < who.length; i++) h = (h * 31 + who.charCodeAt(i)) % 360;
     return { name: who, colour: `hsl(${h} 70% 45%)` };
-  }, [config.me?.name, config.me?.email]);  // The project's live public links, filtered to the open file. One query
+  }, [config.me?.name, config.me?.email]);
+
+  /* ---- fullscreen (?full=1) ----
+     The same file page with the app chrome hidden. The flag is derived from
+     the URL rather than held in state, so a pasted link lands fullscreen and
+     browser Back leaves it like any other navigation.
+
+     `!isDir` rather than `isFile`: isFile waits for the tree to load, so a
+     direct hit on /<pid>/<file>?full=1 would paint the whole app for a frame
+     before the chrome vanished. A path is a file until the tree says
+     otherwise, and a folder carrying ?full=1 simply drops back out. */
+  const full = !!route.full && !route.view && !!path && !isDir && !panel;
+  const fullBtnRef = useRef<HTMLButtonElement>(null);
+  const exitRef = useRef<HTMLButtonElement>(null);
+  // Whether WE pushed the fullscreen entry. Exit then goes back, collapsing
+  // that entry instead of stacking a third; a pasted ?full=1 URL has nothing
+  // to pop, so it is replaced in place.
+  const pushedFull = useRef(false);
+  useEffect(() => {
+    pushedFull.current = false;
+  }, [path]);
+  const enterFull = useCallback(() => {
+    pushedFull.current = true;
+    navigate(urlForPath(path, project?.id, version, true));
+  }, [path, project?.id, version]);
+  const exitFull = useCallback(() => {
+    if (pushedFull.current) {
+      pushedFull.current = false;
+      history.back();
+    } else {
+      navigate(urlForPath(path, project?.id, version), { replace: true });
+    }
+  }, [path, project?.id, version]);
+  // Hide the chrome; never unmount it. #content stays the same element, so it
+  // keeps its scrollTop across the toggle and the reader does not move — and
+  // display:none takes the hidden controls out of the tab order and the
+  // accessibility tree together, which is the lesson syncSidebarInert already
+  // encodes. useLayoutEffect, not useEffect: a paint between the two is the
+  // flash of normal layout a pasted link must not have.
+  useLayoutEffect(() => {
+    if (!full) return;
+    document.body.classList.add("full-view");
+    // Otherwise the mobile drawer and its scrim sit over a file that just
+    // asked for the whole window.
+    document.body.classList.remove("sb-open");
+    syncSidebarInert();
+    return () => {
+      document.body.classList.remove("full-view");
+      syncSidebarInert();
+    };
+  }, [full]);
+  // Esc is the other exit — and it can never reach us while focus is inside
+  // the HTML sandbox (opaque origin) or the browser's own PDF viewer, which
+  // is why the Exit button is painted over both and is not a hover reveal.
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => {
+      // The palette owns Escape while it is open, like every other overlay.
+      if (e.key === "Escape" && !paletteOpen) exitFull();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [full, paletteOpen, exitFull]);
+  // Focus follows the chrome: onto Exit when it appears, back onto the
+  // trigger when it goes. The layout effect above has already removed the
+  // body class by then — a display:none button cannot take focus.
+  const wasFull = useRef(false);
+  useEffect(() => {
+    if (full) exitRef.current?.focus();
+    else if (wasFull.current) fullBtnRef.current?.focus();
+    wasFull.current = full;
+  }, [full]);
+  // The project's live public links, filtered to the open file. One query
   // for the whole project (Settings reads the same cache entry), so opening
   // a file costs no extra request.
   const { data: shares } = useShares(project?.id, hub && !!project);
@@ -281,6 +358,9 @@ export default function Browser(props: {
     toast(copied ? "Web link copied" : url, !copied);
   }, [webBase]);
   const canHistory = !panel && hub && !!project;
+  // Fullscreen is a file-page control: a folder listing and the view routes
+  // have no content the chrome is in the way of.
+  const canFull = !panel && isFile && !route.view;
   // Browser upload is deliberately absent (for now): content enters through
   // local sync only; the web app is a read/share/history surface.
   const canDownload = !panel && isFile;
@@ -689,6 +769,10 @@ export default function Browser(props: {
       // A PDF page is unreadable squeezed into the 768px reading column.
       pageWidth = HTML_EXT.test(path) || PDF_EXT.test(path) ? "wide" : "read";
       pageClass = "markdown";
+      // Fullscreen gives the window to everything that is not prose. Markdown
+      // keeps its measure: a 2000px line is unreadable, and what prose gains
+      // here is the removed chrome, not a wider column.
+      if (full && !MD_EXT.test(path)) pageClass += " bleed";
       const conflict = parseConflict(path);
       view = (
         <>
@@ -821,6 +905,19 @@ export default function Browser(props: {
               <Icon name="share" />
             </Button>
           )}
+          {canFull && (
+            <Button
+              id="full-btn"
+              ref={fullBtnRef}
+              variant="toolbar"
+              className="icon-only"
+              title="Fullscreen"
+              aria-label="Fullscreen"
+              onClick={enterFull}
+            >
+              <Icon name="expand" />
+            </Button>
+          )}
           {canHistory && !path && !route.view && (
             <Button id="history-btn" variant="toolbar" onClick={historyNow}>
               <Icon name="hist" /> <span className="lbl">History</span>
@@ -914,6 +1011,15 @@ export default function Browser(props: {
           />
         }
         topbar={topbar}
+        exit={
+          full ? (
+            <button id="exit-full" ref={exitRef} onClick={exitFull} aria-label="Exit fullscreen">
+              <Icon name="shrink" />
+              <span className="lbl">Exit</span>
+              <kbd>esc</kbd>
+            </button>
+          ) : undefined
+        }
         contentRef={contentRef}
         onContentScroll={onScroll}
       >

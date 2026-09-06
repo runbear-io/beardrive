@@ -34,8 +34,10 @@ import {
   Link,
   Lock,
   LogOut,
+  Maximize2,
   Megaphone,
   Menu,
+  Minimize2,
   Music,
   Package,
   PenLine,
@@ -138,6 +140,7 @@ const ICONS: Record<string, LucideIcon> = {
   doc: FileText,
   dots: Ellipsis,
   download: Download,
+  expand: Maximize2,
   folder: Folder,
   dashboard: LayoutDashboard,
   gear: Settings,
@@ -152,6 +155,7 @@ const ICONS: Record<string, LucideIcon> = {
   search: Search,
   share: Share2,
   shield: Shield,
+  shrink: Minimize2,
   terminal: SquareTerminal,
   trash: Trash2,
   upload: Upload,
@@ -281,6 +285,11 @@ export function AppShell(props: {
   tree?: ReactNode;
   orgBar?: ReactNode;
   topbar: ReactNode;
+  // Fullscreen's Exit control. It lives here, outside the topbar it hides,
+  // and is positioned over the content — the HTML sandbox and the browser's
+  // PDF viewer swallow every key event, so a control painted on top of them
+  // is the only exit that works from inside one.
+  exit?: ReactNode;
   contentRef?: React.Ref<HTMLElement>;
   onContentScroll?: () => void;
   children: ReactNode;
@@ -296,6 +305,7 @@ export function AppShell(props: {
       </aside>
       <main id="main">
         {props.topbar}
+        {props.exit}
         <article
           id="content"
           ref={props.contentRef}
