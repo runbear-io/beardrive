@@ -162,7 +162,7 @@ func secretsFound(rel string, resp *http.Response) error {
 	// Not readBody: that does a single 256-byte Read and would truncate a
 	// long findings list mid-JSON.
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || len(out.Findings) == 0 {
-		return fmt.Errorf("%s looks like it contains credentials; nothing was shared (re-run with --force if that is intentional)", rel)
+		return secretsError{fmt.Sprintf("%s looks like it contains credentials; nothing was shared (re-run with --force if that is intentional)", rel)}
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s looks like it contains credentials (checked at the moment you shared it):\n", rel)
@@ -173,8 +173,14 @@ func secretsFound(rel string, resp *http.Response) error {
 		fmt.Fprintf(&b, "  line %-4d %s (%s)\n", f.Line, secrets.Label(f.Rule), f.Rule)
 	}
 	b.WriteString("Nothing was shared. Re-run with --force if that is intentional.")
-	return fmt.Errorf("%s", b.String())
+	return secretsError{b.String()}
 }
+
+// secretsError marks the hub's 409 so a caller other than `share` — which has
+// no --force of its own — can name its own way past it.
+type secretsError struct{ msg string }
+
+func (e secretsError) Error() string { return e.msg }
 
 func listShares(settings config.Settings) error {
 	root, proj, err := findProject(".")

@@ -22,6 +22,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive forget <path>...` | Stop syncing a path and remove it from the hub. Adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first, and warns on stderr if the hub refused that push; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file — links are per-file, so a folder is refused with a file inside it named instead. `--list`, `--revoke`, `--expires` (the hub's Share dialog can also set an expiry on an existing link). Refuses a file whose first 1 MiB holds credential-shaped strings — `--force` shares it anyway |
+| `bdrive capture` | File whatever is piped in as `inbox/<date>-<time>.md` in this project, and print that path. `--share` syncs it immediately and prints a public link on the next line. Refuses when the project's sync scope excludes `inbox/`, rather than writing a file that would never leave the machine |
 | `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it, and a plain `bdrive sync` with no `--note` clears it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: it also reports the files teammates changed since the agent's last turn |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each detected agent platform's user config — once per machine, covering every folder. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection. `uninstall` removes only BearDrive's own hook entries |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
@@ -203,6 +204,47 @@ this is advisory output, not a gate — grep's "1 means nothing found" conventio
 would invert here and fail on a clean project. Read heat, a badge on the hub's
 file view, and injecting the flag into an agent's session context are not built
 yet; this ships the signal.
+
+### `bdrive capture` — file an agent's output into the project
+
+An agent finishes a piece of work and its output goes wherever you remember to
+put it, or nowhere. `capture` is the one step between the two:
+
+```sh
+claude -p "summarise today's incident" | bdrive capture --share
+```
+
+```
+inbox/2026-09-08-141233.md
+https://app.beardrive.ai/s/9fK2mQ
+```
+
+A pipe is the whole interface — there is no file argument and no inline text.
+It reads stdin to EOF and writes those bytes verbatim to
+`inbox/<YYYY-MM-DD-HHMMSS>.md` at the **project root**, so running it from a
+subfolder still files into the one inbox. A second capture in the same second
+gets `-2`. Stdout is the path, and nothing else, so a script can read it; with
+`--share`, the link is on line 2.
+
+Nothing after the write is special: the file is an ordinary file in the
+project, so the daemon journals it within seconds, teammates get it, and
+History attributes it to this device and account like any other change.
+`--share` only shortcuts the wait — it runs one sync cycle first, because the
+hub can only share what it already holds.
+
+:::caution[The scope gate]
+If the project's sync scope excludes `inbox/` — because it was set up with
+`bdrive init --only` or narrowed with `bdrive scope add` — `capture` **refuses
+before writing anything** and tells you to run `bdrive scope add inbox`.
+Writing the file anyway would leave it on one laptop forever, syncing to
+nobody, with no error ever — which is the exact failure the command exists to
+fix.
+:::
+
+A capture that holds a credential-shaped string still syncs to the team (the
+scan only warns), but `--share` is refused at mint time like any other share.
+The file is already written and its path already printed, so nothing is lost:
+`bdrive share <path> --force` mints the link anyway.
 
 ### `bdrive forget` and `bdrive sync --prune` — cleaning up the hub
 
