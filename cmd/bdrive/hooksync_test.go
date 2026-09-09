@@ -567,6 +567,24 @@ func TestHookRosterPaths(t *testing.T) {
 		}
 	}
 
+	// Multi-mount: each roster path carries its OWN mount's prefix. Hanging one
+	// project's path on another project's prefix is the bug the link formula
+	// already had once.
+	got := hookRoster([]hookLink{
+		{prefix: "projA/", people: []remote.Person{{Name: "Mira", Path: "a.md"}}},
+		{prefix: "projB/", people: []remote.Person{{Name: "Ken", Path: "b.md"}}},
+	})
+	for _, want := range []string{"`projA/a.md` — Mira", "`projB/b.md` — Ken"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("multi-mount: missing %q in %q", want, got)
+		}
+	}
+	for _, crossed := range []string{"projA/b.md", "projB/a.md"} {
+		if strings.Contains(got, crossed) {
+			t.Errorf("multi-mount: crossed the mounts (%q): %q", crossed, got)
+		}
+	}
+
 	// Nothing to say → nothing emitted, so a turn with an empty roster is
 	// byte-identical to one on a hub that has never heard of presence.
 	if got := hookRoster([]hookLink{{}}); got != "" {
@@ -578,7 +596,7 @@ func TestHookRosterPaths(t *testing.T) {
 	for i := 0; i < hookRosterMax+1; i++ {
 		many = append(many, remote.Person{Name: fmt.Sprintf("P%02d", i), Path: fmt.Sprintf("f%02d.md", i)})
 	}
-	got := hookRoster([]hookLink{{people: many}})
+	got = hookRoster([]hookLink{{people: many}})
 	if !strings.Contains(got, "+1 more") {
 		t.Errorf("no overflow tail past the cap: %q", got)
 	}
