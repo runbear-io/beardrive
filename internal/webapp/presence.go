@@ -121,15 +121,42 @@ func rosterOf(room map[string]presenceEntry) []person {
 	for _, e := range room {
 		out = append(out, person{Name: e.name, Path: e.path})
 	}
-	// Sorted so an unchanged roster serializes identically and the frontend's
-	// structural sharing sees no update: Go map order is deliberately random.
+	sortRoster(out)
+	return out
+}
+
+// rosterFor renders a room for one reader: expired rows and the reader's own
+// row are filtered out of the RESULT, and the map is not touched. mark stays
+// the only thing that deletes, which is what makes the GET handler read-only
+// — a project whose only traffic is agent hooks must not evict browser rows
+// that are merely between beats. Nothing grows without end as a result: only
+// the POST ever inserts, and maxPresencePerProject still caps it.
+func (h *presenceHub) rosterFor(project, actor string, now time.Time) []person {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	room := h.at[project]
+	out := make([]person, 0, len(room))
+	for k, e := range room {
+		if k == actor || now.Sub(e.seen) > presenceTTL {
+			continue
+		}
+		out = append(out, person{Name: e.name, Path: e.path})
+	}
+	sortRoster(out)
+	return out
+}
+
+// sortRoster orders a rendered room so an unchanged roster serializes
+// identically and the frontend's structural sharing sees no update: Go map
+// order is deliberately random. It is also what makes the agent hook's
+// sentence deterministic without re-sorting.
+func sortRoster(out []person) {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Name != out[j].Name {
 			return out[i].Name < out[j].Name
 		}
 		return out[i].Path < out[j].Path
 	})
-	return out
 }
 
 // handlePresence serves POST {prefix}presence — one heartbeat.
@@ -142,22 +169,10 @@ func (s *Server) handlePresence(v *volume, w http.ResponseWriter, r *http.Reques
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	u := s.requestUser(r)
-	// The actor key identifies WHO, and the display name is what everyone
-	// sees. An auth-less hub (the plain-folder viewer) has neither, so it
-	// falls back to the device — and to nothing, in which case there is no
-	// one to report and the beat is a no-op rather than a fake "someone".
-	actor, name := u.Email, u.Name
-	if actor == "" {
-		actor = deviceID(r)
-		name = actor
-	}
+	actor, name := s.presenceActor(r)
 	if actor == "" {
 		writeJSON(w, map[string]any{"ok": true, "people": []person{}})
 		return
-	}
-	if name == "" {
-		name = u.Email // History shows the address too when there is no name
 	}
 	project := projectID(r)
 
@@ -182,5 +197,53 @@ func (s *Server) handlePresence(v *volume, w http.ResponseWriter, r *http.Reques
 	if changed {
 		s.events().publish(project, changeEvent{Type: "presence", People: people})
 	}
+	writeJSON(w, map[string]any{"ok": true, "people": people})
+}
+
+// presenceActor is who is asking, keyed the way the roster keys them. The
+// actor key identifies WHO, and the display name is what everyone sees. An
+// auth-less hub (the plain-folder viewer) has neither, so it falls back to the
+// device — and to nothing, in which case there is nobody to report and a beat
+// is a no-op rather than a fake "someone".
+//
+// One function on purpose. The GET below excludes the caller's own row BY THIS
+// KEY, so a second copy of "who is asking" is how self-exclusion silently
+// stops matching the key the POST inserts under — at which point the roster
+// reports the caller to itself and an agent is told it is colliding with
+// itself.
+func (s *Server) presenceActor(r *http.Request) (actor, name string) {
+	u := s.requestUser(r)
+	actor, name = u.Email, u.Name
+	if actor == "" {
+		actor = deviceID(r)
+		name = actor
+	}
+	if actor == "" {
+		return "", ""
+	}
+	if name == "" {
+		name = u.Email // History shows the address too when there is no name
+	}
+	return actor, name
+}
+
+// handlePresenceRoster serves GET {prefix}presence — who else is here, read
+// only. Same shape the POST answers with, so one client decoder serves both.
+//
+// This exists because the agent hook needs the roster once per turn
+// (cmd/bdrive/hooksync.go) and must not appear in it, which the POST cannot
+// do: beating with an empty path would put a phantom agent row in every
+// teammate's top bar, refreshed every turn, and the {leave:true}
+// read-without-marking trick is keyed by ACCOUNT — so when the same person
+// also has a browser tab open it would delete their own live row and publish
+// the shrunken roster to everyone.
+//
+// It publishes no presence event and deletes nothing. The reader's own row is
+// filtered by the hub rather than by the client because the roster
+// deliberately never serializes the actor key, so a client cannot reliably
+// exclude itself — and the hub knows exactly who is asking.
+func (s *Server) handlePresenceRoster(_ *volume, w http.ResponseWriter, r *http.Request) {
+	actor, _ := s.presenceActor(r)
+	people := s.presence().rosterFor(projectID(r), actor, time.Now())
 	writeJSON(w, map[string]any{"ok": true, "people": people})
 }

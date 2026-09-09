@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -145,4 +146,113 @@ func TestPresenceRefusesAnUnsafePath(t *testing.T) {
 func quoteJSON(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// The regression the rejected `POST {"leave":true}` design would have shipped:
+// a device reading the roster must not evict, or even hide, its own account's
+// browser tab. The GET filters only the row it hands back.
+func TestPresenceRosterExcludesTheCaller(t *testing.T) {
+	h, srv, c, p := permHub(t)
+	base := "/api/p/" + p.ID + "/presence"
+
+	for _, who := range []string{"alice", "bob"} {
+		if rec := doAs(t, h, "POST", base, map[string]any{"path": who + ".md"}, c[who]); rec.Code != 200 {
+			t.Fatalf("%s beat: %d %s", who, rec.Code, rec.Body)
+		}
+	}
+
+	roster := func(who string) []person {
+		t.Helper()
+		rec := doAs(t, h, "GET", base, nil, c[who])
+		if rec.Code != 200 {
+			t.Fatalf("GET as %s: %d %s", who, rec.Code, rec.Body)
+		}
+		var out struct {
+			People []person `json:"people"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.People
+	}
+
+	people := roster("alice")
+	if len(people) != 1 || people[0].Name != "Bob" || people[0].Path != "bob.md" {
+		t.Fatalf("alice's roster = %+v, want only Bob", people)
+	}
+	// The read did not remove Alice: Bob still sees her, which is exactly what
+	// POST-with-leave broke.
+	people = roster("bob")
+	if len(people) != 1 || people[0].Name != "Alice" {
+		t.Fatalf("bob's roster after alice read = %+v, want only Alice", people)
+	}
+	if _, ok := srv.presence().at[p.ID]["alice@x.io"]; !ok {
+		t.Fatal("reading the roster deleted the reader's own row")
+	}
+}
+
+// Reading is not an event. A GET must not wake every browser tab in the
+// project — an agent turn would otherwise flicker everyone's top bar.
+func TestPresenceRosterPublishesNoEvent(t *testing.T) {
+	h, srv, c, p := permHub(t)
+	base := "/api/p/" + p.ID + "/presence"
+	if rec := doAs(t, h, "POST", base, map[string]any{"path": "a.md"}, c["alice"]); rec.Code != 200 {
+		t.Fatalf("beat: %d %s", rec.Code, rec.Body)
+	}
+
+	sub, ok := srv.events().subscribe(p.ID)
+	if !ok {
+		t.Fatal("subscribe")
+	}
+	defer srv.events().unsubscribe(p.ID, sub)
+
+	if rec := doAs(t, h, "GET", base, nil, c["bob"]); rec.Code != 200 {
+		t.Fatalf("GET: %d %s", rec.Code, rec.Body)
+	}
+	select {
+	case frame := <-sub.ch:
+		t.Fatalf("a roster read published an event: %s", frame)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// And the POST still does, so the assertion above is about the GET and not
+	// about a stream that never carries anything.
+	if rec := doAs(t, h, "POST", base, map[string]any{"path": "b.md"}, c["bob"]); rec.Code != 200 {
+		t.Fatalf("beat: %d %s", rec.Code, rec.Body)
+	}
+	select {
+	case <-sub.ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a heartbeat published no event")
+	}
+}
+
+// Expiry on read is a filter, not a delete: only mark() ever removes, so a
+// project whose only traffic is agent hooks cannot evict a browser row that is
+// merely between beats.
+func TestPresenceRosterHidesExpiredRows(t *testing.T) {
+	ph := &presenceHub{at: map[string]map[string]presenceEntry{}}
+	t0 := time.Now()
+	ph.mark("p1", "a@x.io", "Alice", "a.md", t0)
+	ph.mark("p1", "b@x.io", "Bob", "b.md", t0)
+
+	later := t0.Add(presenceTTL + time.Second)
+	if people := ph.rosterFor("p1", "b@x.io", later); len(people) != 0 {
+		t.Fatalf("an expired row was reported: %+v", people)
+	}
+	// Nothing was deleted, so Alice is back the moment she beats again — and
+	// in the meantime an in-TTL read still finds her row in the map.
+	if _, ok := ph.at["p1"]["a@x.io"]; !ok {
+		t.Fatal("rosterFor deleted an expired row")
+	}
+	if people := ph.rosterFor("p1", "b@x.io", t0.Add(time.Second)); len(people) != 1 {
+		t.Fatalf("an in-TTL read = %+v, want Alice", people)
+	}
+}
+
+func TestPresenceRosterRefusesNonMember(t *testing.T) {
+	h, _, c, p := permHub(t)
+	// dave is in another org entirely.
+	if rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/presence", nil, c["dave"]); rec.Code != http.StatusForbidden {
+		t.Fatalf("GET presence as a non-member: %d, want 403", rec.Code)
+	}
 }

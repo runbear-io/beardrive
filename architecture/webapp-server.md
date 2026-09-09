@@ -162,6 +162,11 @@ classDiagram
         <<interface>>
         +Watch(ctx) signal channel
     }
+    class Rosterer {
+        <<interface>>
+        +Roster(ctx) []Person
+    }
+    note for Rosterer "internal/remote — optional, in the Scoper mold: only httpBackend implements it (GET /api/p/id/presence), because an object store has nobody to ask. 404 is ErrNoRoster (a hub too old to report presence) rather than a transport error, for parity with ErrNoScope — though the one caller today, the agent turn-start hook, treats every failure identically: say nothing. Its call gets its own 2s timeout, since httpBackend's client carries a 5-minute whole-request one and a turn must never wait that long for a nicety"
     note for Watcher "internal/remote — optional, in the PutSigner mold: only httpBackend implements it (GET /api/p/id/events). The channel carries NO payload — the daemon's only question is &quot;talk to the remote now?&quot;, and the answer to a burst is one cycle, so the impl coalesces on a buffer of one and can never make the hub's writer block. A closed channel means the path is gone (hub down, proxy timeout, an older hub with no route) and the caller falls back to its interval. Accelerator only: nothing may depend on a signal arriving, because for every object-store backend none ever will. Its stream gets a client WITHOUT httpBackend's 5-minute whole-request timeout (doWith), which would otherwise sever a healthy idle stream on the dot"
     note for Backend "internal/remote — impls: localBackend (file://), s3Backend, gcsBackend, httpBackend (https:// hub), Prefixed wrapper"
     note for Backend "Key handling is fallible now: Prefixed.key and localBackend.path RETURN AN ERROR (safeKey / store.UnderRoot) rather than concatenating, so a `..` key cannot walk out of a project's prefix or out of a file:// root — and Prefixed.List re-checks the STRIPPED key on the way out, since the prefix it removes is the only thing that was ever validated. The httpBackend client is origin-bound: the device token is keyed to settings.Server, SameOrigin is the one rule, refuseOffOriginRedirect is its CheckRedirect, a presign target must be https on a trusted origin (directTargetOK), and List drops keys failing journal.SafePath and clamps a negative Size. gcs SignPut now signs Content-Length too. Object carries Modified (S3 LastModified, GCS Updated, file mtime; zero where the backend has none) — RemoteSource.verify reads it to decide when a blob can no longer be rewritten by a presigned URL"
@@ -199,12 +204,15 @@ classDiagram
         -at per project, per actor entry
         +mark(project, actor, name, path, now) roster, changed
         +drop(project, actor) roster, changed
+        +rosterFor(project, actor, now) roster
     }
     class person {
         +Name string
         +Path string
     }
     note for presenceHub "POST {prefix}presence, proj(PermRead) — saying &quot;I am reading this&quot; is not a write, and a read-only member is precisely who a teammate most wants to see on a file. NOT persisted and deliberately not a MetaStore repo: presence is true for 15s and then it is a lie, so storing it would only create something to serve staler than the thing it describes. The actor key is an account email and the roster reaches every member of the project, so the key is a MAP KEY ONLY and never serialized — rosterOf emits display name + path, the same pair History already shows them. A claimed path is untrusted text echoed to teammates, so it goes through journal.SafePath. Expiry is LAZY, computed in mark rather than by a sweeper: the only people who need to know a roster shrank are the ones still in it, and they are exactly the ones still heartbeating. rosterOf sorts because Go map order is random and an unstable roster would look like a change on every beat"
+
+    note for presenceHub "GET {prefix}presence, proj(PermRead) — the read-only half, added for the agent hook, which needs the roster once per turn and must not appear in it. It cannot be the POST: beating with an empty path puts a phantom agent row in every teammate\'s top bar, and the {leave:true} read-without-marking trick is keyed by ACCOUNT, so it would delete the caller\'s OWN live browser row and publish the shrunken roster to everyone. rosterFor FILTERS expired rows and the reader\'s own row out of the RESULT and touches nothing — mark stays the only thing that deletes, or a project whose only traffic is agent hooks would evict browser rows merely between beats. Self-exclusion is server-side because the roster never serializes the actor key, so a client cannot reliably exclude itself. presenceActor is ONE function for both handlers: a second copy of &quot;who is asking&quot; is how the GET silently stops matching the key the POST inserted under, at which point an agent is told it is colliding with itself"
 
     class changeEvent {
         +Type change or resync
@@ -591,6 +599,7 @@ classDiagram
     RemoteSource o-- Backend : Prefixed(Root, projectID)
     Backend <|-- PutSigner : optional capability
     Backend <|-- Watcher : optional capability
+    Backend <|-- Rosterer : optional capability
     Server *-- eventHub : live change fan-out
     Server *-- presenceHub : who is looking at what
     Server *-- collabHub : per-document editing relay
@@ -598,7 +607,8 @@ classDiagram
     collabRoom o-- subscriber : reuses the event fan-out
     eventHub *-- subscriber
     presenceHub ..> eventHub : publishes roster on the SAME stream
-    presenceHub ..> person : rosterOf
+    presenceHub ..> person : rosterOf, rosterFor
+    Rosterer ..> presenceHub : the CLI hook reads the roster it never joins
 
     AuthProvider <|.. BuiltinAuth
     AccountApprover <|.. BuiltinAuth

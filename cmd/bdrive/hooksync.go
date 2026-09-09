@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
@@ -49,12 +52,28 @@ type hookLink struct {
 	// is: the daemon usually scanned the agent's write seconds ago, so this
 	// cycle's own scan sees an unchanged file and finds nothing.
 	secrets map[string][]secrets.Finding
+	// people is who had a file in this project open in the hub when the turn
+	// started. A live snapshot, not a subscription — see hookRoster.
+	people []remote.Person
 }
 
 // hookChangedMax caps the changed-file list the turn pays for. Past it the
 // tail is a count — the first cycle on a fresh mount materializes the whole
 // project, and no turn should carry that.
 const hookChangedMax = 20
+
+// hookRosterMax caps the roster line, below hookChangedMax on purpose: a
+// presence path may be up to a kilobyte and this is paid on every turn of
+// every session on the machine.
+const hookRosterMax = 10
+
+// hookRosterNameMax bounds one display name in the sentence.
+const hookRosterNameMax = 64
+
+// hookRosterTimeout is the roster call's own budget. The backend's client
+// carries a five-minute whole-request timeout, and a turn must never wait that
+// long for a nicety.
+const hookRosterTimeout = 2 * time.Second
 
 // hookSessionID reads the platform's event JSON from stdin — once per run,
 // since stdin can only be consumed once and the sync loop may cover several
@@ -82,6 +101,7 @@ type hookSync struct {
 	base    string
 	paths   []store.InboundEvent
 	secrets map[string][]secrets.Finding
+	people  []remote.Person
 }
 
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
@@ -120,11 +140,23 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// changes without them, so every turn sees the ones still true.
 	found, _ := sess.Store.LoadSecrets(sess.MountID)
 
+	// Who has a file open right now — the collision the spool cannot see,
+	// because a teammate typing in the browser has not saved yet. Best-effort
+	// to the letter: every error, ErrNoRoster included, means the turn says
+	// nothing about presence and still gets its links, so this deliberately
+	// does NOT join runHookSync's `return hookSync{}, false` error paths.
+	var people []remote.Person
+	if rr, ok := sess.Backend.(remote.Rosterer); ok {
+		rctx, cancel := context.WithTimeout(cmd.Context(), hookRosterTimeout)
+		people, _ = rr.Roster(rctx)
+		cancel()
+	}
+
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {
 		return hookSync{}, false // non-hub remote: nothing to link to
 	}
-	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found}, true
+	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found, people: people}, true
 }
 
 // hookLinkFor places one mount relative to the folder the hook ran in.
@@ -199,6 +231,9 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 	if changed := hookChanged(links); changed != "" {
 		context += " " + changed
 	}
+	if roster := hookRoster(links); roster != "" {
+		context += " " + roster
+	}
 	if found := hookSecrets(links); found != "" {
 		context += " " + found
 	}
@@ -268,6 +303,80 @@ func hookAgentPath(l hookLink, path string) (string, bool) {
 	default:
 		return path, true
 	}
+}
+
+// hookRoster renders who has a synced file open in the hub right now — the
+// half of a collision the inbound spool cannot see, because a teammate typing
+// in the browser has not saved and so nothing has synced.
+//
+// It is a snapshot taken when the turn started and the sentence says so: the
+// hub's roster has a fifteen-second TTL while a turn can run for minutes, so
+// the honest claim is timestamped, not live. Re-checking mid-turn is the
+// PreToolUse design this deliberately is not (it would spawn on every tool
+// call).
+//
+// Presence is VIEWING, not editing: the browser heartbeats whatever path it is
+// showing, so this covers anyone with the file open — which is the right
+// breadth, and why the sentence must not claim someone is editing.
+func hookRoster(links []hookLink) string {
+	var parts []string
+	over := 0
+	for _, l := range links {
+		for _, who := range l.people {
+			if who.Path == "" {
+				continue // "someone is in the project" is not a collision
+			}
+			p, ok := hookAgentPath(l, who.Path)
+			if !ok {
+				continue
+			}
+			if len(parts) >= hookRosterMax {
+				over++
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("`%s` — %s", p, hookSafeName(who.Name)))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	s := "Open in the hub right now (as of this turn's start): " + strings.Join(parts, "; ")
+	if over > 0 {
+		s += fmt.Sprintf("; +%d more", over)
+	}
+	return s + ". A teammate may be typing; re-read before editing."
+}
+
+// hookSafeName bounds a display name before it enters the agent's prompt.
+//
+// Every other string this file emits is machine-shaped — journal paths
+// (journal.SafePath), rule labels, line numbers. A roster name is free text a
+// project member typed into their own account, relayed by a hub this device
+// does not control, and it lands verbatim in additionalContext: a newline in it
+// would end this sentence and start whatever the next line claims to be.
+//
+// The character rule is journal.SafeText's, per rune, rather than a private
+// list of the controls worth fearing — that list is exactly what the repo
+// already consolidated once (C0, C1, DEL, every Cf, the tag block, U+2028/9),
+// and a second copy here would drift the same way.
+func hookSafeName(name string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range name {
+		if !journal.SafeText(string(r)) {
+			continue
+		}
+		if n == hookRosterNameMax {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	if s := strings.TrimSpace(b.String()); s != "" {
+		return s
+	}
+	return "a teammate"
 }
 
 // hookSecrets tells the turn which synced files looked like they hold

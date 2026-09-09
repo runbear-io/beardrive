@@ -84,3 +84,66 @@ func TestPresignedForbiddenIsNotAuthz(t *testing.T) {
 		t.Fatalf("a presigned-target 403 must not be ErrForbidden: %v", err)
 	}
 }
+
+// Roster is a hub-only capability, and the 404 must be distinguishable: "this
+// hub has no opinion" is what an older hub answers, and it must not read as a
+// transport failure.
+func TestRosterFromHubAnd404(t *testing.T) {
+	var status int
+	var body string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || !strings.HasSuffix(r.URL.Path, "/presence") {
+			t.Errorf("Roster asked for %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	be, err := Open(context.Background(), ts.URL+"/p/p-0123abcd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.Close()
+	rr, ok := be.(Rosterer)
+	if !ok {
+		t.Fatal("the https backend does not implement Rosterer")
+	}
+	ctx := context.Background()
+
+	status, body = 200, `{"ok":true,"people":[{"name":"Mira Chen","path":"docs/plan.md"},{"name":"Ken"}]}`
+	people, err := rr.Roster(ctx)
+	if err != nil {
+		t.Fatalf("Roster: %v", err)
+	}
+	if len(people) != 2 || people[0].Name != "Mira Chen" || people[0].Path != "docs/plan.md" || people[1].Path != "" {
+		t.Fatalf("Roster = %+v", people)
+	}
+
+	status, body = 404, "no such route"
+	if _, err := rr.Roster(ctx); !errors.Is(err, ErrNoRoster) {
+		t.Fatalf("404: %v does not wrap ErrNoRoster", err)
+	}
+
+	// Anything else is a real error and must NOT read as "no opinion".
+	status, body = 500, "boom"
+	_, err = rr.Roster(ctx)
+	if err == nil || errors.Is(err, ErrNoRoster) {
+		t.Fatalf("500: %v, want a plain error", err)
+	}
+}
+
+// Object-store backends have nobody to ask, so they must not satisfy the
+// interface — the caller's type assertion is the whole gate.
+func TestRosterIsHubOnly(t *testing.T) {
+	be, err := Open(context.Background(), "file://"+t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.Close()
+	if _, ok := be.(Rosterer); ok {
+		t.Fatal("a file:// backend implements Rosterer")
+	}
+}
+
+var _ Rosterer = (*httpBackend)(nil)

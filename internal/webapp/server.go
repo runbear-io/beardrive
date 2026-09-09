@@ -923,6 +923,11 @@ func (s *Server) Handler() http.Handler {
 		// Saying "I am reading this" is not a write — a read-only member is
 		// exactly who a teammate most wants to see on a file.
 		mux.HandleFunc("POST "+prefix+"presence", resolve(PermRead, s.handlePresence))
+		// The read-only half: the roster without joining it. The agent hook
+		// asks once per turn so it can tell the agent whose file it is about
+		// to land on (cmd/bdrive/hooksync.go); see handlePresenceRoster for
+		// why that cannot be the POST.
+		mux.HandleFunc("GET "+prefix+"presence", resolve(PermRead, s.handlePresenceRoster))
 		// Co-editing is a write channel: a read-only member has nothing to
 		// send on it, so both halves need write rather than read.
 		mux.HandleFunc("GET "+prefix+"collab", resolve(PermWrite, s.handleCollabStream))
