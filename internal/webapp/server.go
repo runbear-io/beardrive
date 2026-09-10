@@ -1509,18 +1509,28 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	w.Header().Set("ETag", etag)
 	ct := contentType(p)
 	w.Header().Set("Content-Type", ct)
-	setContentLength(w, rc)
 	// nosniff on both branches, the sandbox CSP only on the inline one: an
 	// attachment is not rendered, and TestInlineHTMLIsSandboxed pins that
 	// /download answers with a disposition INSTEAD of a CSP.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	pv := false
 	if attach {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(p)))
 	} else {
 		w.Header().Set("Content-Type", inlineType(ct))
 		sandboxInline(w, ct)
+		pv = printView(w, r, ct, true)
+	}
+	// A print view appends printSuffix after the stored bytes, so the source's
+	// own length stops being the body's length — promising it would truncate
+	// the script right back off again.
+	if !pv {
+		setContentLength(w, rc)
 	}
 	io.Copy(w, rc)
+	if pv {
+		io.WriteString(w, printSuffix)
+	}
 }
 
 // setContentLength promises a body length only when the thing about to be
@@ -1731,6 +1741,39 @@ func sandboxInline(w http.ResponseWriter, ct string) {
 	if inlineMarkup(ct) {
 		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
 	}
+}
+
+// printSuffix is appended to an HTML print view so the document opens the
+// browser's print dialog itself. Nothing else can open it: the app shell
+// renders synced HTML in a cross-origin frame, and a cross-origin frame
+// prints CLIPPED to its box — the parent cannot measure the content to size
+// it, and an over-tall guess prints the difference as blank pages. So the
+// print button opens the document as a top-level page, where the browser
+// paginates it natively, and this is what presses Print.
+const printSuffix = "<script>addEventListener('load',function(){print()})</script>"
+
+// printView reports whether this request asked for the self-printing variant
+// of an inline render, and if so relaxes the sandbox by exactly one flag.
+// allow-modals is what a sandboxed document needs to call print() at all (the
+// same flag that gates alert/confirm). allow-same-origin stays OFF, so the
+// document is still opaque: it can no more reach the API or the reader's
+// session cookie than the iframe render it replaces.
+//
+// text/html only. The suffix is appended AFTER the stored bytes, which HTML's
+// parser accepts and application/xhtml+xml — parsed as XML, where trailing
+// content after the root element is fatal — does not. Every other type the
+// hub serves inline is either not a document or not one a script belongs in.
+// Callers pass false for `inline` on the download doors: an attachment is
+// saved, not rendered, and appending to it would corrupt the file on disk.
+func printView(w http.ResponseWriter, r *http.Request, ct string, inline bool) bool {
+	if !inline || r.URL.Query().Get("print") != "1" {
+		return false
+	}
+	if !strings.HasPrefix(strings.ToLower(ct), "text/html") {
+		return false
+	}
+	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-modals")
+	return true
 }
 
 func contentType(p string) string {

@@ -340,6 +340,7 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 	name := r.URL.Query().Get("name")
+	pv := false
 	if name != "" {
 		ct := contentType(name)
 		// Same wall and the same inert declaration as the live-file door: a
@@ -347,10 +348,15 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", inlineType(ct))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		sandboxInline(w, ct)
-		if r.URL.Query().Get("download") == "1" {
+		download := r.URL.Query().Get("download") == "1"
+		if download {
 			w.Header().Set("Content-Type", ct)
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(name)))
 		}
+		// Printing a pinned ?v= prints THAT version. The live-file door and
+		// this one serve identical bytes, so a print button that silently
+		// fell back to the current ones would be the worst kind of wrong.
+		pv = printView(w, r, ct, !download)
 	} else {
 		// Same door, same stored bytes, two lines down — and it did not get the
 		// header the arm above did. The rule is "nosniff on every door that
@@ -360,6 +366,9 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
 	io.Copy(w, rc)
+	if pv {
+		io.WriteString(w, printSuffix)
+	}
 }
 
 func sanitizeFilename(name string) string {

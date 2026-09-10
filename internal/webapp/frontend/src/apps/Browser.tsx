@@ -212,6 +212,7 @@ export default function Browser(props: {
   const [paletteOpen, setPaletteOpen] = useState(false);
   useEffect(() => onSearchRequest(() => setPaletteOpen(true)), []);
   const downloadRef = useRef<HTMLAnchorElement>(null);
+  const printRef = useRef<HTMLAnchorElement>(null);
 
   const panel = props.panel ?? null;
   // Sharing is a write — a read-only member sees no Share button rather than
@@ -288,6 +289,13 @@ export default function Browser(props: {
   // already renders as text — still offers Copy. Images, PDFs and the HTML
   // iframe are the three things a clipboard cannot usefully hold.
   const canCopy = canDownload && !IMG_EXT.test(path) && !PDF_EXT.test(path) && !HTML_EXT.test(path);
+  // PDFs are the one file the app shows that already carries its own print
+  // button — the browser's embedded viewer draws one right there in the
+  // frame — so a second one in our menu would be the redundant affordance.
+  // Not while editing either: CodeMirror only puts the VISIBLE lines in the
+  // DOM, so printing an open editor would silently drop most of a long file.
+  // Reading is the mode you print from; Done is one click away.
+  const canPrint = canDownload && !PDF_EXT.test(path) && !editing;
   const canMore = !panel && (isFile || (hub && !!project && isDir));
   // Downloading while a version is open gives you THAT version — the ⋯ menu
   // offering the current bytes under a page framed as historical was half of
@@ -295,6 +303,28 @@ export default function Browser(props: {
   const downloadURL = version
     ? apiBase + "blob?sha=" + version + "&name=" + encodeURIComponent(path) + "&download=1"
     : apiBase + "download?path=" + encodeURIComponent(path);
+
+  /* Printing splits by where the document actually lives.
+     Everything the app renders into its OWN dom — markdown, text, csv, code,
+     images — prints from this page: `@media print` (style.css) drops the
+     chrome and hands #content's overflow back to the page, which is the
+     issue's "content only".
+     Synced HTML cannot. It renders in a sandboxed cross-origin frame, and a
+     cross-origin frame prints CLIPPED to its box: the parent may not measure
+     the content to size the frame, and an over-tall guess prints the slack as
+     blank pages. So HTML opens as a top-level print view that presses Print
+     itself (server.go's printView) — the browser's own pagination, not ours.
+     `?v=` rides along, so printing a pinned version prints that version.
+     Through an anchor rather than window.open, for rel=noopener: the print
+     view is opaque-origin but still gets a WindowProxy, and `opener.location`
+     is a tab this page owns. */
+  const printsInPlace = !HTML_EXT.test(path);
+  const printURL = fileURLFor(apiBase, path, version) + "&print=1";
+  const printNow = useCallback(() => {
+    setMoreOpen(false);
+    if (printsInPlace) window.print();
+    else printRef.current?.click();
+  }, [printsInPlace]);
 
   // Copy is Download's counterpart: the same bytes, to the clipboard instead
   // of to disk — whole file, frontmatter included, so what you paste back is
@@ -545,6 +575,7 @@ export default function Browser(props: {
       if (canShare) add("share", "Share: " + path, "action", shareNow);
       add("hist", "History: " + path, "action", historyNow);
       if (isFile) add("download", "Download: " + path, "action", () => downloadRef.current?.click());
+      if (canPrint) add("printer", "Print: " + path, "action", printNow);
       if (canCopy) add("copy", "Copy: " + path, "action", copyNow);
     }
     if (hub && project) add("hist", "History: whole project", "action", () => openHistory(""));
@@ -561,7 +592,7 @@ export default function Browser(props: {
     for (const d of dirIndex.keys()) add("folder", d, "folder", () => openPath(d));
     for (const f of flatFiles) add("doc", f.path, "file", () => openPath(f.path));
     return items;
-  }, [hub, project, path, isFile, canShare, canCopy, config.auth?.enabled, dirIndex, flatFiles, props.projects, props.onClosePanel, shareNow, copyNow, historyNow, openHistory, openPath]);
+  }, [hub, project, path, isFile, canShare, canCopy, canPrint, config.auth?.enabled, dirIndex, flatFiles, props.projects, props.onClosePanel, shareNow, copyNow, printNow, historyNow, openHistory, openPath]);
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
   useEffect(() => {
@@ -800,6 +831,11 @@ export default function Browser(props: {
               Download
             </a>
           )}
+          {canPrint && !printsInPlace && (
+            <a id="print" hidden target="_blank" rel="noopener" href={printURL} ref={printRef}>
+              Print
+            </a>
+          )}
           {canMore && (
             <Button
               id="more-btn"
@@ -825,6 +861,11 @@ export default function Browser(props: {
               {canDownload && (
                 <button className="more-item" onClick={() => downloadRef.current?.click()}>
                   Download
+                </button>
+              )}
+              {canPrint && (
+                <button id="print-item" className="more-item" onClick={printNow}>
+                  Print
                 </button>
               )}
               {webBase && (

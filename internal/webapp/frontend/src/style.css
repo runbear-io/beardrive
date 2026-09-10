@@ -21,6 +21,16 @@
   --text-faint: #868b93;      /* ≥4.5:1 on near-black */
   --text-ghost: #666b74;      /* decorative icons only */
 
+  /* The reading view's own ink. These were eight and four repeated hex
+     literals; they are variables because @media print has to flip them (the
+     app is dark-only, so the document's text is near-white by default) and a
+     print block that re-listed every selector would go stale on the first
+     new rule. Same values, so nothing changes on screen. */
+  --text-bright: #f4f6f9;     /* headings and view titles — above --text */
+  --text-body: #c6cbd3;       /* prose, code blocks, table cells */
+  --code-ink: #e4d9c4;        /* inline code */
+  --quote-ink: #d8cdb6;       /* blockquote */
+
   --accent: #f5a623;          /* honey */
   --accent-bright: #ffcf85;   /* honey text / primary hover */
   --accent-dim: #d3861a;
@@ -463,7 +473,7 @@ button, input, a.btn { font-family: inherit; }
 /* ---- onboarding ---- */
 /* A hero card inside .page.read, not a page column of its own. */
 .onboard { max-width: 560px; margin: var(--hero-top) auto 0; }
-.onboard h1 { font-size: 25px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 8px; color: #f4f6f9; }
+.onboard h1 { font-size: 25px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 8px; color: var(--text-bright); }
 .onboard > p { color: var(--text-dim); margin: 0 0 28px; font-size: 14px; }
 /* One card shape, two surfaces. The hub stacks these in a column and the
    desktop Done frame lays them in a row, with different backgrounds and
@@ -508,7 +518,7 @@ button, input, a.btn { font-family: inherit; }
 /* ---- project settings ---- */
 /* Sectioned cards: General (editable), About (facts), People, Danger zone. */
 .project-settings { display: flex; flex-direction: column; gap: 14px; }
-.project-settings > h2 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
+.project-settings > h2 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: var(--text-bright); }
 .ps-form { display: flex; flex-direction: column; gap: 18px; }
 .ps-field { display: flex; flex-direction: column; gap: 7px; }
 .ps-field label { font-size: 12.5px; color: var(--text-dim); }
@@ -549,7 +559,7 @@ button, input, a.btn { font-family: inherit; }
 
 /* ---- admin panels ---- */
 /* width comes from .page (app) — see #content */
-.admin h1 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 6px; color: #f4f6f9; }
+.admin h1 { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 6px; color: var(--text-bright); }
 .admin h3 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); font-weight: 600; margin: 30px 0 10px; }
 .admin-lbl { flex: 1 1 100%; margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--text-dim); }
 .admin-sub { color: var(--text-dim); font-size: 13.5px; margin: -2px 0 16px; line-height: 1.55; }
@@ -619,7 +629,7 @@ a.ai-main:hover { color: var(--accent); }
 
 /* ---- folder listing ---- */
 /* .dirlist width comes from .page (app) */
-.dl-title { display: flex; align-items: center; gap: 10px; font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
+.dl-title { display: flex; align-items: center; gap: 10px; font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: var(--text-bright); }
 .dl-title-icon { display: flex; color: var(--accent); }
 .dl-title-icon .ico { width: 20px; height: 20px; }
 .dl-sub { color: var(--text-faint); font-size: 12.5px; margin: 0 0 18px; }
@@ -708,7 +718,7 @@ a.ai-main:hover { color: var(--accent); }
 
 /* ---- insights (read×write matrix) ---- */
 /* .insights width comes from .page (app) */
-.in-title { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: #f4f6f9; }
+.in-title { font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: var(--text-bright); }
 .in-title .in-scope { color: var(--text-ghost); font-weight: 500; font-size: 15px; }
 /* The project dashboard title carries the project's mark; its description
    (when it has one) sits directly under the name. */
@@ -1128,12 +1138,12 @@ a.ai-main:hover { color: var(--accent); }
 
 /* ---- markdown reading view ---- */
 /* .markdown is typography only; the column is .page.read around it */
-.markdown h1, .markdown h2, .markdown h3, .markdown h4 { color: #f4f6f9; line-height: 1.25; letter-spacing: -.018em; margin: 1.5em 0 .5em; text-wrap: balance; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 { color: var(--text-bright); line-height: 1.25; letter-spacing: -.018em; margin: 1.5em 0 .5em; text-wrap: balance; }
 .markdown h1:first-child { margin-top: 0; }
 .markdown h1 { font-size: 1.85em; font-weight: 660; letter-spacing: -.024em; }
 .markdown h2 { font-size: 1.32em; font-weight: 620; margin-top: 1.7em; }
 .markdown h3 { font-size: 1.08em; font-weight: 620; }
-.markdown p, .markdown li { color: #c6cbd3; font-size: 14.5px; line-height: 1.72; }
+.markdown p, .markdown li { color: var(--text-body); font-size: 14.5px; line-height: 1.72; }
 .markdown p { margin: 0 0 1em; }
 .markdown strong { color: var(--text); font-weight: 620; }
 .markdown a { color: var(--accent-bright); text-decoration: none; border-bottom: 1px solid rgba(245,166,35,.28); }
@@ -1145,11 +1155,11 @@ a.ai-main:hover { color: var(--accent); }
 .markdown ul, .markdown ol { margin: 0 0 1em; padding-left: 1.4em; }
 .markdown li { margin-bottom: .4em; }
 .markdown li::marker { color: var(--text-ghost); }
-.markdown code { background: var(--hover); border: 1px solid var(--border); padding: .1em .4em; border-radius: 5px; font: 12.5px/1.5 var(--mono); color: #e4d9c4; }
+.markdown code { background: var(--hover); border: 1px solid var(--border); padding: .1em .4em; border-radius: 5px; font: 12.5px/1.5 var(--mono); color: var(--code-ink); }
 .markdown pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; margin: 1.3em 0; }
-.markdown pre code { background: none; border: none; padding: 0; color: #c6cbd3; }
-.markdown blockquote { margin: 1.3em 0; padding: .3em 1em; border-left: 2px solid var(--accent); background: linear-gradient(90deg, var(--glow), transparent); border-radius: 0 8px 8px 0; color: #d8cdb6; }
-.markdown blockquote p { margin: .3em 0; color: #d8cdb6; }
+.markdown pre code { background: none; border: none; padding: 0; color: var(--text-body); }
+.markdown blockquote { margin: 1.3em 0; padding: .3em 1em; border-left: 2px solid var(--accent); background: linear-gradient(90deg, var(--glow), transparent); border-radius: 0 8px 8px 0; color: var(--quote-ink); }
+.markdown blockquote p { margin: .3em 0; color: var(--quote-ink); }
 .markdown table { border-collapse: collapse; margin: 1.3em 0; font-size: 13.5px; }
 .markdown th, .markdown td { border-bottom: 1px solid var(--border); padding: 9px 13px; text-align: left; }
 .markdown th { color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; border-bottom-color: var(--border-2); }
@@ -1184,7 +1194,7 @@ a.ai-main:hover { color: var(--accent); }
 .fmpanel dl > div:last-child { border-bottom: none; }
 .fmpanel dt { flex: 0 0 auto; max-width: 40%; color: var(--text-faint); font-size: 11.5px; font-weight: 600; overflow-wrap: anywhere; }
 .fmpanel dd { margin: 0; min-width: 0; color: var(--text-dim); overflow-wrap: anywhere; }
-.fmpanel code { white-space: pre-wrap; font: 11px/1.5 var(--mono); color: #e4d9c4; }
+.fmpanel code { white-space: pre-wrap; font: 11px/1.5 var(--mono); color: var(--code-ink); }
 /* Wide enough for a rail, and the number is arithmetic rather than taste:
    768 (prose) + 28 (gap) + 240 (rail) = 1036 of column, plus 265 of sidebar,
    80 of #content padding and ~10 of scrollbar gutter = 1391. A 1280 laptop
@@ -1236,7 +1246,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .sbadge .sb-text span { color: var(--text-dim); }
 
 /* plain file / binary views */
-pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: #c6cbd3; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: var(--text-body); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* long unbreakable lines wrap instead of blowing out the column: .page has min-width: 0 */
 /* CSV/TSV table view. Cells never wrap (white-space: pre keeps a quoted
    newline as a line break without turning a wide file into a tall one), so
@@ -1247,7 +1257,7 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
    scroller, which is exactly the job .csvbox is here to do. */
 .csvbox { overflow-x: auto; width: fit-content; max-width: 100%; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--code-bg); }
 .csvbox .csvview { display: table; max-width: none; overflow: visible; margin: 0; border-collapse: collapse; font: 12.5px/1.5 var(--mono); font-variant-numeric: tabular-nums; }
-.csvbox .csvview th, .csvbox .csvview td { border-bottom: 1px solid var(--border); padding: 8px 14px; text-align: left; white-space: pre; vertical-align: top; color: #c6cbd3; font-size: 12.5px; }
+.csvbox .csvview th, .csvbox .csvview td { border-bottom: 1px solid var(--border); padding: 8px 14px; text-align: left; white-space: pre; vertical-align: top; color: var(--text-body); font-size: 12.5px; }
 .csvbox .csvview th { background: var(--surface); color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; border-bottom-color: var(--border-2); }
 .csvbox .csvview tr:last-child td { border-bottom: none; }
 .csvbox .csvview tbody tr:hover td { background: rgba(255,255,255,.02); }
@@ -1295,7 +1305,7 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .setup-welcome { text-align: left; }
 .setup-foot { color: var(--text-ghost); font-size: 12px; margin: 10px 0 0; }
 .setup-connect header h2 { font-size: 20px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 6px;
-  color: #f4f6f9; display: flex; align-items: center; gap: 8px; }
+  color: var(--text-bright); display: flex; align-items: center; gap: 8px; }
 .setup-badge { background: var(--glow); border: 1px solid rgba(245,166,35,.4); color: var(--accent-bright);
   font-size: 10px; font-weight: 600; border-radius: 999px; padding: 2px 8px; letter-spacing: .04em; }
 .setup-connect header p { color: var(--text-dim); font-size: 13px; margin: 0 0 18px; }
@@ -1336,7 +1346,7 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .setup-shared-tag { color: var(--accent); font-size: 10px; }
 .setup-tree-foot { color: var(--text-ghost); font-size: 10.5px; line-height: 1.5; margin: 10px 0 0;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
-.setup-syncing h2, .setup-done h2 { font-size: 20px; font-weight: 640; margin: 0 0 10px; color: #f4f6f9; }
+.setup-syncing h2, .setup-done h2 { font-size: 20px; font-weight: 640; margin: 0 0 10px; color: var(--text-bright); }
 .setup-bar { height: 8px; border-radius: 4px; background: var(--hover); overflow: hidden; margin: 14px 0; }
 .setup-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent-dim), var(--accent));
   border-radius: 4px; transition: width .3s ease; }
@@ -1420,3 +1430,59 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
   user-select: none;
 }
 .cm-host .cm-ySelectionCaret:hover .cm-ySelectionInfo { opacity: 1; }
+
+/* ---- print ----
+   "The printing part should be the content only" (BEA-219): everything the
+   app draws AROUND the document — sidebar, topbar, overlays, toasts — is
+   chrome, and chrome on paper is wasted ink and a wasted first page.
+
+   The tokens flip rather than the rules: the app is dark-only (see :root),
+   so a straight print puts near-white text on white paper. Overriding the
+   ~20 variables here means every rule that already reads them — code blocks,
+   tables, hairlines, dim captions — resolves light with no !important and no
+   second stylesheet to keep in sync.
+
+   Synced HTML is not printed through here: it renders in a cross-origin
+   frame, which prints clipped to its box. That one gets a top-level print
+   view instead (server.go's printView). */
+@media print {
+  :root {
+    color-scheme: light;
+    --bg: #fff;
+    --bg-side: #fff;
+    --bg-raise: #fff;
+    --surface: #f6f6f7;
+    --hover: transparent;
+    --border: #d9dade;
+    --border-2: #c3c5ca;
+    --code-bg: #f6f6f7;
+    --text: #14161a;
+    --text-bright: #000;
+    --text-body: #1c1f24;
+    --code-ink: #4a3a12;
+    --quote-ink: #3a3226;
+    --text-dim: #444851;
+    --text-faint: #5c6069;
+    --text-ghost: #767b84;
+    --accent: #8a5a00;
+    --accent-bright: #8a5a00;
+    --glow: transparent;
+  }
+  #sidebar, #sb-backdrop, #topbar, #palette, .modal, #more-menu, #presence,
+  [data-slot="dialog-overlay"], [data-sonner-toaster] { display: none !important; }
+  html, body { height: auto; }
+  body { display: block; background: #fff; }
+  #main { display: block; }
+  /* #content is the app's only scroller; on paper there is nothing to
+     scroll, so it has to hand its overflow back to the page or the print
+     stops at one viewport. */
+  #content { overflow: visible; padding: 0; }
+  .page, .page.read, .page.wide { max-width: none; }
+  /* A link's destination is lost the moment it is paper — but underlined
+     text still reads as a link, and the URL is on the page it came from. */
+  a[href] { text-decoration: underline; }
+  /* Keep a heading with what it introduces, and never split a code block or
+     a table row across the fold. */
+  h1, h2, h3, h4 { break-after: avoid; }
+  pre, tr, img, blockquote { break-inside: avoid; }
+}

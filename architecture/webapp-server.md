@@ -411,6 +411,13 @@ classDiagram
         storageErr logs detail, says little
     }
     note for sandboxInline "One helper for every route that returns stored bytes — serveBlob, render, a historical version, the history blob view, and /s/*. Uploaded HTML/SVG/XML is a document a member can author and another member will open on the hub's origin; the sandbox header is what keeps it from acting as the hub. Length is measured from the stream rather than trusting a recorded FileInfo.Size"
+    class printView {
+        <<serveBlob + handleBlob, ?print=1>>
+        text/html only, inline only
+        CSP + allow-modals, never allow-same-origin
+        appends printSuffix, drops Content-Length
+    }
+    note for printView "The one thing allowed to relax sandboxInline's wall, and by exactly one flag. The app shell cannot print synced HTML: it renders in a cross-origin frame, and a cross-origin frame prints CLIPPED to its box — the parent may not measure the content to size it, and an over-tall guess prints the slack as blank pages. So ?print=1 serves the document as a TOP-LEVEL page that presses Print itself, which needs allow-modals (the flag that gates print/alert/confirm in a sandbox). allow-same-origin stays off, so the document is still opaque and can no more reach the API or the session cookie than the frame it replaces. text/html only, because the suffix is appended AFTER the stored bytes: HTML's parser accepts that and XHTML — parsed as XML — does not. Never on a download door, where it would corrupt the saved file, and Content-Length is dropped when it fires or the promised length truncates the script straight back off"
     class Share {
         +Token +Project +Path +Creator +Expires
     }
@@ -566,6 +573,7 @@ classDiagram
     Server *-- journalDoor : /store/* is the only way a device writes
     journalDoor ..> DeviceRegistry : OwnerOf gates the journal key
     Server *-- sandboxInline : every bytes-out route
+    sandboxInline <|.. printView : relaxes, by allow-modals alone
     Server *-- offboard : account deletion
     offboard ..> OrgDB : orgEvictor
     offboard ..> ProjectDB : dropPerm
