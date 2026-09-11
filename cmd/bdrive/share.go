@@ -77,49 +77,15 @@ Use --force to share anyway.`,
 			if err != nil {
 				return err
 			}
-			body := map[string]any{"path": filepath.ToSlash(rel)}
-			if expires > 0 {
-				body["expires_in"] = expires.String()
-			}
-			if force {
-				body["confirm"] = true
-			}
-			data, _ := json.Marshal(body)
-			resp, err := serverDo(http.MethodPost, server+"/api/p/"+projectID+"/shares", settings.Token, data)
+			link, exp, err := mintShare(settings, server, projectID, rel, expires, force)
 			if err != nil {
 				return err
 			}
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusNotFound {
-				return fmt.Errorf("%s (if you just saved it, wait a few seconds for the daemon or run `bdrive sync`)", strings.TrimSpace(readBody(resp)))
+			fmt.Println(link)
+			if !exp.IsZero() {
+				fmt.Printf("  expires: %s\n", exp.Local().Format(time.RFC1123))
 			}
-			// The server writes this one as a sentence to be read (e.g. "share
-			// links are per-file"); httpBodyError would prefix "400 Bad Request: ".
-			if resp.StatusCode == http.StatusBadRequest {
-				return fmt.Errorf("%s", strings.TrimSpace(readBody(resp)))
-			}
-			// Before the generic fallthrough: httpBodyError would print the raw
-			// JSON, and this is the one status the user can act on.
-			if resp.StatusCode == http.StatusConflict {
-				return secretsFound(filepath.ToSlash(rel), resp)
-			}
-			if resp.StatusCode != http.StatusOK {
-				return httpBodyError(resp)
-			}
-			var out struct {
-				URL     string    `json:"url"`
-				Expires time.Time `json:"expires"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-				return err
-			}
-			fmt.Println(out.URL)
-			if !out.Expires.IsZero() {
-				fmt.Printf("  expires: %s\n", out.Expires.Local().Format(time.RFC1123))
-			}
-			if u, err := url.Parse(out.URL); err == nil && isPrivateHost(u.Hostname()) {
-				fmt.Fprintf(os.Stderr, "note: this link is only reachable where %s is (private address)\n", u.Hostname())
-			}
+			printIfPrivate(link)
 			return nil
 		},
 	}
@@ -128,6 +94,58 @@ Use --force to share anyway.`,
 	c.Flags().BoolVar(&list, "list", false, "list this project's share links")
 	c.Flags().StringVar(&revoke, "revoke", "", "revoke a share link (token or full URL)")
 	return c
+}
+
+// mintShare POSTs one share request and returns the link. The status-code
+// handling is load-bearing wording, not plumbing: 404 means "not synced yet",
+// 400 is a sentence to print as-is, 409 is the credential refusal.
+func mintShare(settings config.Settings, server, projectID, rel string, expires time.Duration, force bool) (string, time.Time, error) {
+	slash := filepath.ToSlash(rel)
+	body := map[string]any{"path": slash}
+	if expires > 0 {
+		body["expires_in"] = expires.String()
+	}
+	if force {
+		body["confirm"] = true
+	}
+	data, _ := json.Marshal(body)
+	resp, err := serverDo(http.MethodPost, server+"/api/p/"+projectID+"/shares", settings.Token, data)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", time.Time{}, fmt.Errorf("%s (if you just saved it, wait a few seconds for the daemon or run `bdrive sync`)", strings.TrimSpace(readBody(resp)))
+	}
+	// The server writes this one as a sentence to be read (e.g. "share
+	// links are per-file"); httpBodyError would prefix "400 Bad Request: ".
+	if resp.StatusCode == http.StatusBadRequest {
+		return "", time.Time{}, fmt.Errorf("%s", strings.TrimSpace(readBody(resp)))
+	}
+	// Before the generic fallthrough: httpBodyError would print the raw
+	// JSON, and this is the one status the user can act on.
+	if resp.StatusCode == http.StatusConflict {
+		return "", time.Time{}, secretsFound(slash, resp)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", time.Time{}, httpBodyError(resp)
+	}
+	var out struct {
+		URL     string    `json:"url"`
+		Expires time.Time `json:"expires"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", time.Time{}, err
+	}
+	return out.URL, out.Expires, nil
+}
+
+// printIfPrivate warns on stderr when a minted link points at an address only
+// this network can reach — the link is real, it just travels badly.
+func printIfPrivate(link string) {
+	if u, err := url.Parse(link); err == nil && isPrivateHost(u.Hostname()) {
+		fmt.Fprintf(os.Stderr, "note: this link is only reachable where %s is (private address)\n", u.Hostname())
+	}
 }
 
 // secretsFound turns the hub's 409 into the message that stops the share.
@@ -144,7 +162,7 @@ func secretsFound(rel string, resp *http.Response) error {
 	// Not readBody: that does a single 256-byte Read and would truncate a
 	// long findings list mid-JSON.
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || len(out.Findings) == 0 {
-		return fmt.Errorf("%s looks like it contains credentials; nothing was shared (re-run with --force if that is intentional)", rel)
+		return secretsError{fmt.Sprintf("%s looks like it contains credentials; nothing was shared (re-run with --force if that is intentional)", rel)}
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s looks like it contains credentials (checked at the moment you shared it):\n", rel)
@@ -155,8 +173,14 @@ func secretsFound(rel string, resp *http.Response) error {
 		fmt.Fprintf(&b, "  line %-4d %s (%s)\n", f.Line, secrets.Label(f.Rule), f.Rule)
 	}
 	b.WriteString("Nothing was shared. Re-run with --force if that is intentional.")
-	return fmt.Errorf("%s", b.String())
+	return secretsError{b.String()}
 }
+
+// secretsError marks the hub's 409 so a caller other than `share` — which has
+// no --force of its own — can name its own way past it.
+type secretsError struct{ msg string }
+
+func (e secretsError) Error() string { return e.msg }
 
 func listShares(settings config.Settings) error {
 	root, proj, err := findProject(".")

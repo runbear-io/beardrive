@@ -32,11 +32,14 @@ import (
 // cliEnv is a signed-in CLI against a throwaway hub: the real binary, an
 // isolated HOME/BDRIVE_HOME, and a browser session for hub-side assertions.
 type cliEnv struct {
-	run     func(dir string, args ...string) (string, error)
-	hub     *httptest.Server
-	browser *http.Client
-	home    string // the isolated HOME; hooks live under here now
-	bin     string // the real binary, for tests that need a bdrive to run
+	run func(dir string, args ...string) (string, error)
+	// runStdin is run with something on stdin — `bdrive capture` reads a
+	// pipe, and exec.Command's nil Stdin gives it /dev/null.
+	runStdin func(dir, stdin string, args ...string) (string, error)
+	hub      *httptest.Server
+	browser  *http.Client
+	home     string // the isolated HOME; hooks live under here now
+	bin      string // the real binary, for tests that need a bdrive to run
 }
 
 func newCLIEnv(t *testing.T) cliEnv {
@@ -77,12 +80,18 @@ func newCLIEnvBin(t *testing.T, hub *httptest.Server, bin string) cliEnv {
 	home := t.TempDir()
 	env := append(envWithout("HOME", "BDRIVE_HOME"),
 		"HOME="+home, "BDRIVE_HOME="+filepath.Join(home, ".bdrive"))
-	run := func(dir string, args ...string) (string, error) {
+	runStdin := func(dir, stdin string, args ...string) (string, error) {
 		cmd := exec.Command(bin, args...)
 		cmd.Dir = dir
 		cmd.Env = env
+		if stdin != "" {
+			cmd.Stdin = strings.NewReader(stdin)
+		}
 		out, err := cmd.CombinedOutput()
 		return string(out), err
+	}
+	run := func(dir string, args ...string) (string, error) {
+		return runStdin(dir, "", args...)
 	}
 
 	// Sign in via the real device-code flow, approved over HTTP as the
@@ -108,7 +117,7 @@ func newCLIEnvBin(t *testing.T, hub *httptest.Server, bin string) cliEnv {
 		out, _ := os.ReadFile(logFile)
 		t.Fatalf("login --device: %v\n%s", err, out)
 	}
-	return cliEnv{run: run, hub: hub, browser: browser, home: home, bin: bin}
+	return cliEnv{run: run, runStdin: runStdin, hub: hub, browser: browser, home: home, bin: bin}
 }
 
 func TestCLIOnboardingE2E(t *testing.T) {
@@ -1111,5 +1120,75 @@ func TestCLIStatusReportsUnscannedWork(t *testing.T) {
 	}
 	if !strings.Contains(out, "local:    0 change(s) not yet scanned") {
 		t.Fatalf("drift did not clear after a sync:\n%s", out)
+	}
+}
+
+// `bdrive capture --share` is the whole promise in one pipe: the bytes land in
+// the project's inbox/, the path is on stdout, and the link on the next line
+// really serves them. The second half is the credential case — the hub refuses
+// the LINK, never the capture, so the path must still be there to act on.
+func TestCLICaptureShare(t *testing.T) {
+	e := newCLIEnv(t)
+	run, runStdin := e.run, e.runStdin
+
+	work := t.TempDir()
+	if out, err := run(work, "init", "--name", "capture-e2e", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer run(work, "stop", work)
+
+	const body = "# Incident 2026-09-08\n\nthe retention fold collapsed a day bucket\n"
+	out, err := runStdin(work, body, "capture", "--share")
+	if err != nil {
+		t.Fatalf("capture --share: %v\n%s", err, out)
+	}
+	// CombinedOutput, so a private-address note on stderr can follow; the
+	// "nothing else on stdout" half of the contract is a unit test.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("capture --share should print a path and a URL, got:\n%s", out)
+	}
+	rel, link := strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1])
+	if !strings.HasPrefix(rel, "inbox/") || !strings.HasSuffix(rel, ".md") {
+		t.Fatalf("line 1 should be the inbox path, got %q", rel)
+	}
+	if got, err := os.ReadFile(filepath.Join(work, filepath.FromSlash(rel))); err != nil || string(got) != body {
+		t.Fatalf("the captured file is not the piped bytes: %v %q", err, got)
+	}
+	if !strings.Contains(link, "/s/") {
+		t.Fatalf("line 2 should be a share URL, got %q", link)
+	}
+	resp, err := http.Get(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	served, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(served), "retention fold") {
+		t.Fatalf("the share link does not serve the capture: %d %s", resp.StatusCode, served)
+	}
+
+	// A capture holding a credential still lands and still syncs — only the
+	// link is refused. Fabricated, AWS-shaped. Not a credential.
+	const plantedKey = "AKIAIOSFODNN7EXAMPLE"
+	out, err = runStdin(work, "export AWS_ACCESS_KEY_ID="+plantedKey+"\n", "capture", "--share")
+	if err == nil {
+		t.Fatalf("--share on a capture holding a key succeeded:\n%s", out)
+	}
+	first := strings.SplitN(strings.TrimSpace(out), "\n", 2)[0]
+	if !strings.HasPrefix(first, "inbox/") {
+		t.Fatalf("a refused share must still print where the bytes went, got:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(work, filepath.FromSlash(first))); err != nil {
+		t.Fatalf("the printed path does not exist: %v", err)
+	}
+	if strings.Contains(out, "/s/") {
+		t.Fatalf("a refused share still printed a URL:\n%s", out)
+	}
+	if !strings.Contains(out, "bdrive share "+first+" --force") {
+		t.Fatalf("the refusal should name capture's way past it, got:\n%s", out)
+	}
+	if strings.Contains(out, plantedKey) {
+		t.Fatalf("the CLI echoed the secret back:\n%s", out)
 	}
 }
