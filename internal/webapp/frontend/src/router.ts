@@ -115,6 +115,12 @@ export interface Route {
   // not a property of the project — a teammate connecting next week has their
   // own answer, and would be told the wrong thing by a persisted flag.
   connect?: string;
+  // Fullscreen: the same file page with the app chrome hidden (?full=1).
+  // A query param for the same reason `version` is one — the first segment
+  // after the project id is reserved for view names, and a fullscreen file
+  // is the same page with different chrome, not a different page. The two
+  // compose: ?v=<sha>&full=1 is a past version, read fullscreen.
+  full?: boolean;
   // History feed filters (?q=&user=&since=&until=). Only ever set on the
   // history view; absent when nothing is filtered.
   filters?: HistoryFilters;
@@ -133,6 +139,10 @@ export function parseRoute(url: string, mode: "volume" | "hub"): Route {
   const r = parsePath(qi === -1 ? url : url.slice(0, qi), mode);
   if (version) r.version = version;
   if (connect) r.connect = connect;
+  // Presence, not value: `full=1` is what the app emits, but a hand-typed
+  // `?full` or `?full=0` names the same intent, and a flag whose only job is
+  // to hide chrome has no second state worth parsing.
+  if (q?.has("full")) r.full = true;
   const filters: HistoryFilters = {};
   for (const k of HISTORY_FILTER_KEYS) {
     const v = q?.get(k);
@@ -193,11 +203,34 @@ function parsePath(pathname: string, mode: "volume" | "hub"): Route {
 
 // The URL for a file within a project (hub) or the volume (no project id),
 // optionally pinned to one past version by content hash.
-export function urlForPath(path: string, projectId?: string, version?: string): string {
+export function urlForPath(
+  path: string,
+  projectId?: string,
+  version?: string,
+  full?: boolean,
+): string {
   const enc = encodePath(path);
-  const q = version ? "?v=" + version : "";
+  const q = (version ? "?v=" + version : "") + (full ? (version ? "&" : "?") + "full=1" : "");
   if (projectId) return "/" + projectId + (enc ? "/" + enc : "") + q;
   return "/" + enc + q;
+}
+
+// The same URL with `full` taken out and every other param left as it was.
+// Two callers, one reason each: the scroll memo keys on it (entering and
+// leaving fullscreen must land in the same slot, or the reader is thrown to
+// the top of the document), and exiting navigates to it.
+//
+// A URL with no `full` is returned untouched rather than round-tripped
+// through URLSearchParams, so the key for a page nobody ever put in
+// fullscreen is byte-for-byte the string the location gave us.
+export function withoutFull(url: string): string {
+  const qi = url.indexOf("?");
+  if (qi === -1) return url;
+  const p = new URLSearchParams(url.slice(qi + 1));
+  if (!p.has("full")) return url;
+  p.delete("full");
+  const s = p.toString();
+  return url.slice(0, qi) + (s ? "?" + s : "");
 }
 
 // The URL for a special view of a project, optionally carrying the history

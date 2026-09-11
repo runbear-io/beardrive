@@ -49,7 +49,9 @@ classDiagram
         per-view routes
         +moved: /resolve?path= on a tree miss only
         +scroll restoration: contentRef, memo, goal from lib/scroll
+        +fullscreen: body.full-view from route.full, Exit / Esc / Back
     }
+    note for Browser "Fullscreen is a QUERY PARAM on the file route (?full=1), for the reason ?v= is one: the first segment after the project id is reserved for view names, and a fullscreen file is the same page with different chrome. Two things the code forced: routeKey is withoutFull(useLocationPath()), because a ?full=1 push otherwise looks like a fresh route and arms a scroll goal of 0 — the reader is thrown to the top of the document the moment they ask for more of it; and the chrome is HIDDEN by a body class, never unmounted, so &lt;article id=content&gt; survives the toggle and keeps its scrollTop in both directions. display:none also takes the hidden controls out of the tab order and the accessibility tree together, which is what syncSidebarInert already encodes for the off-canvas sidebar. The Exit control is rendered by AppShell OUTSIDE the topbar it hides and painted over the content: the HTML sandbox is an opaque origin and the PDF viewer is the browser's own, so Esc can never reach the app from inside either one (BEA-195)"
     note for Browser "A missing path is decided from /tree alone — the file is never fetched — so the X-Bdrive-Canonical-Path header /file answers with would never reach the browser, and a moved FOLDER has no content fetch to hang a header on. The not-found branch asks GET /resolve?path= instead, then replaceState-navigates to the destination and prints one Moved from … line above it (BEA-81)"
 
     class router {
@@ -58,11 +60,13 @@ classDiagram
         +top-level routes orgs billing
         +parseRoute(url, mode) Route
         +Route.version ?v= sha, one past version
+        +Route.full ?full=1, the file page with the chrome hidden
         +Route.trailingSlash notes/ resolves, then replaces to notes
         +Route.queryTarget history ?path= / ?prefix= resolves, then replaces to /history/target
         +Route.filters q user since until, history feed
         +historyFilterQuery(filters) / hasHistoryFilters
-        +urlForPath(path, projectId, version)
+        +urlForPath(path, projectId, version, full)
+        +withoutFull(url) the same URL minus full — the scroll memo key
         +urlForView(view, projectId, target, filters) / encodePath / decodePath
         +projectByName(projects, seg) id, only when exactly one name matches
     }
