@@ -118,6 +118,12 @@ versions in between stay in the history, the restore itself shows up in
 teammate like any other edit — so you can restore away from a restore. The hub
 has the same button on every history row.
 
+`restore` re-reads the file after the sync it ends with, and **exits non-zero
+if the bytes on disk are not the version you asked for** — the success line
+never names a version the file does not hold. In `--list`, exactly one row
+carries the `*` that marks the version the file holds now; restoring puts old
+bytes back under a new entry, so several rows can legitimately share a hash.
+
 The hub's History view narrows the feed by path substring, author and date
 range (dates are UTC days, inclusive at both ends). The filters live in the
 URL — `<project>/history?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31`
@@ -266,6 +272,19 @@ The `local` count is a read-only walk of the folder — the same filter the
 cycle uses, so a `.bdriveignore`d path never counts — and it commits no ops,
 writes no journal, and contacts no hub. `status` describes; it never changes
 what it is describing.
+
+`status` also prints a `warning:` line when this device's sync clock has
+fallen behind the project:
+
+```
+  warning:  sync clock is behind this project — run 'bdrive sync' (edits made before that may not stick)
+```
+
+Sync re-derives the clock at the start of every cycle, so this names the window
+between falling behind and the next cycle — not a permanent condition. Running
+`bdrive sync` clears it. It exists because neither count above can express that
+state: `pending` is zero the moment a push succeeds, and `local` compares the
+folder against what was last written to it.
 
 Alongside those, `status` prints a `secrets:` block naming any synced file
 that looked like it held a credential when it last changed, and an `access:`

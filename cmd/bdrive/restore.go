@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -111,6 +114,21 @@ delete the file here and let the next sync carry it.`,
 			if _, err := sess.Cycle(cmd.Context()); err != nil {
 				return err
 			}
+			// Say what is on disk, not what was asked for. Restore writes the
+			// right bytes and then runs a full cycle, and a cycle can resolve
+			// the path to something else — which is exactly what BEA-196 was
+			// reported as: the success line named the requested version while
+			// the file held the head's bytes. The line below is what an agent
+			// trusts, so it is checked rather than assumed.
+			got, herr := hashFileAt(abs)
+			switch {
+			case herr != nil:
+				return fmt.Errorf("restored %s, but could not read it back to confirm: %w", rel, herr)
+			case got != op.Blob:
+				return fmt.Errorf("restore of %s did not stick: the file now holds %s, not the requested %s — "+
+					"a newer change won this sync; run 'bdrive log %s' to see it",
+					rel, shortSHA(got), shortSHA(op.Blob), rel)
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "restored %s to the version from %s (%s, %s)\n",
 				rel, op.Time.Local().Format("2006-01-02 15:04:05"), shortSHA(op.Blob), humanBytes(op.Size))
 			return nil
@@ -118,6 +136,21 @@ delete the file here and let the next sync carry it.`,
 	}
 	c.Flags().BoolVar(&list, "list", false, "list this file's versions instead of restoring one")
 	return c
+}
+
+// hashFileAt is the content address of what is on disk right now — the same
+// sha256 the journal records, so it can be compared to an op's Blob directly.
+func hashFileAt(abs string) (string, error) {
+	f, err := os.Open(abs)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func shortSHA(sha string) string {
@@ -182,6 +215,13 @@ func pickVersion(versions []journal.Op, current, want string) (journal.Op, error
 }
 
 func printVersions(w io.Writer, versions []journal.Op, current string) {
+	// `*` marks the version the file HOLDS, so exactly one row can carry it.
+	// It used to be printed for every op whose blob equalled the current
+	// content — and restoring a version puts those same bytes back under a new
+	// op, so a restored-then-restored file showed two starred rows and read as
+	// two competing heads. That is what sent BEA-196's diagnosis sideways.
+	// versions is newest-first, so the first match is the one on disk.
+	marked := false
 	for _, op := range versions {
 		who := op.UserName
 		if who == "" {
@@ -191,8 +231,8 @@ func printVersions(w io.Writer, versions []journal.Op, current string) {
 			who = op.Author
 		}
 		mark := "  "
-		if op.Blob == current {
-			mark = "* "
+		if !marked && op.Blob == current {
+			mark, marked = "* ", true
 		}
 		// Same treatment as `bdrive log`: these strings are a peer's.
 		fmt.Fprintf(w, "%s%s  %s  %8s  %s on %s\n", mark, shortSHA(op.Blob),

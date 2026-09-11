@@ -1,7 +1,13 @@
 // Package syncer drives a volume's sync cycle:
 //
-//	scan → commit local ops → pull peer journals → preserve conflicts →
-//	materialize merged state → push blobs + own journal
+//	re-derive the clock → scan → commit local ops → pull peer journals →
+//	preserve conflicts → materialize merged state → push blobs + own journal
+//
+// The cycle opens by folding every op already in the volume's journal dir
+// through absorbLamport. Nothing else re-derives the clock — a pull absorbs
+// only the new tail it fetched, and a fully-downloaded peer journal yields
+// none — so a device whose stored clock fell below the journals beside it
+// would stay there forever, and every op it wrote would lose replay.
 //
 // Scanning always happens before pulling, so local edits are committed to the
 // journal (and their content captured in the blob store) before any remote
@@ -425,6 +431,47 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// This device has never contributed to this volume: it is JOINING a project,
 	// not editing one. Step 1b is what that changes.
 	joining := st.Lamport == 0 && st.PushedOps == 0
+	// Re-derive the clock from the journals this device ALREADY holds.
+	//
+	// Nothing else does. st.Lamport is only ever raised from a pull's new tail
+	// (absorbLamport, step 2), and pull returns nothing once a peer's journal
+	// is fully downloaded — it skips an object no larger than the local copy,
+	// and one whose bytes are identical. So a device whose sync.json falls
+	// below the journals in its own volume dir stays there forever, however
+	// many times it syncs, and because journal.Less orders on lamport BEFORE
+	// wall-clock time, every op it writes then LOSES replay: the cycle really
+	// pushes the edit, replay resolves the path to a peer's older op, and
+	// materialize writes those bytes back over the file — in the same run that
+	// reported "remote: pushed". That is BEA-196, and it is silent.
+	//
+	// Any desync does it: a crash between AppendOps and SaveSync, a restored
+	// backup, a pull that died on a 403 before it absorbed. Re-deriving heals
+	// all of them the same way, which is why this is a derivation and not a
+	// fix at one of those sites.
+	//
+	// Folded through absorbLamport rather than taken as a raw max: a journal on
+	// disk holds a peer's bytes, and the maxLamport ceiling is what stops a
+	// hostile peer installing a permanent write lock.
+	//
+	// AFTER `joining` is read, never before. joining gates the adoption path,
+	// so deriving first would turn a device whose first cycle crashed into a
+	// non-joiner and change what `bdrive init` adopts.
+	//
+	// ponytail: re-reads every journal, so the cycle now parses them twice (the
+	// other read is step 4's). The cycle already walks the whole working folder
+	// every tick, which is the larger cost by far. If it ever measures badly,
+	// cache the derived max against a per-journal (name, size) fingerprint in
+	// SyncState — do NOT hand-scan the JSONL for "lamport": Op.Path and Op.Note
+	// are peer-chosen strings that can contain that literal.
+	if ops, err := s.Store.AllOps(); err != nil {
+		// Never break sync: a journal we cannot read must not stop the scan
+		// from capturing local edits. The stored clock stands for this cycle.
+		log.Printf("beardrive: could not re-derive the sync clock: %v", err)
+	} else {
+		for _, op := range ops {
+			st.Lamport = absorbLamport(st.Lamport, op.Lamport)
+		}
+	}
 	filter, err := loadFilter(s.Folder, proj.Include)
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
@@ -503,6 +550,17 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	var pulled, gone []journal.Op
 	if s.Backend != nil {
 		pulled, gone, err = s.pull(ctx, cache)
+		// Before the switch, not after it: pull WRITES each peer journal to
+		// disk as it goes, and the ErrForbidden arm returns without ever
+		// reaching an absorb that sat below it — so a pull that died partway
+		// left this device holding ops its clock was below, and the
+		// commitLocal() in that same arm then journalled local edits under
+		// them. The derivation above heals that on the next cycle; this keeps
+		// the cycle that hit it from minting losing ops in the first place.
+		res.PulledOps = len(pulled)
+		for _, op := range pulled {
+			st.Lamport = absorbLamport(st.Lamport, op.Lamport)
+		}
 		switch {
 		case err == nil:
 			if st.Access == store.AccessNone {
@@ -537,10 +595,6 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 			res.Offline = true
 			res.OfflineErr = err
 			blocked = true
-		}
-		res.PulledOps = len(pulled)
-		for _, op := range pulled {
-			st.Lamport = absorbLamport(st.Lamport, op.Lamport)
 		}
 	}
 
@@ -582,7 +636,14 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	}
 
 	// 3. Preserve losing local edits as conflict copies.
-	if len(pulled) > 0 {
+	//
+	// Not gated on `len(pulled) > 0` any more. A local op can lose replay to an
+	// op that is ALREADY on this disk — a peer op above maxLamport, which
+	// absorbLamport refuses by design — and a settled peer journal yields
+	// nothing on every later cycle, so the gate meant that loss was reverted
+	// with no copy and no message, forever (BEA-196). Unpushed ops are the
+	// candidate set now; with none there is nothing that could lose.
+	if len(pulled) > 0 || st.PushedOps < int64(len(myOps)) {
 		conflictOps, err := s.conflictCopies(myOps, st.PushedOps, pulled, &st)
 		if err != nil {
 			return nil, err
@@ -1392,7 +1453,7 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 			pulledLatest[op.Path] = op
 		}
 	}
-	if len(pulledLatest) == 0 {
+	if len(unpushed) == 0 {
 		return nil, nil
 	}
 	all, err := s.Store.AllOps()
@@ -1402,13 +1463,25 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 	state := journal.Replay(all)
 	seqBase := int64(len(myOps))
 	var out []journal.Op
-	for p, theirs := range pulledLatest {
-		mine := unpushed[p]
+	// Every unpushed local op, not just the paths a pulled op touched: what
+	// makes an edit need preserving is that replay did not resolve to it, and
+	// whether the op that beat it arrived THIS cycle or was already on disk
+	// makes no difference to the user whose bytes are about to be overwritten.
+	for p, mine := range unpushed {
+		theirs, collided := pulledLatest[p]
 		cur, exists := state[p]
 		mineWon := (mine.Kind == journal.KindPut && exists && cur.Blob == mine.Blob) ||
 			(mine.Kind == journal.KindDelete && !exists)
 		loser := mine
 		if mineWon {
+			// Our version is what replay resolved to, so the only thing that
+			// could need preserving is the op that lost to it — and with no
+			// pull this cycle there is no such op. This is the common case now
+			// that the candidate set is every unpushed op: a healthy device's
+			// own edits win, and nothing is written.
+			if !collided {
+				continue
+			}
 			loser = theirs
 		}
 		if loser.Kind != journal.KindPut || loser.Blob == "" {
@@ -1420,6 +1493,14 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 		if !s.Store.HasBlob(loser.Blob) {
 			continue // content unavailable (partial pull); skip rather than fail
 		}
+		// Already preserved. `pushed` only advances on a successful push, so a
+		// losing op stays in the unpushed set and is re-examined on every later
+		// cycle — and the copy's name is derived from the loser, so without
+		// this the same bytes are re-journaled under the same path forever.
+		// Only reachable now that a collision is no longer required.
+		if kept, ok := state[conflictName(p, loser.DeviceName, loser.Time)]; ok && kept.Blob == loser.Blob {
+			continue
+		}
 		// Two people editing DIFFERENT parts of one text file is the common
 		// case, and forking it into a conflict copy makes both of them do a
 		// merge by hand that the machine could have done. Try the merge; if
@@ -1428,7 +1509,13 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 		// The merged op is an ordinary put of ordinary content — the same
 		// shape the conflict copy is, at the real path instead of a new one —
 		// so nothing about replay, ordering or the one-writer rule changes.
-		if merged, ok := s.tryMerge(p, mine, theirs, all); ok {
+		// Only against an op that actually arrived: tryMerge takes THEIR op,
+		// and without a collision there is no such op to merge with.
+		merged, canMerge := mergedBlob{}, false
+		if collided {
+			merged, canMerge = s.tryMerge(p, mine, theirs, all)
+		}
+		if canMerge {
 			st.Lamport = tickLamport(st.Lamport)
 			seqBase++
 			out = append(out, journal.Op{

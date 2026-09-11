@@ -296,6 +296,31 @@ func statusCmd() *cobra.Command {
 								added+modified+gone, added, modified, gone)
 						}
 					}
+					// The one state that reported "healthy" all the way
+					// through BEA-196. `pending` is len(myOps)-PushedOps, so a
+					// successful push makes it 0 by construction, and Drift
+					// compares disk against the cache, which materialize just
+					// made agree — both numbers were correct and neither could
+					// say "the ops I write are losing replay". A clock below
+					// the journals in this device's own volume dir is what
+					// that state IS, and it is readable without a cycle.
+					//
+					// Sync re-derives the clock now, so this is the window
+					// between falling behind and the next cycle rather than a
+					// permanent condition — which is exactly why it names the
+					// command that closes it.
+					if all, aErr := sess.Store.AllOps(); aErr == nil {
+						var hi int64
+						for _, op := range all {
+							if op.Lamport > hi {
+								hi = op.Lamport
+							}
+						}
+						if st.Lamport < hi {
+							fmt.Printf("  warning:  sync clock is behind this project — run 'bdrive sync' " +
+								"(edits made before that may not stick)\n")
+						}
+					}
 					switch st.Access {
 					case store.AccessReadOnly:
 						fmt.Printf("  access:   read-only (pull only) — %d local change(s) stay on this device\n", pending)
