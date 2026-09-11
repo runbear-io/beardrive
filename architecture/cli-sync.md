@@ -85,6 +85,15 @@ classDiagram
         +ReadOnly slash-terminated prefixes
         +Deny slash-terminated prefixes
     }
+    class Rosterer {
+        <<remote — optional capability>>
+        +Roster(ctx) []Person
+    }
+    class Person {
+        +Name string
+        +Path string
+    }
+    note for Rosterer "Scoper\'s twin, same mold: only the hub backend implements it (GET /api/p/id/presence), an object store has nobody to ask. This is the half of a collision the inbound spool cannot see — a teammate typing in the browser has not saved, so nothing has synced. The hook fetches once per mount after the cycle, on its OWN 2s context (httpBackend\'s client carries a 5-minute whole-request timeout), and swallows every error including ErrNoRoster: an unreachable roster must not join runHookSync\'s early-return paths, or the turn would lose its LINKS over a nicety. A name is free text a member typed, so hookSafeName strips control runes and truncates to 64 before it enters the prompt — every other string the hook emits is machine-shaped"
     note for SyncState "Access/AccessReason are written ONLY by the leg that asked the hub — pull clears no-access, push records read-only or clears it. A cycle with no remote leg leaves the last answer standing, so the daemon's local-only ticks stop alternating 'read-only' / 'access restored' and bdrive status stops reporting healthy sync moments after a refused push"
     note for SyncState "ReadOnly/Denied/ScopeTag are the hub's folder-permission answer, PERSISTED so an unreachable hub keeps the last scope instead of widening to &quot;everything is writable&quot; and building a journal the hub refuses whole when it returns. A ScopeTag that moved means this account's view changed, so forgetPeerJournals drops every peer copy: the hub serves each peer journal filtered, and pull skips a journal that did not grow and otherwise resumes at a BYTE OFFSET — so a revocation would silently stop that peer being read forever"
     note for Scoper "In the PutSigner mold: a hub knows about folder permissions, a raw object store has no account to answer for and does not implement it. ErrNoScope (a hub too old to have them) means &quot;nothing is restricted&quot; and clears a stale list; a transport error means keep the last answer. sanePrefixes drops what the hub sends that this device will not act on — an empty prefix matches every path and would stop the device syncing its own work, silently"
@@ -241,6 +250,9 @@ classDiagram
     Scoper <|.. Backend : the hub backend answers, a raw bucket has no account to answer for
     Session ..> Scoper : loadScope, once per cycle before scan
     Scoper ..> Scope : tag + readonly + deny prefixes
+    Rosterer <|.. Backend : the hub backend answers, a raw bucket has nobody to ask
+    Rosterer ..> Person : name + path, viewing not editing
+    Commands ..> Rosterer : sync --hook, once per mount per turn
     Scope ..> SyncState : persisted, so an unreachable hub never widens
     SyncState ..> Filter : AcceptRules(IgnoreAccepted)
     Session ..> SafePath : every path and note, in and out
@@ -342,6 +354,7 @@ classDiagram
         post-edit: sync --note
         post-read: read-log
     }
+    note for AgentHooks "The turn-start context now carries THREE advisories, all best-effort and none blocking: what teammates changed since the last turn (the inbound spool), which synced files looked like they hold credentials, and who has a file OPEN in the hub right now (remote.Rosterer). The last is a snapshot and the sentence says so — &quot;as of this turn\'s start&quot; — because the hub roster has a 15s TTL and a turn can run for minutes. A staleness MECHANISM would be a PreToolUse check, which is deliberately not built: it would spawn on every tool call and the hook guard stays pure shell"
     note for AgentHooks "internal/agenthooks — registers per-platform hook commands (claude, codex, gemini, hermes) in each platform's USER config, once per machine; they fire in every folder, every turn, and no-op outside mounts"
     note for AgentHooks "config.AgentHookConfig is the OTHER half of this story and deliberately NOT this package: it names the files an agent READS hooks from, so sync refuses to carry them. A teammate must never be able to push .claude/settings.json into your mount and have your next turn run their command. The two lists are kept apart on purpose — one is what we write, one is what the agent executes — and internal/config imports nothing to say it"
 

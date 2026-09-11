@@ -108,6 +108,31 @@ type Scoper interface {
 // sync everything, "the hub is unreachable" means keep the last answer.
 var ErrNoScope = errors.New("this server does not report project scope")
 
+// Person is one row of a project's presence roster: someone with a file open
+// in the hub right now. Mirrors internal/webapp's own shape; duplicated rather
+// than imported for the same reason ReadKindAgent is — remote must not depend
+// on the server package it talks to.
+type Person struct {
+	Name string `json:"name"`
+	Path string `json:"path,omitempty"`
+}
+
+// Rosterer is the optional "who else is on this project right now" capability,
+// in the Scoper mold. A hub keeps that roster in memory; an object store has
+// nobody to ask, so the object-store backends simply do not implement it and
+// the caller says nothing.
+//
+// It is what lets the agent hook warn about a collision no journal can see
+// yet: a teammate typing in the browser has not saved, so nothing has synced.
+type Rosterer interface {
+	Roster(ctx context.Context) ([]Person, error)
+}
+
+// ErrNoRoster is Roster's answer from a hub too old to report presence.
+// Distinct from a transport error for parity with ErrNoScope, though the one
+// caller today treats every failure the same way: say nothing.
+var ErrNoRoster = errors.New("this server does not report presence")
+
 // ReadReporter is the optional read-telemetry capability, in the PutSigner
 // mold: backends that sync through a hub report the device's agent reads so
 // the heat view can split human from agent traffic. Object-store backends
