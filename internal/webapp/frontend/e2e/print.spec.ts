@@ -32,6 +32,23 @@ test("print media drops the chrome and keeps the document", async ({ page }) => 
   }
 });
 
+// The two features landed hours apart and overlap: fullscreen's Exit button
+// floats OVER the content, so printing a file opened fullscreen would stamp it
+// onto the page along with the strip reserved for it.
+test("printing a fullscreen file does not print its Exit button", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/index.md?full=1`);
+  await expect(page.locator("#exit-full")).toBeVisible();
+
+  await page.emulateMedia({ media: "print" });
+  await expect(page.locator("#exit-full")).toBeHidden();
+  await expect(page.locator("#content h1")).toBeVisible();
+  // And the strip that was reserved for it goes too, or the document prints
+  // with a band of nothing at the top of the first page.
+  await expect(page.locator("#content")).toHaveCSS("padding-top", "0px");
+});
+
 test("markdown prints in place, from this page", async ({ page }) => {
   await page.addInitScript(() => {
     (window as unknown as { __printed: number }).__printed = 0;
