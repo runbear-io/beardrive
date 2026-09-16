@@ -11,7 +11,30 @@ import { useQueryClient } from "@tanstack/react-query";
    The poll stays exactly where it is. This is an accelerator on top of it:
    EventSource reconnects on its own, but a proxy that buffers the stream, or
    a hub too old to serve the route, simply leaves the poll doing what it
-   always did. Nothing here is load-bearing. */
+   always did. Nothing here is load-bearing.
+
+   ONE stream per browser, not per tab. Every tab of a project receives the
+   identical fan-out, so the second tab onward used to buy nothing and cost a
+   slot at both ends: a permanently in-flight request against the hub's finite
+   per-instance concurrency, and one of the browser's ~6 per-origin HTTP/1.1
+   sockets — six tabs wedged the whole app, streams that never finish being
+   the worst possible thing to spend that pool on. So one tab holds the
+   EventSource and relays each frame verbatim to the others, which handle it
+   exactly as if they had read it off the wire themselves.
+
+   Leader election is a Web Lock, held for the leader's lifetime. The browser
+   hands it to the next waiter when that tab dies — including a crash or a
+   force-quit, which is the case a heartbeat-and-TTL scheme gets wrong. There
+   is no stale leader to detect and no timeout to tune.
+
+   Frames published in the gap between a leader dying and its successor
+   connecting are lost. That is the poll's job, as it was before any of this
+   existed. Where either API is missing, every tab opens its own stream and
+   behaves exactly as it did before.
+
+   Deliberately NOT shared: /collab. Two tabs editing one document are two
+   distinct CRDT peers with their own awareness state — sharing that stream
+   would be wrong, not thrifty. */
 
 type ChangeEvent = {
   type: "change" | "resync" | "presence";
@@ -36,7 +59,6 @@ export function useProjectEvents(
 
   useEffect(() => {
     if (!enabled || typeof EventSource === "undefined") return;
-    const es = new EventSource(apiBase + "events");
 
     // The tree gains and loses entries on any change; heat and history are
     // derived from the same journal, so they go stale at the same moment.
@@ -46,10 +68,13 @@ export function useProjectEvents(
       qc.invalidateQueries({ queryKey: ["heat", apiBase] });
     };
 
-    es.onmessage = (e) => {
+    // One frame, from the socket this tab owns or from the tab that owns it.
+    // Identical either way — which is the point, and why the relay ships the
+    // raw `data` string rather than anything it has already interpreted.
+    const handle = (data: string) => {
       let ev: ChangeEvent;
       try {
-        ev = JSON.parse(e.data);
+        ev = JSON.parse(data);
       } catch {
         return; // a frame we can't read is not a reason to tear the stream down
       }
@@ -84,11 +109,56 @@ export function useProjectEvents(
       qc.invalidateQueries({ queryKey: ["text"] });
     };
 
-    // Errors are expected and self-healing: EventSource retries on its own,
-    // and the poll covers the gap. Logging here would mean a line per hub
-    // restart, per sleeping laptop, forever.
-    es.onerror = () => {};
+    // Scoped to the project: tabs on different projects share nothing, and
+    // two hubs open in one browser never cross.
+    const key = `bdrive:events:${apiBase}`;
+    let es: EventSource | null = null;
+    let chan: BroadcastChannel | null = null;
+    // Resolving this frees the Web Lock, which is what hands leadership on.
+    let release: (() => void) | null = null;
+    const giveUp = new AbortController();
+    let done = false;
 
-    return () => es.close();
+    const connect = () => {
+      es = new EventSource(apiBase + "events");
+      es.onmessage = (e) => {
+        // Followers first: a tab that is mid-render should not delay the
+        // others. BroadcastChannel never echoes to its own sender, so the
+        // leader still has to handle the frame itself.
+        chan?.postMessage(e.data);
+        handle(e.data);
+      };
+      // Errors are expected and self-healing: EventSource retries on its own,
+      // and the poll covers the gap. Logging here would mean a line per hub
+      // restart, per sleeping laptop, forever.
+      es.onerror = () => {};
+    };
+
+    if (typeof BroadcastChannel === "undefined" || !navigator.locks) {
+      connect(); // no way to share; behave exactly as this hook always did
+    } else {
+      chan = new BroadcastChannel(key);
+      chan.onmessage = (e: MessageEvent<string>) => handle(e.data);
+      navigator.locks
+        .request(`${key}:leader`, { signal: giveUp.signal }, () => {
+          // Held until this promise settles, so it resolves only on cleanup.
+          return new Promise<void>((resolve) => {
+            if (done) return resolve(); // unmounted while the lock was pending
+            release = resolve;
+            connect();
+          });
+        })
+        // AbortError is the ordinary path for a follower that closes before
+        // ever leading. Nothing here is load-bearing enough to report.
+        .catch(() => {});
+    }
+
+    return () => {
+      done = true;
+      giveUp.abort(); // drop a still-pending request to lead
+      release?.(); // or, if we are leading, pass it to the next tab
+      es?.close();
+      chan?.close();
+    };
   }, [apiBase, enabled, qc]);
 }
