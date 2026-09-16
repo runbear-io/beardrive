@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -194,7 +195,39 @@ func newOpPaths(ops []journal.Op, storedMax int64) []string {
 	return out
 }
 
+// refuseUnstreamable answers a stream the connection cannot actually carry,
+// and reports whether it did.
+//
+// http.ResponseController finds a Flusher by walking Unwrap(), so a middleware
+// that wraps http.ResponseWriter and implements neither leaves every stream
+// unflushable. A handler that discovers this only AFTER WriteHeader can do
+// nothing but hang up, and what reaches the browser then is a valid, empty,
+// closed 200 that EventSource retries forever — live updates and co-editing
+// both dead, with no error anywhere to say so. That shipped to production
+// once, behind an analytics middleware; the point of checking before a byte
+// is written is that the next one is a 500 in the log instead.
+func refuseUnstreamable(w http.ResponseWriter, r *http.Request) bool {
+	for rw := w; ; {
+		if _, ok := rw.(http.Flusher); ok {
+			return false
+		}
+		u, ok := rw.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		rw = u.Unwrap()
+	}
+	log.Printf("bdrive: cannot stream %s — an http.ResponseWriter in the "+
+		"middleware chain implements neither Flush nor Unwrap, so live "+
+		"updates and collaborative editing cannot work", r.URL.Path)
+	http.Error(w, "this server cannot stream events", http.StatusInternalServerError)
+	return true
+}
+
 func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request) {
+	if refuseUnstreamable(w, r) {
+		return
+	}
 	rc := http.NewResponseController(w)
 	project := projectID(r)
 	sub, ok := s.events().subscribe(project)
@@ -214,7 +247,7 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 	h.Set("X-Accel-Buffering", "no") // nginx and friends
 	w.WriteHeader(http.StatusOK)
 	if err := rc.Flush(); err != nil {
-		return // not a streaming-capable writer; nothing to do but leave
+		return // the client hung up between the header and the first flush
 	}
 
 	tick := time.NewTicker(keepalive)
