@@ -38,6 +38,60 @@ func TestCollabExactlyOneJoinerSeeds(t *testing.T) {
 	}
 }
 
+/*
+A claim that never produced a document must not hold the room forever.
+
+	leave() releases a claim when the last subscriber goes, but a stream that is
+	never cleanly torn down — a killed tab, a connection a proxy still holds —
+	leaves a phantom subscriber behind. The room is then claimed, permanently
+	empty, and every later joiner is told it is NOT the seeder: the visual
+	editor hands out no anchors and silently refuses to save, and the source
+	editor mounts a blank buffer that will snapshot its blankness over the file.
+
+	This was not hypothetical. It is what "I edited and nothing happened" turned
+	out to be, and it survives a page reload because the state is the hub's.
+*/
+func TestCollabAbandonedSeedClaimExpires(t *testing.T) {
+	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+
+	ghost := &subscriber{ch: make(chan []byte, 1)}
+	if _, first := room.join(ghost); !first {
+		t.Fatal("the first joiner was not told to seed")
+	}
+	// It never posts, and it never leaves.
+
+	if _, first := room.join(&subscriber{ch: make(chan []byte, 1)}); first {
+		t.Fatal("a joiner inside the grace was told to seed — that is the race the claim exists to prevent")
+	}
+
+	// Past the grace, with the room still empty, the claim is up for grabs.
+	room.mu.Lock()
+	room.claimed = time.Now().Add(-seedClaimGrace - time.Second)
+	room.mu.Unlock()
+
+	if _, first := room.join(&subscriber{ch: make(chan []byte, 1)}); !first {
+		t.Fatal("an abandoned claim still owns the room; every editor of this file gets a blank document")
+	}
+}
+
+// The other half: a claim that DID produce a document keeps the room, however
+// long ago it was made. Expiring that one would tell a joiner to seed a room
+// that already has content, and the two documents merge into doubled text.
+func TestCollabLiveRoomKeepsItsClaimForever(t *testing.T) {
+	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	seeder := &subscriber{ch: make(chan []byte, 8)}
+	room.join(seeder)
+	room.post([]byte("the document"), seeder)
+
+	room.mu.Lock()
+	room.claimed = time.Now().Add(-100 * seedClaimGrace)
+	room.mu.Unlock()
+
+	if _, first := room.join(&subscriber{ch: make(chan []byte, 8)}); first {
+		t.Fatal("a room with content told a joiner to seed; that duplicates every character on merge")
+	}
+}
+
 // A joiner after the first gets the log, which is what lets it rebuild the
 // same document instead of seeding a second one.
 func TestCollabLaterJoinerGetsTheLog(t *testing.T) {

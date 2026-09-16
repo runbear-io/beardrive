@@ -18,6 +18,7 @@
 package webapp
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -1495,7 +1496,17 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	// Count the read before the ETag check: a 304 render is still a person
 	// reading the file, and skipping it would undercount the hottest pages.
 	s.recordRead(r, p)
+	ct := contentType(p)
+	// The editable view is a different body off the same blob, so it needs a
+	// different validator — and it needs it HERE, before the conditional. Left
+	// sharing the plain render's tag, a browser holding the plain bytes gets a
+	// 304 for ?edit=1 and shows a page with nothing to click, which looks
+	// exactly like the feature being broken.
+	edit := !attach && editView(r, ct, true) && s.mayWritePath(r, p)
 	etag := `"` + fi.Blob + `"`
+	if edit {
+		etag = `"` + fi.Blob + `-edit"`
+	}
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
@@ -1506,8 +1517,11 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 		return
 	}
 	defer rc.Close()
+	// body is what actually gets streamed. It is rc until something needs to
+	// read ahead — only the editable view does — after which it is rc with the
+	// read-ahead spliced back on the front.
+	var body io.Reader = rc
 	w.Header().Set("ETag", etag)
-	ct := contentType(p)
 	w.Header().Set("Content-Type", ct)
 	// nosniff on both branches, the sandbox CSP only on the inline one: an
 	// attachment is not rendered, and TestInlineHTMLIsSandboxed pins that
@@ -1519,18 +1533,53 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	} else {
 		w.Header().Set("Content-Type", inlineType(ct))
 		sandboxInline(w, ct)
+		// The editable view is served INSTEAD of the stored bytes, so it gets
+		// its say before the print view and before anything is streamed.
+		// Declining is always safe: the reader falls through to the ordinary
+		// render and sees the file, just not a clickable one.
+		if edit {
+			done, rest := s.serveEditable(w, rc)
+			if done {
+				return
+			}
+			body = rest // whatever stamping consumed, put back in front
+		}
 		pv = printView(w, r, ct, true)
 	}
 	// A print view appends printSuffix after the stored bytes, so the source's
 	// own length stops being the body's length — promising it would truncate
 	// the script right back off again.
 	if !pv {
-		setContentLength(w, rc)
+		setContentLength(w, body)
 	}
-	io.Copy(w, rc)
+	io.Copy(w, body)
 	if pv {
 		io.WriteString(w, printSuffix)
 	}
+}
+
+// serveEditable answers with the stamped variant of an HTML file, reporting
+// whether it did and, when it did not, handing back a reader positioned where
+// the caller left off. Stamping has to read ahead — an element is only known to
+// be innermost once its end tag arrives — so declining after a partial read
+// must put those bytes back, or the fallback render serves a truncated file.
+//
+// The caller has already set the -edit ETag: that decision has to be made
+// before the conditional request is answered, which is upstream of here.
+func (s *Server) serveEditable(w http.ResponseWriter, rc io.Reader) (bool, io.Reader) {
+	src, err := readCapped(rc, maxEditableHTML)
+	if err != nil {
+		if errors.Is(err, errEditTooLarge) {
+			// Past the buffering ceiling: serve it plainly, whole.
+			return false, io.MultiReader(bytes.NewReader(src), rc)
+		}
+		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
+		return true, nil
+	}
+	out := stampEditable(src, editScriptURL)
+	w.Header().Set("Content-Length", fmt.Sprint(len(out)))
+	w.Write(out)
+	return true, nil
 }
 
 // setContentLength promises a body length only when the thing about to be

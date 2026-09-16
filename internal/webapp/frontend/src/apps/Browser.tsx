@@ -248,9 +248,15 @@ export default function Browser(props: {
       (!!project &&
         atLeast(folderPerm(path) ?? project.perm, "write")));
   const [editing, setEditing] = useState(false);
+  // HTML edits as its rendered page by default; this is the way down to its
+  // markup. Only meaningful for HTML — every other type has one surface.
+  const [editSource, setEditSource] = useState(false);
   // Leaving the file (or pinning a version) leaves edit mode with it, so the
   // next file never opens straight into an editor the reader did not ask for.
-  useEffect(() => setEditing(false), [path, version]);
+  useEffect(() => {
+    setEditing(false);
+    setEditSource(false);
+  }, [path, version]);
   // The label and colour on this account's caret in a co-editor's window. The
   // colour is derived from the identity rather than assigned by the server, so
   // the same person is the same colour on everyone's screen and in every
@@ -805,6 +811,7 @@ export default function Browser(props: {
             onMeta={setMeta}
             onRendered={onRendered}
             editing={editing && canEdit}
+            editSource={editSource}
             me={editorIdentity}
           />
         </>
@@ -898,6 +905,24 @@ export default function Browser(props: {
               onClick={() => setEditing((e) => !e)}
             >
               {editing ? "Done" : "Edit"}
+            </Button>
+          )}
+          {/* The escape hatch, offered only while actually editing an HTML
+              file. Click-to-edit cannot add a section or repair a tag, and
+              without a way down to the markup the answer to either would be
+              "go and find a synced device". */}
+          {canEdit && editing && HTML_EXT.test(path) && (
+            <Button
+              id="edit-source-btn"
+              variant="toolbar"
+              title={
+                editSource
+                  ? "Back to editing the page"
+                  : "Edit this file's HTML markup"
+              }
+              onClick={() => setEditSource((e) => !e)}
+            >
+              {editSource ? "Edit page" : "Edit source"}
             </Button>
           )}
           {canShare && (

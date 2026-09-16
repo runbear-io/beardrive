@@ -113,7 +113,7 @@ classDiagram
     class components {
         FileView FolderListing FileTree
         HistoryView HistoryRow HistoryFilters DiffView VersionBanner ConflictBanner
-        PresenceBar Editor
+        PresenceBar Editor VisualEdit
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
@@ -124,6 +124,9 @@ classDiagram
     note for components "FileView's transformHTML resolves the server's `wiki:` marker against flatFiles into a real urlForPath() href (unresolvable ones lose the href and get .wiki-missing), so copy-link/middle-click/new-tab work and only a plain click reaches the delegated handler — resolution used to happen at click time, which left a dead `wiki:guide` string in the DOM (BEA-136). It also drops `data:image/svg` from any rendered img and any `data:` href from any rendered link — goldmark admits them, and an inline SVG is a document rather than a picture (the same property the server's sandboxInline walls off). Insights builds its per-device folder bag with Object.create(null), since folder names come off a peer's journal and one named __proto__ silently emptied the matrix. style.css sets unicode-bidi isolate-override on the peer-authored strings a reader is expected to CHECK (listing rows, breadcrumb, history path/note/device) — journal.SafeText refuses the bidi CONTROLS, but a single strong-RTL LETTER is legal and still reorders a row"
     note for components "HistoryView's RunGroup header carries the run-wide undo (POST undo-run, gated by the same write permission as the per-row restore/remove). It asks the SERVER for the file list first (preview: true) rather than deriving it from the loaded feed — that window is paged and filterable, so a client-computed list is wrong exactly when the run is old. modal.tsx's Confirm.message widened from string to ReactNode for it (the prompt's one-field API is untouched), so the dialog can show every path, its action, and the &quot;changed after this run&quot; warning inline"
     note for components "FileView's MarkdownView renders SecretBadge above the content when the render response carries findings — VersionBanner's shape (a strip, role=status, no actions), the red family rather than the accent because accent+glow already means 'you are looking at an old version' and the two strips stack on the ?sha= view. It phrases from lib/secrets so the badge and the share dialog name the rule and the line identically"
+    note for components "VisualEdit is click-to-edit for a synced HTML file: the page is rendered by the server's ?edit=1 view inside the SAME sandboxed iframe reading uses, and the editor is injected into it as a separate bundle (src/inline-edit.ts, built IIFE by vite.inline-edit.config.ts — an opaque-origin iframe cannot load a module script without CORS the hub has no business growing). Nothing here serializes the document: the iframe reports ONE element's inner HTML and the source range it belongs to, and this splices that range into the shared Y.Text, which is why the rest of the file survives byte-for-byte. Those ranges are held as Y.RelativePosition, never offsets — a peer's edit earlier in the file moves every number — and they are anchored against the CRDT ITSELF, never openSharedFile.current(), whose seed fallback reports a full document while the Y.Text being measured is empty and collapses every anchor onto index 0 (one edit then replaced an entire file). A patch whose resolved range would swallow a document the stamped range was only part of is refused outright. The iframe does NOT debounce its patch: for 700ms the edit lived only inside it, and Done tears the iframe down — typing and pressing Done is what finishing an edit looks like, and it silently lost the text"
+    note for components "FileView's HtmlView re-mounts its iframe on the change stream. An iframe loads once, so leaving the editor rendered the file as it was when Done was pressed — BEFORE the save landed — and then sat there with the edit saved on the hub and invisible on screen; the same reload makes a teammate's edit appear in a page you are already looking at. EditView's `mine` is a COUNT, not a flag: the change stream announces a write as soon as the hub journals it, often before the PUT's own response, so openSharedFile reports a write BEFORE it goes out, and two saves in flight (routine — clicking between paragraphs saves each) left the second event with nothing to claim it and raised the peer banner on the user's own edit"
+    note for lib "sharedfile.ts is everything about having a file open that is not about a keyboard — join the room, hold the CRDT, save on idle, save once more on the way out. Both surfaces sit on it: Editor binds CodeMirror to the Y.Text, VisualEdit splices ranges into the same one, so somebody typing markup and somebody clicking a headline are in one room and neither has to know the other exists"
     note for components "components/ui — shadcn/ui primitives (Radix, copied in), themed from BearDrive tokens in tw.css; rendered markdown is transformed as a string before mounting, link clicks delegated on the container — never patch the dangerouslySetInnerHTML subtree"
 
     class lib {
@@ -137,6 +140,7 @@ classDiagram
         +heat.ts HOT_READS STALE_DAYS isDanger daysSince agoLabel staleNote
         +conflict.ts parseConflict Conflict
         +collab.ts CollabDoc peerCount (Yjs over SSE + POST)
+        +sharedfile.ts openSharedFile SharedFile SAVE_IDLE_MS
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +scroll.ts Goal armGoal applyGoal noteScroll MAX_APPLY
         +csv.ts parseDelimited Csv CSV_ROWS
@@ -164,6 +168,7 @@ classDiagram
     Browser --> router
     Browser --> lib : parseConflict
     Browser --> components
+    components --> lib : openSharedFile (Editor and VisualEdit share one room)
     HubApp --> components
     components --> nav : linkProps navigate
     components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid parseConflict secretsBadge scoreLabel

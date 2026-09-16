@@ -271,6 +271,21 @@ func (s *Server) writablePath(w http.ResponseWriter, r *http.Request, path strin
 	return s.requirePathPerm(w, r, p, path, PermWrite)
 }
 
+// mayWritePath is writablePath for a caller that wants to DEGRADE rather than
+// refuse: it answers the question without answering the request.
+//
+// It resolves the PROJECT level too, which writablePath does not have to —
+// that one is only reachable from routes registered at PermWrite, where proj()
+// has already settled it. This is called from the file door, registered at
+// PermRead, where nothing upstream has asked about writing at all.
+func (s *Server) mayWritePath(r *http.Request, filePath string) bool {
+	p, ok := projectFromCtx(r)
+	if !ok {
+		return true // not hub mode: no project to have an opinion
+	}
+	return atLeast(s.pathPermOf(r, p, filePath), PermWrite)
+}
+
 // writablePaths is writablePath for an operation that touches several paths at
 // once (undo run). All or nothing: a partial write would leave the caller with
 // half a reverted run and no way to name what was skipped.

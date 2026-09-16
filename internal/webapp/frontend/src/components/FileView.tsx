@@ -25,6 +25,7 @@ import { hasMermaid, renderMermaid } from "../lib/mermaid";
 import { secretsBadge, type SecretFinding } from "../lib/secrets";
 import { Icon } from "./shell";
 import { Editor, type SaveState } from "./Editor";
+import { VisualEdit } from "./VisualEdit";
 import type { CollabStatus } from "../lib/collab";
 
 export function FileView(props: {
@@ -46,6 +47,12 @@ export function FileView(props: {
   // on a pinned past version (that would silently fork history at ?v=), and
   // never below write permission.
   editing?: boolean;
+  // Editing an HTML file's MARKUP rather than its rendered page. The escape
+  // hatch for the structural work click-to-edit deliberately cannot express:
+  // adding a section, fixing a tag, repairing something the visual editor
+  // refuses to open. Ignored for every other file type, which has only ever
+  // had the one surface.
+  editSource?: boolean;
 }) {
   const { apiBase, path, version, onMeta } = props;
   const fileURL = fileURLFor(apiBase, path, version);
@@ -56,20 +63,7 @@ export function FileView(props: {
   // views below are what you get when you are reading rather than writing.
   if (props.editing) return <EditView {...props} />;
   if (MD_EXT.test(path)) return <MarkdownView {...props} />;
-  if (HTML_EXT.test(path)) {
-    // Rendered, not shown as source — inside a sandboxed iframe so synced
-    // HTML never runs with the hub origin's session (the server also
-    // stamps the response with a sandbox CSP; this is belt and braces).
-    return (
-      <iframe
-        className="htmlview"
-        sandbox="allow-scripts"
-        src={fileURL}
-        title={path}
-        onLoad={props.onRendered}
-      />
-    );
-  }
+  if (HTML_EXT.test(path)) return <HtmlView {...props} fileURL={fileURL} />;
   if (PDF_EXT.test(path)) {
     // The browser's own viewer, streaming — no byte cap needed, nothing is
     // held in JS memory. Deliberately NOT sandboxed: the PDF viewer is not
@@ -109,6 +103,44 @@ export function FileView(props: {
   if (TEXT_EXT.test(path)) return <TextView {...props} fileURL={fileURL} />;
   // No extension we recognize: decide on the bytes instead of giving up.
   return <SniffView {...props} fileURL={fileURL} />;
+}
+
+/* A rendered HTML file, and it FOLLOWS the file.
+
+   Rendered, not shown as source — inside a sandboxed iframe so synced HTML
+   never runs with the hub origin's session (the server also stamps the
+   response with a sandbox CSP; this is belt and braces).
+
+   The reload is the part worth explaining. An iframe loads once and then sits
+   there, so the page a reader is looking at is the file as it was when they
+   opened it. Leaving the visual editor made that obvious and awkward: the read
+   view mounts the instant Done is pressed, which is BEFORE the save lands, so
+   it rendered the pre-edit file and stayed that way — the edit was on the hub
+   and nowhere on screen. Following the change stream fixes that case and a
+   quieter one with it: a teammate's edit now appears instead of the page going
+   stale under you. */
+function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
+  const { path, fileURL, onRendered } = props;
+  const [rev, setRev] = useState(0);
+  useEffect(() => {
+    const onChanged = (e: Event) => {
+      if ((e as CustomEvent<string[]>).detail?.includes(path)) setRev((r) => r + 1);
+    };
+    window.addEventListener("bdrive:changed", onChanged);
+    return () => window.removeEventListener("bdrive:changed", onChanged);
+  }, [path]);
+  return (
+    <iframe
+      // Re-mounted rather than re-pointed: an iframe whose src is unchanged
+      // does not reload, and the src IS unchanged — it is the same file.
+      key={rev}
+      className="htmlview"
+      sandbox="allow-scripts"
+      src={fileURL}
+      title={path}
+      onLoad={onRendered}
+    />
+  );
 }
 
 /* The fallthrough: one fetch, then text / binary / too-large. Only files
@@ -183,6 +215,9 @@ function FileCard(props: {
    what the CRDT layer is for. The banner tells you instead. */
 function EditView(props: Parameters<typeof FileView>[0]) {
   const { apiBase, path, onMeta } = props;
+  // An HTML file edits as the page it renders as, unless the reader asked for
+  // its markup instead. Everything else has only ever had one surface.
+  const visual = HTML_EXT.test(path) && !props.editSource;
   // Live path, never immutable: the buffer is seeded from whatever the file
   // says right now. Shares the ["text", url] family the rest of the app uses,
   // so a restore or a peer write invalidates it like any other read.
@@ -194,7 +229,14 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // and only interesting when it did NOT come through the shared document:
   // a co-editor's keystrokes are already in the buffer.
   const [peerWrote, setPeerWrote] = useState(false);
-  const mine = useRef(false);
+  /* Writes of MY OWN that the change stream has not accounted for yet.
+
+     A count, not a flag. Each save is announced before it goes out and claimed
+     by the event it produces; a flag loses that pairing the moment two saves
+     are in flight — which the visual editor does routinely, since clicking
+     from one paragraph to the next saves each of them. The second event then
+     had nothing to claim it and raised the banner on the user's own edit. */
+  const mine = useRef(0);
   // Co-editors in this document right now. A write while somebody else is in
   // the room is their snapshot of the document I already have — warning about
   // it would fire on every co-editing save. Alone, the same event means
@@ -207,8 +249,8 @@ function EditView(props: Parameters<typeof FileView>[0]) {
       const p = (e as CustomEvent<string[]>).detail;
       if (!p?.includes(path)) return;
       // Our own save comes back through the stream; that is not a peer.
-      if (mine.current) {
-        mine.current = false;
+      if (mine.current > 0) {
+        mine.current--;
         return;
       }
       if (peers.current > 0) return; // a co-editor's snapshot, already in my buffer
@@ -230,7 +272,10 @@ function EditView(props: Parameters<typeof FileView>[0]) {
               : "saved"}
       </span>,
     );
-  }, [state, onMeta]);
+    // collab belongs in the deps: without it the status line keeps whatever
+    // connection state it was first rendered with, so a room that came up
+    // fine still reads "connecting" forever.
+  }, [state, collab, onMeta]);
 
   if (error)
     return <div className="empty">Could not open {path} for editing.</div>;
@@ -251,20 +296,43 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           unchanged — saving keeps your version and theirs stays in history.
         </div>
       )}
-      <Editor
-        apiBase={apiBase}
-        path={path}
-        initial={data.text}
-        onSaved={() => {
-          mine.current = true;
-        }}
-        onStateChange={setState}
-        onCollab={setCollab}
-        onPeers={(n) => {
-          peers.current = n;
-        }}
-        me={props.me}
-      />
+      {visual ? (
+        /* HTML gets the rendered page, clicked directly. Same file, same
+           shared document, same save — a different surface onto it. Source
+           editing stays one click away for the structural work this cannot
+           express (Browser.tsx's "Edit source"). */
+        <VisualEdit
+          apiBase={apiBase}
+          fileURL={fileURL}
+          path={path}
+          initial={data.text}
+          onWriting={() => {
+            mine.current++;
+          }}
+          onStateChange={setState}
+          onCollab={setCollab}
+          onPeers={(n) => {
+            peers.current = n;
+          }}
+          me={props.me}
+          onRendered={props.onRendered}
+        />
+      ) : (
+        <Editor
+          apiBase={apiBase}
+          path={path}
+          initial={data.text}
+          onWriting={() => {
+            mine.current++;
+          }}
+          onStateChange={setState}
+          onCollab={setCollab}
+          onPeers={(n) => {
+            peers.current = n;
+          }}
+          me={props.me}
+        />
+      )}
     </>
   );
 }

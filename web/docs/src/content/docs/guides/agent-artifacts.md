@@ -98,6 +98,45 @@ serves the file's latest content forever, so don't put secrets in a synced
 folder. Note also that a LAN-bound hub means LAN-only links.
 :::
 
+## Fixing the wording without regenerating the report
+
+An agent writes a good report with one wrong number, or a sentence that reads
+badly. Re-prompting the agent to regenerate the whole file to fix six words is
+the slow answer, and it churns every other line in the process.
+
+Open the file in the web UI and press **Edit**. The page stays the page — its
+own CSS, its own layout — and the text becomes clickable. Click a paragraph,
+type. `Cmd/Ctrl+B` and `Cmd/Ctrl+I` do bold and italic; `Cmd/Ctrl+Z` undoes.
+It saves as you go — pressing **Done** straight after typing keeps what you
+typed — and teammates editing the same file at the same time see each other's
+changes. A rendered page also refreshes itself when the file changes, so a
+teammate's edit appears while you are looking at it.
+
+The point is what happens to the file. Only the paragraph you edited is
+rewritten: your indentation, comments, `<script>` and `<style>` blocks come
+back byte-for-byte, so the next agent to read the file finds what it wrote and
+the History diff is one line instead of a whole-file reformat.
+
+Some things it deliberately won't do:
+
+- **No structural edits.** Enter doesn't split a paragraph and Backspace won't
+  merge two. Adding a section, deleting one, or repairing a tag is what
+  **Edit source** is for — the same file, its markup, in a normal text editor.
+- **Occasionally a paragraph won't open.** Inline markup the editor doesn't
+  model — a styled `<span>`, a link, `<sup>` — is carried through untouched,
+  so those paragraphs edit normally and the markup comes back byte-for-byte.
+  A few things still can't be represented (a `<br>` inside a paragraph, for
+  one), and those stay read-only rather than being quietly flattened. Hovering
+  shows a not-allowed cursor; use **Edit source** for them.
+- **Text a page's own JavaScript generates isn't editable**, because it isn't
+  in the file. A chart's labels are drawn at runtime; there is nothing to
+  click and nothing to write back.
+
+Editing needs write permission on the file, and respects
+[folder permissions](/concepts/permissions/) — a read-only folder shows no Edit
+button rather than one that fails on save. Shared `/s/` links are never
+editable.
+
 ## Who wrote what
 
 Every change is attributed to the account, agent, and device behind it, and
