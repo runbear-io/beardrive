@@ -186,13 +186,14 @@ classDiagram
     class collabRoom {
         -updates opaque Yjs updates
         -seeded claimed at join
+        -claimed when, so a dead claim can expire
         +join(sub) log, first
         +post(update, from) ok
         +relay(frame) not logged
         +reset()
     }
     note for collabHub "GET and POST {prefix}collab?path=, proj(PermWrite) — the editing channel, so a read-only member has nothing to send on it. The hub is a RELAY and an append-only log: it never parses a Yjs update, holds no document, and links no CRDT library, which is what keeps the build pure Go (a cgo y-crdt would break the cross-compiled release the way a cgo sqlite would). Nothing here touches the journal — the DOCUMENT is a CRDT between browsers, the FILE is still an ordinary blob written by an ordinary upload/content call from whichever client stopped typing last, so journal.Less and Replay are untouched and every desktop device, agent and older client converges as before. The log is deliberately NOT durable; the file is"
-    note for collabRoom "`seeded` is CLAIMED at join under the room lock, never inferred from an empty log: the log only fills once the seeding client has POSTED, so every joiner arriving inside that window was told to seed too — 32 of 32 in the test that found it — and two clients seeding the same text build two DIFFERENT Yjs documents whose merge duplicates every character. The claim is released when the last editor leaves without having posted, or a tab opened and closed would leave the room claimed but empty and the next joiner would snapshot that emptiness over a real file. relay() is the awareness path: broadcast, never recorded, because a caret position replayed to a joiner paints cursors for people who have left"
+    note for collabRoom "`seeded` is CLAIMED at join under the room lock, never inferred from an empty log: the log only fills once the seeding client has POSTED, so every joiner arriving inside that window was told to seed too — 32 of 32 in the test that found it — and two clients seeding the same text build two DIFFERENT Yjs documents whose merge duplicates every character. The claim is released when the last editor leaves without having posted, or a tab opened and closed would leave the room claimed but empty and the next joiner would snapshot that emptiness over a real file — and because leave() only fires for a stream that is CLEANLY torn down, a claim that has produced nothing for seedClaimGrace expires on its own: a killed tab otherwise leaves a phantom subscriber holding the room forever, every later joiner is handed a blank document, the visual editor silently refuses to save and the source editor writes that blankness to the file. relay() is the awareness path: broadcast, never recorded, because a caret position replayed to a joiner paints cursors for people who have left"
 
     class presenceHub {
         <<internal/webapp, presence.go>>
@@ -418,6 +419,15 @@ classDiagram
         appends printSuffix, drops Content-Length
     }
     note for printView "The one thing allowed to relax sandboxInline's wall, and by exactly one flag. The app shell cannot print synced HTML: it renders in a cross-origin frame, and a cross-origin frame prints CLIPPED to its box — the parent may not measure the content to size it, and an over-tall guess prints the slack as blank pages. So ?print=1 serves the document as a TOP-LEVEL page that presses Print itself, which needs allow-modals (the flag that gates print/alert/confirm in a sandbox). allow-same-origin stays off, so the document is still opaque and can no more reach the API or the session cookie than the frame it replaces. text/html only, because the suffix is appended AFTER the stored bytes: HTML's parser accepts that and XHTML — parsed as XML — does not. Never on a download door, where it would corrupt the saved file, and Content-Length is dropped when it fires or the promised length truncates the script straight back off"
+    class editView {
+        <<serveBlob, ?edit=1>>
+        text/html only, inline only, PermWrite on the path
+        stampEditable marks innermost text blocks
+        data-bd-src offsets in UTF-16 units
+        appends /inline-edit.js + hash + length
+        own ETag; declines past maxEditableHTML
+    }
+    note for editView "Click-to-edit's server half (htmledit.go), shaped like printView and for the same reason: HTML's parser accepts content appended after the stored bytes. It marks the INNERMOST text-bearing block with the byte range of its own inner content, so the browser can send back one element's markup and the app can splice exactly that range — the file keeps its indentation, comments and script blocks, and the history diff is one line instead of a whole-file rewrite. Phrasing content (a, span, strong, sup) is CONTENT, not a region: stamping it instead would make the only editable thing in 'See the &lt;a&gt;notes&lt;/a&gt; for the method' the link text, and real prose almost always contains one. Offsets are UTF-16 code units because the browser resolves them against a Y.Text, which is indexed like every JS string — counting bytes agrees for ASCII and silently splices over a neighbour's markup on the first accented character. A DIFFERENT ETag from the plain render: same blob, different body, and a shared tag lets a cache answer ?edit=1 with unstamped bytes. Never on /s/* or a download, and the sandbox is untouched — editing buys no capability the reading view did not have"
     class Share {
         +Token +Project +Path +Creator +Expires
     }
@@ -574,6 +584,7 @@ classDiagram
     journalDoor ..> DeviceRegistry : OwnerOf gates the journal key
     Server *-- sandboxInline : every bytes-out route
     sandboxInline <|.. printView : relaxes, by allow-modals alone
+    sandboxInline <|.. editView : relaxes nothing — same sandbox as reading
     Server *-- offboard : account deletion
     offboard ..> OrgDB : orgEvictor
     offboard ..> ProjectDB : dropPerm

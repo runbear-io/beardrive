@@ -37,6 +37,18 @@ const (
 	// this is memory a member can grow by typing. Past it the room asks its
 	// clients to snapshot and start over.
 	maxRoomBytes = 8 << 20
+	// seedClaimGrace is how long a seeding client has to actually post the
+	// document before its claim is treated as abandoned.
+	//
+	// leave() releases a claim when the last subscriber goes, but a stream
+	// that is never cleanly torn down — a killed tab, a dropped connection a
+	// proxy still holds open — leaves a subscriber behind forever. The room is
+	// then claimed, permanently empty, and every later joiner is told it is
+	// not the seeder and hands its editor a BLANK document: the visual editor
+	// silently refuses to save, and the source editor will happily snapshot
+	// that blankness over the file. Two orders of magnitude longer than the
+	// 60ms a real client takes to post its seed, so this never races one.
+	seedClaimGrace = 10 * time.Second
 	// roomIdle is how long a room with no subscribers is kept before its log
 	// is dropped. The file is the durable copy — the log only has to outlive
 	// a reload or a flaky connection.
@@ -57,6 +69,9 @@ type collabRoom struct {
 	// building a different Yjs document from the same text, which on merge
 	// duplicates every character.
 	seeded bool
+	// claimed is when that claim was made, so a claim that never produced
+	// anything can expire. See seedClaimGrace.
+	claimed time.Time
 }
 
 type collabHub struct {
@@ -110,8 +125,15 @@ func (r *collabRoom) join(sub *subscriber) (log [][]byte, first bool) {
 	defer r.mu.Unlock()
 	r.subs[sub] = struct{}{}
 	r.touched = time.Now()
-	first = !r.seeded
-	r.seeded = true
+	// Claimed but still empty well past the grace: whoever took it is not
+	// coming back with content, and somebody has to seed or this document can
+	// never be edited again.
+	stale := r.seeded && len(r.updates) == 0 && time.Since(r.claimed) > seedClaimGrace
+	first = !r.seeded || stale
+	if first {
+		r.seeded = true
+		r.claimed = time.Now()
+	}
 	log = make([][]byte, len(r.updates))
 	copy(log, r.updates)
 	return log, first

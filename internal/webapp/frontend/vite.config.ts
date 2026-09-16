@@ -18,7 +18,10 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       // Two entries: the SPA, and the one script the server-rendered /s/
-      // share page loads when its document has a mermaid fence.
+      // share page loads when its document has a mermaid fence. The
+      // click-to-edit bootstrap is NOT here — it has to be a classic script
+      // for the opaque-origin iframe it is injected into, so it gets its own
+      // IIFE pass (vite.inline-edit.config.ts).
       input: {
         index: path.resolve(__dirname, "index.html"),
         "share-mermaid": path.resolve(__dirname, "src/share-mermaid.ts"),
