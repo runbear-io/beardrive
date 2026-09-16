@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
-	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
@@ -104,24 +103,8 @@ func runGrep(cmd *cobra.Command, pattern string, folderArg []string, ignoreCase,
 	}
 
 	// The rules this device has ACCEPTED, so results match what the cycle
-	// actually uploads (syncer.Filter.SkipUp). Best-effort, exactly as
-	// `bdrive scope --explain` does it: store.Open takes no volume flock, so
-	// this cannot block behind a running daemon, and a store that will not
-	// open degrades the answer to the live rules rather than failing a read.
-	//
-	// The Stat guard is this command's own: store.Open MkdirAlls the volume
-	// directory, and a search must not create one for a project that has never
-	// synced. No store means no accepted rules, which is what "" already says.
-	var accepted string
-	if vdir, verr := config.VolumeDir(proj.ID); verr == nil && dirExists(vdir) {
-		if st, serr := store.Open(vdir); serr == nil {
-			if sync, serr := st.LoadSync(); serr == nil {
-				accepted = sync.IgnoreAccepted
-			}
-		}
-	}
-
-	paths, err := syncer.SyncedFiles(folder, proj.Include, accepted)
+	// actually uploads (syncer.Filter.SkipUp).
+	paths, err := syncer.SyncedFiles(folder, proj.Include, acceptedRules(proj.ID))
 	if err != nil {
 		return err
 	}

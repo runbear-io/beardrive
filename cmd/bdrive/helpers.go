@@ -142,6 +142,31 @@ func workspaceRootUnder(folder string) (string, bool) {
 	return "", false
 }
 
+// acceptedRules is the .bdriveignore text THIS device has accepted
+// (store.SyncState.IgnoreAccepted) — the floor Filter.SkipUp applies, so a
+// read reports what the cycle will really upload. Best-effort: store.Open
+// takes no volume flock, so this cannot block behind a running daemon, and
+// any failure degrades to "" (the live rules), never an error.
+//
+// The Stat guard matters: store.Open MkdirAlls the volume directory, and a
+// read must not create one for a project that has never synced. No store
+// means no accepted rules, which is what "" already says.
+func acceptedRules(projID string) string {
+	vdir, err := config.VolumeDir(projID)
+	if err != nil || !dirExists(vdir) {
+		return ""
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		return ""
+	}
+	sync, err := st.LoadSync()
+	if err != nil {
+		return ""
+	}
+	return sync.IgnoreAccepted
+}
+
 // notAProject is the "this folder has no project" error every command shares,
 // including the one case where the usual advice is wrong: at a workspace root
 // `bdrive init` refuses on purpose, so sending the user there is a dead end.
