@@ -103,3 +103,74 @@ test("a teammate viewing the project shows up in the presence bar", async ({ bro
     await two.close();
   }
 });
+
+/* One stream per BROWSER, not per tab.
+
+   Both specs below use two pages in ONE context on purpose: that is what a
+   second tab is. Two contexts are two browsers, which share no Web Lock and
+   no BroadcastChannel and are SUPPOSED to hold a stream each — running these
+   that way would pass for the wrong reason (see the presence spec above,
+   which genuinely needs two contexts because it needs two accounts). */
+
+// Own paths, per the note at the top of this file.
+const SHARED = "shared-stream-spec.md";
+
+test("a second tab rides the first tab's stream instead of opening one", async ({ context }) => {
+  const a = await context.newPage();
+  await login(a);
+  const pid = await wikiId(a);
+
+  let streams = 0;
+  context.on("request", (r) => {
+    if (r.url().includes(`/api/p/${pid}/events`)) streams++;
+  });
+
+  await a.request.put(`/api/p/${pid}/upload/content?path=${SHARED}`, {
+    data: "# Before\n",
+  });
+  await a.goto(`/${pid}/${SHARED}`);
+  // Wait for the leader to actually dial, so "no second stream" below is an
+  // observation and not a race this test won by asserting too early.
+  await expect.poll(() => streams, { timeout: 10_000 }).toBe(1);
+
+  const b = await context.newPage();
+  await b.goto(`/${pid}/${SHARED}`);
+  await expect(b.locator("#content h1")).toHaveText("Before");
+
+  // The second tab rendered the project without dialing the hub again.
+  expect(streams).toBe(1);
+
+  // And it is genuinely live, not merely quiet: a write reaches it over the
+  // leader's connection. Well inside the 15s poll, which would otherwise be
+  // an alternative explanation for the text changing.
+  await a.request.put(`/api/p/${pid}/upload/content?path=${SHARED}`, {
+    data: "# Relayed\n",
+  });
+  await expect(b.locator("#content h1")).toHaveText("Relayed", { timeout: 10_000 });
+  expect(streams).toBe(1);
+});
+
+// The failover a heartbeat-and-TTL scheme gets wrong: the leader does not
+// resign, it vanishes. Closing the tab never runs React cleanup — the browser
+// drops the Web Lock because the document holding it was destroyed, and the
+// next tab is granted it.
+test("closing the leader tab hands the stream to a survivor", async ({ context }) => {
+  const a = await context.newPage();
+  await login(a);
+  const pid = await wikiId(a);
+  const b = await context.newPage();
+
+  await a.request.put(`/api/p/${pid}/upload/content?path=${SHARED}`, {
+    data: "# Before\n",
+  });
+  await a.goto(`/${pid}/${SHARED}`);
+  await b.goto(`/${pid}/${SHARED}`);
+  await expect(b.locator("#content h1")).toHaveText("Before");
+
+  await a.close(); // the leader, without warning
+
+  await b.request.put(`/api/p/${pid}/upload/content?path=${SHARED}`, {
+    data: "# Promoted\n",
+  });
+  await expect(b.locator("#content h1")).toHaveText("Promoted", { timeout: 10_000 });
+});
