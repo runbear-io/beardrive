@@ -239,6 +239,9 @@ func (s *Server) handleCollabStream(v *volume, w http.ResponseWriter, r *http.Re
 	if !s.writablePath(w, r, path) {
 		return
 	}
+	if refuseUnstreamable(w, r) {
+		return
+	}
 	rc := http.NewResponseController(w)
 	key := roomKey(projectID(r), path)
 	room := s.collab().room(key)
