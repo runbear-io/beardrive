@@ -147,6 +147,7 @@ func TestSec_Router_TheShellIsServedForPathsTheClientMustSurvive(t *testing.T) {
 	} {
 		req := httptest.NewRequest("GET", path, nil)
 		req.AddCookie(c["alice"])
+		req.Header.Set("Accept", "text/html") // the browser router is the subject
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != 200 {

@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -123,6 +124,16 @@ func TestShellTitleNamesEveryRouteShape(t *testing.T) {
 func TestShellOpenGraph(t *testing.T) {
 	srv, p, _ := newHub(t, true, nil)
 	h := srv.Handler()
+	// An unfurler, which is who this markup is for: it sends no text/html, so
+	// without its User-Agent a file URL is an agent fetch (agentfetch_test.go).
+	do := func(t *testing.T, h http.Handler, method, u string, _ any) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, u, nil)
+		req.Header.Set("User-Agent", "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
 
 	generic := do(t, h, "GET", "/", nil).Body.String()
 	if !strings.Contains(generic, "<title>BearDrive</title>") {
@@ -335,7 +346,11 @@ func TestOGEscapesHostileNames(t *testing.T) {
 	if !strings.Contains(hostile.Name, "<img") {
 		t.Fatalf("name was sanitized away: %q", hostile.Name)
 	}
-	shell := do(t, h, "GET", "/"+hostile.ID+`/%22%3E%3Cscript%3E.md`, nil).Body.String()
+	// As an unfurler: with no text/html and no unfurler UA, a file URL is an
+	// agent fetch and never reaches the templated shell.
+	unfurl := httptest.NewRequest("GET", "/"+hostile.ID+`/%22%3E%3Cscript%3E.md`, nil)
+	unfurl.Header.Set("User-Agent", "Slackbot-LinkExpanding 1.0")
+	shell := doHTTP(h, unfurl).Body.String()
 
 	f.put("dev1", `"><script>.md`, "# hi\n\n\"><script>alert(1)</script> prose\n")
 	tok, _ := authedShare(t, srv, h, p.ID, `"><script>.md`)

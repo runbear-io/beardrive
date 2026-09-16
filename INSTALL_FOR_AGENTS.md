@@ -242,6 +242,12 @@ link: seeing the folder rendered in the browser is the moment the setup
 clicks. Teammate links require sign-in; `bdrive share <file>` exists for
 fully public URLs.
 
+Those same teammate links are fetchable by you. A browser gets the viewer; a
+fetch whose `Accept` names no `text/html` gets the file's own bytes plus an
+`X-Bdrive-Provenance` header, behind the same sign-in — so a link you emit is a
+link you (or another agent) can actually read back, and a missing file or a
+project you cannot see answers 404/403 rather than an empty page.
+
 Only if something looked wrong in init's output: `bdrive status` shows the
 daemon and pending count, and `bdrive url <file>` links a specific file.
 

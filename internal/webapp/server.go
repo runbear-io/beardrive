@@ -36,6 +36,7 @@ import (
 	"path"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -884,23 +885,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	proj := func(level string, h func(*volume, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			id := r.PathValue("project")
-			p, v, err := s.projectVolume(id)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			// p, not id: the resolver has already read the registry once for
-			// this request and re-reading it is the hub's per-request cost.
-			if !s.requirePermOn(w, r, p, level) {
-				return
-			}
-			// Read recording (and anything else downstream) finds the project
-			// id in the context; permission has already passed at this point.
-			// The resolved Project rides along too, so a handler needing the
-			// FOLDER level for a path it only learns from its own body
-			// (folders.go) does not re-read the registry a third time.
-			h(v, w, withProject(withProjectID(r, id), p))
+			s.serveProject(w, r, r.PathValue("project"), level, h)
 		}
 	}
 
@@ -1005,6 +990,35 @@ func (s *Server) Handler() http.Handler {
 	return s.rateLimitAuth(s.authGate(mux))
 }
 
+// serveProject resolves a project id to its volume, enforces level on the
+// caller, and hands the volume to h with the id in the request context.
+//
+// A method rather than the route closure it used to be, because the SPA
+// fallback needs the same three gates and is built outside Handler()'s scope:
+// the agent-fetch branch in frontend takes the id out of the URL path, where
+// no r.PathValue("project") exists. Nothing about the order may change — the
+// 404 tells a caller a project exists, so authentication belongs in front of
+// this, not inside it.
+func (s *Server) serveProject(w http.ResponseWriter, r *http.Request, id, level string,
+	h func(*volume, http.ResponseWriter, *http.Request)) {
+	p, v, err := s.projectVolume(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	// p, not id: the resolver has already read the registry once for
+	// this request and re-reading it is the hub's per-request cost.
+	if !s.requirePermOn(w, r, p, level) {
+		return
+	}
+	// Read recording (and anything else downstream) finds the project
+	// id in the context; permission has already passed at this point.
+	// The resolved Project rides along too, so a handler needing the
+	// FOLDER level for a path it only learns from its own body
+	// (folders.go) does not re-read the registry a third time.
+	h(v, w, withProject(withProjectID(r, id), p))
+}
+
 // frontend serves the embedded single-page app. Real asset files (app.js,
 // style.css) are served directly; every other GET that isn't an API, auth,
 // or share route — or, on a hub, a root-level path shaped like a file —
@@ -1021,6 +1035,23 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 	pre, post, marked := strings.Cut(string(index), "<title>BearDrive</title>")
 	return func(w http.ResponseWriter, r *http.Request) {
 		upath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		// A caller that did not ask for HTML asked for the file. The hook this
+		// product installs teaches every agent to append a hub link to every
+		// path it mentions, and those links used to answer 200 text/html with
+		// an empty app shell — indistinguishable from "no such file", "no such
+		// project" and "not permitted", so an agent summarized nothing and
+		// reported that it had read the doc. Same URL, negotiated
+		// representation; the browser's answer below is byte-identical.
+		//
+		// FIRST, above the shell's own headers: those (nosniff, DENY,
+		// frame-ancestors, no-cache) belong to the app document, and a file
+		// answered here carries exactly what /api/p/<id>/file carries.
+		// Nothing this can match is reachable by an earlier rule — api/,
+		// auth/, s/, orgs/, join/, billing/ and assets/ all fail projectIDRe.
+		if s.agentFetchTarget(r, upath) {
+			s.serveAgentFetch(w, r, upath)
+			return
+		}
 		// This document carries the session cookie and drives share creation,
 		// permission edits and project deletion, so it must not be framed by
 		// another origin or MIME-sniffed. /s/* sets its own sandbox CSP and
@@ -1110,6 +1141,89 @@ func (s *Server) frontend(static fs.FS) http.HandlerFunc {
 		io.WriteString(w, pre+titleTag(title)+
 			ogMeta(title, "", "", "website", requestBaseURL(r)+r.URL.EscapedPath())+post)
 	}
+}
+
+// reservedViews are the first path segments after a project id that name an
+// app page rather than a file: /<pid>/history, /<pid>/settings and friends.
+// They must keep answering the app shell to any Accept, or "every user-facing
+// page owns a URL" would break for a curl.
+//
+// Mirrors VIEW_ROUTES + LEGACY_VIEWS in frontend/src/router.ts — rename a view
+// there and this list needs the same edit. (A root-level file literally named
+// like a view has always lost the URL shortcut; the frontend documents that.)
+var reservedViews = map[string]bool{
+	"dashboard": true,
+	"history":   true,
+	"install":   true,
+	"settings":  true,
+	"insights":  true, // legacy name for dashboard
+}
+
+// agentFetchTarget reports whether this request is a non-browser fetch of a
+// project file: hub mode, <project-id>/<path> with a real path after the id,
+// not one of the app's own view routes, and an Accept that names no HTML.
+//
+// Accept: */* (bare curl, most HTTP libraries) and an absent Accept both count
+// as "not a browser" — a browser navigation always sends text/html.
+func (s *Server) agentFetchTarget(r *http.Request, upath string) bool {
+	if s.Root == nil { // single-volume viewer: no project ids, no branch
+		return false
+	}
+	id, rest, ok := strings.Cut(upath, "/")
+	if !ok || rest == "" || !projectIDRe.MatchString(id) {
+		return false
+	}
+	head, _, _ := strings.Cut(rest, "/")
+	if reservedViews[head] {
+		return false
+	}
+	// A link unfurler is not an agent asking for the file: it wants the titled
+	// shell (og.go), and several send no text/html. Without this a pasted hub
+	// link in Slack would unfurl as a 401.
+	ua := strings.ToLower(r.UserAgent())
+	for _, bot := range unfurlerUAs {
+		if strings.Contains(ua, bot) {
+			return false
+		}
+	}
+	return !strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html")
+}
+
+// unfurlerUAs are lowercase User-Agent substrings of the link previewers og.go
+// names pages for.
+// ponytail: a UA list, so a previewer missing here unfurls as a 401 instead of a
+// title; add it when one is reported.
+var unfurlerUAs = []string{
+	"slackbot", "discordbot", "facebookexternalhit", "twitterbot", "linkedinbot",
+	"telegrambot", "whatsapp", "iframely", "embedly", "skypeuripreview", "redditbot",
+}
+
+// serveAgentFetch answers /<project-id>/<path> with the file.
+//
+// The order is the whole security of this change, and it is not the order the
+// /api/ routes use. The SPA fallback runs OUTSIDE authGate — auth.go treats
+// every non-/api/ path as open so a browser can reach the login page — so this
+// branch authenticates itself, and it does so BEFORE resolving anything:
+// serveProject's 404 says "no such project <id>", which for an anonymous
+// caller is a project-existence oracle.
+//
+//	negotiate → authenticate (401) → serveProject (404, then 403) → serve
+func (s *Server) serveAgentFetch(w http.ResponseWriter, r *http.Request, upath string) {
+	id, rest, _ := strings.Cut(upath, "/")
+	if s.Auth != nil {
+		if _, ok := s.Auth.Authenticate(r); !ok {
+			// authGate's message verbatim: an agent that gets this back should
+			// read the same actionable line the /api/ routes give it.
+			http.Error(w, "authentication required (bdrive login, or sign in at /auth/login)", http.StatusUnauthorized)
+			return
+		}
+	}
+	// withAgentFetch, so the read this records is agent-kind: these are human
+	// URLs, and counting an agent's fetch as a person would inflate the number
+	// the Dashboard's reads-x-staleness quadrant is built on.
+	s.serveProject(w, withAgentFetch(r), id, PermRead, func(v *volume, w http.ResponseWriter, r *http.Request) {
+		s.serveFileAt(v, w, r, rest)
+	})
 }
 
 // handleConfig tells the client how this server is configured. Deliberately
@@ -1456,6 +1570,12 @@ func (s *Server) lookup(v *volume, r *http.Request) (string, FileInfo, int, erro
 	if p == "" {
 		return "", FileInfo{}, http.StatusBadRequest, fmt.Errorf("missing ?path=")
 	}
+	return s.lookupPath(v, r, p)
+}
+
+// lookupPath is lookup with the path supplied rather than read from the
+// query, for the agent-fetch branch, which carries it in the URL itself.
+func (s *Server) lookupPath(v *volume, r *http.Request, p string) (string, FileInfo, int, error) {
 	snap, err := v.snapshot(r.Context())
 	if err != nil {
 		log.Printf("beardrive: read project snapshot: %v", err)
@@ -1492,6 +1612,54 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 		http.Error(w, err.Error(), code)
 		return
 	}
+	s.serveBlobAt(v, w, r, p, fi, attach)
+}
+
+// serveFileAt answers the agent-fetch branch: the path comes out of the URL
+// rather than ?path=, and the response carries provenance. Everything else —
+// content type, ETag, the sandbox CSP, the move redirect header, the read
+// record — is serveBlob's, so this stays byte-identical to /api/p/<id>/file.
+func (s *Server) serveFileAt(v *volume, w http.ResponseWriter, r *http.Request, at string) {
+	p, fi, code, err := s.lookupPath(v, r, at)
+	if err != nil {
+		http.Error(w, err.Error(), code)
+		return
+	}
+	// Before serveBlobAt, so a 304 carries it too: a conditional fetch is
+	// still an answer about who last wrote the file.
+	setProvenance(w, p, fi)
+	s.serveBlobAt(v, w, r, p, fi, false)
+}
+
+// setProvenance describes the newest journal op behind p — which is what the
+// FileInfo already in hand IS, so this needs no history query.
+//
+// Every value here came out of a journal a client wrote, so each one goes
+// through strconv.Quote: a raw CR/LF in Op.Author is response splitting, and
+// this is the place to stop it rather than net/http's sanitizer downstream.
+func setProvenance(w http.ResponseWriter, p string, fi FileInfo) {
+	parts := []string{"path=" + strconv.Quote(p)}
+	add := func(k, v string) {
+		if v != "" {
+			parts = append(parts, k+"="+strconv.Quote(v))
+		}
+	}
+	add("sha", fi.Blob)
+	if !fi.Time.IsZero() {
+		add("modified", fi.Time.UTC().Format(time.RFC3339))
+	}
+	// The account behind the change, falling back to the git/OS identity an
+	// offline device wrote — the same order history renders.
+	by := fi.User
+	if by == "" {
+		by = fi.Author
+	}
+	add("by", by)
+	add("device", fi.Device)
+	w.Header().Set("X-Bdrive-Provenance", strings.Join(parts, "; "))
+}
+
+func (s *Server) serveBlobAt(v *volume, w http.ResponseWriter, r *http.Request, p string, fi FileInfo, attach bool) {
 	setCanonical(w, r, p)
 	// Count the read before the ETag check: a 304 render is still a person
 	// reading the file, and skipping it would undercount the hottest pages.

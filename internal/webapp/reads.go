@@ -654,11 +654,46 @@ func projectID(r *http.Request) string {
 	return id
 }
 
-// recordRead counts a human read of path for the request's project. No-op
-// outside hub mode (no project id) or when read tracking is off.
+// ctxAgentFetchKey marks a request the agent-fetch branch is serving, so the
+// read it records lands in the agent bucket rather than the human one.
+type ctxAgentFetchKey struct{}
+
+func withAgentFetch(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), ctxAgentFetchKey{}, true))
+}
+
+func agentFetch(r *http.Request) bool {
+	on, _ := r.Context().Value(ctxAgentFetchKey{}).(bool)
+	return on
+}
+
+// recordRead counts a read of path for the request's project. No-op outside
+// hub mode (no project id) or when read tracking is off.
+//
+// A viewer fetch is a person; the same URL fetched with an Accept that has no
+// text/html is an agent (see frontend's agent-fetch branch), and counting
+// those as human would inflate the number the Dashboard and the heat dots are
+// built on. The actor on an agent bucket is a DEVICE ID or the fixed string
+// "agent" — never an email: AgentHeat hands key.Actor to heatByDevice, which
+// serves it to every project member as a device id, so an email there is an
+// identity leak through GET /heat?by=device. ownsDevice is the same validation
+// handleReadReport runs, for the same reason.
 func (s *Server) recordRead(r *http.Request, path string) {
 	project := projectID(r)
 	if project == "" {
+		return
+	}
+	// Above ReportRead: the sidecar forwards what it is handed as a HUMAN read,
+	// and an agent fetch is not one.
+	if agentFetch(r) {
+		if s.Reads == nil {
+			return
+		}
+		actor := "agent"
+		if id := deviceID(r); s.ownsDevice(r, id) {
+			actor = id
+		}
+		s.Reads.Record(project, path, ReadKindAgent, actor)
 		return
 	}
 	// The sidecar has no ledger of its own and forwards to the project's hub.

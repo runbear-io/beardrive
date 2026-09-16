@@ -43,6 +43,40 @@ path is always linked to the project it actually lives in. See
 [Set up with your agent](/start/setup/).
 :::
 
+### The same link, fetched by an agent
+
+An internal link opens the viewer in a browser. Fetched by something that isn't
+a browser — an agent, `curl`, an HTTP library — the *same URL* returns the file
+itself: its own bytes, its own content type, no HTML wrapper. The hub decides
+from the request's `Accept` header, so there is no second URL to teach anyone.
+
+```console
+$ curl -H "Authorization: Bearer $BDRIVE_TOKEN" \
+    https://drive.example.com/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d/wiki/report.md
+# Q3 report
+...
+```
+
+The response carries provenance for the newest change behind that path:
+
+```
+X-Bdrive-Provenance: path="wiki/report.md"; sha="9f86d0…"; modified="2026-09-04T18:22:10Z"; by="alice@example.com"; device="alice-laptop"
+```
+
+Nothing about the gate changes — it is the same membership wall the viewer sits
+behind, and the failures are honest rather than an empty page:
+
+| what happened | you get |
+| -- | -- |
+| signed in, member, file exists | **200** and the file's bytes |
+| no credentials | **401** |
+| signed in, not a member of that project | **403** |
+| no such file, or no such project | **404** |
+
+These fetches count as **agent** reads on the [read heat map](/guides/what-agents-read/),
+never human ones. View routes like `/<project-id>/history` stay pages for every
+`Accept`, and [public `/s/` links](#public-links-for-everyone-else) always render.
+
 ## Public links, for everyone else
 
 For people outside the hub — a client, a candidate, someone in another company —

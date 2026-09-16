@@ -370,8 +370,30 @@ classDiagram
     }
     note for folderLevel "A rule may narrow OR widen a subtree of a project you can see — a read-only project with one writable drop-box is a real shape — but base none returns none unconditionally, so it can never open a project you cannot see. That arm is unreachable over HTTP today because proj() answers first; it exists because the filtered fold and the blob gate are NOT behind that gate."
     note for pathFilter "Deliberately not a cached per-reader fold: no cache, no eviction, no memory per scope. Single-path routes pay one comparison; listing routes already iterate. Hidden paths answer 404, never 403 — a 403 confirms the file is there."
-    note for projectPerm "perms.go — the single authorization ladder. proj(level, h) in server.go is the one choke point: every per-project route declares its level at registration."
+    note for projectPerm "perms.go — the single authorization ladder. serveProject(w, r, id, level, h) in server.go is the one choke point: every per-project route declares its level at registration, and the agent-fetch branch in Server.frontend goes through the same method."
     note for projectPerm "Both escape hatches are closed: a project with no org, or naming an org that no longer exists, resolves to none instead of falling through to a default, and org membership is checked BEFORE an explicit grant — so a grant left behind by a removed member is no longer a way back in"
+
+    class serveProject {
+        <<Server method>>
+        projectVolume(id) → 404
+        requirePermOn(level) → 403
+        withProjectID(r, id)
+        h(volume, w, r)
+    }
+    note for serveProject "Was the proj(level, h) closure inside Handler(). A method because the SPA fallback needs the same three gates and is built outside that scope: agentFetch takes the id out of the URL path, where no r.PathValue(&quot;project&quot;) exists. The order is load-bearing — the 404 names a project, so authentication belongs in FRONT of this, never inside it"
+
+    class agentFetch {
+        <<Server.frontend branch>>
+        Accept has no text/html
+        &lt;project-id&gt;/&lt;path&gt;, rest non-empty
+        head not in reservedViews
+        Auth.Authenticate → 401
+        serveProject(PermRead)
+        serveFileAt + X-Bdrive-Provenance
+        withAgentFetch(r) → agent-kind read
+    }
+    note for agentFetch "The gated links the sync hook teaches every agent to emit are human URLs, and they answered 200 text/html with an empty app shell — byte-identical to no-such-file, no-such-project and not-permitted, so an agent summarized nothing and reported that it read the doc. Same URL, negotiated representation; the browser's answer is unchanged. It runs FIRST in frontend, above the shell's own headers, so a file carries exactly what /api/p/&lt;id&gt;/file carries. It authenticates ITSELF because the SPA fallback sits outside authGate (auth.go treats every non-/api/ path as open so a browser can reach the login page), and the 401 comes BEFORE serveProject or the 404 is a project-existence oracle for anonymous callers. Single-volume mode, view routes, project roots, /s/&lt;token&gt; and the deliberate root-dotted-path 404 (/llms.txt) are all excluded"
+    note for agentFetch "reservedViews duplicates VIEW_ROUTES + LEGACY_VIEWS from frontend/src/router.ts — renaming a view needs both edits. A curl to /&lt;pid&gt;/history answering &quot;no such file: history&quot; would break &quot;every user-facing page owns a URL&quot;"
 
     class ShareDB {
         -repo ShareRepo
@@ -635,6 +657,12 @@ classDiagram
     Server *-- seedTemplate : on create, when `template` is set
     seedTemplate ..> Uploader : RemoteSource.Upload (blob, then journal)
     seedTemplate ..> ProjectDB : SetTemplate records it once
+    Server *-- serveProject : the one per-project resolver, routes and the SPA fallback alike
+    serveProject ..> projectPerm : requirePermOn
+    Server *-- agentFetch : Server.frontend, above the app shell
+    agentFetch ..> AuthProvider : Authenticate → 401, before anything resolves
+    agentFetch ..> serveProject : 404 then 403, then the file
+    agentFetch ..> ReadLedger : ReadKindAgent — a validated device id, else the fixed string agent, never an email
     Server *-- projectPerm : gates every per-project route
     projectPerm ..> Project : Perms + Default
     folderLevel ..> FolderRule : longest prefix
