@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { desktopPost, postJSON } from "../api/http";
 import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../api/types";
 import { useFetchProjects, useOrgs, usePending, usePermissions, useProjects, useHubRefresh } from "../hooks/useHub";
-import { decodePath, parseRoute, projectByName, urlForPath, urlForView } from "../router";
+import { decodePath, parseRoute, projectByName, titleForRoute, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
@@ -136,12 +136,15 @@ export default function HubApp({ config }: { config: ServerConfig }) {
 
   useEffect(() => {
     document.title = current
-      ? current.name + " — BearDrive"
+      ? titleForRoute(route, current.name)
       : config.brand || "BearDrive";
-    // Fires on exactly the events that matter — sidebar, deep link, palette,
-    // post-create navigate — so the memory needs no subscription of its own.
+  }, [current, route, config.brand]);
+
+  // Fires on exactly the events that matter — sidebar, deep link, palette,
+  // post-create navigate — so the memory needs no subscription of its own.
+  useEffect(() => {
     if (current) rememberProject(current.id);
-  }, [current, config]);
+  }, [current]);
 
   if (joinToken) {
     return (

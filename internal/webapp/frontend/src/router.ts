@@ -130,6 +130,28 @@ export interface Route {
   queryTarget?: boolean;
 }
 
+const VIEW_TITLES: Record<ViewName, string> = {
+  dashboard: "Dashboard",
+  history: "History",
+  install: "Install",
+  settings: "Settings",
+};
+
+// Browser tabs have little horizontal space, so the route-specific part goes
+// first and the project/volume name provides context at the end. Product
+// identity stays in the favicon; callers use their configured brand only when
+// no project or volume name is available.
+export function titleForRoute(route: Route, scope: string): string {
+  let page = "";
+  if (route.view) {
+    page = VIEW_TITLES[route.view];
+    if (route.viewTarget) page = `${route.viewTarget} · ${page}`;
+  } else if (route.path) {
+    page = route.path + (route.version ? " · Version" : "");
+  }
+  return page ? `${page} — ${scope}` : scope;
+}
+
 // `url` is pathname + search (what useLocationPath hands back).
 export function parseRoute(url: string, mode: "volume" | "hub"): Route {
   const qi = url.indexOf("?");

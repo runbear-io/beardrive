@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 import type { ServerConfig } from "../api/types";
 import { VaultHeader } from "../components/shell";
-import { parseRoute, urlForPath } from "../router";
+import { parseRoute, titleForRoute, urlForPath } from "../router";
 import { Redirect, useLocationPath } from "../nav";
 import Browser from "./Browser";
 
@@ -10,10 +10,11 @@ import Browser from "./Browser";
 export default function VolumeApp({ config }: { config: ServerConfig }) {
   const loc = useLocationPath(); // pathname + search
   const name = config.volume || "BearDrive";
-  useEffect(() => {
-    document.title = config.brand || name;
-  }, [config, name]);
   const route = useMemo(() => parseRoute(loc, "volume"), [loc]);
+  const scope = config.brand || config.volume;
+  useEffect(() => {
+    document.title = scope ? titleForRoute(route, scope) : "BearDrive";
+  }, [route, scope]);
 
   // /notes/ is the same page as /notes — see the same guard in HubApp.
   if (route.trailingSlash && route.path) {
