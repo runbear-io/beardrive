@@ -8,8 +8,33 @@ import {
   urlForView,
   withoutFull,
   historyFilterQuery,
+  titleForRoute,
 } from "./router.ts";
 
+
+test("tab titles put the active route before the project name", () => {
+  const cases: Array<[string, string]> = [
+    ["/p-1", "team"],
+    ["/p-1/docs", "docs — team"],
+    ["/p-1/docs/roadmap.md", "docs/roadmap.md — team"],
+    ["/p-1/dashboard", "Dashboard — team"],
+    ["/p-1/history", "History — team"],
+    ["/p-1/history/docs/roadmap.md", "docs/roadmap.md · History — team"],
+    ["/p-1/docs/roadmap.md?v=abc123", "docs/roadmap.md · Version — team"],
+    ["/p-1/settings", "Settings — team"],
+  ];
+  for (const [url, want] of cases) {
+    assert.equal(titleForRoute(parseRoute(url, "hub"), "team"), want);
+  }
+});
+
+test("volume tab titles use the same path-first format", () => {
+  assert.equal(titleForRoute(parseRoute("/", "volume"), "wiki"), "wiki");
+  assert.equal(
+    titleForRoute(parseRoute("/docs/roadmap.md", "volume"), "wiki"),
+    "docs/roadmap.md — wiki",
+  );
+});
 // A trailing slash is what a browser hands you when you copy a folder URL,
 // so /notes/ has to be the same page as /notes.
 test("trailing slashes are stripped off project paths", () => {

@@ -10,7 +10,7 @@ test("landing selects the first project and rewrites the URL", async ({ page }) 
   const pid = await wikiId(page);
   await page.waitForURL("/" + pid);
   await expect(page.locator("#project-select")).toContainText("wiki");
-  await expect(page).toHaveTitle("wiki — BearDrive");
+  await expect(page).toHaveTitle("wiki");
   await expect(page.locator("#vault-name")).toHaveText("BearDrive");
 });
 

@@ -11,6 +11,28 @@ test("tree lists the seeded folders and files", async ({ page }) => {
   await expect(page.locator('#tree .row[data-path="guide.md"]')).toBeVisible();
 });
 
+test("tab title follows SPA navigation and browser history", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await expect(page).toHaveTitle("wiki");
+
+  await page.click('#tree .row[data-path="index.md"]');
+  await page.waitForURL(`/${pid}/index.md`);
+  await expect(page).toHaveTitle("index.md — wiki");
+
+  await page.click("#nav-history");
+  await page.waitForURL(`/${pid}/history`);
+  await expect(page).toHaveTitle("History — wiki");
+
+  await page.goBack();
+  await expect(page).toHaveURL(`/${pid}/index.md`);
+  await expect(page).toHaveTitle("index.md — wiki");
+
+  await page.goForward();
+  await expect(page).toHaveURL(`/${pid}/history`);
+  await expect(page).toHaveTitle("History — wiki");
+});
+
 test("markdown file: rendered content, crumb, meta, download + share buttons", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
