@@ -699,6 +699,12 @@ plus `history` and `restore` — the two no local-filesystem MCP server can
 offer. There is no `mkdir` (directories are implicit; writing a nested path
 creates it) and no shell.
 
+Every file those tools name comes back with its **hub link** beside the path,
+so an agent's answer can point you at the file instead of naming a path you
+then have to go find. Same gated URL `bdrive url` prints — sign-in plus project
+membership, safe to paste in a ticket; `bdrive share` is still the only way to
+mint a public one.
+
 Everything is scoped and attributed: the grant reaches only the ticked
 projects, can never exceed the permission you already have (lose access to a
 project and every connection loses it with you, nothing to revoke), writes land

@@ -107,7 +107,15 @@ If a project is also synced to this machine as a local folder, work on the local
 files with your ordinary file tools: they are the same bytes, and editing
 through both doors at once makes conflict copies and stale reads. Use these
 tools for projects you have not synced, and for history and restore, which a
-local folder cannot give you.`
+local folder cannot give you.
+
+Output carries each file's hub page as a url: read prints one under its header,
+list, glob and files_only grep rows end with one, and write, move, restore and
+history all name one. When you mention a file in prose, append that link on a
+link emoji right after the path — the path stays plain text and the hyperlink
+goes on the emoji only, like notes.md [🔗](https://hub.example/<id>/notes.md).
+Opening one needs hub sign-in and membership of the project, so they are safe
+to paste anywhere internal.`
 
 func (s *Server) mcpServer() *mcp.Server {
 	s.mcpOnce.Do(func() {
@@ -152,7 +160,13 @@ func (s *Server) MCPHandler() http.Handler {
 		r = withUser(withGrant(r, g), u)
 		// One resolved project list per request, shared by every tool call in
 		// it. See grantProjects.
-		r = r.WithContext(context.WithValue(r.Context(), projCacheKey{}, &projCache{}))
+		ctx := context.WithValue(r.Context(), projCacheKey{}, &projCache{})
+		// The origin THIS client reached us on, so tool output can hand back
+		// links it can actually open. Per request for the same reason issuer()
+		// is: one hub answers on a tunnel, a LAN address and a public name,
+		// and a link pinned to one of them is dead in the other two.
+		ctx = context.WithValue(ctx, mcpBaseKey{}, requestBaseURL(r))
+		r = r.WithContext(ctx)
 		h.ServeHTTP(w, r)
 	})
 }
@@ -302,6 +316,62 @@ func joinMCPPath(project, rest string) string {
 		return "/" + project
 	}
 	return "/" + project + "/" + rest
+}
+
+// mcpBaseKey carries this hub's origin, set once per request by MCPHandler.
+type mcpBaseKey struct{}
+
+// fileURL is the viewer page for one project-relative path: the link an agent
+// puts in an answer next to the path it is talking about.
+//
+// It is emitted rather than left to the agent to compose, and that is the
+// whole point of it. A formula ("this hub, then the path you were given")
+// builds a dead link twice over: the paths these tools print carry the
+// project's NAME, and the viewer resolves a name only when it is unique among
+// the projects the BROWSER user can see — a bigger set than this grant's, so a
+// name unambiguous here can be ambiguous there and the link lands on a project
+// list instead of the file. The id always resolves, for every reader. And
+// percent-encoding is the second thing to get wrong.
+func fileURL(ctx context.Context, project, rest string) string {
+	base, _ := ctx.Value(mcpBaseKey{}).(string)
+	if base == "" || project == "" {
+		return ""
+	}
+	u := base + "/" + url.PathEscape(project)
+	if rest != "" {
+		u += "/" + encodeSegments(rest)
+	}
+	return u
+}
+
+// urlLine is the "url: …" line a single-file response carries, and nothing at
+// all when the origin is unknown — a tool that is useful without a link must
+// not start printing "url: " with nothing after it.
+func urlLine(ctx context.Context, project, rest string) string {
+	if u := fileURL(ctx, project, rest); u != "" {
+		return "url: " + u + "\n"
+	}
+	return ""
+}
+
+// urlCol is the same link as a trailing column, for output with one file per
+// row. Appended last so every existing column keeps its position.
+func urlCol(ctx context.Context, project, rest string) string {
+	if u := fileURL(ctx, project, rest); u != "" {
+		return "\t" + u
+	}
+	return ""
+}
+
+// encodeSegments percent-encodes each segment and leaves the "/" separators
+// literal, which is how the frontend's router parses a path back out of a URL
+// (see encodePath in router.ts — encoded slashes must survive).
+func encodeSegments(p string) string {
+	segs := strings.Split(p, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return strings.Join(segs, "/")
 }
 
 // ---- internal dispatch ----
@@ -688,7 +758,7 @@ func (s *Server) mcpList(ctx context.Context, in listIn) (string, error) {
 
 	var b strings.Builder
 	for _, d := range names {
-		fmt.Fprintf(&b, "%s\n", d)
+		fmt.Fprintf(&b, "%s%s\n", d, urlCol(ctx, project, prefix+strings.TrimSuffix(d, "/")))
 	}
 	n := 0
 	for _, r := range rows {
@@ -699,8 +769,9 @@ func (s *Server) mcpList(ctx context.Context, in listIn) (string, error) {
 		// Z, not a bare local-looking stamp: an agent relaying "2026-09-17
 		// 04:53" to a user reports the wrong day for most of the planet, with
 		// nothing in the string to signal it. history already says Z.
-		fmt.Fprintf(&b, "%s\t%s\t%s\tsha:%s\n", r.name, humanSize(r.fi.Size),
-			r.fi.Time.UTC().Format("2006-01-02T15:04Z"), short(r.fi.Blob))
+		fmt.Fprintf(&b, "%s\t%s\t%s\tsha:%s%s\n", r.name, humanSize(r.fi.Size),
+			r.fi.Time.UTC().Format("2006-01-02T15:04Z"), short(r.fi.Blob),
+			urlCol(ctx, project, prefix+r.name))
 		n++
 	}
 	return b.String(), nil
@@ -801,11 +872,12 @@ func (s *Server) mcpRead(ctx context.Context, in readIn) ([]mcp.Content, error) 
 			return []mcp.Content{&mcp.ImageContent{Data: data, MIMEType: ct}}, nil
 		}
 		return mcpText("%s is a %s image, %s — too large to inline (cap %s). "+
-			"Open it in the viewer.", in.Path, ct, humanSize(fi.Size), humanSize(maxInlineImage)), nil
+			"Open it in the viewer.\n%s", in.Path, ct, humanSize(fi.Size),
+			humanSize(maxInlineImage), urlLine(ctx, project, rest)), nil
 	}
 	if isBinary(data) {
-		return mcpText("%s is a binary file (%s, sha %s). Not shown as text.",
-			in.Path, humanSize(fi.Size), short(fi.Blob)), nil
+		return mcpText("%s is a binary file (%s, sha %s). Not shown as text.\n%s",
+			in.Path, humanSize(fi.Size), short(fi.Blob), urlLine(ctx, project, rest)), nil
 	}
 	// Paging STREAMS the whole file rather than slicing a 1 MiB prefix, and
 	// that is the whole fix for the worst bug this door has had.
@@ -873,6 +945,15 @@ func (s *Server) mcpRead(ctx context.Context, in readIn) ([]mcp.Content, error) 
 		return mcpText("%s has %d lines; offset %d is past the end.", in.Path, total, start), nil
 	}
 	fmt.Fprintf(&b, "%s (sha %s, %d lines)\n", in.Path, short(fi.Blob), total)
+	if u := fileURL(ctx, project, rest); u != "" {
+		// Pinned to the version actually returned. Linking the live page after
+		// reading a past one hands the reader different bytes than the answer
+		// was written from, and nothing in the link says so.
+		if in.SHA != "" {
+			u += "?v=" + fi.Blob
+		}
+		fmt.Fprintf(&b, "url: %s\n", u)
+	}
 	for i, line := range window {
 		fmt.Fprintf(&b, "%6d\t%s\n", start+i, line)
 	}
@@ -911,6 +992,7 @@ func (s *Server) mcpGlob(ctx context.Context, in globIn) (string, error) {
 	type hit struct {
 		path string
 		at   time.Time
+		url  string
 	}
 	labels := s.projectLabels(ctx)
 	var hits []hit
@@ -925,7 +1007,7 @@ func (s *Server) mcpGlob(ctx context.Context, in globIn) (string, error) {
 			// meant `path:"/p/g/"` with `one/**/*.log` matched nothing while
 			// the results printed as `g/...` — the tool contradicting itself.
 			if matchGlob(in.Pattern, relTo(rest, f)) {
-				hits = append(hits, hit{labelPath(labels, p.ID, f), fi.Time})
+				hits = append(hits, hit{labelPath(labels, p.ID, f), fi.Time, urlCol(ctx, p.ID, f)})
 			}
 		}
 		return nil
@@ -944,7 +1026,7 @@ func (s *Server) mcpGlob(ctx context.Context, in globIn) (string, error) {
 			fmt.Fprintf(&b, "... truncated at %d entries; narrow with a more specific pattern or path\n", maxListEntries)
 			break
 		}
-		fmt.Fprintf(&b, "%s\n", h.path)
+		fmt.Fprintf(&b, "%s%s\n", h.path, h.url)
 	}
 	return b.String(), nil
 }
@@ -969,13 +1051,16 @@ func (s *Server) mcpGrep(ctx context.Context, in grepIn) (string, error) {
 	}
 
 	labels := s.projectLabels(ctx)
+	// A matching file and its link, together: the FilesOnly listing sorts
+	// these, so a parallel slice of URLs would desync from the paths.
+	type hitFile struct{ path, url string }
 	var (
 		out             strings.Builder
 		matches         int
 		scanned         int
 		bytesRead       int64
 		truncated       bool
-		hitFiles        []string
+		hitFiles        []hitFile
 		skippedBinary   []string
 		unreadableFiles []string
 		totalMatches    int
@@ -1042,7 +1127,7 @@ func (s *Server) mcpGrep(ctx context.Context, in grepIn) (string, error) {
 				unreadableFiles = append(unreadableFiles, labelPath(labels, p.ID, f))
 			}
 			if found {
-				hitFiles = append(hitFiles, labelPath(labels, p.ID, f))
+				hitFiles = append(hitFiles, hitFile{labelPath(labels, p.ID, f), urlCol(ctx, p.ID, f)})
 			}
 			if matches >= maxGrepMatches {
 				truncated = true
@@ -1059,10 +1144,10 @@ func (s *Server) mcpGrep(ctx context.Context, in grepIn) (string, error) {
 		if len(hitFiles) == 0 {
 			return "No files contain " + in.Pattern + "." + grepCaveats(skippedBinary, unreadableFiles), nil
 		}
-		sort.Strings(hitFiles)
+		sort.Slice(hitFiles, func(i, j int) bool { return hitFiles[i].path < hitFiles[j].path })
 		fmt.Fprintf(&b, "%d file(s) contain %s:\n", len(hitFiles), in.Pattern)
 		for _, f := range hitFiles {
-			fmt.Fprintf(&b, "%s\n", f)
+			fmt.Fprintf(&b, "%s%s\n", f.path, f.url)
 		}
 	} else {
 		if totalMatches == 0 {
@@ -1079,6 +1164,12 @@ func (s *Server) mcpGrep(ctx context.Context, in grepIn) (string, error) {
 			fmt.Fprintf(&b, "%d match(es) in %d file(s):\n", totalMatches, len(hitFiles))
 		}
 		b.WriteString(out.String())
+		// No link column on match rows, and no trailing block of them: a row
+		// is "path:N:text" and the only other lines grep prints are bracketed
+		// notes, so anything reading its output line by line can tell the two
+		// apart. A links section is path-shaped lines with no line number in
+		// them — it broke the first reader that tried. files_only is the mode
+		// that prints one row per file, and that one carries the link.
 	}
 	b.WriteString(grepCaveats(skippedBinary, unreadableFiles))
 	// Always say when the answer is partial. See the caps above.
@@ -1326,8 +1417,9 @@ func (s *Server) putFile(ctx context.Context, project, rest string, content []by
 	if w.code < 200 || w.code >= 300 {
 		return "", callErr(w)
 	}
-	return fmt.Sprintf("%s %s (%s)", verb,
-		labelPath(s.projectLabels(ctx), project, rest), humanSize(int64(len(content)))), nil
+	return fmt.Sprintf("%s %s (%s)\n%s", verb,
+		labelPath(s.projectLabels(ctx), project, rest), humanSize(int64(len(content))),
+		urlLine(ctx, project, rest)), nil
 }
 
 func (s *Server) mcpEdit(ctx context.Context, in editIn) (string, error) {
@@ -1582,7 +1674,7 @@ func (s *Server) mcpMove(ctx context.Context, in moveIn) (string, error) {
 	if _, err := s.mcpDelete(ctx, pathIn{Path: in.From}); err != nil {
 		return "", fmt.Errorf("copied to %s but could not remove %s: %w", in.To, in.From, err)
 	}
-	return fmt.Sprintf("moved %s → %s", in.From, in.To), nil
+	return fmt.Sprintf("moved %s → %s\n%s", in.From, in.To, urlLine(ctx, toP, toR)), nil
 }
 
 func (s *Server) mcpHistory(ctx context.Context, in historyIn) (string, error) {
@@ -1628,6 +1720,7 @@ func (s *Server) mcpHistory(ctx context.Context, in historyIn) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "History of %s (newest first):\n", in.Path)
+	b.WriteString(urlLine(ctx, project, rest))
 	for i, e := range resp.Entries {
 		if i >= limit {
 			fmt.Fprintf(&b, "... %d older version(s)\n", len(resp.Entries)-i)
@@ -1681,7 +1774,8 @@ func (s *Server) mcpRestore(ctx context.Context, in restoreIn) (string, error) {
 	if w.code < 200 || w.code >= 300 {
 		return "", callErr(w)
 	}
-	return fmt.Sprintf("restored %s to version %s", in.Path, short(sha)), nil
+	return fmt.Sprintf("restored %s to version %s\n%s", in.Path, short(sha),
+		urlLine(ctx, project, rest)), nil
 }
 
 // ---- small helpers ----

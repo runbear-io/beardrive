@@ -81,6 +81,25 @@ about. When it is *copying* a file it should pass `raw: true` and get the exact
 bytes back — numbered output is lossy (a file with and without a trailing
 newline look identical), so a copy made from it would not match the original.
 
+## Links back to the hub
+
+Every file the tools name comes back with its hub page beside the path:
+
+```
+spec.md   4.1 KB   2026-09-17T09:12Z   sha:1f3c9ab   https://your-hub.example.com/6f4a…/docs/spec.md
+```
+
+So an answer can link the file it is talking about, instead of naming a path
+you then have to go and find. These are the same gated URLs
+[`bdrive url`](/reference/cli/) prints: opening one needs hub sign-in and
+membership of the project, which makes them safe to paste into a ticket or a
+team chat and useless to anyone outside it. [Public share
+links](/guides/agent-artifacts/) stay something you mint deliberately.
+
+The link always carries the project's **id**, even where the path shows its
+name. A name is only unambiguous among the projects *you* can see, and a link
+is for whoever you send it to.
+
 ## What it can and cannot do
 
 The connection acts as **you**, and it can never do more than you can:
