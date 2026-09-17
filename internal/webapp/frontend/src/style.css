@@ -394,6 +394,17 @@ button, input, a.btn { font-family: inherit; }
 }
 .icon-btn { display: none; width: 34px; height: 34px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; border-radius: 7px; align-items: center; justify-content: center; }
 .icon-btn:hover { color: var(--text); background: var(--hover); }
+/* The sidebar toggle (⌘B / Ctrl+B). Off-canvas widths already show it as the
+   drawer's menu button; at desktop widths it stays visible so a collapsed
+   sidebar can always be brought back. */
+#menu-btn { display: inline-flex; }
+/* Focus mode: ⌘B / Ctrl+B collapses the sidebar at desktop widths so the
+   document gets the whole window. Below the breakpoint the sidebar is already
+   an off-canvas drawer, so the class is scoped out here; #main is flex:1 and
+   reclaims the space. */
+@media (min-width: 901px) {
+  body.sb-collapsed #sidebar { display: none; }
+}
 /* Desktop-app back/forward (Topbar nav slot) — like .icon-btn but always
    visible: the app window has no browser chrome to fall back on. */
 #nav-btns { display: inline-flex; gap: 2px; flex: none; }
