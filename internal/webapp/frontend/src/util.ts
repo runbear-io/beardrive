@@ -9,6 +9,16 @@ export const CSV_EXT = /\.(csv|tsv)$/i;
 export const TEXT_EXT =
   /\.(txt|log|json|ya?ml|toml|csv|go|py|js|ts|jsx|tsx|sh|bash|zsh|rb|rs|c|h|cpp|java|kt|swift|sql|css|xml|ini|conf|env|mod|sum|jsonl)$/i;
 
+/* ⌘ on Apple platforms, Ctrl everywhere else. Drives the keyboard-shortcut
+   labels the UI shows (e.g. the sidebar toggle's ⌘B / Ctrl+B), so a Windows
+   user is never told to press a key their keyboard does not have. The actual
+   shortcut handlers accept metaKey OR ctrlKey, so this is a label concern
+   only. `navigator.platform` is deprecated but still the most reliable signal
+   and we fall back to the UA string. */
+export const isMac =
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || "");
+
 export function humanSize(n: number): string {
   if (n < 1024) return n + " B";
   const units = ["KB", "MB", "GB", "TB"];

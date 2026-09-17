@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { requestSearch } from "../search";
+import { isMac } from "../util";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Beaker,
@@ -40,6 +41,7 @@ import {
   Minimize2,
   Music,
   Package,
+  PanelLeft,
   PenLine,
   Plus,
   Printer,
@@ -63,7 +65,19 @@ import {
 // it), topbar, and the content pane. Ids and classes match the classic app
 // so style.css applies unchanged.
 
+export const SIDEBAR_COLLAPSED_KEY = "bdrive.sbCollapsed";
+
+// The sidebar has two hidden states, one per layout. Below the breakpoint it
+// is a modal off-canvas drawer (body.sb-open); at desktop widths it is a fixed
+// column that collapses for a distraction-free reading width
+// (body.sb-collapsed, remembered per browser). One control and one shortcut
+// (⌘B / Ctrl+B) drive whichever applies at the current width.
 export function toggleSidebar() {
+  if (window.innerWidth <= SIDEBAR_BREAKPOINT) toggleDrawer();
+  else setCollapsed(!document.body.classList.contains("sb-collapsed"));
+}
+
+function toggleDrawer() {
   const opening = !document.body.classList.contains("sb-open");
   document.body.classList.toggle("sb-open");
   syncSidebarInert();
@@ -79,6 +93,18 @@ export function toggleSidebar() {
   }
 }
 
+function setCollapsed(collapsed: boolean) {
+  document.body.classList.toggle("sb-collapsed", collapsed);
+  // A preference is never worth a broken page: storage throws in private modes
+  // and wherever it is disabled, so swallow (see util.lastProject).
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+  syncSidebarInert();
+}
+
 const FOCUSABLE = 'a[href], button:not(:disabled), select, input, [tabindex]:not([tabindex="-1"])';
 export function closeSidebarOnMobile() {
   const wasOpen = document.body.classList.contains("sb-open");
@@ -91,37 +117,73 @@ export function closeSidebarOnMobile() {
   }
 }
 
+// ⌘B is Bold inside a text editor, so the shortcut yields whenever the event
+// originates in an editable surface: a form field, the ProseMirror visual
+// editor (contentEditable), or the CodeMirror source editor.
+function isEditingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || typeof el.tagName !== "string") return false;
+  const tag = el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (el.isContentEditable) return true;
+  return !!el.closest?.(".cm-editor");
+}
+
 // The sidebar is off-canvas below the breakpoint — translated out of view, but
 // still in the DOM, so its nine controls stayed in the tab order with no
 // visible focus indicator: nine dead stops before the first thing on screen
 // (WCAG 2.4.7). `inert` removes focusability and AT exposure together, which
-// is exactly the "it isn't there right now" the transform already implies.
+// is exactly the "it isn't there right now" that the transform — or, collapsed
+// at desktop width, the display:none — already implies.
 const SIDEBAR_BREAKPOINT = 900; // must match the off-canvas media query in style.css
 
 export function syncSidebarInert() {
   const el = document.getElementById("sidebar");
   if (!el) return;
-  const open = document.body.classList.contains("sb-open");
-  const hidden = window.innerWidth <= SIDEBAR_BREAKPOINT && !open;
+  const mobile = window.innerWidth <= SIDEBAR_BREAKPOINT;
+  const drawerOpen = document.body.classList.contains("sb-open");
+  const collapsed = document.body.classList.contains("sb-collapsed");
+  const hidden = mobile ? !drawerOpen : collapsed;
   if (hidden) el.setAttribute("inert", "");
   else el.removeAttribute("inert");
   // The mirror: while the drawer is over the page, the page is not reachable.
   const main = document.getElementById("main");
   if (main) {
-    if (open && window.innerWidth <= SIDEBAR_BREAKPOINT) main.setAttribute("inert", "");
+    if (drawerOpen && mobile) main.setAttribute("inert", "");
     else main.removeAttribute("inert");
   }
-  el.setAttribute("aria-modal", String(open && window.innerWidth <= SIDEBAR_BREAKPOINT));
-  // The trigger's state lives in a body class rather than React state, so it
+  el.setAttribute("aria-modal", String(drawerOpen && mobile));
+  // The trigger's state lives in body classes rather than React state, so it
   // is declared from here — the one place that always runs when it changes.
-  document.getElementById("menu-btn")?.setAttribute("aria-expanded", String(open));
+  // aria-expanded answers "is the sidebar on screen": the drawer when narrow,
+  // the collapse state when wide.
+  document.getElementById("menu-btn")?.setAttribute("aria-expanded", String(!hidden));
 }
 
 if (typeof window !== "undefined") {
+  // Restore the remembered collapse before React mounts, so the first paint at
+  // desktop width is already correct (the mobile drawer always loads closed).
+  try {
+    if (document.body && localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1") {
+      document.body.classList.add("sb-collapsed");
+    }
+  } catch {
+    /* ignore */
+  }
   window.addEventListener("resize", syncSidebarInert);
-  // Escape closes the drawer, the way every other overlay in the app does.
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && document.body.classList.contains("sb-open")) closeSidebarOnMobile();
+    // Escape closes the drawer, the way every other overlay in the app does.
+    if (e.key === "Escape" && document.body.classList.contains("sb-open")) {
+      closeSidebarOnMobile();
+      return;
+    }
+    // ⌘B / Ctrl+B toggles the sidebar — the VS Code convention, and the one
+    // Windows users already know (Ctrl+B), since there is no ⌘ key there.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "b") {
+      if (isEditingTarget(e.target)) return; // ⌘B is Bold in an editor
+      e.preventDefault();
+      toggleSidebar();
+    }
   });
 }
 
@@ -154,6 +216,7 @@ const ICONS: Record<string, LucideIcon> = {
   printer: Printer,
   search: Search,
   share: Share2,
+  sidebar: PanelLeft,
   shield: Shield,
   shrink: Minimize2,
   terminal: SquareTerminal,
@@ -385,17 +448,23 @@ export function VaultHeader(props: {
 export function Topbar(props: { crumb?: ReactNode; meta?: ReactNode; actions?: ReactNode; nav?: ReactNode }) {
   return (
     <header id="topbar">
-      <button
-        id="menu-btn"
-        className="icon-btn"
-        title="Menu"
-        aria-label="Menu"
-        aria-controls="sidebar"
-        aria-expanded="false"
-        onClick={toggleSidebar}
-      >
-        <Icon name="menu" />
-      </button>
+      <Tooltip delayDuration={150}>
+        <TooltipTrigger asChild>
+          <button
+            id="menu-btn"
+            className="icon-btn"
+            aria-label="Toggle sidebar"
+            aria-controls="sidebar"
+            aria-expanded="false"
+            onClick={toggleSidebar}
+          >
+            <Icon name="sidebar" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="tipcard" sideOffset={6}>
+          Toggle sidebar <kbd>{isMac ? "⌘B" : "Ctrl+B"}</kbd>
+        </TooltipContent>
+      </Tooltip>
       {props.nav}
       <span id="crumb">{props.crumb}</span>
       <span id="meta">{props.meta}</span>
