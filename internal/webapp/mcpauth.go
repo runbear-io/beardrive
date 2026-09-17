@@ -855,8 +855,36 @@ Folders you cannot see stay hidden.</p>
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+	// form-action covers the whole redirect chain a submit sets off, not just
+	// the action URL — so 'self' alone lets the POST reach /oauth/authorize and
+	// then has the browser silently kill the 302 carrying the code back to the
+	// client. The button looks dead. Name the callback's origin too; it was
+	// exact-matched against the client's registered URIs before we rendered
+	// anything, so this widens the policy to precisely the one destination this
+	// authorization was always going to end at.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' "+
+			formActionSrc(r.URL.Query().Get("redirect_uri")))
 	io.WriteString(w, b.String())
+}
+
+// formActionSrc is a CSP source expression for one redirect URI: the origin for
+// http(s), and a bare scheme-source for the custom schemes native clients
+// register (cursor://, vscode://), which have no meaningful host to pin. Empty
+// when it cannot be parsed — the caller then emits 'self' alone, which is the
+// old behavior and fails closed.
+func formActionSrc(redirect string) string {
+	u, err := url.Parse(redirect)
+	if err != nil || u.Scheme == "" {
+		return ""
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		if u.Host == "" {
+			return ""
+		}
+		return u.Scheme + "://" + u.Host
+	}
+	return u.Scheme + ":"
 }
 
 // orgLabel is set by the server so the consent page can name orgs; without a
