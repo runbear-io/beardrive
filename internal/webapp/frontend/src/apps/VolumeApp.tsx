@@ -18,7 +18,7 @@ export default function VolumeApp({ config }: { config: ServerConfig }) {
 
   // /notes/ is the same page as /notes — see the same guard in HubApp.
   if (route.trailingSlash && route.path) {
-    return <Redirect to={urlForPath(route.path, undefined, route.version, route.full)} />;
+    return <Redirect to={urlForPath(route.path, undefined, route.version, route.full, route.editing)} />;
   }
 
   return (

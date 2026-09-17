@@ -1441,6 +1441,13 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
 }
 .cm-host .cm-activeLine { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .cm-host .cm-activeLineGutter { background: transparent; color: var(--text); }
+/* The caret. CodeMirror's base theme carries a light and a dark variant and
+   nothing here selects one, so it uses the light default — `caret-color:
+   black` on a #0a0b0d page, which is a caret nobody can find. The NATIVE
+   caret is what draws today (.cm-cursor exists only with drawSelection(),
+   which this editor does not load), so both are set: adding that extension
+   later must not quietly bring the black one back. */
+.cm-host .cm-content { caret-color: var(--text); }
 .cm-host .cm-cursor { border-left-color: var(--text); }
 .cm-host .cm-selectionBackground,
 .cm-host .cm-content ::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); }

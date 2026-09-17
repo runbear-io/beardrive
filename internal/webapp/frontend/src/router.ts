@@ -120,6 +120,15 @@ export interface Route {
   // not a property of the project — a teammate connecting next week has their
   // own answer, and would be told the wrong thing by a persisted flag.
   connect?: string;
+  // The editor is open on `path` (/<project-id>/edit/<path>).
+  //
+  // A path rather than a query flag because an edit session is a place two
+  // people can be at once: the co-editing room is keyed on the file, so the
+  // URL IS the invitation — send it and the recipient lands in the same
+  // document, caret and all. It is deliberately NOT a view route: the page is
+  // the file page, so `path` keeps carrying the file and every behaviour it
+  // drives (the tree selection, share, download, folder rules) is untouched.
+  editing?: boolean;
   // Fullscreen: the same file page with the app chrome hidden (?full=1).
   // A query param for the same reason `version` is one — the first segment
   // after the project id is reserved for view names, and a fullscreen file
@@ -152,7 +161,7 @@ export function titleForRoute(route: Route, scope: string): string {
     page = VIEW_TITLES[route.view];
     if (route.viewTarget) page = `${route.viewTarget} · ${page}`;
   } else if (route.path) {
-    page = route.path + (route.version ? " · Version" : "");
+    page = route.path + (route.editing ? " · Editing" : route.version ? " · Version" : "");
   }
   return page ? `${page} — ${scope}` : scope;
 }
@@ -204,9 +213,21 @@ function withPath(r: Route, raw: string): Route {
   return r;
 }
 
+// "edit/<path>" opens the file page with the editor on it. Not a view name:
+// the rest stays `path`, so the file page behaves exactly as it does without
+// it. Reserved at the same cost the view names already pay — a folder called
+// "edit" at the root loses the URL shortcut and stays reachable from the tree.
+function takeEdit(r: Route): Route {
+  const head = r.path.split("/")[0];
+  if (head !== "edit") return r;
+  r.editing = true;
+  r.path = r.path.slice("edit/".length).replace(/\/+$/, "");
+  return r;
+}
+
 function parsePath(pathname: string, mode: "volume" | "hub"): Route {
   const raw = pathname.replace(/^\/+/, "");
-  if (mode !== "hub") return withPath({ path: "" }, raw);
+  if (mode !== "hub") return takeEdit(withPath({ path: "" }, raw));
   if (raw === "orgs" || raw.startsWith("orgs/")) {
     return { org: raw.slice(5).replace(/\/+$/, ""), path: "" };
   }
@@ -221,6 +242,9 @@ function parsePath(pathname: string, mode: "volume" | "hub"): Route {
   const r = withPath({ project: raw.slice(0, slash), path: "" }, raw.slice(slash + 1));
   const seg = r.path.indexOf("/");
   const head = seg === -1 ? r.path : r.path.slice(0, seg);
+  // Before the view names, so /<project-id>/edit/history/notes.md edits a
+  // file that happens to live under a folder called history.
+  if (head === "edit") return takeEdit(r);
   const legacy = legacyView(head);
   if (VIEW_ROUTES.has(head) || legacy) {
     r.view = legacy || (head as ViewName);
@@ -238,11 +262,15 @@ export function urlForPath(
   projectId?: string,
   version?: string,
   full?: boolean,
+  editing?: boolean,
 ): string {
   const enc = encodePath(path);
+  // No file, no editor: "edit/" alone would be a trailing-slash URL that the
+  // trailing-slash redirect rewrites back to itself forever.
+  const tail = enc && editing ? "edit/" + enc : enc;
   const q = (version ? "?v=" + version : "") + (full ? (version ? "&" : "?") + "full=1" : "");
-  if (projectId) return "/" + projectId + (enc ? "/" + enc : "") + q;
-  return "/" + enc + q;
+  if (projectId) return "/" + projectId + (tail ? "/" + tail : "") + q;
+  return "/" + tail + q;
 }
 
 // The same URL with `full` taken out and every other param left as it was.

@@ -112,6 +112,14 @@ typed — and teammates editing the same file at the same time see each other's
 changes. A rendered page also refreshes itself when the file changes, so a
 teammate's edit appears while you are looking at it.
 
+**The address bar follows you into the editor**, from
+`.../<project>/report.html` to `.../<project>/edit/report.html`. Copy it and
+send it to someone: they land in the same live document rather than on the
+read-only page, so "come and fix this paragraph with me" is one link. It is
+still a gated hub URL — sign-in and write access on that folder — so the
+invitation only works for people who could have edited the file anyway.
+Reloading, and Back, do what you expect for the same reason.
+
 The point is what happens to the file. Only the paragraph you edited is
 rewritten: your indentation, comments, `<script>` and `<style>` blocks come
 back byte-for-byte, so the next agent to read the file finds what it wrote and

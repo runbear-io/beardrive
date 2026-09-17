@@ -303,6 +303,64 @@ test("full survives the normalizations that rewrite a file URL", () => {
   assert.equal(parseRoute("/p-1/history?path=guide.md&full=1", "hub").viewTarget, "guide.md");
 });
 
+// The editor has a URL so it can be handed to someone: everyone editing one
+// file shares a co-editing room, so /<project>/edit/<path> IS the invitation.
+test("edit is a path segment in front of the file, and round-trips", () => {
+  const r = parseRoute(urlForPath("docs/spec.md", "p-1", undefined, undefined, true), "hub");
+  assert.equal(r.project, "p-1");
+  assert.equal(r.editing, true);
+  // The point of a path prefix over a view name: `path` still carries the
+  // file, so the file page needs to know nothing about editing.
+  assert.equal(r.path, "docs/spec.md");
+  assert.equal(r.view, undefined);
+
+  // Volume mode (bdrive serve <folder>) has the same editor.
+  const vol = parseRoute(urlForPath("notes/a.md", undefined, undefined, undefined, true), "volume");
+  assert.equal(vol.editing, true);
+  assert.equal(vol.path, "notes/a.md");
+
+  // Composes with fullscreen, both ways round.
+  const both = parseRoute(urlForPath("a.md", "p-1", undefined, true, true), "hub");
+  assert.equal(both.editing, true);
+  assert.equal(both.full, true);
+
+  // Not asked for, not emitted.
+  assert.equal(urlForPath("a.md", "p-1"), "/p-1/a.md");
+  assert.equal(parseRoute("/p-1/a.md", "hub").editing, undefined);
+});
+
+// A view name after the prefix is a FILE PATH, not a view: /edit/ means the
+// rest is what is being edited, whatever it is called.
+test("edit shadows nothing but its own first segment", () => {
+  const r = parseRoute("/p-1/edit/history/notes.md", "hub");
+  assert.equal(r.editing, true);
+  assert.equal(r.path, "history/notes.md");
+  assert.equal(r.view, undefined);
+
+  // And the view routes are untouched by the prefix existing.
+  assert.equal(parseRoute("/p-1/history/notes.md", "hub").view, "history");
+
+  // A file called "edit" at the root is the cost, same as for a view name.
+  assert.equal(parseRoute("/p-1/edit", "hub").path, "");
+});
+
+// The redirects that rebuild a file URL must carry it, or the editor closes
+// under the person typing — and an editor with no file must not build
+// "/p-1/edit/", which the trailing-slash redirect would rewrite to itself
+// forever.
+test("edit survives the rewrites, and never stands alone", () => {
+  const slash = parseRoute("/p-1/edit/notes/", "hub");
+  assert.equal(slash.trailingSlash, true);
+  assert.equal(slash.editing, true);
+  assert.equal(slash.path, "notes");
+  const fixed = urlForPath(slash.path, "p-1", slash.version, slash.full, slash.editing);
+  assert.equal(fixed, "/p-1/edit/notes");
+  assert.equal(parseRoute(fixed, "hub").trailingSlash, undefined);
+
+  assert.equal(urlForPath("", "p-1", undefined, undefined, true), "/p-1");
+  assert.equal(urlForPath("", undefined, undefined, undefined, true), "/");
+});
+
 // The scroll memo keys on this: entering and leaving fullscreen must land in
 // the same slot, or the reader is thrown to the top of the document.
 test("withoutFull strips only full, and is a no-op without it", () => {
