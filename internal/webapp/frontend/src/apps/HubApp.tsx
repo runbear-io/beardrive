@@ -328,7 +328,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           to={
             route.view
               ? urlForView(route.view, named, route.viewTarget, route.filters)
-              : urlForPath(route.path, named, route.version, route.full)
+              : urlForPath(route.path, named, route.version, route.full, route.editing)
           }
         />
       );
@@ -462,7 +462,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // the address bar. After the rewrite the flag is false, so there is no
   // second hop.
   if (route.trailingSlash && route.path) {
-    return <Redirect to={urlForPath(route.path, current.id, route.version, route.full)} />;
+    return <Redirect to={urlForPath(route.path, current.id, route.version, route.full, route.editing)} />;
   }
 
   return (

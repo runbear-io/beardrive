@@ -121,8 +121,10 @@ export default function Browser(props: {
   useEffect(() => {
     if (!isMissing || !moved?.to) return;
     setMovedFrom({ from: path, to: moved.to });
-    navigate(urlForPath(moved.to, project?.id, undefined, route.full), { replace: true });
-  }, [isMissing, moved, path, project?.id, route.full]);
+    navigate(urlForPath(moved.to, project?.id, undefined, route.full, route.editing), {
+      replace: true,
+    });
+  }, [isMissing, moved, path, project?.id, route.full, route.editing]);
 
   /* ---- tree expansion ---- */
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -247,14 +249,22 @@ export default function Browser(props: {
     (!hub ||
       (!!project &&
         atLeast(folderPerm(path) ?? project.perm, "write")));
-  const [editing, setEditing] = useState(false);
+  // Edit mode is the URL (/<project-id>/edit/<path>), not component state.
+  //
+  // That is what makes it shareable: everyone editing one file is in the same
+  // co-editing room, so pasting this URL to a teammate drops them into the
+  // session rather than onto a read-only page they then have to find the Edit
+  // button on. It also buys the things a URL always buys — reload stays in
+  // the editor, Back leaves it, and the tab title says Editing.
+  //
+  // Leaving the file or pinning a version leaves edit mode with it, the same
+  // as before: openPath builds a plain file URL, and canEdit is false for a
+  // ?v= version, so the editor never opens on bytes it would overwrite.
+  const editing = !!route.editing && canEdit;
   // HTML edits as its rendered page by default; this is the way down to its
   // markup. Only meaningful for HTML — every other type has one surface.
   const [editSource, setEditSource] = useState(false);
-  // Leaving the file (or pinning a version) leaves edit mode with it, so the
-  // next file never opens straight into an editor the reader did not ask for.
   useEffect(() => {
-    setEditing(false);
     setEditSource(false);
   }, [path, version]);
   // The label and colour on this account's caret in a co-editor's window. The
@@ -289,16 +299,19 @@ export default function Browser(props: {
   }, [path]);
   const enterFull = useCallback(() => {
     pushedFull.current = true;
-    navigate(urlForPath(path, project?.id, version, true));
-  }, [path, project?.id, version]);
+    // Editing survives the toggle: fullscreen is chrome, and dropping someone
+    // out of a live document to give them more room to read it is not what
+    // the button says.
+    navigate(urlForPath(path, project?.id, version, true, route.editing));
+  }, [path, project?.id, version, route.editing]);
   const exitFull = useCallback(() => {
     if (pushedFull.current) {
       pushedFull.current = false;
       history.back();
     } else {
-      navigate(urlForPath(path, project?.id, version), { replace: true });
+      navigate(urlForPath(path, project?.id, version, false, route.editing), { replace: true });
     }
-  }, [path, project?.id, version]);
+  }, [path, project?.id, version, route.editing]);
   // Hide the chrome; never unmount it. #content stays the same element, so it
   // keeps its scrollTop across the toggle and the reader does not move — and
   // display:none takes the hidden controls out of the tab order and the
@@ -810,7 +823,7 @@ export default function Browser(props: {
             onOpenFile={openPath}
             onMeta={setMeta}
             onRendered={onRendered}
-            editing={editing && canEdit}
+            editing={editing}
             editSource={editSource}
             me={editorIdentity}
           />
@@ -902,7 +915,9 @@ export default function Browser(props: {
               id="edit-btn"
               variant="toolbar"
               title={editing ? "Stop editing" : "Edit this file"}
-              onClick={() => setEditing((e) => !e)}
+              onClick={() =>
+                navigate(urlForPath(path, project?.id, version, route.full, !editing))
+              }
             >
               {editing ? "Done" : "Edit"}
             </Button>
@@ -911,7 +926,7 @@ export default function Browser(props: {
               file. Click-to-edit cannot add a section or repair a tag, and
               without a way down to the markup the answer to either would be
               "go and find a synced device". */}
-          {canEdit && editing && HTML_EXT.test(path) && (
+          {editing && HTML_EXT.test(path) && (
             <Button
               id="edit-source-btn"
               variant="toolbar"

@@ -61,11 +61,12 @@ classDiagram
         +parseRoute(url, mode) Route
         +Route.version ?v= sha, one past version
         +Route.full ?full=1, the file page with the chrome hidden
+        +Route.editing /edit/&lt;path&gt;, the file page with the editor open
         +Route.trailingSlash notes/ resolves, then replaces to notes
         +Route.queryTarget history ?path= / ?prefix= resolves, then replaces to /history/target
         +Route.filters q user since until, history feed
         +historyFilterQuery(filters) / hasHistoryFilters
-        +urlForPath(path, projectId, version, full)
+        +urlForPath(path, projectId, version, full, editing)
         +withoutFull(url) the same URL minus full — the scroll memo key
         +urlForView(view, projectId, target, filters) / encodePath / decodePath
         +projectByName(projects, seg) id, only when exactly one name matches
@@ -84,6 +85,7 @@ classDiagram
         +Redirect
     }
     note for router "Two lookups on peer-authored path segments are now prototype-safe and one is throw-safe: legacyView() goes through Object.hasOwn, because LEGACY_VIEWS['constructor'] is truthy and turned a folder of that name into a view whose name was a FUNCTION; decodePath falls back to the raw segment instead of letting decodeURIComponent throw URIError out of a useMemo during render. Same shape as ProjectIcon's PROJECT_ICONS lookup in shell.tsx"
+    note for router "Route.editing is the odd one: a path segment (/&lt;project-id&gt;/edit/&lt;path&gt;) for a thing that is not a view. The editor is the FILE page with a different surface, so `path` keeps carrying the file and nothing in Browser has to learn about editing — but it is a path rather than a ?flag because everyone editing one file shares a co-editing room, which makes the URL the INVITATION: paste it and the recipient is in the document with you. It is parsed before the view names, so /edit/history/notes.md edits a file under a folder called history, and urlForPath never emits the prefix without a path (the trailing-slash redirect would rewrite /edit/ to itself forever)"
     note for router "projectByName is what makes /wiki reach the project called wiki: the id never appears in the UI as something to copy, so a hand-typed first segment is the NAME the sidebar shows. It decodes the segment (route.project is the still-encoded slice) and returns an id only on EXACTLY one case-insensitive match — ProjectDB names are scoped per organization, so a viewer in two orgs can hold two projects named wiki and guessing between them is worse than the not-found page (BEA-140)"
     note for nav "nav.ts + router.ts — deliberately NOT a router library (react-router v7 startTransition left stale views); History-API path routing, slashes literal, every user-facing page owns a URL path. A version is not a view route (the first segment after the project id is reserved for view names) — it rides as ?v=, so useLocationPath must snapshot the search too or the URL changes and nothing re-renders"
 
