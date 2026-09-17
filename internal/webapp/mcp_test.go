@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -1013,7 +1014,7 @@ func TestMCPOutputPathsUseProjectNames(t *testing.T) {
 	cs := f.session(f.connect("alice", f.wiki.ID))
 
 	out := mustCall(t, cs, "write", map[string]any{"path": "/wiki/notes/a.md", "content": "needle\n"})
-	if strings.Contains(out, f.wiki.ID) {
+	if strings.Contains(withoutURLs(out), f.wiki.ID) {
 		t.Errorf("write confirmation names the project by id: %s", out)
 	}
 	if !strings.Contains(out, "/wiki/notes/a.md") {
@@ -1022,7 +1023,7 @@ func TestMCPOutputPathsUseProjectNames(t *testing.T) {
 	for _, tc := range []struct{ tool, arg string }{{"grep", "needle"}, {"glob", "**/*.md"}} {
 		args := map[string]any{"pattern": tc.arg}
 		got := mustCall(t, cs, tc.tool, args)
-		if strings.Contains(got, f.wiki.ID) {
+		if strings.Contains(withoutURLs(got), f.wiki.ID) {
 			t.Errorf("%s output names the project by id:\n%s", tc.tool, got)
 		}
 		if !strings.Contains(got, "/wiki/") {
@@ -1031,6 +1032,89 @@ func TestMCPOutputPathsUseProjectNames(t *testing.T) {
 	}
 	// And a path quoted back from that output is accepted.
 	mustCall(t, cs, "read", map[string]any{"path": "/wiki/notes/a.md"})
+}
+
+// withoutURLs strips the hub links tool output carries, so an assertion about
+// the PATHS it prints is not fooled by the project id inside a link. Links are
+// id-based deliberately — see fileURL.
+var urlRe = regexp.MustCompile(`https?://\S+`)
+
+func withoutURLs(s string) string { return urlRe.ReplaceAllString(s, "") }
+
+// An answer that names a file should be able to link it, so every place these
+// tools name one they print its hub page beside the path.
+//
+// Emitted, not left to the agent to compose. The two things a formula gets
+// wrong are both checked here: the link carries the project ID even though the
+// path column carries its NAME (the viewer resolves a name only when it is
+// unique among the READER's projects, which is a different set), and every
+// path segment is percent-encoded.
+func TestMCPOutputCarriesHubLinks(t *testing.T) {
+	f := newMCPHub(t)
+	cs := f.session(f.connect("alice", f.wiki.ID))
+
+	// A name with the two characters that must not reach a URL raw: a space,
+	// and the "#" that would otherwise cut the path off at a fragment.
+	const rest = "notes/road map #2.md"
+	proj := f.ts.URL + "/" + f.wiki.ID
+	want := proj + "/notes/road%20map%20%232.md"
+
+	out := mustCall(t, cs, "write", map[string]any{"path": "/wiki/" + rest, "content": "needle\n"})
+	if !strings.Contains(out, "url: "+want+"\n") {
+		t.Errorf("write has no link (want %s):\n%s", want, out)
+	}
+	if out := mustCall(t, cs, "read", map[string]any{"path": "/wiki/" + rest}); !strings.Contains(out, "url: "+want+"\n") {
+		t.Errorf("read has no link (want %s):\n%s", want, out)
+	}
+	if out := mustCall(t, cs, "history", map[string]any{"path": "/wiki/" + rest}); !strings.Contains(out, "url: "+want+"\n") {
+		t.Errorf("history has no link (want %s):\n%s", want, out)
+	}
+
+	// One row per file: the link is the last column, so every column that was
+	// there before keeps its position.
+	if out := mustCall(t, cs, "list", map[string]any{"path": "/wiki/notes"}); !strings.Contains(out, "\t"+want+"\n") {
+		t.Errorf("list row has no link (want %s):\n%s", want, out)
+	}
+	if out := mustCall(t, cs, "list", map[string]any{"path": "/wiki"}); !strings.Contains(out, "notes/\t"+proj+"/notes\n") {
+		t.Errorf("folder row has no link:\n%s", out)
+	}
+	if out := mustCall(t, cs, "glob", map[string]any{"pattern": "**/*.md"}); !strings.Contains(out, "\t"+want+"\n") {
+		t.Errorf("glob row has no link (want %s):\n%s", want, out)
+	}
+	if out := mustCall(t, cs, "grep", map[string]any{"pattern": "needle", "files_only": true}); !strings.Contains(out, "\t"+want+"\n") {
+		t.Errorf("files_only grep row has no link (want %s):\n%s", want, out)
+	}
+
+	// A move links the destination — the source is gone, and a link to it 404s.
+	out = mustCall(t, cs, "move", map[string]any{"from": "/wiki/" + rest, "to": "/wiki/notes/plan.md"})
+	if !strings.Contains(out, "url: "+proj+"/notes/plan.md\n") {
+		t.Errorf("move does not link the destination:\n%s", out)
+	}
+}
+
+// Reading a past version must link THOSE bytes. The live page is a different
+// file by then, and nothing in a bare link says which one the answer was
+// written from.
+func TestMCPReadOfOldVersionLinksThatVersion(t *testing.T) {
+	f := newMCPHub(t)
+	cs := f.session(f.connect("alice", f.wiki.ID))
+	mustCall(t, cs, "write", map[string]any{"path": "/wiki/v.md", "content": "first\n"})
+	mustCall(t, cs, "write", map[string]any{"path": "/wiki/v.md", "content": "second\n"})
+
+	hist := mustCall(t, cs, "history", map[string]any{"path": "/wiki/v.md"})
+	shas := regexp.MustCompile(`sha:([0-9a-f]+)`).FindAllStringSubmatch(hist, -1)
+	if len(shas) < 2 {
+		t.Fatalf("want two versions:\n%s", hist)
+	}
+	old := shas[len(shas)-1][1]
+
+	out := mustCall(t, cs, "read", map[string]any{"path": "/wiki/v.md", "sha": old})
+	if !strings.Contains(out, "first") {
+		t.Fatalf("did not read the old version:\n%s", out)
+	}
+	if !strings.Contains(out, "url: "+f.ts.URL+"/"+f.wiki.ID+"/v.md?v="+old) {
+		t.Errorf("link is not pinned to the version read (sha %s):\n%s", old, out)
+	}
 }
 
 // A file with one enormous line used to be unreachable by EVERY tool at once —

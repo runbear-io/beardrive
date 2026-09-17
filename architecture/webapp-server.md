@@ -739,6 +739,13 @@ classDiagram
     }
     note for lockPath "edit and restore are read-modify-write over HTTP, which is not atomic. One mutex per (project, path) makes the compare-and-set real; removing it lets 4 of 8 concurrent writers silently lose their edit"
 
+    class fileURL {
+        &lt;&lt;mcp.go&gt;&gt;
+        origin off the request (mcpBaseKey)
+        /&lt;project-ID&gt;/&lt;percent-encoded path&gt;
+    }
+    note for fileURL "Every tool that names a file prints that file's hub page beside the path, so an answer can link what it is talking about instead of naming a path a human then has to go and find. Emitted rather than described in the instructions, because a formula the agent applies gets it wrong twice over: the paths these tools print carry the project NAME, and the viewer resolves a name only when it is unique among the READER's projects; and each segment needs percent-encoding with the separators left literal. The origin comes off the request for the same reason issuer() does — one hub answers on a tunnel, a LAN address and a public name. grep match rows are the one place with no link: a row is path:N:text and a trailing links block is path-shaped lines with no line number in them, which broke the first reader that parsed it — files_only is the grep mode whose rows carry the link"
+
     class recordAgentRead {
         ReadKindAgent
         actor mcp:&lt;grantID&gt;
@@ -752,6 +759,7 @@ classDiagram
     mcpTools ..> internalClient : every tool
     mcpTools ..> lockPath : edit, restore
     mcpTools ..> recordAgentRead : read
+    mcpTools ..> fileURL : link beside every named file
     internalClient ..> Server : apiMux
     Server *-- MCPAuth
 ```
