@@ -1569,65 +1569,100 @@ func TestMCPEditChecksPermissionBeforeDiagnosis(t *testing.T) {
 	}
 }
 
-// The consent screen's CSP must name the client's callback origin, not just
-// 'self'. form-action governs the whole redirect chain a submit sets off, so
-// 'self' alone lets the POST through and then has the browser silently drop
-// the 302 that carries the code back — the Connect button looks dead, and no
-// status-code assertion anywhere sees it, because only a browser enforces CSP.
-func TestMCPConsentCSPAllowsClientCallback(t *testing.T) {
+// The consent screen must NOT pin form-action. It constrains every hop of the
+// redirect chain a submit sets off, and the hub only knows the first: a client
+// that registers an API host which forwards to its app host (the normal shape —
+// Runbear goes api.runbear.io -> app.runbear.io) has the chain killed at a hop
+// this page can never enumerate. Only a browser enforces CSP, so this asserts
+// the header; the chain semantics themselves were confirmed in Chromium.
+func TestMCPConsentCSPDoesNotPinFormAction(t *testing.T) {
+	f := newMCPHub(t)
+	csp := f.consentCSP(t, "https://api.example.com/oauth/callback")
+
+	if strings.Contains(csp, "form-action") {
+		t.Errorf("CSP pins form-action, which breaks any client whose callback "+
+			"redirects onward:\n  %s", csp)
+	}
+	// The rest of the policy is still doing real work — no script is what makes
+	// dropping form-action safe, since the form cannot be repointed without it.
+	if !strings.Contains(csp, "default-src 'none'") {
+		t.Errorf("default-src 'none' must stay — it is what blocks script: %q", csp)
+	}
+}
+
+// Where the code may be sent is enforced server-side, by exact match against
+// the client's registered redirect_uris. With form-action gone this is the only
+// control on the code's destination, so it gets a test of its own.
+func TestMCPAuthorizeRejectsUnregisteredRedirect(t *testing.T) {
 	f := newMCPHub(t)
 
-	for _, tc := range []struct {
-		name, redirect, want string
-	}{
-		{"https callback", "https://claude.ai/api/mcp/auth_callback", "https://claude.ai"},
-		{"loopback callback", "http://127.0.0.1:9999/callback", "http://127.0.0.1:9999"},
-		{"native custom scheme", "cursor://anysphere.cursor-retrieval/oauth/cb", "cursor:"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			regBody, _ := json.Marshal(map[string]any{
-				"client_name": "Test Agent", "redirect_uris": []string{tc.redirect},
-			})
-			rec := httptest.NewRecorder()
-			f.h.ServeHTTP(rec, httptest.NewRequest("POST", "/oauth/register", strings.NewReader(string(regBody))))
-			if rec.Code != 201 {
-				t.Fatalf("register: %d %s", rec.Code, rec.Body)
-			}
-			var reg struct {
-				ClientID string `json:"client_id"`
-			}
-			json.Unmarshal(rec.Body.Bytes(), &reg)
-
-			q := url.Values{}
-			q.Set("client_id", reg.ClientID)
-			q.Set("redirect_uri", tc.redirect)
-			q.Set("response_type", "code")
-			q.Set("code_challenge", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
-			q.Set("code_challenge_method", "S256")
-
-			rec = httptest.NewRecorder()
-			req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
-			req.AddCookie(f.cookies["alice"])
-			f.h.ServeHTTP(rec, req)
-			if rec.Code != 200 {
-				t.Fatalf("consent page: %d %s", rec.Code, rec.Body)
-			}
-
-			csp := rec.Header().Get("Content-Security-Policy")
-			_, fa, ok := strings.Cut(csp, "form-action ")
-			if !ok {
-				t.Fatalf("no form-action in CSP %q", csp)
-			}
-			fa, _, _ = strings.Cut(fa, ";")
-			if !strings.Contains(fa, tc.want) {
-				t.Errorf("form-action = %q, want it to allow %q\n(browser would block the 302 back to %s)",
-					strings.TrimSpace(fa), tc.want, tc.redirect)
-			}
-			if !strings.Contains(fa, "'self'") {
-				t.Errorf("form-action = %q, must still allow 'self' for the POST itself", strings.TrimSpace(fa))
-			}
-		})
+	regBody, _ := json.Marshal(map[string]any{
+		"client_name": "Test Agent", "redirect_uris": []string{"https://api.example.com/oauth/callback"},
+	})
+	rec := httptest.NewRecorder()
+	f.h.ServeHTTP(rec, httptest.NewRequest("POST", "/oauth/register", strings.NewReader(string(regBody))))
+	var reg struct {
+		ClientID string `json:"client_id"`
 	}
+	json.Unmarshal(rec.Body.Bytes(), &reg)
+
+	for _, evil := range []string{
+		"https://evil.example.com/cb",                 // another origin entirely
+		"https://api.example.com.evil.com/cb",         // prefix that a sloppy match would pass
+		"https://api.example.com/oauth/callback/../x", // same origin, different path
+		"https://api.example.com/oauth/callback?x=1",  // registered path plus a query
+	} {
+		q := url.Values{}
+		q.Set("client_id", reg.ClientID)
+		q.Set("redirect_uri", evil)
+		q.Set("response_type", "code")
+		q.Set("code_challenge", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+		q.Set("code_challenge_method", "S256")
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+		req.AddCookie(f.cookies["alice"])
+		f.h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("redirect_uri %q: got %d, want 400 — an unregistered "+
+				"destination must never reach the consent screen", evil, rec.Code)
+		}
+	}
+}
+
+// consentCSP renders the consent screen for a freshly registered client and
+// returns its Content-Security-Policy.
+func (f *mcpFixture) consentCSP(t *testing.T, redirect string) string {
+	t.Helper()
+	regBody, _ := json.Marshal(map[string]any{
+		"client_name": "Test Agent", "redirect_uris": []string{redirect},
+	})
+	rec := httptest.NewRecorder()
+	f.h.ServeHTTP(rec, httptest.NewRequest("POST", "/oauth/register", strings.NewReader(string(regBody))))
+	if rec.Code != 201 {
+		t.Fatalf("register: %d %s", rec.Code, rec.Body)
+	}
+	var reg struct {
+		ClientID string `json:"client_id"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &reg)
+
+	q := url.Values{}
+	q.Set("client_id", reg.ClientID)
+	q.Set("redirect_uri", redirect)
+	q.Set("response_type", "code")
+	q.Set("code_challenge", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+	q.Set("code_challenge_method", "S256")
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	req.AddCookie(f.cookies["alice"])
+	f.h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("consent page: %d %s", rec.Code, rec.Body)
+	}
+	return rec.Header().Get("Content-Security-Policy")
 }
 
 // The instructions must reach the client in the initialize result, not merely
