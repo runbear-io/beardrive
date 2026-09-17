@@ -84,13 +84,38 @@ const (
 // are methods on *Server and read the grant from the request context, which
 // is also what keeps one shared instance from leaking one caller's scope into
 // another's.
+// mcpInstructions rides the initialize result, so a client shows it to the
+// model once per session rather than on every tool call.
+//
+// It earns that space by answering the one question the tool names cannot.
+// They are deliberately the names of the local file tools — that is what makes
+// the door usable with no instructions at all — and the paths are
+// absolute-looking, so nothing in `read(/wiki/spec.md)` says whether the bytes
+// are on this disk or on a hub across the network. Most of the way to get that
+// wrong fails loudly (a local path has no project named `Users`), but the
+// expensive case is silent: a project that is ALSO synced to the machine is
+// reachable through both doors at once, and an agent alternating between them
+// races the daemon into conflict copies and reads its own stale writes.
+const mcpInstructions = `These tools read and write files stored on a BearDrive hub, over the network.
+
+They are NOT the local filesystem. A path here is /<project>/... — the first
+segment names one of the projects connected to this session, and it has nothing
+to do with paths on the machine you are running on. Call list with no path to
+see which projects you have.
+
+If a project is also synced to this machine as a local folder, work on the local
+files with your ordinary file tools: they are the same bytes, and editing
+through both doors at once makes conflict copies and stale reads. Use these
+tools for projects you have not synced, and for history and restore, which a
+local folder cannot give you.`
+
 func (s *Server) mcpServer() *mcp.Server {
 	s.mcpOnce.Do(func() {
 		srv := mcp.NewServer(&mcp.Implementation{
 			Name:    "beardrive",
 			Title:   "BearDrive",
 			Version: "1",
-		}, nil)
+		}, &mcp.ServerOptions{Instructions: mcpInstructions})
 		s.addMCPTools(srv)
 		s.mcpSrv = srv
 	})

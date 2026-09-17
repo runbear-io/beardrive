@@ -1629,3 +1629,23 @@ func TestMCPConsentCSPAllowsClientCallback(t *testing.T) {
 		})
 	}
 }
+
+// The instructions must reach the client in the initialize result, not merely
+// exist as a constant: the options argument to mcp.NewServer was nil before
+// this, and passing nil again would drop them with nothing else changing.
+func TestMCPInstructionsReachTheClient(t *testing.T) {
+	f := newMCPHub(t)
+	cs := f.session(f.connect("alice", f.wiki.ID))
+
+	got := cs.InitializeResult().Instructions
+	if got == "" {
+		t.Fatal("no instructions in the initialize result — ServerOptions dropped?")
+	}
+	// The two facts that cannot be recovered from the tool names and paths:
+	// where the bytes live, and what to do when the project is synced locally.
+	for _, want := range []string{"NOT the local filesystem", "/<project>/", "conflict copies"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instructions missing %q:\n%s", want, got)
+		}
+	}
+}
