@@ -24,6 +24,7 @@ type MetaStore interface {
 	Projects() ProjectRepo
 	Orgs() OrgRepo
 	Shares() ShareRepo
+	MCP() MCPRepo
 	Devices() DeviceRepo
 	Reads() ReadRepo
 	SessionReads() SessionReadRepo
@@ -59,6 +60,22 @@ type ShareRepo interface {
 	Load() ([]Share, error)
 	Put(s Share) error
 	Delete(token string) error
+}
+
+// MCPRepo persists the two rows the MCP door needs: OAuth clients that
+// registered themselves (RFC 7591 dynamic registration — an MCP client
+// arrives knowing nothing about this hub, so the hub has to hand it an
+// identity) and the grants those clients hold.
+//
+// Both in one repo because neither is useful without the other and MetaStore
+// is an interface every backend must implement in full: two methods for one
+// feature is two migrations for every future backend.
+type MCPRepo interface {
+	LoadGrants() ([]MCPGrant, error)
+	PutGrant(g MCPGrant) error
+	DeleteGrant(id string) error
+	LoadClients() ([]MCPClient, error)
+	PutClient(c MCPClient) error
 }
 
 type DeviceRepo interface {

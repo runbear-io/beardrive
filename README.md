@@ -262,6 +262,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first, and warns on stderr if the hub refused that push; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
+| `bdrive mcp list|revoke` | Agents connected to your hub over MCP; revoke disconnects one immediately |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. A plain `bdrive sync` with no `--note` clears it, so a hand edit is never stamped with the last agent session's note. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
@@ -671,6 +672,44 @@ agent devices read which folders). The API
 distinct-reader counts, and last-read times — never who read what;
 `?by=device` adds the agent-only per-device folder breakdown (device
 identity is already public via history; human emails never appear).
+
+### MCP: agents with no CLI and no synced folder
+
+The hooks above need the CLI and a folder on disk. A hub started with
+`"mcp": { "enabled": true }` also serves an **MCP endpoint at `/mcp`**, so an
+agent in Claude, ChatGPT, Cursor — anything that speaks
+[MCP](https://modelcontextprotocol.io) — can work in your projects with
+nothing installed at all. Point the client at `https://your-hub/mcp`; it
+registers itself, sends you to a consent screen on your own hub, and you
+**tick which projects to connect**. One connection, several projects.
+
+The agent sees one filesystem, with each connected project as a top-level
+folder (named by its name or its id):
+
+```
+/                       <- only the projects you ticked
+├── wiki/
+│   └── docs/spec.md
+└── infra/
+    └── terraform/main.tf
+```
+
+Tools: `list`, `read`, `glob`, `grep`, `write`, `edit`, `delete`, `move`,
+plus `history` and `restore` — the two no local-filesystem MCP server can
+offer. There is no `mkdir` (directories are implicit; writing a nested path
+creates it) and no shell.
+
+Everything is scoped and attributed: the grant reaches only the ticked
+projects, can never exceed the permission you already have (lose access to a
+project and every connection loses it with you, nothing to revoke), writes land
+in History under your name, and restricted folders stay invisible. Both `write`
+and `edit` accept the `sha` you read, so they refuse rather than silently
+overwriting a teammate's change; `read` takes `raw: true` when an agent is
+copying a file and needs the exact bytes. The account menu's **Connected agents**
+page lists what is connected and disconnects any of it; `bdrive mcp
+list`/`revoke` do the same from a terminal. Either way it takes effect
+immediately, killing the access and refresh token at once. See
+[Hub configuration](https://docs.beardrive.ai/reference/hub-config/).
 
 ### Authentication & database
 

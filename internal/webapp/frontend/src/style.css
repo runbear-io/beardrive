@@ -553,6 +553,11 @@ button, input, a.btn { font-family: inherit; }
    the same markup with its controls disabled, so nothing shifts when the
    caller's level changes. Native selects here rather than the shadcn Select:
    the org admin's role picker already uses them, and this table matches it. */
+/* Connected agents (/connections): the project chips a grant covers, above
+   the Disconnect button. .ps-chip carries a left margin for its inline use
+   next to a heading, so the row cancels it on the first chip. */
+.mcp-projects { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+.mcp-projects .ps-chip { margin-left: 0; }
 .ps-chip { margin-left: 10px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-faint); font-size: 11px; font-weight: 600; letter-spacing: .02em; vertical-align: middle; }
 .ps-people h4 { font-size: 12.5px; font-weight: 600; color: var(--text-dim); margin: 0; }
 .ps-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--text-dim); margin: 0 0 10px; }

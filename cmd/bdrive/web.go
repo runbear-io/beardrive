@@ -30,6 +30,9 @@ type webConfig struct {
 	UploadTTL  string `json:"upload_ttl,omitempty"`  // duration, e.g. "15m"
 	ProjectsDB string `json:"projects_db,omitempty"` // hub project registry path
 	ShareRPM   int    `json:"share_rpm,omitempty"`   // per-IP rate on /s/* (default 120/min)
+	// MCP serves the agent door at /mcp (hub mode only) plus its OAuth
+	// endpoints. Absent or disabled means the hub has no /mcp at all.
+	MCP *webapp.MCPConfig `json:"mcp,omitempty"`
 	// TrustProxy makes the rate limiters read the client address from
 	// X-Forwarded-For sent by ANY peer. Usually unnecessary: a proxy that
 	// reaches the hub over loopback or a private network is trusted with no
@@ -386,6 +389,34 @@ credentials); otherwise it is relayed through this server.`,
 					return fmt.Errorf("open share registry: %w", err)
 				}
 				srv.Shares = shares
+				if cfg.MCP != nil && cfg.MCP.Enabled {
+					// The consent screen needs two things the server owns: who
+					// the browser session is, and which projects that account
+					// may connect (with the level it holds, since a grant can
+					// never exceed it).
+					session := func(r *http.Request) (webapp.User, bool) {
+						return srv.SessionUser(r)
+					}
+					var mcpAuth *webapp.MCPAuth
+					if meta != nil {
+						mcpAuth, err = webapp.NewMCPAuth(meta.MCP(), session, srv.ConnectableProjects)
+					} else {
+						mcpAuth, err = webapp.OpenMCPAuth(
+							filepath.Join(filepath.Dir(projectsDB), "mcp.json"), session, srv.ConnectableProjects)
+					}
+					if err != nil {
+						return fmt.Errorf("open mcp grants: %w", err)
+					}
+					mcpAuth.OrgName = srv.OrgName
+					// Any authenticated credential may list and revoke its own
+					// connections, so `bdrive mcp` works without a browser.
+					mcpAuth.UseCaller(func(r *http.Request) (webapp.User, bool) {
+						u := srv.RequestUser(r)
+						return u, u.Email != ""
+					})
+					srv.MCP = mcpAuth
+					display += " (mcp: /mcp)"
+				}
 				readsOn, retention, sessRetention := true, 0, 0
 				if cfg.Reads != nil {
 					if cfg.Reads.Enabled != nil {

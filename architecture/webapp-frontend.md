@@ -57,7 +57,7 @@ classDiagram
     class router {
         +VIEW_ROUTES dashboard history install settings
         +LEGACY_VIEWS insights to dashboard
-        +top-level routes orgs billing
+        +top-level routes orgs billing connections
         +parseRoute(url, mode) Route
         +Route.version ?v= sha, one past version
         +Route.full ?full=1, the file page with the chrome hidden
@@ -70,6 +70,13 @@ classDiagram
         +urlForView(view, projectId, target, filters) / encodePath / decodePath
         +projectByName(projects, seg) id, only when exactly one name matches
     }
+    class McpConnections {
+        the grants this account holds
+        client name, projects, last used
+        Disconnect → DELETE /api/mcp/grants/:id
+    }
+    note for McpConnections "components/McpConnections.tsx — the browser half of MCP. CONNECTING is not here: it happens on the server-rendered /oauth/authorize consent screen, which has to work before any grant exists and is where a human decides what an agent may touch. This page is seeing and revoking. Account-level, not per-project, so HubApp's stale-route guard has to name route.connections alongside route.org and route.billing — a top-level route missing from that condition is silently redirected to the last-opened project id"
+
     class nav {
         +navigate(url)
         +useLocationPath() pathname + search
@@ -180,6 +187,7 @@ classDiagram
     Browser --> hooks : useTree useHeat useShares useProjectEvents, fetchBlobText + fileURLFor (Copy)
     HubApp --> hooks
     HubApp --> Setup : desktop mode only, /setup/* frames
+    HubApp --> McpConnections : /connections, account-level
     Setup --> api : /api/desktop/init/{start,status}
     Setup --> nav : each frame owns a URL
     hooks --> analytics : initAnalytics + identify on config

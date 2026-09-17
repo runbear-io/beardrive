@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
@@ -374,5 +375,75 @@ func TestRedirectedReadCreditsCanonicalPath(t *testing.T) {
 	}
 	if heat.Entries["a.md"].Human != 0 {
 		t.Errorf("heat credited the OLD path a.md: %v", heat.Entries)
+	}
+}
+
+// TestMoveHistoryChainSurvivesTwoRenames documents a PRE-EXISTING defect in
+// buildMoveIndex, found while validating the MCP door but reproducible with no
+// MCP involvement at all — this test drives only the hub's own upload/remove
+// API, which is the same journal shape a synced device produces for a rename.
+//
+// Renaming a file twice loses its entire version history:
+//
+//	3 writes to m1.md        -> history: 3 rows
+//	rename m1.md -> m2.md    -> history: 4 rows (3 + a duplicate of the newest)
+//	rename m2.md -> m3.md    -> history: 1 row   <- the first three are gone
+//
+// restore cannot reach them either, so "undo what you did to that spec" is
+// unanswerable after two renames — in a product whose headline feature is
+// per-file history.
+//
+// Why: buildMoveIndex pairs a create with a delete by (device, blob). After a
+// second rename of unchanged content there are TWO creates and TWO deletes
+// carrying the same (device, blob), the one-to-one check cannot choose between
+// them, and the whole chain is dropped rather than a wrong pair being made.
+// Pairing by time proximity would fix it, but that is a change to core history
+// logic with its own performance constraints (see the n^2 note in
+// buildMoveIndex) and does not belong in the MCP change.
+//
+// Skipped so the suite stays green; unskip when fixing the pairing.
+func TestMoveHistoryChainSurvivesTwoRenames(t *testing.T) {
+	t.Skip("known pre-existing defect: see the comment above; unskip when buildMoveIndex pairs by time")
+
+	h, _, cookies, p, _ := permHubAt(t)
+	put := func(path, body string) {
+		t.Helper()
+		rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/upload/content?path="+url.QueryEscape(path),
+			[]byte(body), cookies["alice"])
+		if rec.Code != 200 {
+			t.Fatalf("put %s: %d %s", path, rec.Code, rec.Body)
+		}
+	}
+	del := func(path string) {
+		t.Helper()
+		rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/remove",
+			map[string]string{"path": path}, cookies["alice"])
+		if rec.Code != 200 {
+			t.Fatalf("remove %s: %d %s", path, rec.Code, rec.Body)
+		}
+	}
+	count := func(path string) int {
+		t.Helper()
+		rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/history?path="+url.QueryEscape(path), nil, cookies["alice"])
+		var resp struct {
+			Entries []HistoryEntry `json:"entries"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &resp)
+		return len(resp.Entries)
+	}
+
+	put("m1.md", "v1\n")
+	put("m1.md", "v2\n")
+	put("m1.md", "v3\n")
+	if n := count("m1.md"); n != 3 {
+		t.Fatalf("before any move: %d rows, want 3", n)
+	}
+	put("m2.md", "v3\n")
+	del("m1.md")
+	put("m3.md", "v3\n")
+	del("m2.md")
+	if n := count("m3.md"); n < 3 {
+		t.Fatalf("history collapsed to %d rows after a second rename; the first "+
+			"three versions are unreachable from history and from restore", n)
 	}
 }

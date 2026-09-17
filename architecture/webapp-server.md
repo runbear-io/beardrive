@@ -31,6 +31,8 @@ classDiagram
         +Desktop bool
         +DesktopMe func() (email, name)
         +ReportRead func(project, path)
+        +MCP *MCPAuth
+        -apiMux the bare API mux, re-entered by MCP tools
         -vols per-project volume cache
         -grants reservation ledger
         -routes what Handler registered
@@ -345,6 +347,7 @@ classDiagram
 
     class projectPerm {
         <<resolver>>
+        capByGrant(...) — OUTERMOST
         Server.Desktop → read (first)
         org owner → admin
         explicit grant → that level
@@ -371,6 +374,7 @@ classDiagram
     note for folderLevel "A rule may narrow OR widen a subtree of a project you can see — a read-only project with one writable drop-box is a real shape — but base none returns none unconditionally, so it can never open a project you cannot see. That arm is unreachable over HTTP today because proj() answers first; it exists because the filtered fold and the blob gate are NOT behind that gate."
     note for pathFilter "Deliberately not a cached per-reader fold: no cache, no eviction, no memory per scope. Single-path routes pay one comparison; listing routes already iterate. Hidden paths answer 404, never 403 — a 403 confirms the file is there."
     note for projectPerm "perms.go — the single authorization ladder. proj(level, h) in server.go is the one choke point: every per-project route declares its level at registration."
+    note for projectPerm "capByGrant wraps the WHOLE ladder, not a branch of it. projectPermOf = capByGrant(resolveProjectPerm(...)): an MCP agent can never exceed the level its human holds, and never reach a project outside its grant. It has to be outermost because the ladder has early returns — the Dir==nil / Auth==nil arm answers admin before any of the org checks run, so a ceiling applied inside the ladder is a ceiling the first early return skips"
     note for projectPerm "Both escape hatches are closed: a project with no org, or naming an org that no longer exists, resolves to none instead of falling through to a default, and org membership is checked BEFORE an explicit grant — so a grant left behind by a removed member is no longer a way back in"
 
     class ShareDB {
@@ -665,6 +669,93 @@ classDiagram
     QuotaProvider <|.. UnlimitedQuota
 ```
 
+## MCP server (`mcp.go`, `mcpauth.go`)
+
+A remote MCP server at `/mcp` that presents the hub's projects as one virtual
+filesystem. The tools are the ones an agent already knows — read, write, edit,
+grep, glob — so the agent needs no BearDrive-specific vocabulary. Every tool
+re-enters the hub's own API rather than reaching for storage, which is what
+keeps permissions, quota, journaling and history identical to a browser's.
+
+```mermaid
+classDiagram
+    direction LR
+
+    class MCPAuth {
+        <<OAuth 2.1 AS + RS>>
+        +Enabled bool
+        +Grants map[id]MCPGrant
+        +Clients map[id]MCPClient
+        +Repo MCPRepo
+        +Authorize / Token / Register
+        +GrantFor(bearer) MCPGrant
+        +Revoke(account, id)
+    }
+    note for MCPAuth "mcpauth.go — the hub is both the authorization server and the resource server, because an MCP client discovers everything from the resource URL alone: RFC 9728 protected-resource metadata points at RFC 8414 AS metadata, RFC 7591 dynamic registration mints a client, PKCE S256 and RFC 8707 resource indicators carry the rest. No pre-registration, no shared secret to paste — the user types the hub URL into their agent and the handshake does the rest"
+
+    class MCPGrant {
+        +ID, Account
+        +ClientID, ClientName
+        +Projects []string
+        +Created, LastUsed, Expires
+        +TokenDigest, RefreshDigest
+    }
+    note for MCPGrant "Projects is a CEILING, not a permission: it names what the human ticked on the consent screen, and every access still resolves live through projectPermOf. A project the account later loses stays listed and grants nothing. Access tokens live an hour, refresh tokens 30 days and rotate on use, so a leaked token is a bounded window and a replayed refresh is detectable"
+
+    class consentPage {
+        <<server-rendered HTML>>
+        one checkbox per project
+        nothing pre-checked
+        shows your level per project
+    }
+    note for consentPage "Deliberately NOT the React app: it has to work before any grant exists, it is where a human decides what an agent may touch, and a server-rendered form has no bundle to go stale. Nothing is pre-ticked — the default answer to &quot;which projects may this agent read and change&quot; is none of them"
+
+    class capByGrant {
+        <<the one choke point>>
+        capByGrant(r, projectID, have) string
+        not in grant → none
+        else min(have, grant level)
+    }
+    note for capByGrant "Wraps projectPermOf, so it applies to every per-project route at once — including routes written before MCP existed and routes written after. Mutation-tested: disabling it fails 7 tests. Anything reached with an MCP bearer token is capped here or it is not capped at all"
+
+    class mcpTools {
+        <<10 tools>>
+        list read glob grep
+        write edit delete move
+        history restore
+    }
+    note for mcpTools "mcp.go — list and glob are the ls/tree pair; grep is an on-demand bounded scan (2000 files / 64 MiB / 200 matches), no index to build or invalidate. history and restore are the two BearDrive has that a local filesystem does not, and they are why an agent can undo itself. Bounds are reported in the output, never silent: a truncated grep says so, because a scan that quietly stopped reads to an agent as proof the string is absent"
+
+    class internalClient {
+        <<mcp.go>>
+        re-enters Server.apiMux
+        memWriter captures the response
+        withGrant + withUser on the context
+    }
+    note for internalClient "A tool builds an http.Request and sends it through the hub's OWN mux instead of calling handlers directly, so permissions, folder rules, quota, journaling, history and read telemetry all happen exactly once, in the code that already does them. apiMux is the BARE mux, not the wrapped handler — the wrapper re-authenticates from cookies, and an MCP request has none"
+
+    class lockPath {
+        <<sync.Map of per-path mutexes>>
+    }
+    note for lockPath "edit and restore are read-modify-write over HTTP, which is not atomic. One mutex per (project, path) makes the compare-and-set real; removing it lets 4 of 8 concurrent writers silently lose their edit"
+
+    class recordAgentRead {
+        ReadKindAgent
+        actor mcp:&lt;grantID&gt;
+    }
+    note for recordAgentRead "An MCP read is an AGENT read, not a human one — the Knowledge insights split is only meaningful if the two are actually distinguished. The grant id never escapes: heatByDevice skips any actor that is not shaped like a device id, so the identity-free heat API stays identity-free"
+
+    MCPAuth *-- MCPGrant
+    MCPAuth *-- consentPage
+    MCPAuth ..> capByGrant : grant on the request context
+    capByGrant ..> projectPerm : caps the resolved level
+    mcpTools ..> internalClient : every tool
+    mcpTools ..> lockPath : edit, restore
+    mcpTools ..> recordAgentRead : read
+    internalClient ..> Server : apiMux
+    Server *-- MCPAuth
+```
+
 ## Metadata persistence (`MetaStore`)
 
 Service structs keep in-memory maps + logic; every change persists as one
@@ -691,6 +782,7 @@ classDiagram
         +Devices() DeviceRepo
         +Reads() ReadRepo
         +SessionReads() SessionReadRepo
+        +MCP() MCPRepo
         +Close()
     }
 
@@ -714,6 +806,12 @@ classDiagram
         <<interface>>
         +Load() +Put +Delete(user, id)
     }
+    class MCPRepo {
+        <<interface>>
+        +LoadGrants() +PutGrant +DeleteGrant
+        +LoadClients() +PutClient
+    }
+    note for MCPRepo "mcp.json (file) / mcp_grants + mcp_clients (SQL). A grant stores project IDs and token DIGESTS, never a token — the same posture as device tokens in AccountRepo. Clients are separate because dynamic registration (RFC 7591) mints one before any human has consented to anything"
 
     class Versioned {
         <<optional interface>>
@@ -783,6 +881,7 @@ classDiagram
     MetaStore *-- DeviceRepo
     MetaStore *-- ReadRepo
     MetaStore *-- SessionReadRepo
+    MetaStore *-- MCPRepo
 
     class BuiltinAuth
     class ProjectDB
@@ -790,6 +889,7 @@ classDiagram
     class ShareDB
     class DeviceRegistry
     class ReadLedger
+    class MCPAuth
 
     BuiltinAuth o-- AccountRepo
     ProjectDB o-- ProjectRepo
@@ -798,6 +898,7 @@ classDiagram
     DeviceRegistry o-- DeviceRepo
     ReadLedger o-- ReadRepo
     ReadLedger o-- SessionReadRepo
+    MCPAuth o-- MCPRepo
 
     BuiltinAuth *-- versionGate
     ProjectDB *-- versionGate
