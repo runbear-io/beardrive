@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"io"
 	"io/fs"
 	"log"
@@ -88,6 +89,16 @@ type Server struct {
 	Devices *DeviceRegistry
 	// Shares, when set, enables public share links (/s/<token>).
 	Shares *ShareDB
+	// MCP, when set, serves the agent door at /mcp plus its OAuth endpoints.
+	// Nil means the hub has no MCP surface at all — not an unauthenticated
+	// one. See MCPConfig.
+	MCP *MCPAuth
+	// apiMux is this server's own handler, kept so MCP tools can re-enter it
+	// as internal clients (mcp.go). Set by Handler; nil before it is called.
+	apiMux http.Handler
+
+	mcpOnce sync.Once
+	mcpSrv  *mcp.Server // the tool registry, built once (see mcpServer)
 	// Reads, when set, aggregates read telemetry (viewer, share, and agent
 	// reads) for the heat API. Nil means read tracking is off.
 	Reads *ReadLedger
@@ -994,6 +1005,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/p/{project}/store/sign", proj(PermWrite, s.handleStoreSign))
 	mux.HandleFunc("PUT /api/p/{project}/store/object", proj(PermWrite, s.handleStorePut))
 
+	// The MCP door and its OAuth endpoints. Registered before the SPA catch-all
+	// for the same reason every other route is, and only when configured: a hub
+	// with no MCP block has no /mcp at all rather than an unauthenticated one.
+	if s.MCP != nil {
+		s.MCP.Register(mux.ServeMux)
+		mcpHandler := s.MCPHandler()
+		mux.Handle("POST /mcp", mcpHandler)
+		mux.Handle("GET /mcp", mcpHandler)
+		mux.Handle("DELETE /mcp", mcpHandler)
+	}
+
 	mux.Handle("GET /", s.frontend(static))
 	if s.Auth != nil {
 		// The provider registers /auth/* on the concrete mux: those routes are
@@ -1002,7 +1024,14 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.Register(mux.ServeMux)
 	}
 	s.routes = mux.pats
-	return s.rateLimitAuth(s.authGate(mux))
+	h := s.rateLimitAuth(s.authGate(mux))
+	// Kept so MCP tools can re-enter the API as internal clients (mcp.go).
+	// The bare mux, NOT the wrapped handler: a tool call has already passed
+	// the OAuth check and carries its identity on the context, so sending it
+	// back through authGate would ask a cookie-shaped gate about a request
+	// that has no cookie.
+	s.apiMux = mux
+	return h
 }
 
 // frontend serves the embedded single-page app. Real asset files (app.js,
@@ -1173,6 +1202,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// invisible. Wire authPage up if that becomes the question.
 	if s.Analytics.Key != "" {
 		out["analytics"] = map[string]string{"key": s.Analytics.Key, "host": s.Analytics.Endpoint()}
+	}
+	// The MCP door, so the account menu can offer connection management only
+	// on a hub that has one. A boolean, not the endpoint: the client already
+	// knows the origin, and an absent key means the feature is off rather
+	// than merely unconfigured.
+	if s.MCP != nil {
+		out["mcp"] = true
 	}
 	if me.Email != "" {
 		out["me"] = map[string]string{"email": me.Email, "name": me.Name}

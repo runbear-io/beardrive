@@ -88,6 +88,7 @@ type fileMetaStore struct {
 	projects *fileProjectRepo
 	orgs     *fileOrgRepo
 	shares   *fileShareRepo
+	mcp      *fileMCPRepo
 	devices  *fileDeviceRepo
 	reads    *fileReadRepo
 	sessions *fileSessionReadRepo
@@ -101,6 +102,7 @@ func OpenFileStore(dir string) (MetaStore, error) {
 		projects: newFileProjectRepo(filepath.Join(dir, "projects.json")),
 		orgs:     newFileOrgRepo(filepath.Join(dir, "orgs.json")),
 		shares:   newFileShareRepo(filepath.Join(dir, "shares.json")),
+		mcp:      newFileMCPRepo(filepath.Join(dir, "mcp.json")),
 		devices:  newFileDeviceRepo(filepath.Join(dir, "devices.json")),
 		reads:    newFileReadRepo(filepath.Join(dir, "reads.json")),
 		sessions: newFileSessionReadRepo(filepath.Join(dir, "sessions.json")),
@@ -111,6 +113,7 @@ func (s *fileMetaStore) Accounts() AccountRepo         { return s.accounts }
 func (s *fileMetaStore) Projects() ProjectRepo         { return s.projects }
 func (s *fileMetaStore) Orgs() OrgRepo                 { return s.orgs }
 func (s *fileMetaStore) Shares() ShareRepo             { return s.shares }
+func (s *fileMetaStore) MCP() MCPRepo                  { return s.mcp }
 func (s *fileMetaStore) Devices() DeviceRepo           { return s.devices }
 func (s *fileMetaStore) Reads() ReadRepo               { return s.reads }
 func (s *fileMetaStore) SessionReads() SessionReadRepo { return s.sessions }
@@ -653,6 +656,106 @@ func (r *fileShareRepo) Delete(token string) error {
 		return err
 	}
 	delete(r.byToken, token)
+	return r.write()
+}
+
+// ---- mcp grants + clients (mcp.json) ----
+
+type fileMCPRepo struct {
+	path    string
+	mu      sync.Mutex
+	grants  map[string]MCPGrant
+	clients map[string]MCPClient
+}
+
+func newFileMCPRepo(path string) *fileMCPRepo {
+	return &fileMCPRepo{path: path, grants: map[string]MCPGrant{}, clients: map[string]MCPClient{}}
+}
+
+func (r *fileMCPRepo) Version() (string, error) { return fileVersion(r.path) }
+
+type mcpFileShape struct {
+	Grants  []MCPGrant  `json:"grants"`
+	Clients []MCPClient `json:"clients"`
+}
+
+// reload re-reads before every write, for the reason fileShareRepo.reload
+// states — and the stakes are the same shape. The row a stale rewrite brings
+// back here is a REVOKED GRANT: an access token the user pulled on one hub
+// process would start working again the moment any second process registered
+// any unrelated client. Callers hold mu.
+func (r *fileMCPRepo) reload() (mcpFileShape, error) {
+	var f mcpFileShape
+	if _, err := readJSONFile(r.path, &f); err != nil {
+		return f, err
+	}
+	r.grants = map[string]MCPGrant{}
+	for _, g := range f.Grants {
+		r.grants[g.ID] = g
+	}
+	r.clients = map[string]MCPClient{}
+	for _, c := range f.Clients {
+		r.clients[c.ID] = c
+	}
+	return f, nil
+}
+
+func (r *fileMCPRepo) write() error {
+	var f mcpFileShape
+	for _, g := range r.grants {
+		f.Grants = append(f.Grants, g)
+	}
+	for _, c := range r.clients {
+		f.Clients = append(f.Clients, c)
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(r.path, append(data, '\n'))
+}
+
+func (r *fileMCPRepo) LoadGrants() ([]MCPGrant, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f, err := r.reload()
+	return f.Grants, err
+}
+
+func (r *fileMCPRepo) LoadClients() ([]MCPClient, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f, err := r.reload()
+	return f.Clients, err
+}
+
+func (r *fileMCPRepo) PutGrant(g MCPGrant) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	r.grants[g.ID] = g
+	return r.write()
+}
+
+func (r *fileMCPRepo) DeleteGrant(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	delete(r.grants, id)
+	return r.write()
+}
+
+func (r *fileMCPRepo) PutClient(c MCPClient) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	r.clients[c.ID] = c
 	return r.write()
 }
 

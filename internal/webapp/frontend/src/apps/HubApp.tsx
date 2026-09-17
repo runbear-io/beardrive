@@ -7,6 +7,7 @@ import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
 import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
+import { McpConnections } from "../components/McpConnections";
 import { ProjectNav } from "../components/ProjectNav";
 import { useQueryClient } from "@tanstack/react-query";
 import { AccountBar, SignedOutBar } from "../components/AccountBar";
@@ -210,6 +211,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       org={org}
       orgActive={!!route.org}
       billing={config.billing}
+      mcp={config.mcp}
       signOut={config.desktop ? () => desktopAuth("/api/desktop/logout") : undefined}
       admin={
         isAdmin
@@ -370,6 +372,22 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // project-scoped — like the org route it borrows whichever project the
   // sidebar is showing. An OSS hub has no billing block; a hand-typed
   // /billing there says so instead of silently showing files.
+  // Connected agents (MCP). Account-level like billing: a grant can span
+  // several projects, so it has no project to live under.
+  const connectionsPage = route.connections
+    ? {
+        crumb: "Connected agents",
+        body: config.mcp ? (
+          <McpConnections projects={projects} />
+        ) : (
+          <div className="empty">
+            <h3>No agent access on this hub</h3>
+            <p>This BearDrive hub doesn't serve an MCP endpoint.</p>
+          </div>
+        ),
+      }
+    : null;
+
   const billingPage = route.billing
     ? {
         crumb: "Billing",
@@ -418,9 +436,11 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // guard of their own.
 
   // Landing ("/") resolves to a real project URL; replace so back/forward
-  // never bounces through the redirect. The org route is not project-scoped,
-  // so it is exempt — it borrows whichever project the sidebar is showing.
-  if (!route.org && !route.billing && route.project !== current.id) {
+  // never bounces through the redirect. The account-level routes are exempt —
+  // org, billing and connections are not project-scoped, they just borrow
+  // whichever project the sidebar is showing. A new one added here without
+  // being listed below silently redirects to a project instead of rendering.
+  if (!route.org && !route.billing && !route.connections && route.project !== current.id) {
     return <Redirect to={"/" + current.id} />;
   }
 
@@ -504,7 +524,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
         ),
         orgBar: accountBar,
       }}
-      panel={activePanel || orgPage || billingPage || routePage}
+      panel={activePanel || orgPage || billingPage || connectionsPage || routePage}
       onClosePanel={() => setPanel(null)}
       />
       {newProjectDialog}

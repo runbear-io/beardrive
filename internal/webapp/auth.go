@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"context"
 	"net/http"
 	"strings"
 )
@@ -122,9 +123,33 @@ func (s *Server) authGate(next http.Handler) http.Handler {
 // requestUser returns the authenticated user, or a zero User when auth is
 // disabled (everything then runs as an anonymous single user).
 func (s *Server) requestUser(r *http.Request) User {
+	// A user already resolved onto the context wins. This is how the MCP door
+	// tells the rest of the hub who a re-entrant internal call acts as: the
+	// bearer token on such a request is an MCP access token, which no
+	// AuthProvider has ever heard of, so asking Authenticate would answer
+	// "nobody" and every tool would act as an anonymous caller.
+	//
+	// Safe because a context cannot cross a network: only in-process code sets
+	// this, and the only thing that sets it is MCPHandler, after the token has
+	// been resolved to a live grant.
+	if u, ok := userFrom(r.Context()); ok {
+		return u
+	}
 	if s.Auth == nil {
 		return User{}
 	}
 	u, _ := s.Auth.Authenticate(r)
 	return u
+}
+
+type ctxUserKey struct{}
+
+// withUser pins the account an in-process request acts as. See requestUser.
+func withUser(r *http.Request, u User) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), ctxUserKey{}, u))
+}
+
+func userFrom(ctx context.Context) (User, bool) {
+	u, ok := ctx.Value(ctxUserKey{}).(User)
+	return u, ok
 }

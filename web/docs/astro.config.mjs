@@ -135,6 +135,7 @@ export default defineConfig({
           // for. Command-by-command CLI detail belongs in Reference.
           label: "Working with agents",
           items: [
+            { label: "Connect an agent over MCP", slug: "guides/mcp" },
             { label: "Shared agent memory", slug: "guides/shared-agent-memory" },
             { label: "Artifacts and links", slug: "guides/agent-artifacts" },
             { label: "What agents read", slug: "guides/what-agents-read" },

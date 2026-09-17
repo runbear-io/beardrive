@@ -93,6 +93,11 @@ export interface Route {
   // from /api/config's billing block. Reserved only in hub mode — project
   // ids are UUIDs (or legacy p-…), so the segment can't collide with one.
   billing?: boolean;
+  // Connected agents (MCP) are account-level, not project-level: one grant can
+  // span several projects, so it has no project to live under. Top-level like
+  // the org and billing routes, and reserved here for the same reason — a
+  // project id is a UUID (or legacy p-…) and cannot collide with the word.
+  connections?: boolean;
   project?: string;
   path: string;
   view?: ViewName;
@@ -207,6 +212,9 @@ function parsePath(pathname: string, mode: "volume" | "hub"): Route {
   }
   if (raw === "billing" || raw.startsWith("billing/")) {
     return { billing: true, path: "" };
+  }
+  if (raw === "connections" || raw.startsWith("connections/")) {
+    return { connections: true, path: "" };
   }
   const slash = raw.indexOf("/");
   if (slash === -1) return { project: raw, path: "" };

@@ -177,7 +177,25 @@ func (s *Server) pathPermOf(r *http.Request, p Project, filePath string) string 
 // requirePathPerm answers the request itself when the caller is short of level
 // on a path. Same shape (and same 403 body) as requirePerm one level up.
 func (s *Server) requirePathPerm(w http.ResponseWriter, r *http.Request, p Project, filePath, level string) bool {
-	return s.permit(w, s.pathPermOf(r, p, filePath), level)
+	have := s.pathPermOf(r, p, filePath)
+	if atLeast(have, level) {
+		return true
+	}
+	// Say WHERE the refusal comes from. permDenied speaks about the project
+	// ("you have read-only access to this project"), which is a false
+	// statement when the caller has write on the project and a folder rule is
+	// what stopped them — they get told to go fix project permissions they
+	// already have. The folder's name discloses nothing: it is the prefix
+	// they just named, and /scope already tells a device its denied prefixes.
+	if base := s.projectPermOf(r, p); atLeast(base, level) {
+		if rule, ok := p.ruleFor(filePath); ok {
+			http.Error(w, fmt.Sprintf("you have %s access to this project but not to %s",
+				base, rule.Prefix), http.StatusForbidden)
+			return false
+		}
+	}
+	http.Error(w, permDenied(level), http.StatusForbidden)
+	return false
 }
 
 // scopeTag identifies what ONE account can currently see in a project. It

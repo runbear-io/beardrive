@@ -72,7 +72,7 @@ func (s *Server) projectPerm(r *http.Request, projectID string) string {
 		return PermRead // the desktop viewer is read-only, for everyone
 	}
 	if s.Dir == nil || s.Auth == nil {
-		return PermAdmin
+		return capByGrant(r, projectID, PermAdmin)
 	}
 	p, ok := s.Projects.Get(projectID)
 	if !ok {
@@ -88,6 +88,17 @@ func (s *Server) projectPerm(r *http.Request, projectID string) string {
 // Postgres. Same rules, same fail-closed defaults; the resolution just does
 // not happen again.
 func (s *Server) projectPermOf(r *http.Request, p Project) string {
+	// The grant ceiling is applied OUTSIDE the resolution, not on one branch
+	// of it. Every early return below is a path that answers without asking
+	// who the caller is — Desktop, and a hub with no directory — and an MCP
+	// token reaching one of those would have come back PermAdmin on a project
+	// its grant never named. A ceiling that only covers the common branch is
+	// the same shape of bug as a gate wired to one concrete type: enforced
+	// further than it can be satisfied, and silent about the gap.
+	return capByGrant(r, p.ID, s.resolveProjectPerm(r, p))
+}
+
+func (s *Server) resolveProjectPerm(r *http.Request, p Project) string {
 	if s.Desktop {
 		return PermRead // the desktop viewer is read-only, for everyone
 	}

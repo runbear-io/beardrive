@@ -57,6 +57,7 @@ export function AccountBar({
   admin,
   orgActive,
   billing,
+  mcp,
   signOut,
 }: {
   me: { email: string; name: string };
@@ -64,6 +65,7 @@ export function AccountBar({
   admin?: { pending: number; onClick: () => void }; // hub admins only
   orgActive?: boolean; // the org page is the open surface
   billing?: { plan: string; url: string }; // managed deployments only
+  mcp?: boolean; // the hub serves /mcp, so agent connections can be managed
   // Desktop app: sign-out is a sidecar call, not the hub's /auth/logout page.
   signOut?: () => void;
 }) {
@@ -77,6 +79,7 @@ export function AccountBar({
   const [menuOpen, setMenuOpen] = useState(false);
   const orgLink = org ? linkProps(org.manage_url) : null;
   const billingLink = billing ? linkProps(billing.url) : null;
+  const connectionsLink = linkProps("/connections");
   return (
     <footer id="accountbar">
       <StarOnGitHub />
@@ -149,6 +152,23 @@ export function AccountBar({
             </>
           )}
           <DropdownMenuLabel className="menu-sec">Account</DropdownMenuLabel>
+          {mcp && (
+            <DropdownMenuItem asChild>
+              {/* An in-app route (/connections), account-level: one grant can
+                  span several projects, so it has no project to live under. */}
+              <a
+                id="menu-connections"
+                {...connectionsLink}
+                onClick={(e) => {
+                  connectionsLink.onClick?.(e);
+                  setMenuOpen(false);
+                }}
+              >
+                <Icon name="plug" />
+                <span>Connected agents</span>
+              </a>
+            </DropdownMenuItem>
+          )}
           {signOut ? (
             <DropdownMenuItem id="signout" onSelect={signOut}>
               <Icon name="power" />

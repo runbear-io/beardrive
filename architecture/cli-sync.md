@@ -262,8 +262,9 @@ classDiagram
         sync stop scope grep stale forget status log
         restore url share export import
         web desktop daemon hooks read-log
-        resume autostart
+        resume autostart mcp
     }
+    note for Commands "mcp list / mcp revoke &lt;id&gt; is the terminal half of the hub's Connected agents page — the same /api/mcp/grants routes, reached with the saved device token. A revocation is a security control, so it must not depend on a browser being available"
     note for Commands "desktop is hidden and spawned by the BearDrive Desktop app: a loopback-only webapp.Server over this machine's volume stores (Desktop:true ⇒ PermRead for everyone), with sync control, sign-in and onboarding under /api/desktop/*"
     note for Commands "desktopRoutes classifies every per-project hub route as local (with a required reason) or proxied, and desktopHandler REGISTERS FROM IT — so &quot;classified as proxied&quot; and &quot;actually proxied&quot; cannot drift. It exists because the desktop mux falls through to a local server, which makes forgetting a route invisible: the local registry answers plausibly and wrongly. TestDesktopRoutesClassified fails on any hub route not listed, reading the hub's own list from webapp.APIRoutes"
     note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"

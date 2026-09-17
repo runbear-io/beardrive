@@ -559,3 +559,80 @@ func TestSQLMigrateRefusesALostFolderTable(t *testing.T) {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }
+
+// TestMetaStoreMCPConformance runs MCP grants and registered OAuth clients
+// through every backend: write, reopen over the same storage, and assert both
+// survived with their fields intact.
+//
+// The property worth pinning is that a REVOKED grant stays revoked across a
+// reopen. A grant is a live credential; a backend that loses a deletion hands
+// an already-pulled access token back the next time the hub restarts.
+func TestMetaStoreMCPConformance(t *testing.T) {
+	for _, be := range metaBackends(t) {
+		t.Run(be.name, func(t *testing.T) {
+			be.reset(t)
+
+			st := be.open(t)
+			repo := st.MCP()
+
+			client := MCPClient{
+				ID: "mcpc_1", Name: "Claude",
+				RedirectURIs: []string{"https://claude.ai/cb", "http://127.0.0.1:1/cb"},
+				Created:      time.Now().UTC().Truncate(time.Second),
+			}
+			if err := repo.PutClient(client); err != nil {
+				t.Fatal(err)
+			}
+			keep := MCPGrant{
+				ID: "mcpg_keep", Account: "dev@x.io", ClientID: client.ID, ClientName: "Claude",
+				Projects: []string{"p-1", "p-2"}, Created: time.Now().UTC().Truncate(time.Second),
+				TokenDigest: "aa", RefreshDigest: "bb",
+			}
+			gone := keep
+			gone.ID, gone.Projects, gone.TokenDigest = "mcpg_gone", []string{"p-3"}, "cc"
+			for _, g := range []MCPGrant{keep, gone} {
+				if err := repo.PutGrant(g); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := repo.DeleteGrant(gone.ID); err != nil {
+				t.Fatal(err)
+			}
+			st.Close()
+
+			// ---- reopen over the same storage ----
+			st = be.open(t)
+			defer st.Close()
+			repo = st.MCP()
+
+			clients, err := repo.LoadClients()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(clients) != 1 || clients[0].ID != client.ID || clients[0].Name != "Claude" {
+				t.Fatalf("clients = %+v", clients)
+			}
+			if len(clients[0].RedirectURIs) != 2 {
+				t.Fatalf("redirect URIs did not survive: %+v", clients[0].RedirectURIs)
+			}
+
+			grants, err := repo.LoadGrants()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(grants) != 1 {
+				t.Fatalf("grants = %+v, want only the surviving one (a revoked grant came back)", grants)
+			}
+			g := grants[0]
+			if g.ID != keep.ID || g.Account != keep.Account || g.ClientID != client.ID {
+				t.Fatalf("grant = %+v", g)
+			}
+			if len(g.Projects) != 2 || g.Projects[0] != "p-1" || g.Projects[1] != "p-2" {
+				t.Fatalf("project set did not survive: %+v", g.Projects)
+			}
+			if g.TokenDigest != "aa" || g.RefreshDigest != "bb" {
+				t.Fatalf("digests did not survive: %+v", g)
+			}
+		})
+	}
+}

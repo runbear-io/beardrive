@@ -780,6 +780,18 @@ func (s *Server) heatByDevice(w http.ResponseWriter, r *http.Request, project st
 	vis := s.visibility(r)
 	devices := make([]deviceHeat, 0, len(byDevice))
 	for id, folders := range byDevice {
+		// Agent actors are not all devices. An MCP grant reads as an agent
+		// too, and its id has never appeared in History — reporting it here
+		// would widen ?by=device's ONE stated privacy exception (device ids,
+		// which every project member already sees) into a second one by
+		// accident.
+		//
+		// Dropped from THIS breakdown only. The reads still count as agent
+		// traffic in the per-path heat every other view is built from; what
+		// they do not get is a row naming the credential that made them.
+		if !validDeviceID(id) {
+			continue
+		}
 		// The keys are FOLDERS, so an unfiltered row names a hidden folder as
 		// plainly as a file listing would.
 		if vis.hides() {

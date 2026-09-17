@@ -34,6 +34,7 @@ type sqlMetaStore struct {
 	projects *sqlProjectRepo
 	orgs     *sqlOrgRepo
 	shares   *sqlShareRepo
+	mcp      *sqlMCPRepo
 	devices  *sqlDeviceRepo
 	reads    *sqlReadRepo
 	sessions *sqlSessionReadRepo
@@ -69,6 +70,7 @@ func OpenSQLStore(driver, dsn string) (MetaStore, error) {
 	s.projects = &sqlProjectRepo{s: s, w: regWriter{s, regProjects}}
 	s.orgs = &sqlOrgRepo{s: s, w: regWriter{s, regOrgs}}
 	s.shares = &sqlShareRepo{s: s, w: regWriter{s, regShares}}
+	s.mcp = &sqlMCPRepo{s: s, w: regWriter{s, regMCP}}
 	s.devices = &sqlDeviceRepo{s: s, w: regWriter{s, regDevices}}
 	s.reads = &sqlReadRepo{s: s, w: regWriter{s, regReads}}
 	s.sessions = &sqlSessionReadRepo{s: s}
@@ -79,6 +81,7 @@ func (s *sqlMetaStore) Accounts() AccountRepo         { return s.accounts }
 func (s *sqlMetaStore) Projects() ProjectRepo         { return s.projects }
 func (s *sqlMetaStore) Orgs() OrgRepo                 { return s.orgs }
 func (s *sqlMetaStore) Shares() ShareRepo             { return s.shares }
+func (s *sqlMetaStore) MCP() MCPRepo                  { return s.mcp }
 func (s *sqlMetaStore) Devices() DeviceRepo           { return s.devices }
 func (s *sqlMetaStore) Reads() ReadRepo               { return s.reads }
 func (s *sqlMetaStore) SessionReads() SessionReadRepo { return s.sessions }
@@ -115,6 +118,7 @@ const (
 	regProjects = "projects"
 	regOrgs     = "orgs"
 	regShares   = "shares"
+	regMCP      = "mcp"
 	regDevices  = "devices"
 	regReads    = "reads"
 )
@@ -221,6 +225,19 @@ func (s *sqlMetaStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS shares (
 			token TEXT PRIMARY KEY, project TEXT NOT NULL, path TEXT NOT NULL,
 			creator TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '')`,
+		// projects is a comma-joined id list rather than a join table: a grant's
+		// project set is read in full on every MCP request and never queried
+		// across grants, so a second table would buy a JOIN on the hot path and
+		// nothing else. Ids are opaque and contain no commas (see newID).
+		`CREATE TABLE IF NOT EXISTS mcp_grants (
+			id TEXT PRIMARY KEY, account TEXT NOT NULL DEFAULT '',
+			client_id TEXT NOT NULL DEFAULT '', client_name TEXT NOT NULL DEFAULT '',
+			projects TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '',
+			last_used TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '',
+			token_digest TEXT NOT NULL DEFAULT '', refresh_digest TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS mcp_clients (
+			id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
+			redirect_uris TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '')`,
 		// device_rows replaces the original `devices` table, whose primary key
 		// was the id alone: two accounts naming one device id collapsed into a
 		// single row, so a restart handed the device to whoever wrote last and
@@ -1016,6 +1033,89 @@ func (r *sqlShareRepo) Put(s Share) error {
 
 func (r *sqlShareRepo) Delete(token string) error {
 	return r.w.exec(`DELETE FROM shares WHERE token = ?`, token)
+}
+
+// ---- mcp grants + clients ----
+
+type sqlMCPRepo struct {
+	s *sqlMetaStore
+	w regWriter
+}
+
+func (r *sqlMCPRepo) Version() (string, error) { return r.s.version(regMCP) }
+
+func (r *sqlMCPRepo) LoadGrants() ([]MCPGrant, error) {
+	rows, err := r.s.db.Query(`SELECT id, account, client_id, client_name, projects,
+		created, last_used, expires, token_digest, refresh_digest FROM mcp_grants`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MCPGrant
+	for rows.Next() {
+		var g MCPGrant
+		var projects, created, lastUsed, expires string
+		if err := rows.Scan(&g.ID, &g.Account, &g.ClientID, &g.ClientName, &projects,
+			&created, &lastUsed, &expires, &g.TokenDigest, &g.RefreshDigest); err != nil {
+			return nil, err
+		}
+		g.Projects = splitList(projects)
+		g.Created, g.LastUsed, g.Expires = tdec(created), tdec(lastUsed), tdec(expires)
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+func (r *sqlMCPRepo) PutGrant(g MCPGrant) error {
+	return r.w.exec(`INSERT INTO mcp_grants (id,account,client_id,client_name,projects,
+		created,last_used,expires,token_digest,refresh_digest) VALUES (?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET account=excluded.account, client_id=excluded.client_id,
+		client_name=excluded.client_name, projects=excluded.projects, created=excluded.created,
+		last_used=excluded.last_used, expires=excluded.expires,
+		token_digest=excluded.token_digest, refresh_digest=excluded.refresh_digest`,
+		g.ID, g.Account, g.ClientID, g.ClientName, strings.Join(g.Projects, ","),
+		tenc(g.Created), tenc(g.LastUsed), tenc(g.Expires), g.TokenDigest, g.RefreshDigest)
+}
+
+func (r *sqlMCPRepo) DeleteGrant(id string) error {
+	return r.w.exec(`DELETE FROM mcp_grants WHERE id = ?`, id)
+}
+
+func (r *sqlMCPRepo) LoadClients() ([]MCPClient, error) {
+	rows, err := r.s.db.Query(`SELECT id, name, redirect_uris, created FROM mcp_clients`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MCPClient
+	for rows.Next() {
+		var c MCPClient
+		var uris, created string
+		if err := rows.Scan(&c.ID, &c.Name, &uris, &created); err != nil {
+			return nil, err
+		}
+		c.RedirectURIs, c.Created = splitList(uris), tdec(created)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (r *sqlMCPRepo) PutClient(c MCPClient) error {
+	return r.w.exec(`INSERT INTO mcp_clients (id,name,redirect_uris,created) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+		redirect_uris=excluded.redirect_uris, created=excluded.created`,
+		c.ID, c.Name, strings.Join(c.RedirectURIs, "\n"), tenc(c.Created))
+}
+
+// splitList is the inverse of strings.Join for the two list columns above.
+// Redirect URIs are newline-joined (a URI may contain a comma), project ids
+// comma-joined; splitting on both is safe because neither separator can appear
+// inside a value of the other kind.
+func splitList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == '\n' })
 }
 
 // ---- devices ----

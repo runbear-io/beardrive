@@ -31,6 +31,10 @@ export interface ServerConfig {
   me?: { email: string; name: string };
   // Managed deployments only: where billing lives + the user's current plan.
   billing?: { plan: string; url: string };
+  // The hub serves an MCP endpoint (agents can connect to it). Absent means
+  // the feature is off, not merely unconfigured — so the account menu hides
+  // connection management entirely rather than offering an empty page.
+  mcp?: boolean;
   // Managed deployments only: PostHog project key + ingestion host. Absent
   // on a self-hosted hub, and absence is what keeps analytics.ts inert.
   analytics?: { key: string; host: string };
@@ -296,4 +300,15 @@ export interface UndoPlan {
   skipped: string[]; // already at their pre-run content: nothing to write
   changed_after: string[]; // someone landed a change on this path after the run
   refused: string[]; // a path the hub's own upload door would refuse
+}
+
+// One agent's standing permission to act as you over a chosen set of projects
+// (GET /api/mcp/grants). The server never sends the tokens themselves, only
+// which client holds them and what it may touch.
+export interface McpGrant {
+  id: string;
+  client_name?: string;
+  projects: string[];
+  created: string;
+  last_used?: string;
 }

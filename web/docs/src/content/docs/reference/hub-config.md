@@ -66,12 +66,50 @@ cloud credentials on the serving machine.
     "retention_days": 400,           // daily buckets older than this fold into all-time totals
     "session_retention_days": 30     // how long History's run cards keep per-session read detail
   },
+  "mcp": { "enabled": true },        // the MCP door at /mcp (hub mode; off by default)
   "database": { "driver": "sqlite", "dsn": "/var/lib/bdrive/hub.db" }
 }
 ```
 
 See [Authentication](/self-hosting/authentication/) for the `auth` block and
 [Database](/self-hosting/database/) for `database`.
+
+## MCP (agent access)
+
+`"mcp": { "enabled": true }` serves an [MCP](https://modelcontextprotocol.io)
+endpoint at `/mcp`, so an agent in Claude, ChatGPT, Cursor or anything else
+that speaks MCP can read and write your projects with **no CLI install and no
+synced folder**. Off by default: a hub that has not decided to allow agent
+access should not have it.
+
+Connecting is an OAuth flow the client starts on its own — it registers
+itself, sends the user to a consent screen on your hub, and the user **ticks
+which projects to connect**. The grant is scoped to exactly those projects and
+can never exceed the permission that account already has, so connecting a
+project you can only view gives the agent read-only access to it.
+
+Enabling `mcp` adds these endpoints:
+
+| Endpoint | What it is |
+|---|---|
+| `/mcp` | The MCP server itself (streamable HTTP, Bearer token) |
+| `/.well-known/oauth-protected-resource` | Tells a client where to authenticate (RFC 9728) |
+| `/.well-known/oauth-authorization-server` | Endpoint discovery (RFC 8414) |
+| `/oauth/register` | Dynamic client registration (RFC 7591) |
+| `/oauth/authorize` | The consent screen with the project picker |
+| `/oauth/token` | Code exchange and refresh |
+| `GET /api/mcp/grants` | The signed-in account's connections |
+| `DELETE /api/mcp/grants/{id}` | Revoke one, immediately |
+
+Access tokens last an hour and refresh silently; revoking a connection kills
+both the access and refresh token at once.
+
+Everything an agent does arrives as the person who connected it: writes show
+up in History under their name, folder permissions apply unchanged, and a
+folder they cannot see is invisible rather than forbidden. Reads are counted
+as **agent** traffic in the read heatmap, never as a person opening a file.
+
+Point a client at `https://your-hub/mcp` and it will do the rest.
 
 ## Running behind a reverse proxy
 
