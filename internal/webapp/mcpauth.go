@@ -855,36 +855,25 @@ Folders you cannot see stay hidden.</p>
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// form-action covers the whole redirect chain a submit sets off, not just
-	// the action URL — so 'self' alone lets the POST reach /oauth/authorize and
-	// then has the browser silently kill the 302 carrying the code back to the
-	// client. The button looks dead. Name the callback's origin too; it was
-	// exact-matched against the client's registered URIs before we rendered
-	// anything, so this widens the policy to precisely the one destination this
-	// authorization was always going to end at.
+	// No form-action, deliberately. It covers EVERY hop of the redirect chain a
+	// submit sets off, and the hub only ever knows the first one: real clients
+	// register an API host that immediately forwards to their app host, so
+	// naming the registered origin just moves the silent breakage one hop later
+	// (Runbear: app.beardrive.ai -> api.runbear.io -> app.runbear.io, blocked at
+	// the third). CSP cannot express "constrain the first hop only".
+	//
+	// Dropping it costs nothing real. Where the code goes is decided by the
+	// exact match against the client's registered redirect_uris in authorize —
+	// a server-side control a browser cannot be talked out of — and by the time
+	// any later hop runs, the code has already been delivered to that URI and
+	// the rest of the chain carries none of it. form-action would only add
+	// anything if this page could be made to submit somewhere else, which needs
+	// injected markup or script: every interpolation here is escaped, and
+	// default-src 'none' (which script-src falls back to) blocks script
+	// outright.
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' "+
-			formActionSrc(r.URL.Query().Get("redirect_uri")))
+		"default-src 'none'; style-src 'unsafe-inline'")
 	io.WriteString(w, b.String())
-}
-
-// formActionSrc is a CSP source expression for one redirect URI: the origin for
-// http(s), and a bare scheme-source for the custom schemes native clients
-// register (cursor://, vscode://), which have no meaningful host to pin. Empty
-// when it cannot be parsed — the caller then emits 'self' alone, which is the
-// old behavior and fails closed.
-func formActionSrc(redirect string) string {
-	u, err := url.Parse(redirect)
-	if err != nil || u.Scheme == "" {
-		return ""
-	}
-	if u.Scheme == "http" || u.Scheme == "https" {
-		if u.Host == "" {
-			return ""
-		}
-		return u.Scheme + "://" + u.Host
-	}
-	return u.Scheme + ":"
 }
 
 // orgLabel is set by the server so the consent page can name orgs; without a
