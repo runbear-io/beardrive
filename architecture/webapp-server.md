@@ -187,15 +187,20 @@ classDiagram
     }
     class collabRoom {
         -updates opaque Yjs updates
+        -subs subscriber to the client id it declared
+        -key project and path, for log lines
         -seeded claimed at join
         -claimed when, so a dead claim can expire
-        +join(sub) log, first
+        +join(sub) backlog, first
+        +identify(sub, cid)
+        +subFor(cid) subscriber
         +post(update, from) ok
         +relay(frame) not logged
+        +relayExcept(frame, from)
         +reset()
     }
     note for collabHub "GET and POST {prefix}collab?path=, proj(PermWrite) — the editing channel, so a read-only member has nothing to send on it. The hub is a RELAY and an append-only log: it never parses a Yjs update, holds no document, and links no CRDT library, which is what keeps the build pure Go (a cgo y-crdt would break the cross-compiled release the way a cgo sqlite would). Nothing here touches the journal — the DOCUMENT is a CRDT between browsers, the FILE is still an ordinary blob written by an ordinary upload/content call from whichever client stopped typing last, so journal.Less and Replay are untouched and every desktop device, agent and older client converges as before. The log is deliberately NOT durable; the file is"
-    note for collabRoom "`seeded` is CLAIMED at join under the room lock, never inferred from an empty log: the log only fills once the seeding client has POSTED, so every joiner arriving inside that window was told to seed too — 32 of 32 in the test that found it — and two clients seeding the same text build two DIFFERENT Yjs documents whose merge duplicates every character. The claim is released when the last editor leaves without having posted, or a tab opened and closed would leave the room claimed but empty and the next joiner would snapshot that emptiness over a real file — and because leave() only fires for a stream that is CLEANLY torn down, a claim that has produced nothing for seedClaimGrace expires on its own: a killed tab otherwise leaves a phantom subscriber holding the room forever, every later joiner is handed a blank document, the visual editor silently refuses to save and the source editor writes that blankness to the file. relay() is the awareness path: broadcast, never recorded, because a caret position replayed to a joiner paints cursors for people who have left"
+    note for collabRoom "`seeded` is CLAIMED at join under the room lock, never inferred from an empty log: the log only fills once the seeding client has POSTED, so every joiner arriving inside that window was told to seed too — 32 of 32 in the test that found it — and two clients seeding the same text build two DIFFERENT Yjs documents whose merge duplicates every character. The claim is released when the last editor leaves without having posted, or a tab opened and closed would leave the room claimed but empty and the next joiner would snapshot that emptiness over a real file — and because leave() only fires for a stream that is CLEANLY torn down, a claim that has produced nothing for seedClaimGrace expires on its own: a killed tab otherwise leaves a phantom subscriber holding the room forever, every later joiner is handed a blank document, the visual editor silently refuses to save and the source editor writes that blankness to the file. relay() is the awareness path: broadcast, never recorded, because a caret position replayed to a joiner paints cursors for people who have left. The POST is a DIFFERENT request from the stream, so the room has no sender to skip unless the browser names one: each stream declares a client id (identify), every POST carries it, and subFor resolves it back to that subscriber — without it the relay mails every editor its own keystrokes, which is 1 of N fan-out wasted and fills the sender's own 32-frame queue. An unknown or absent id means no sender and fans out to everyone, which is what an older frontend gets and stays correct because Yjs updates are idempotent. A drop is logged once per EPISODE, not per frame: a backed-up editor sheds hundreds in a row and the useful signal is that someone in this room fell behind"
 
     class presenceHub {
         <<internal/webapp, presence.go>>

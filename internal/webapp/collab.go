@@ -4,7 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,9 +61,15 @@ const (
 
 type collabRoom struct {
 	mu      sync.Mutex
+	key     string   // project\x00path, for log lines
 	updates [][]byte // opaque Yjs updates, in arrival order
 	bytes   int
-	subs    map[*subscriber]struct{}
+	// subs maps each subscriber to the client id it declared, or "" for a
+	// client that declared none (an older frontend). The id is what lets a
+	// POST — a separate request from the stream — be recognised as coming
+	// from one of the room's own subscribers, so its update is not mailed
+	// back to it.
+	subs    map[*subscriber]string
 	touched time.Time
 	// seeded is CLAIMED at join, not inferred from the log being non-empty.
 	// The log only fills once the seeding client has posted, and every joiner
@@ -95,7 +103,7 @@ func (h *collabHub) room(key string) *collabRoom {
 	h.sweepLocked()
 	r := h.rooms[key]
 	if r == nil {
-		r = &collabRoom{subs: map[*subscriber]struct{}{}, touched: time.Now()}
+		r = &collabRoom{key: key, subs: map[*subscriber]string{}, touched: time.Now()}
 		h.rooms[key] = r
 	}
 	return r
@@ -120,10 +128,10 @@ func (h *collabHub) sweepLocked() {
 // is the one that must seed the document from the file. Both under one lock:
 // "am I first" and "here is what exists" have to be answered together or two
 // clients both seed and the text doubles.
-func (r *collabRoom) join(sub *subscriber) (log [][]byte, first bool) {
+func (r *collabRoom) join(sub *subscriber) (backlog [][]byte, first bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.subs[sub] = struct{}{}
+	r.subs[sub] = ""
 	r.touched = time.Now()
 	// Claimed but still empty well past the grace: whoever took it is not
 	// coming back with content, and somebody has to seed or this document can
@@ -134,9 +142,41 @@ func (r *collabRoom) join(sub *subscriber) (log [][]byte, first bool) {
 		r.seeded = true
 		r.claimed = time.Now()
 	}
-	log = make([][]byte, len(r.updates))
-	copy(log, r.updates)
-	return log, first
+	backlog = make([][]byte, len(r.updates))
+	copy(backlog, r.updates)
+	return backlog, first
+}
+
+// identify records the client id a subscriber declared on its stream. Kept
+// separate from join so join stays the one call that answers "am I the
+// seeder", which is the question the whole room is built around.
+func (r *collabRoom) identify(sub *subscriber, cid string) {
+	if cid == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.subs[sub]; ok {
+		r.subs[sub] = cid
+	}
+}
+
+// subFor resolves a client id to the subscriber holding that stream, so a
+// POST can be attributed to it. Returns nil for an unknown or empty id, which
+// post() reads as "no sender" and fans out to everyone — the old behaviour,
+// which stays correct because Yjs updates are idempotent.
+func (r *collabRoom) subFor(cid string) *subscriber {
+	if cid == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for sub, id := range r.subs {
+		if id == cid {
+			return sub
+		}
+	}
+	return nil
 }
 
 func (r *collabRoom) leave(sub *subscriber) {
@@ -185,7 +225,17 @@ func (r *collabRoom) post(update []byte, from *subscriber) bool {
 			// the thread of it: dropping one update is not recoverable for a
 			// CRDT peer the way a dropped file-change notification is, so it
 			// is told to rebuild rather than left silently diverged.
-			sub.lost.Store(true)
+			//
+			// Swap, not Store, so this logs once per episode rather than once
+			// per dropped frame: a backed-up editor drops hundreds in a row,
+			// and the useful signal is "someone in this room fell behind",
+			// not a line for each frame. Cleared when the stream writes the
+			// resync, so the next episode says so again.
+			if !sub.lost.Swap(true) {
+				proj, path, _ := strings.Cut(r.key, "\x00")
+				log.Printf("collab: editor fell behind in %s/%s (%d in room); told to rebuild",
+					proj, path, len(peers)+1)
+			}
 		}
 	}
 	return true
@@ -193,7 +243,11 @@ func (r *collabRoom) post(update []byte, from *subscriber) bool {
 
 // relay fans a frame out without recording it. Used for awareness, which is
 // true for a moment and then is not.
-func (r *collabRoom) relay(ev collabFrame) {
+func (r *collabRoom) relay(ev collabFrame) { r.relayExcept(ev, nil) }
+
+// relayExcept is relay, skipping one subscriber — the sender, who already
+// knows where its own caret is.
+func (r *collabRoom) relayExcept(ev collabFrame, from *subscriber) {
 	frame, err := json.Marshal(ev)
 	if err != nil {
 		return
@@ -201,7 +255,9 @@ func (r *collabRoom) relay(ev collabFrame) {
 	r.mu.Lock()
 	peers := make([]*subscriber, 0, len(r.subs))
 	for sub := range r.subs {
-		peers = append(peers, sub)
+		if sub != from {
+			peers = append(peers, sub)
+		}
 	}
 	r.touched = time.Now()
 	r.mu.Unlock()
@@ -274,8 +330,12 @@ func (s *Server) handleCollabStream(v *volume, w http.ResponseWriter, r *http.Re
 		return
 	}
 	defer s.events().unsubscribe("collab:"+key, sub)
-	log, first := room.join(sub)
+	backlog, first := room.join(sub)
 	defer room.leave(sub)
+	// The id this browser also puts on its POSTs, so its own updates are not
+	// relayed back to it. Optional: an older frontend sends none and simply
+	// keeps receiving its own echoes, as it always did.
+	room.identify(sub, r.URL.Query().Get("cid"))
 
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
@@ -288,7 +348,7 @@ func (s *Server) handleCollabStream(v *volume, w http.ResponseWriter, r *http.Re
 	}
 
 	hello := collabFrame{Type: "hello", Seed: first}
-	for _, u := range log {
+	for _, u := range backlog {
 		hello.Log = append(hello.Log, b64(u))
 	}
 	frame, err := json.Marshal(hello)
@@ -346,6 +406,8 @@ func (s *Server) handleCollabPost(v *volume, w http.ResponseWriter, r *http.Requ
 	var req struct {
 		Update    string `json:"update"`
 		Awareness string `json:"awareness"`
+		// CID identifies the caller's own stream in this room; see identify.
+		CID string `json:"cid"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxUpdateBytes*2)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
@@ -358,9 +420,9 @@ func (s *Server) handleCollabPost(v *volume, w http.ResponseWriter, r *http.Requ
 			http.Error(w, "awareness must be base64 and under the size limit", http.StatusBadRequest)
 			return
 		}
-		s.collab().room(roomKey(projectID(r), path)).relay(collabFrame{
-			Type: "awareness", Awareness: b64(aw),
-		})
+		room := s.collab().room(roomKey(projectID(r), path))
+		room.relayExcept(collabFrame{Type: "awareness", Awareness: b64(aw)},
+			room.subFor(req.CID))
 		writeJSON(w, map[string]any{"ok": true})
 		return
 	}
@@ -370,7 +432,7 @@ func (s *Server) handleCollabPost(v *volume, w http.ResponseWriter, r *http.Requ
 		return
 	}
 	room := s.collab().room(roomKey(projectID(r), path))
-	if !room.post(update, nil) {
+	if !room.post(update, room.subFor(req.CID)) {
 		room.reset()
 		writeJSON(w, map[string]any{"ok": true, "full": true})
 		return
