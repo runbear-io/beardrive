@@ -245,15 +245,23 @@ A frame names the paths that changed. Use them.
 
 ### Stage 5 — a transient failure must not end an editing session
 
-- [ ] `useTextAt` retries transient statuses (429, 5xx) with backoff instead of
-      `retry: false` (`hooks/useBlob.ts:50`); a pinned `?v=` URL keeps today's
-      no-retry behavior
-- [ ] `EditView` never unmounts a live editor on a read error — the failure is
-      a banner, the buffer and its save timer stay alive
-      (`components/FileView.tsx:281`)
-- [ ] The collab stream is not torn down by a failed *file* read
-- [ ] Test (e2e): with `file?path=` forced to 429, the editor stays mounted,
-      the buffer keeps its text, and a save still lands once the route recovers
+- [x] `HttpError` carries the status (`api/http.ts`), so a retry policy can be
+      keyed on 429/5xx instead of matching on error prose that product copy
+      rewrites. `.message` is unchanged, so every existing toast reads as before
+- [x] `useTextAt` retries transient failures with backoff (1s/2s/4s) instead of
+      `retry: false`; 403 and 404 are answers and are not retried; a pinned
+      `?v=` URL keeps today's no-retry behavior
+- [x] `EditView` only treats a read error as fatal when there is no `data` yet.
+      React Query keeps the last good body across a failed refetch, so a live
+      editor keeps its buffer, its idle save timer AND its co-editing stream
+- [x] The failure is a banner (`#read-stale`) that says the work is untouched
+      and still saving
+- [x] Test (e2e): with `file?path=` forced to 429, the editor stays mounted,
+      the buffer keeps its typed text, no `.empty` state appears, and a save
+      still lands once the route recovers
+- [x] Verified the gate FAILS on the previous behaviour (the banner never
+      appears, because the editor was replaced by "Could not open … for
+      editing")
 
 **Success criteria**
 
@@ -310,7 +318,7 @@ claim that it is done._
 | 2 — compress + revalidate | **done** | Go + e2e green. Prod HAR: pending |
 | 3 — narrow the fan-out | blocked on 1 | |
 | 4 — stop no-op writes | blocked on 3 | |
-| 5 — survive a failure | not started | |
+| 5 — survive a failure | **done** | e2e green, and verified failing on the old behaviour |
 | 6 — slim the payload | ready | |
 
 ### Measurements

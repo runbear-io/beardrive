@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { getResponse } from "../api/http";
+import { getResponse, HttpError } from "../api/http";
 import { MAX_BYTES, sniffBytes, type BlobText } from "../lib/sniff";
 
 // One URL's bytes, decoded as text when they are text. The sniff itself
@@ -46,13 +46,27 @@ export function fileURLFor(apiBase: string, path: string, version?: string): str
 // staleness cannot apply and re-expanding a history row costs no request. A
 // live path must never be pinned that way — a teammate's edit would keep
 // serving the old body.
+/* Worth another try, or an answer?
+
+   429 and 5xx are the server saying "not now"; a dropped connection is not an
+   answer at all. 403 and 404 ARE answers, and retrying them just spends
+   requests on a hub that is already telling us to slow down. */
+function transient(e: unknown): boolean {
+  return !(e instanceof HttpError) || e.status === 429 || e.status >= 500;
+}
+
 export function useTextAt(url: string, key: unknown[], enabled: boolean, immutable: boolean) {
   return useQuery({
     queryKey: key,
     queryFn: () => fetchBlobText(url),
     enabled,
     ...(immutable ? { staleTime: Infinity, gcTime: Infinity } : {}),
-    retry: false,
+    // A pinned ?v= URL is content-addressed: if it failed it failed, and
+    // there is no editor open on it to protect. A LIVE path is different —
+    // one 429 used to end an editing session (see EditView), so it backs off
+    // and tries again rather than turning into a dead end.
+    retry: immutable ? false : (count, e) => count < 3 && transient(e),
+    retryDelay: (count) => Math.min(1_000 * 2 ** count, 8_000),
   });
 }
 

@@ -285,7 +285,16 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     // fine still reads "connecting" forever.
   }, [state, collab, onMeta]);
 
-  if (error)
+  /* A read that failed is only fatal before there is anything to lose.
+
+     This used to be `if (error)`, which unmounted a LIVE editor the moment a
+     refetch failed — taking the buffer, its idle save timer and the co-editing
+     stream with it, and leaving "Could not open … for editing" over work that
+     was still perfectly intact. One 429 from the hub's rate limiter was enough,
+     and the only way back was a reload. React Query keeps the last good `data`
+     across a failed refetch, so the editor keeps running and the failure is a
+     banner (BEA network-efficiency stage 5). */
+  if (error && !data)
     return <div className="empty">Could not open {path} for editing.</div>;
   if (!data) return <div className="empty">Loading…</div>;
   if (data.kind !== "text") {
@@ -298,6 +307,12 @@ function EditView(props: Parameters<typeof FileView>[0]) {
 
   return (
     <>
+      {error && (
+        <div id="read-stale" className="banner">
+          Could not check this file for changes just now — your work is
+          untouched and still saving. Retrying.
+        </div>
+      )}
       {peerWrote && (
         <div id="peer-wrote" className="banner">
           Someone else changed this file while you were editing. Your buffer is

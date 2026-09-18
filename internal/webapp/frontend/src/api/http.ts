@@ -79,8 +79,24 @@ function errorFor(status: number, body: string): string {
   }
 }
 
+/* The status travels with the message.
+
+   Callers used to get a bare Error, so anything wanting to tell a 429 from a
+   404 had to match on prose — which is how a retry policy ends up keyed on
+   copy that a product decision then rewrites. `.message` is unchanged, so
+   every existing toast and error branch reads exactly as before. */
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
 async function fail(r: Response): Promise<never> {
-  throw new Error(errorFor(r.status, await r.text()));
+  throw new HttpError(r.status, errorFor(r.status, await r.text()));
 }
 
 export async function getJSON<T>(url: string): Promise<T> {
