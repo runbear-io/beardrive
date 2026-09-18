@@ -225,7 +225,7 @@ classDiagram
         +People roster, presence frames only
     }
     note for eventHub "GET {prefix}events, proj(PermRead) — reading the stream names paths, so it sits behind the same permission the tree does, and proj() already walls it by org membership. publish() is called from the FIVE write handlers beside captureChange, never inside it: that one is the PostHog path, whose contract is that &quot;nothing here carries a path or a file name&quot;, and whose signature is counts-only. publish sits on the sync push path, so it never blocks and never errors — it copies the subscriber set under the lock and sends outside it, and a full buffer marks the subscriber lost rather than waiting. Bounded (subBuffer 32, 256/project, 4096/hub) in the ratelimit.go mold"
-    note for subscriber "A reader that falls behind is not waited for: the next frame it does receive is preceded by a single {type:resync}, because a client that missed one change and a client that missed fifty both need the same thing — to refetch. The frontend keeps its 15s tree poll underneath all of this, so a dropped frame self-heals regardless"
+    note for subscriber "A reader that falls behind is not waited for: the next frame it does receive is preceded by a single {type:resync}, because a client that missed one change and a client that missed fifty both need the same thing — to refetch. The frontend keeps a 5-minute tree refetch underneath all of this, so a dropped frame self-heals regardless — slower than the 15s poll it replaced, which is the point: a resync frame already covers the case this insures against"
 
     class wireCodec {
         <<internal/remote, compress.go>>

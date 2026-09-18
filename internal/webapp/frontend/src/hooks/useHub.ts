@@ -13,11 +13,13 @@ const projectsQuery = {
   queryFn: () => getJSON<ProjectList>("/api/projects"),
 };
 
+// Not polled: a project appears or disappears through an action this client
+// took (create, join, delete), and each of those invalidates ["projects"]
+// directly. The 30s timer it used to carry was the classic app's refresh.
 export function useProjects(enabled: boolean) {
   return useQuery({
     ...projectsQuery,
     enabled,
-    refetchInterval: 30_000,
     select: (d) => d.projects || [],
   });
 }
