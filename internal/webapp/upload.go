@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -465,6 +466,29 @@ func (s *Server) handleUploadInit(v *volume, w http.ResponseWriter, r *http.Requ
 	writeJSON(w, map[string]any{"mode": "server"})
 }
 
+// lockPath serializes writes to one path within this process. Returns the
+// unlock, so callers read `defer s.lockPath(...)()`.
+func (s *Server) lockPath(project, p string) func() {
+	v, _ := s.pathLocks.LoadOrStore(project+"\x00"+p, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// headBlob is the sha a path currently resolves to, and whether it resolves at
+// all. Read from the cached snapshot rather than the journal: every write on
+// this hub invalidates it, so the answer is as fresh as the last change, and a
+// stale one can only cost a spurious 409 the client recovers from — never a
+// missed conflict that costs somebody their text.
+func (s *Server) headBlob(ctx context.Context, v *volume, p string) (string, bool) {
+	snap, err := v.snapshot(ctx)
+	if err != nil {
+		return "", false
+	}
+	fi, ok := snap.files[p]
+	return fi.Blob, ok
+}
+
 // handleUploadContent receives content through the server (server mode).
 func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.Request) {
 	up := s.gateUpload(v, w)
@@ -478,6 +502,41 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	}
 	if !s.writablePath(w, r, p) {
 		return
+	}
+	// Check-then-write, serialized per path: without this both halves of a
+	// simultaneous save pass the check before either lands, and the second
+	// still erases the first — which is exactly the case this exists for, two
+	// people typing at once. Process-local, which is the same assumption the
+	// journal's read-modify-write already makes about this hub being the
+	// single writer of its own key.
+	//
+	// ponytail: a sync.Map of mutexes, never pruned — one entry per path ever
+	// written through this route, a few dozen bytes each. Swap for a sharded
+	// lock table if a hub ever writes enough distinct paths for that to show
+	// up in a heap profile.
+	defer s.lockPath(projectID(r), p)()
+
+	// The browser says which version its buffer was built on. A mismatch means
+	// somebody else wrote this path in the meantime, and taking this body
+	// wholesale would erase their work — which is exactly what happened when a
+	// client lost the co-editing relay: two browsers holding different
+	// documents, each overwriting the other every few seconds, silently.
+	//
+	// Optional by design. A caller that sends no If-Match gets the old
+	// behaviour, so older clients, the MCP tools and every other writer here
+	// are untouched.
+	if base := strings.Trim(r.Header.Get("If-Match"), `"`); base != "" {
+		if head, ok := s.headBlob(r.Context(), v, p); ok && head != base {
+			// The current sha travels with the refusal, so the client can fetch
+			// what it missed without a second round trip to find out what to ask
+			// for.
+			writeJSONStatus(w, http.StatusConflict, map[string]any{
+				"error": "this file changed since you last read it",
+				"sha":   head,
+				"path":  p,
+			})
+			return
+		}
 	}
 	// Spool first, then charge what actually arrived. Content-Length is -1 on
 	// any chunked request, so max(r.ContentLength, 0) admitted an upload of any
@@ -514,7 +573,21 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	v.invalidate()
 	s.captureChange(r, "browser", 1, 0)
 	s.publishChange(r, "browser", []string{p}, 1, 0)
-	writeJSON(w, map[string]any{"ok": true, "path": p})
+	/* The version to base the NEXT If-Match on — read back, not assumed.
+
+	   It is NOT necessarily the content sha this write produced. A DirSource
+	   identifies a file by mtime and size ("dir-<ns>-<bytes>", dir.go), which
+	   is all revalidation needs and is never a content hash — so handing the
+	   caller the sha it just uploaded would hand it a value the next
+	   comparison could never match, and every save after the first on
+	   `bdrive serve --dir` would be refused and parked as a conflict copy.
+	   Whatever headBlob says now is, by construction, what the next write
+	   will be checked against. */
+	head, ok := s.headBlob(r.Context(), v, p)
+	if !ok {
+		head = blob
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head})
 }
 
 // handleUploadCommit journals a direct upload after the blob is in the store.

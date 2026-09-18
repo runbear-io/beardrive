@@ -8,7 +8,10 @@ export const MAX_BYTES = 1 << 20; // 1 MB
 export const SNIFF = 8192;
 
 export type BlobText =
-  | { kind: "text"; text: string }
+  // `sha` is the version these bytes ARE — the server's ETag, filled in by
+  // fetchBlobText. An editor needs it to say what its buffer was built on,
+  // so a save cannot silently land on top of somebody else's work.
+  | { kind: "text"; text: string; sha?: string }
   | { kind: "binary" }
   | { kind: "too-large"; size: number };
 

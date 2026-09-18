@@ -96,6 +96,9 @@ type Server struct {
 	// apiMux is this server's own handler, kept so MCP tools can re-enter it
 	// as internal clients (mcp.go). Set by Handler; nil before it is called.
 	apiMux http.Handler
+	// One mutex per (project, path) so a check-then-write on a file cannot
+	// interleave with another request's. See lockPath.
+	pathLocks sync.Map
 
 	mcpOnce sync.Once
 	mcpSrv  *mcp.Server // the tool registry, built once (see mcpServer)

@@ -41,3 +41,36 @@ export function parseConflict(path: string): Conflict | null {
   }
   return { original: path.slice(0, m.index), device, when };
 }
+
+/* The inverse: the name a losing version is preserved under.
+
+   Must agree with conflictName in internal/syncer/syncer.go character for
+   character — a browser and a syncing device produce copies that sit in the
+   same folder and are read by the same parser above, so a second format would
+   be a second thing to explain to the same reader. Round-tripped through
+   parseConflict in conflict.test.ts.
+
+   Both variable parts are bounded the way the Go does it: the device is
+   sanitized (everything outside [A-Za-z0-9_-] becomes '-') and then clipped
+   to 32, and the base name is clipped so the whole thing stays under 255. */
+export function conflictName(path: string, device: string, when: Date): string {
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  const stamp =
+    String(when.getUTCFullYear()) +
+    p2(when.getUTCMonth() + 1) +
+    p2(when.getUTCDate()) +
+    "T" +
+    p2(when.getUTCHours()) +
+    p2(when.getUTCMinutes()) +
+    p2(when.getUTCSeconds()) +
+    "Z";
+  const suffix =
+    ".bdrive-conflict-" +
+    device.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 32) +
+    "-" +
+    stamp;
+  const cut = path.lastIndexOf("/");
+  const dir = cut < 0 ? "" : path.slice(0, cut + 1);
+  const base = cut < 0 ? path : path.slice(cut + 1);
+  return dir + base.slice(0, Math.max(0, 255 - suffix.length)) + suffix;
+}

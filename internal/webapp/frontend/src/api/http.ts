@@ -89,6 +89,10 @@ export class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    // The server's own body, unprocessed. A 409 from upload/content carries
+    // the sha that replaced ours, and a caller recovering from it needs the
+    // value, not the sentence errorFor built out of it.
+    readonly body = "",
   ) {
     super(message);
     this.name = "HttpError";
@@ -96,7 +100,8 @@ export class HttpError extends Error {
 }
 
 async function fail(r: Response): Promise<never> {
-  throw new HttpError(r.status, errorFor(r.status, await r.text()));
+  const body = await r.text();
+  throw new HttpError(r.status, errorFor(r.status, body), body);
 }
 
 export async function getJSON<T>(url: string): Promise<T> {
@@ -172,13 +177,27 @@ export async function postJSON<T>(url: string, body?: unknown): Promise<T> {
    desktop app already use — which is why the desktop gets editing for free:
    its sidecar proxies that route to the hub, so the write is journaled by the
    hub under this account exactly like any other. */
-export async function putText(url: string, text: string): Promise<void> {
+/* Write text, optionally only if the file is still the version we read.
+
+   `base` is the sha the caller's buffer was built on. With it, the hub
+   refuses (409) rather than letting this body erase a write that landed in
+   between — see handleUploadContent. Without it, the write is
+   unconditional, which is what every other caller still does. */
+export async function putText(
+  url: string,
+  text: string,
+  base?: string,
+): Promise<{ sha?: string }> {
   const r = await fetch(url, {
     method: "PUT",
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      ...(base ? { "If-Match": base } : {}),
+    },
     body: text,
   });
   if (r.status === 401) toLogin();
   if (!r.ok) await fail(r);
   trackWrite("PUT", url);
+  return (await r.json().catch(() => ({}))) as { sha?: string };
 }

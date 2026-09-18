@@ -72,3 +72,32 @@ test("responses are compressed, and streams are left alone", async ({ page }) =>
   // the stream — and once took live updates and co-editing down with it.
   expect(enc.get("events") ?? "").not.toBe("gzip");
 });
+
+/* Moving the caret is not a change to anything.
+
+   Every awareness update used to be its own POST, so arrow-keying around a
+   file — or holding a key down — spent one request per keypress. Alone in a
+   document that is a request per keystroke to draw a caret nobody can see. */
+test("moving the cursor alone costs nothing", async ({ page }) => {
+  await login(page, ADMIN);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/edit/guide.md`);
+  await page.waitForSelector(".cm-host .cm-content");
+  await page.waitForTimeout(1_500); // the room joins and announces once
+
+  const posts: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && r.url().includes("/collab")) posts.push(r.url());
+  });
+
+  await page.locator(".cm-host .cm-content").click();
+  for (let i = 0; i < 20; i++) {
+    await page.keyboard.press(i % 2 ? "ArrowRight" : "ArrowDown");
+    await page.waitForTimeout(60);
+  }
+  await page.waitForTimeout(1_000); // past the coalescing window
+
+  expect(posts, `cursor moves sent ${posts.length} requests`).toHaveLength(0);
+  // ...and the document is untouched: a caret is not an edit.
+  await expect(page.locator("#editor-state")).not.toHaveAttribute("data-state", "dirty");
+});

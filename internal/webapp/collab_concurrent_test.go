@@ -22,7 +22,11 @@ import (
 // continuously, plus updates it POSTs.
 type collabClient struct {
 	id      int
-	seed    bool
+	// Written by this client's stream goroutine, read by the summary below
+	// while those goroutines are still draining: close(stop) asks them to
+	// finish, it does not wait for them. Every field they touch is therefore
+	// read the way it is written.
+	seed    atomic.Bool
 	updates int32 // frames of type "update" received
 	resyncs int32 // forced rebuilds — the symptom we are hunting
 	badPost int32 // non-200 from a POST
@@ -111,7 +115,7 @@ func TestCollabSevenEditorsOneFile(t *testing.T) {
 				}
 				switch f.Type {
 				case "hello":
-					c.seed = f.Seed
+					c.seed.Store(f.Seed)
 					if !gotHello {
 						gotHello = true
 						streamsUp.Done()
@@ -170,18 +174,20 @@ func TestCollabSevenEditorsOneFile(t *testing.T) {
 	want := (editors - 1) * updatesPerEdit
 	seeders := 0
 	for _, c := range clients {
-		if c.seed {
+		if c.seed.Load() {
 			seeders++
 		}
 		t.Logf("client %d: seed=%v posted=%d received=%d (want %d) resyncs=%d badPost=%d",
-			c.id, c.seed, c.posted, c.updates, want, c.resyncs, c.badPost)
+			c.id, c.seed.Load(), atomic.LoadInt32(&c.posted),
+			atomic.LoadInt32(&c.updates), want, atomic.LoadInt32(&c.resyncs),
+			atomic.LoadInt32(&c.badPost))
 	}
 	if seeders != 1 {
 		t.Errorf("seeders = %d, want exactly 1", seeders)
 	}
 	for _, c := range clients {
-		if c.badPost != 0 {
-			t.Errorf("client %d: %d POSTs failed", c.id, c.badPost)
+		if bad := atomic.LoadInt32(&c.badPost); bad != 0 {
+			t.Errorf("client %d: %d POSTs failed", c.id, bad)
 		}
 		got := int(atomic.LoadInt32(&c.updates))
 		switch {

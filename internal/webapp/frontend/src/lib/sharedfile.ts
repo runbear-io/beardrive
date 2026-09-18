@@ -1,6 +1,7 @@
 import { CollabDoc, type CollabStatus } from "./collab";
 import { textEdit } from "./diff";
-import { putText } from "../api/http";
+import { HttpError, putText } from "../api/http";
+import { conflictName } from "./conflict";
 
 /* One open file, shared with everyone else who has it open, and written back
    to the hub when the typing stops.
@@ -50,6 +51,17 @@ export function openSharedFile(opts: {
   path: string;
   /** The file's current bytes, used only if this client seeds the room. */
   seed: string;
+  /** The version those bytes ARE (the read's ETag). Every save says it was
+      built on this, so the hub can refuse one that would erase a write that
+      landed in between. Absent (an older hub, a source with no ETag) means
+      unconditional writes, exactly as before. */
+  baseSha?: string;
+  /** Names this client in a conflict copy's filename, the way a device id
+      does on the sync path. */
+  who?: string;
+  /** A concurrent edit could not be merged, so this client's version was
+      preserved beside the file instead of being dropped. */
+  onConflictCopy?: (path: string) => void;
   me?: { name: string; colour: string };
   /** The relay answered: the shared document is live and holds the truth. */
   onReady: (collab: CollabDoc) => void;
@@ -75,24 +87,71 @@ export function openSharedFile(opts: {
   soloApply?: (e: { from: number; to: number; insert: string }) => void;
 }): SharedFile {
   let saved = opts.seed;
+  let base = opts.baseSha;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const setState = (s: SaveState) => opts.onState?.(s);
 
+  const contentURL = (p: string) =>
+    opts.apiBase + "upload/content?path=" + encodeURIComponent(p);
+
   const save = async (text: string) => {
-    if (text === saved) return;
+    if (text === saved) {
+      // Nothing to write IS clean, and saying so matters: seeding the room
+      // marks the document dirty, and the save it schedules lands here — so
+      // without this the status line read "unsaved" for the rest of a session
+      // in which everything had been saved all along.
+      setState("clean");
+      return;
+    }
     setState("saving");
     opts.onWriting?.();
     try {
-      await putText(
-        opts.apiBase + "upload/content?path=" + encodeURIComponent(opts.path),
-        text,
-      );
+      const out = await putText(contentURL(opts.path), text, base);
       saved = text;
+      if (out.sha) base = out.sha;
       setState("clean");
       opts.onSaved?.(text);
-    } catch {
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 409) {
+        await preserve(text, e);
+        return;
+      }
       // Keep the document: the CRDT is the truth until a save lands, and the
       // next edit schedules another attempt.
+      setState("error");
+    }
+  };
+
+  /* Somebody else's write landed on this path while we were editing, and the
+     two versions cannot be reconciled here — if they could, merge() would
+     already have done it, because a save only happens when this buffer has
+     changes of its own.
+
+     So neither version is dropped. Theirs is the file (it got there first);
+     ours goes beside it under the same name the sync path has used since the
+     beginning, `<name>.bdrive-conflict-<who>-<utc>`, which the reader already
+     knows how to explain (lib/conflict.ts, ConflictBanner).
+
+     The alternative is what this door did until now: take the body wholesale
+     and erase their work silently. Two browsers holding different documents —
+     one that had lost the co-editing relay — did exactly that to each other
+     every few seconds, with nothing anywhere to say so. */
+  const preserve = async (text: string, e: HttpError) => {
+    let theirs = "";
+    try {
+      theirs = (JSON.parse(e.body) as { sha?: string }).sha ?? "";
+    } catch {
+      /* an older hub, or a body we cannot read: the copy still matters */
+    }
+    const copy = conflictName(opts.path, opts.who || "browser", new Date());
+    try {
+      await putText(contentURL(copy), text); // unconditional: a new path
+      saved = text;
+      base = theirs;
+      setState("clean");
+      opts.onConflictCopy?.(copy);
+    } catch {
+      // Could not even park it. Stay dirty and loud rather than pretend.
       setState("error");
     }
   };

@@ -247,6 +247,17 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // case the banner exists for.
   const peers = useRef(0);
 
+  /* A concurrent edit that could not be merged. Nothing was dropped: this
+     account's version was written beside the file under the name the sync
+     path has always used, so the reader meets it as an ordinary file with an
+     alarming name and ConflictBanner explains it there. */
+  const onConflictCopy = (copy: string) => {
+    toast(
+      "Someone else saved this file first. Your version is beside it as " +
+        (copy.split("/").pop() ?? copy),
+    );
+  };
+
   useEffect(() => {
     const onPeer = (e: Event) => {
       const p = (e as CustomEvent<string[]>).detail;
@@ -329,6 +340,8 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           fileURL={fileURL}
           path={path}
           initial={data.text}
+          baseSha={data.sha}
+          onConflictCopy={onConflictCopy}
           onWriting={() => {
             mine.current++;
           }}
@@ -345,6 +358,8 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           apiBase={apiBase}
           path={path}
           initial={data.text}
+          baseSha={data.sha}
+          onConflictCopy={onConflictCopy}
           /* Someone wrote the file while it was open here. Merged, it is
              already on screen and only worth a word; refused, it is the
              banner — and either way this is the only thing that raises or
