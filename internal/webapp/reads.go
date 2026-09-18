@@ -762,7 +762,7 @@ func (s *Server) handleHeat(v *volume, w http.ResponseWriter, r *http.Request) {
 	if !since.IsZero() {
 		out["since"] = since.Format("2006-01-02")
 	}
-	writeJSON(w, out)
+	writeJSONCached(w, r, out)
 }
 
 // deviceHeat is one row of the ?by=device response.

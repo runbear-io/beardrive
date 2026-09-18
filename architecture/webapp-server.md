@@ -43,6 +43,14 @@ classDiagram
         +HandleFunc / Handle record then delegate
         +APIRoutes() []string
     }
+    class gzipWriter {
+        <<http.ResponseWriter wrapper>>
+        +WriteHeader(code) decides once
+        +Write / Flush / Unwrap
+        -compressible(contentType) allowlist
+    }
+    note for gzipWriter "Everything the viewer serves went out raw to browsers that asked for gzip on every request: a 1.65 MB tree that is 148 KB compressed, a 1.34 MB script bundle that is 431 KB. Outermost in Handler, so it covers what authGate and the rate limiter write themselves. Content types are an ALLOWLIST — an unknown type is left alone rather than compressed hopefully, and everything already compressed is binary with a type of its own. What it refuses to touch is the interesting part. text/event-stream: excluded outright, and this implements Flush AND Unwrap, because a wrapper implementing neither is how live updates and co-editing died behind an analytics middleware once (refuseUnstreamable exists because of it). /store/*: skipped by PATH, not merely when a body is already encoded — syncer.pull skips a journal that did not grow and then resumes at a BYTE OFFSET, so a length meaning anything other than bytes-on-this-socket re-downloads forever. 206/Content-Range: skipped, since a range is an offset into the plaintext and http.FileServerFS answers ranges for the embedded assets. Content-Length: kept as X-Uncompressed-Length, because the file viewer decides too-large-to-render BEFORE reading the body (useBlob.ts) and compressing would have silently disarmed that."
+    note for Server "writeJSONCached is writeJSON for a response worth revalidating rather than re-sending: tree and heat carry an ETag over the encoded bytes plus Cache-Control: no-cache, and answer If-None-Match with a bodiless 304. The body is still built and hashed to answer one — the saving is the transfer, not the work, and the work was already being done."
     note for recordingMux "Exists for one caller: cmd/bdrive/desktop.go must classify every per-project route this hub serves, because a route it does not know falls through to local state and answers plausibly and WRONGLY. That has shipped twice. Recording beats parsing server.go: the per-project block builds eight patterns at runtime by concatenating a prefix, so a source scanner would silently miss exactly the routes it is meant to police."
     note for Server "ReportRead is the desktop's read seam, dead on a hub. The sidecar keeps no ReadLedger and answers the viewer routes locally, so a person reading in the Mac app reached no ledger at all while the same file in the web app counted. The hook hands each viewer read to the sidecar, which forwards it to the project's own hub as HUMAN traffic — routing it through the agent report route instead would have filed a person's browsing as a device's."
     note for Server "Desktop marks the loopback sidecar posture (`bdrive desktop`), NOT a hub: the server fronts this machine's own volume stores. It is set in exactly one production place — cmd/bdrive/desktop.go — so on a deployed hub it stays false and both branches below are dead code, leaving /api/config byte-identical to a hub without it. DesktopMe supplies `me` from the device's saved sign-in (settings.json), a func because the tray can change it at runtime; the desktop has no AuthProvider"
@@ -576,6 +584,7 @@ classDiagram
     Server o-- ShareDB
     Server o-- ReadLedger
     Server ..> recordingMux : Handler registers through it
+    Server ..> gzipWriter : Handler wraps the whole chain (gzipResponses, outermost)
     Server o-- QuotaProvider
     Server *-- reservations : holds before it charges
     reservations *-- grant
