@@ -1,6 +1,12 @@
 package webapp
 
-import "io"
+import (
+	"context"
+	"io"
+	"strings"
+
+	"github.com/runbear-io/beardrive/internal/remote"
+)
 
 // QuotaProvider is the seam a managed deployment uses to enforce plan
 // limits, exactly like AuthProvider is the seam for identity. The
@@ -64,4 +70,33 @@ func (s *Server) quota() QuotaProvider {
 		return s.Quota
 	}
 	return UnlimitedQuota{}
+}
+
+// billableBytes is what a write of size bytes to key should be charged.
+//
+// Blob keys are content-addressed, so writing one the store already holds
+// replaces it with byte-identical content and grows storage by NOTHING. It
+// must therefore cost nothing, on both doors: charging it inflates the usage
+// counter (which only ever climbs — deletes never decrement it, and only the
+// reconciler corrects it), and refusing it would block a save that adds no
+// bytes at all.
+//
+// That matters most for co-editing, where it is not an edge case but the
+// design: every peer's idle timer fires after the LAST change by ANYONE, so
+// all N editors write the same converged text at once, and sharedfile.ts
+// counts on "a second writer is a no-op put of a blob the store already has".
+// It is a no-op for storage; it was not a no-op for the bill. N editors on
+// one file charged N times per save for one blob, which is how a room of
+// seven reached a storage limit that a room of one never would.
+//
+// Only blobs: a journal key is appended to, so its rewrite genuinely grows.
+// An Exists failure charges the full size — billing must fail closed.
+func billableBytes(ctx context.Context, be remote.Backend, key string, size int64) int64 {
+	if !strings.HasPrefix(key, "blobs/") {
+		return size
+	}
+	if ok, err := be.Exists(ctx, key); err == nil && ok {
+		return 0
+	}
+	return size
 }

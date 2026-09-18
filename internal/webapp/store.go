@@ -961,7 +961,11 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	project := r.PathValue("project")
 	s.reconcileGrants(r.Context(), project, rs.Backend)
 	org := s.orgOf(project)
-	if err := s.quota().CheckWrite(org, size+s.reservedBytes(org)); err != nil {
+	// A device re-pushing a blob this hub already holds adds no bytes, so it
+	// must not be charged for them — same rule the browser door follows.
+	// Journals are exempt: they are appended to, so a rewrite really grows.
+	billed := billableBytes(r.Context(), rs.Backend, key, size)
+	if err := s.quota().CheckWrite(org, billed+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -1084,7 +1088,9 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	// These bytes came through the hub, so they are charged here — drop any
 	// reservation for the same key rather than charging it twice.
 	s.claimGrant(project, key)
-	s.quota().RecordUsage(org, size)
+	if billed > 0 {
+		s.quota().RecordUsage(org, billed)
+	}
 	if strings.HasPrefix(key, "journal/") {
 		v.invalidate() // new ops should show in the viewer immediately
 		puts, deletes := countOps(ops, storedMax)

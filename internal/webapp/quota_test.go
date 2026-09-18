@@ -1,6 +1,8 @@
 package webapp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -163,5 +165,76 @@ func TestQuotaHooks(t *testing.T) {
 	doAs(t, h, "POST", "/api/invites/"+inv.Token, nil, bob)
 	if len(q.seats) != seatCalls {
 		t.Fatal("re-join of an existing member consulted CheckSeat")
+	}
+}
+
+// Seven people co-editing one file must not be billed seven times for it.
+//
+// sharedfile.ts restarts EVERY peer's idle timer on any change by anyone, so
+// when typing stops all N editors save the same converged text at once. That
+// is deliberate — the content is identical, so every writer after the first
+// is a no-op put of a blob the store already has. Storage grows once. The
+// bill used to grow N times, and because the cloud usage counter only ever
+// climbs, a busy room walked an org into "storage limit reached" without
+// storing anything.
+func TestQuotaCoEditingChargesOneBlobOnce(t *testing.T) {
+	h, srv, alice, _, pa := orgHubSrv(t)
+	q := &recQuota{}
+	srv.Quota = q
+
+	const editors = 7
+	doc := []byte("# notes\n\nthe converged document every peer saves\n")
+	for i := 0; i < editors; i++ {
+		rec := doAs(t, h, "PUT", "/api/p/"+pa.ID+"/upload/content?path=notes.md", doc, alice)
+		if rec.Code != 200 {
+			t.Fatalf("editor %d save: %d %s", i, rec.Code, rec.Body)
+		}
+	}
+
+	var charged int64
+	for _, u := range q.usage {
+		charged += u.bytes
+	}
+	if charged != int64(len(doc)) {
+		t.Errorf("charged %d bytes for %d editors saving one %d-byte file, want %d — "+
+			"a blob the store already holds costs nothing to write again",
+			charged, editors, len(doc), len(doc))
+	}
+	// The later saves must still be ADMITTED, and admitted as free: an org at
+	// its ceiling has to be able to re-save text that adds no bytes.
+	if len(q.writes) != editors {
+		t.Fatalf("CheckWrite calls = %d, want one per save (%d)", len(q.writes), editors)
+	}
+	for i, w := range q.writes[1:] {
+		if w.bytes != 0 {
+			t.Errorf("save %d asked CheckWrite for %d bytes, want 0 — the blob "+
+				"was already stored by the first writer", i+2, w.bytes)
+		}
+	}
+}
+
+// The same rule on the device door: a second device pushing a blob this hub
+// already holds is not new storage.
+func TestQuotaRepeatedBlobPushChargesOnce(t *testing.T) {
+	h, srv, alice, _, pa := orgHubSrv(t)
+	q := &recQuota{}
+	srv.Quota = q
+
+	body := []byte("shared content two devices both have")
+	sum := sha256.Sum256(body)
+	key := "blobs/" + hex.EncodeToString(sum[:])
+	for i := 0; i < 3; i++ {
+		rec := doAs(t, h, "PUT", "/api/p/"+pa.ID+"/store/object?key="+key, body, alice)
+		if rec.Code != 200 {
+			t.Fatalf("push %d: %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	var charged int64
+	for _, u := range q.usage {
+		charged += u.bytes
+	}
+	if charged != int64(len(body)) {
+		t.Errorf("charged %d for three pushes of one %d-byte blob, want %d",
+			charged, len(body), len(body))
 	}
 }
