@@ -60,6 +60,8 @@ export function Editor({
   onCollab,
   onPeers,
   onExternal,
+  onConflictCopy,
+  baseSha,
   me,
 }: {
   apiBase: string;
@@ -72,6 +74,12 @@ export function Editor({
   /* Someone wrote the file while it was open here, and whether that write
      could be folded into the buffer. False is the case the banner is for. */
   onExternal?: (r: MergeResult) => void;
+  // A concurrent edit this client could not merge: its version was preserved
+  // beside the file rather than dropped.
+  onConflictCopy?: (path: string) => void;
+  // The version the buffer was read at, so a save can refuse to land on top
+  // of somebody else's write.
+  baseSha?: string;
   // Who this editor is, for the label and colour on a remote caret.
   me?: { name: string; colour: string };
   // Reports whether other editors are in the document, so the caller can
@@ -92,8 +100,8 @@ export function Editor({
   //  - `initial` changes whenever the seed query refetches, and a peer's write
   //    invalidates exactly that query — so it would reset the buffer under the
   //    typist's cursor, which is the one thing this component must never do.
-  const cb = useRef({ onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal });
-  cb.current = { onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal };
+  const cb = useRef({ onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal, onConflictCopy });
+  cb.current = { onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal, onConflictCopy };
   const seed = useRef(initial);
   // The bytes this editor opened with, so a later `initial` can be told apart
   // from the one that mounted us.
@@ -120,6 +128,10 @@ export function Editor({
   }, [initial]);
   const meRef = useRef(me);
   meRef.current = me;
+  // Read through a ref for the same reason `seed` is: the effect must depend
+  // on the document alone, and this changes on every save.
+  const shaRef = useRef(baseSha);
+  shaRef.current = baseSha;
 
   useEffect(() => {
     if (!host.current) return;
@@ -190,7 +202,10 @@ export function Editor({
       apiBase,
       path,
       seed: seed.current,
+      baseSha: shaRef.current,
+      who: meRef.current?.name,
       me: meRef.current,
+      onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
       onReady: () => mount(),
       // No relay: an older hub, or a desktop build that does not proxy the
       // route. Editing is single-writer then — exactly what it was before

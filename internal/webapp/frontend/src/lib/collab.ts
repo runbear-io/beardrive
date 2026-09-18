@@ -27,6 +27,15 @@ export type CollabStatus = "connecting" | "live" | "offline";
 // of keystrokes, short enough that a watcher sees you type.
 const FLUSH_MS = 60;
 
+/* Cursor moves are coalesced harder, and not sent at all when nobody is
+   looking.
+
+   A caret is a courtesy; the document is the point. Every arrow key used to
+   be its own POST — holding one down is a request per repeat, and moving
+   around a file you are editing ALONE spent a request per keypress drawing a
+   caret for nobody. Nothing downstream can tell 5 updates a second from 16. */
+const CURSOR_MS = 200;
+
 export class CollabDoc {
   readonly doc = new Y.Doc();
   readonly text: Y.Text;
@@ -36,6 +45,10 @@ export class CollabDoc {
   private pending: Uint8Array[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  private cursorTimer: ReturnType<typeof setTimeout> | null = null;
+  // Whether this client has ever said it is here. Until it has, staying quiet
+  // would make it invisible rather than cheap.
+  private announced = false;
   // Whether a `hello` has ever arrived. Distinguishes a dropped connection
   // (retry, keep the document) from a relay that does not exist (give up on
   // co-editing and let the editor open solo).
@@ -92,7 +105,30 @@ export class CollabDoc {
   }) => {
     const changed = added.concat(updated, removed);
     if (!changed.length || this.closed) return;
-    const update = encodeAwarenessUpdate(this.awareness, changed);
+    // Only our own state is ours to publish. The rest of `changed` is what
+    // just arrived FROM the relay, and re-broadcasting it sends every peer's
+    // caret back to every peer — the relay already fans out to everyone.
+    if (!changed.includes(this.doc.clientID)) return;
+    if (this.cursorTimer) return; // one POST per window, carrying the latest
+    this.cursorTimer = setTimeout(() => {
+      this.cursorTimer = null;
+      this.publishAwareness();
+    }, CURSOR_MS);
+  };
+
+  /* Publish where this client's caret is.
+
+     `force` is for the two moments that are about existence rather than
+     position: the first announcement, and a new arrival. Awareness is relayed
+     and never logged (a joiner replaying it would get cursors for people who
+     have gone home), so our announcement is lost to anyone who shows up after
+     it — if both clients stayed quiet while they each believed they were
+     alone, two people in one document would never discover each other. */
+  private publishAwareness(force = false) {
+    if (this.closed) return;
+    if (!force && this.announced && this.awareness.getStates().size <= 1) return;
+    this.announced = true;
+    const update = encodeAwarenessUpdate(this.awareness, [this.doc.clientID]);
     void fetch(this.url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -100,7 +136,7 @@ export class CollabDoc {
     }).catch(() => {
       // A lost cursor position corrects itself on the next keystroke.
     });
-  };
+  }
 
   connect() {
     this.onStatus("connecting");
@@ -148,7 +184,11 @@ export class CollabDoc {
         return;
       }
       if (f.type === "awareness" && f.awareness) {
+        const before = this.awareness.getStates().size;
         applyAwarenessUpdate(this.awareness, b64ToBytes(f.awareness), this);
+        // Somebody new. They cannot have heard our announcement — it went out
+        // before they arrived and nothing replays it — so answer with one.
+        if (this.awareness.getStates().size > before) this.publishAwareness(true);
         return;
       }
       if (f.type === "resync") {
@@ -214,6 +254,7 @@ export class CollabDoc {
     this.closed = true;
     this.awareness.off("update", this.onAwareness);
     if (this.timer) clearTimeout(this.timer);
+    if (this.cursorTimer) clearTimeout(this.cursorTimer);
     this.es?.close();
     this.awareness.destroy();
     this.doc.destroy();

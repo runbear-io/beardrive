@@ -3,7 +3,7 @@
 // app's DOM-only lib set does not know about.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseConflict } from "./conflict.ts";
+import { parseConflict, conflictName } from "./conflict.ts";
 
 test("parses the original, the device and the moment out of the name", () => {
   const c = parseConflict("notes/plan.md.bdrive-conflict-laptop-20260814T060945Z");
@@ -63,4 +63,26 @@ test("an empty device name (sanitize kept nothing) still parses", () => {
   assert.ok(c);
   assert.equal(c.device, "");
   assert.equal(c.original, "plan.md");
+});
+
+test("conflictName round-trips through parseConflict", () => {
+  const when = new Date(Date.UTC(2026, 8, 18, 12, 11, 4));
+  const name = conflictName("areas/team/notes.md", "browser", when);
+  assert.equal(
+    name,
+    "areas/team/notes.md.bdrive-conflict-browser-20260918T121104Z",
+  );
+  const back = parseConflict(name);
+  assert.ok(back, "the name this builds must be one the parser recognises");
+  assert.equal(back.original, "areas/team/notes.md");
+  assert.equal(back.device, "browser");
+  assert.equal(back.when.toISOString(), when.toISOString());
+});
+
+test("conflictName sanitizes and clips the device, like the Go does", () => {
+  const when = new Date(Date.UTC(2026, 0, 2, 3, 4, 5));
+  const messy = conflictName("a.md", "Snow's MacBook Pro <work>", when);
+  assert.match(messy, /\.bdrive-conflict-Snow-s-MacBook-Pro--work--20260102T030405Z$/);
+  const long = conflictName("a.md", "x".repeat(80), when);
+  assert.ok(parseConflict(long), "a 32-char clip keeps the name parseable");
 });

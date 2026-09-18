@@ -259,12 +259,29 @@ test("a failing read leaves the editor, and the work, alone", async ({ page }) =
   await expect(buf).toContainText("SURVIVES");
   await expect(page.locator(".empty")).toHaveCount(0);
 
-  // And it is still a working editor once the hub recovers.
+  // And it is still a working editor once the hub recovers. The write that
+  // landed while the reads were failing makes this buffer stale, so the save
+  // is preserved BESIDE the file rather than on top of it — see
+  // concurrent-edit.spec.ts. Either way it is written down somewhere, which
+  // is the whole claim.
   await page.unroute("**/file?path=*");
   await page.keyboard.type(" AND SAVES");
   await expect(page.locator("#editor-state")).toHaveAttribute("data-state", "clean");
-  const after = await (
-    await page.request.get(`/api/p/${id}/file?path=${encodeURIComponent(file)}`)
-  ).text();
-  expect(after).toContain("AND SAVES");
+  // ?prefix= is a FOLDER prefix (history.go), so a file name matches nothing
+  // there — ask for the whole project and pick this file's paths out of it.
+  const feed = await (
+    await page.request.get(`/api/p/${id}/history?prefix=&n=100`)
+  ).json();
+  const paths: string[] = [
+    ...new Set(feed.entries.map((e: { path: string }) => e.path)),
+  ].filter((p) => (p as string).startsWith(file)) as string[];
+  expect(paths.length, "the file has no history at all").toBeGreaterThan(0);
+  let found = "";
+  for (const p of paths) {
+    const body = await (
+      await page.request.get(`/api/p/${id}/file?path=${encodeURIComponent(p)}`)
+    ).text();
+    if (body.includes("AND SAVES")) found = p;
+  }
+  expect(found, `"AND SAVES" is nowhere: ${paths.join(", ")}`).toBeTruthy();
 });

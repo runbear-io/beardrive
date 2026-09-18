@@ -28,7 +28,12 @@ export async function fetchBlobText(url: string): Promise<BlobText> {
     r.headers.get("Content-Length") ?? r.headers.get("X-Uncompressed-Length"),
   );
   if (len > MAX_BYTES) return { kind: "too-large", size: len };
-  return sniffBytes(new Uint8Array(await r.arrayBuffer()));
+  const out = sniffBytes(new Uint8Array(await r.arrayBuffer()));
+  // The ETag IS the content hash (webapp/server.go serves blobs by sha), so
+  // this is the version the buffer is based on — not a guess we could get
+  // subtly wrong by re-hashing decoded text.
+  const etag = r.headers.get("ETag")?.replace(/^W\/|"/g, "");
+  return out.kind === "text" && etag ? { ...out, sha: etag } : out;
 }
 
 // The URL a file page reads its bytes from: content-addressed when a version

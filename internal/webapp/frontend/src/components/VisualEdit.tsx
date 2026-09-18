@@ -59,6 +59,8 @@ export function VisualEdit({
   onStateChange,
   onCollab,
   onPeers,
+  onConflictCopy,
+  baseSha,
   onSaved,
   onWriting,
   onRendered,
@@ -71,6 +73,8 @@ export function VisualEdit({
   onStateChange?: (s: SaveState) => void;
   onCollab?: (s: CollabStatus) => void;
   onPeers?: (n: number) => void;
+  onConflictCopy?: (path: string) => void;
+  baseSha?: string;
   onSaved?: (text: string) => void;
   onWriting?: () => void;
   onRendered?: () => void;
@@ -92,11 +96,13 @@ export function VisualEdit({
   // describing the document this side holds.
   const [gen, setGen] = useState(0);
 
-  const cb = useRef({ onStateChange, onCollab, onPeers, onSaved, onWriting, onRendered });
-  cb.current = { onStateChange, onCollab, onPeers, onSaved, onWriting, onRendered };
+  const cb = useRef({ onStateChange, onCollab, onPeers, onSaved, onWriting, onRendered, onConflictCopy });
+  cb.current = { onStateChange, onCollab, onPeers, onSaved, onWriting, onRendered, onConflictCopy };
   const seed = useRef(initial);
   const meRef = useRef(me);
   meRef.current = me;
+  const shaRef = useRef(baseSha);
+  shaRef.current = baseSha;
 
   useEffect(() => {
     /* The two halves arrive independently and BOTH are needed before a range
@@ -137,7 +143,10 @@ export function VisualEdit({
       apiBase,
       path,
       seed: seed.current,
+      baseSha: shaRef.current,
+      who: meRef.current?.name,
       me: meRef.current,
+      onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
       // Nothing to mount either way: the surface is the iframe, which is
       // already on screen. The room is joined for the CRDT alone.
       onReady: () => {
