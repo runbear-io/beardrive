@@ -7,11 +7,29 @@ test("unauthenticated visit redirects to the login page", async ({ page }) => {
   await expect(page.locator('input[name="email"]')).toBeVisible();
 });
 
+/* The title asserted against what the app actually landed on.
+
+   It used to be `toHaveTitle(/BearDrive/)`, with a comment claiming hub mode
+   renders "<project> — BearDrive". It does not: titleForRoute returns the
+   SCOPE ALONE when a route has no page, so a project's root is titled with
+   the project's name and nothing else. The brand only appears when there is
+   no project to name — so that assertion passed exactly while this hub had no
+   projects yet, and broke the moment any earlier spec created one (hub.spec
+   makes "brought-my-own", and sorts first). It was the suite's most frequent
+   red, and never once about this page.
+
+   Asserting the landed project's own name tests the wiring that matters and
+   cannot be perturbed by what another spec left behind. */
 test("login lands in the app shell", async ({ page }) => {
   await login(page);
-  await expect(page).toHaveTitle(/BearDrive/); // "<project> — BearDrive" in hub mode
   await expect(page.locator("#sidebar")).toBeVisible();
   await expect(page.locator("#topbar")).toBeVisible();
+
+  const projects = (await (await page.request.get("/api/projects")).json())
+    .projects as { id: string; name: string }[];
+  const landed = projects.find((p) => page.url().includes(p.id));
+  // A hub with no projects at all titles itself with the brand instead.
+  await expect(page).toHaveTitle(landed ? landed.name : /BearDrive/);
 });
 
 test("hashed assets are served immutable, shell revalidates", async ({ page, request }) => {
