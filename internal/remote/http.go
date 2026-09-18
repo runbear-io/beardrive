@@ -647,4 +647,35 @@ func (b *httpBackend) Scope(ctx context.Context) (Scope, error) {
 	return sc, nil
 }
 
+// Roster asks the hub who has a file open in this project right now. A hub
+// that predates presence answers 404, reported as ErrNoRoster.
+//
+// Read-only on purpose: the GET route exists precisely so a device asking this
+// does not join the roster it is reading (internal/webapp/presence.go).
+func (b *httpBackend) Roster(ctx context.Context) ([]Person, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		b.base+"/api/p/"+b.project+"/presence", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := b.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNoRoster
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpError(resp)
+	}
+	var out struct {
+		People []Person `json:"people"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBytes)).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.People, nil
+}
+
 func (b *httpBackend) Close() error { return nil }

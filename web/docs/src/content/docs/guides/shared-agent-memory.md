@@ -106,6 +106,26 @@ the list, and the agent hears nothing.
 The list is capped, so the first turn after joining a project names some of
 what arrived rather than the whole project.
 
+### And who has a file open right now
+
+The changed-files list covers work that has already synced. The other half of a
+collision is a teammate who has the file open in the hub and hasn't saved yet —
+nothing has synced, so nothing is in the list.
+
+So the same turn-start context also names who is **viewing** which file in the
+hub right now, as of the moment the turn started: "open in the hub right now
+(as of this turn's start): `docs/plan.md` — Mira Chen. A teammate may be
+typing; re-read before editing."
+
+It says *viewing*, not editing, because that is what it knows — anyone with the
+file open in the browser counts, whether or not they are typing into it. And it
+is a snapshot, not a subscription: a turn can run for minutes, so the sentence
+is timestamped rather than live. Same advisory posture as the changed list —
+nothing blocks, and the agent decides.
+
+Nothing to say costs nothing: a project with no one in it, an unreachable hub,
+or a hub too old to report presence all emit no sentence at all.
+
 ## What belongs in shared memory
 
 Good candidates are the things that are expensive to rediscover and cheap to

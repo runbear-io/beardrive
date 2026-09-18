@@ -151,6 +151,7 @@ var desktopRoutes = []struct {
 	// on the relay's first frame.
 	{"GET /api/p/{project}/events", routeProxy, ""},
 	{"POST /api/p/{project}/presence", routeProxy, ""},
+	{"GET /api/p/{project}/presence", routeProxy, ""},
 	{"GET /api/p/{project}/collab", routeProxy, ""},
 	{"POST /api/p/{project}/collab", routeProxy, ""},
 
