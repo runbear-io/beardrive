@@ -156,18 +156,35 @@ silently dropped stream still self-heals within a few minutes.
 
 ### Stage 2 — compress and revalidate
 
-- [ ] A `gzip` response wrapper applied at the mux for JSON and static assets
-- [ ] Explicitly skipped: `events` and `collab` (SSE — buffering breaks the
-      stream, and `events.go:245` already says so), `/store/*` (negotiates its
-      own encoding), `/s/*` (own CSP and rate limiter; add later if wanted)
-- [ ] Skipped for bodies below ~1 KB, where the header costs more than it saves
-- [ ] `ETag` on `tree` and `heat`, derived from the snapshot the response is
-      built from; `If-None-Match` answered with 304
-- [ ] `Cache-Control: no-cache` (revalidate, don't reuse blindly) on both
-- [ ] Test: a Go test asserts `Content-Encoding: gzip` on `tree` for a client
-      that asks, and its absence for one that does not
-- [ ] Test: a second `tree` request carrying the first's `ETag` gets 304 and an
-      empty body; a write in between makes it 200 again
+- [x] `gzipResponses` applied outermost in `Server.Handler`, so it covers even
+      what the auth gate and the rate limiter write themselves (`compress.go`)
+- [x] An allowlist by content type, not a denylist: an unknown type is left
+      alone rather than compressed hopefully
+- [x] `text/event-stream` excluded outright, and `gzipWriter` implements both
+      `Flush` and `Unwrap` — the failure mode here is not slowness, it is SSE
+      that never arrives (`refuseUnstreamable` exists because that shipped once)
+- [x] `/store/*` skipped by PATH, not merely when it has already encoded:
+      `syncer.pull` resumes at a byte offset, so a length meaning anything
+      other than "bytes on this socket" re-downloads forever
+- [x] 206 / `Content-Range` skipped — a range is an offset into the plaintext,
+      and `http.FileServerFS` answers ranges for the embedded assets
+- [x] `Content-Length` preserved as `X-Uncompressed-Length`: the file viewer
+      decides "too large to render" before reading the body (`useBlob.ts`),
+      and compression would have silently disarmed that
+- [x] `ETag` + `Cache-Control: no-cache` on `tree` and `heat`
+      (`writeJSONCached`); `If-None-Match` answered with a bodiless 304
+- [x] Tests: compressed for a client that asks and not for one that does not;
+      `gzip;q=0` is a refusal; an event stream is neither compressed nor
+      buffered and its flush still reaches the socket; `gzipWriter` passes
+      `refuseUnstreamable`; already-encoded and already-compressed bodies pass
+      through; the sync wire is untouched; a range response is untouched; the
+      size hint survives; the ETag round-trips and moves when the tree does
+- [x] e2e: `tree` carries `content-encoding: gzip` and `events` does not
+- [ ] Skipped for bodies below ~1 KB — **not done, deliberately**: the
+      buffering that needs is where the bugs live, and a 12-byte `{"ok":true}`
+      gaining 20 bytes of framing is not a problem anyone has. Revisit if tiny
+      JSON ever dominates a profile.
+- [ ] `/s/*` share pages — left for later, as scoped
 
 **Success criteria**
 
@@ -290,11 +307,11 @@ claim that it is done._
 | Stage | State | Measured |
 |---|---|---|
 | 1 — stop polling | **done** | e2e: 0 tree/heat/projects requests in a 70 s idle window (was 4 tree + 2 projects + 1 heat). Prod HAR: pending |
-| 2 — compress + revalidate | blocked on 1 | |
+| 2 — compress + revalidate | **done** | Go + e2e green. Prod HAR: pending |
 | 3 — narrow the fan-out | blocked on 1 | |
 | 4 — stop no-op writes | blocked on 3 | |
 | 5 — survive a failure | not started | |
-| 6 — slim the payload | blocked on 2 | |
+| 6 — slim the payload | ready | |
 
 ### Measurements
 

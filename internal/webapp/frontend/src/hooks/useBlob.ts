@@ -21,7 +21,12 @@ export async function fetchBlobText(url: string): Promise<BlobText> {
   // Cheap out before reading the body when the server tells us the size.
   // Content-Length is a hint, not a guarantee (a chunked or proxied
   // response may omit it), so sniffBytes checks the real length too.
-  const len = Number(r.headers.get("Content-Length"));
+  // A compressed response has no Content-Length at all — it describes bytes
+  // on the wire, and the hub moves the plaintext size aside under its own
+  // name so this check survives compression (webapp/compress.go).
+  const len = Number(
+    r.headers.get("Content-Length") ?? r.headers.get("X-Uncompressed-Length"),
+  );
   if (len > MAX_BYTES) return { kind: "too-large", size: len };
   return sniffBytes(new Uint8Array(await r.arrayBuffer()));
 }

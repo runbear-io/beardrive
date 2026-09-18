@@ -1024,7 +1024,10 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.Register(mux.ServeMux)
 	}
 	s.routes = mux.pats
-	h := s.rateLimitAuth(s.authGate(mux))
+	// Outermost, so every response below it is compressed on the way out —
+	// including the ones authGate and the rate limiter write themselves.
+	// See compress.go for why streaming survives this.
+	h := gzipResponses(s.rateLimitAuth(s.authGate(mux)))
 	// Kept so MCP tools can re-enter the API as internal clients (mcp.go).
 	// The bare mux, NOT the wrapped handler: a tool call has already passed
 	// the OAuth check and carries its identity on the context, so sending it
@@ -1424,7 +1427,7 @@ func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, buildTree(visibleFiles(snap.files, s.visibility(r))))
+	writeJSONCached(w, r, buildTree(visibleFiles(snap.files, s.visibility(r))))
 }
 
 // visibleFiles drops the entries this account may not read. It returns the
@@ -1887,6 +1890,54 @@ func storageErr(w http.ResponseWriter, code int, msg string, err error) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	writeJSONStatus(w, http.StatusOK, v)
+}
+
+/* writeJSONCached is writeJSON for a response worth revalidating instead of
+   re-sending: the whole file tree, the whole heat map.
+
+   The ETag is over the encoded bytes, which means encoding them even for a
+   304 — the saving is the transfer, not the work, and the work was already
+   being done (buildTree walks a snapshot that is itself cached). For a
+   5,700-node project that is ~150 KB compressed versus 30 bytes.
+
+   Cache-Control: no-cache is REVALIDATE, not "do not store": the browser
+   keeps the body and asks whether it still holds, which is the entire point.
+   Without it a heuristic cache would serve a tree from an hour ago with no
+   way for anyone to notice. */
+func writeJSONCached(w http.ResponseWriter, r *http.Request, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
+	h := w.Header()
+	h.Set("ETag", etag)
+	h.Set("Cache-Control", "no-cache")
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		// No Content-Type and no body: a 304 carries neither, and gzipWriter
+		// leaves this status alone for the same reason.
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	h.Set("Content-Type", "application/json")
+	w.Write(body)
+}
+
+// etagMatches handles the header as sent: a comma-separated list, entries
+// possibly weak-prefixed, and `*` meaning any current representation.
+func etagMatches(header, etag string) bool {
+	for _, part := range strings.Split(header, ",") {
+		candidate := strings.TrimSpace(part)
+		if candidate == "*" {
+			return true
+		}
+		if strings.TrimPrefix(candidate, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // writeJSONStatus is writeJSON for the answers a client has to read the body

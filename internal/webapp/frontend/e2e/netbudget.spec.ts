@@ -45,3 +45,30 @@ test("an idle tab does not fetch the project down again", async ({ page }) => {
   const other = seen.filter((r) => !r.includes("/presence") && !r.includes("/events"));
   expect(other, `unexpected idle traffic: ${other.join(", ")}`).toHaveLength(0);
 });
+
+/* What does leave the hub is compressed.
+
+   Asserted on the wire rather than by byte counts, for the same reason as
+   above: the seeded project is small, so the ratio here would prove nothing.
+   The header is the behaviour — a browser that asked for gzip and got raw
+   JSON is the bug, whatever the size happened to be. */
+test("responses are compressed, and streams are left alone", async ({ page }) => {
+  const enc = new Map<string, string | null>();
+  page.on("response", async (r) => {
+    const name = new URL(r.url()).pathname.split("/").pop() || "";
+    if (["tree", "events", "collab"].includes(name) && !enc.has(name)) {
+      enc.set(name, await r.headerValue("content-encoding").catch(() => null));
+    }
+  });
+
+  await login(page, ADMIN);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/`);
+  await page.waitForSelector("#sidebar");
+  await page.waitForTimeout(2_000); // the SSE stream opens just after paint
+
+  expect(enc.get("tree"), "the biggest response on the wire").toBe("gzip");
+  // Buffering an event stream to save bytes trades away the whole point of
+  // the stream — and once took live updates and co-editing down with it.
+  expect(enc.get("events") ?? "").not.toBe("gzip");
+});
