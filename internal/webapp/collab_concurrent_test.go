@@ -29,6 +29,24 @@ type collabClient struct {
 	posted  int32
 }
 
+// awaitResync waits for the rebuild notice a dropped client is owed.
+//
+// The dropped frames themselves are gone — post() only ever queued 32 and
+// discarded the rest — so the notice cannot ride them. It goes out just
+// before the NEXT frame the stream writes, or on the keepalive tick if the
+// room fell silent, which is up to 20s away. A busy CI box reaches that
+// second case (the typists finish, nothing more is queued, and the notice
+// waits for the tick) where a fast laptop never does.
+func awaitResync(c *collabClient, d time.Duration) {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&c.resyncs) > 0 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // TestCollabSevenEditorsOneFile drives seven real HTTP clients editing one file
 // at once and reports what the relay did: who seeded, how many updates each
 // peer actually received, and whether anyone was told to resync (a dropped
@@ -170,7 +188,10 @@ func TestCollabSevenEditorsOneFile(t *testing.T) {
 		case got > want:
 			t.Errorf("client %d: received %d updates, want %d — the relay is "+
 				"echoing this client its own updates", c.id, got, want)
-		case got < want && atomic.LoadInt32(&c.resyncs) == 0:
+		case got < want && func() bool {
+			awaitResync(c, 30*time.Second)
+			return atomic.LoadInt32(&c.resyncs) == 0
+		}():
 			// The invariant that matters for a CRDT peer: frames may be
 			// dropped when a client falls behind, but it must always be TOLD,
 			// or it is silently diverged from everyone else.
@@ -326,9 +347,12 @@ func TestCollabSlowEditorAmongSeven(t *testing.T) {
 			t.Errorf("client %d: received %d, want at most %d — self-echo",
 				c.id, got, want)
 		}
-		if got < want && atomic.LoadInt32(&c.resyncs) == 0 {
-			t.Errorf("client %d: received %d of %d and was never told to "+
-				"resync — silent divergence", c.id, got, want)
+		if got < want {
+			awaitResync(c, 30*time.Second)
+			if atomic.LoadInt32(&c.resyncs) == 0 {
+				t.Errorf("client %d: received %d of %d and was never told to "+
+					"resync — silent divergence", c.id, got, want)
+			}
 		}
 	}
 	slow := clients[slowIdx]
