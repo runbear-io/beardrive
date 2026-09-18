@@ -36,7 +36,10 @@ const (
 	// holding a long queue for a tab that has stopped reading buys nothing.
 	subBuffer = 32
 	// maxSubsPerProject bounds one project's fan-out, maxSubsTotal the hub's.
-	// A browser holds one stream per open tab, a device one per mount, so
+	// A browser holds ONE project stream however many tabs are open — the
+	// tabs elect a leader over a Web Lock and the others read its frames off
+	// a BroadcastChannel (useProjectEvents.ts) — plus one collab stream per
+	// open editor, which is not shared. A device holds one per mount. So
 	// these are far above any real deployment and exist only so an
 	// unauthenticated-adjacent surface cannot be made to allocate without end.
 	maxSubsPerProject = 256

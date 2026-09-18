@@ -14,7 +14,7 @@ import (
 // DIFFERENT documents, and merging them duplicates every character — so this
 // is a correctness test, not a tidiness one.
 func TestCollabExactlyOneJoinerSeeds(t *testing.T) {
-	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	room := &collabRoom{subs: map[*subscriber]string{}}
 	const n = 32
 	var wg sync.WaitGroup
 	seeds := make([]bool, n)
@@ -52,7 +52,7 @@ A claim that never produced a document must not hold the room forever.
 	out to be, and it survives a page reload because the state is the hub's.
 */
 func TestCollabAbandonedSeedClaimExpires(t *testing.T) {
-	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	room := &collabRoom{subs: map[*subscriber]string{}}
 
 	ghost := &subscriber{ch: make(chan []byte, 1)}
 	if _, first := room.join(ghost); !first {
@@ -78,7 +78,7 @@ func TestCollabAbandonedSeedClaimExpires(t *testing.T) {
 // long ago it was made. Expiring that one would tell a joiner to seed a room
 // that already has content, and the two documents merge into doubled text.
 func TestCollabLiveRoomKeepsItsClaimForever(t *testing.T) {
-	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	room := &collabRoom{subs: map[*subscriber]string{}}
 	seeder := &subscriber{ch: make(chan []byte, 8)}
 	room.join(seeder)
 	room.post([]byte("the document"), seeder)
@@ -95,7 +95,7 @@ func TestCollabLiveRoomKeepsItsClaimForever(t *testing.T) {
 // A joiner after the first gets the log, which is what lets it rebuild the
 // same document instead of seeding a second one.
 func TestCollabLaterJoinerGetsTheLog(t *testing.T) {
-	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	room := &collabRoom{subs: map[*subscriber]string{}}
 	first := &subscriber{ch: make(chan []byte, 8)}
 	if _, seed := room.join(first); !seed {
 		t.Fatal("the first joiner into an empty room must seed")
@@ -114,7 +114,7 @@ func TestCollabLaterJoinerGetsTheLog(t *testing.T) {
 
 // An update reaches the other editors and is not echoed to its sender.
 func TestCollabPostFansOutButNotToSender(t *testing.T) {
-	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	room := &collabRoom{subs: map[*subscriber]string{}}
 	a := &subscriber{ch: make(chan []byte, 4)}
 	b := &subscriber{ch: make(chan []byte, 4)}
 	room.join(a)
@@ -141,7 +141,7 @@ func TestCollabPostFansOutButNotToSender(t *testing.T) {
 // A CRDT peer that misses an update is silently diverged, which is worse than
 // a missed file notification: it is told to rebuild.
 func TestCollabSlowEditorIsToldToResync(t *testing.T) {
-	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	room := &collabRoom{subs: map[*subscriber]string{}}
 	slow := &subscriber{ch: make(chan []byte, 2)}
 	room.join(slow)
 	for i := 0; i < 10; i++ {
@@ -156,7 +156,7 @@ func TestCollabSlowEditorIsToldToResync(t *testing.T) {
 // answer to a full room is "everyone rebuild", not a silent truncation that
 // would diverge every peer.
 func TestCollabRoomIsBounded(t *testing.T) {
-	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	room := &collabRoom{subs: map[*subscriber]string{}}
 	big := make([]byte, 1<<20)
 	n := 0
 	for room.post(big, nil) {
@@ -229,7 +229,7 @@ func TestCollabRejectsBadUpdates(t *testing.T) {
 // typing: otherwise the room stays claimed but empty, and the next joiner
 // opens a blank document and snapshots that emptiness over a real file.
 func TestCollabSeedClaimIsReleasedByAnEditorWhoNeverTyped(t *testing.T) {
-	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	room := &collabRoom{subs: map[*subscriber]string{}}
 	a := &subscriber{ch: make(chan []byte, 1)}
 	if _, first := room.join(a); !first {
 		t.Fatal("first joiner should seed")
@@ -245,7 +245,7 @@ func TestCollabSeedClaimIsReleasedByAnEditorWhoNeverTyped(t *testing.T) {
 // But a room that HAS content stays claimed, so a joiner rebuilds from the
 // log rather than seeding a second document over it.
 func TestCollabSeedClaimSurvivesWhenTheLogHasContent(t *testing.T) {
-	room := &collabRoom{subs: map[*subscriber]struct{}{}}
+	room := &collabRoom{subs: map[*subscriber]string{}}
 	a := &subscriber{ch: make(chan []byte, 4)}
 	room.join(a)
 	room.post([]byte("typed something"), a)

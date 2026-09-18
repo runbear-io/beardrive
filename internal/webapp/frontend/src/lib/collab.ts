@@ -42,6 +42,12 @@ export class CollabDoc {
   private everConnected = false;
   // Updates that came FROM the relay must not be echoed back to it.
   private applying = false;
+  // Identifies this stream to the relay, so our own updates and cursor moves
+  // are not mailed back to us. Sent on the stream URL and on every POST; the
+  // relay treats an unknown id as "no sender" and fans out to everyone, which
+  // is what an older hub does anyway.
+  private readonly cid =
+    globalThis.crypto?.randomUUID?.() ?? String(Math.random()).slice(2);
 
   constructor(
     private readonly url: string,
@@ -90,7 +96,7 @@ export class CollabDoc {
     void fetch(this.url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ awareness: bytesToB64(update) }),
+      body: JSON.stringify({ awareness: bytesToB64(update), cid: this.cid }),
     }).catch(() => {
       // A lost cursor position corrects itself on the next keystroke.
     });
@@ -98,7 +104,9 @@ export class CollabDoc {
 
   connect() {
     this.onStatus("connecting");
-    const es = new EventSource(this.url);
+    const es = new EventSource(
+      this.url + (this.url.includes("?") ? "&" : "?") + "cid=" + this.cid,
+    );
     this.es = es;
     es.onmessage = (e) => {
       let f: {
@@ -176,7 +184,7 @@ export class CollabDoc {
       const res = await fetch(this.url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ update: bytesToB64(merged) }),
+        body: JSON.stringify({ update: bytesToB64(merged), cid: this.cid }),
       });
       if (res.ok) {
         const out = await res.json().catch(() => ({}));
