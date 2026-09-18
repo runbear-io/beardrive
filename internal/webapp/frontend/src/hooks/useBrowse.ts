@@ -3,16 +3,25 @@ import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, HistoryEntry, Node } from "../api/types";
 
-// The volume's file tree, polled so synced changes appear without a
-// reload. react-query's structural sharing keeps identical polls from
-// re-rendering (the classic app compared JSON strings for the same
-// reason).
+/* The volume's file tree.
+
+   NOT polled for freshness: useProjectEvents holds an SSE stream that names
+   every changed path, and this query is invalidated from it. The 15s poll
+   this used to carry predates that stream and was never retired — on a real
+   project the tree is 1.65 MB, so it was re-sending the whole project four
+   times a minute to a client that already knew nothing had changed
+   (docs/network-efficiency-prd.md).
+
+   The 5 minute interval that remains is not freshness, it is insurance: a
+   stream that dies quietly on a tab nobody touches would otherwise leave the
+   tree wrong until navigation. Long enough to be a rounding error, short
+   enough that nobody stares at a stale listing. */
 export function useTree(apiBase: string, enabled = true) {
   const q = useQuery({
     queryKey: ["tree", apiBase],
     queryFn: () => getJSON<Node>(apiBase + "tree"),
     enabled,
-    refetchInterval: 15_000,
+    refetchInterval: 300_000,
   });
   // Flattened lookups: every file (wikilink resolution, palette) and every
   // directory (folder listings, path-kind dispatch).
@@ -43,8 +52,10 @@ export function useHeat(apiBase: string, enabled: boolean) {
     queryKey: ["heat", apiBase],
     queryFn: () => getJSON<{ entries: HeatMap }>(apiBase + "heat?days=30"),
     enabled,
+    // Read counts move when somebody READS, which nothing here can observe —
+    // so this is refreshed when a surface that shows it opens (Browser.tsx),
+    // not on a timer that re-sent 133 KB every minute forever.
     staleTime: 60_000,
-    refetchInterval: 60_000,
   });
   return q.data?.entries ?? null;
 }

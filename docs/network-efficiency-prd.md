@@ -106,13 +106,13 @@ tree download.
 
 Two instruments, both repeatable:
 
-1. **`e2e/netbudget.spec.ts`** (new, Stage 1) — drives the seeded hub and
+1. **`e2e/netbudget.spec.ts`** (Stage 1) — drives the seeded hub and
    counts requests with `page.on("request")`. Assertions are on request
    *counts* and response *headers*, never absolute byte totals: the seeded
    project is tiny, so bytes there prove nothing. This is the regression gate
    and runs in CI with the rest of the suite.
 2. **A production HAR**, re-measured after each stage on the same project with
-   the same script (`docs/assets/net-audit.py`, added in Stage 1). This is
+   the same script (`docs/assets/net-audit.py`). This is
    where the byte numbers in each stage's success criteria come from. Record
    the result in §Status.
 
@@ -127,22 +127,25 @@ The SSE stream (`hooks/useProjectEvents.ts`) already announces every change.
 Delete the timers that duplicate it. Keep one long safety-net interval so a
 silently dropped stream still self-heals within a few minutes.
 
-- [ ] `refetchInterval` removed from `useTree` (`hooks/useBrowse.ts:15`)
-- [ ] `refetchInterval` removed from `useHeat` (`hooks/useBrowse.ts:46`)
-- [ ] `refetchInterval` removed from `useProjects` (`hooks/useHub.ts:19`)
-- [ ] One safety net: a 5-minute `refetchInterval` on `tree` only, with a
-      comment naming what it is insuring against (a dropped `events` stream on
-      a tab nobody touches)
-- [ ] Global `staleTime: 30_000` default in `main.tsx:9` — every query is
-      currently stale on arrival, so any remount refetches
-- [ ] `e2e/netbudget.spec.ts` added: opens a project, idles 90 s, asserts the
-      request count
-- [ ] `docs/assets/net-audit.py` added — the HAR analysis used for the
+- [x] 15 s `refetchInterval` removed from `useTree` (`hooks/useBrowse.ts`)
+- [x] 60 s `refetchInterval` removed from `useHeat` (`hooks/useBrowse.ts`)
+- [x] 30 s `refetchInterval` removed from `useProjects` (`hooks/useHub.ts`)
+- [x] One safety net: a 5-minute `refetchInterval` on `tree` only, commented
+      as insurance against a dropped `events` stream on a tab nobody touches
+- [x] Global `staleTime: 30_000` default in `main.tsx` — every query was
+      stale on arrival, so any remount refetched
+- [x] `e2e/netbudget.spec.ts` added: opens a project, idles 70 s, asserts the
+      request count. Window is 70 s because the slowest poll it replaces ran
+      at 60 s — a shorter one would pass against code that still polls
+- [x] Verified the gate FAILS on the pre-stage bundle (4 tree polls caught)
+- [x] `docs/assets/net-audit.py` added — the HAR analysis used for the
       baseline above, so the next measurement is the same measurement
+- [x] `architecture/webapp-frontend.md` + `webapp-server.md` notes corrected:
+      both claimed a 15 s tree poll sat underneath the stream
 
 **Success criteria**
 
-- e2e: in a 90-second idle window with no writes, the tab issues **zero**
+- e2e: in a 70-second idle window with no writes, the tab issues **zero**
   `tree`, `heat` and `projects` requests, and at most 10 requests in total
   (presence beats only).
 - HAR, same project: an idle foreground tab for 10 minutes transfers
@@ -286,7 +289,7 @@ claim that it is done._
 
 | Stage | State | Measured |
 |---|---|---|
-| 1 — stop polling | not started | |
+| 1 — stop polling | **done** | e2e: 0 tree/heat/projects requests in a 70 s idle window (was 4 tree + 2 projects + 1 heat). Prod HAR: pending |
 | 2 — compress + revalidate | blocked on 1 | |
 | 3 — narrow the fan-out | blocked on 1 | |
 | 4 — stop no-op writes | blocked on 3 | |
