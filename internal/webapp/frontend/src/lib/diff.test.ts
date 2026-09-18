@@ -3,7 +3,7 @@
 // app's DOM-only lib set does not know about.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { splitLines, lcsDiff, diffText } from "./diff.ts";
+import { splitLines, lcsDiff, diffText, textEdit } from "./diff.ts";
 
 const ops = (ls: ReturnType<typeof lcsDiff>) => ls.map((l) => l.op + l.line);
 
@@ -96,4 +96,39 @@ test("past the cell budget it degrades to whole-file replacement", () => {
   assert.equal(d.filter((l) => l.op === "-").length, 2100);
   assert.equal(d.filter((l) => l.op === "+").length, 2100);
   assert.equal(d.filter((l) => l.op === "=").length, 0);
+});
+
+test("textEdit is null when there is nothing to do", () => {
+  assert.equal(textEdit("same", "same"), null);
+  assert.equal(textEdit("", ""), null);
+});
+
+test("textEdit touches only the middle that actually changed", () => {
+  assert.deepEqual(textEdit("# Title\n\nold body\n", "# Title\n\nnew body\n"), {
+    from: 9,
+    to: 12,
+    insert: "new",
+  });
+  // Pure insertion: an empty range, nothing deleted.
+  assert.deepEqual(textEdit("ab", "aXb"), { from: 1, to: 1, insert: "X" });
+  // Pure deletion: an empty insert.
+  assert.deepEqual(textEdit("aXb", "ab"), { from: 1, to: 2, insert: "" });
+});
+
+test("textEdit round-trips, including repeats the prefix scan could run past", () => {
+  const cases: [string, string][] = [
+    ["", "hello"],
+    ["hello", ""],
+    ["aaa", "aa"],
+    ["aa", "aaa"],
+    ["abcabc", "abc"],
+    ["one\ntwo\nthree\n", "one\ntwo\n2.5\nthree\n"],
+    ["😀x", "😁x"],
+  ];
+  for (const [a, b] of cases) {
+    const e = textEdit(a, b);
+    const got = e ? a.slice(0, e.from) + e.insert + a.slice(e.to) : a;
+    assert.equal(got, b, `${JSON.stringify(a)} -> ${JSON.stringify(b)}`);
+    if (e) assert.ok(e.to >= e.from, "range runs forwards");
+  }
 });

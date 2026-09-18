@@ -92,3 +92,27 @@ export function diffText(prev: string, next: string): { lines: DiffLine[]; add: 
     del: lines.filter((l) => l.op === "-").length,
   };
 }
+
+/* The smallest single replacement that turns `prev` into `next`: whatever the
+   two share at the front and at the back is left alone.
+
+   Coarser than the line diff above — one range, not a script — and that is the
+   point. It is applied to a LIVE document somebody may have a cursor in, and
+   every character it does not touch is a cursor, a selection and a remote
+   caret that does not move. Replacing the whole document would move all of
+   them. Offsets are UTF-16 code units, which is what both Y.Text and
+   CodeMirror count in. */
+export function textEdit(
+  prev: string,
+  next: string,
+): { from: number; to: number; insert: string } | null {
+  if (prev === next) return null;
+  const max = Math.min(prev.length, next.length);
+  let p = 0;
+  while (p < max && prev[p] === next[p]) p++;
+  // Bounded by what the prefix left, so the two never overlap on the shorter
+  // string — which would produce a range running backwards.
+  let s = 0;
+  while (s < max - p && prev[prev.length - 1 - s] === next[next.length - 1 - s]) s++;
+  return { from: p, to: prev.length - s, insert: next.slice(p, next.length - s) };
+}

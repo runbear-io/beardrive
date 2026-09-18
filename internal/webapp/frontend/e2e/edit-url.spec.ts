@@ -154,3 +154,67 @@ test("the URL is the invitation: a teammate lands in the same document", async (
   });
   await guestCtx.close();
 });
+
+/* An agent writing the file while somebody has it open.
+
+   The editor still never re-seeds itself from the server — that would reset
+   the document under a cursor. The write arrives as a splice instead, which
+   is why the assertion is about what is ON SCREEN and not about the file. */
+test("an outside write lands in the open editor", async ({ page }) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  await page.goto(`/${id}/edit/${file}`);
+  await page.waitForSelector(".cm-host .cm-content");
+  // A cursor parked at the end of the body line, BEFORE the write arrives.
+  await page.locator(".cm-host .cm-line", { hasText: "first line." }).click();
+  await page.keyboard.press("End");
+
+  // The same PUT a syncing device makes, from outside this browser's editor.
+  // It rewrites the line ABOVE the cursor, so a document that was re-seeded
+  // rather than spliced would drop the caret back to the top.
+  const r = await page.request.put(
+    `/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`,
+    { data: "# Notes (rewritten by an agent)\n\nfirst line.\n" },
+  );
+  expect(r.ok()).toBeTruthy();
+
+  const buf = page.locator(".cm-host .cm-content");
+  await expect(buf).toContainText("rewritten by an agent");
+  // Folded in, so there is nothing to warn about.
+  await expect(page.locator("#peer-wrote")).toHaveCount(0);
+
+  // The splice is the claim: everything it did not change is untouched, and
+  // that includes where this account was typing.
+  await page.keyboard.type("STILL HERE");
+  await expect(buf).toContainText("first line.STILL HERE");
+});
+
+/* ...and the case it must refuse. Half a sentence in the buffer is work
+   nothing may overwrite, so the outside write stays out and is announced. */
+test("an outside write never overwrites unsaved typing", async ({ page }) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  await page.goto(`/${id}/edit/${file}`);
+  await page.waitForSelector(".cm-host .cm-content");
+  // The editor's own save can never land, so the buffer stays genuinely
+  // unsaved for the whole test instead of racing the 700ms idle timer.
+  // Routes do not apply to page.request, so the outside write still goes.
+  await page.route("**/upload/content*", (route) => route.abort());
+  await page.locator(".cm-host .cm-content").click();
+  await page.keyboard.type("MID-SENTENCE");
+
+  const r = await page.request.put(
+    `/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`,
+    { data: "# Notes\n\nfirst line, rewritten by an agent.\n" },
+  );
+  expect(r.ok()).toBeTruthy();
+
+  await expect(page.locator("#peer-wrote")).toBeVisible();
+  const buf = page.locator(".cm-host .cm-content");
+  await expect(buf).toContainText("MID-SENTENCE");
+  await expect(buf).not.toContainText("rewritten by an agent");
+});

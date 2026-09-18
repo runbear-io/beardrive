@@ -19,7 +19,13 @@ import {
 } from "@codemirror/language";
 import { yCollab } from "y-codemirror.next";
 import { type CollabStatus } from "../lib/collab";
-import { openSharedFile, SAVE_IDLE_MS, type SaveState } from "../lib/sharedfile";
+import {
+  openSharedFile,
+  SAVE_IDLE_MS,
+  type MergeResult,
+  type SaveState,
+  type SharedFile,
+} from "../lib/sharedfile";
 
 /* Editing a text file in the browser, with everyone else who has it open.
 
@@ -53,6 +59,7 @@ export function Editor({
   onStateChange,
   onCollab,
   onPeers,
+  onExternal,
   me,
 }: {
   apiBase: string;
@@ -62,6 +69,9 @@ export function Editor({
   onWriting?: () => void;
   onStateChange?: (s: SaveState) => void;
   onCollab?: (s: CollabStatus) => void;
+  /* Someone wrote the file while it was open here, and whether that write
+     could be folded into the buffer. False is the case the banner is for. */
+  onExternal?: (r: MergeResult) => void;
   // Who this editor is, for the label and colour on a remote caret.
   me?: { name: string; colour: string };
   // Reports whether other editors are in the document, so the caller can
@@ -82,9 +92,32 @@ export function Editor({
   //  - `initial` changes whenever the seed query refetches, and a peer's write
   //    invalidates exactly that query — so it would reset the buffer under the
   //    typist's cursor, which is the one thing this component must never do.
-  const cb = useRef({ onSaved, onWriting, onStateChange, onCollab, onPeers });
-  cb.current = { onSaved, onWriting, onStateChange, onCollab, onPeers };
+  const cb = useRef({ onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal });
+  cb.current = { onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal };
   const seed = useRef(initial);
+  // The bytes this editor opened with, so a later `initial` can be told apart
+  // from the one that mounted us.
+  const opened = useRef(initial);
+  const shared = useRef<SharedFile | null>(null);
+  const editor = useRef<EditorView | null>(null);
+
+  /* The file changed under us. Fold it in rather than leaving the buffer on
+     bytes that no longer exist anywhere — the splice leaves untouched text
+     (and the cursor sitting in it) alone, and refuses outright when it would
+     have to overwrite unsaved edits. Nothing here re-seeds the document.
+
+     Depends on `initial` ALONE. It is the live ["text", file] query, so a
+     write to this path — ours, a co-editor's, an agent's — refetches it. */
+  useEffect(() => {
+    if (initial === opened.current) return;
+    seed.current = initial;
+    const f = shared.current;
+    // Before the editor is up there is nothing to splice into, and the room
+    // may still be seeding from bytes we now know are stale: say so.
+    cb.current.onExternal?.(
+      f && editor.current ? f.merge(initial) : "blocked",
+    );
+  }, [initial]);
   const meRef = useRef(me);
   meRef.current = me;
 
@@ -124,6 +157,7 @@ export function Editor({
           extensions: [...baseExtensions, soloListener],
         }),
       });
+      editor.current = view;
       view.focus();
     };
 
@@ -145,6 +179,7 @@ export function Editor({
           ],
         }),
       });
+      editor.current = view;
       view.focus();
     };
 
@@ -167,10 +202,16 @@ export function Editor({
       onSaved: (t) => cb.current.onSaved?.(t),
       onWriting: () => cb.current.onWriting?.(),
       soloText: () => view?.state.doc.toString() ?? "",
+      // No CRDT to splice into, so the outside write goes straight into
+      // CodeMirror — which maps the cursor through it for free.
+      soloApply: (e) => view?.dispatch({ changes: e }),
     });
+    shared.current = file;
 
     return () => {
       if (timer.current) clearTimeout(timer.current);
+      shared.current = null;
+      editor.current = null;
       file.destroy();
       view?.destroy();
     };

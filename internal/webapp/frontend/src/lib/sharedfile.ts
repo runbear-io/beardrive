@@ -1,4 +1,5 @@
 import { CollabDoc, type CollabStatus } from "./collab";
+import { textEdit } from "./diff";
 import { putText } from "../api/http";
 
 /* One open file, shared with everyone else who has it open, and written back
@@ -22,6 +23,12 @@ import { putText } from "../api/http";
 
 export type SaveState = "clean" | "dirty" | "saving" | "error";
 
+/* What became of an outside write offered to an open document.
+   "same" — nothing new: our own write coming back, or text we already hold.
+   "merged" — spliced into the live buffer.
+   "blocked" — refused, because applying it would have destroyed something. */
+export type MergeResult = "same" | "merged" | "blocked";
+
 // Idle time before the document is written to the file.
 export const SAVE_IDLE_MS = 700;
 
@@ -31,6 +38,10 @@ export type SharedFile = {
   current(): string;
   /** Force a save now, skipping the idle wait. */
   saveNow(): Promise<void>;
+  /** Fold an outside write — an agent, a CLI, another device — into the open
+      document. "blocked" means the caller should SAY so instead, because this
+      refused to resolve it. */
+  merge(next: string): MergeResult;
   destroy(): void;
 };
 
@@ -58,6 +69,10 @@ export function openSharedFile(opts: {
   /** Text to save when the relay never answered, so there is no CRDT to read
       it from. The solo surface owns its own buffer. */
   soloText?: () => string;
+  /** Apply a merged-in outside write to that same solo buffer. Without it a
+      relay-less surface cannot take one, and merge() says so rather than
+      claiming a change it could not make. */
+  soloApply?: (e: { from: number; to: number; insert: string }) => void;
 }): SharedFile {
   let saved = opts.seed;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -110,9 +125,59 @@ export function openSharedFile(opts: {
   const current = () =>
     collab.text.length ? collab.text.toString() : (opts.soloText?.() ?? "");
 
+  /* Somebody wrote this file while it was open here.
+
+     The editor deliberately does not re-seed itself from the server — that
+     would reset the document under a typist's cursor — so this is the other
+     way the change gets in: as the one splice that turns what we have into
+     what the file says, leaving every untouched character (and so every
+     cursor and every remote caret) exactly where it was.
+
+     It refuses in the two cases where a splice would destroy something, and
+     the refusal is the caller's banner. */
+  const merge = (next: string): MergeResult => {
+    // The file is at the content we last knew about: our own write coming
+    // back through the change stream, or nothing new at all.
+    if (next === saved) return "same";
+    const cur = current();
+    // Already in the buffer: a co-editor snapshotted the document we share.
+    // Recording it is what keeps the check above true for the rest of the
+    // session, so their next save is not mistaken for an outsider's.
+    if (next === cur) {
+      saved = next;
+      return "same";
+    }
+    // Unsaved local edits: not ours to resolve. Splicing over a half-typed
+    // sentence is the one thing this must never do.
+    if (cur !== saved) return "blocked";
+    // A co-editor in the room: they are looking at the same stale document
+    // and would compute the same splice, and two identical splices into one
+    // CRDT is the change applied twice.
+    if (collab.peerCount() > 0) return "blocked";
+    const e = textEdit(cur, next);
+    if (!e) return "same";
+    if (!collab.text.length && !opts.soloApply) return "blocked";
+    // Before the splice, not after: the document change it causes schedules a
+    // save, and this is what makes that save a no-op instead of a write-back
+    // of what we just read.
+    saved = next;
+    if (collab.text.length) {
+      // One transaction, so a peer sees a replacement rather than a delete
+      // followed by a moment of missing text.
+      collab.doc.transact(() => {
+        collab.text.delete(e.from, e.to - e.from);
+        collab.text.insert(e.from, e.insert);
+      });
+    } else {
+      opts.soloApply!(e);
+    }
+    return "merged";
+  };
+
   return {
     collab,
     current,
+    merge,
     saveNow: () => save(current()),
     destroy() {
       if (timer) clearTimeout(timer);
