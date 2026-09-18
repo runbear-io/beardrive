@@ -483,7 +483,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// any chunked request, so max(r.ContentLength, 0) admitted an upload of any
 	// size against a quota of zero bytes and billed it at zero — the hole round
 	// 1 closed on the device door, still open on this one.
-	tmp, size, _, err := spool(r.Body)
+	tmp, size, blob, err := spool(r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
@@ -491,11 +491,16 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	project := r.PathValue("project")
+	// billed is what this write actually adds: zero when the store already
+	// holds this exact blob, which is every co-editor after the first saving
+	// the same converged text. See billableBytes.
+	billed := size
 	if rs, ok := v.source.(*RemoteSource); ok {
 		s.reconcileGrants(r.Context(), project, rs.Backend)
+		billed = billableBytes(r.Context(), rs.Backend, "blobs/"+blob, size)
 	}
 	org := s.orgOf(project)
-	if err := s.quota().CheckWrite(org, size+s.reservedBytes(org)); err != nil {
+	if err := s.quota().CheckWrite(org, billed+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -503,7 +508,9 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
 	}
-	s.quota().RecordUsage(org, size)
+	if billed > 0 {
+		s.quota().RecordUsage(org, billed)
+	}
 	v.invalidate()
 	s.captureChange(r, "browser", 1, 0)
 	s.publishChange(r, "browser", []string{p}, 1, 0)
