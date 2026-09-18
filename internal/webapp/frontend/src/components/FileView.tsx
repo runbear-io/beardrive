@@ -24,6 +24,7 @@ import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
 import { hasMermaid, renderMermaid } from "../lib/mermaid";
 import { secretsBadge, type SecretFinding } from "../lib/secrets";
 import { Icon } from "./shell";
+import { toast } from "../toast";
 import { Editor, type SaveState } from "./Editor";
 import { VisualEdit } from "./VisualEdit";
 import type { CollabStatus } from "../lib/collab";
@@ -209,10 +210,12 @@ function FileCard(props: {
 /* The editing surface. Loads the file's current bytes once and hands them to
    CodeMirror; from then on the buffer is the truth until a save lands.
 
-   It deliberately does NOT follow the change stream. A teammate's write while
-   you are mid-sentence would otherwise reset your document under your cursor,
-   which is worse than the staleness it fixes — and resolving that properly is
-   what the CRDT layer is for. The banner tells you instead. */
+   It still does NOT re-seed itself from the change stream — that would reset
+   the document under your cursor. An outside write is offered to the open
+   document as a SPLICE instead (sharedfile.merge), which leaves every
+   character it does not change, and the cursor sitting in one, alone. The
+   banner is what is left: the cases merge refuses, because folding the write
+   in would have overwritten unsaved edits or landed twice. */
 function EditView(props: Parameters<typeof FileView>[0]) {
   const { apiBase, path, onMeta } = props;
   // An HTML file edits as the page it renders as, unless the reader asked for
@@ -248,6 +251,11 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     const onPeer = (e: Event) => {
       const p = (e as CustomEvent<string[]>).detail;
       if (!p?.includes(path)) return;
+      // The source editor decides from the file's own bytes once the refetch
+      // this same event triggers arrives (Editor's onExternal). That verdict
+      // knows whether the change could be merged; this event cannot, and
+      // raising a banner ahead of it only flashes the wrong answer.
+      if (!visual) return;
       // Our own save comes back through the stream; that is not a peer.
       if (mine.current > 0) {
         mine.current--;
@@ -258,7 +266,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     };
     window.addEventListener("bdrive:changed", onPeer);
     return () => window.removeEventListener("bdrive:changed", onPeer);
-  }, [path]);
+  }, [path, visual]);
 
   useEffect(() => {
     onMeta(
@@ -322,6 +330,14 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           apiBase={apiBase}
           path={path}
           initial={data.text}
+          /* Someone wrote the file while it was open here. Merged, it is
+             already on screen and only worth a word; refused, it is the
+             banner — and either way this is the only thing that raises or
+             clears it for this surface. */
+          onExternal={(r) => {
+            setPeerWrote(r === "blocked");
+            if (r === "merged") toast("Folded in a change from outside this editor.");
+          }}
           onWriting={() => {
             mine.current++;
           }}
