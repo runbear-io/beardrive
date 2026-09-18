@@ -19,3 +19,32 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
+
+  # The race detector, kept off the critical path by not running the whole
+  # suite under it.
+  #
+  # `go test ./... -race` takes 44 minutes, almost all of it internal/webapp,
+  # whose slowest tests drive real bdrive processes and real sync cycles and
+  # have nothing concurrent to say. The split below is ~4 minutes and covers
+  # what races actually live in: every other package whole, and the webapp's
+  # concurrent paths by name (the relay and its rooms, presence, the event
+  # stream, and the check-then-write on uploads).
+  #
+  # It exists because it was missing: a genuine data race in
+  # TestCollabSevenEditorsOneFile — counters written atomically and read
+  # plainly while the reader goroutines were still draining — sat undetected
+  # from #228 until somebody ran -race by hand. Ubuntu alone; a race is not
+  # platform-specific and the macOS runner is the slower of the two.
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: race — every package but the webapp suite
+        run: go test -race -timeout 20m $(go list ./... | grep -v '/internal/webapp$')
+      - name: race — the webapp's concurrent paths
+        run: |
+          go test -race -timeout 20m ./internal/webapp \
+            -run 'Collab|Concurrent|Stress|Events|Presence|Upload|Store'
