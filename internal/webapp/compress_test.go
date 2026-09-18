@@ -127,14 +127,34 @@ func TestEventStreamIsNeitherCompressedNorBuffered(t *testing.T) {
 	}
 }
 
-// The same guard events.go runs before it writes a byte. A gzipWriter that
-// failed this would take every stream on the hub down with it.
-func TestGzipWriterIsStreamable(t *testing.T) {
-	gw := &gzipWriter{ResponseWriter: httptest.NewRecorder()}
-	if refuseUnstreamable(gw, httptest.NewRequest("GET", "/api/events", nil)) {
-		t.Fatal("gzipWriter is not recognised as streamable — SSE would 500")
+// The same guard events.go runs before it writes a byte, asked both ways.
+//
+// Both answers matter, and the second is the one that cost a 15-minute test
+// hang to find: a wrapper that ALWAYS implements Flush answers for a writer
+// that cannot, so the guard stops at the wrapper, believes the chain is
+// streamable, and the handler streams into a void forever.
+func TestStreamabilityIsReportedHonestly(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/events", nil)
+
+	over := &gzipWriter{ResponseWriter: httptest.NewRecorder()} // recorder flushes
+	if refuseUnstreamable(&flushingGzipWriter{over}, req) {
+		t.Error("a flushable chain was refused — SSE would 500 for no reason")
+	}
+
+	// Nothing under here can flush, and the wrapper must not pretend it can.
+	blind := &gzipWriter{ResponseWriter: unflushable{httptest.NewRecorder()}}
+	if !refuseUnstreamable(blind, req) {
+		t.Error("an unflushable chain read as streamable — the handler would " +
+			"stream into a void, which is the bug refuseUnstreamable exists for")
 	}
 }
+
+// unflushable hides the recorder's Flush without hiding the rest of it.
+type unflushable struct{ rec *httptest.ResponseRecorder }
+
+func (u unflushable) Header() http.Header         { return u.rec.Header() }
+func (u unflushable) Write(b []byte) (int, error) { return u.rec.Write(b) }
+func (u unflushable) WriteHeader(code int)        { u.rec.WriteHeader(code) }
 
 func TestAlreadyEncodedBodiesArePassedThrough(t *testing.T) {
 	// A handler that encoded its own body. Deliberately NOT a /store/ URL:

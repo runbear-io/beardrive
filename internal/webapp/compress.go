@@ -46,6 +46,16 @@ func gzipResponses(h http.Handler) http.Handler {
 		}
 		gw := &gzipWriter{ResponseWriter: w}
 		defer gw.close()
+		// Flush is advertised only when the writer underneath can actually
+		// flush. A wrapper that always implements it ANSWERS FOR a writer
+		// that cannot: refuseUnstreamable stops its walk at the first
+		// Flusher, so a permanently unflushable chain would read as
+		// streamable and the handler would stream into a void. Two types is
+		// the only way to say "sometimes" about a Go interface.
+		if _, ok := w.(http.Flusher); ok {
+			h.ServeHTTP(&flushingGzipWriter{gw}, r)
+			return
+		}
 		h.ServeHTTP(gw, r)
 	})
 }
@@ -134,16 +144,19 @@ func (g *gzipWriter) Write(b []byte) (int, error) {
 	return g.gz.Write(b)
 }
 
-// Flush reaches the socket through the gzip writer rather than around it:
+// flushingGzipWriter is the wrapper used when the writer underneath is a real
+// Flusher — which is every production response, and deliberately not every
+// test one.
+type flushingGzipWriter struct{ *gzipWriter }
+
+// Flush reaches the socket THROUGH the gzip writer rather than around it:
 // flushing the socket alone would leave the frame sitting in the compressor,
 // which is a stream that silently stops arriving.
-func (g *gzipWriter) Flush() {
+func (g *flushingGzipWriter) Flush() {
 	if g.gz != nil {
 		_ = g.gz.Flush()
 	}
-	if f, ok := g.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	g.ResponseWriter.(http.Flusher).Flush()
 }
 
 // Unwrap is what http.ResponseController and refuseUnstreamable walk, so a
