@@ -218,3 +218,53 @@ test("an outside write never overwrites unsaved typing", async ({ page }) => {
   await expect(buf).toContainText("MID-SENTENCE");
   await expect(buf).not.toContainText("rewritten by an agent");
 });
+
+/* One failed read must not end an editing session.
+
+   This is the failure a real user hit: the hub's rate limiter answered 429 on
+   the file route, the editor's query gave up (retry: false), and EditView
+   rendered "Could not open … for editing" INSTEAD of the editor — unmounting
+   a buffer that was perfectly intact, along with its save timer and its
+   co-editing stream. Only a reload brought it back. */
+test("a failing read leaves the editor, and the work, alone", async ({ page }) => {
+  test.setTimeout(60_000);
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  await page.goto(`/${id}/edit/${file}`);
+  await page.waitForSelector(".cm-host .cm-content");
+  await page.locator(".cm-host .cm-line", { hasText: "first line." }).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" SURVIVES");
+  await expect(page.locator("#editor-state")).toHaveAttribute("data-state", "clean");
+
+  // Every read of this file now fails the way the rate limiter failed it.
+  // Routes do not apply to page.request, so the write below still goes.
+  await page.route("**/file?path=*", (route) =>
+    route.fulfill({ status: 429, body: "Rate exceeded." }),
+  );
+  // An outside write is what asks the editor to re-read — and that re-read is
+  // the one that now 429s, through every retry.
+  const r = await page.request.put(
+    `/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`,
+    { data: "# Notes\n\nrewritten while the reads were failing.\n" },
+  );
+  expect(r.ok()).toBeTruthy();
+
+  await expect(page.locator("#read-stale")).toBeVisible({ timeout: 30_000 });
+  // The whole point: still an editor, still holding the typed text.
+  const buf = page.locator(".cm-host .cm-content");
+  await expect(buf).toBeVisible();
+  await expect(buf).toContainText("SURVIVES");
+  await expect(page.locator(".empty")).toHaveCount(0);
+
+  // And it is still a working editor once the hub recovers.
+  await page.unroute("**/file?path=*");
+  await page.keyboard.type(" AND SAVES");
+  await expect(page.locator("#editor-state")).toHaveAttribute("data-state", "clean");
+  const after = await (
+    await page.request.get(`/api/p/${id}/file?path=${encodeURIComponent(file)}`)
+  ).text();
+  expect(after).toContain("AND SAVES");
+});
