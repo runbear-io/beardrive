@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, ADMIN, wikiId } from "./helpers";
+import { login, ADMIN, MEMBER, wikiId } from "./helpers";
 
 /* The network budget: what an open tab costs when nothing is happening.
 
@@ -159,4 +159,48 @@ test("fast typing does not stack up requests", async ({ page }) => {
   // And the batching still batches: 60 keystrokes must not be 60 requests.
   expect(posts, `${posts} POSTs for 60 keystrokes`).toBeLessThan(20);
   await expect(page.locator("#editor-state")).toHaveAttribute("data-state", "clean");
+});
+
+/* What a teammate's write costs everyone else.
+
+   A one-path change used to invalidate the whole tree, the whole heat map,
+   and every cached file body in every project open in the tab — twice per
+   frame, because the bare ["text"] prefix was invalidated in two places. On a
+   real project that is ~1.8 MB to say that one file moved.
+
+   The frame names the path. This asserts the client acts like it. */
+test("a peer's write costs the rest of us almost nothing", async ({ page, browser }) => {
+  test.setTimeout(90_000);
+  await login(page, ADMIN);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/`);
+  await page.waitForSelector("#sidebar");
+  await page.waitForTimeout(2_500); // first paint settles
+
+  const seen: string[] = [];
+  const host = new URL(page.url()).host;
+  page.on("request", (r) => {
+    const u = new URL(r.url());
+    if (u.host !== host) return;
+    if (u.pathname.endsWith("/presence") || u.pathname.endsWith("/events")) return;
+    seen.push(u.pathname + u.search);
+  });
+
+  // Somebody else writes one file, from their own session.
+  const peer = await (await browser.newContext()).newPage();
+  await login(peer, MEMBER);
+  const r = await peer.request.put(
+    `/api/p/${pid}/upload/content?path=${encodeURIComponent("peer-cost.md")}`,
+    { data: "# written by a teammate\n" },
+  );
+  expect(r.ok()).toBeTruthy();
+  await page.waitForTimeout(5_000); // past the 2s coalescing window
+
+  const hits = (s: string) => seen.filter((u) => u.includes(s));
+  // Heat is READ telemetry. A write cannot move it, so it must not be asked.
+  expect(hits("/heat"), `heat refetched: ${hits("/heat").join(", ")}`).toHaveLength(0);
+  // The tree is the expensive one, and one write may refresh it at most once.
+  expect(hits("/tree").length).toBeLessThanOrEqual(1);
+  expect(seen.length, `a one-file write cost ${seen.length} requests: ${seen.join(", ")}`)
+    .toBeLessThanOrEqual(2);
 });
