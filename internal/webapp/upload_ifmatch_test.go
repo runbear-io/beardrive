@@ -172,3 +172,51 @@ func TestUploadOfIdenticalContentIsNotAChange(t *testing.T) {
 		t.Errorf("versions after a real edit = %d, want 2", n)
 	}
 }
+
+/* A late arrival is not a disagreement.
+
+   If-Match is there to stop one editor's text being erased by another who
+   never saw it. A client whose base is stale but whose CONTENT already
+   matches the file has erased nothing — there is nothing to preserve — so
+   answering it with a 409 made the editor park a conflict copy of text
+   nobody disputed. Three clients sharing one hub-held document produced two
+   such copies of identical text, which is how this was found. */
+func TestStaleBaseWithIdenticalContentIsNotAConflict(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+
+	first := putContent(t, h, url, "one\n", "")
+	var out struct{ SHA string }
+	if err := json.Unmarshal(first.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	stale := out.SHA
+
+	// Somebody else moves the head on, to the text this client is about to
+	// send — which is what a shared document produces: everyone converges,
+	// then everyone saves.
+	if rec := putContent(t, h, url, "converged\n", ""); rec.Code != http.StatusOK {
+		t.Fatalf("second write: %d", rec.Code)
+	}
+
+	late := putContent(t, h, url, "converged\n", stale)
+	if late.Code == http.StatusConflict {
+		t.Fatal("a write of the text the file already holds was called a conflict")
+	}
+	if late.Code != http.StatusOK {
+		t.Fatalf("late write = %d: %s", late.Code, late.Body.String())
+	}
+	var got struct{ Unchanged bool }
+	if err := json.Unmarshal(late.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Unchanged {
+		t.Error("it was taken as a change")
+	}
+
+	// And a stale base with DIFFERENT content is still a conflict.
+	if rec := putContent(t, h, url, "actually different\n", stale); rec.Code != http.StatusConflict {
+		t.Errorf("a real lost update = %d, want 409", rec.Code)
+	}
+}

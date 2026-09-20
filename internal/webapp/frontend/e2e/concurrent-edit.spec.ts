@@ -1,18 +1,25 @@
 import { test, expect, Page } from "@playwright/test";
 import { login, ADMIN, MEMBER } from "./helpers";
 
-/* Two people editing one file, and one of them cannot reach the relay.
+/* Two people editing one file at the same time.
 
-   The co-editing CRDT makes concurrent typing merge — while the room works.
-   When a client loses the relay (a dropped EventSource, a laptop changing
-   networks) it falls back to single-writer editing over its OWN buffer, and
-   until this suite existed the two browsers simply took turns overwriting
-   each other through upload/content: no conflict copy, no warning, work
-   gone. A real history feed showed it as versions alternating between two
-   sizes, several times a minute.
+   This spec was written against the relay, where a client that lost its
+   connection fell back to editing its OWN buffer — so two browsers held two
+   documents and took turns overwriting each other through upload/content: no
+   conflict copy, no warning, work gone. A real history feed showed it as
+   versions alternating between two sizes several times a minute, and the fix
+   at the time was to preserve the loser beside the winner.
 
-   The guarantee asserted here is the one the sync path has always made:
-   whichever version loses is preserved beside the winner, never dropped. */
+   The hub holds the document now, so there is no second document to diverge
+   into and nothing to preserve: concurrent typing CONVERGES. That is the
+   stronger guarantee, and this asserts it directly — every character both
+   people typed is in the file, and no conflict copy was needed to get it
+   there.
+
+   The conflict-copy machinery has not gone anywhere. It protects the file
+   from writers that never touch a CRDT at all — an agent, the CLI, a device
+   syncing — and internal/webapp/upload_ifmatch_test.go is where that lives
+   now. */
 
 const PROJECT = "zz-concurrent-edit";
 let projectId = "";
@@ -42,7 +49,7 @@ test.afterAll(async ({ browser }) => {
   projectId = "";
 });
 
-test("a relay-less editor cannot overwrite a teammate's work", async ({ browser }) => {
+test("two editors of one file converge instead of overwriting", async ({ browser }) => {
   test.setTimeout(90_000);
   const a = await (await browser.newContext()).newPage();
   await login(a, ADMIN);
@@ -55,9 +62,6 @@ test("a relay-less editor cannot overwrite a teammate's work", async ({ browser 
 
   const b = await (await browser.newContext()).newPage();
   await login(b, MEMBER);
-  // B never reaches the relay — what a dropped EventSource leaves behind once
-  // it stops retrying. B is now editing its own buffer, alone.
-  await b.route("**/collab*", (route) => route.abort());
 
   for (const pg of [a, b]) {
     await pg.goto(`/${id}/edit/${file}`);
@@ -84,19 +88,17 @@ test("a relay-less editor cannot overwrite a teammate's work", async ({ browser 
   const paths: string[] = [
     ...new Set(feed.entries.map((e: { path: string }) => e.path)),
   ];
-  const copy = paths.find((p) => p.includes(".bdrive-conflict-"));
-  expect(copy, `no conflict copy was written; paths: ${paths.join(", ")}`).toBeTruthy();
 
-  // Neither version was dropped: one is the file, the other is beside it.
-  const both = (await read(file)) + "\n" + (await read(copy!));
-  expect(both).toContain("AAAAAA");
-  expect(both).toContain("BBBBBB");
+  // Everything both people typed is in THE FILE. Not split across a winner
+  // and a conflict copy — in one document, which is what a shared document
+  // is for.
+  const text = await read(file);
+  expect(text, `A's characters are missing from ${file}`).toContain("AAAAAA");
+  expect(text, `B's characters are missing from ${file}`).toContain("BBBBBB");
 
-  // And the copy is named the way the sync path names one, so the reader
-  // meets the same explanation wherever it came from (lib/conflict.ts).
-  expect(copy).toMatch(
-    new RegExp(`^${file}\\.bdrive-conflict-[A-Za-z0-9_-]{0,32}-\\d{8}T\\d{6}Z$`),
-  );
+  // And nothing had to be parked to achieve it.
+  const copies = paths.filter((p) => p.includes(".bdrive-conflict-"));
+  expect(copies, `converged text still produced ${copies.join(", ")}`).toHaveLength(0);
 });
 
 /* The ordinary case must stay ordinary: one person editing alone keeps

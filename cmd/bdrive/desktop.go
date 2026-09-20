@@ -146,18 +146,13 @@ var desktopRoutes = []struct {
 	// Live surfaces. Hub state for the same reason every write is: the desktop
 	// never journals locally, so nothing here would ever publish, and a stream
 	// served from local state would be a connection that is open and silent
-	// forever. /collab carries the shared editing document — without it the
-	// app's editor opens on a document that never arrives, because it mounts
-	// on the relay's first frame.
+	// forever.
 	{"GET /api/p/{project}/events", routeProxy, ""},
 	{"POST /api/p/{project}/presence", routeProxy, ""},
-	{"GET /api/p/{project}/collab", routeProxy, ""},
-	{"POST /api/p/{project}/collab", routeProxy, ""},
-	// /ycollab is the same surface with the document held by the hub instead
-	// of relayed between browsers. Proxied for a sharper reason than the
-	// relay's: the document IS hub state now, so a desktop that answered from
-	// local state would hand the editor a second, private document — and the
-	// first thing that document does is get saved over the file.
+	// /ycollab carries the co-editing document. Proxied for a sharper reason
+	// than a stream: the document IS hub state, so a desktop that answered
+	// from local state would hand the editor a second, private document —
+	// and the first thing that document does is get saved over the file.
 	{"GET /api/p/{project}/ycollab", routeProxy, ""},
 	// The same route one segment deeper: y-websocket appends its room
 	// argument to the URL. Decoration — the hub names the room itself — but
@@ -764,7 +759,6 @@ func proxyHub(w http.ResponseWriter, r *http.Request, server string) {
 // answer — the client has to be chosen before the answer exists.
 func streaming(r *http.Request) bool {
 	return strings.HasSuffix(r.URL.Path, "/events") ||
-		(r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/collab")) ||
 		// A websocket is long-lived in the way that matters here — the client
 		// asks for a connection, not an answer — even though it is an upgrade
 		// rather than a stream of frames the proxy can read.
