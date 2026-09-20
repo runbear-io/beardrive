@@ -550,6 +550,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	project := r.PathValue("project")
+
 	// billed is what this write actually adds: zero when the store already
 	// holds this exact blob, which is every co-editor after the first saving
 	// the same converged text. See billableBytes.
@@ -563,6 +564,38 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+
+	/* Identical content is not a change, and journaling it as one is not free.
+
+	   Every co-editor after the first saves the same converged text — "whoever
+	   stops typing last writes the file" means all of them write it — and a
+	   client whose PUT is queued behind a slow response re-sends the same
+	   bytes on its next idle timer. Each of those used to append an op: a new
+	   version in History, a change frame, and a full tree + heat refetch on
+	   every other client in the project. One user's two-minute editing session
+	   produced fourteen versions this way.
+
+	   The storage layer already knows this write adds nothing (billableBytes
+	   charges zero for a blob the store holds), and restore.go already refuses
+	   the same thing with a 409 ("already the current content"). The journal
+	   was the last place that had not been told.
+
+	   Reported as ok, not as an error: nothing the caller wanted is missing,
+	   the file already says what they asked it to say.
+
+	   AFTER the quota gate, not before it. A write that changes nothing still
+	   asks — billableBytes has already made it a request for zero bytes, and
+	   an org at its ceiling must be able to re-save text that adds no bytes
+	   (TestQuotaCoEditingChargesOneBlobOnce pins exactly that). Skipping the
+	   gate would quietly remove a door a managed provider is entitled to
+	   answer; skipping the JOURNAL is the whole point and costs it nothing. */
+	if head, ok := s.headBlob(r.Context(), v, p); ok && head == blob {
+		writeJSON(w, map[string]any{
+			"ok": true, "path": p, "sha": head, "unchanged": true,
+		})
+		return
+	}
+
 	if err := up.Upload(r.Context(), p, tmp, size, s.requestUser(r), ""); err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return

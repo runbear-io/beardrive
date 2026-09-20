@@ -97,3 +97,78 @@ func TestUploadWithoutIfMatchIsUnchanged(t *testing.T) {
 		}
 	}
 }
+
+/* Saving the same bytes twice is not two versions.
+
+   Every co-editor after the first saves the same converged text, and a client
+   whose PUT is queued behind a slow response re-sends on its next idle timer.
+   Each used to append an op — a History row, a change frame, and a full tree
+   refetch for every other client in the project.
+
+   Against a real hub, not the folder viewer: a DirSource identifies a file by
+   mtime and size and has no journal to keep clean, so this is a property of
+   the thing that has one. */
+func TestUploadOfIdenticalContentIsNotAChange(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	body := func(rec *httptest.ResponseRecorder) (sha string, unchanged bool) {
+		t.Helper()
+		var out struct {
+			SHA       string `json:"sha"`
+			Unchanged bool   `json:"unchanged"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("%d %s: %v", rec.Code, rec.Body.String(), err)
+		}
+		return out.SHA, out.Unchanged
+	}
+	versions := func() int {
+		t.Helper()
+		rec := get(t, h, "/api/p/"+p.ID+"/history?path=notes.md&n=50")
+		var out struct {
+			Entries []struct{ Path string } `json:"entries"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("history: %d %s", rec.Code, rec.Body.String())
+		}
+		return len(out.Entries)
+	}
+
+	first := putContent(t, h, url, "the converged text\n", "")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first write = %d: %s", first.Code, first.Body.String())
+	}
+	sha1, unchanged := body(first)
+	if unchanged {
+		t.Fatal("the first write of new content reported itself unchanged")
+	}
+	if n := versions(); n != 1 {
+		t.Fatalf("versions after one write = %d, want 1", n)
+	}
+
+	// The same bytes again: what every other co-editor sends.
+	second := putContent(t, h, url, "the converged text\n", "")
+	if second.Code != http.StatusOK {
+		t.Fatalf("second write = %d: %s", second.Code, second.Body.String())
+	}
+	sha2, unchanged := body(second)
+	if !unchanged {
+		t.Error("re-saving identical bytes was taken as a change")
+	}
+	if sha2 != sha1 {
+		t.Errorf("sha moved on a write that changed nothing: %s -> %s", sha1, sha2)
+	}
+	if n := versions(); n != 1 {
+		t.Errorf("versions after re-saving the same bytes = %d, want 1", n)
+	}
+
+	// A real edit is still a real edit.
+	third := putContent(t, h, url, "actually different\n", "")
+	if _, unchanged := body(third); unchanged {
+		t.Error("a real edit was suppressed as a no-op")
+	}
+	if n := versions(); n != 2 {
+		t.Errorf("versions after a real edit = %d, want 2", n)
+	}
+}
