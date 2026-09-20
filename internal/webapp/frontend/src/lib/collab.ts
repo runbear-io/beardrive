@@ -23,9 +23,16 @@ import {
 
 export type CollabStatus = "connecting" | "live" | "offline";
 
-// Updates are coalesced into one POST per tick. Long enough to batch a burst
-// of keystrokes, short enough that a watcher sees you type.
-const FLUSH_MS = 60;
+/* Updates are coalesced into one POST per tick. Long enough to batch a burst
+   of keystrokes, short enough that a watcher sees you type.
+
+   120ms, not 60: at 60 a fast typist put ~16 POSTs a second on the wire, and
+   nobody can see the difference between a caret that lags 60ms and one that
+   lags 120. This is the uplink's whole cost model — the stream only carries
+   the DOWNlink, so every byte this client produces leaves as an HTTP request
+   (see docs/collab-provider-prd.md, where that is the argument for replacing
+   the transport rather than tuning it). */
+const FLUSH_MS = 120;
 
 /* Cursor moves are coalesced harder, and not sent at all when nobody is
    looking.
@@ -46,6 +53,8 @@ export class CollabDoc {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
+  // Whether a POST of document updates is in flight. See flush().
+  private sending = false;
   // Whether this client has ever said it is here. Until it has, staying quiet
   // would make it invisible rather than cheap.
   private announced = false;
@@ -215,11 +224,25 @@ export class CollabDoc {
     this.connect();
   }
 
+  /* One POST in flight at a time.
+
+     `timer` was cleared before the await, so a keystroke landing mid-request
+     armed a SECOND flush that started while the first was still going: fast
+     typing put several POSTs on the wire at once, each with its own headers,
+     cookie and round trip.
+
+     Serialized, not cancelled. Yjs updates are DELTAS — dropping one in
+     flight deletes those keystrokes from every peer and silently diverges the
+     document — so anything typed during a send is merged into the next one
+     instead. (A cursor position is the opposite kind of value, which is why
+     publishAwareness coalesces to the latest and this does not.) */
   private async flush() {
     this.timer = null;
-    if (!this.pending.length || this.closed) return;
+    if (this.sending || !this.pending.length || this.closed) return;
+    this.sending = true;
     const merged = Y.mergeUpdates(this.pending);
     this.pending = [];
+    let failed = false;
     try {
       const res = await fetch(this.url, {
         method: "POST",
@@ -238,6 +261,17 @@ export class CollabDoc {
       // updates are idempotent).
       this.pending.unshift(merged);
       this.onStatus("offline");
+      failed = true;
+    } finally {
+      this.sending = false;
+      // Whatever was typed while that request was in flight, as one more
+      // request rather than one per keystroke. Deliberately not armed on the
+      // failure path: a dead relay would turn into a POST every 120ms, and a
+      // failed update already waits for the next keystroke the way it always
+      // has.
+      if (!this.closed && !this.timer && this.pending.length && !failed) {
+        this.timer = setTimeout(() => this.flush(), FLUSH_MS);
+      }
     }
   }
 
