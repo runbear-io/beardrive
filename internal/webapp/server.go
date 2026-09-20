@@ -1411,7 +1411,7 @@ func (s *Server) orgForCreate(r *http.Request, requested string) (string, error)
 // Node is one entry of the file tree returned by the tree endpoint.
 type Node struct {
 	Name string    `json:"name"`
-	Path string    `json:"path"`
+	Path string    `json:"path,omitempty"`
 	Dir  bool      `json:"dir"`
 	Size int64     `json:"size,omitempty"`
 	Time time.Time `json:"time,omitzero"`
@@ -1430,7 +1430,31 @@ func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSONCached(w, r, buildTree(visibleFiles(snap.files, s.visibility(r))))
+	tree := buildTree(visibleFiles(snap.files, s.visibility(r)))
+	/* ?slim=1 drops the one field a client can derive for itself.
+
+	   Every node's `path` is its ancestors' names plus its own, and the
+	   frontend already walks the whole tree to build its lookups — so on a
+	   5,700-node project the hub was spending 480 KB, 29% of the payload and
+	   22% of it even after gzip, re-sending what the walk could reconstruct
+	   for free.
+
+	   Opt-in rather than removed, for the same reason If-Match is: a tab
+	   still running a cached bundle refetches this tree, and a field it reads
+	   vanishing underneath it would break every link on the page until
+	   someone reloaded. A client that can rebuild paths says so. */
+	if r.URL.Query().Get("slim") == "1" {
+		stripPaths(tree)
+	}
+	writeJSONCached(w, r, tree)
+}
+
+// stripPaths removes what the children chain already says.
+func stripPaths(n *Node) {
+	n.Path = ""
+	for _, c := range n.Children {
+		stripPaths(c)
+	}
 }
 
 // visibleFiles drops the entries this account may not read. It returns the
