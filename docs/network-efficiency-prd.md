@@ -221,23 +221,36 @@ A frame names the paths that changed. Use them.
 
 ### Stage 4 — stop writing what did not change
 
-- [ ] `RemoteSource.Commit` skips the op when the path already resolves to
-      that blob, and reports that it did nothing
-- [ ] `handleUploadContent` (`upload.go:516`) skips `publishChange` and
-      `v.invalidate()` when nothing was written
-- [ ] `lib/sharedfile.ts` tracks in-flight save text so a second idle-save of
-      the same content never leaves the browser, and so a refetch of our own
-      write is recognised before its PUT resolves — which also fixes the
-      false-positive "someone else changed this file" banner from #230
-- [ ] Test (Go): two identical content PUTs produce one history entry and one
-      change frame
-- [ ] Test (e2e): typing while a save is in flight does not raise the peer
-      banner
+- [x] `handleUploadContent` returns before it journals when the path already
+      resolves to the blob being written: no op, no change frame, no History
+      row, no tree invalidation. Reported as `unchanged: true`, not an error —
+      nothing the caller asked for is missing
+- [x] `lib/sharedfile.ts` tracks in-flight writes as a **Set**, not a slot: a
+      second idle timer fires while the first PUT is still out, and a single
+      slot forgets the earlier write exactly when its refetch arrives. (The
+      first version of this fix was a slot. The e2e caught it.)
+- [x] A duplicate idle-save of identical text never leaves the browser
+- [x] The false-positive "someone else changed this file" banner from #230 is
+      closed: a refetch of our own write is recognised before its PUT resolves
+- [x] Test (Go): two identical PUTs leave ONE version and a real edit still
+      leaves two — against a real hub, since a DirSource has no journal to
+      keep clean and identifies files by mtime and size
+- [x] Test (e2e): typing while a save is in flight does not raise the banner.
+      Took four attempts to become a real gate — see the note below
 
 **Success criteria**
 
 - Two identical saves → **1** journal op, **1** change frame, **1** history
-  row (today: 2 of each).
+  row (today: 2 of each). ✅ asserted.
+
+> **On testing these.** Three tests in this PRD's stages would have passed
+> against the bug they were written for, and the reason is always the same:
+> localhost is too fast to reproduce a timing bug. A save completes inside the
+> coalescing window; a refetch lands before the next keystroke; a banner
+> appears and is cleared before the assertion looks. Every one of them needed
+> induced latency — a held response, a delayed re-read — and a watcher armed
+> before the window rather than a check after it. Re-run a new test against
+> the UNFIXED code before believing it.
 - e2e: a co-editing session of two clients typing the same document produces
   no duplicate-content PUTs.
 - History on a real project stops accumulating consecutive identical-content
@@ -317,7 +330,7 @@ claim that it is done._
 | 1 — stop polling | **done** | e2e: 0 tree/heat/projects requests in a 70 s idle window (was 4 tree + 2 projects + 1 heat). Prod HAR: pending |
 | 2 — compress + revalidate | **done** | Go + e2e green. Prod HAR: pending |
 | 3 — narrow the fan-out | blocked on 1 | |
-| 4 — stop no-op writes | blocked on 3 | |
+| 4 — stop no-op writes | **done** | Go + e2e green, both verified failing without the fix |
 | 5 — survive a failure | **done** | e2e green, and verified failing on the old behaviour |
 | 6 — slim the payload | ready | |
 

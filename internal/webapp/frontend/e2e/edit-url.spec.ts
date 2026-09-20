@@ -285,3 +285,65 @@ test("a failing read leaves the editor, and the work, alone", async ({ page }) =
   }
   expect(found, `"AND SAVES" is nowhere: ${paths.join(", ")}`).toBeTruthy();
 });
+
+/* Your own save must never look like somebody else's.
+
+   The hub announces a write the moment it journals it, which is BEFORE that
+   write's own response gets back — so the change frame, and the refetch it
+   triggers, routinely beat the PUT home. `saved` only moves when the response
+   lands, so for that window the editor's own text matched neither what it had
+   saved nor the buffer it had typed further into, and the peer banner went up
+   over the user's own keystrokes (the hazard #230 walked into from the other
+   side). */
+test("a save still in flight is not mistaken for a teammate", async ({ page }) => {
+  test.setTimeout(60_000);
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  await page.goto(`/${id}/edit/${file}`);
+  await page.waitForSelector(".cm-host .cm-content");
+
+  /* Two delays, and both are the point.
+
+     The PUT reaches the hub — so it journals and announces — and then its
+     response is held, which is what keeps `saved` behind. The re-READ that
+     the announcement triggers is held too, so it lands AFTER the next
+     keystroke rather than before it.
+
+     Without that second delay the refetch arrives while the buffer still
+     equals the text just sent, merge answers "same" for an entirely
+     different reason, and the test passes against the bug. It did. */
+  await page.route("**/upload/content*", async (route) => {
+    const res = await route.fetch();
+    await new Promise((r) => setTimeout(r, 4_000));
+    await route.fulfill({ response: res });
+  });
+  await page.route("**/file?path=*", async (route) => {
+    const res = await route.fetch();
+    await new Promise((r) => setTimeout(r, 1_500));
+    await route.fulfill({ response: res });
+  });
+
+  await page.locator(".cm-host .cm-line", { hasText: "first line." }).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" ONE");
+  await page.waitForTimeout(900); // just past the 700ms idle save
+
+  /* Watch the whole window, do not sample its end.
+
+     Once the held response finally lands, `saved` catches up and the next
+     merge says "same" — which CLEARS the banner. Checking after the fact
+     therefore passes against the bug: the wrong answer was on screen for two
+     seconds and gone by the time anyone looked. This resolves the moment it
+     appears. */
+  const banner = page
+    .locator("#peer-wrote")
+    .waitFor({ state: "visible", timeout: 4_000 })
+    .then(() => true)
+    .catch(() => false);
+
+  await page.keyboard.type(" TWO"); // typed before the held re-read lands
+  expect(await banner, "the editor blamed a teammate for this account's own save").toBe(false);
+  await expect(page.locator(".cm-host .cm-content")).toContainText("ONE TWO");
+});

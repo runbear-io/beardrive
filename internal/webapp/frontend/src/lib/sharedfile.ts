@@ -88,6 +88,23 @@ export function openSharedFile(opts: {
 }): SharedFile {
   let saved = opts.seed;
   let base = opts.baseSha;
+  /* The texts of writes that have left but not landed.
+
+     A SET, not a slot: a second idle timer can fire while the first PUT is
+     still out — type, pause, type again on a slow link — and a single slot
+     would forget the earlier write exactly when its own refetch arrives. That
+     is not hypothetical, it is what the first version of this fix did, and
+     the e2e caught it.
+
+     `saved` only moves when a PUT RESOLVES, and the hub announces a write the
+     moment it journals it — so the change frame, and the refetch it triggers,
+     routinely beat our own response back. Without this, that refetch looked
+     like a stranger's write: merge() saw text that matched neither `saved`
+     nor a buffer we had typed further into, and raised "someone else changed
+     this file" over the user's own save. It also stops a second idle timer
+     re-sending bytes that are already on their way, which is how two
+     byte-identical PUTs 4.5s apart ended up in one user's history. */
+  const inFlight = new Set<string>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   const setState = (s: SaveState) => opts.onState?.(s);
 
@@ -95,6 +112,7 @@ export function openSharedFile(opts: {
     opts.apiBase + "upload/content?path=" + encodeURIComponent(p);
 
   const save = async (text: string) => {
+    if (inFlight.has(text)) return; // already on its way; its response decides
     if (text === saved) {
       // Nothing to write IS clean, and saying so matters: seeding the room
       // marks the document dirty, and the save it schedules lands here — so
@@ -105,6 +123,7 @@ export function openSharedFile(opts: {
     }
     setState("saving");
     opts.onWriting?.();
+    inFlight.add(text);
     try {
       const out = await putText(contentURL(opts.path), text, base);
       saved = text;
@@ -113,12 +132,15 @@ export function openSharedFile(opts: {
       opts.onSaved?.(text);
     } catch (e) {
       if (e instanceof HttpError && e.status === 409) {
+        inFlight.delete(text); // preserve() writes under a different path
         await preserve(text, e);
         return;
       }
       // Keep the document: the CRDT is the truth until a save lands, and the
       // next edit schedules another attempt.
       setState("error");
+    } finally {
+      inFlight.delete(text);
     }
   };
 
@@ -196,8 +218,10 @@ export function openSharedFile(opts: {
      the refusal is the caller's banner. */
   const merge = (next: string): MergeResult => {
     // The file is at the content we last knew about: our own write coming
-    // back through the change stream, or nothing new at all.
-    if (next === saved) return "same";
+    // back through the change stream, or nothing new at all. `inFlight`
+    // covers the common case that `saved` cannot — the frame announcing our
+    // own write arriving before that write's own response does.
+    if (next === saved || inFlight.has(next)) return "same";
     const cur = current();
     // Already in the buffer: a co-editor snapshotted the document we share.
     // Recording it is what keeps the check above true for the rest of the
