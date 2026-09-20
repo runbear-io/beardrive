@@ -198,19 +198,29 @@ silently dropped stream still self-heals within a few minutes.
 
 A frame names the paths that changed. Use them.
 
-- [ ] `["heat"]` removed from the change fan-out (`useProjectEvents.ts:68`) —
-      a write cannot change read counts; heat refreshes on its own cadence
-- [ ] `["text"]` invalidation scoped to the named paths instead of the bare
-      prefix (`useProjectEvents.ts:100,109`), which today drops every cached
-      body in every project, twice per frame
-- [ ] `["history"]` invalidation kept, but only when a history view is mounted
-- [ ] The tree cache is **patched** from the frame's paths rather than
-      refetched; a full refetch remains the fallback for `resync`, `more`, or
-      an empty path list
-- [ ] Remaining invalidations coalesced with a ~2 s debounce, so a burst of
-      frames (a sync push, a multi-file agent run) costs one refresh
-- [ ] Test: multi-client e2e — client B writes one file, client A's request
-      count for that frame is asserted
+- [x] `["heat"]` removed from the change fan-out — a write cannot change read
+      counts; heat refreshes when a surface that shows it opens
+- [x] `["text"]` invalidation scoped to the named path via `fileURLFor`
+      instead of the bare prefix, which dropped every cached body in every
+      project open in the tab, twice per frame
+- [x] `["history"]` invalidation kept. No gating needed: `invalidateQueries`
+      refetches ACTIVE queries and only marks inactive ones stale, so a
+      history view that is not mounted already costs nothing
+- [x] The tree and history coalesced behind a 2 s window, so a sync push or a
+      multi-file agent run costs one refresh instead of N
+- [x] Per-path bodies deliberately NOT delayed: an open file updating is what
+      a reader notices, and one body is small
+- [ ] The tree cache **patched** rather than refetched — **not done, and
+      deliberately deferred**. A change frame carries paths, not the new
+      size/time/author, so patching needs the hub to enrich the frame. That is
+      a server change with a permissions question attached (a frame must not
+      name a path its reader cannot see), and the measurable criterion below
+      is already met without it: with heat gone and the window in place, a
+      peer's write costs one tree refresh at most. Revisit if the tree
+      refetch shows up in a HAR again.
+- [x] Test: multi-client e2e — a second account writes one file and the first
+      client's request count for that frame is asserted. Verified failing
+      without the change (heat refetched).
 
 **Success criteria**
 
@@ -329,7 +339,7 @@ claim that it is done._
 |---|---|---|
 | 1 — stop polling | **done** | e2e: 0 tree/heat/projects requests in a 70 s idle window (was 4 tree + 2 projects + 1 heat). Prod HAR: pending |
 | 2 — compress + revalidate | **done** | Go + e2e green. Prod HAR: pending |
-| 3 — narrow the fan-out | blocked on 1 | |
+| 3 — narrow the fan-out | **done** | e2e: a peer write costs <=2 requests, 0 heat |
 | 4 — stop no-op writes | **done** | Go + e2e green, both verified failing without the fix |
 | 5 — survive a failure | **done** | e2e green, and verified failing on the old behaviour |
 | 6 — slim the payload | ready | |

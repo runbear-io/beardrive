@@ -1,17 +1,21 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { fileURLFor } from "./useBlob";
 
 /* Live change notification.
    The hub streams "these paths changed" over server-sent events, so a
-   teammate's edit lands in about a second instead of on the tree's 15s poll —
-   and an OPEN file updates at all, which it previously never did: file
-   content has no refetch interval (see useBlob), so a body fetched once
-   stayed on screen until the reader navigated away.
+   teammate's edit lands in about a second — and an OPEN file updates at all,
+   which it previously never did: file content has no refetch interval (see
+   useBlob), so a body fetched once stayed on screen until the reader
+   navigated away.
 
-   The poll stays exactly where it is. This is an accelerator on top of it:
-   EventSource reconnects on its own, but a proxy that buffers the stream, or
-   a hub too old to serve the route, simply leaves the poll doing what it
-   always did. Nothing here is load-bearing.
+   This IS load-bearing now, which it was not when it was written. It used to
+   be an accelerator on top of a 15s tree poll, a 60s heat poll and a 30s
+   project-list poll, all of which would have covered for it. Those are gone
+   (docs/network-efficiency-prd.md): they re-sent the whole project four times
+   a minute to say nothing had changed. What remains underneath is a 5-minute
+   tree refetch, which is insurance against a stream that died quietly rather
+   than a second source of truth.
 
    ONE stream per browser, not per tab. Every tab of a project receives the
    identical fan-out, so the second tab onward used to buy nothing and cost a
@@ -60,12 +64,35 @@ export function useProjectEvents(
   useEffect(() => {
     if (!enabled || typeof EventSource === "undefined") return;
 
-    // The tree gains and loses entries on any change; heat and history are
-    // derived from the same journal, so they go stale at the same moment.
+  /* What a change frame actually invalidates, and what it does not.
+
+     HEAT IS NOT IN HERE. Heat is READ telemetry — it moves when somebody
+     opens a file, which no write can tell us — so refreshing it on every
+     write re-sent the whole map (133 KB on a real project) to say exactly
+     what it said before. The surfaces that show it refresh it when they open
+     (Browser.tsx) and it carries its own staleTime.
+
+     HISTORY IS. It is genuinely derived from the same journal, and it costs
+     nothing when no history view is mounted: invalidateQueries refetches
+     ACTIVE queries and only marks inactive ones stale.
+
+     THE TREE IS, BUT ON A DELAY. It is the single biggest response the hub
+     serves — 1.65 MB raw, ~148 KB compressed, for 5,700 nodes — and a sync
+     push or a multi-file agent run announces itself as a burst of frames.
+     Coalescing them costs a couple of seconds of staleness in a listing and
+     saves that payload N-1 times.
+
+     Per-path bodies are NOT delayed: an open file updating is the thing a
+     reader actually notices, and one body is small. */
+    const COALESCE_MS = 2_000;
+    let coalesce: ReturnType<typeof setTimeout> | null = null;
     const invalidateProject = () => {
-      qc.invalidateQueries({ queryKey: ["tree", apiBase] });
-      qc.invalidateQueries({ queryKey: ["history", apiBase] });
-      qc.invalidateQueries({ queryKey: ["heat", apiBase] });
+      if (coalesce) return;
+      coalesce = setTimeout(() => {
+        coalesce = null;
+        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history", apiBase] });
+      }, COALESCE_MS);
     };
 
     // One frame, from the socket this tab owns or from the tab that owns it.
@@ -102,11 +129,16 @@ export function useProjectEvents(
       }
       for (const p of ev.paths) {
         qc.invalidateQueries({ queryKey: ["render", apiBase, p] });
+        /* The BODY of the named path, not every body in the browser.
+
+           This used to be a bare ["text"] prefix — twice per frame — which
+           dropped every cached file in every project open in this tab,
+           because one path in one of them changed. The live URL is a pure
+           function of the path (fileURLFor), so the key is knowable here;
+           a ?v= URL is content-addressed, keyed on its sha, and cannot go
+           stale at all. */
+        qc.invalidateQueries({ queryKey: ["text", fileURLFor(apiBase, p)] });
       }
-      // Blob queries are keyed by content hash when the caller pinned one
-      // (those can never go stale) and by path otherwise — the live ones are
-      // exactly what a peer's write invalidates.
-      qc.invalidateQueries({ queryKey: ["text"] });
     };
 
     // Scoped to the project: tabs on different projects share nothing, and
