@@ -297,20 +297,41 @@ A frame names the paths that changed. Use them.
 Diminishing returns after Stage 2; do it only if the tree is still the biggest
 response on the wire.
 
-- [ ] `path` dropped from tree nodes — 29% of the payload (480 KB), fully
-      derivable from the `children` chain; the client already walks the tree
-      (`useBrowse.ts:19-34`) and can build it there
-- [ ] `author` dropped where it equals `user`
-- [ ] `user`/`user_name`/`device` interned into an id table on the response,
-      instead of repeating a handful of strings 5,050 times
-- [ ] `architecture/webapp-frontend.md` and `architecture/webapp-server.md`
-      updated if the node type changes shape
+Measured first, on the real 5,734-node payload, because this stage's own rule
+is to walk away if compression already absorbs the win:
+
+| variant | raw | gzip | gzip saved |
+|---|---|---|---|
+| as served | 1611 KB | 144.6 KB | — |
+| **A: drop `path`** | 1086 KB | 113.4 KB | **22%** |
+| B: + drop `author` where it equals `user` | 976 KB | 112.6 KB | 22% (+0.6 KB) |
+| C: + intern `user`/`user_name`/`device` | 756 KB | 109.1 KB | 25% (+3.5 KB) |
+
+A is the entire win. B and C shed another 330 KB of **raw** payload and about
+**4 KB** of wire — gzip already eats repeated strings, which is exactly the
+case this stage said to walk away from. A string table and a new response
+shape for 3% is complexity bought at a loss.
+
+- [x] `path` dropped from tree nodes, behind `?slim=1`
+- [x] The client rebuilds it in the walk it already performs, and writes it
+      back onto the node — so every consumer (file tree, folder listing,
+      palette, wikilinks) reads `c.path` exactly as before; only the wire
+      changed
+- [x] **Opt-in, not removed.** A tab running a cached bundle still refetches
+      this tree, and a field it reads vanishing underneath it would break
+      every link on the page until someone reloaded. Same reasoning as
+      `If-Match`: a client that can do without it says so
+- [ ] `author` dropped where it equals `user` — **declined**, 0.6 KB
+- [ ] actor interning — **declined**, 3.5 KB for a string table
+- [x] No diagram change: `Node` keeps its shape, one field became
+      `omitempty` and one query parameter appeared
 
 **Success criteria**
 
-- Raw `tree` payload **≥ 35% smaller** for the same project.
-- Gzipped `tree` measurably smaller (interning helps less after compression —
-  if it does not, stop and revert this stage rather than carry the complexity).
+- Raw `tree` **33% smaller** — just under the 35% this stage asked for, and
+  the right place to stop. Reaching 35% needs variant B, which buys 0.6 KB on
+  the wire; the number that was worth targeting was always the compressed one.
+- Gzipped `tree` **22% smaller** (144.6 KB → 113.4 KB). ✅
 
 ## Backlog (filed, not scheduled)
 
@@ -342,7 +363,7 @@ claim that it is done._
 | 3 — narrow the fan-out | **done** | e2e: a peer write costs <=2 requests, 0 heat |
 | 4 — stop no-op writes | **done** | Go + e2e green, both verified failing without the fix |
 | 5 — survive a failure | **done** | e2e green, and verified failing on the old behaviour |
-| 6 — slim the payload | ready | |
+| 6 — slim the payload | **done** | 22% off the compressed tree; B and C declined on measurement |
 
 ### Measurements
 

@@ -19,7 +19,12 @@ import type { HeatMap, HistoryEntry, Node } from "../api/types";
 export function useTree(apiBase: string, enabled = true) {
   const q = useQuery({
     queryKey: ["tree", apiBase],
-    queryFn: () => getJSON<Node>(apiBase + "tree"),
+    // ?slim=1: every node's path is its ancestors' names plus its own, and
+    // the walk below has to visit every node anyway — so asking the hub to
+    // re-send 480 KB of derivable strings (22% of this response even after
+    // gzip) was paying for the same information twice. An older hub ignores
+    // the parameter and sends them, which costs nothing but the bytes.
+    queryFn: () => getJSON<Node>(apiBase + "tree?slim=1"),
     enabled,
     refetchInterval: 300_000,
   });
@@ -28,17 +33,23 @@ export function useTree(apiBase: string, enabled = true) {
   const index = useMemo(() => {
     const flatFiles: Node[] = [];
     const dirIndex = new Map<string, Node>();
-    const walk = (n: Node) => {
+    /* Rebuilds `path` on the way down, where it is a string concat rather
+       than a payload. Written back onto the node so every consumer — file
+       tree, folder listing, palette, wikilink resolution — keeps reading
+       `c.path` exactly as before; only the wire changed. A hub that still
+       sends paths simply gets the same value assigned over itself. */
+    const walk = (n: Node, prefix: string) => {
       for (const c of n.children || []) {
+        c.path = prefix ? prefix + "/" + c.name : c.name;
         if (c.dir) {
           dirIndex.set(c.path, c);
-          walk(c);
+          walk(c, c.path);
         } else {
           flatFiles.push(c);
         }
       }
     };
-    if (q.data) walk(q.data);
+    if (q.data) walk(q.data, "");
     return { flatFiles, dirIndex };
   }, [q.data]);
   return { tree: q.data, ...index, loaded: !!q.data };

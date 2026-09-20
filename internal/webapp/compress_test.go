@@ -313,3 +313,69 @@ func TestRangeResponsesAreNotCompressed(t *testing.T) {
 		t.Fatalf("partial body = %d bytes, want the 100 the range promised", rec.Body.Len())
 	}
 }
+
+/* ?slim=1 drops what the children chain already says.
+
+   Every node's path is its ancestors' names plus its own, so re-sending it
+   was 29% of this response and 22% of it even after gzip. Opt-in, because a
+   tab running a cached bundle still refetches this tree and a field it reads
+   vanishing underneath it would break every link on the page. */
+func TestSlimTreeOmitsDerivablePaths(t *testing.T) {
+	files := map[string]string{}
+	for i := 0; i < 40; i++ {
+		files[fmt.Sprintf("areas/team/daily-meetings/2026-09/note-%02d.md", i)] = "x"
+	}
+	h := dirServer(t, files)
+
+	full := get(t, h, "/api/tree")
+	slim := get(t, h, "/api/tree?slim=1")
+	if slim.Code != http.StatusOK {
+		t.Fatalf("slim tree = %d", slim.Code)
+	}
+	if !strings.Contains(full.Body.String(), `"path"`) {
+		t.Fatal("the default response must still carry paths — older clients read them")
+	}
+	if strings.Contains(slim.Body.String(), `"path"`) {
+		t.Error("slim response still carries paths")
+	}
+	if slim.Body.Len() >= full.Body.Len() {
+		t.Errorf("slim %d bytes is not smaller than full %d", slim.Body.Len(), full.Body.Len())
+	}
+
+	// The names and the shape are untouched: the client rebuilds paths from
+	// exactly this, so anything missing here cannot be reconstructed.
+	var root Node
+	if err := json.Unmarshal(slim.Body.Bytes(), &root); err != nil {
+		t.Fatal(err)
+	}
+	var walk func(n *Node, prefix string) int
+	walk = func(n *Node, prefix string) int {
+		seen := 0
+		for _, c := range n.Children {
+			if c.Name == "" {
+				t.Error("a node with no name cannot have its path rebuilt")
+			}
+			p := c.Name
+			if prefix != "" {
+				p = prefix + "/" + c.Name
+			}
+			if c.Dir {
+				seen += walk(c, p)
+			} else {
+				seen++
+				if _, ok := files[p]; !ok {
+					t.Errorf("rebuilt path %q is not a file that was served", p)
+				}
+			}
+		}
+		return seen
+	}
+	if n := walk(&root, ""); n != len(files) {
+		t.Errorf("rebuilt %d files, served %d", n, len(files))
+	}
+
+	// And it still revalidates: the ETag is over what was actually sent.
+	if slim.Header().Get("ETag") == full.Header().Get("ETag") {
+		t.Error("slim and full share an ETag despite being different bodies")
+	}
+}
