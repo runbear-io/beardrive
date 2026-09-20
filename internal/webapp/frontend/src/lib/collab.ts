@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { WebsocketProvider } from "y-websocket";
 import {
   Awareness,
   applyAwarenessUpdate,
@@ -70,6 +71,11 @@ export class CollabDoc {
   // is what an older hub does anyway.
   private readonly cid =
     globalThis.crypto?.randomUUID?.() ?? String(Math.random()).slice(2);
+  // Set when the HUB holds this document (ycollab.go). Then none of the
+  // relay machinery below runs: no seed claim, no log to replay, no resync
+  // frame, no solo fallback — the provider does the sync protocol and the
+  // server is the one copy everybody converges on.
+  private ws: WebsocketProvider | null = null;
 
   constructor(
     private readonly url: string,
@@ -80,6 +86,11 @@ export class CollabDoc {
     // caller can fall back to plain single-writer editing.
     private readonly onUnavailable: () => void,
     private readonly me?: { name: string; colour: string },
+    // Whether the HUB holds this document (/api/config collab.held). Not
+    // sniffed: a hub too old to serve the route and a proxy that refuses the
+    // upgrade fail identically, and guessing wrong means an editor waiting
+    // for a document nobody will send.
+    private readonly held = false,
   ) {
     this.text = this.doc.getText("body");
     this.awareness = new Awareness(this.doc);
@@ -95,7 +106,12 @@ export class CollabDoc {
     }
     this.awareness.on("update", this.onAwareness);
     this.doc.on("update", (u: Uint8Array) => {
-      if (this.applying) return;
+      // When the hub holds the document the provider IS the transport: it
+      // sends updates over the socket and answers sync step 1 with state
+      // vectors. Queueing them for the relay's POST as well would be the
+      // same bytes twice, at a route that only serves GET — which is what
+      // the 405s in the console were.
+      if (this.held || this.applying) return;
       this.pending.push(u);
       if (!this.timer) this.timer = setTimeout(() => this.flush(), FLUSH_MS);
     });
@@ -134,7 +150,9 @@ export class CollabDoc {
      it — if both clients stayed quiet while they each believed they were
      alone, two people in one document would never discover each other. */
   private publishAwareness(force = false) {
-    if (this.closed) return;
+    // Same reason as the doc updates above: y-websocket carries awareness on
+    // the socket, so the relay's POST is both redundant and a 405.
+    if (this.closed || this.held) return;
     if (!force && this.announced && this.awareness.getStates().size <= 1) return;
     this.announced = true;
     const update = encodeAwarenessUpdate(this.awareness, [this.doc.clientID]);
@@ -147,8 +165,48 @@ export class CollabDoc {
     });
   }
 
+  /* The hub holds the document.
+
+     y-websocket rather than the hand-rolled SSE-down/POST-up provider below,
+     and rather than @hocuspocus/provider which the plan named: ygo speaks
+     y-websocket natively and Hocuspocus only behind a server flag, so this is
+     one fewer thing that has to agree. What it buys is the part that was
+     hand-rolled badly — a state-vector handshake instead of replaying the
+     whole room log on every reconnect, and backoff that is somebody else's
+     problem.
+
+     Nothing seeds here. The server built the document from the file before
+     anyone attached (fileSeed.LoadDoc), which is what makes the seed claim,
+     its grace timer, and the blank-document failure it papered over all
+     unnecessary. */
+  private connectHeld() {
+    const u = new URL(this.url, location.href);
+    const path = u.searchParams.get("path") ?? "";
+    const base =
+      (u.protocol === "https:" ? "wss://" : "ws://") + u.host + u.pathname;
+    // The room argument is decoration: the hub names the room itself from
+    // (project, path) after it has resolved who is asking, because a caller
+    // who could name it could join any project's document by asking for it.
+    const provider = new WebsocketProvider(base, "held", this.doc, {
+      params: { path },
+      awareness: this.awareness,
+      connect: true,
+    });
+    this.ws = provider;
+    provider.on("status", (e: { status: string }) => {
+      this.onStatus(e.status === "connected" ? "live" : "offline");
+    });
+    provider.on("sync", (synced: boolean) => {
+      // "Synced" is the document having arrived, which is the moment the
+      // editor may mount on it — the same moment the relay signalled with
+      // its `hello`.
+      if (synced) this.onSeeded();
+    });
+  }
+
   connect() {
     this.onStatus("connecting");
+    if (this.held) return this.connectHeld();
     const es = new EventSource(
       this.url + (this.url.includes("?") ? "&" : "?") + "cid=" + this.cid,
     );
@@ -286,6 +344,8 @@ export class CollabDoc {
 
   destroy() {
     this.closed = true;
+    this.ws?.destroy();
+    this.ws = null;
     this.awareness.off("update", this.onAwareness);
     if (this.timer) clearTimeout(this.timer);
     if (this.cursorTimer) clearTimeout(this.cursorTimer);
