@@ -145,3 +145,54 @@ func TestPathPermReportsWithoutRefusing(t *testing.T) {
 		t.Errorf("pathPerm = %q, which is not one of the four levels", got)
 	}
 }
+
+/* The document starts as the file, without anybody claiming to be first.
+
+   This is the property the seed claim and its grace timer existed to fake:
+   exactly one joiner was told to build the document from the bytes it had
+   loaded, and a claim that never produced anything left every later joiner
+   with a blank document the editor would then save over the file. The hub
+   seeds it instead, before any client is attached. */
+func TestYCollabSeedsTheDocumentFromTheFile(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	const body = "# seeded by the hub\n\nünïcode ✅ 日本語\n"
+	rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", body, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed write: %d %s", rec.Code, rec.Body.String())
+	}
+
+	update, err := fileSeed{srv}.LoadDoc(p.ID + "/notes.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(update) == 0 {
+		t.Fatal("the room would have started empty, which is what the seed claim was for")
+	}
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := doc.GetText("body").ToString(); got != body {
+		t.Errorf("seeded %q, want %q", got, body)
+	}
+}
+
+// A room for something that is not a file is an empty document, never an
+// error: a file being created is an ordinary thing to open an editor on.
+func TestYCollabSeedsEmptyForWhatIsNotThere(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	for _, room := range []string{
+		p.ID + "/never-written.md",
+		"no-such-project/notes.md",
+		"malformed-room-name",
+	} {
+		update, err := fileSeed{srv}.LoadDoc(room)
+		if err != nil {
+			t.Errorf("%s: %v", room, err)
+		}
+		if len(update) != 0 {
+			t.Errorf("%s: seeded %d bytes from nothing", room, len(update))
+		}
+	}
+}

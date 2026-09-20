@@ -1,8 +1,12 @@
 package webapp
 
 import (
+	"context"
+	"io"
 	"net/http"
+	"strings"
 
+	"github.com/reearth/ygo/crdt"
 	ygows "github.com/reearth/ygo/provider/websocket"
 )
 
@@ -44,7 +48,7 @@ import (
 // worth having is eviction, not bytes.
 func (s *Server) ydocs() *ygows.Server {
 	s.yOnce.Do(func() {
-		srv := ygows.NewServer()
+		srv := ygows.NewServerWithPersistence(fileSeed{s})
 		/* Authorization runs per CONNECTION, after proj() has already decided
 		   this caller may see this project.
 
@@ -106,3 +110,72 @@ func (s *Server) handleYCollab(v *volume, w http.ResponseWriter, r *http.Request
 	r.SetPathValue("room", projectID(r)+"/"+path)
 	s.ydocs().ServeHTTP(w, r)
 }
+
+/*
+fileSeed is what makes the seed CLAIM unnecessary.
+
+	The relay could not seed: it never parsed a frame, so it had no way to turn
+	a file into a document. Exactly one joiner was therefore told "you are
+	first, build it from the bytes you loaded" — with a grace timer, because a
+	claim that never produced anything would leave every later joiner holding a
+	blank document that the source editor would then cheerfully save over the
+	file.
+
+	The hub can just do it. LoadDoc runs once, when the room is created and
+	before any client is attached, so there is nothing to claim and nothing to
+	race: the document starts as the file, deterministically, every time.
+
+	StoreUpdate is Stage 3's seam — snapshotting the document back to the file
+	is what finally retires "whoever stops typing last writes it", and until
+	then the client still saves through upload/content exactly as it does now.
+	Returning nil is not a stub that forgot to be written; it is this stage
+	declining to own the write path yet.
+*/
+type fileSeed struct{ s *Server }
+
+func (f fileSeed) LoadDoc(room string) ([]byte, error) {
+	project, path, ok := strings.Cut(room, "/")
+	if !ok {
+		return nil, nil
+	}
+	_, v, err := f.s.projectVolume(project)
+	if err != nil {
+		return nil, nil // no such project: an empty document, not an error
+	}
+	ctx := context.Background()
+	snap, err := v.snapshot(ctx)
+	if err != nil {
+		return nil, nil
+	}
+	fi, ok := snap.files[path]
+	if !ok {
+		return nil, nil // a file that does not exist yet starts empty
+	}
+	rc, err := v.source.Open(ctx, path, fi)
+	if err != nil {
+		return nil, nil
+	}
+	defer rc.Close()
+	// Bounded: a document is held in memory for as long as somebody has it
+	// open, and a 500 MB file is not something to seed a CRDT with.
+	body, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes))
+	if err != nil {
+		return nil, nil
+	}
+	doc := crdt.New()
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) {
+		txt.Insert(txn, 0, string(body), nil)
+	})
+	return crdt.EncodeStateAsUpdateV1(doc, nil), nil
+}
+
+// StoreUpdate is Stage 3. See fileSeed.
+func (f fileSeed) StoreUpdate(string, []byte) error { return nil }
+
+// maxSeedBytes bounds what will be turned into a held document. Editing costs
+// roughly ten times the content in CRDT items, so this is a memory ceiling
+// rather than a file-size opinion; past it the editor falls back to the
+// ordinary read/write path, which is what it does for any file it cannot
+// render anyway.
+const maxSeedBytes = 2 << 20

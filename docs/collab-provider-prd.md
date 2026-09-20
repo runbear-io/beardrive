@@ -180,14 +180,28 @@ document, and the cap is an eviction policy rather than a byte ceiling.
 
 ### Stage 1 — the hub holds the document
 
-- [ ] The Go Yjs server embedded as an `http.Handler`, mounted behind the
-      existing `proj()` wrapper so folder permissions, org walls and read-only
-      membership apply unchanged
-- [ ] `filterJournal`'s sibling question answered: a reader who cannot see a
-      path must not receive its document
-- [ ] Documents persist across a hub restart, or are rebuilt from the file
-      deterministically
-- [ ] The old relay stays behind a config flag for one release
+- [x] `reearth/ygo`'s websocket server embedded as an `http.Handler`
+      (`ycollab.go`), mounted behind the existing `proj()` wrapper
+- [x] **The room name is the hub's, never the caller's.** ygo reads it from
+      `PathValue("room")` or the URL's last segment, so a caller who could
+      name the room would make the project id in the path decoration — any
+      member of any project could join any other project's document by asking
+      for its name. Verified failing without the guard
+- [x] Read-only membership applies as read-only, not as refusal: the route is
+      `PermRead` and the CONNECTION carries `ReadOnly`, so a member who may
+      read a file can open it and watch it being edited
+- [x] `filterJournal`'s sibling question: a path the caller cannot see is
+      **404, never 403** — the rule the viewer's `pathFilter` already applies,
+      because a 403 confirms the file is there
+- [x] Documents are **rebuilt from the file deterministically**, by the hub,
+      on room creation and before any client is attached (`fileSeed.LoadDoc`).
+      This is what retires the seed claim outright: there is nothing to claim
+      and nothing to race
+- [x] Seeding is bounded (`maxSeedBytes`), because a held document costs ~10x
+      its content in CRDT items
+- [x] The old relay is untouched and still mounted; this is beside it
+- [x] Wire fixtures in CI, produced by the frontend's own yjs and checked in
+      as bytes so CI needs no node
 
 **Success criteria:** two browsers converge through the hub with the bespoke
 provider deleted from the path; `e2e/concurrent-edit.spec.ts` still passes.
@@ -249,8 +263,8 @@ updates. Implementation proceeds._
 | Stage | State | Notes |
 |---|---|---|
 | 0 — decide + spike | **done — GO** | reearth/ygo v1.50.0; JS<->Go fixtures pass V1+V2 incl. 10k ops; ~100 KB per edited doc |
-| 1 — hub holds the document | next | |
-| 2 — client stops being a provider | blocked on 1 | |
+| 1 — hub holds the document | **done** | behind proj(); hub seeds from the file; wire fixtures in CI |
+| 2 — client stops being a provider | next | y-websocket, not hocuspocus: it is ygo's default mode |
 | 3 — server writes the file | blocked on 1 | |
 | 4 — delete the compensations | blocked on 2, 3 | |
 
