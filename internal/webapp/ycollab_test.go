@@ -7,21 +7,26 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/reearth/ygo/crdt"
 )
 
-/* The wire, pinned in both directions.
+/*
+The wire, pinned in both directions.
 
-   The hub now decodes CRDT updates that browsers produce, so "our Go library
-   and their JS library agree" stopped being a property of somebody else's
-   README and became a thing this repo has to keep true across version bumps.
+	The hub now decodes CRDT updates that browsers produce, so "our Go library
+	and their JS library agree" stopped being a property of somebody else's
+	README and became a thing this repo has to keep true across version bumps.
 
-   The fixtures in testdata/ were produced by the exact yjs build the frontend
-   ships (node_modules/yjs) and are checked in as BYTES: CI runs Go without
-   node, and a test that needs a toolchain it does not have is a test that
-   gets skipped. A bump that breaks the wire fails the build instead of the
-   editor. */
+	The fixtures in testdata/ were produced by the exact yjs build the frontend
+	ships (node_modules/yjs) and are checked in as BYTES: CI runs Go without
+	node, and a test that needs a toolchain it does not have is a test that
+	gets skipped. A bump that breaks the wire fails the build instead of the
+	editor.
+*/
 func TestYjsWireCompatBothDirections(t *testing.T) {
 	read := func(name string) []byte {
 		t.Helper()
@@ -88,13 +93,15 @@ func TestYjsWireCompatBothDirections(t *testing.T) {
 	}
 }
 
-/* The room name is the hub's to decide.
+/*
+The room name is the hub's to decide.
 
-   ygo takes the room from PathValue("room") or the URL's last segment. If a
-   caller could name the room, the project id in the path would be decoration
-   — any member of any project could join any other project's document by
-   asking for its name. The handler sets the name itself, after proj() has
-   resolved which project this is. */
+	ygo takes the room from PathValue("room") or the URL's last segment. If a
+	caller could name the room, the project id in the path would be decoration
+	— any member of any project could join any other project's document by
+	asking for its name. The handler sets the name itself, after proj() has
+	resolved which project this is.
+*/
 func TestYCollabRoomNameIsNotTheCallersToChoose(t *testing.T) {
 	srv, p, _ := newHub(t, true, nil)
 	h := srv.Handler()
@@ -146,13 +153,15 @@ func TestPathPermReportsWithoutRefusing(t *testing.T) {
 	}
 }
 
-/* The document starts as the file, without anybody claiming to be first.
+/*
+The document starts as the file, without anybody claiming to be first.
 
-   This is the property the seed claim and its grace timer existed to fake:
-   exactly one joiner was told to build the document from the bytes it had
-   loaded, and a claim that never produced anything left every later joiner
-   with a blank document the editor would then save over the file. The hub
-   seeds it instead, before any client is attached. */
+	This is the property the seed claim and its grace timer existed to fake:
+	exactly one joiner was told to build the document from the bytes it had
+	loaded, and a claim that never produced anything left every later joiner
+	with a blank document the editor would then save over the file. The hub
+	seeds it instead, before any client is attached.
+*/
 func TestYCollabSeedsTheDocumentFromTheFile(t *testing.T) {
 	srv, p, _ := newHub(t, true, nil)
 	h := srv.Handler()
@@ -194,5 +203,56 @@ func TestYCollabSeedsEmptyForWhatIsNotThere(t *testing.T) {
 		if len(update) != 0 {
 			t.Errorf("%s: seeded %d bytes from nothing", room, len(update))
 		}
+	}
+}
+
+/*
+A real websocket, through the real handler, into the real document.
+
+	Everything above this tests the pieces. This tests that a client can
+	actually connect — which is where the first three attempts failed, each
+	for a different reason the unit tests could not see: a route that did not
+	match the URL y-websocket builds, a client dialling the relay's path, and
+	a hub still serving a bundle compiled before any of it existed.
+*/
+func TestYCollabAcceptsARealWebsocket(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	const body = "# held by the hub\n"
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", body, ""); rec.Code != http.StatusOK {
+		t.Fatalf("seed write: %d %s", rec.Code, rec.Body.String())
+	}
+
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") +
+		"/api/p/" + p.ID + "/ycollab/held?path=notes.md"
+
+	// Accept-Encoding as a BROWSER sends it on a handshake. Go's dialer does
+	// not, and without it this test passed against a compression middleware
+	// that made the upgrade impossible for every real client.
+	conn, resp, err := websocket.DefaultDialer.Dial(u, http.Header{
+		"Accept-Encoding": {"gzip, deflate, br, zstd"},
+	})
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("dial %s: %v (HTTP %d)", u, err, status)
+	}
+	defer conn.Close()
+
+	// y-websocket opens by sending sync step 1; the hub must answer with the
+	// document it seeded rather than silence.
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	_, frame, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("no frame from the hub: %v", err)
+	}
+	if len(frame) == 0 {
+		t.Fatal("the hub answered with an empty frame")
 	}
 }

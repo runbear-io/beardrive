@@ -952,6 +952,11 @@ func (s *Server) Handler() http.Handler {
 		// read-only and their writes are dropped server-side. The relay's
 		// PermWrite is the older, coarser answer to the same question.
 		mux.HandleFunc("GET "+prefix+"ycollab", resolve(PermRead, s.handleYCollab))
+		// y-websocket appends its room argument to the URL, so the request
+		// arrives one segment deeper. The segment is DECORATION — handleYCollab
+		// overwrites it with the name the hub derives — but the route has to
+		// match for the request to reach the place that overwrites it.
+		mux.HandleFunc("GET "+prefix+"ycollab/{room...}", resolve(PermRead, s.handleYCollab))
 		mux.HandleFunc("POST "+prefix+"upload/init", resolve(PermWrite, s.handleUploadInit))
 		mux.HandleFunc("PUT "+prefix+"upload/content", resolve(PermWrite, s.handleUploadContent))
 		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(PermWrite, s.handleUploadCommit))
@@ -1194,6 +1199,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		"auth":  auth,
 		"reads": map[string]any{"enabled": s.Reads != nil || s.Desktop},
+		// Whether this hub HOLDS the co-editing document (ycollab.go) or only
+		// relays frames between browsers (collab.go). The client cannot infer
+		// it: a missing route and a proxy that will not upgrade a websocket
+		// fail the same way, and guessing wrong means either an editor that
+		// waits for a document nobody is going to send, or two clients
+		// seeding two documents of one file. The hub knows, so it says.
+		"collab": map[string]any{"held": s.Root != nil && s.Projects != nil},
 		// The starting structures the create dialog offers. Served rather
 		// than hardcoded in the frontend so a hub that ships another one
 		// needs no frontend change.
