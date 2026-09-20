@@ -101,3 +101,62 @@ test("moving the cursor alone costs nothing", async ({ page }) => {
   // ...and the document is untouched: a caret is not an edit.
   await expect(page.locator("#editor-state")).not.toHaveAttribute("data-state", "dirty");
 });
+
+/* Typing puts one request on the wire at a time.
+
+   The uplink is HTTP: the stream carries peers' updates DOWN, but everything
+   this client produces leaves as a POST. `timer` used to be cleared before
+   the await, so a keystroke landing mid-request armed a second flush that
+   started while the first was still going — several POSTs in flight at once,
+   each with its own headers, cookie and round trip.
+
+   Serialized, never cancelled: Yjs updates are deltas, and dropping one in
+   flight would delete those keystrokes from every peer. */
+test("fast typing does not stack up requests", async ({ page }) => {
+  test.setTimeout(60_000);
+  await login(page, ADMIN);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/edit/guide.md`);
+  await page.waitForSelector(".cm-host .cm-content");
+  await page.waitForTimeout(1_500);
+
+  /* Latency has to be induced, or this proves nothing.
+
+     Against a hub on localhost a POST completes in a few milliseconds —
+     inside the coalescing window — so the second flush never starts before
+     the first finishes and even the un-serialized code looks fine. Overlap
+     needs a request slower than the window, which is every real network and
+     no local one. 300ms against a 120ms window guarantees it. */
+  await page.route("**/collab*", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await new Promise((r) => setTimeout(r, 300));
+    await route.continue();
+  });
+
+  let inFlight = 0;
+  let peak = 0;
+  let posts = 0;
+  const isUpdate = (u: string) => u.includes("/collab");
+  page.on("request", (r) => {
+    if (r.method() === "POST" && isUpdate(r.url())) {
+      posts++;
+      peak = Math.max(peak, ++inFlight);
+    }
+  });
+  const done = (r: { method(): string; url(): string }) => {
+    if (r.method() === "POST" && isUpdate(r.url())) inFlight--;
+  };
+  page.on("requestfinished", done);
+  page.on("requestfailed", done);
+
+  await page.locator(".cm-host .cm-content").click();
+  await page.keyboard.press("End");
+  // Faster than the coalescing window, for longer than one request takes.
+  for (let i = 0; i < 60; i++) await page.keyboard.type("x", { delay: 10 });
+  await page.waitForTimeout(4_000); // drain, at 300ms a request
+
+  expect(peak, `${peak} collab POSTs were in flight at once`).toBeLessThanOrEqual(1);
+  // And the batching still batches: 60 keystrokes must not be 60 requests.
+  expect(posts, `${posts} POSTs for 60 keystrokes`).toBeLessThan(20);
+  await expect(page.locator("#editor-state")).toHaveAttribute("data-state", "clean");
+});
