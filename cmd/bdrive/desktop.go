@@ -153,6 +153,16 @@ var desktopRoutes = []struct {
 	{"POST /api/p/{project}/presence", routeProxy, ""},
 	{"GET /api/p/{project}/collab", routeProxy, ""},
 	{"POST /api/p/{project}/collab", routeProxy, ""},
+	// /ycollab is the same surface with the document held by the hub instead
+	// of relayed between browsers. Proxied for a sharper reason than the
+	// relay's: the document IS hub state now, so a desktop that answered from
+	// local state would hand the editor a second, private document — and the
+	// first thing that document does is get saved over the file.
+	{"GET /api/p/{project}/ycollab", routeProxy, ""},
+	// The same route one segment deeper: y-websocket appends its room
+	// argument to the URL. Decoration — the hub names the room itself — but
+	// it has to be classified, or the desktop answers it locally.
+	{"GET /api/p/{project}/ycollab/{room...}", routeProxy, ""},
 
 	{"POST /api/p/{project}/reads", routeLocal, "the sync client posts these straight to the hub, never through here; the app's own viewer reads go out through desktop_reads.go instead, as human traffic"},
 }
@@ -755,6 +765,10 @@ func proxyHub(w http.ResponseWriter, r *http.Request, server string) {
 func streaming(r *http.Request) bool {
 	return strings.HasSuffix(r.URL.Path, "/events") ||
 		(r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/collab")) ||
+		// A websocket is long-lived in the way that matters here — the client
+		// asks for a connection, not an answer — even though it is an upgrade
+		// rather than a stream of frames the proxy can read.
+		strings.EqualFold(r.Header.Get("Upgrade"), "websocket") ||
 		strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 }
 

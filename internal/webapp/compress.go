@@ -39,7 +39,23 @@ func gzipResponses(h http.Handler) http.Handler {
 		// socket" is how that loop re-downloads forever or resumes
 		// mid-stream. store.go negotiates its own encoding end to end and is
 		// the only thing that gets to decide there.
-		if strings.Contains(r.URL.Path, "/store/") ||
+		/* An upgrade is not a response to compress, it is a connection to
+		   hand over.
+
+		   A websocket handshake ends with the handler HIJACKING the socket,
+		   and a wrapper that does not implement http.Hijacker makes that
+		   impossible — the upgrade fails and the client sees a 500 it cannot
+		   explain. Browsers send Accept-Encoding on the handshake like any
+		   other request, so without this the co-editing document is
+		   unreachable from a browser and reachable from Go's own dialer,
+		   which sends no such header. That is exactly how it presented.
+
+		   Skipped rather than made hijackable: there is nothing to gzip here,
+		   and a Hijack method on a compressing writer is a trapdoor that
+		   returns a socket somebody may already have written a gzip header
+		   to. */
+		if isUpgrade(r) ||
+			strings.Contains(r.URL.Path, "/store/") ||
 			!acceptsGzip(r.Header.Get("Accept-Encoding")) {
 			h.ServeHTTP(w, r)
 			return
@@ -58,6 +74,21 @@ func gzipResponses(h http.Handler) http.Handler {
 		}
 		h.ServeHTTP(gw, r)
 	})
+}
+
+// isUpgrade reports whether this request asks to stop being HTTP. Both
+// headers are checked because Connection is a comma-separated list in the
+// wild ("keep-alive, Upgrade") and some proxies rewrite one but not the other.
+func isUpgrade(r *http.Request) bool {
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	for _, tok := range strings.Split(r.Header.Get("Connection"), ",") {
+		if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+			return true
+		}
+	}
+	return false
 }
 
 // acceptsGzip is a token scan, not a substring test: "gzip;q=0" means the
@@ -169,17 +200,20 @@ func (g *gzipWriter) close() {
 	}
 }
 
-/* compressible is an allowlist, and the direction matters: an unknown type is
-   left alone rather than compressed hopefully.
+/*
+compressible is an allowlist, and the direction matters: an unknown type is
 
-   Everything this hub serves that is already compressed — images, fonts, PDFs,
-   the export tarball, blobs the sync wire encoded — is binary with a type of
-   its own, so a denylist would have to be complete to be safe and an allowlist
-   only has to be right. Re-compressing a PNG spends CPU to add bytes.
+	left alone rather than compressed hopefully.
 
-   ponytail: no minimum size, so a 12-byte {"ok":true} gains ~20 bytes of gzip
-   framing. Add a buffer-until-threshold if tiny JSON responses ever dominate
-   a profile; they do not today, and the buffering is where the bugs live. */
+	Everything this hub serves that is already compressed — images, fonts, PDFs,
+	the export tarball, blobs the sync wire encoded — is binary with a type of
+	its own, so a denylist would have to be complete to be safe and an allowlist
+	only has to be right. Re-compressing a PNG spends CPU to add bytes.
+
+	ponytail: no minimum size, so a 12-byte {"ok":true} gains ~20 bytes of gzip
+	framing. Add a buffer-until-threshold if tiny JSON responses ever dominate
+	a profile; they do not today, and the buffering is where the bugs live.
+*/
 func compressible(contentType string) bool {
 	ct, _, _ := strings.Cut(contentType, ";")
 	ct = strings.ToLower(strings.TrimSpace(ct))

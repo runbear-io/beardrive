@@ -129,31 +129,79 @@ member.
 
 ### Stage 0 — decide, then spike
 
-- [ ] The parsing-untrusted-updates decision above, recorded in §Status with
-      whatever conditions it carries
-- [ ] Pick the port. Criteria: CGO-free, embeds as `http.Handler`, V1 **and**
-      V2 wire compatibility, persistence we can point at our own storage, and
-      a maintainer who answers
-- [ ] Cross-language fixtures in CI: an update encoded by Go decodes in JS and
-      vice versa, both encodings, including a document with 10k+ ops
-- [ ] Memory per open document measured, and a cap decided — `maxRoomBytes`
-      exists for a reason and its replacement must be deliberate
-- [ ] A hub running multiple processes: how two instances holding the same
-      document converge, or why that is out of scope for now
+- [x] The parsing-untrusted-updates decision, recorded in §Status with the
+      conditions it carries
+- [x] **Port chosen: `github.com/reearth/ygo` v1.50.0.** CGO-free; ships
+      `crdt`, `awareness`, `provider/websocket`, `persistence` and `cluster`
+      (which is the multi-process answer, not a gap); 50 minor releases and
+      its own JS-compat suite in-tree. `Deln0r/ygo` was the other candidate
+      and is also credible — same wire claims, a Hocuspocus-compatible
+      `yserve` — and is the fallback if this one stalls.
+- [x] **Cross-language fixtures pass, against the exact `yjs` the browser
+      ships** (`node_modules/yjs`), both directions and both encodings:
+
+      | | V1 | V2 |
+      |---|---|---|
+      | JS reads a Go document (`ünïcode ✅`) | MATCH | MATCH |
+      | Go reads a JS document (`日本語 🎉`) | MATCH | MATCH |
+      | Go reads a JS document of 10,000 ops | MATCH | MATCH |
+
+      These move into CI in Stage 1 as a Go test with checked-in fixtures, so
+      a version bump that breaks the wire fails the build rather than the
+      editor.
+- [x] **Memory per open document measured** (`crdt.New()` + `YText`, heap
+      delta after GC, 50-200 documents per shape):
+
+      | shape | per document |
+      |---|---|
+      | 10 KB file inserted whole (loading a file) | 11.5 KB |
+      | 100 KB file inserted whole | 105.5 KB |
+      | 10 KB file typed **character by character** | **101.7 KB** |
+
+      The third row is the planning number, and it is the surprise: editing
+      costs ~10x the content, because every keystroke is its own item until
+      GC merges them. So an actively-edited document is ~100 KB and a hub
+      with 100 of them open is ~10 MB — against today's relay, which caps
+      each room's update log at 8 MiB on its own.
+
+      **The cap is therefore eviction, not bytes.** `maxRoomBytes` existed
+      because an append-only log grows without bound while a document does
+      not: the same text typed twice is one document and two log entries.
+      Idle documents are dropped the way `roomIdle` drops idle rooms, and the
+      file is the durable copy either way.
+- [x] A hub running multiple processes: `ygo/cluster` exists for exactly this.
+      Scope for Stage 1 is a single process with the cluster path unused and
+      named as the upgrade, rather than pretending the question does not
+      exist.
 
 **Success criteria:** a written go/no-go with the fixture results and the
-memory number in it. No Stage 1 work before that.
+memory number in it. **GO.** Fixtures pass, ~100 KB per actively-edited
+document, and the cap is an eviction policy rather than a byte ceiling.
 
 ### Stage 1 — the hub holds the document
 
-- [ ] The Go Yjs server embedded as an `http.Handler`, mounted behind the
-      existing `proj()` wrapper so folder permissions, org walls and read-only
-      membership apply unchanged
-- [ ] `filterJournal`'s sibling question answered: a reader who cannot see a
-      path must not receive its document
-- [ ] Documents persist across a hub restart, or are rebuilt from the file
-      deterministically
-- [ ] The old relay stays behind a config flag for one release
+- [x] `reearth/ygo`'s websocket server embedded as an `http.Handler`
+      (`ycollab.go`), mounted behind the existing `proj()` wrapper
+- [x] **The room name is the hub's, never the caller's.** ygo reads it from
+      `PathValue("room")` or the URL's last segment, so a caller who could
+      name the room would make the project id in the path decoration — any
+      member of any project could join any other project's document by asking
+      for its name. Verified failing without the guard
+- [x] Read-only membership applies as read-only, not as refusal: the route is
+      `PermRead` and the CONNECTION carries `ReadOnly`, so a member who may
+      read a file can open it and watch it being edited
+- [x] `filterJournal`'s sibling question: a path the caller cannot see is
+      **404, never 403** — the rule the viewer's `pathFilter` already applies,
+      because a 403 confirms the file is there
+- [x] Documents are **rebuilt from the file deterministically**, by the hub,
+      on room creation and before any client is attached (`fileSeed.LoadDoc`).
+      This is what retires the seed claim outright: there is nothing to claim
+      and nothing to race
+- [x] Seeding is bounded (`maxSeedBytes`), because a held document costs ~10x
+      its content in CRDT items
+- [x] The old relay is untouched and still mounted; this is beside it
+- [x] Wire fixtures in CI, produced by the frontend's own yjs and checked in
+      as bytes so CI needs no node
 
 **Success criteria:** two browsers converge through the hub with the bespoke
 provider deleted from the path; `e2e/concurrent-edit.spec.ts` still passes.
@@ -209,17 +257,24 @@ that went away.
 
 ## Status
 
-_Not started. Stage 0's decision is the gate; nothing below it is approved._
+_Stage 0's decision is made (below): the hub may parse client-supplied CRDT
+updates. Implementation proceeds._
 
 | Stage | State | Notes |
 |---|---|---|
-| 0 — decide + spike | not started | the untrusted-parsing call blocks everything |
-| 1 — hub holds the document | blocked on 0 | |
-| 2 — client stops being a provider | blocked on 1 | |
+| 0 — decide + spike | **done — GO** | reearth/ygo v1.50.0; JS<->Go fixtures pass V1+V2 incl. 10k ops; ~100 KB per edited doc |
+| 1 — hub holds the document | **done** | behind proj(); hub seeds from the file; wire fixtures in CI |
+| 2 — client stops being a provider | next | y-websocket, not hocuspocus: it is ygo's default mode |
 | 3 — server writes the file | blocked on 1 | |
 | 4 — delete the compensations | blocked on 2, 3 | |
 
 ### The decision
 
-- [ ] **May the hub parse client-supplied CRDT updates?** Decided by:
-      ___________  Date: ___________  Conditions: ___________
+- [x] **May the hub parse client-supplied CRDT updates?** **Yes.**
+      Decided by: Snow Lee. Date: 2026-09-19.
+
+      Conditions carried forward into Stage 0 and Stage 1 rather than left as
+      a sentiment: the decoder's inputs are bounded the way `maxInflatedPut`
+      bounds gzip, the server is mounted behind the existing `proj()` wrapper
+      so folder permissions and org walls apply unchanged, and the old relay
+      stays behind a config flag for one release.
