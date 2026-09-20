@@ -263,16 +263,38 @@ client leaving at once.
 
 ### Stage 4 — delete the compensations
 
-- [ ] `seedClaimGrace`, the seed claim, `maxRoomBytes`/`full`, and the
-      reconnect-and-replay path removed
-- [ ] The awareness announce/re-announce dance removed — the server knows the
-      roster
-- [ ] `architecture/webapp-server.md` and `webapp-frontend.md` updated; the
-      `collabRoom` notes are the largest single block of "why this is hard" in
-      either diagram and most of it should stop being true
+- [x] `internal/webapp/collab.go` **deleted** (441 lines), with its two test
+      files: the relay, its rooms, the seed claim, `seedClaimGrace`,
+      `maxRoomBytes`, the `full` rebuild and the resync frame
+- [x] `lib/collab.ts` reduced from a hand-rolled provider to a thin wrapper
+      over `y-websocket`; the SSE/POST transport, the log replay, the
+      announce/re-announce dance and `soloText`/`soloApply` are gone
+- [x] `/api/config`'s `collab.held` removed too — with one transport there is
+      nothing left to choose, and a capability flag nobody reads is exactly
+      the "new mechanism replacing one that went away" this stage forbids
+- [x] Solo mode survives only as *no live collaboration*: an unreachable hub
+      leaves the editor open and saving through `upload/content`. That is not
+      a second CRDT path — a client editing its own COPY of a shared document
+      is precisely what let two browsers overwrite each other
+- [x] Both architecture diagrams updated and parse-checked. The `collabRoom`
+      note was the largest single block of "why this is hard" in either file;
+      it is now one note about a hub that owns the document
 
 **Success criteria:** net lines deleted, and no new mechanism replacing one
-that went away.
+that went away. ✅ **1,669 deletions against 68 insertions.**
+
+### What the deletion is worth, concretely
+
+`e2e/concurrent-edit.spec.ts` used to assert that a relay-less editor's work
+was *preserved beside* a teammate's, because the two held different documents.
+It now asserts they **converge**: every character both people typed is in the
+file, and no conflict copy was needed to get it there. The stress spec agrees
+— `1 paths, 2 versions`, where it used to report three paths and two conflict
+copies.
+
+The conflict-copy machinery stays. It guards the file against writers that
+never touch a CRDT at all — an agent, the CLI, a device syncing — which is a
+door the relay's removal does not close.
 
 ## Risks
 
@@ -287,8 +309,9 @@ that went away.
 
 ## Status
 
-_Stage 0's decision is made (below): the hub may parse client-supplied CRDT
-updates. Implementation proceeds._
+_All five stages are implemented. The hub holds the document, seeds it from
+the file, writes it back, and the compensations the relay needed are deleted
+rather than disabled._
 
 | Stage | State | Notes |
 |---|---|---|
@@ -296,7 +319,7 @@ updates. Implementation proceeds._
 | 1 — hub holds the document | **done** | behind proj(); hub seeds from the file; wire fixtures in CI |
 | 2 — client stops being a provider | **done** | y-websocket; editor mounts on the hub-held document; 25 editor e2e pass |
 | 3 — server writes the file | **done** | snapshot on last peer; attributed to the human; re-enters the API |
-| 4 — delete the compensations | next | |
+| 4 — delete the compensations | **done** | -1669/+68; two browsers now converge instead of conflicting |
 
 ### The decision
 

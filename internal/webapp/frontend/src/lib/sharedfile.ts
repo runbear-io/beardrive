@@ -59,16 +59,16 @@ export function openSharedFile(opts: {
   /** Names this client in a conflict copy's filename, the way a device id
       does on the sync path. */
   who?: string;
-  /** Whether the hub holds the document rather than relaying frames. */
-  held?: boolean;
   /** A concurrent edit could not be merged, so this client's version was
       preserved beside the file instead of being dropped. */
   onConflictCopy?: (path: string) => void;
   me?: { name: string; colour: string };
-  /** The relay answered: the shared document is live and holds the truth. */
+  /** The document arrived: it is live and holds the truth. */
   onReady: (collab: CollabDoc) => void;
-  /** No relay at all — an older hub, or a desktop build that does not proxy
-      the route. The caller falls back to single-writer editing. */
+  /** The document could not be reached — an older hub, or a proxy that will
+      not upgrade a websocket. The caller falls back to single-writer editing:
+      the editor still opens and still saves, it just has no live
+      collaboration. Deliberately NOT a second CRDT path. */
   onSolo: () => void;
   onState?: (s: SaveState) => void;
   onCollab?: (s: CollabStatus) => void;
@@ -181,19 +181,11 @@ export function openSharedFile(opts: {
   };
 
   const collab = new CollabDoc(
-    // Two different surfaces, named apart rather than one route that behaves
-    // two ways: ycollab is the hub-held document over a websocket, collab is
-    // the SSE-down/POST-up relay it will replace.
-    opts.apiBase +
-      (opts.held ? "ycollab" : "collab") +
-      "?path=" +
-      encodeURIComponent(opts.path),
-    opts.seed,
+    opts.apiBase + "ycollab?path=" + encodeURIComponent(opts.path),
     (s) => opts.onCollab?.(s),
     () => opts.onReady(collab),
     () => opts.onSolo(),
     opts.me,
-    opts.held,
   );
 
   // Any change to the shared document — mine or a peer's — restarts the idle

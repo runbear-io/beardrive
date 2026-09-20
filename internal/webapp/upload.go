@@ -516,32 +516,6 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// up in a heap profile.
 	defer s.lockPath(projectID(r), p)()
 
-	// The browser says which version its buffer was built on. A mismatch means
-	// somebody else wrote this path in the meantime, and taking this body
-	// wholesale would erase their work — which is exactly what happened when a
-	// client lost the co-editing relay: two browsers holding different
-	// documents, each overwriting the other every few seconds, silently.
-	//
-	// Optional by design. A caller that sends no If-Match gets the old
-	// behaviour, so older clients, the MCP tools and every other writer here
-	// are untouched.
-	if base := strings.Trim(r.Header.Get("If-Match"), `"`); base != "" {
-		if head, ok := s.headBlob(r.Context(), v, p); ok && head != base {
-			// The current sha travels with the refusal, so the client can fetch
-			// what it missed without a second round trip to find out what to ask
-			// for.
-			writeJSONStatus(w, http.StatusConflict, map[string]any{
-				"error": "this file changed since you last read it",
-				"sha":   head,
-				"path":  p,
-			})
-			return
-		}
-	}
-	// Spool first, then charge what actually arrived. Content-Length is -1 on
-	// any chunked request, so max(r.ContentLength, 0) admitted an upload of any
-	// size against a quota of zero bytes and billed it at zero — the hole round
-	// 1 closed on the device door, still open on this one.
 	tmp, size, blob, err := spool(r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
@@ -595,6 +569,41 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		})
 		return
 	}
+
+	/* Only now, whether this write was built on the version it replaces.
+
+	   AFTER the no-op check above, and that order is load-bearing: a client
+	   whose base is stale but whose CONTENT matches the file has nothing to
+	   conflict about. Answering it with a 409 made the editor park a conflict
+	   copy of text nobody disputed — three clients sharing one document
+	   produced two such copies of identical text, which is how this was
+	   found. A conflict is a disagreement, not a late arrival. */
+	// The browser says which version its buffer was built on. A mismatch means
+	// somebody else wrote this path in the meantime, and taking this body
+	// wholesale would erase their work — which is exactly what happened when a
+	// client lost the co-editing relay: two browsers holding different
+	// documents, each overwriting the other every few seconds, silently.
+	//
+	// Optional by design. A caller that sends no If-Match gets the old
+	// behaviour, so older clients, the MCP tools and every other writer here
+	// are untouched.
+	if base := strings.Trim(r.Header.Get("If-Match"), `"`); base != "" {
+		if head, ok := s.headBlob(r.Context(), v, p); ok && head != base {
+			// The current sha travels with the refusal, so the client can fetch
+			// what it missed without a second round trip to find out what to ask
+			// for.
+			writeJSONStatus(w, http.StatusConflict, map[string]any{
+				"error": "this file changed since you last read it",
+				"sha":   head,
+				"path":  p,
+			})
+			return
+		}
+	}
+	// Spool first, then charge what actually arrived. Content-Length is -1 on
+	// any chunked request, so max(r.ContentLength, 0) admitted an upload of any
+	// size against a quota of zero bytes and billed it at zero — the hole round
+	// 1 closed on the device door, still open on this one.
 
 	if err := up.Upload(r.Context(), p, tmp, size, s.requestUser(r), ""); err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)

@@ -191,8 +191,6 @@ type Server struct {
 	presOnce sync.Once
 	pres     *presenceHub // who is looking at what (presence.go)
 
-	colOnce sync.Once
-	col     *collabHub // per-document editing relay (collab.go)
 
 	resMu  sync.Mutex
 	grants []grant // outstanding presigned upload reservations (reserve.go)
@@ -948,13 +946,11 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST "+prefix+"presence", resolve(PermRead, s.handlePresence))
 		// Co-editing is a write channel: a read-only member has nothing to
 		// send on it, so both halves need write rather than read.
-		mux.HandleFunc("GET "+prefix+"collab", resolve(PermWrite, s.handleCollabStream))
-		mux.HandleFunc("POST "+prefix+"collab", resolve(PermWrite, s.handleCollabPost))
-		// The hub-held document (ycollab.go), beside the relay rather than
-		// instead of it: PermRead, because a read-only member may OPEN a file
-		// and watch it being edited — the connection itself is marked
-		// read-only and their writes are dropped server-side. The relay's
-		// PermWrite is the older, coarser answer to the same question.
+		// The co-editing document (ycollab.go). PermRead, because a read-only
+		// member may OPEN a file and watch it being edited — the connection
+		// itself is marked read-only and their writes are dropped
+		// server-side. The relay this replaced asked for PermWrite, which was
+		// the older and coarser answer to the same question.
 		mux.HandleFunc("GET "+prefix+"ycollab", resolve(PermRead, s.handleYCollab))
 		// y-websocket appends its room argument to the URL, so the request
 		// arrives one segment deeper. The segment is DECORATION — handleYCollab
@@ -1203,13 +1199,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		"auth":  auth,
 		"reads": map[string]any{"enabled": s.Reads != nil || s.Desktop},
-		// Whether this hub HOLDS the co-editing document (ycollab.go) or only
-		// relays frames between browsers (collab.go). The client cannot infer
-		// it: a missing route and a proxy that will not upgrade a websocket
-		// fail the same way, and guessing wrong means either an editor that
-		// waits for a document nobody is going to send, or two clients
-		// seeding two documents of one file. The hub knows, so it says.
-		"collab": map[string]any{"held": s.Root != nil && s.Projects != nil},
 		// The starting structures the create dialog offers. Served rather
 		// than hardcoded in the frontend so a hub that ships another one
 		// needs no frontend change.

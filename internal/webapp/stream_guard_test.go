@@ -28,7 +28,12 @@ func TestStreamsRefuseAnUnflushableWriter(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	for _, path := range []string{"/events", "/collab?path=a.md"} {
+	// /events is the hub's remaining long-lived stream. It used to be tested
+	// alongside /collab, the co-editing relay — which is gone: the hub holds
+	// the document now and serves it over a websocket, an upgrade rather than
+	// a stream this guard applies to (compression skips upgrades for the
+	// related reason, see compress.go).
+	for _, path := range []string{"/events"} {
 		resp, err := http.Get(ts.URL + "/api/p/" + p.ID + path)
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
@@ -63,13 +68,13 @@ func TestUnwrapRestoresStreamingThroughMiddleware(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/p/" + p.ID + "/collab?path=a.md")
+	resp, err := http.Get(ts.URL + "/api/p/" + p.ID + "/events")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("collab stream behind the fixed middleware: %d", resp.StatusCode)
+		t.Fatalf("event stream behind the fixed middleware: %d", resp.StatusCode)
 	}
 	buf := make([]byte, 64)
 	if n, err := resp.Body.Read(buf); err != nil || n == 0 {
@@ -84,13 +89,13 @@ func TestStreamsStillOpenThroughAPlainWriter(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/p/" + p.ID + "/collab?path=a.md")
+	resp, err := http.Get(ts.URL + "/api/p/" + p.ID + "/events")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("collab stream: %d", resp.StatusCode)
+		t.Fatalf("event stream: %d", resp.StatusCode)
 	}
 	buf := make([]byte, 64)
 	n, err := resp.Body.Read(buf) // the hello frame, flushed before anything else

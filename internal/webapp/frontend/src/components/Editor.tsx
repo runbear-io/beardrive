@@ -19,7 +19,6 @@ import {
 } from "@codemirror/language";
 import { yCollab } from "y-codemirror.next";
 import { type CollabStatus } from "../lib/collab";
-import { useConfig } from "../hooks/useConfig";
 import {
   openSharedFile,
   SAVE_IDLE_MS,
@@ -87,7 +86,6 @@ export function Editor({
   // tell a co-editor's snapshot from an outside write.
   onPeers?: (n: number) => void;
 }) {
-  const { data: config } = useConfig();
   const host = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -204,7 +202,6 @@ export function Editor({
       apiBase,
       path,
       seed: seed.current,
-      held: !!config?.collab?.held,
       baseSha: shaRef.current,
       who: meRef.current?.name,
       me: meRef.current,

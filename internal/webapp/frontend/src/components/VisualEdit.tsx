@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState } from "../lib/sharedfile";
 import { type CollabStatus } from "../lib/collab";
-import { useConfig } from "../hooks/useConfig";
 
 /* Click-to-edit for a synced HTML file: the app's half.
 
@@ -80,7 +79,6 @@ export function VisualEdit({
   onWriting?: () => void;
   onRendered?: () => void;
 }) {
-  const { data: config } = useConfig();
   const frame = useRef<HTMLIFrameElement>(null);
   const [warning, setWarning] = useState<string | null>(null);
   /* Whether clicks will actually do anything yet.
@@ -145,7 +143,6 @@ export function VisualEdit({
       apiBase,
       path,
       seed: seed.current,
-      held: !!config?.collab?.held,
       baseSha: shaRef.current,
       who: meRef.current?.name,
       me: meRef.current,
