@@ -1,6 +1,8 @@
 package webapp
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -171,16 +173,12 @@ func TestYCollabSeedsTheDocumentFromTheFile(t *testing.T) {
 		t.Fatalf("seed write: %d %s", rec.Code, rec.Body.String())
 	}
 
-	update, err := fileSeed{srv}.LoadDoc(p.ID + "/notes.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(update) == 0 {
-		t.Fatal("the room would have started empty, which is what the seed claim was for")
-	}
 	doc := crdt.New()
-	if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+	if err := srv.seedDoc(p.ID+"/notes.md", doc); err != nil {
 		t.Fatal(err)
+	}
+	if doc.GetText("body").Len() == 0 {
+		t.Fatal("the room would have started empty, which is what the seed claim was for")
 	}
 	if got := doc.GetText("body").ToString(); got != body {
 		t.Errorf("seeded %q, want %q", got, body)
@@ -196,12 +194,12 @@ func TestYCollabSeedsEmptyForWhatIsNotThere(t *testing.T) {
 		"no-such-project/notes.md",
 		"malformed-room-name",
 	} {
-		update, err := fileSeed{srv}.LoadDoc(room)
-		if err != nil {
+		doc := crdt.New()
+		if err := srv.seedDoc(room, doc); err != nil {
 			t.Errorf("%s: %v", room, err)
 		}
-		if len(update) != 0 {
-			t.Errorf("%s: seeded %d bytes from nothing", room, len(update))
+		if n := doc.GetText("body").Len(); n != 0 {
+			t.Errorf("%s: seeded %d chars from nothing", room, n)
 		}
 	}
 }
@@ -254,5 +252,102 @@ func TestYCollabAcceptsARealWebsocket(t *testing.T) {
 	}
 	if len(frame) == 0 {
 		t.Fatal("the hub answered with an empty frame")
+	}
+}
+
+/*
+The hub can write the document back to the file.
+
+	A safety net rather than the primary writer: the browser still saves on
+	idle. What this covers is the case no client can — every client going away
+	at once, which used to lose whatever had not reached the 700ms idle save.
+
+	Attribution is the part worth pinning. A version whose author is "the
+	server" is a regression in History even when the server is holding the pen,
+	so the snapshot is written as the human who was editing.
+*/
+func TestYCollabSnapshotsTheDocumentAsTheHuman(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	room := p.ID + "/notes.md"
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "before\n", ""); rec.Code != http.StatusOK {
+		t.Fatalf("seed write: %d", rec.Code)
+	}
+
+	// A room, as ygo would hand it to us, edited by somebody.
+	doc := crdt.New()
+	if err := srv.seedDoc(room, doc); err != nil {
+		t.Fatal(err)
+	}
+	srv.rooms().load(room, doc)
+	srv.rooms().writer(room, User{Email: "editor@example.com", Name: "An Editor"})
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) {
+		txt.Insert(txn, txt.Len(), "and after\n", nil)
+	})
+
+	srv.snapshotRoom(context.Background(), room)
+
+	got := get(t, h, "/api/p/"+p.ID+"/file?path=notes.md").Body.String()
+	if got != "before\nand after\n" {
+		t.Fatalf("file says %q, want the document's text", got)
+	}
+	feed := get(t, h, "/api/p/"+p.ID+"/history?path=notes.md&n=10")
+	var out struct {
+		Entries []struct{ User, Path string } `json:"entries"`
+	}
+	if err := json.Unmarshal(feed.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Entries) == 0 {
+		t.Fatal("the snapshot journaled nothing")
+	}
+	if u := out.Entries[0].User; u != "editor@example.com" {
+		t.Errorf("newest version is attributed to %q, want the human who typed it", u)
+	}
+}
+
+// A snapshot of text the file already holds writes nothing: the no-op check
+// in upload.go covers the write path, and this covers the read path so the
+// hub does not even ask.
+func TestYCollabSnapshotOfUnchangedTextIsNotAWrite(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	room := p.ID + "/notes.md"
+	const body = "unchanged\n"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", body, "")
+
+	doc := crdt.New()
+	if err := srv.seedDoc(room, doc); err != nil {
+		t.Fatal(err)
+	}
+	srv.rooms().load(room, doc)
+	srv.rooms().writer(room, User{Email: "editor@example.com"})
+
+	before := get(t, h, "/api/p/"+p.ID+"/history?path=notes.md&n=10").Body.String()
+	srv.snapshotRoom(context.Background(), room)
+	after := get(t, h, "/api/p/"+p.ID+"/history?path=notes.md&n=10").Body.String()
+	if before != after {
+		t.Error("snapshotting unchanged text added a version")
+	}
+}
+
+// Nobody with write access ever joined, so there is nobody to attribute a
+// write to — and a read-only room must not write at all.
+func TestYCollabSnapshotNeedsSomeoneToAttribute(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	room := p.ID + "/notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "original\n", "")
+
+	doc := crdt.New()
+	_ = srv.seedDoc(room, doc)
+	srv.rooms().load(room, doc) // loaded, but no writer recorded
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "SHOULD NOT LAND ", nil) })
+
+	srv.snapshotRoom(context.Background(), room)
+	if got := get(t, h, "/api/p/"+p.ID+"/file?path=notes.md").Body.String(); got != "original\n" {
+		t.Errorf("file says %q — a room with no writer wrote anyway", got)
 	}
 }

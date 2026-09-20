@@ -103,6 +103,10 @@ type Server struct {
 	// The document server, built on first use. See ycollab.go.
 	yOnce sync.Once
 	y     *ygows.Server
+	// Live co-editing rooms, so a snapshot can find the document ygo handed
+	// us when the room was created. See ycollab.go.
+	roomOnce sync.Once
+	roomReg  *roomRegistry
 
 	mcpOnce sync.Once
 	mcpSrv  *mcp.Server // the tool registry, built once (see mcpServer)
