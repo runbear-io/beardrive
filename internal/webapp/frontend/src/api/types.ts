@@ -18,6 +18,12 @@ export interface ServerConfig {
     admin?: boolean;
   };
   reads: { enabled: boolean };
+  /* Whether this hub HOLDS the co-editing document or only relays frames
+     between browsers. Not inferable from the client: a hub too old to serve
+     the route and a proxy that refuses to upgrade a websocket fail the same
+     way, and guessing wrong means either an editor waiting for a document
+     nobody will send, or two clients seeding two documents of one file. */
+  collab?: { held: boolean };
   // The BearDrive Desktop sidecar (`bdrive desktop`): a loopback server over
   // this machine's own mounts. Projects report perm "read" (local state is
   // never written through the viewer), but hub-backed surfaces — heat,

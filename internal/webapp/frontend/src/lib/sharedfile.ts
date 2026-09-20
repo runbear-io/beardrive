@@ -59,6 +59,8 @@ export function openSharedFile(opts: {
   /** Names this client in a conflict copy's filename, the way a device id
       does on the sync path. */
   who?: string;
+  /** Whether the hub holds the document rather than relaying frames. */
+  held?: boolean;
   /** A concurrent edit could not be merged, so this client's version was
       preserved beside the file instead of being dropped. */
   onConflictCopy?: (path: string) => void;
@@ -179,12 +181,19 @@ export function openSharedFile(opts: {
   };
 
   const collab = new CollabDoc(
-    opts.apiBase + "collab?path=" + encodeURIComponent(opts.path),
+    // Two different surfaces, named apart rather than one route that behaves
+    // two ways: ycollab is the hub-held document over a websocket, collab is
+    // the SSE-down/POST-up relay it will replace.
+    opts.apiBase +
+      (opts.held ? "ycollab" : "collab") +
+      "?path=" +
+      encodeURIComponent(opts.path),
     opts.seed,
     (s) => opts.onCollab?.(s),
     () => opts.onReady(collab),
     () => opts.onSolo(),
     opts.me,
+    opts.held,
   );
 
   // Any change to the shared document — mine or a peer's — restarts the idle

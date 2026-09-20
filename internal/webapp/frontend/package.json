@@ -42,6 +42,7 @@
     "tailwind-merge": "^3.6.0",
     "y-codemirror.next": "^0.3.6",
     "y-protocols": "^1.0.7",
+    "y-websocket": "^3.1.0",
     "yjs": "^13.6.32",
     "zod": "^4.4.3"
   },

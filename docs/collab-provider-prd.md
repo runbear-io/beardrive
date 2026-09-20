@@ -208,11 +208,25 @@ provider deleted from the path; `e2e/concurrent-edit.spec.ts` still passes.
 
 ### Stage 2 — the client stops being a provider
 
-- [ ] `@hocuspocus/provider` replaces `CollabDoc`
-- [ ] `collab.ts` deleted, not adapted
-- [ ] `onSolo` and every caller of it deleted — there is no solo mode when the
-      server holds the document; an unreachable hub is offline, and offline
-      editing is the desktop app's job, not a second CRDT path
+- [x] **`y-websocket`, not `@hocuspocus/provider`.** ygo speaks y-websocket
+      natively and Hocuspocus only behind a server flag, so this is one fewer
+      thing that has to agree. Same gain either way: a state-vector handshake
+      instead of replaying the whole room log on reconnect, and backoff that
+      is somebody else's problem
+- [x] The client is told, not left to guess: `/api/config` carries
+      `collab.held`. A hub too old to serve the route and a proxy that refuses
+      an upgrade fail identically, and guessing wrong means an editor waiting
+      for a document nobody will send
+- [x] Nothing seeds client-side on the held path — the hub built the document
+      from the file before anyone attached
+- [x] The relay's update and awareness POSTs are silent on the held path: the
+      socket carries both, and posting them too was the same bytes twice at a
+      route that only serves GET (405s in the console, which is how it was
+      found)
+- [ ] `collab.ts` deleted, not adapted — **Stage 4**. Both transports live in
+      it for now, which is what "the old relay stays reachable for a release"
+      means in practice
+- [ ] `onSolo` and its callers deleted — **Stage 4**, for the same reason
 
 **Success criteria:** `zz-stress-edit.spec.ts` — three editors, one cut off
 throughout, one losing the relay halfway — produces **zero conflict copies**,
@@ -264,8 +278,8 @@ updates. Implementation proceeds._
 |---|---|---|
 | 0 — decide + spike | **done — GO** | reearth/ygo v1.50.0; JS<->Go fixtures pass V1+V2 incl. 10k ops; ~100 KB per edited doc |
 | 1 — hub holds the document | **done** | behind proj(); hub seeds from the file; wire fixtures in CI |
-| 2 — client stops being a provider | next | y-websocket, not hocuspocus: it is ygo's default mode |
-| 3 — server writes the file | blocked on 1 | |
+| 2 — client stops being a provider | **done** | y-websocket; editor mounts on the hub-held document; 25 editor e2e pass |
+| 3 — server writes the file | next | |
 | 4 — delete the compensations | blocked on 2, 3 | |
 
 ### The decision
