@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	ygows "github.com/reearth/ygo/provider/websocket"
 	"io"
 	"io/fs"
 	"log"
@@ -99,6 +100,9 @@ type Server struct {
 	// One mutex per (project, path) so a check-then-write on a file cannot
 	// interleave with another request's. See lockPath.
 	pathLocks sync.Map
+	// The document server, built on first use. See ycollab.go.
+	yOnce sync.Once
+	y     *ygows.Server
 
 	mcpOnce sync.Once
 	mcpSrv  *mcp.Server // the tool registry, built once (see mcpServer)
@@ -942,6 +946,12 @@ func (s *Server) Handler() http.Handler {
 		// send on it, so both halves need write rather than read.
 		mux.HandleFunc("GET "+prefix+"collab", resolve(PermWrite, s.handleCollabStream))
 		mux.HandleFunc("POST "+prefix+"collab", resolve(PermWrite, s.handleCollabPost))
+		// The hub-held document (ycollab.go), beside the relay rather than
+		// instead of it: PermRead, because a read-only member may OPEN a file
+		// and watch it being edited — the connection itself is marked
+		// read-only and their writes are dropped server-side. The relay's
+		// PermWrite is the older, coarser answer to the same question.
+		mux.HandleFunc("GET "+prefix+"ycollab", resolve(PermRead, s.handleYCollab))
 		mux.HandleFunc("POST "+prefix+"upload/init", resolve(PermWrite, s.handleUploadInit))
 		mux.HandleFunc("PUT "+prefix+"upload/content", resolve(PermWrite, s.handleUploadContent))
 		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(PermWrite, s.handleUploadCommit))
@@ -1919,18 +1929,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 	writeJSONStatus(w, http.StatusOK, v)
 }
 
-/* writeJSONCached is writeJSON for a response worth revalidating instead of
-   re-sending: the whole file tree, the whole heat map.
+/*
+writeJSONCached is writeJSON for a response worth revalidating instead of
 
-   The ETag is over the encoded bytes, which means encoding them even for a
-   304 — the saving is the transfer, not the work, and the work was already
-   being done (buildTree walks a snapshot that is itself cached). For a
-   5,700-node project that is ~150 KB compressed versus 30 bytes.
+	re-sending: the whole file tree, the whole heat map.
 
-   Cache-Control: no-cache is REVALIDATE, not "do not store": the browser
-   keeps the body and asks whether it still holds, which is the entire point.
-   Without it a heuristic cache would serve a tree from an hour ago with no
-   way for anyone to notice. */
+	The ETag is over the encoded bytes, which means encoding them even for a
+	304 — the saving is the transfer, not the work, and the work was already
+	being done (buildTree walks a snapshot that is itself cached). For a
+	5,700-node project that is ~150 KB compressed versus 30 bytes.
+
+	Cache-Control: no-cache is REVALIDATE, not "do not store": the browser
+	keeps the body and asks whether it still holds, which is the entire point.
+	Without it a heuristic cache would serve a tree from an hour ago with no
+	way for anyone to notice.
+*/
 func writeJSONCached(w http.ResponseWriter, r *http.Request, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {
