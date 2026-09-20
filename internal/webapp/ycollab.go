@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/reearth/ygo/crdt"
 	ygows "github.com/reearth/ygo/provider/websocket"
@@ -48,7 +50,20 @@ import (
 // worth having is eviction, not bytes.
 func (s *Server) ydocs() *ygows.Server {
 	s.yOnce.Do(func() {
-		srv := ygows.NewServerWithPersistence(fileSeed{s})
+		srv := ygows.NewServer()
+		// Seeding, remembering and snapshotting, in the three places ygo
+		// offers: the document is built from the file before anyone attaches,
+		// kept addressable while the room lives, and written back when the
+		// last editor leaves.
+		srv.OnLoadDocument = func(_ context.Context, room string, doc *crdt.Doc) error {
+			s.rooms().load(room, doc)
+			return s.seedDoc(room, doc)
+		}
+		srv.OnLastPeer = func(ctx context.Context, room string) { s.snapshotRoom(ctx, room) }
+		srv.OnUnloadDocument = func(ctx context.Context, room string) {
+			s.snapshotRoom(ctx, room)
+			s.rooms().drop(room)
+		}
 		/* Authorization runs per CONNECTION, after proj() has already decided
 		   this caller may see this project.
 
@@ -63,9 +78,17 @@ func (s *Server) ydocs() *ygows.Server {
 				return ygows.ConnectionConfig{}, false
 			}
 			path := r.URL.Query().Get("path")
-			return ygows.ConnectionConfig{
-				ReadOnly: !atLeast(s.pathPerm(r, p, path), PermWrite),
-			}, true
+			writable := atLeast(s.pathPerm(r, p, path), PermWrite)
+			if writable {
+				// Who a snapshot is attributed to. History showing "the
+				// server" for a version a person typed would be a regression:
+				// the hub holds the pen, it is never the author. Approximate
+				// in the same way the client's own save already is — it names
+				// whoever most recently sat down to write, not whoever typed
+				// each character.
+				s.rooms().writer(projectID(r)+"/"+path, s.requestUser(r))
+			}
+			return ygows.ConnectionConfig{ReadOnly: !writable}, true
 		}
 		s.y = srv
 	})
@@ -111,71 +134,142 @@ func (s *Server) handleYCollab(v *volume, w http.ResponseWriter, r *http.Request
 	s.ydocs().ServeHTTP(w, r)
 }
 
-/*
-fileSeed is what makes the seed CLAIM unnecessary.
-
-	The relay could not seed: it never parsed a frame, so it had no way to turn
-	a file into a document. Exactly one joiner was therefore told "you are
-	first, build it from the bytes you loaded" — with a grace timer, because a
-	claim that never produced anything would leave every later joiner holding a
-	blank document that the source editor would then cheerfully save over the
-	file.
-
-	The hub can just do it. LoadDoc runs once, when the room is created and
-	before any client is attached, so there is nothing to claim and nothing to
-	race: the document starts as the file, deterministically, every time.
-
-	StoreUpdate is Stage 3's seam — snapshotting the document back to the file
-	is what finally retires "whoever stops typing last writes it", and until
-	then the client still saves through upload/content exactly as it does now.
-	Returning nil is not a stub that forgot to be written; it is this stage
-	declining to own the write path yet.
-*/
-type fileSeed struct{ s *Server }
-
-func (f fileSeed) LoadDoc(room string) ([]byte, error) {
-	project, path, ok := strings.Cut(room, "/")
-	if !ok {
-		return nil, nil
+// seedDoc is what makes the seed CLAIM unnecessary.
+//
+// The relay could not seed: it never parsed a frame, so it had no way to turn
+// a file into a document. Exactly one joiner was therefore told "you are
+// first, build it from the bytes you loaded" — with a grace timer, because a
+// claim that never produced anything left every later joiner holding a blank
+// document that the source editor would then cheerfully save over the file.
+//
+// The hub can just do it. This runs once, when the room is created and before
+// any client is attached, so there is nothing to claim and nothing to race.
+func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
+	body, ok := s.roomBytes(room)
+	if !ok || len(body) == 0 {
+		return nil // a file that does not exist yet starts empty
 	}
-	_, v, err := f.s.projectVolume(project)
-	if err != nil {
-		return nil, nil // no such project: an empty document, not an error
-	}
-	ctx := context.Background()
-	snap, err := v.snapshot(ctx)
-	if err != nil {
-		return nil, nil
-	}
-	fi, ok := snap.files[path]
-	if !ok {
-		return nil, nil // a file that does not exist yet starts empty
-	}
-	rc, err := v.source.Open(ctx, path, fi)
-	if err != nil {
-		return nil, nil
-	}
-	defer rc.Close()
-	// Bounded: a document is held in memory for as long as somebody has it
-	// open, and a 500 MB file is not something to seed a CRDT with.
-	body, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes))
-	if err != nil {
-		return nil, nil
-	}
-	doc := crdt.New()
 	txt := doc.GetText("body")
 	doc.Transact(func(txn *crdt.Transaction) {
 		txt.Insert(txn, 0, string(body), nil)
 	})
-	return crdt.EncodeStateAsUpdateV1(doc, nil), nil
+	return nil
 }
 
-// StoreUpdate is Stage 3. See fileSeed.
-func (f fileSeed) StoreUpdate(string, []byte) error { return nil }
+// roomBytes is the file behind a room, bounded.
+func (s *Server) roomBytes(room string) ([]byte, bool) {
+	project, path, ok := strings.Cut(room, "/")
+	if !ok {
+		return nil, false
+	}
+	_, v, err := s.projectVolume(project)
+	if err != nil {
+		return nil, false
+	}
+	ctx := context.Background()
+	snap, err := v.snapshot(ctx)
+	if err != nil {
+		return nil, false
+	}
+	fi, ok := snap.files[path]
+	if !ok {
+		return nil, false
+	}
+	rc, err := v.source.Open(ctx, path, fi)
+	if err != nil {
+		return nil, false
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes))
+	if err != nil {
+		return nil, false
+	}
+	return body, true
+}
 
-// maxSeedBytes bounds what will be turned into a held document. Editing costs
-// roughly ten times the content in CRDT items, so this is a memory ceiling
-// rather than a file-size opinion; past it the editor falls back to the
-// ordinary read/write path, which is what it does for any file it cannot
-// render anyway.
+// snapshotRoom writes the document back to the file.
+//
+// A SAFETY NET, not the primary writer — the browser still saves on idle
+// exactly as it did. Two writes of one text is not two versions: identical
+// content journals nothing (upload.go), so whichever lands second is free.
+// What this adds is the case no client can cover, which is every client going
+// away at once: a closed laptop used to lose whatever had not yet reached the
+// 700ms idle save.
+//
+// Re-entering through the API rather than calling the uploader directly is
+// what makes it honest. Quota, folder permissions, the no-op check, journaling
+// and the change frame are then the same code every other write goes through;
+// a second path into the file would be a second set of rules to keep in
+// agreement.
+func (s *Server) snapshotRoom(ctx context.Context, room string) {
+	project, path, ok := strings.Cut(room, "/")
+	if !ok {
+		return
+	}
+	doc, who, ok := s.rooms().get(room)
+	if !ok || who.Email == "" {
+		return // nobody with write access ever joined: nothing to attribute
+	}
+	text := doc.GetText("body").ToString()
+	if cur, ok := s.roomBytes(room); ok && string(cur) == text {
+		return // the file already says this
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		"/api/p/"+url.PathEscape(project)+"/upload/content?path="+url.QueryEscape(path),
+		strings.NewReader(text))
+	if err != nil || s.apiMux == nil {
+		return
+	}
+	// The human, never the hub: an op authored by "the server" is a
+	// regression in History even when the server is holding the pen.
+	req = withUser(req, who)
+	s.apiMux.ServeHTTP(newMemWriter(), req)
+}
+
+// roomRegistry keeps a live room's document addressable, and remembers who may
+// be attributed for it. ygo hands the document to OnLoadDocument and then only
+// ever names the room again, so without this a snapshot would have nothing to
+// write.
+type roomRegistry struct {
+	mu    sync.Mutex
+	docs  map[string]*crdt.Doc
+	users map[string]User
+}
+
+func (s *Server) rooms() *roomRegistry {
+	s.roomOnce.Do(func() {
+		s.roomReg = &roomRegistry{docs: map[string]*crdt.Doc{}, users: map[string]User{}}
+	})
+	return s.roomReg
+}
+
+func (r *roomRegistry) load(room string, doc *crdt.Doc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.docs[room] = doc
+}
+
+func (r *roomRegistry) writer(room string, u User) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.users[room] = u
+}
+
+func (r *roomRegistry) get(room string) (*crdt.Doc, User, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	doc, ok := r.docs[room]
+	return doc, r.users[room], ok
+}
+
+func (r *roomRegistry) drop(room string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.docs, room)
+	delete(r.users, room)
+}
+
+// maxSeedBytes bounds what becomes a held document. Editing costs roughly ten
+// times the content in CRDT items, so this is a memory ceiling rather than an
+// opinion about file size.
 const maxSeedBytes = 2 << 20

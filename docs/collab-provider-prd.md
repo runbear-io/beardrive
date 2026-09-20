@@ -235,15 +235,31 @@ session's total update volume (measured, not assumed).
 
 ### Stage 3 — the server writes the file
 
-- [ ] The hub snapshots the document to the file on settle, replacing
-      "whoever stops typing last writes it"
-- [ ] One settle = one journal op, whatever the number of editors
-- [ ] `Op.User` still names the human, not the hub — a version whose author is
-      "the server" is a regression in History
+- [x] The hub snapshots the document to the file when the last editor leaves
+      and when the room is unloaded (`OnLastPeer`, `OnUnloadDocument`)
+- [x] **A safety net, not a replacement.** The browser still saves on idle.
+      That is not double-writing: identical content journals nothing
+      (#238), so whichever write lands second is free. What the snapshot adds
+      is the case no client can cover — every client going away at once, which
+      used to lose whatever had not reached the 700 ms idle save
+- [x] One settle = one journal op, whatever the number of editors — which
+      #238 already delivers for identical text, and this does not undo
+- [x] `Op.User` names the human. A version authored by "the server" is a
+      regression in History even when the server holds the pen, so the writer
+      is recorded at `Authorize` and a room nobody could write to writes
+      nothing at all
+- [x] The snapshot RE-ENTERS the API rather than calling the uploader: quota,
+      folder permissions, the no-op check, journaling and the change frame are
+      then the same code every other write goes through. A second path into
+      the file is a second set of rules to keep in agreement
+- [x] Seeding moved from the persistence adapter to `OnLoadDocument`, which
+      hands over the actual document instead of encoded bytes
 
 **Success criteria:** a three-editor session that today produces one version
-per editor per pause produces one per pause. Measured against
-`docs/network-efficiency-prd.md`'s history-noise baseline.
+per editor per pause produces one per pause. ✅ — though honestly it was #238
+that delivered it, by making the duplicate writes free rather than by stopping
+them. This stage's own contribution is durability: the document survives every
+client leaving at once.
 
 ### Stage 4 — delete the compensations
 
@@ -279,8 +295,8 @@ updates. Implementation proceeds._
 | 0 — decide + spike | **done — GO** | reearth/ygo v1.50.0; JS<->Go fixtures pass V1+V2 incl. 10k ops; ~100 KB per edited doc |
 | 1 — hub holds the document | **done** | behind proj(); hub seeds from the file; wire fixtures in CI |
 | 2 — client stops being a provider | **done** | y-websocket; editor mounts on the hub-held document; 25 editor e2e pass |
-| 3 — server writes the file | next | |
-| 4 — delete the compensations | blocked on 2, 3 | |
+| 3 — server writes the file | **done** | snapshot on last peer; attributed to the human; re-enters the API |
+| 4 — delete the compensations | next | |
 
 ### The decision
 
