@@ -263,7 +263,14 @@ credentials); otherwise it is relayed through this server.`,
 				if err != nil {
 					return fmt.Errorf("open project registry: %w", err)
 				}
-				dev, err := config.LoadDevice()
+				// Seeded with the storage root, so a hub whose $BDRIVE_HOME
+				// does not survive a restart — a container, anything on a
+				// tmpfs — keeps the identity it journals its own writes
+				// under. An id already on disk still wins, so a hub with a
+				// real home is untouched. Without this, every restart is a
+				// new permanent journal key in every project it touches
+				// (docs/hub-load-prd.md Stage 6).
+				dev, err := config.LoadDeviceSeeded(remoteURL)
 				if err != nil {
 					return fmt.Errorf("load device identity: %w", err)
 				}

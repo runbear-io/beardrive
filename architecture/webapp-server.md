@@ -142,7 +142,7 @@ classDiagram
     }
     note for DirectUploader "BlobSize replaced HasBlob: in direct mode the server never sees the bytes, so the CALLER's declared size was the only number it had to quota-check and journal — and the caller picks it. Size now comes from storage, and the commit journals and charges that"
     note for DirectUploader "Commit's note is &quot;&quot; for an upload and &quot;restore &lt;path&gt;@&lt;sha8&gt;&quot; for POST /api/p/{id}/restore — which is the upload commit minus the upload: find the historical op for (path, sha), journal a NEW put at its blob. Never rewrites a journal."
-    note for RemoteSource "Every write ends at appendOps: stamp Seq/Lamport/Time + this server's Identity across the batch, append N ops to journal/&lt;own-device&gt;.jsonl in ONE read-modify-write (appendOp is the single-op call). Commit does that for a put; Remove (POST /api/p/{id}/remove, restore's gates + a snapshot existence check) does it for a delete — the only server path that takes a file away, and itself undone by restoring the DELETED row. The batch is not an optimization: ONE Put of ONE object either lands or it does not, which is the whole atomicity argument for undoRunDoor — a loop of appendOp there would leave half a run reverted with nothing to report it."
+    note for RemoteSource "The hub's Identity is now DERIVED from its storage root when $BDRIVE_HOME holds no device.json (config.LoadDeviceSeeded), not minted at random. An id on disk still wins, so a self-hosted hub with a real home is untouched — but a hub on an ephemeral filesystem used to mint a fresh one every cold start, and since it journals its own writes under it, each boot left a permanent journal/&lt;rand&gt;.jsonl in every project it touched: 43 of them on one production project with about five real devices, a long tail at 321 bytes apiece, none of which can ever be collected because a journal is append-only and might hold real work. Every write ends at appendOps: stamp Seq/Lamport/Time + this server's Identity across the batch, append N ops to journal/&lt;own-device&gt;.jsonl in ONE read-modify-write (appendOp is the single-op call). Commit does that for a put; Remove (POST /api/p/{id}/remove, restore's gates + a snapshot existence check) does it for a delete — the only server path that takes a file away, and itself undone by restoring the DELETED row. The batch is not an optimization: ONE Put of ONE object either lands or it does not, which is the whole atomicity argument for undoRunDoor — a loop of appendOp there would leave half a run reverted with nothing to report it."
 
     class undoRunDoor {
         <<Server, POST /api/p/id/undo-run>>
@@ -690,11 +690,12 @@ classDiagram
         +Grants map[id]MCPGrant
         +Clients map[id]MCPClient
         +Repo MCPRepo
+        +ver versionGate
         +Authorize / Token / Register
         +GrantFor(bearer) MCPGrant
         +Revoke(account, id)
     }
-    note for MCPAuth "mcpauth.go — the hub is both the authorization server and the resource server, because an MCP client discovers everything from the resource URL alone: RFC 9728 protected-resource metadata points at RFC 8414 AS metadata, RFC 7591 dynamic registration mints a client, PKCE S256 and RFC 8707 resource indicators carry the rest. No pre-registration, no shared secret to paste — the user types the hub URL into their agent and the handshake does the rest"
+    note for MCPAuth "mcpauth.go — the hub is both the authorization server and the resource server, because an MCP client discovers everything from the resource URL alone: RFC 9728 protected-resource metadata points at RFC 8414 AS metadata, RFC 7591 dynamic registration mints a client, PKCE S256 and RFC 8707 resource indicators carry the rest. No pre-registration, no shared secret to paste — the user types the hub URL into their agent and the handshake does the rest. Grants and clients are re-read behind a versionGate, the same change-token check ProjectDB/OrgDB/ShareDB/DeviceRegistry use: this registry loaded once at construction and never looked again, so a grant REVOKED anywhere else stayed honoured for the life of the process. The maps are REBUILT rather than merged, because a revocation is an absence and merging can only add. `codes` is deliberately excluded — pending authorization codes are ephemeral and single-use, and a re-read must not drop a consent that is mid-flight"
 
     class MCPGrant {
         +ID, Account

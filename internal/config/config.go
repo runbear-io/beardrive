@@ -5,6 +5,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -67,19 +68,46 @@ type Device struct {
 }
 
 // LoadDevice loads the device identity, creating one on first use.
-func LoadDevice() (Device, error) {
+func LoadDevice() (Device, error) { return loadDevice("") }
+
+/* LoadDeviceSeeded is LoadDevice for a process whose $BDRIVE_HOME may not
+   survive a restart, which is every hub on an ephemeral filesystem.
+
+   An identity already on disk still wins — a self-hosted hub with a real home
+   keeps the id every peer already has in its journal listing. What changes is
+   the OTHER branch: instead of minting at random, the id is derived from a
+   seed that identifies this installation (its storage root), so the same hub
+   over the same store is the same writer however many times it is restarted.
+
+   This is not a nicety. The hub journals its own writes under this id, so a
+   random one per boot means a permanent journal/<rand>.jsonl per boot per
+   project — 43 of them on one production project with five real devices, a
+   long tail at 321 bytes apiece. A journal is append-only and may hold real
+   work, so nothing can ever collect them, and every reader's cold fold pays a
+   round trip for each.
+
+   The seed must identify the STORE, not the process: two hubs on one store
+   sharing an id would both append one journal key, which is the corruption
+   "each device writes only its own journal" exists to prevent. That is also
+   why this stays a single derived id rather than one per instance — the hub
+   is pinned to one instance until per-instance identities exist
+   (docs/hub-load-prd.md Phase 3). */
+func LoadDeviceSeeded(seed string) (Device, error) { return loadDevice(seed) }
+
+func loadDevice(seed string) (Device, error) {
 	home, err := Home()
 	if err != nil {
 		return Device{}, err
 	}
 	p := filepath.Join(home, "device.json")
-	if data, err := os.ReadFile(p); err == nil {
-		var d Device
-		if err := json.Unmarshal(data, &d); err == nil && d.ID != "" {
-			return d, nil
-		}
+	if d, err := readDeviceFile(p); err == nil {
+		return d, nil
 	}
-	d := Device{ID: randID(), Name: hostname(), Author: detectAuthor()}
+	id := randID()
+	if seed != "" {
+		id = derivedID(seed)
+	}
+	d := Device{ID: id, Name: hostname(), Author: detectAuthor()}
 	if _, err := ensureHome(); err != nil {
 		return Device{}, err
 	}
@@ -87,6 +115,31 @@ func LoadDevice() (Device, error) {
 		return Device{}, err
 	}
 	return d, nil
+}
+
+// readDeviceFile reads an identity already on disk. A file that is missing,
+// unreadable, corrupt, or has no id is all the same answer: there isn't one.
+func readDeviceFile(path string) (Device, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Device{}, err
+	}
+	var d Device
+	if err := json.Unmarshal(data, &d); err != nil {
+		return Device{}, err
+	}
+	if d.ID == "" {
+		return Device{}, fmt.Errorf("%s has no device id", path)
+	}
+	return d, nil
+}
+
+// derivedID is randID's deterministic twin: same shape (12 hex characters, the
+// only thing anything downstream assumes about a device id), derived from the
+// seed rather than from entropy.
+func derivedID(seed string) string {
+	sum := sha256.Sum256([]byte("bdrive-device-v1\x00" + seed))
+	return hex.EncodeToString(sum[:6])
 }
 
 func randID() string {

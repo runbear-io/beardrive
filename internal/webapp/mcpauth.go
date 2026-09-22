@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -110,7 +111,15 @@ type MCPAuth struct {
 	// consent screen must stay cookie-only.
 	caller func(*http.Request) (User, bool)
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// ver is the change-token gate every other registry already uses
+	// (ProjectDB, OrgDB, ShareDB, DeviceRegistry). Without it this one loaded
+	// at construction and never read the store again, so a grant revoked by
+	// anything else — `bdrive mcp revoke` in another process, an admin action
+	// on another instance — stayed honoured for the life of the process.
+	ver    versionGate
+	warned bool
+
 	grants  map[string]MCPGrant // by id
 	byToken map[string]string   // access-token digest → grant id
 	byFresh map[string]string   // refresh-token digest → grant id
@@ -155,6 +164,59 @@ func NewMCPAuth(repo MCPRepo, session func(*http.Request) (User, bool), projects
 	return m, nil
 }
 
+/*
+refresh re-reads the grants and clients when the store says they moved.
+
+	Callers hold mu.
+
+	Modelled on ProjectDB.refresh: a change token (one primary-key lookup on
+	SQL, and "always stale" for a repo that cannot answer), then a full re-read
+	only when it moves. A failed re-read keeps what we have and says so once —
+	serving the last known grants is strictly better than refusing everybody
+	because the metadata store hiccuped.
+
+	`codes` is deliberately NOT rebuilt: pending authorization codes are
+	ephemeral, single-use and never persisted, so a re-read must not drop a
+	consent that is mid-flight.
+*/
+func (m *MCPAuth) refresh() {
+	token, stale := m.ver.stale(m.repo)
+	if !stale {
+		return
+	}
+	gs, err := m.repo.LoadGrants()
+	if err != nil {
+		if !m.warned {
+			m.warned = true
+			log.Printf("beardrive: MCP grant re-read failed, serving the last known grants: %v", err)
+		}
+		return
+	}
+	cs, err := m.repo.LoadClients()
+	if err != nil {
+		if !m.warned {
+			m.warned = true
+			log.Printf("beardrive: MCP client re-read failed, serving the last known clients: %v", err)
+		}
+		return
+	}
+	m.warned = false
+	m.ver.fresh(token)
+
+	// Rebuilt rather than merged: a revocation is an ABSENCE, and merging can
+	// only ever add. Leaving the old maps in place is the bug this fixes.
+	m.grants = make(map[string]MCPGrant, len(gs))
+	m.byToken = make(map[string]string, len(gs))
+	m.byFresh = make(map[string]string, len(gs))
+	for _, g := range gs {
+		m.index(g)
+	}
+	m.clients = make(map[string]MCPClient, len(cs))
+	for _, c := range cs {
+		m.clients[c.ID] = c
+	}
+}
+
 // index puts a grant in all three maps. Callers hold mu (or are constructing).
 func (m *MCPAuth) index(g MCPGrant) {
 	m.grants[g.ID] = g
@@ -189,6 +251,7 @@ func (m *MCPAuth) Grant(token string) (MCPGrant, bool) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.refresh()
 	id, ok := m.byToken[hashToken(token)]
 	if !ok {
 		return MCPGrant{}, false
@@ -223,6 +286,7 @@ func (m *MCPAuth) List(email string) []MCPGrant {
 	email = normEmail(email)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.refresh() // a connection revoked elsewhere must not still be listed
 	var out []MCPGrant
 	for _, g := range m.grants {
 		if g.Account == email {
@@ -238,6 +302,7 @@ func (m *MCPAuth) List(email string) []MCPGrant {
 // the refresh token alive would be a revocation in name only.
 func (m *MCPAuth) Revoke(email, id string) bool {
 	m.mu.Lock()
+	m.refresh() // revoking something this process has not heard of must still work
 	g, ok := m.grants[id]
 	// An empty email is the server revoking on its own behalf (an expired
 	// refresh), not a wildcard match on accounts with no email.
@@ -438,6 +503,7 @@ func validRedirect(raw string) bool {
 func (m *MCPAuth) client(id string) (MCPClient, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.refresh() // a client registered elsewhere is a real client
 	c, ok := m.clients[id]
 	return c, ok
 }
