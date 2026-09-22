@@ -1,10 +1,12 @@
 package webapp
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -223,30 +225,15 @@ func (r *RemoteSource) appendOps(ctx context.Context, ops []journal.Op) error {
 		ops[i].Device, ops[i].DeviceName, ops[i].Author = r.Device.ID, r.Device.Name, r.Device.Author
 	}
 
-	// Read-modify-write of our own journal. A transient read error must fail
-	// the commit — treating it as "no journal yet" would rewrite the key
-	// without our earlier ops.
-	key := "journal/" + r.Device.ID + ".jsonl"
-	var existing []byte
-	if exists, err := r.Backend.Exists(ctx, key); err != nil {
-		return fmt.Errorf("check journal: %w", err)
-	} else if exists {
-		rc, err := r.Backend.Get(ctx, key)
-		if err != nil {
-			return fmt.Errorf("fetch journal: %w", err)
-		}
-		existing, err = io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return err
-		}
-	}
 	line, err := journal.Marshal(ops)
 	if err != nil {
 		return err
 	}
-	data := append(existing, line...)
-	return r.Backend.Put(ctx, key, strings.NewReader(string(data)), int64(len(data)))
+	key := "journal/" + r.Device.ID + ".jsonl"
+	if cp, ok := r.Backend.(remote.ConditionalPutter); ok {
+		return r.appendConditional(ctx, cp, key, line)
+	}
+	return r.appendLastWriterWins(ctx, key, line)
 }
 
 var errBlobMissing = fmt.Errorf("content not uploaded yet")
@@ -692,4 +679,89 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 	s.captureChange(r, "browser", 1, 0)
 	s.publishChange(r, "browser", []string{req.Path}, 1, 0)
 	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
+}
+
+/*
+appendConditional is the journal append when the store can compare and swap.
+
+	The read and the write are ONE transaction as far as the store is
+	concerned: read the journal at a version, append, write back only if
+	nothing moved. If something did, re-read and redo it — the ops being
+	appended are already stamped and do not change, so a retry re-appends onto
+	whatever is there now rather than duplicating anything.
+
+	upmu is still held, and is not redundant. Within one process it stops N
+	goroutines from all taking the slow path; the precondition covers the case
+	a mutex structurally cannot, which is a second process. Both, because they
+	guard different things.
+
+	A bounded number of attempts rather than looping until it works.
+	Contention here means two hub processes committing to the SAME device
+	journal within milliseconds, which is rare — a commit that loses five
+	times running is more likely a store misbehaving than a busy one, and
+	failing it is how the caller learns to retry instead of the hub spinning.
+*/
+func (r *RemoteSource) appendConditional(ctx context.Context, cp remote.ConditionalPutter, key string, line []byte) error {
+	const attempts = 5
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		existing, version, err := readVersioned(ctx, cp, key)
+		if err != nil {
+			return fmt.Errorf("fetch journal: %w", err)
+		}
+		data := append(append([]byte(nil), existing...), line...)
+		_, err = cp.PutIf(ctx, key, bytes.NewReader(data), int64(len(data)), version)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, remote.ErrVersionMismatch) {
+			return err
+		}
+		lastErr = err
+	}
+	return fmt.Errorf("journal changed under %d successive appends: %w", attempts, lastErr)
+}
+
+// readVersioned reads a journal that may not exist yet. A missing object is
+// not an error — it is VersionAbsent, which PutIf turns into "create this and
+// fail if somebody beat me to it", so two processes creating one journal at
+// the same moment still cannot lose an append.
+func readVersioned(ctx context.Context, cp remote.ConditionalPutter, key string) ([]byte, remote.Version, error) {
+	rc, version, err := cp.GetVersioned(ctx, key)
+	if err != nil {
+		if remote.IsNotExist(err) {
+			return nil, remote.VersionAbsent, nil
+		}
+		return nil, remote.VersionAbsent, err
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, remote.VersionAbsent, err
+	}
+	return body, version, nil
+}
+
+// appendLastWriterWins is the original path, for a store with no
+// compare-and-swap. Correct while the hub runs as ONE process, which is the
+// only configuration it is currently allowed to run in.
+func (r *RemoteSource) appendLastWriterWins(ctx context.Context, key string, line []byte) error {
+	// A transient read error must fail the commit — treating it as "no
+	// journal yet" would rewrite the key without our earlier ops.
+	var existing []byte
+	if exists, err := r.Backend.Exists(ctx, key); err != nil {
+		return fmt.Errorf("check journal: %w", err)
+	} else if exists {
+		rc, err := r.Backend.Get(ctx, key)
+		if err != nil {
+			return fmt.Errorf("fetch journal: %w", err)
+		}
+		existing, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return err
+		}
+	}
+	data := append(existing, line...)
+	return r.Backend.Put(ctx, key, strings.NewReader(string(data)), int64(len(data)))
 }

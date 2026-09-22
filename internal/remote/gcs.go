@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"google.golang.org/api/googleapi"
 	"io"
 	"net/http"
 	"path"
@@ -113,3 +114,64 @@ func (b *gcsBackend) Exists(ctx context.Context, key string) (bool, error) {
 }
 
 func (b *gcsBackend) Close() error { return b.client.Close() }
+
+// Compile-time: this is the one backend that offers compare-and-swap, and the
+// hub's journal append silently falls back to last-writer-wins without it.
+var _ ConditionalPutter = (*gcsBackend)(nil)
+
+/* Compare-and-swap, which GCS gives us for free through object generations.
+
+   A generation is GCS's own revision number for an object: every successful
+   write produces a new one, and a precondition on it is evaluated by the
+   storage service rather than by us. That is the whole point — two hub
+   processes appending to one journal cannot be serialised by anything either
+   of them holds, so the only place the check can be honest is the store.
+
+   DoesNotExist is the VersionAbsent case rather than GenerationMatch(0),
+   which GCS would read as "match generation zero" and refuse everything. */
+
+func (b *gcsBackend) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {
+	obj := b.bucket.Object(b.key(key))
+	attrs, err := obj.Attrs(ctx)
+	if err != nil {
+		return nil, VersionAbsent, err
+	}
+	// Read the generation we just looked at, not "latest": between Attrs and
+	// NewReader another process may have written, and a body from a different
+	// revision than the version we report is the exact bug this prevents.
+	rc, err := obj.Generation(attrs.Generation).NewReader(ctx)
+	if err != nil {
+		return nil, VersionAbsent, err
+	}
+	return rc, gcsVersion(attrs.Generation), nil
+}
+
+func (b *gcsBackend) PutIf(ctx context.Context, key string, r io.Reader, _ int64, expect Version) (Version, error) {
+	obj := b.bucket.Object(b.key(key))
+	if expect == VersionAbsent {
+		obj = obj.If(gcs.Conditions{DoesNotExist: true})
+	} else {
+		gen, err := strconv.ParseInt(string(expect), 10, 64)
+		if err != nil {
+			return VersionAbsent, fmt.Errorf("bad version %q: %w", expect, err)
+		}
+		obj = obj.If(gcs.Conditions{GenerationMatch: gen})
+	}
+	w := obj.NewWriter(ctx)
+	if _, err := io.Copy(w, r); err != nil {
+		w.Close()
+		return VersionAbsent, err
+	}
+	if err := w.Close(); err != nil {
+		// 412 is the precondition failing, which is not an error so much as
+		// "somebody else got there" — the caller re-reads and retries.
+		var apiErr *googleapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+			return VersionAbsent, ErrVersionMismatch
+		}
+		return VersionAbsent, err
+	}
+	return gcsVersion(w.Attrs().Generation), nil
+}
+
+func gcsVersion(gen int64) Version { return Version(strconv.FormatInt(gen, 10)) }

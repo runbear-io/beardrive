@@ -14,11 +14,13 @@
 package remote
 
 import (
+	gcs "cloud.google.com/go/storage"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -61,6 +63,65 @@ type Backend interface {
 	List(ctx context.Context, prefix string) ([]Object, error)
 	Exists(ctx context.Context, key string) (bool, error)
 	Close() error
+}
+
+/*
+Version identifies one stored revision of an object.
+
+	Opaque on purpose: a GCS generation, an S3 ETag and a file backend's
+	fingerprint have nothing in common but equality, and the moment anything
+	parses one it has made a promise the next backend cannot keep. Only ever
+	compared, never inspected.
+*/
+type Version string
+
+// VersionAbsent is the version of an object that does not exist. Passing it to
+// PutIf means "create this, and fail if somebody beat me to it".
+const VersionAbsent Version = ""
+
+// ErrVersionMismatch is PutIf's answer when the object moved since the caller
+// read it. It is not a failure so much as an instruction: re-read, redo the
+// work against what is there now, and try again.
+var ErrVersionMismatch = errors.New("object changed since it was read")
+
+/*
+ConditionalPutter is the optional compare-and-swap capability, in the
+
+	PutSigner and Watcher mold: a backend that cannot do it simply does not
+	implement it, and callers keep exactly the behaviour they had.
+
+	It exists because a journal append is a READ-MODIFY-WRITE of one object,
+	and Put is last-writer-wins. Inside one process a mutex is enough and that
+	is what the hub has always used. Across two it is not: both read the same
+	journal, both append their own ops, and whichever writes second silently
+	erases the other's — no error anywhere, because both writes succeeded. That
+	is the lost update the "each device writes only its own journal" invariant
+	has always prevented BETWEEN devices, reappearing inside one device id the
+	moment the hub runs more than once (docs/hub-load-prd.md Stage 10).
+
+	Implemented for GCS, which is what the managed hub stores in. Not for S3
+	(conditional PutObject is recent and unevenly supported), not for file://
+	(a rename is atomic but a compare-and-swap across processes is not, and
+	inventing one would be a worse lie than not offering the capability), and
+	not for the https:// client — that one talks to a hub, and the hub is the
+	process doing the conditional write.
+*/
+type ConditionalPutter interface {
+	// GetVersioned reads an object and reports the version it was at, so a
+	// later PutIf can say "only if this has not moved".
+	GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error)
+	// PutIf writes only if the object is still at expect, and reports the
+	// version it wrote. ErrVersionMismatch means somebody else got there.
+	PutIf(ctx context.Context, key string, r io.Reader, size int64, expect Version) (Version, error)
+}
+
+// IsNotExist reports whether err means "no such object", across backends that
+// each spell it differently (GCS has its own sentinel, a file backend uses
+// os.ErrNotExist). One place, so a caller does not have to know which backend
+// it is holding to tell "absent" from "broken" — and getting that wrong means
+// treating a transient failure as an empty journal.
+func IsNotExist(err error) bool {
+	return err != nil && (errors.Is(err, os.ErrNotExist) || errors.Is(err, gcs.ErrObjectNotExist))
 }
 
 // ReadEvent is one agent file read reported to the hub for its read heatmap.
