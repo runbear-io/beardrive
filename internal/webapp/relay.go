@@ -230,6 +230,20 @@ func newMemPending() *memPending {
 	return &memPending{rows: map[string]PendingGrant{}}
 }
 
+/*
+NewMemoryPending is the in-memory PendingRepo, for a caller that needs the
+
+	default rather than a store.
+
+	Exported because the seam is used from outside this package — the managed
+	hub's auth provider holds the same kind of short-lived sign-in state — and a
+	caller that has no MetaStore configured should be able to get the SAME
+	implementation the rest of the hub falls back to, not write a second one.
+	Two in-memory stores with slightly different expiry rules is how the two
+	come to disagree, which is the whole reason memPending exists.
+*/
+func NewMemoryPending() PendingRepo { return newMemPending() }
+
 func (m *memPending) Put(g PendingGrant) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
