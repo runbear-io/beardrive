@@ -560,7 +560,36 @@ Record each stage's before/after here, from the two production queries in
 | date | req/24h | peak:trough | daemon share | idle daemon req/day |
 |---|---|---|---|---|
 | 2026-09-21 (baseline) | 183,150 | 1.6× | 67% | 17,280 |
-| 2026-09-22 (Phase 1+2 deployed) | *pending — needs 24h at the new cadence* | | | |
+| 2026-09-22 (Phase 1+2 deployed) | ~4,600/hr vs ~7,900/hr — **≈45% down**, see below | n/a yet | **80%** (up from 67%) | unchanged |
+
+**Phase 1 landed by half, and the reason matters more than the number.**
+
+Measured 2026-09-22 08:00–08:20Z against the same-shaped window on 09-21:
+1,561 requests vs 3,446. Hourly volume fell from a 6,700–10,400 band to
+3,500–5,100.
+
+What moved: `POST /presence` fell **76%** (≈670 → 160 in twenty minutes), and
+the editor's duplicate writes are gone. Both are browser-side, and the browser
+gets its bundle from the hub — so those landed the moment the hub deployed.
+
+What did NOT move: `/store/list` fell about 11% and is now **80% of all hub
+traffic**, with daemons at 80% of clients (up from 67%). The daemons are
+holding their change streams correctly — `/events` opens now last the full
+3601s, so the timeout fix is working for them — but they are still polling at
+`remoteInterval`, because **Stage 1 is a change to the `bdrive` BINARY**. The
+hub cannot lower a cadence that a client decides.
+
+So the 30x-per-idle-device win, which is the largest single item in this
+document, is gated on a CLI release and on devices upgrading to it. Until
+then the hub keeps paying 17,280 requests a day per idle daemon-project. That
+is not a defect in the change; it is a deployment fact the PRD failed to state
+anywhere, and it should have been the first line of Stage 1.
+
+A correction on the way: an earlier read of this window said `/scope` had
+vanished. It had not — my aggregation collapsed only UUID-shaped project ids,
+so the `p-xxxxxxx` ones stayed split across rows and fell below the cutoff I
+was printing. `/scope` is still fetched once per remote cycle, exactly as
+expected from daemons on the old binary.
 
 **Journal-key growth (Stage 6).** Recorded so the next reader can check it
 stopped rather than take my word for it. On 2026-09-22, immediately after the
