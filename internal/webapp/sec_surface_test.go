@@ -29,7 +29,7 @@ import (
 // ALLOCATES, on the hub, a pending grant that lives for ten minutes —
 //
 //	code := c.newGrant(cliGrant{
-//	    kind: "device", device: req.Device, os: req.OS, ip: requestIP(r),
+//	    Kind: "device", Device: req.Device, OS: req.OS, IP: requestIP(r),
 //	}, 10*time.Minute)                                     // authcli.go:340
 //
 // — and `req.Device` / `req.OS` are whatever the caller put in a body bounded
@@ -92,13 +92,21 @@ func TestSec_DeviceFlow_AnAnonymousStrangerCannotAccumulateHubState(t *testing.T
 		return // throttled: the secure outcome
 	}
 
+	// What one anonymous caller can make this process hold: the index entries
+	// the caps count, and the grant bodies behind them.
 	auth.cli.mu.Lock()
-	kept := len(auth.cli.pending)
-	var bytes int
-	for _, g := range auth.cli.pending {
-		bytes += len(g.device) + len(g.os) + len(g.ip)
+	ids := make([]string, 0, len(auth.cli.seen))
+	for id := range auth.cli.seen {
+		ids = append(ids, id)
 	}
 	auth.cli.mu.Unlock()
+	kept := len(ids)
+	var bytes int
+	for _, id := range ids {
+		if g, ok := auth.cli.load("device", id); ok {
+			bytes += len(g.Device) + len(g.OS) + len(g.IP)
+		}
+	}
 
 	t.Errorf("%d anonymous POSTs to /api/auth/device/start were all accepted (%d) and "+
 		"left %d pending grants holding %d bytes of hub memory — no rate limit "+

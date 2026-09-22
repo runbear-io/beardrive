@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 )
 
 /* Carrying change frames between hub processes.
@@ -45,18 +46,20 @@ type eventRelay interface {
 	Close() error
 }
 
-/* relayOrigin is how a process recognises its own frames coming back.
+/*
+relayOrigin is how a process recognises its own frames coming back.
 
-   Both transports here broadcast to every listener including the publisher —
-   Postgres delivers a NOTIFY to a LISTENing connection in the same process,
-   and a memory relay has no reason not to. Rather than each implementation
-   inventing an echo rule, the origin is prefixed to the wire payload and
-   stripped on the way out, so "did I send this?" is one comparison in one
-   place.
+	Both transports here broadcast to every listener including the publisher —
+	Postgres delivers a NOTIFY to a LISTENing connection in the same process,
+	and a memory relay has no reason not to. Rather than each implementation
+	inventing an echo rule, the origin is prefixed to the wire payload and
+	stripped on the way out, so "did I send this?" is one comparison in one
+	place.
 
-   Random per process, not per Server: two Servers in one test process
-   sharing a relay are exactly the two-instance case being tested, and giving
-   them one origin would make each ignore the other. */
+	Random per process, not per Server: two Servers in one test process
+	sharing a relay are exactly the two-instance case being tested, and giving
+	them one origin would make each ignore the other.
+*/
 type relayOrigin string
 
 func newRelayOrigin() relayOrigin {
@@ -91,15 +94,17 @@ func decodeRelay(mine relayOrigin, payload string) (project string, frame []byte
 	return project, []byte(body), true
 }
 
-/* resyncFrame is what a relay sends when a real frame will not fit.
+/*
+resyncFrame is what a relay sends when a real frame will not fit.
 
-   Every transport has a payload ceiling — Postgres NOTIFY stops at 8000
-   bytes, and a change frame naming 64 long paths can exceed that. Truncating
-   the path list would be a lie (a client would believe it had been told about
-   every change), so the honest move is the one the local fan-out already
-   makes for a subscriber that fell behind: say "resync" and let the client
-   refetch. A client that missed one path and a client that missed fifty need
-   the same thing. */
+	Every transport has a payload ceiling — Postgres NOTIFY stops at 8000
+	bytes, and a change frame naming 64 long paths can exceed that. Truncating
+	the path list would be a lie (a client would believe it had been told about
+	every change), so the honest move is the one the local fan-out already
+	makes for a subscriber that fell behind: say "resync" and let the client
+	refetch. A client that missed one path and a client that missed fifty need
+	the same thing.
+*/
 func resyncFrame() []byte {
 	frame, _ := json.Marshal(changeEvent{Type: "resync"})
 	return frame
@@ -113,11 +118,14 @@ const maxRelayFrame = 7 * 1024
 
 // ---- memory relay ---------------------------------------------------------
 
-/* memRelay connects processes that share an address space, which in practice
-   means a test. It is not a shortcut around the real thing: the cross-instance
-   PROPERTIES — a frame reaching a hub that did not publish it, and a hub not
-   seeing its own twice — are the same ones the Postgres relay has to satisfy,
-   and they are far cheaper to pin here than against a database. */
+/*
+memRelay connects processes that share an address space, which in practice
+
+	means a test. It is not a shortcut around the real thing: the cross-instance
+	PROPERTIES — a frame reaching a hub that did not publish it, and a hub not
+	seeing its own twice — are the same ones the Postgres relay has to satisfy,
+	and they are far cheaper to pin here than against a database.
+*/
 type memRelay struct {
 	mu      sync.Mutex
 	members []*memRelayMember
@@ -197,4 +205,77 @@ func (s *Server) UseRelay(r eventRelay) {
 		log.Printf("beardrive: change relay could not start, this process will only "+
 			"notify the clients it is holding: %v", err)
 	}
+}
+
+// ---- in-memory pending store ----------------------------------------------
+
+/*
+memPending is PendingRepo without a database behind it.
+
+	It exists so that code holding short-lived sign-in state has ONE path
+	rather than two: a hub with no metadata store still goes through a
+	PendingRepo, it just gets one that forgets at exit — which is precisely
+	what such a hub did before any of this existed. A second in-process
+	code path beside the persistent one is how the two come to disagree.
+
+	Not exported: a caller wanting durable grants should be handed the store's,
+	and a caller that does not have one gets this by default.
+*/
+type memPending struct {
+	mu   sync.Mutex
+	rows map[string]PendingGrant
+}
+
+func newMemPending() *memPending {
+	return &memPending{rows: map[string]PendingGrant{}}
+}
+
+func (m *memPending) Put(g PendingGrant) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rows[pendingKey(g.Kind, g.Key)] = g
+	return nil
+}
+
+func (m *memPending) Get(kind, key string) (PendingGrant, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	g, ok := m.rows[pendingKey(kind, key)]
+	if !ok || pendingExpired(g) {
+		return PendingGrant{}, false, nil
+	}
+	return g, true, nil
+}
+
+func (m *memPending) Take(kind, key string) (PendingGrant, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := pendingKey(kind, key)
+	g, ok := m.rows[k]
+	if !ok {
+		return PendingGrant{}, false, nil
+	}
+	delete(m.rows, k) // spent either way, expired or not
+	if pendingExpired(g) {
+		return PendingGrant{}, false, nil
+	}
+	return g, true, nil
+}
+
+func (m *memPending) Delete(kind, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.rows, pendingKey(kind, key))
+	return nil
+}
+
+func (m *memPending) Prune(now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, g := range m.rows {
+		if !g.Expires.IsZero() && now.After(g.Expires) {
+			delete(m.rows, k)
+		}
+	}
+	return nil
 }

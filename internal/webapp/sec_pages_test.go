@@ -123,7 +123,7 @@ func TestSec_DevicePage_ApprovalPageIsNotSharedCacheable(t *testing.T) {
 
 	// A pending device grant, exactly as POST /api/auth/device/start mints it.
 	link := "abc123def456"
-	id := a.cli.newGrant(cliGrant{kind: "device", link: link, device: "laptop", os: "darwin"}, 10*time.Minute)
+	id := a.cli.newGrant(cliGrant{Kind: "device", Link: link, Device: "laptop", OS: "darwin"}, 10*time.Minute)
 	if id == "" {
 		t.Fatal("fixture: could not mint a device grant")
 	}
@@ -363,7 +363,7 @@ func TestSec_DeviceLegacy_CodeIsNotAnOpenRedirect(t *testing.T) {
 func TestSec_DeviceLegacy_ForwardingDoesNotRequireOrLeakASession(t *testing.T) {
 	a, h := sec10Auth(t)
 	link := "feedfacefeedface"
-	if id := a.cli.newGrant(cliGrant{kind: "device", link: link, device: "laptop", os: "linux"}, 10*time.Minute); id == "" {
+	if id := a.cli.newGrant(cliGrant{Kind: "device", Link: link, Device: "laptop", OS: "linux"}, 10*time.Minute); id == "" {
 		t.Fatal("fixture: no grant")
 	}
 

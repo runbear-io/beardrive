@@ -99,7 +99,7 @@ func secaud2ByDevice(t *testing.T, h http.Handler, projectID string, c *http.Coo
 	t.Helper()
 	rec := secaud2Do(t, h, "GET", "/api/p/"+projectID+"/heat?by=device&days=0", nil, c, nil)
 	if rec.Code != 200 {
-		t.Fatalf("heat?by=device: %d %s", rec.Code, rec.Body)
+		t.Fatalf("heat?by=Device: %d %s", rec.Code, rec.Body)
 	}
 	var out struct {
 		Devices []deviceHeat `json:"devices"`
@@ -646,13 +646,16 @@ func TestSec_CLIAuth_AGrantTheHubReportsDeadIsNotRetainedForever(t *testing.T) {
 	}
 
 	// Ten minutes pass. Every one of them is now expired, and the hub says so.
-	c.mu.Lock()
 	for _, id := range codes {
-		g := c.pending[id]
-		g.expires = time.Now().Add(-time.Minute)
-		c.pending[id] = g
+		g, ok := c.load("device", id)
+		if !ok {
+			t.Fatalf("grant %s vanished before the clock was moved", id)
+		}
+		g.Expires = time.Now().Add(-time.Minute)
+		if err := c.save(id, g); err != nil {
+			t.Fatal(err)
+		}
 	}
-	c.mu.Unlock()
 	for _, id := range codes[:5] {
 		rec := secaud2Do(t, h, "POST", "/api/auth/device/poll",
 			map[string]string{"code": id}, nil, nil)
@@ -661,19 +664,21 @@ func TestSec_CLIAuth_AGrantTheHubReportsDeadIsNotRetainedForever(t *testing.T) {
 		}
 	}
 
-	c.mu.Lock()
+	// "Held" is now two places: the store's rows, and this process's index of
+	// what it has outstanding (which is what the caps count).
 	held := 0
 	for _, id := range codes {
-		if _, ok := c.pending[id]; ok {
+		if _, ok, err := c.pending.Get(pendingCLI, id); err == nil && ok {
 			held++
 		}
 	}
-	stillLive := len(c.pending)
+	c.mu.Lock()
+	stillLive := len(c.seen)
 	c.mu.Unlock()
 
 	if held != 0 {
-		t.Errorf("%d of %d grants the hub reports as invalid are still held in CLIAuth.pending "+
-			"(%d rows total, ~%d KiB of attacker-chosen strings) — POST /api/auth/device/start "+
+		t.Errorf("%d of %d grants the hub reports as invalid are still held by CLIAuth "+
+			"(%d index entries, ~%d KiB of attacker-chosen strings) — POST /api/auth/device/start "+
 			"needs no credential and is not rate limited, and nothing in authcli.go ever sweeps "+
 			"the map, so every unpolled sign-in attempt is a permanent allocation",
 			held, n, stillLive, held*len(big)/1024)
