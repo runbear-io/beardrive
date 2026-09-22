@@ -326,6 +326,12 @@ credentials); otherwise it is relayed through this server.`,
 				var auth *webapp.BuiltinAuth
 				if meta != nil {
 					auth, err = webapp.NewBuiltinAuth(meta.Accounts(), allowSignup, mail)
+					// A pending sign-in outlives the request that made it and
+					// must be findable by whichever process answers the next
+					// hop — `bdrive login` is three of them.
+					if err == nil {
+						auth.UsePending(meta.Pending())
+					}
 				} else {
 					auth, err = webapp.OpenBuiltinAuth(usersDB, allowSignup, mail)
 				}
