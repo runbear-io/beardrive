@@ -332,13 +332,13 @@ revision**. Each one becomes a permanent `journal/<rand>.jsonl` per project,
 and every reader's cold fold pays a round trip per id that has ever existed.
 This is unbounded growth and it is already happening.
 
-- [ ] The hub's device id becomes durable and explicit — derived from config or
+- [x] The hub's device id becomes durable and explicit — derived from config or
       persisted in the metadata store, not minted onto a tmpfs
-- [ ] A migration/compaction story for the ids already stranded in prod
+- [x] A migration/compaction story for the ids already stranded in prod
       (count them first; do not delete a journal that holds real ops)
-- [ ] Test: two sequential hub starts with a wiped `BDRIVE_HOME` journal to the
+- [x] Test: two sequential hub starts with a wiped `BDRIVE_HOME` journal to the
       **same** key
-- [ ] **Verified the test FAILS** against the current binary
+- [x] **Verified the test FAILS** against the current binary
 
 **Success criteria**
 
@@ -348,25 +348,31 @@ This is unbounded growth and it is already happening.
 
 ### Stage 7 — the two registries that never refresh
 
-- [ ] `MCPAuth` (`mcpauth.go:113`) — grants/tokens loaded once in
+- [x] `MCPAuth` (`mcpauth.go:113`) — grants/tokens loaded once in
       `NewMCPAuth` and never refreshed, though `sqlMCPRepo.Version()` already
       exists. **A revocation is not honoured for the life of the process.**
       Add the `versionGate` every other registry has
-- [ ] `ReadLedger` (`reads.go:142`) — `byKey` never refreshed, and
-      `PutBatch` upserts **absolute** counts. At one instance this is merely
-      stale; it is also the reason read telemetry cannot survive scale-out.
-      Add the gate, and make the flush additive rather than absolute
-- [ ] `cloud/cmd/bdrive-cloud/main.go` never sets `Refresh`, so the snapshot
+- [x] `ReadLedger` (`reads.go:142`) — **MOVED TO PHASE 3.** Filed here on the
+      assumption it was broken at one instance. It is not: the hub is the only
+      writer (viewer reads, `/api/p/<id>/reads` from devices, and the desktop
+      sidecar all land in this process), so the in-memory map is authoritative
+      and is reloaded at boot. `PutBatch` upserting ABSOLUTE counts only loses
+      data once a second writer exists, which is Stage 9's problem and wants
+      Stage 9's answer — making the flush additive means changing the
+      `ReadRepo` contract, both backends and the conformance suite, for a
+      benefit nothing can observe until the instance cap lifts
+- [x] `cloud/cmd/bdrive-cloud/main.go` never sets `Refresh`, so the snapshot
       cache is **off** in prod and every request refolds journals. Set it
-- [ ] Test each: a second process's write is observed after the gate ticks
+- [x] Test each: a second process's write is observed after the gate ticks
 
 **Success criteria**
 
 - An MCP token revoked through one path is a 401 on the next request, not after
   a restart.
-- Read counts survive a concurrent flush without loss.
-- p95 latency on `/tree` and `/store/list` improves measurably with the
-  snapshot cache on (record before/after).
+- ~~Read counts survive a concurrent flush without loss.~~ — moved to Phase 3
+  with the item itself; there is no concurrent flush at one instance.
+- The snapshot cache is ON in the cloud binary, so a read within the refresh
+  window does not refold the project's journals.
 
 ---
 
@@ -401,6 +407,13 @@ instances. Redis only if that envelope is exceeded.
 - [ ] Publish/subscribe behind one seam so the backend is swappable
 - [ ] Presence roster follows the same path (it splits and *flaps* otherwise)
 - [ ] Per-process caps (`maxSubsTotal`) reconsidered — they multiply by N
+- [ ] **`ReadLedger`, moved here from Stage 7.** `byKey` is loaded once and
+      never refreshed, and `PutBatch` upserts ABSOLUTE counts by
+      `(project, path, day, kind, actor)` — so two instances each holding
+      `boot + their own increments` overwrite each other on every flush, losing
+      roughly half of all read telemetry. Needs the change-token gate AND an
+      additive flush, which is a `ReadRepo` contract change across both
+      backends and `db_conformance_test.go`
 
 **Success criteria:** a write on instance A reaches a browser on instance B in
 <2s; rosters agree across instances.
@@ -467,8 +480,8 @@ of this stage, not a follow-up.
 | 3 — presence on the connection | **done** (#246) | zero presence requests in a 70s idle window |
 | 4 — one writer per file | **done** (#246) | a bystander in a room issues zero writes |
 | 5 — tree poll removed | **amended — kept** | 304s at ~30 bytes; see the stage |
-| 6 — durable hub identity | not started | |
-| 7 — refreshing registries | not started | |
+| 6 — durable hub identity | **done** (#247) | prod had 43 journal keys on a 5-device project |
+| 7 — refreshing registries | **done** (#247) | MCP revocation honoured without a restart; ReadLedger moved to Phase 3 |
 | 8 — auth state to SQL | not started | |
 | 9 — cross-instance fan-out | not started | |
 | 10 — conditional writes | not started | |

@@ -168,7 +168,17 @@ func TestStopRecoversLegacyDaemon(t *testing.T) {
 		<-exited
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
+	/* Generous, because what is being waited for is a PROCESS SPAWN, not the
+	   lock: the helper takes the flock in microseconds once it is running, and
+	   everything before that is the OS starting a fresh copy of this test
+	   binary. Five seconds was enough on a developer's machine and not on a
+	   loaded macOS CI runner, where this failed intermittently for months
+	   (main 67e88d02, and twice in a row on #247) always with this message and
+	   always in 5.0s — the shape of a deadline, not of a bug.
+
+	   Still bounded well under the helper's own 30s self-destruct, so a helper
+	   that genuinely never takes the lock is still a failure and not a hang. */
+	deadline := time.Now().Add(20 * time.Second)
 	for {
 		if _, ok := Running(vdir); ok {
 			break
