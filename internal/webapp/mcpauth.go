@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -124,28 +125,35 @@ type MCPAuth struct {
 	byToken map[string]string   // access-token digest → grant id
 	byFresh map[string]string   // refresh-token digest → grant id
 	clients map[string]MCPClient
-	// codes are pending authorization codes: ephemeral, single-use, and
-	// deliberately not persisted. A hub restart cancels an in-flight consent,
-	// which costs the user one click and saves a table.
-	codes map[string]mcpCode
+	/* pending holds authorization codes, which are ephemeral and single-use
+	   but NOT process-local: the browser POSTs consent to one instance and
+	   the MCP client exchanges the code from another, so a code in a map is
+	   a coin flip per sign-in behind more than one instance. It also meant a
+	   hub restart cancelled an in-flight consent. */
+	pending PendingRepo
 }
 
+// mcpCode is one pending consent. Serialized into a PendingGrant payload, so
+// the fields carry tags — it is written by one process and read by another.
 type mcpCode struct {
-	grantID   string
-	clientID  string
-	redirect  string
-	challenge string // PKCE S256
-	expires   time.Time
+	GrantID   string    `json:"grant_id"`
+	ClientID  string    `json:"client_id"`
+	Redirect  string    `json:"redirect"`
+	Challenge string    `json:"challenge"` // PKCE S256
+	Expires   time.Time `json:"expires"`
 }
+
+// pendingMCPCode is the PendingGrant kind these live under.
+const pendingMCPCode = "mcp-code"
 
 // NewMCPAuth loads the grants and clients already on disk.
-func NewMCPAuth(repo MCPRepo, session func(*http.Request) (User, bool), projects func(string) []MCPProject) (*MCPAuth, error) {
+func NewMCPAuth(repo MCPRepo, pending PendingRepo, session func(*http.Request) (User, bool), projects func(string) []MCPProject) (*MCPAuth, error) {
 	m := &MCPAuth{
 		repo: repo, session: session, projects: projects,
 		caller: session, // until UseCaller widens it; cookie-only is the safe default
 		grants: map[string]MCPGrant{}, byToken: map[string]string{},
 		byFresh: map[string]string{}, clients: map[string]MCPClient{},
-		codes: map[string]mcpCode{},
+		pending: pending,
 	}
 	gs, err := repo.LoadGrants()
 	if err != nil {
@@ -587,13 +595,27 @@ func (m *MCPAuth) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Lock()
 	m.grants[g.ID] = g
-	code := "mcpa_" + randHex(24)
-	m.pruneCodes()
-	m.codes[code] = mcpCode{
-		grantID: g.ID, clientID: c.ID, redirect: redirect,
-		challenge: challenge, expires: time.Now().Add(mcpCodeTTL),
-	}
 	m.mu.Unlock()
+	code := "mcpa_" + randHex(24)
+	expires := time.Now().Add(mcpCodeTTL)
+	payload, err := json.Marshal(mcpCode{
+		GrantID: g.ID, ClientID: c.ID, Redirect: redirect,
+		Challenge: challenge, Expires: expires,
+	})
+	if err == nil {
+		err = m.pending.Put(PendingGrant{
+			Kind: pendingMCPCode, Key: code, Payload: payload, Expires: expires,
+		})
+	}
+	if err != nil {
+		// Nothing to redirect to: without a stored code the exchange cannot
+		// succeed, and sending the browser back with one that will be refused
+		// is a worse failure than saying so here.
+		log.Printf("beardrive: could not record an MCP consent: %v", err)
+		http.Error(w, "could not record this authorization; try again", http.StatusInternalServerError)
+		return
+	}
+	m.pruneOrphanGrants()
 	_ = resource // bound at token time; recorded here only to echo it back
 
 	u2, _ := url.Parse(redirect)
@@ -613,20 +635,39 @@ func (m *MCPAuth) authorize(w http.ResponseWriter, r *http.Request) {
 // memory and only issue() persists it, so a consent the user completes but the
 // client never exchanges left a grant behind that nothing could reach, nothing
 // wrote to disk, and nothing cleaned up until a restart. Callers hold mu.
-func (m *MCPAuth) pruneCodes() {
-	now := time.Now()
-	orphaned := map[string]bool{}
-	for k, v := range m.codes {
-		if now.After(v.expires) {
-			orphaned[v.grantID] = true
-			delete(m.codes, k)
+/* pruneOrphanGrants drops grants that a consent created and no exchange ever
+   claimed, and prunes the expired codes behind them.
+
+   It used to work the other way round — walk the in-memory codes, and for each
+   expired one drop its grant. That cannot survive codes moving into a store
+   this process does not hold alone, so the rule is expressed as a property of
+   the GRANT instead: a grant with no token digest was never exchanged, and one
+   older than a code could possibly still be valid for never will be.
+
+   Safer than the old form as well as simpler. A grant with an empty digest is
+   not in byToken and cannot authenticate anything, so the worst an uncollected
+   one ever did was occupy a row; and keying on the grant's own age means a
+   code that vanished for any reason — an instance that died mid-consent, a
+   store that was briefly unreachable — no longer strands its grant forever. */
+func (m *MCPAuth) pruneOrphanGrants() {
+	if err := m.pending.Prune(time.Now()); err != nil {
+		log.Printf("beardrive: could not prune expired MCP consents: %v", err)
+	}
+	cutoff := time.Now().Add(-mcpCodeTTL)
+	m.mu.Lock()
+	var dead []string
+	for id, g := range m.grants {
+		if g.TokenDigest == "" && g.RefreshDigest == "" && g.Created.Before(cutoff) {
+			dead = append(dead, id)
 		}
 	}
-	for id := range orphaned {
-		// Only if it never got a token. A code can expire long after its
-		// grant was successfully exchanged and is in daily use.
-		if g, ok := m.grants[id]; ok && g.TokenDigest == "" {
-			delete(m.grants, id)
+	for _, id := range dead {
+		delete(m.grants, id)
+	}
+	m.mu.Unlock()
+	for _, id := range dead {
+		if err := m.repo.DeleteGrant(id); err != nil {
+			log.Printf("beardrive: could not delete an unclaimed MCP grant: %v", err)
 		}
 	}
 }
@@ -650,30 +691,34 @@ func (m *MCPAuth) tokenFromCode(w http.ResponseWriter, r *http.Request) {
 	code := r.Form.Get("code")
 	verifier := r.Form.Get("code_verifier")
 
-	m.mu.Lock()
-	c, ok := m.codes[code]
-	if ok {
-		delete(m.codes, code) // single use, consumed even on failure below
+	// Single use, consumed even on failure below — and consumed ATOMICALLY,
+	// so two clients racing one code cannot both win it.
+	row, ok, err := m.pending.Take(pendingMCPCode, code)
+	var c mcpCode
+	if ok && err == nil {
+		ok = json.Unmarshal(row.Payload, &c) == nil
 	}
-	m.mu.Unlock()
+	if err != nil {
+		log.Printf("beardrive: could not read an MCP consent: %v", err)
+	}
 
-	if !ok || time.Now().After(c.expires) {
+	if !ok || time.Now().After(c.Expires) {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "unknown or expired code")
 		return
 	}
-	if cid := r.Form.Get("client_id"); cid != "" && cid != c.clientID {
+	if cid := r.Form.Get("client_id"); cid != "" && cid != c.ClientID {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "code was issued to a different client")
 		return
 	}
-	if ru := r.Form.Get("redirect_uri"); ru != "" && ru != c.redirect {
+	if ru := r.Form.Get("redirect_uri"); ru != "" && ru != c.Redirect {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "redirect_uri does not match the authorization request")
 		return
 	}
-	if !verifierMatches(verifier, c.challenge) {
+	if !verifierMatches(verifier, c.Challenge) {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "code_verifier does not match the challenge")
 		return
 	}
-	m.issue(w, c.grantID)
+	m.issue(w, c.GrantID)
 }
 
 func (m *MCPAuth) tokenFromRefresh(w http.ResponseWriter, r *http.Request) {
@@ -969,6 +1014,10 @@ func levelPhrase(level string) string {
 
 // OpenMCPAuth is NewMCPAuth over the file backend, for a hub running without
 // a configured database. Mirrors OpenShareDB.
+//
+// The pending store lands beside the grants, under the same directory: a
+// consent has to outlive the process for the same reason a grant does.
 func OpenMCPAuth(path string, session func(*http.Request) (User, bool), projects func(string) []MCPProject) (*MCPAuth, error) {
-	return NewMCPAuth(newFileMCPRepo(path), session, projects)
+	pending := newFilePendingRepo(filepath.Join(filepath.Dir(path), "pending.json"))
+	return NewMCPAuth(newFileMCPRepo(path), pending, session, projects)
 }

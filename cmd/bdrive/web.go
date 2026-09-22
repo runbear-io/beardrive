@@ -406,7 +406,7 @@ credentials); otherwise it is relayed through this server.`,
 					}
 					var mcpAuth *webapp.MCPAuth
 					if meta != nil {
-						mcpAuth, err = webapp.NewMCPAuth(meta.MCP(), session, srv.ConnectableProjects)
+						mcpAuth, err = webapp.NewMCPAuth(meta.MCP(), meta.Pending(), session, srv.ConnectableProjects)
 					} else {
 						mcpAuth, err = webapp.OpenMCPAuth(
 							filepath.Join(filepath.Dir(projectsDB), "mcp.json"), session, srv.ConnectableProjects)

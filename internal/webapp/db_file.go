@@ -89,6 +89,7 @@ type fileMetaStore struct {
 	orgs     *fileOrgRepo
 	shares   *fileShareRepo
 	mcp      *fileMCPRepo
+	pending  *filePendingRepo
 	devices  *fileDeviceRepo
 	reads    *fileReadRepo
 	sessions *fileSessionReadRepo
@@ -103,6 +104,7 @@ func OpenFileStore(dir string) (MetaStore, error) {
 		orgs:     newFileOrgRepo(filepath.Join(dir, "orgs.json")),
 		shares:   newFileShareRepo(filepath.Join(dir, "shares.json")),
 		mcp:      newFileMCPRepo(filepath.Join(dir, "mcp.json")),
+		pending:  newFilePendingRepo(filepath.Join(dir, "pending.json")),
 		devices:  newFileDeviceRepo(filepath.Join(dir, "devices.json")),
 		reads:    newFileReadRepo(filepath.Join(dir, "reads.json")),
 		sessions: newFileSessionReadRepo(filepath.Join(dir, "sessions.json")),
@@ -114,6 +116,7 @@ func (s *fileMetaStore) Projects() ProjectRepo         { return s.projects }
 func (s *fileMetaStore) Orgs() OrgRepo                 { return s.orgs }
 func (s *fileMetaStore) Shares() ShareRepo             { return s.shares }
 func (s *fileMetaStore) MCP() MCPRepo                  { return s.mcp }
+func (s *fileMetaStore) Pending() PendingRepo          { return s.pending }
 func (s *fileMetaStore) Devices() DeviceRepo           { return s.devices }
 func (s *fileMetaStore) Reads() ReadRepo               { return s.reads }
 func (s *fileMetaStore) SessionReads() SessionReadRepo { return s.sessions }
@@ -1034,4 +1037,132 @@ func (r *fileSessionReadRepo) PruneBefore(t time.Time) error {
 		return nil
 	}
 	return r.write()
+}
+
+// ---- pending sign-in state ------------------------------------------------
+
+/*
+filePendingRepo is the JSON backend for PendingRepo.
+
+	Re-reads before every write for the reason fileShareRepo.reload states: two
+	processes sharing one file must not resurrect each other's rows. Here the
+	row a stale rewrite brings back is a CONSUMED sign-in code, which is the one
+	thing single use exists to prevent — so Take re-reads too, not just the
+	writes.
+*/
+type filePendingRepo struct {
+	path string
+	mu   sync.Mutex
+	rows map[string]PendingGrant // kind + "\x00" + key
+}
+
+func newFilePendingRepo(path string) *filePendingRepo {
+	return &filePendingRepo{path: path, rows: map[string]PendingGrant{}}
+}
+
+func pendingKey(kind, key string) string { return kind + "\x00" + key }
+
+func (r *filePendingRepo) reload() error {
+	var f struct {
+		Pending []PendingGrant `json:"pending"`
+	}
+	if _, err := readJSONFile(r.path, &f); err != nil {
+		return err
+	}
+	r.rows = make(map[string]PendingGrant, len(f.Pending))
+	for _, g := range f.Pending {
+		r.rows[pendingKey(g.Kind, g.Key)] = g
+	}
+	return nil
+}
+
+func (r *filePendingRepo) write() error {
+	var f struct {
+		Pending []PendingGrant `json:"pending"`
+	}
+	for _, g := range r.rows {
+		f.Pending = append(f.Pending, g)
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(r.path, append(data, '\n'))
+}
+
+func (r *filePendingRepo) Put(g PendingGrant) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.reload(); err != nil {
+		return err
+	}
+	r.rows[pendingKey(g.Kind, g.Key)] = g
+	return r.write()
+}
+
+func (r *filePendingRepo) Get(kind, key string) (PendingGrant, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.reload(); err != nil {
+		return PendingGrant{}, false, err
+	}
+	g, ok := r.rows[pendingKey(kind, key)]
+	if !ok || pendingExpired(g) {
+		return PendingGrant{}, false, nil
+	}
+	return g, true, nil
+}
+
+func (r *filePendingRepo) Take(kind, key string) (PendingGrant, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.reload(); err != nil {
+		return PendingGrant{}, false, err
+	}
+	k := pendingKey(kind, key)
+	g, ok := r.rows[k]
+	if !ok {
+		return PendingGrant{}, false, nil
+	}
+	// Deleted even when expired: the row is spent either way, and leaving it
+	// behind is how a "gone" grant comes back on the next stale rewrite.
+	delete(r.rows, k)
+	if err := r.write(); err != nil {
+		return PendingGrant{}, false, err
+	}
+	if pendingExpired(g) {
+		return PendingGrant{}, false, nil
+	}
+	return g, true, nil
+}
+
+func (r *filePendingRepo) Delete(kind, key string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.reload(); err != nil {
+		return err
+	}
+	delete(r.rows, pendingKey(kind, key))
+	return r.write()
+}
+
+func (r *filePendingRepo) Prune(now time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.reload(); err != nil {
+		return err
+	}
+	for k, g := range r.rows {
+		if !g.Expires.IsZero() && now.After(g.Expires) {
+			delete(r.rows, k)
+		}
+	}
+	return r.write()
+}
+
+// pendingExpired is the read-side expiry check both backends share. A grant
+// with no deadline never expires on its own — every current owner sets one,
+// and inventing a default here would silently cancel a caller that did not.
+func pendingExpired(g PendingGrant) bool {
+	return !g.Expires.IsZero() && time.Now().After(g.Expires)
 }

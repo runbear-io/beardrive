@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestMCPGrantRevokedElsewhereStopsWorking(t *testing.T) {
 		TokenDigest: hashToken(token),
 	})
 
-	m, err := NewMCPAuth(repo, nil, func(string) []MCPProject { return nil })
+	m, err := NewMCPAuth(repo, newFilePendingRepo(filepath.Join(t.TempDir(), "pending.json")), nil, func(string) []MCPProject { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func TestMCPGrantRevokedElsewhereStopsWorking(t *testing.T) {
 func TestMCPGrantCreatedElsewhereIsHonoured(t *testing.T) {
 	const token = "mcp-token-created-later"
 	repo := newFakeMCPRepo()
-	m, err := NewMCPAuth(repo, nil, func(string) []MCPProject { return nil })
+	m, err := NewMCPAuth(repo, newFilePendingRepo(filepath.Join(t.TempDir(), "pending.json")), nil, func(string) []MCPProject { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +82,7 @@ func TestMCPExpiredGrantStaysRefusedAcrossARefresh(t *testing.T) {
 		Created: time.Now().Add(-time.Hour), Expires: time.Now().Add(-time.Minute),
 		TokenDigest: hashToken(token),
 	})
-	m, err := NewMCPAuth(repo, nil, func(string) []MCPProject { return nil })
+	m, err := NewMCPAuth(repo, newFilePendingRepo(filepath.Join(t.TempDir(), "pending.json")), nil, func(string) []MCPProject { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
