@@ -73,7 +73,7 @@ func (s *Server) presence() *presenceHub {
 // needs to be told a roster shrank except the people still in it, and they are
 // exactly the ones still heartbeating, so the next beat notices within its own
 // interval. A ticker would buy nothing and would have to be shut down.
-func (h *presenceHub) mark(project, actor, name, path string, now time.Time) ([]person, bool) {
+func (h *presenceHub) mark(project, actor, name, path string, now time.Time, stillHere func(string) bool) ([]person, bool, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	room := h.at[project]
@@ -84,16 +84,25 @@ func (h *presenceHub) mark(project, actor, name, path string, now time.Time) ([]
 	prev, existed := room[actor]
 	changed := !existed || prev.path != path || prev.name != name
 	for k, e := range room {
-		if now.Sub(e.seen) > presenceTTL && k != actor {
-			delete(room, k)
-			changed = true
+		if k == actor || now.Sub(e.seen) <= presenceTTL {
+			continue
 		}
+		// Still holding a change stream? Then they are here, whatever the
+		// clock says. The TTL used to be the only evidence of liveness because
+		// the only evidence WAS a heartbeat; the hub now holds the socket, and
+		// a socket is better evidence than a timer. Without this the removal
+		// of the beat would expire every reader 15 seconds after they arrived.
+		if stillHere != nil && stillHere(k) {
+			continue
+		}
+		delete(room, k)
+		changed = true
 	}
 	if !existed && len(room) >= maxPresencePerProject {
-		return rosterOf(room), false // full: this beat vouches for nobody
+		return rosterOf(room), false, false // full: this beat vouches for nobody
 	}
 	room[actor] = presenceEntry{name: name, path: path, seen: now}
-	return rosterOf(room), changed
+	return rosterOf(room), changed, true
 }
 
 // drop removes an actor immediately, for a client that says it is leaving.
@@ -114,6 +123,33 @@ func (h *presenceHub) drop(project, actor string) ([]person, bool) {
 	return rosterOf(room), true
 }
 
+// markPresence records that actor is looking at path and publishes the roster
+// if it moved. The Server-level wrapper exists because liveness is no longer a
+// property of the presence map alone: see stillHere.
+func (s *Server) markPresence(project, actor, name, path string, now time.Time) ([]person, bool, bool) {
+	// Liveness comes from the fan-out: anyone holding a stream on this project
+	// is here. Passed as a predicate rather than a snapshot so the presence
+	// lock is never held across the event hub's.
+	people, changed, ok := s.presence().mark(project, actor, name, path, now,
+		func(a string) bool { return s.events().hasActor(project, a) })
+	if changed {
+		s.events().publish(project, changeEvent{Type: "presence", People: people})
+	}
+	return people, changed, ok
+}
+
+// streamGone is called when a change stream closes. If that was the actor's
+// last stream on this project, they are no longer here — which is the whole
+// replacement for the heartbeat's TTL.
+func (s *Server) streamGone(project, actor string) {
+	if actor == "" || s.events().hasActor(project, actor) {
+		return // another tab or device of the same person is still holding one
+	}
+	if people, changed := s.presence().drop(project, actor); changed {
+		s.events().publish(project, changeEvent{Type: "presence", People: people})
+	}
+}
+
 // rosterOf renders a room. The actor key never appears in the result: it is an
 // email, and the roster goes to every member of the project.
 func rosterOf(room map[string]presenceEntry) []person {
@@ -132,6 +168,31 @@ func rosterOf(room map[string]presenceEntry) []person {
 	return out
 }
 
+// presenceIdentity is WHO a request is, for the roster: a stable actor key and
+// the display name everyone else sees. An auth-less hub (the plain-folder
+// viewer) has no account, so it falls back to the device — and to nothing, in
+// which case there is no one to report and the caller does nothing rather than
+// inventing a "someone".
+func presenceIdentity(s *Server, r *http.Request) (actor, name string) {
+	u := s.requestUser(r)
+	actor, name = u.Email, u.Name
+	if actor == "" {
+		actor = deviceID(r)
+		name = actor
+	}
+	if name == "" {
+		name = u.Email // History shows the address too when there is no name
+	}
+	return actor, name
+}
+
+// presenceActor is presenceIdentity's key half, for callers that only need to
+// know which roster row a connection belongs to.
+func presenceActor(s *Server, r *http.Request) string {
+	actor, _ := presenceIdentity(s, r)
+	return actor
+}
+
 // handlePresence serves POST {prefix}presence — one heartbeat.
 func (s *Server) handlePresence(v *volume, w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -142,22 +203,10 @@ func (s *Server) handlePresence(v *volume, w http.ResponseWriter, r *http.Reques
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	u := s.requestUser(r)
-	// The actor key identifies WHO, and the display name is what everyone
-	// sees. An auth-less hub (the plain-folder viewer) has neither, so it
-	// falls back to the device — and to nothing, in which case there is no
-	// one to report and the beat is a no-op rather than a fake "someone".
-	actor, name := u.Email, u.Name
-	if actor == "" {
-		actor = deviceID(r)
-		name = actor
-	}
+	actor, name := presenceIdentity(s, r)
 	if actor == "" {
 		writeJSON(w, map[string]any{"ok": true, "people": []person{}})
 		return
-	}
-	if name == "" {
-		name = u.Email // History shows the address too when there is no name
 	}
 	project := projectID(r)
 
@@ -178,9 +227,6 @@ func (s *Server) handlePresence(v *volume, w http.ResponseWriter, r *http.Reques
 	if len(path) > presencePathMax || (path != "" && !journal.SafePath(path)) {
 		path = ""
 	}
-	people, changed := s.presence().mark(project, actor, name, path, time.Now())
-	if changed {
-		s.events().publish(project, changeEvent{Type: "presence", People: people})
-	}
+	people, _, _ := s.markPresence(project, actor, name, path, time.Now())
 	writeJSON(w, map[string]any{"ok": true, "people": people})
 }

@@ -12,23 +12,23 @@ func TestPresenceMarkAndExpire(t *testing.T) {
 	h := &presenceHub{at: map[string]map[string]presenceEntry{}}
 	t0 := time.Now()
 
-	people, changed := h.mark("p1", "a@x.io", "Alice", "index.md", t0)
+	people, changed, _ := h.mark("p1", "a@x.io", "Alice", "index.md", t0, nil)
 	if !changed || len(people) != 1 || people[0].Name != "Alice" {
 		t.Fatalf("first beat: people=%+v changed=%v", people, changed)
 	}
 	// A repeat beat on the same path is not news — otherwise every client
 	// would wake every other client every heartbeat, forever.
-	if _, changed = h.mark("p1", "a@x.io", "Alice", "index.md", t0.Add(time.Second)); changed {
+	if _, changed, _ = h.mark("p1", "a@x.io", "Alice", "index.md", t0.Add(time.Second), nil); changed {
 		t.Fatal("an unchanged beat reported a change")
 	}
 	// Moving to another file is.
-	if _, changed = h.mark("p1", "a@x.io", "Alice", "guide.md", t0.Add(2*time.Second)); !changed {
+	if _, changed, _ = h.mark("p1", "a@x.io", "Alice", "guide.md", t0.Add(2*time.Second), nil); !changed {
 		t.Fatal("moving to another path reported no change")
 	}
 
-	h.mark("p1", "b@x.io", "Bob", "guide.md", t0.Add(3*time.Second))
+	h.mark("p1", "b@x.io", "Bob", "guide.md", t0.Add(3*time.Second), nil)
 	// Bob goes quiet; Alice's next beat is what notices.
-	people, changed = h.mark("p1", "a@x.io", "Alice", "guide.md", t0.Add(3*time.Second+presenceTTL+time.Second))
+	people, changed, _ = h.mark("p1", "a@x.io", "Alice", "guide.md", t0.Add(3*time.Second+presenceTTL+time.Second), nil)
 	if !changed {
 		t.Fatal("an expiry reported no change")
 	}
@@ -40,8 +40,8 @@ func TestPresenceMarkAndExpire(t *testing.T) {
 func TestPresenceDrop(t *testing.T) {
 	h := &presenceHub{at: map[string]map[string]presenceEntry{}}
 	now := time.Now()
-	h.mark("p1", "a@x.io", "Alice", "index.md", now)
-	h.mark("p1", "b@x.io", "Bob", "index.md", now)
+	h.mark("p1", "a@x.io", "Alice", "index.md", now, nil)
+	h.mark("p1", "b@x.io", "Bob", "index.md", now, nil)
 
 	people, changed := h.drop("p1", "a@x.io")
 	if !changed || len(people) != 1 || people[0].Name != "Bob" {
@@ -57,7 +57,7 @@ func TestPresenceDrop(t *testing.T) {
 // project. The key must never be in what they receive.
 func TestPresenceRosterCarriesNoAccountKey(t *testing.T) {
 	h := &presenceHub{at: map[string]map[string]presenceEntry{}}
-	people, _ := h.mark("p1", "secret-address@x.io", "Alice", "index.md", time.Now())
+	people, _, _ := h.mark("p1", "secret-address@x.io", "Alice", "index.md", time.Now(), nil)
 	blob, err := json.Marshal(people)
 	if err != nil {
 		t.Fatal(err)
@@ -71,10 +71,10 @@ func TestPresenceBounded(t *testing.T) {
 	h := &presenceHub{at: map[string]map[string]presenceEntry{}}
 	now := time.Now()
 	for i := 0; i < maxPresencePerProject; i++ {
-		h.mark("p1", string(rune('a'+i%26))+strings.Repeat("x", i), "n", "p", now)
+		h.mark("p1", string(rune('a'+i%26))+strings.Repeat("x", i), "n", "p", now, nil)
 	}
 	before := len(h.at["p1"])
-	h.mark("p1", "one-too-many@x.io", "Nope", "p", now)
+	h.mark("p1", "one-too-many@x.io", "Nope", "p", now, nil)
 	if len(h.at["p1"]) > before {
 		t.Fatalf("roster grew past the cap: %d", len(h.at["p1"]))
 	}
@@ -86,11 +86,11 @@ func TestPresenceRosterIsSorted(t *testing.T) {
 	h := &presenceHub{at: map[string]map[string]presenceEntry{}}
 	now := time.Now()
 	for _, n := range []string{"Carol", "Alice", "Bob"} {
-		h.mark("p1", n+"@x.io", n, "index.md", now)
+		h.mark("p1", n+"@x.io", n, "index.md", now, nil)
 	}
 	var first string
 	for i := 0; i < 20; i++ {
-		people, _ := h.mark("p1", "Alice@x.io", "Alice", "index.md", now)
+		people, _, _ := h.mark("p1", "Alice@x.io", "Alice", "index.md", now, nil)
 		blob, _ := json.Marshal(people)
 		if i == 0 {
 			first = string(blob)

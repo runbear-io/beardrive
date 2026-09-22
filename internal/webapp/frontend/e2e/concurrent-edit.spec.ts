@@ -143,3 +143,68 @@ test("editing alone never produces a conflict copy", async ({ page }) => {
     ).text(),
   ).toContain("round3");
 });
+
+/* A peer's keystroke is not my reason to write the file.
+
+   The idle-save timer was rearmed by ANY change to the shared document,
+   including one that arrived from someone else. So in a room of N editors,
+   700ms after the last keystroke by anyone, all N clients PUT the identical
+   full body: N writes of one text, N times the bandwidth, and a History feed
+   that grows N versions per quiet period. Four people in one file made it four
+   of everything — which is the "realtime collab makes too many change
+   histories" report, and part of the burst that had Cloud Run shedding
+   requests (docs/hub-load-prd.md Stage 4).
+
+   Only the typist writes now. Everyone else's copy is identical by
+   construction — that is what a CRDT is — and the hub snapshots the room
+   itself when the last editor leaves, so nothing depends on a bystander
+   saving on the typist's behalf. */
+test("a bystander in a shared document does not write the file", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const a = await (await browser.newContext()).newPage();
+  await login(a, ADMIN);
+  const id = await project(a);
+  const file = `bystander-${Date.now()}.md`;
+  await a.request.put(
+    `/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`,
+    { data: "BASE\n" },
+  );
+
+  const b = await (await browser.newContext()).newPage();
+  await login(b, MEMBER);
+
+  for (const pg of [a, b]) {
+    await pg.goto(`/${id}/edit/${file}`);
+    await pg.waitForSelector(".cm-host .cm-content");
+  }
+  // Let both rooms settle, and let the seed-driven save that joining schedules
+  // land before anything is counted.
+  await a.waitForTimeout(3_000);
+
+  // B is the bystander: present, in the room, never touching the keyboard.
+  const bWrites: string[] = [];
+  b.on("request", (r) => {
+    if (r.method() === "PUT" && r.url().includes("/upload/content")) {
+      bWrites.push(r.url());
+    }
+  });
+
+  await a.locator(".cm-host .cm-line").first().click();
+  await a.keyboard.press("End");
+  for (let i = 0; i < 6; i++) {
+    await a.keyboard.type("A");
+    await a.waitForTimeout(300);
+  }
+  // Well past the 700ms idle timer, so a save that was going to happen has.
+  await a.waitForTimeout(4_000);
+
+  // A's characters really did arrive in B's document — otherwise this test
+  // proves nothing about a bystander who saw the change and declined to write.
+  await expect(b.locator(".cm-host .cm-content")).toContainText("AAAAAA");
+
+  expect(
+    bWrites,
+    `a bystander wrote the file ${bWrites.length} time(s) because a peer typed; ` +
+      `in a room of N editors that is N writes of identical text per quiet period`,
+  ).toHaveLength(0);
+});

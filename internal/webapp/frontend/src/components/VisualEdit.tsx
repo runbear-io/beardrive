@@ -103,6 +103,22 @@ export function VisualEdit({
   meRef.current = me;
   const shaRef = useRef(baseSha);
   shaRef.current = baseSha;
+  const fileRef = useRef<ReturnType<typeof openSharedFile> | null>(null);
+
+  /* A co-editor saved the document we share.
+
+     This surface never re-reads the file — the iframe is the view and the CRDT
+     is the truth — so nothing here would otherwise notice that the hub's head
+     moved. What it must notice is the VERSION: every save carries If-Match,
+     and a base from before a peer's save is refused for a conflict that does
+     not exist, which parked this editor's work in a .bdrive-conflict- copy of
+     the file against itself.
+
+     Only the sha is taken, never content: the bytes are already ours through
+     the room. */
+  useEffect(() => {
+    fileRef.current?.rebase(baseSha);
+  }, [baseSha]);
 
   useEffect(() => {
     /* The two halves arrive independently and BOTH are needed before a range
@@ -139,7 +155,7 @@ export function VisualEdit({
     }, 11_000);
     const stuckTimer = setTimeout(() => setStuck(true), 24_000);
 
-    const file = openSharedFile({
+    const file = (fileRef.current = openSharedFile({
       apiBase,
       path,
       seed: seed.current,
@@ -169,7 +185,7 @@ export function VisualEdit({
       onSaved: (t) => cb.current.onSaved?.(t),
       onWriting: () => cb.current.onWriting?.(),
       soloText: () => seed.current,
-    });
+    }));
 
     /* Ranges are held as RELATIVE positions, not offsets.
 

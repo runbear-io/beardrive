@@ -716,6 +716,7 @@ func (s *Server) handleProjectFolderSet(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.publishScope(id)
 	writeJSON(w, map[string]any{"ok": true, "prefix": prefix})
 }
 
@@ -735,5 +736,6 @@ func (s *Server) handleProjectFolderClear(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.publishScope(id)
 	writeJSON(w, map[string]any{"ok": true})
 }

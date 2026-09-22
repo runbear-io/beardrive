@@ -41,7 +41,7 @@ import { fileURLFor } from "./useBlob";
    would be wrong, not thrifty. */
 
 type ChangeEvent = {
-  type: "change" | "resync" | "presence";
+  type: "change" | "resync" | "presence" | "scope";
   paths?: string[];
   more?: boolean;
   people?: { name: string; path?: string }[];
@@ -108,6 +108,29 @@ export function useProjectEvents(
       // Presence is not a file change: it invalidates nothing.
       if (ev.type === "presence") {
         onPresenceRef.current?.(ev.people ?? []);
+        return;
+      }
+      /* Scope moved: someone changed this project's permissions or a folder
+         rule. Nothing was written, so this must NOT take the generic path
+         below — that dispatches "a peer wrote your file" at an open editor,
+         and no peer wrote anything.
+
+         What it does change is what this account can SEE, so the listing and
+         the permission views are genuinely stale. Bodies go too: a file that
+         just became invisible should stop rendering rather than sit there
+         from cache. The frame deliberately carries no prefix (see
+         publishScope) — the hub answers per reader, so the honest move is to
+         re-ask rather than guess which subtree moved. */
+      if (ev.type === "scope") {
+        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        // These two are keyed on the project id, not apiBase (useHub.ts), and
+        // they are small and usually unmounted — invalidateQueries only marks
+        // an inactive query stale — so the bare prefix is the cheap, correct
+        // key rather than a second way to spell the project.
+        qc.invalidateQueries({ queryKey: ["folders"] });
+        qc.invalidateQueries({ queryKey: ["permissions"] });
+        qc.invalidateQueries({ queryKey: ["render", apiBase] });
+        qc.invalidateQueries({ queryKey: ["text"] });
         return;
       }
       // An open editor must know a peer wrote its file, but must NOT be

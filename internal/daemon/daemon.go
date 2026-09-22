@@ -287,6 +287,25 @@ const startTimeout = 10 * time.Second
 // time, so this delay only ever costs latency, never a sync.
 const watchRetry = time.Minute
 
+// watchedPollFactor is how much the remote poll slows down while the hub's
+// change stream is open and healthy.
+//
+// The stream already announces every peer write, so the poll beside it exists
+// for exactly one job: catching a stream that has stopped delivering without
+// saying so — a half-open TCP connection whose reads simply never return. That
+// is a rare failure with a cheap fix, so it wants a safety net, not a
+// heartbeat. At the 10s default this makes the watched cadence 5 minutes.
+//
+// It is a FACTOR rather than an absolute so the relationship survives both
+// ends: an operator who tightens --remote-interval tightens the net with it,
+// and a test can run the whole contract in seconds.
+//
+// The measurement that motivated it: one idle device on one project cost
+// 17,280 requests a day at the unwatched cadence — 9.4% of the production
+// hub's entire daily traffic — to be told nothing by a poll while an open
+// stream told it the same nothing for free (docs/hub-load-prd.md).
+const watchedPollFactor = 30
+
 // Stop terminates the daemon for a mount and waits for it to exit. Exit is
 // observed by the lock being released, not by the pid disappearing: the pid
 // could be recycled while we wait, and the lock cannot.
@@ -436,7 +455,13 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	// so a teammate's edit lands in about a second instead of waiting out
 	// remoteInterval. Nil whenever there is no stream — a nil channel blocks
 	// forever in select, which is exactly the polling behaviour we want back.
-	// It is an accelerator only: every guarantee still rests on the tick.
+	//
+	// It used to be an accelerator ONLY, with the poll running at full rate
+	// beside it. That made an idle device the hub's single largest source of
+	// traffic (docs/hub-load-prd.md), so the stream now also decides the poll
+	// cadence: see pollEvery below. The tick is still the guarantee — the
+	// stream can die silently, and nothing here trusts it further than
+	// watchedPollFactor.
 	var watch <-chan struct{}
 	var watchCancel context.CancelFunc
 	// Re-dialling is not free (a request here, a goroutine on the hub), and a
@@ -509,7 +534,22 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			lastRemote = time.Time{}
 		}
 
-		doRemote := proj.Remote != "" && time.Since(lastRemote) >= remoteInterval
+		// How long this daemon is willing to go without talking to the hub.
+		//
+		// With the change stream open, a peer's write arrives by push and
+		// clears the gate below, so the timer is only catching a stream that
+		// died without telling us. Without one, the timer IS the sync: it has
+		// to stay at remoteInterval or nothing would notice a peer at all.
+		//
+		// Note this reads `watch`, which a failed dial, a token change, an
+		// offline cycle and the hub's own streamMaxAge all set back to nil —
+		// so losing the stream restores the tight cadence on the very next
+		// tick rather than at the end of a long one.
+		pollEvery := remoteInterval
+		if watch != nil {
+			pollEvery = remoteInterval * watchedPollFactor
+		}
+		doRemote := proj.Remote != "" && time.Since(lastRemote) >= pollEvery
 		if doRemote && be == nil {
 			b, err := remote.Open(ctx, proj.Remote)
 			if err != nil {

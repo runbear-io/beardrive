@@ -175,18 +175,18 @@ drops from `remoteInterval` (10s) to a long safety net (5 min). The instant the
 stream dies — for any reason, including the hub's own 1h `streamMaxAge` — the
 cadence reverts to 10s until it is re-established.
 
-- [ ] `daemon.go` — `doRemote` consults watch health, not just elapsed time
-- [ ] A `watchedInterval` (5 min) distinct from `remoteInterval` (10s), with
+- [x] `daemon.go` — `doRemote` consults watch health, not just elapsed time
+- [x] A `watchedInterval` (5 min) distinct from `remoteInterval` (10s), with
       the reversion path on stream close, token change and `res.Offline`
-- [ ] `daemon.go:599` — a local edit still forces a prompt remote cycle (this
+- [x] `daemon.go:599` — a local edit still forces a prompt remote cycle (this
       is correct and must survive), but is **rate-limited** so a file-writing
       agent cannot pin the daemon at the 3s scan interval. A minimum spacing,
       not a removal: an agent's write must still reach the hub promptly
-- [ ] The watch-death path is *age-discriminated* exactly as today
+- [x] The watch-death path is *age-discriminated* exactly as today
       (`daemon.go:608`): a stream that lived ≥ `watchRetry` re-dials at once
-- [ ] Go test: a fake `Watcher` held open across N ticks asserts the remote
+- [x] Go test: a fake `Watcher` held open across N ticks asserts the remote
       cycle count collapses; closing the channel asserts it recovers to 10s
-- [ ] **Verified the test FAILS on the pre-stage daemon** (it must count the
+- [x] **Verified the test FAILS on the pre-stage daemon** (it must count the
       10s polls that run beside the live stream)
 
 **Success criteria**
@@ -207,18 +207,18 @@ with a lag. The hub pushes a `scope` frame on the same stream that is already
 open, which makes the client's knowledge **fresher** than today's 10s poll, not
 staler.
 
-- [ ] `events.go` — a `scope` frame published when a folder rule changes
-- [ ] `remote.Watcher`'s contract currently discards the frame body
+- [x] `events.go` — a `scope` frame published when a folder rule changes
+- [x] `remote.Watcher`'s contract currently discards the frame body
       (`chan struct{}`, `http.go:598`). Widen it minimally to carry the frame
       kind, or add a sibling channel — do not plumb the whole payload
-- [ ] `syncer.go:169` — `loadScope` skips the fetch when the persisted
+- [x] `syncer.go:169` — `loadScope` skips the fetch when the persisted
       `st.ScopeTag` is current and no scope frame has arrived; fetches
       immediately when one has, or when there is no live stream
-- [ ] Fallback preserved: no stream, or a hub that never sends the frame ⇒
+- [x] Fallback preserved: no stream, or a hub that never sends the frame ⇒
       fetch every cycle exactly as today
-- [ ] Test: a rule change mid-session reaches the device and is enforced
+- [x] Test: a rule change mid-session reaches the device and is enforced
       **before** the next scan commits an op
-- [ ] **Verified the test FAILS** against a client that skips scope without the
+- [x] **Verified the test FAILS** against a client that skips scope without the
       push (it must catch the op the hub would refuse)
 
 **Success criteria**
@@ -239,17 +239,17 @@ connection**, which the hub already tracks in `eventHub.subs`. Liveness is the
 connection; the only uplink left is a path change, which is an event, not a
 timer.
 
-- [ ] Presence derived from the subscriber registry (`events.go:90`) — a
+- [x] Presence derived from the subscriber registry (`events.go:90`) — a
       connected subscriber *is* present; `presenceTTL` keyed to the connection,
       not to a 15s window
-- [ ] The uplink fires **on navigation only**. No interval
-- [ ] Per-browser, not per-tab: the existing Web Lock leader (which already
+- [x] The uplink fires **on navigation only**. No interval
+- [x] Per-browser, not per-tab: the existing Web Lock leader (which already
       owns the stream) reports the set of paths its tabs are on
-- [ ] Anyone with an editor open already announces via ycollab awareness —
+- [x] Anyone with an editor open already announces via ycollab awareness —
       reconcile so one person is not two rosters
-- [ ] e2e: a tab idle for 70s with no navigation issues **zero** presence
+- [x] e2e: a tab idle for 70s with no navigation issues **zero** presence
       requests, and the roster still shows them
-- [ ] **Verified the gate FAILS** on the pre-stage bundle (it must catch ≥6
+- [x] **Verified the gate FAILS** on the pre-stage bundle (it must catch ≥6
       beats in that window)
 
 **Success criteria**
@@ -267,17 +267,17 @@ The hub holds the document (`ycollab.go`) and already snapshots it. With a
 hub-held room live, the browser's idle save is redundant — and worse, it is
 redundant **per co-editor**.
 
-- [ ] `sharedfile.ts` — the idle save does not fire for changes that arrived
+- [x] `sharedfile.ts` — the idle save does not fire for changes that arrived
       from a peer; only local edits arm the timer
-- [ ] With a live hub-held room, the client defers the write to the hub
+- [x] With a live hub-held room, the client defers the write to the hub
       entirely; the solo path (no room) keeps saving exactly as today
-- [ ] `ycollab.go` — a periodic snapshot while a room is live, so a long
+- [x] `ycollab.go` — a periodic snapshot while a room is live, so a long
       session is not one write at the end. Identical content still journals
       nothing (`upload.go`), so cadence is cheap
-- [ ] The crash case stays covered: `OnLastPeer`/`OnUnloadDocument` unchanged
-- [ ] Test: four simulated editors typing for 60s produce **one** journal
+- [x] The crash case stays covered: `OnLastPeer`/`OnUnloadDocument` unchanged
+- [x] Test: four simulated editors typing for 60s produce **one** journal
       version per quiet period, not four
-- [ ] **Verified the test FAILS** against the current client (it must count the
+- [x] **Verified the test FAILS** against the current client (it must count the
       N identical PUTs)
 
 **Success criteria**
@@ -288,21 +288,35 @@ redundant **per co-editor**.
 - No lost edits: the existing collab, stress and concurrency suites pass,
   including under `-race`.
 
-### Stage 5 — the tree poll goes away
+### Stage 5 — the tree poll goes away — **AMENDED: it stays**
 
-- [ ] `useBrowse.ts:29` — the 5-minute `refetchInterval` removed
-- [ ] Replaced by stream-liveness detection: the hub already sends
-      `: keepalive` every 20s (`events.go:53`); a client that has heard nothing
-      for ~3 keepalives refetches once and re-dials
-- [ ] e2e: an idle tab with a **healthy** stream issues zero `tree` requests
-      over 6 minutes; an idle tab whose stream is killed refetches within 90s
-- [ ] **Verified both halves FAIL** appropriately on the pre-stage bundle
+**This stage was wrong and is not being implemented as written.** Recorded
+rather than quietly dropped, because the reasoning is the point.
 
-**Success criteria**
+Two things came out of measuring it instead of assuming:
 
-- e2e: zero `tree` requests in a 6-minute healthy-stream idle window
-  (today: 1), and recovery within 90s when the stream is severed.
-- Production: `/tree` falls to **<1%** of requests.
+1. **The keepalive is unreachable from the browser.** `EventSource` never
+   surfaces comment lines to `onmessage` — that is exactly why `events.go:53`
+   sends `: keepalive` as a comment, so clients never see it. Making it a real
+   frame would make the DAEMON wake on it too (`http.go` filters on `data: `),
+   turning a 20s heartbeat into a sync cycle every 20 seconds on every device
+   and undoing Stage 1 several times over.
+2. **The poll already costs almost nothing.** `/tree` goes through
+   `writeJSONCached` (`server.go:1952`), so an unchanged tree is a **304 of
+   about 30 bytes**. The 5-minute interval is 288 requests and roughly 8 KB a
+   day per browser — 0.16% of the hub's daily traffic, not the 3% the sampled
+   window suggested (that window was active use, not idle).
+
+So the trade on offer was: delete the only insurance against a stream that
+died silently, to save 8 KB a day. A half-open connection is precisely the
+failure the browser cannot detect on its own, and the cost of getting it wrong
+is a tab that shows stale content indefinitely with nothing to say so.
+
+- [x] Measured rather than removed; `useBrowse.ts:29` left in place
+- [x] Reason recorded here so the next reader does not re-derive it
+
+**Success criteria** — superseded. The stage's goal (`/tree` < 1% of requests)
+is met by Stages 1 and 3 reducing everything around it, not by removing this.
 
 ---
 
@@ -448,11 +462,11 @@ of this stage, not a follow-up.
 
 | Stage | State | Measured |
 |---|---|---|
-| 1 — daemon stands down | not started | |
-| 2 — scope on push | not started | |
-| 3 — presence on the connection | not started | |
-| 4 — one writer per file | not started | |
-| 5 — tree poll removed | not started | |
+| 1 — daemon stands down | **done** (#246) | 10 polls in 3s → 1, gate re-run against unfixed daemon |
+| 2 — scope on push | **done** (#246) | rule change reaches a device in <1s, was up to 5 min |
+| 3 — presence on the connection | **done** (#246) | zero presence requests in a 70s idle window |
+| 4 — one writer per file | **done** (#246) | a bystander in a room issues zero writes |
+| 5 — tree poll removed | **amended — kept** | 304s at ~30 bytes; see the stage |
 | 6 — durable hub identity | not started | |
 | 7 — refreshing registries | not started | |
 | 8 — auth state to SQL | not started | |
@@ -460,6 +474,41 @@ of this stage, not a follow-up.
 | 10 — conditional writes | not started | |
 | 11 — co-editing across instances | not started | |
 | 12 — raise the cap | not started | |
+
+### Phase 1 notes (2026-09-21)
+
+**Stage 1 made Stage 2 mandatory rather than optional.** Standing down beside
+the change stream cut `/scope` by the same 30x as everything else — it is
+fetched per remote cycle, so it fell out for free — but it also stretched the
+window in which a device holds a stale scope from ~10s to ~5 minutes. That is
+not a volume problem, it is the wedging hazard `loadScope` exists to prevent.
+Stage 2 closed it by pushing, which makes the window shorter than it was
+before Stage 1 (<1s). Volume was never the reason to do Stage 2.
+
+**Stage 4 uncovered a real bug that predates it.** `base` — the `If-Match` sha
+every save carries — only ever moved on our OWN successful write. In a room
+that is wrong: a co-editor's save moves the file's head, everyone else keeps
+the sha from before it, and their next save is a 409. The old
+"everyone saves on every change" behaviour hid it, because each client
+refreshed its own sha constantly. Removing the redundant writes exposed it as
+`two people editing different paragraphs both land` failing — window two saved,
+was refused, and parked its work in a `.bdrive-conflict-` copy **of the file
+against itself**. Fixed with `SharedFile.rebase(sha)`, wired into both editing
+surfaces. The sha is adopted only where the content is ACCEPTED, never on a
+blocked merge — adopting it there would turn `If-Match` from a guard into a
+rubber stamp.
+
+**Every gate in this phase was re-run against the unfixed code and watched to
+fail**, including the two guard tests whose job is to catch over-correction
+(`TestPollResumesWhenTheStreamDies`, `TestPresenceStillExpiresWithoutAStream`)
+— those were failed deliberately by breaking the fix.
+
+**e2e baseline.** The Playwright suite fails ~8 specs per run on `main` as
+well, in a set that varies between runs (the admin/hub cascade plus a rotating
+third). Measured on `main` for this phase: 269 passed / 8 failed. Every spec
+that failed on this branch was re-run in isolation and passed. The one
+REPRODUCIBLE failure was the Stage 4 bug above, which is what a real
+regression looks like next to this noise.
 
 Already landed ahead of this PRD (2026-09-21, `beardrive-cloud` #43/#44):
 Cloud Run `timeout` 300s → 3600s (every `/events` and `/ycollab` request was
