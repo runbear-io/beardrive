@@ -400,24 +400,35 @@ Sign-in would fail roughly half the time on two instances.
       property of the GRANT (no token digest, older than `mcpCodeTTL`) rather
       than a walk over in-memory codes — simpler, and it no longer strands a
       grant when a code vanishes for any other reason
-- [ ] **CLI one-time codes and device-flow grants** (`authcli.go:32`) — NOT
-      done, and not a mechanical port. `pending` carries a deliberate
-      availability design: a hub-wide cap that EVICTS rather than refuses, and
-      a per-IP cap, with heaviest-first eviction. Against a repo that needs
-      either a count/evict query or the IP promoted out of the opaque payload
-      into a column. **This is the open design decision in Phase 3** — my
-      recommendation is to keep the caps per-instance (they bound memory,
-      which is a per-process resource) and persist only the grants, but it is
-      a security-sensitive call on the path that mints device tokens and
-      wants its own change
+- [x] **CLI one-time codes and device-flow grants** (`authcli.go`) — done, and
+      the design question is settled the way the recommendation said: the caps
+      stay PER-PROCESS. They bound memory, which is a per-process resource, so
+      a shared counter would be the wrong shape as well as a round trip on the
+      mint path. `seen` is this process's index of what it has outstanding;
+      the store is the truth. Two consequences worth writing down:
+      - the link lookup stopped being a linear scan over every pending grant
+        and became a keyed row of its own. A store has no "find by field", and
+        the scan was already flagged in a ponytail note as the thing to fix if
+        the ceiling rose
+      - `takeGranted` reads through the store's atomic `Take`, so the race it
+        was written to close inside one process — every poll in flight when a
+        human approves getting its own permanent token — stays closed ACROSS
+        processes
 - [ ] **PropelAuth OAuth state nonce** (`cloud/internal/authpropel`) — the
       biggest single sign-in blocker, in the cloud repo
 - [ ] Builtin email-verify / reset grants (`authlocal.go:78`) — not prod, same
       shape
 
 **Success criteria:** two instances behind a non-sticky LB complete 50/50
-browser sign-ins and 20/20 `bdrive login` flows. **Not met** — the seam exists
-and one consumer uses it; the two that gate sign-in do not yet.
+browser sign-ins and 20/20 `bdrive login` flows.
+
+**Partly met.** `bdrive login` now spans processes and is covered by tests
+that mint on one, approve on a second and poll back on the first — including
+the one that matters most, that an approved grant is won by EXACTLY ONE of
+them. What remains is the PropelAuth state nonce in the cloud repo, which is
+what gates the BROWSER half. The two halves are independent: the CLI flow
+would survive two instances today, a browser sign-in would still be a coin
+flip.
 
 ### Stage 9 — cross-instance fan-out — **the transport is done**
 
@@ -530,7 +541,7 @@ of this stage, not a follow-up.
 | 5 — tree poll removed | **amended — kept** | 304s at ~30 bytes; see the stage |
 | 6 — durable hub identity | **done** (#247) | prod had 43 journal keys on a 5-device project |
 | 7 — refreshing registries | **done** (#247) | MCP revocation honoured without a restart; ReadLedger moved to Phase 3 |
-| 8 — auth state to SQL | **partial** (#248) | seam + MCP consent done; CLI and PropelAuth outstanding |
+| 8 — auth state to SQL | **partial** (#248, #251) | seam, MCP consent and `bdrive login` done; PropelAuth nonce outstanding |
 | 9 — cross-instance fan-out | **transport done** (#250) | frame crosses, no echo, oversize degrades — on real postgres in CI |
 | 10 — conditional writes | not started | |
 | 11 — co-editing across instances | not started | |
