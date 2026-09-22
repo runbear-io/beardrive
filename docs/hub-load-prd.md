@@ -383,19 +383,41 @@ append one journal — under `BDRIVE_HOME=/tmp` they mint different ids
 (Stage 6 makes that *deliberate* rather than accidental). The real blockers are
 elsewhere and are worse. Ordered; each is a prerequisite for the next.
 
-### Stage 8 — in-memory auth state to SQL
+### Stage 8 — in-memory auth state to SQL — **PARTIAL**
 
 Sign-in would fail roughly half the time on two instances.
 
-- [ ] PropelAuth OAuth state nonce (`authpropel/provider.go:68`) — minted on
-      one instance, consumed on another
-- [ ] CLI one-time codes and device-flow grants (`authcli.go:32`) —
-      `bdrive login` spans three requests and becomes a coin flip
-- [ ] Builtin email-verify / reset grants (`authlocal.go:78`) — not prod, but
-      the same shape
+- [x] **The seam.** `PendingRepo` + `PendingGrant` on `MetaStore`: short-lived,
+      single-use state keyed by (kind, key), with an opaque payload so four
+      owners do not put four shapes in one schema. `Take` is atomic (a
+      transaction on SQL) because single use has to be — two pollers winning
+      one code is the bug `takeGranted` already fixes inside one process.
+      Expiry is enforced on READ, never by a sweeper having run. Both backends
+      + `TestPendingRepoConformance`
+- [x] **MCP consent codes** (`mcpauth.go`) — the first consumer, and a real
+      cross-instance flow: the browser POSTs consent to one instance and the
+      client exchanges the code from another. Orphan cleanup rewritten as a
+      property of the GRANT (no token digest, older than `mcpCodeTTL`) rather
+      than a walk over in-memory codes — simpler, and it no longer strands a
+      grant when a code vanishes for any other reason
+- [ ] **CLI one-time codes and device-flow grants** (`authcli.go:32`) — NOT
+      done, and not a mechanical port. `pending` carries a deliberate
+      availability design: a hub-wide cap that EVICTS rather than refuses, and
+      a per-IP cap, with heaviest-first eviction. Against a repo that needs
+      either a count/evict query or the IP promoted out of the opaque payload
+      into a column. **This is the open design decision in Phase 3** — my
+      recommendation is to keep the caps per-instance (they bound memory,
+      which is a per-process resource) and persist only the grants, but it is
+      a security-sensitive call on the path that mints device tokens and
+      wants its own change
+- [ ] **PropelAuth OAuth state nonce** (`cloud/internal/authpropel`) — the
+      biggest single sign-in blocker, in the cloud repo
+- [ ] Builtin email-verify / reset grants (`authlocal.go:78`) — not prod, same
+      shape
 
 **Success criteria:** two instances behind a non-sticky LB complete 50/50
-browser sign-ins and 20/20 `bdrive login` flows.
+browser sign-ins and 20/20 `bdrive login` flows. **Not met** — the seam exists
+and one consumer uses it; the two that gate sign-in do not yet.
 
 ### Stage 9 — cross-instance fan-out
 
@@ -482,7 +504,7 @@ of this stage, not a follow-up.
 | 5 — tree poll removed | **amended — kept** | 304s at ~30 bytes; see the stage |
 | 6 — durable hub identity | **done** (#247) | prod had 43 journal keys on a 5-device project |
 | 7 — refreshing registries | **done** (#247) | MCP revocation honoured without a restart; ReadLedger moved to Phase 3 |
-| 8 — auth state to SQL | not started | |
+| 8 — auth state to SQL | **partial** (#248) | seam + MCP consent done; CLI and PropelAuth outstanding |
 | 9 — cross-instance fan-out | not started | |
 | 10 — conditional writes | not started | |
 | 11 — co-editing across instances | not started | |

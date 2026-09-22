@@ -684,6 +684,16 @@ keeps permissions, quota, journaling and history identical to a browser's.
 classDiagram
     direction LR
 
+    class PendingRepo {
+        <<internal/webapp, db.go>>
+        +Put(PendingGrant)
+        +Get(kind, key) grant, ok
+        +Take(kind, key) grant, ok
+        +Delete(kind, key)
+        +Prune(now)
+    }
+    note for PendingRepo "Short-lived single-use sign-in state — a pending bdrive login, an OAuth state nonce, an MCP consent code — in a place a SECOND PROCESS can see. Every flow that uses it spans more than one request (login is mint/approve/poll; an OAuth sign-in is redirect/callback), and while the state was a map inside one process each hop had to land on that process: a coin flip per hop behind two instances, and the real blocker on max_instance_count, not the journal. Payload is OPAQUE — those owners share a key, a deadline and single use and nothing else, so encoding each shape here would buy nothing. Take is ATOMIC (a transaction on SQL): read-then-delete let two pollers win one code, which is the bug takeGranted already fixes inside a process. Expiry is checked on READ, never left to a sweeper having run — Prune only reclaims space, and compares in Go because tenc is RFC3339Nano and strips trailing zeros, so string ordering is wrong across fractional digits"
+
     class MCPAuth {
         <<OAuth 2.1 AS + RS>>
         +Enabled bool
@@ -691,6 +701,7 @@ classDiagram
         +Clients map[id]MCPClient
         +Repo MCPRepo
         +ver versionGate
+        +pending PendingRepo
         +Authorize / Token / Register
         +GrantFor(bearer) MCPGrant
         +Revoke(account, id)
@@ -756,6 +767,7 @@ classDiagram
     }
     note for recordAgentRead "An MCP read is an AGENT read, not a human one — the Knowledge insights split is only meaningful if the two are actually distinguished. The grant id never escapes: heatByDevice skips any actor that is not shaped like a device id, so the identity-free heat API stays identity-free"
 
+    MCPAuth ..> PendingRepo : consent codes, so another instance can exchange them
     MCPAuth *-- MCPGrant
     MCPAuth *-- consentPage
     MCPAuth ..> capByGrant : grant on the request context

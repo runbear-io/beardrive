@@ -28,7 +28,46 @@ type MetaStore interface {
 	Devices() DeviceRepo
 	Reads() ReadRepo
 	SessionReads() SessionReadRepo
+	Pending() PendingRepo
 	Close() error
+}
+
+/* PendingGrant is one piece of short-lived, single-use sign-in state: a
+   pending `bdrive login`, an OAuth state nonce, an MCP consent code.
+
+   Payload is OPAQUE to the store. Those three have nothing in common except a
+   key, a deadline and single use, so encoding what each holds here would put
+   several owners' shapes into one schema and buy nothing; each owner marshals
+   its own. */
+type PendingGrant struct {
+	Kind    string // who owns it: "cli", "oauth-state", "mcp-code"
+	Key     string // unique within the kind
+	Payload []byte
+	Expires time.Time
+}
+
+/* PendingRepo persists those grants.
+
+   This exists because every flow that uses them spans MORE THAN ONE REQUEST —
+   `bdrive login` is mint, approve, poll; an OAuth sign-in is redirect and
+   callback — and until now each hop had to land on the same PROCESS, because
+   the state was a map inside it. That is a coin flip per hop behind two
+   instances, and it is the real blocker on raising max_instance_count, not
+   the journal (docs/hub-load-prd.md Phase 3).
+
+   Expiry is enforced on READ, not by a sweeper: an expired grant must be
+   refused whether or not anything has pruned lately. Prune only reclaims
+   space. */
+type PendingRepo interface {
+	Put(g PendingGrant) error
+	// Get reads without consuming — the device-flow poll reads the same grant
+	// until a human approves it.
+	Get(kind, key string) (PendingGrant, bool, error)
+	// Take reads and deletes as ONE step. Single use has to be atomic, or two
+	// pollers win the same code.
+	Take(kind, key string) (PendingGrant, bool, error)
+	Delete(kind, key string) error
+	Prune(now time.Time) error
 }
 
 // AccountRepo persists accounts, device tokens, and the (singleton) signup

@@ -38,6 +38,7 @@ type sqlMetaStore struct {
 	devices  *sqlDeviceRepo
 	reads    *sqlReadRepo
 	sessions *sqlSessionReadRepo
+	pending  *sqlPendingRepo
 }
 
 // OpenSQLStore opens (and migrates) a SQL metadata store. driver is "sqlite"
@@ -74,6 +75,7 @@ func OpenSQLStore(driver, dsn string) (MetaStore, error) {
 	s.devices = &sqlDeviceRepo{s: s, w: regWriter{s, regDevices}}
 	s.reads = &sqlReadRepo{s: s, w: regWriter{s, regReads}}
 	s.sessions = &sqlSessionReadRepo{s: s}
+	s.pending = &sqlPendingRepo{s: s}
 	return s, nil
 }
 
@@ -85,6 +87,7 @@ func (s *sqlMetaStore) MCP() MCPRepo                  { return s.mcp }
 func (s *sqlMetaStore) Devices() DeviceRepo           { return s.devices }
 func (s *sqlMetaStore) Reads() ReadRepo               { return s.reads }
 func (s *sqlMetaStore) SessionReads() SessionReadRepo { return s.sessions }
+func (s *sqlMetaStore) Pending() PendingRepo          { return s.pending }
 func (s *sqlMetaStore) Close() error                  { return s.db.Close() }
 
 // q rebinds ?-placeholders to $1,$2,… for Postgres; SQLite keeps ?.
@@ -289,6 +292,14 @@ func (s *sqlMetaStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS project_folder_perms (
 			project TEXT NOT NULL, prefix TEXT NOT NULL, email TEXT NOT NULL,
 			level TEXT NOT NULL, PRIMARY KEY (project, prefix, email))`,
+		// pending is short-lived single-use sign-in state: a `bdrive login`
+		// mid-flight, an OAuth state nonce, an MCP consent code. Keyed by
+		// (kind, key) so several owners share one table without sharing a key
+		// space. payload is opaque bytes — see PendingRepo for why.
+		`CREATE TABLE IF NOT EXISTS pending_grants (
+			kind TEXT NOT NULL DEFAULT '', pend_key TEXT NOT NULL DEFAULT '',
+			payload TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (kind, pend_key))`,
 		`CREATE TABLE IF NOT EXISTS schema_meta (
 			key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`,
 		// One counter per registry, bumped inside every write transaction, so
@@ -1273,4 +1284,131 @@ func (r *sqlSessionReadRepo) ListBySession(project, session, device string) ([]S
 func (r *sqlSessionReadRepo) PruneBefore(t time.Time) error {
 	_, err := r.s.db.Exec(r.s.q(`DELETE FROM read_sessions WHERE last < ?`), tenc(t))
 	return err
+}
+
+// ---- pending sign-in state ------------------------------------------------
+
+/*
+sqlPendingRepo is the SQL backend for PendingRepo.
+
+	Deliberately NOT behind a regWriter: these rows have no in-memory registry
+	to invalidate, so bumping a change token on every login attempt would move
+	a version other registries poll against and make them all re-read for
+	nothing.
+
+	Take is a TRANSACTION rather than DELETE ... RETURNING, which both engines
+	support but spell differently enough to be a dialect problem. The
+	transaction is the property that matters anyway: read and delete have to be
+	one step, or two pollers win the same code — which is the bug takeGranted
+	was written to fix inside one process, and would come straight back here.
+*/
+type sqlPendingRepo struct{ s *sqlMetaStore }
+
+func (r *sqlPendingRepo) Put(g PendingGrant) error {
+	_, err := r.s.db.Exec(r.s.q(`INSERT INTO pending_grants (kind,pend_key,payload,expires)
+		VALUES (?,?,?,?)
+		ON CONFLICT(kind,pend_key) DO UPDATE SET payload=excluded.payload, expires=excluded.expires`),
+		g.Kind, g.Key, string(g.Payload), tenc(g.Expires))
+	return err
+}
+
+func (r *sqlPendingRepo) Get(kind, key string) (PendingGrant, bool, error) {
+	var payload, expires string
+	err := r.s.db.QueryRow(r.s.q(`SELECT payload, expires FROM pending_grants
+		WHERE kind = ? AND pend_key = ?`), kind, key).Scan(&payload, &expires)
+	if err == sql.ErrNoRows {
+		return PendingGrant{}, false, nil
+	}
+	if err != nil {
+		return PendingGrant{}, false, err
+	}
+	g := PendingGrant{Kind: kind, Key: key, Payload: []byte(payload), Expires: tdec(expires)}
+	if pendingExpired(g) {
+		return PendingGrant{}, false, nil
+	}
+	return g, true, nil
+}
+
+func (r *sqlPendingRepo) Take(kind, key string) (PendingGrant, bool, error) {
+	var g PendingGrant
+	var found bool
+	err := func() error {
+		tx, err := r.s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		var payload, expires string
+		err = tx.QueryRow(r.s.q(`SELECT payload, expires FROM pending_grants
+			WHERE kind = ? AND pend_key = ?`), kind, key).Scan(&payload, &expires)
+		if err == sql.ErrNoRows {
+			return tx.Commit()
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(r.s.q(`DELETE FROM pending_grants
+			WHERE kind = ? AND pend_key = ?`), kind, key); err != nil {
+			return err
+		}
+		g = PendingGrant{Kind: kind, Key: key, Payload: []byte(payload), Expires: tdec(expires)}
+		found = true
+		return tx.Commit()
+	}()
+	if err != nil {
+		return PendingGrant{}, false, err
+	}
+	// Deleted even when expired — the row is spent either way — but never
+	// HANDED BACK expired, or a grant that timed out still signs somebody in.
+	if !found || pendingExpired(g) {
+		return PendingGrant{}, false, nil
+	}
+	return g, true, nil
+}
+
+func (r *sqlPendingRepo) Delete(kind, key string) error {
+	_, err := r.s.db.Exec(r.s.q(`DELETE FROM pending_grants WHERE kind = ? AND pend_key = ?`), kind, key)
+	return err
+}
+
+/*
+Prune compares in Go, not in SQL.
+
+	tenc is RFC3339Nano, which STRIPS trailing zeros from the fraction — so
+	"…:00Z" and "…:00.000000001Z" do not sort in time order as strings ('.' is
+	below 'Z'), and a WHERE expires < ? would drop or keep rows by a nanosecond
+	on the wrong side. That is harmless for a grant with a ten-minute life and
+	still the wrong thing to write down, because the next person to copy this
+	pattern may not be pruning something disposable.
+
+	The table holds sign-ins that are currently in flight, so reading it whole
+	is a handful of rows, and Prune is housekeeping rather than a hot path.
+*/
+func (r *sqlPendingRepo) Prune(now time.Time) error {
+	rows, err := r.s.db.Query(r.s.q(`SELECT kind, pend_key, expires FROM pending_grants`))
+	if err != nil {
+		return err
+	}
+	type key struct{ kind, k string }
+	var dead []key
+	for rows.Next() {
+		var kind, k, expires string
+		if err := rows.Scan(&kind, &k, &expires); err != nil {
+			rows.Close()
+			return err
+		}
+		if t := tdec(expires); !t.IsZero() && now.After(t) {
+			dead = append(dead, key{kind, k})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, d := range dead {
+		if err := r.Delete(d.kind, d.k); err != nil {
+			return err
+		}
+	}
+	return nil
 }
