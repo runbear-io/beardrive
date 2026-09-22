@@ -419,16 +419,42 @@ Sign-in would fail roughly half the time on two instances.
 browser sign-ins and 20/20 `bdrive login` flows. **Not met** — the seam exists
 and one consumer uses it; the two that gate sign-in do not yet.
 
-### Stage 9 — cross-instance fan-out
+### Stage 9 — cross-instance fan-out — **the transport is done**
 
 `eventHub` is a per-process map, so a frame reaches only clients pinned to the
 writing instance. **Postgres `LISTEN/NOTIFY`** — already in prod, no new
 infrastructure, and comfortably within its envelope at a handful of listener
 instances. Redis only if that envelope is exceeded.
 
-- [ ] Publish/subscribe behind one seam so the backend is swappable
+- [x] `eventRelay` seam (`relay.go`), with `publish` split from the local
+      `fanout` so a frame from another process re-enters the SAME path a local
+      one takes. It carries bytes, not a `changeEvent`: what arrives is the
+      JSON the other process marshalled, and re-decoding it here would only
+      create a way for the two paths to disagree
+- [x] Echo suppression in ONE place. Both transports broadcast to every
+      listener including the publisher, so the origin is prefixed to the wire
+      payload and stripped on the way out — without it every client is told
+      about each change twice and refetches twice
+- [x] An oversized frame degrades to `resync`, never to a truncated path list.
+      A client handed half the paths believes it has been told about all of
+      them; Postgres `NOTIFY` refuses anything over 8000 bytes outright
+- [x] `memRelay` for the shape, `pgRelay` for the transport — the latter with
+      a dedicated LISTEN connection (it blocks for the life of the process)
+      and NOTIFY through the existing pool, sent via `pg_notify($1,$2)` rather
+      than a built statement, because the thing that would need escaping is a
+      path chosen by whoever wrote the file
+- [x] Reconnection with backoff, which matters more than it looks: a dropped
+      listener is SILENT — the hub keeps serving and simply stops hearing
+      other processes, so the symptom is "some tabs are stale", not an error
+- [x] Tested against a real Postgres in CI (`meta-postgres`), including the
+      echo and oversize cases. The `-run` pattern names them, because a test
+      that runs for nobody is the trap that job was added to close
+- [ ] **Not wired on by default.** The relay is opt-in until the instance cap
+      lifts: at one instance it would hold a Postgres connection to talk to
+      nobody, and `db-f1-micro` allows about 25 of them
 - [ ] Presence roster follows the same path (it splits and *flaps* otherwise)
 - [ ] Per-process caps (`maxSubsTotal`) reconsidered — they multiply by N
+- [ ] `ReadLedger` (moved here from Stage 7) — still outstanding
 - [ ] **`ReadLedger`, moved here from Stage 7.** `byKey` is loaded once and
       never refreshed, and `PutBatch` upserts ABSOLUTE counts by
       `(project, path, day, kind, actor)` — so two instances each holding
@@ -505,7 +531,7 @@ of this stage, not a follow-up.
 | 6 — durable hub identity | **done** (#247) | prod had 43 journal keys on a 5-device project |
 | 7 — refreshing registries | **done** (#247) | MCP revocation honoured without a restart; ReadLedger moved to Phase 3 |
 | 8 — auth state to SQL | **partial** (#248) | seam + MCP consent done; CLI and PropelAuth outstanding |
-| 9 — cross-instance fan-out | not started | |
+| 9 — cross-instance fan-out | **transport done** (#250) | frame crosses, no echo, oversize degrades — on real postgres in CI |
 | 10 — conditional writes | not started | |
 | 11 — co-editing across instances | not started | |
 | 12 — raise the cap | not started | |

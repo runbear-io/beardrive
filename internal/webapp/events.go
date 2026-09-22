@@ -101,6 +101,10 @@ type eventHub struct {
 	mu    sync.Mutex
 	subs  map[string]map[*subscriber]struct{} // project id ("" in single-volume mode)
 	total int
+	// relay carries frames to the hub's OTHER processes, and delivers theirs
+	// back into fanout. Nil on a single-instance hub, which is the default
+	// and costs nothing (relay.go).
+	relay eventRelay
 }
 
 // events returns the hub's fan-out, built on first use. Servers are assembled
@@ -169,6 +173,28 @@ func (h *eventHub) publish(project string, ev changeEvent) {
 	if err != nil {
 		return // a struct of strings and ints; unreachable, and not worth a log
 	}
+	h.fanout(project, frame)
+	// And to the processes this one is not. Deliberately AFTER the local
+	// fan-out: a relay that is slow or broken must not delay the clients this
+	// process is already holding, and it must never fail a write — publish
+	// sits on the sync push path.
+	h.mu.Lock()
+	relay := h.relay
+	h.mu.Unlock()
+	if relay != nil {
+		if err := relay.publish(project, frame); err != nil {
+			log.Printf("beardrive: a change frame did not reach the hub's other "+
+				"processes; their clients will notice on their next poll: %v", err)
+		}
+	}
+}
+
+// fanout delivers one already-encoded frame to this process's subscribers. It
+// is the half that a relay re-enters with a frame from somewhere else, which
+// is why it takes bytes rather than a changeEvent: what arrives from another
+// process is the JSON that process marshalled, and re-decoding it here would
+// only create a way for the two paths to disagree.
+func (h *eventHub) fanout(project string, frame []byte) {
 	h.mu.Lock()
 	subs := make([]*subscriber, 0, len(h.subs[project]))
 	for sub := range h.subs[project] {

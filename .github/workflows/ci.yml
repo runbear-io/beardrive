@@ -30,6 +30,10 @@ jobs:
   # is no type rewriting in the dialect shim — would have been caught by
   # nothing in this repo and by the hub failing to boot in that one.
   #
+  # Also carries the LISTEN/NOTIFY change relay (relay_pg_test.go), which is
+  # skipped everywhere else for want of a DSN — the same "runs for nobody"
+  # trap this job was added to close, so the -run pattern has to name it.
+  #
   # Only the webapp package, and only on Linux: this is about a database, not
   # a platform, and the suite it belongs to already runs in full above.
   meta-postgres:
@@ -53,7 +57,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: metadata conformance on postgres
-        run: go test ./internal/webapp -run 'Conformance|Pending|SQL' -count=1 -v
+        run: go test ./internal/webapp -run 'Conformance|Pending|SQL|PostgresRelay' -count=1 -v
         env:
           BDRIVE_TEST_POSTGRES: postgres://bdrive:bdrive@localhost:5544/bdrive?sslmode=disable
 
