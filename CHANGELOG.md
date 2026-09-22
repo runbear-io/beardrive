@@ -29,6 +29,41 @@ hub first, then clients promptly if your projects hold large files.
   name only chunks the store holds, and reassembly is bounded (256 MiB) —
   a project member cannot poison, re-point, or amplify large-file storage.
 
+**Update your devices to get the sync traffic fix.** The largest change here
+is a change to the *client*: a daemon holding a healthy change stream now
+polls the hub every five minutes instead of every ten seconds. The hub cannot
+lower a cadence a client decides, so an un-upgraded device keeps costing what
+it always did — about 17,000 requests a day while doing nothing at all.
+
+- **An idle device stops shouting at the hub.** The daemon already held a
+  live change stream that announces every peer write, and polled at full rate
+  beside it anyway. With the stream healthy the remote cadence drops 30x; it
+  snaps back to the old one the instant the stream dies, for any reason, so a
+  hub that cannot stream syncs exactly as before. Measured against
+  production: one idle device on one project was 9.4% of the entire hub&apos;s
+  daily traffic.
+- **An idle browser tab stops announcing itself.** Presence was a 10-second
+  heartbeat per TAB, ~19% of everything the hub served, sent by people who
+  were reading. A member holding an open change stream is present by
+  definition, so the hub keys presence to that connection and the tab speaks
+  only when it arrives, navigates or leaves.
+- **Co-editing writes the file once per pause, not once per editor.** Every
+  client&apos;s save timer was rearmed by a peer&apos;s keystroke, so four people in
+  one document wrote four identical copies and grew four History versions
+  every time the room went quiet.
+- **A permission change reaches devices in under a second** (it could take up
+  to the poll interval), pushed on the stream that is already open. The frame
+  deliberately names no prefix: a rule that hides a folder must not leak its
+  name to the people it hides it from.
+- **Fixes a hub that minted a new identity on every restart.** A hub whose
+  state directory does not survive a restart — a container, anything on a
+  tmpfs — was writing its own journal under a fresh random device id each
+  time, leaving a permanent file per boot in every project it touched. Hubs
+  with a persistent home are unaffected and keep the id they have.
+- **An MCP connection revoked elsewhere now stops working immediately**
+  rather than at the next hub restart, and an MCP consent can be completed by
+  a hub process other than the one that started it.
+
 ## v0.15.0 — 2026-08-11
 
 **Upgrade if your pushes are being refused.** Hubs running the journal
