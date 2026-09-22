@@ -491,16 +491,57 @@ instances. Redis only if that envelope is exceeded.
 **Success criteria:** a write on instance A reaches a browser on instance B in
 <2s; rosters agree across instances.
 
-### Stage 10 — conditional writes in the storage layer
+### Stage 10 — conditional writes in the storage layer — **the journal is done**
 
-`upload.go:471`'s `lockPath` is a process-local `sync.Map` and no backend
-issues a storage precondition, so two instances can both pass `If-Match` and
-both journal. This is the lost-update hazard, and it is worth doing **even at
-one instance** for the MCP compare-and-swap that currently advertises more than
-it delivers (`mcp.go:1352` already admits this).
+`upload.go`'s `lockPath` is a process-local `sync.Map` and no backend issued a
+storage precondition, so two instances could both pass `If-Match` and both
+journal. A journal append is a READ-MODIFY-WRITE and `Put` is
+last-writer-wins: both read the same object, both append their own ops, and
+whichever writes second silently erases the other's — with no error anywhere,
+because both writes succeeded. That is the lost update the "each device writes
+only its own journal" invariant prevents BETWEEN devices, reappearing inside
+one device id the moment the hub runs twice.
 
-- [ ] GCS generation preconditions (and the S3 equivalent) on journal writes
-- [ ] Quota reservations and the invite seat lock stop being per-process
+- [x] `remote.ConditionalPutter` — an optional capability in the `PutSigner`
+      and `Watcher` mold, so a backend that cannot compare-and-swap simply
+      does not implement it and its callers keep exactly the behaviour they
+      had. `Version` is OPAQUE: a GCS generation, an S3 ETag and a file
+      fingerprint share nothing but equality, and anything that parses one has
+      made a promise the next backend cannot keep
+- [x] GCS implementation over object generations, which is the only place the
+      check can be honest — two hub processes cannot be serialised by anything
+      either of them holds, so the precondition has to be evaluated by the
+      store. `DoesNotExist` for the absent case, because `GenerationMatch(0)`
+      means "match generation zero" and refuses everything
+- [x] `appendConditional` with a BOUNDED retry: re-read, re-append, try again.
+      The ops are already stamped and do not change, so a retry appends onto
+      what is there now rather than duplicating. Five attempts, not a loop —
+      losing repeatedly means a store misbehaving rather than a busy one, and
+      failing the commit is how a caller learns to retry instead of the hub
+      spinning inside a request
+- [x] `upmu` is KEPT. It is not redundant: within one process it stops N
+      goroutines taking the slow path, and the precondition covers what a
+      mutex structurally cannot. They guard different things
+- [ ] **Not done: S3.** Conditional `PutObject` is recent and unevenly
+      supported across S3-compatible stores; claiming the capability and
+      having it silently not hold would be worse than not claiming it
+- [ ] **Not done: file://.** A rename is atomic, a compare-and-swap across
+      processes is not, and inventing one would be a worse lie than declining
+      the capability
+- [ ] **Not done: quota reservations and the invite seat lock.** Both are
+      per-process, so N instances can oversubscribe a cap by up to N. Left
+      deliberately: these are a business limit being exceeded by a seat or
+      two, not corruption, and the fix belongs in a SQL transaction
+      (`OrgDB.Join` checking the count inside the write) rather than in the
+      storage layer this stage is about
+
+**Success criteria**
+
+- Two processes appending to one journal cannot lose an op — covered by
+  `TestConditionalAppendRetriesInsteadOfLosingAnUpdate`, which injects the
+  exact interleaving and fails when the retry is removed.
+- A backend without the capability behaves exactly as before, asserted
+  permanently rather than assumed.
 
 ### Stage 11 — co-editing across instances
 
@@ -557,7 +598,7 @@ of this stage, not a follow-up.
 | 7 — refreshing registries | **done** (#247) | MCP revocation honoured without a restart; ReadLedger moved to Phase 3 |
 | 8 — auth state to SQL | **done** (#248, #251, #252, cloud #47) | every sign-in flow crosses processes; 50/50 live run deferred to Stage 12 |
 | 9 — cross-instance fan-out | **transport done** (#250) | frame crosses, no echo, oversize degrades — on real postgres in CI |
-| 10 — conditional writes | not started | |
+| 10 — conditional writes | **journal done** (#254) | the lost-update interleaving, injected and survived; quota/seat caps deferred |
 | 11 — co-editing across instances | not started | |
 | 12 — raise the cap | not started | |
 
