@@ -183,19 +183,21 @@ classDiagram
         <<internal/webapp, events.go>>
         -subs per project id
         -total int
-        +subscribe(project) sub, ok
+        +subscribe(project, actor) sub, ok
         +unsubscribe(project, sub)
+        +hasActor(project, actor) bool
         +publish(project, changeEvent)
     }
     class subscriber {
         -ch chan of frames
         -lost atomic.Bool
+        -actor who holds this stream
     }
 
     class presenceHub {
         <<internal/webapp, presence.go>>
         -at per project, per actor entry
-        +mark(project, actor, name, path, now) roster, changed
+        +mark(project, actor, name, path, now, stillHere) roster, changed, ok
         +drop(project, actor) roster, changed
     }
     class person {
@@ -210,7 +212,7 @@ classDiagram
         +OnLastPeer / OnUnloadDocument snapshot to the file
     }
     note for ydocs "GET {prefix}ycollab, proj(PermRead) — the hub HOLDS the co-editing document now rather than relaying frames between browsers, which is what retired an entire category of machinery: a seed CLAIM with a grace timer, a byte cap on a log that only grows, a rebuild when that cap was hit, a resync-and-replay reconnect, and a solo fallback that let a disconnected client edit its own copy and then overwrite everyone else (six characters of a real user's work, #234). None of that is disabled; it is deleted, because the property each piece faked — somebody owns the document — is now simply true. PermRead and not PermWrite: a read-only member may OPEN a file and watch it being edited, and the CONNECTION carries ReadOnly so their writes are dropped server-side. The room name is DERIVED from (project, path) after proj() resolves the project and never taken from the caller, or the project id in the URL would be decoration — any member of any project could join any other project's document by asking for its name. The hub parses client-supplied CRDT updates to do this, which it never did before: a deliberate, recorded decision (docs/collab-provider-prd.md), possible at all because a pure-Go port removed the cgo that would have broken the cross-compiled release. Snapshotting RE-ENTERS the API rather than calling the uploader, so quota, folder permissions, the no-op check and journaling are the same code every other write goes through, and it is attributed to the human who was editing — a version authored by the server is a regression in History even when the server holds the pen."
-    note for presenceHub "POST {prefix}presence, proj(PermRead) — saying &quot;I am reading this&quot; is not a write, and a read-only member is precisely who a teammate most wants to see on a file. NOT persisted and deliberately not a MetaStore repo: presence is true for 15s and then it is a lie, so storing it would only create something to serve staler than the thing it describes. The actor key is an account email and the roster reaches every member of the project, so the key is a MAP KEY ONLY and never serialized — rosterOf emits display name + path, the same pair History already shows them. A claimed path is untrusted text echoed to teammates, so it goes through journal.SafePath. Expiry is LAZY, computed in mark rather than by a sweeper: the only people who need to know a roster shrank are the ones still in it, and they are exactly the ones still heartbeating. rosterOf sorts because Go map order is random and an unstable roster would look like a change on every beat"
+    note for presenceHub "POST {prefix}presence, proj(PermRead) — saying &quot;I am reading this&quot; is not a write, and a read-only member is precisely who a teammate most wants to see on a file. NOT persisted and deliberately not a MetaStore repo: presence is true for 15s and then it is a lie, so storing it would only create something to serve staler than the thing it describes. The actor key is an account email and the roster reaches every member of the project, so the key is a MAP KEY ONLY and never serialized — rosterOf emits display name + path, the same pair History already shows them. A claimed path is untrusted text echoed to teammates, so it goes through journal.SafePath. There is no heartbeat any more: a member holding an open change stream is here by definition, so mark takes a stillHere predicate backed by eventHub.hasActor and handleEvents calls streamGone when the last stream for an actor closes. The 15s TTL survives as a backstop for a client that reports presence WITHOUT holding a stream. Expiry is still LAZY, computed in mark rather than by a sweeper: the only people who need to know a roster shrank are the ones still in it. rosterOf sorts because Go map order is random and an unstable roster would look like a change on every beat"
 
     class changeEvent {
         +Type change or resync
@@ -222,7 +224,7 @@ classDiagram
         +Device string
         +People roster, presence frames only
     }
-    note for eventHub "GET {prefix}events, proj(PermRead) — reading the stream names paths, so it sits behind the same permission the tree does, and proj() already walls it by org membership. publish() is called from the FIVE write handlers beside captureChange, never inside it: that one is the PostHog path, whose contract is that &quot;nothing here carries a path or a file name&quot;, and whose signature is counts-only. publish sits on the sync push path, so it never blocks and never errors — it copies the subscriber set under the lock and sends outside it, and a full buffer marks the subscriber lost rather than waiting. Bounded (subBuffer 32, 256/project, 4096/hub) in the ratelimit.go mold"
+    note for eventHub "GET {prefix}events, proj(PermRead) — reading the stream names paths, so it sits behind the same permission the tree does, and proj() already walls it by org membership. publish() is called from the FIVE write handlers beside captureChange, never inside it: that one is the PostHog path, whose contract is that &quot;nothing here carries a path or a file name&quot;, and whose signature is counts-only. publish sits on the sync push path, so it never blocks and never errors — it copies the subscriber set under the lock and sends outside it, and a full buffer marks the subscriber lost rather than waiting. Bounded (subBuffer 32, 256/project, 4096/hub) in the ratelimit.go mold. A SIXTH frame type joins change/resync/presence: publishScope, sent by folders.go and perms.go when a rule or a project level moves. It carries NO prefix — the same rule hides a subtree from one account and widens it for another, so naming it would leak a folder name to the people it exists to keep out — and each listener re-asks /scope, which answers per reader. It exists because the daemon now stands down beside a healthy stream, which stretched the window in which a device holds a stale scope from ~10s to ~5m; loadScope runs before the scan precisely so a scan cannot mint an op the hub would refuse with a 403 that wedges a journal"
     note for subscriber "A reader that falls behind is not waited for: the next frame it does receive is preceded by a single {type:resync}, because a client that missed one change and a client that missed fifty both need the same thing — to refetch. The frontend keeps a 5-minute tree refetch underneath all of this, so a dropped frame self-heals regardless — slower than the 15s poll it replaced, which is the point: a resync frame already covers the case this insures against"
 
     class wireCodec {
