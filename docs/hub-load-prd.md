@@ -543,7 +543,46 @@ one device id the moment the hub runs twice.
 - A backend without the capability behaves exactly as before, asserted
   permanently rather than assumed.
 
-### Stage 11 — co-editing across instances
+### Stage 11 — co-editing across instances — **BLOCKED, and the plan was wrong**
+
+The plan said: "Choose: ygo `cluster` + Redis, or room affinity by consistent
+hash with internal forwarding (no new infrastructure, but a routing layer)."
+
+**Room affinity is not buildable on Cloud Run.** It requires addressing a
+SPECIFIC instance, and Cloud Run has no per-instance hostname — traffic always
+enters at the service endpoint and is load-balanced. Google's own guidance
+names this case directly: if an architecture needs peer discovery, gossip, or
+*stateful sharding*, Cloud Run is the wrong abstraction, and the answer is "a
+shared coordination layer (Pub/Sub, Redis, Spanner) so instances never need to
+address each other". That option should never have been on the menu; it was
+offered without checking the platform first.
+
+Postgres was investigated as a way to keep the "no new infrastructure"
+property. `ygo`'s `cluster.Relay` is genuinely implementable over
+`LISTEN/NOTIFY` — the contract requires no per-room ordering and `KindSync`
+payloads are commutative and idempotent. Two things rule it out:
+
+- `NOTIFY` caps a payload at **8000 bytes** and a CRDT update can exceed it.
+  Unlike a change frame this CANNOT degrade to "resync": the far node simply
+  diverges. It would need a spill table plus a read per message.
+- It would put keystroke-rate binary traffic on the same `db-f1-micro` that
+  serves every piece of metadata — far outside the envelope that made
+  `LISTEN/NOTIFY` the right answer for change frames (low rate, small, already
+  there).
+
+So the only real path is **ygo `cluster` + Redis**, which is the tool built for
+it. Whenever that happens, it carries a caveat that is not optional: the relay
+shares CRDT state but does NOT dedupe `OnLoadDocument`/`OnLastPeer`/
+`OnUnloadDocument`, so N nodes fire N snapshots and the History noise Stage 4
+removed comes straight back. A snapshot owner per room is part of that work,
+not a follow-up to it.
+
+**Decision (2026-09-22, Snow Lee): stop here.** The hub measures 2–5 requests a
+second and Phase 1 removed roughly half its traffic; one instance is nowhere
+near capacity, and one instance is also what makes co-editing correct — one
+process, one document. Redis when there is real demand, not before.
+
+### Stage 11 — co-editing across instances (original plan, kept for the record)
 
 Two instances = two `crdt.Doc`s per file, each seeding from storage and each
 snapshotting back: precisely the failure the relay rewrite eliminated,
@@ -562,13 +601,60 @@ of this stage, not a follow-up.
 - [ ] Cloud Run session affinity is **best-effort only** and is not a
       substitute for either
 
-### Stage 12 — raise the cap
+### Stage 12 — raise the cap — **blocked on Stage 11**
+
+Not a judgement call any more: with co-editing unsharded, two instances would
+hold two `crdt.Doc`s for one file, each seeded from storage and each
+snapshotting back. That is precisely the failure the relay rewrite eliminated,
+reintroduced at the server. The cap stays at 1 until Stage 11 lands.
+
+What the cap is NO LONGER blocked on, which is most of what this phase was
+for: sign-in (every flow crosses processes now), journal appends (a store-side
+precondition with a bounded retry), and change fan-out (a relay that exists and
+is switched off). `run.tf`'s comment has been corrected to say so — it used to
+blame the journal, which was never the real obstacle.
+
+### Stage 12 — raise the cap (original plan, kept for the record)
 
 - [ ] `max_instance_count` raised only after 8–11, with the `run.tf` comment
       rewritten to say what is actually true
 - [ ] Load test that reproduces the 2026-09-21 burst and shows zero shedding
 
 **Success criteria:** the burst that shed 378 requests sheds zero.
+
+## Where this left things (2026-09-22)
+
+Phases 1 and 2 are done and deployed. Phase 3 is three-quarters done and
+stopped on purpose.
+
+**What the hub gained.** Traffic fell from a 6,700–10,400/hr band to
+3,500–5,100/hr, and the half that has not landed yet is waiting on devices
+upgrading to v0.16.0 rather than on any further work. Every sign-in flow now
+crosses processes. A journal append cannot lose an op to a second writer.
+Change frames can reach clients on another instance. A hub that restarts keeps
+its identity instead of stranding a journal.
+
+**What it did not gain, and why that is fine.** The instance cap is still 1.
+The 429 incident that started all of this was burst-shedding on a service with
+no headroom; Phase 1 removed the burst. At 2–5 requests a second the hub is
+nowhere near needing a second instance, and one instance is what makes
+co-editing correct — one process, one document. Raising the cap would trade a
+problem the hub does not have for one it would.
+
+**Three things this document got wrong, kept here because the corrections are
+the useful part.**
+
+1. The first diagnosis blamed a concurrency ceiling of 80 and cold starts.
+   Live was 200 and minimum instances 1; measured peak was 26. The numbers
+   came from a gitignored, stale `terraform.tfstate`.
+2. Stage 5 wanted to delete the tree poll. The poll already 304s at ~30 bytes
+   and is the only guard against a silently dead stream — deleting it would
+   have traded insurance for 8 KB a day.
+3. Stage 11 offered "room affinity, no new infrastructure" as the
+   recommendation. It is not implementable on Cloud Run at all.
+
+Each was caught by measuring rather than by reasoning harder, which is the one
+habit worth carrying out of this document.
 
 ## Backlog (filed, not scheduled)
 
@@ -599,8 +685,8 @@ of this stage, not a follow-up.
 | 8 — auth state to SQL | **done** (#248, #251, #252, cloud #47) | every sign-in flow crosses processes; 50/50 live run deferred to Stage 12 |
 | 9 — cross-instance fan-out | **transport done** (#250) | frame crosses, no echo, oversize degrades — on real postgres in CI |
 | 10 — conditional writes | **journal done** (#254) | the lost-update interleaving, injected and survived; quota/seat caps deferred |
-| 11 — co-editing across instances | not started | |
-| 12 — raise the cap | not started | |
+| 11 — co-editing across instances | **blocked** | room affinity impossible on Cloud Run; needs Redis |
+| 12 — raise the cap | **blocked on 11** | every other blocker cleared |
 
 ### Phase 1 notes (2026-09-21)
 
