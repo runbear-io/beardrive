@@ -85,7 +85,17 @@ type subscriber struct {
 	// a single resync frame: a client that missed one change and a client
 	// that missed fifty need the same thing, which is to refetch.
 	lost atomic.Bool
+
+	// Who this stream belongs to. Set at subscribe and never mutated.
+	actor subscriberActor
 }
+
+// actor is who holds this stream — an account email, or a device id on an
+// auth-less hub. It is what makes presence a property of the connection
+// (presence.go): the hub does not need to be told someone is still here by a
+// timer when it is holding their socket. Never serialized; a map key and a
+// comparison, exactly like the presence actor key it matches.
+type subscriberActor = string
 
 type eventHub struct {
 	mu    sync.Mutex
@@ -105,19 +115,36 @@ func (s *Server) events() *eventHub {
 
 // subscribe registers a listener for one project, or reports that the hub is
 // already carrying as many streams as it will.
-func (h *eventHub) subscribe(project string) (*subscriber, bool) {
+func (h *eventHub) subscribe(project string, actor subscriberActor) (*subscriber, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.total >= maxSubsTotal || len(h.subs[project]) >= maxSubsPerProject {
 		return nil, false
 	}
-	sub := &subscriber{ch: make(chan []byte, subBuffer)}
+	sub := &subscriber{ch: make(chan []byte, subBuffer), actor: actor}
 	if h.subs[project] == nil {
 		h.subs[project] = map[*subscriber]struct{}{}
 	}
 	h.subs[project][sub] = struct{}{}
 	h.total++
 	return sub, true
+}
+
+// hasActor reports whether this actor still holds at least one stream on this
+// project. Two tabs of one browser, or a laptop and a phone, are two streams
+// and one person: presence must not end while any of them is still open.
+func (h *eventHub) hasActor(project string, actor subscriberActor) bool {
+	if actor == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs[project] {
+		if sub.actor == actor {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *eventHub) unsubscribe(project string, sub *subscriber) {
@@ -181,6 +208,25 @@ func (s *Server) publishChange(r *http.Request, source string, paths []string, p
 	s.events().publish(projectID(r), ev)
 }
 
+// publishScope announces that a project's folder rules moved.
+//
+// Not a file change — no path was written, and the frame deliberately carries
+// no prefix. What a rule change is, to each listener, is different for each
+// listener: the same rule hides a subtree from one account, widens it for
+// another, and means nothing to a third. Naming the prefix here would leak a
+// folder NAME to every member of the project, including the ones the rule
+// exists to keep out. Everyone is told only that scope moved; each device then
+// asks /scope, which answers per reader, and each browser refetches a listing
+// that is already filtered for it.
+//
+// This exists because the daemon stands down beside a healthy change stream
+// (watchedPollFactor). Without a push, a narrowing rule would wait out the
+// watched poll — and loadScope runs before the scan specifically so a scan
+// cannot mint an op the hub would refuse with a 403 that wedges the journal.
+func (s *Server) publishScope(project string) {
+	s.events().publish(project, changeEvent{Type: "scope"})
+}
+
 // newOpPaths is countOps' sibling: the paths of the ops this push actually
 // added, in journal order. Same storedMax filter — an op the hub already had
 // is not news. Deduped, because a push that rewrote one file ten times is one
@@ -233,12 +279,19 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 	}
 	rc := http.NewResponseController(w)
 	project := projectID(r)
-	sub, ok := s.events().subscribe(project)
+	// The stream now carries who opened it, because presence is a property of
+	// this connection rather than of a timer (presence.go). Same fallback the
+	// presence handler uses: an account email, else the device, else nobody.
+	actor := presenceActor(s, r)
+	sub, ok := s.events().subscribe(project, actor)
 	if !ok {
 		http.Error(w, "too many event streams open; try again shortly", http.StatusServiceUnavailable)
 		return
 	}
-	defer s.events().unsubscribe(project, sub)
+	defer func() {
+		s.events().unsubscribe(project, sub)
+		s.streamGone(project, actor)
+	}()
 
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")

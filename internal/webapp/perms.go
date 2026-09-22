@@ -214,6 +214,9 @@ func (s *Server) handleProjectPermDefault(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The project level is the base every folder rule narrows or widens, so
+	// moving it moves every reader's scope — and scopeTag with it.
+	s.publishScope(id)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -243,6 +246,7 @@ func (s *Server) handleProjectPermSet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.publishScope(id)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -257,6 +261,7 @@ func (s *Server) handleProjectPermClear(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.publishScope(id)
 	writeJSON(w, map[string]any{"ok": true})
 }
 

@@ -122,8 +122,11 @@ export function Editor({
     const f = shared.current;
     // Before the editor is up there is nothing to splice into, and the room
     // may still be seeding from bytes we now know are stale: say so.
+    // The sha travels with the bytes: both come from the same ["text", file]
+    // query, so this is the version `initial` IS. Without it a co-editor's
+    // save leaves us writing against a base the hub has moved past.
     cb.current.onExternal?.(
-      f && editor.current ? f.merge(initial) : "blocked",
+      f && editor.current ? f.merge(initial, shaRef.current) : "blocked",
     );
   }, [initial]);
   const meRef = useRef(me);

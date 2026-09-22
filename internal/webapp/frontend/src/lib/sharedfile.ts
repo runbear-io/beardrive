@@ -42,7 +42,12 @@ export type SharedFile = {
   /** Fold an outside write — an agent, a CLI, another device — into the open
       document. "blocked" means the caller should SAY so instead, because this
       refused to resolve it. */
-  merge(next: string): MergeResult;
+  merge(next: string, nextSha?: string): MergeResult;
+  /** Tell this file the head sha moved without its content being news to us —
+      a co-editor saved the document we already share. Without it every other
+      member of a room keeps saving against a base the hub has moved past, and
+      is refused for a conflict that does not exist. */
+  rebase(sha?: string): void;
   destroy(): void;
 };
 
@@ -188,11 +193,28 @@ export function openSharedFile(opts: {
     opts.me,
   );
 
-  // Any change to the shared document — mine or a peer's — restarts the idle
-  // timer. Whoever stops typing last writes the file, and because the content
-  // is identical for everyone, a second writer is a no-op put of a blob the
-  // store already has.
-  const onDocChange = () => {
+  /* MY changes restart the idle timer. A peer's do not.
+
+     This used to be "any change, mine or a peer's — whoever stops typing last
+     writes the file", on the reasoning that the content is identical for
+     everyone so a second writer is a harmless no-op put. It is not harmless.
+     In a room of N editors, 700ms after the last keystroke by ANYONE, all N
+     clients PUT the identical full body: N uploads of the same text, and a
+     History feed that grows N versions every time the room goes quiet. That
+     is the "too many change histories" report, and four co-editors made it
+     four of everything (docs/hub-load-prd.md Stage 4).
+
+     Dropping to one writer loses nothing. Every copy is identical by
+     construction — that is what the CRDT is for — and the hub snapshots the
+     room itself when the last editor leaves (ycollab.go, OnLastPeer), so the
+     closed-laptop case never depended on a bystander saving on the typist's
+     behalf either.
+
+     Seeding is a remote change too, which is a second thing this fixes: the
+     document arriving from the hub used to mark the buffer dirty and schedule
+     a save of bytes the file already contained. */
+  const onDocChange = (_e: unknown, tx: { origin?: unknown }) => {
+    if (collab.isRemote(tx?.origin)) return;
     setState("dirty");
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => save(collab.text.toString()), SAVE_IDLE_MS);
@@ -217,18 +239,47 @@ export function openSharedFile(opts: {
 
      It refuses in the two cases where a splice would destroy something, and
      the refusal is the caller's banner. */
-  const merge = (next: string): MergeResult => {
+  /* The file's current sha, learned from somewhere other than our own write.
+
+     `base` is the If-Match this editor saves against, and until now the ONLY
+     thing that moved it was a successful save of our own. That is fine alone
+     and wrong in a room: a co-editor's save moves the file's head, every other
+     member keeps the sha from before it, and their next save is a 409 against
+     a file that already contains their work.
+
+     The hub is right to refuse it — a stale base is exactly what If-Match is
+     for — and the conflict copy that followed was right for the writer it was
+     designed for, an agent or a device outside the room. It was nonsense
+     between two people in one document: the CRDT had already merged them, so
+     the "conflict" was a copy of the file against itself.
+
+     So whoever learns the new sha tells us. Nothing about the CONTENT is
+     assumed here; the caller has just read this path from the hub. */
+  const rebase = (sha?: string) => {
+    if (sha) base = sha;
+  };
+
+  const merge = (next: string, nextSha?: string): MergeResult => {
     // The file is at the content we last knew about: our own write coming
     // back through the change stream, or nothing new at all. `inFlight`
     // covers the common case that `saved` cannot — the frame announcing our
     // own write arriving before that write's own response does.
-    if (next === saved || inFlight.has(next)) return "same";
+    /* Adopting the sha is the same decision as accepting the content, so it
+       happens at each ACCEPT below and never here. On "blocked" we are holding
+       work the file does not have; taking their sha would make our next save
+       overwrite them cleanly instead of being refused — turning If-Match from
+       a guard into a rubber stamp. */
+    if (next === saved || inFlight.has(next)) {
+      rebase(nextSha);
+      return "same";
+    }
     const cur = current();
     // Already in the buffer: a co-editor snapshotted the document we share.
     // Recording it is what keeps the check above true for the rest of the
     // session, so their next save is not mistaken for an outsider's.
     if (next === cur) {
       saved = next;
+      rebase(nextSha);
       return "same";
     }
     // Unsaved local edits: not ours to resolve. Splicing over a half-typed
@@ -245,6 +296,7 @@ export function openSharedFile(opts: {
     // save, and this is what makes that save a no-op instead of a write-back
     // of what we just read.
     saved = next;
+    rebase(nextSha);
     if (collab.text.length) {
       // One transaction, so a peer sees a replacement rather than a delete
       // followed by a moment of missing text.
@@ -262,6 +314,7 @@ export function openSharedFile(opts: {
     collab,
     current,
     merge,
+    rebase,
     saveNow: () => save(current()),
     destroy() {
       if (timer) clearTimeout(timer);

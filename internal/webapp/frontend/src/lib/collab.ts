@@ -99,6 +99,21 @@ export class CollabDoc {
     }, UNREACHABLE_MS);
   }
 
+  /* Did this change come from the hub, or from the person at this keyboard?
+
+     Yjs stamps every transaction with an origin, and y-websocket applies what
+     it receives with the provider as that origin. So this is the difference
+     between "a peer typed" and "I typed" — which is the difference between a
+     file that is written once per quiet period and one written once per quiet
+     period PER EDITOR (see sharedfile.ts, and docs/hub-load-prd.md Stage 4).
+
+     A local edit's origin is whatever CodeMirror's binding used, never the
+     provider, so testing against the provider identifies remote changes
+     precisely rather than guessing at the local ones. */
+  isRemote(origin: unknown): boolean {
+    return this.ws !== null && origin === this.ws;
+  }
+
   /* How many OTHER editors are in this document right now, from awareness.
      It is what tells a write on this path apart: with a co-editor present the
      change is their snapshot of the document I already have, so warning me

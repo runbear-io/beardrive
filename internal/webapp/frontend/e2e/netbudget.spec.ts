@@ -40,9 +40,22 @@ test("an idle tab does not fetch the project down again", async ({ page }) => {
   expect(hits("/heat")).toHaveLength(0);
   expect(hits("/api/projects")).toHaveLength(0);
 
-  // What is left is the presence heartbeat (10s) and nothing else. The SSE
-  // stream is one request made before the window and is allowed to reconnect.
-  const other = seen.filter((r) => !r.includes("/presence") && !r.includes("/events"));
+  /* Presence used to be the one thing left ticking in here: a POST every 10s,
+     per TAB, from somebody reading a page. In production that was ~19% of
+     every request the hub served (docs/hub-load-prd.md Stage 3).
+
+     It is gone. A member holding an open change stream is here by definition,
+     so the hub keys presence to that connection and the client announces only
+     when the answer changes — arriving, moving to another file, leaving.
+     Idling is none of those. */
+  expect(
+    hits("/presence"),
+    "presence announced itself while nothing happened; the heartbeat is back",
+  ).toHaveLength(0);
+
+  // Only the SSE stream remains: one request made before the window opened,
+  // allowed to reconnect within it.
+  const other = seen.filter((r) => !r.includes("/events"));
   expect(other, `unexpected idle traffic: ${other.join(", ")}`).toHaveLength(0);
 });
 

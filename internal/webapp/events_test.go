@@ -116,15 +116,15 @@ func TestRemoteWatchClosesOnCancel(t *testing.T) {
 
 func TestEventHubFanOut(t *testing.T) {
 	h := &eventHub{subs: map[string]map[*subscriber]struct{}{}}
-	a, ok := h.subscribe("p1")
+	a, ok := h.subscribe("p1", "")
 	if !ok {
 		t.Fatal("subscribe a")
 	}
-	b, ok := h.subscribe("p1")
+	b, ok := h.subscribe("p1", "")
 	if !ok {
 		t.Fatal("subscribe b")
 	}
-	other, ok := h.subscribe("p2")
+	other, ok := h.subscribe("p2", "")
 	if !ok {
 		t.Fatal("subscribe other")
 	}
@@ -165,7 +165,7 @@ func TestEventHubFanOut(t *testing.T) {
 // must not silently miss changes either: it is told to resync instead.
 func TestEventHubSlowSubscriberIsToldToResync(t *testing.T) {
 	h := &eventHub{subs: map[string]map[*subscriber]struct{}{}}
-	sub, _ := h.subscribe("p1")
+	sub, _ := h.subscribe("p1", "")
 
 	for i := 0; i < subBuffer+10; i++ {
 		h.publish("p1", changeEvent{Type: "change", Paths: []string{"a.md"}})
@@ -181,22 +181,22 @@ func TestEventHubSlowSubscriberIsToldToResync(t *testing.T) {
 func TestEventHubBounds(t *testing.T) {
 	h := &eventHub{subs: map[string]map[*subscriber]struct{}{}}
 	for i := 0; i < maxSubsPerProject; i++ {
-		if _, ok := h.subscribe("p1"); !ok {
+		if _, ok := h.subscribe("p1", ""); !ok {
 			t.Fatalf("refused subscriber %d, under the cap", i)
 		}
 	}
-	if _, ok := h.subscribe("p1"); ok {
+	if _, ok := h.subscribe("p1", ""); ok {
 		t.Fatal("accepted a subscriber past maxSubsPerProject")
 	}
 	// The cap is per project, not global, until the global one is reached.
-	if _, ok := h.subscribe("p2"); !ok {
+	if _, ok := h.subscribe("p2", ""); !ok {
 		t.Fatal("a different project should still be able to subscribe")
 	}
 }
 
 func TestPublishChangeTruncatesLongPathLists(t *testing.T) {
 	s := &Server{}
-	sub, _ := s.events().subscribe("")
+	sub, _ := s.events().subscribe("", "")
 
 	paths := make([]string, eventPathLimit+5)
 	for i := range paths {
@@ -222,7 +222,7 @@ func TestPublishChangeTruncatesLongPathLists(t *testing.T) {
 // idle push does not wake every client in the project.
 func TestPublishChangeIgnoresEmptyWrites(t *testing.T) {
 	s := &Server{}
-	sub, _ := s.events().subscribe("")
+	sub, _ := s.events().subscribe("", "")
 
 	s.publishChange(httptest.NewRequest("POST", "/", nil), "sync", nil, 0, 0)
 	select {
