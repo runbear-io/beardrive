@@ -4,7 +4,7 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
-## Unreleased
+## v0.16.0 — 2026-09-22
 
 **Deploy hubs before clients.** A hub older than this release refuses the
 chunk keys a new client pushes for large files (sync degrades to
