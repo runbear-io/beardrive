@@ -187,7 +187,16 @@ classDiagram
         +unsubscribe(project, sub)
         +hasActor(project, actor) bool
         +publish(project, changeEvent)
+        +fanout(project, frame)
+        -relay eventRelay
     }
+    class eventRelay {
+        <<internal/webapp, relay.go>>
+        +publish(project, frame)
+        +start(deliver)
+        +Close()
+    }
+    note for eventRelay "Carries frames to the hub's OTHER processes, because publish only ever reached the subscribers ONE process holds — behind two instances a write on A reaches nobody on B, and their tree simply stops updating. Moves BYTES and knows nothing about them: what arrives is the JSON the far side marshalled, and re-decoding it would only let the two paths disagree. Echo suppression lives here rather than in each transport (both broadcast to the publisher too, and a doubled frame is a doubled refetch); an oversized frame degrades to resync rather than a truncated path list, because a client handed half the paths believes it has all of them. memRelay is the shape, pgRelay the transport: a dedicated LISTEN connection (it blocks for the life of the process), NOTIFY through the existing pool via pg_notify($1,$2) rather than a built statement — the thing that would need escaping is a path chosen by whoever wrote the file. Postgres because it is ALREADY THERE; Redis is the answer past a handful of instances, and this interface is what makes that a swap"
     class subscriber {
         -ch chan of frames
         -lost atomic.Bool
@@ -623,6 +632,7 @@ classDiagram
     Server *-- eventHub : live change fan-out
     Server *-- presenceHub : who is looking at what
     eventHub *-- subscriber
+    eventHub ..> eventRelay : the processes this one is not
     presenceHub ..> eventHub : publishes roster on the SAME stream
     presenceHub ..> person : rosterOf
 
