@@ -1,0 +1,478 @@
+# PRD: The hub talks to itself — make push authoritative, then unpin the instance
+
+The hub serves **183,150 requests a day**, and it serves them at 04:00 UTC at
+almost exactly the rate it serves them at 17:00. A product driven by people
+swings tenfold between night and peak. This one swings 1.6×.
+
+That flatness is the whole finding: **~95% of the traffic is machines polling
+on timers while nobody is working.** One idle laptop's sync daemon accounts
+for 9.4% of the entire hub. Two of them are a fifth of it.
+
+None of this needed new transport. The push channels already exist and both
+sides already speak them — an SSE change stream (`/events`, consumed by the
+browser *and* by `remote.httpBackend.Watch`) and a co-editing websocket. The
+polls simply never learned to stand down next to them.
+
+This spec removes the chatter first, because it is mostly deletion and touches
+no invariant. Then it fixes three things that are broken today at one
+instance. Only then does it approach `max_instance_count = 1`, which is a real
+project and whose stated justification turns out to be false.
+
+Implement the stages in order; a stage is done only when every acceptance box
+in its checklist is checked and its success criteria are measured. Record
+progress in §Status.
+
+> **Standing rule, inherited from `network-efficiency-prd.md` and earned three
+> times there.** Every new test in this PRD must be re-run against the
+> **unfixed** code and observed to FAIL before it is believed. Five tests in
+> that PRD passed against the bug they were written for. Localhost is too fast
+> to reproduce a timing bug, an empty feed proves nothing, and a nil provider
+> is never in the path. A gate you have not watched fail is not a gate.
+
+## Baseline
+
+Measured 2026-09-21 from `beardrive-prod` Cloud Run logs and Cloud Monitoring.
+Live service: one instance, 1 vCPU, concurrency 1000, timeout 3600s.
+
+**183,150 requests / 24h = 2.1 req/s average.** Hourly range 6,405–10,457 —
+**peak-to-trough 1.6×**.
+
+Request mix over a representative 20-minute window (3,446 requests, 33 distinct
+clients: 12 sync daemons, 17 browsers):
+
+| endpoint | requests | % | what it is |
+|---|---|---|---|
+| `GET /store/list` | ~1,400 | 41% | daemon poll, every cycle, per project |
+| `POST /presence` | ~670 | 19% | browser beat, every 10s, **per tab** |
+| `GET /scope` | ~283 | 8% | daemon, every cycle, paired 1:1 with `store/list` |
+| `GET /store/object` | 272 | 8% | real blob/journal transfer |
+| `GET /tree` | 117 | 3% | 5-min "insurance" poll, ~148 KB gz |
+| `PUT /upload/content` | 90 | 3% | editor idle-saves, N identical bodies |
+
+Daemons were **67%** of all requests. A single laptop produced **1,223 of
+3,446 (35%)**, cycling every 3.3s rather than the configured 10s.
+
+### What one client costs while doing nothing
+
+| client | requests/day | share of the whole hub |
+|---|---|---|
+| idle daemon, one project, 10s cadence | 17,280 | **9.4%** |
+| same daemon during an agent session (3s) | 57,600 | 31% |
+| idle browser tab (presence beat alone) | 8,640 | **4.7%** |
+| idle browser (tree poll alone) | 288 | 41.6 MB/day |
+
+### Where the polls ignore the push
+
+Five, with the line that does it:
+
+1. **`daemon.go:512`** — `doRemote` gates only on `remoteInterval` and never
+   consults `watch`. A healthy open change stream does not extend the poll by
+   one millisecond. The code states the intent plainly at `daemon.go:438`:
+   *"It is an accelerator only: every guarantee still rests on the tick."*
+2. **`daemon.go:599`** — a local-only tick with `res.LocalOps > 0` zeroes
+   `lastRemote`, forcing the *next* 3s tick to be a full remote cycle. This is
+   the 3.3s laptop: an agent writing files pins the daemon at the scan
+   interval.
+3. **`syncer.go:169`** — `loadScope` calls `GET /scope` before every scan,
+   unconditionally, with no `If-None-Match`. The response carries a `tag`
+   whose only purpose is to say "unchanged" — *after* the round trip.
+4. **`useBrowse.ts:29`** — a 5-minute tree refetch as insurance against the
+   same stream that already emits a `: keepalive` comment every 20s
+   (`events.go:53`), which is a better liveness signal than 148 KB.
+5. **`usePresence.ts:18`** — `BEAT_MS = 10_000`, **per tab**, not
+   leader-elected (the SSE stream is, via Web Lock). Six tabs, six beats.
+   Anyone with an editor open is simultaneously announcing presence over
+   ycollab awareness: two liveness mechanisms for one person.
+
+And one write amplification: **`sharedfile.ts:195`** rearms the 700ms save
+timer on *any* `Y.Text` change including a remote peer's, so N co-editors each
+PUT the identical full body; `ycollab.go:63` then snapshots the same bytes a
+third time.
+
+### The 429, and why it is a separate problem
+
+378 requests were shed in ten minutes on 2026-09-21 with
+`The request was aborted because there was no available instance` — while CPU
+sat at 38%, memory 56%, concurrency 26/1000 and handler p95 under 400ms, on one
+healthy instance. Nothing was full. `max_instance_count = 1` leaves zero burst
+headroom: the autoscaler wants a second instance, is denied one, and sheds.
+Minute-granularity metrics cannot see the sub-second arrival bursts that
+trigger it, so healthy-looking graphs are expected and are **not** evidence
+against it.
+
+Phases 1–2 do not fix this. They lower the arrival rate that provokes it, which
+is worth roughly 10× and is cheaper than Phase 3.
+
+## Goals
+
+- Cut hub requests per idle client by **≥90%** without losing a single
+  freshness guarantee.
+- Make the 24h traffic profile track human activity: peak-to-trough **≥4×**,
+  from 1.6×.
+- Fix three defects that are live today at one instance (device-id churn,
+  unrefreshed MCP grants, lossy read ledger).
+- Leave `max_instance_count = 1` *removable* — with an honest, ordered blocker
+  list rather than a comment that is no longer true.
+
+## Non-goals (do NOT do these)
+
+- **Do not add a new transport.** SSE downlink and the collab websocket both
+  work. Adding a second socket where a poll should simply stop is more code
+  for less benefit.
+- **Do not use Web Push as a sync channel.** ~240 msgs/min/device, 4 KB
+  payloads, permission-gated, relayed through FCM/APNs, and structurally
+  irrelevant to the CLI daemon, which is two-thirds of the traffic. It is
+  admissible in the backlog for one thing only: "a teammate changed this while
+  your tab was closed".
+- **Do not raise `max_instance_count` before Phase 3 lands in order.** Sign-in
+  would fail ~50% of the time and co-editing would hold two documents per file.
+- **Do not weaken the scope-before-scan ordering.** `loadScope` runs before the
+  scan so the scan cannot mint an op the hub will refuse; a refused op wedges
+  that device's sync until someone edits its journal by hand.
+- **Do not add Redis in Phases 1–2.** Postgres is already in prod and covers
+  the fan-out need at this scale.
+
+## How success is measured
+
+Three instruments, all repeatable:
+
+1. **`e2e/netbudget.spec.ts`** — the existing regression gate from
+   `network-efficiency-prd.md`. Extend it; assert request *counts* and
+   *headers*, never byte totals (the seeded project is tiny).
+2. **A new `internal/daemon` test** for the poll/watch interaction. This is
+   where Stage 1 lives or dies, and it must be a Go test — a live stream
+   suppressing a timer is deterministic and machine-local.
+3. **Production, via the same two queries each time.** These produce every
+   number in §Baseline, so each re-measurement is the same measurement:
+
+   ```sh
+   # 24h volume and shape (the flatness metric)
+   gcloud monitoring ... run.googleapis.com/request_count   # see §Measurements
+
+   # 20-minute request mix by endpoint and client
+   gcloud logging read 'resource.type="cloud_run_revision" AND
+     resource.labels.service_name="bdrive-cloud" AND httpRequest.requestMethod:*' \
+     --project beardrive-prod --limit 5000 \
+     --format 'value(timestamp, httpRequest.remoteIp, httpRequest.userAgent,
+                     httpRequest.requestMethod, httpRequest.requestUrl, httpRequest.status)'
+   ```
+
+Every stage states its criteria in both forms: what the automated gate
+asserts, and what production must show.
+
+---
+
+# Phase 1 — make push authoritative
+
+No new infrastructure. No invariant touched. Mostly deletion.
+
+### Stage 1 — the daemon stands down while the stream is live
+
+The single biggest win in this document: 30× fewer requests per idle device.
+
+`doRemote` learns a third state. With a healthy watch open, the remote cadence
+drops from `remoteInterval` (10s) to a long safety net (5 min). The instant the
+stream dies — for any reason, including the hub's own 1h `streamMaxAge` — the
+cadence reverts to 10s until it is re-established.
+
+- [ ] `daemon.go` — `doRemote` consults watch health, not just elapsed time
+- [ ] A `watchedInterval` (5 min) distinct from `remoteInterval` (10s), with
+      the reversion path on stream close, token change and `res.Offline`
+- [ ] `daemon.go:599` — a local edit still forces a prompt remote cycle (this
+      is correct and must survive), but is **rate-limited** so a file-writing
+      agent cannot pin the daemon at the 3s scan interval. A minimum spacing,
+      not a removal: an agent's write must still reach the hub promptly
+- [ ] The watch-death path is *age-discriminated* exactly as today
+      (`daemon.go:608`): a stream that lived ≥ `watchRetry` re-dials at once
+- [ ] Go test: a fake `Watcher` held open across N ticks asserts the remote
+      cycle count collapses; closing the channel asserts it recovers to 10s
+- [ ] **Verified the test FAILS on the pre-stage daemon** (it must count the
+      10s polls that run beside the live stream)
+
+**Success criteria**
+
+- Go test: with a live stream over a simulated 5 minutes, remote cycles drop
+  from 30 to ≤2; after the stream closes, the next cycle is ≤10s away.
+- Production: an idle daemon-project falls from 17,280 to **≤600 requests/day**.
+- No freshness regression: a peer's write still lands within **2s** (this is
+  what proves the stream was doing the work all along).
+
+### Stage 2 — stop asking for scope on every cycle
+
+`/scope` is 8% of all hub traffic to re-answer a question whose answer changes
+approximately never.
+
+The safety ordering is non-negotiable, so the fix is *not* a client-side cache
+with a lag. The hub pushes a `scope` frame on the same stream that is already
+open, which makes the client's knowledge **fresher** than today's 10s poll, not
+staler.
+
+- [ ] `events.go` — a `scope` frame published when a folder rule changes
+- [ ] `remote.Watcher`'s contract currently discards the frame body
+      (`chan struct{}`, `http.go:598`). Widen it minimally to carry the frame
+      kind, or add a sibling channel — do not plumb the whole payload
+- [ ] `syncer.go:169` — `loadScope` skips the fetch when the persisted
+      `st.ScopeTag` is current and no scope frame has arrived; fetches
+      immediately when one has, or when there is no live stream
+- [ ] Fallback preserved: no stream, or a hub that never sends the frame ⇒
+      fetch every cycle exactly as today
+- [ ] Test: a rule change mid-session reaches the device and is enforced
+      **before** the next scan commits an op
+- [ ] **Verified the test FAILS** against a client that skips scope without the
+      push (it must catch the op the hub would refuse)
+
+**Success criteria**
+
+- `/scope` falls from ~8% of requests to **<0.5%**.
+- A narrowing rule change is enforced on a connected device in **<2s**
+  (today: up to 10s).
+- No device ever journals an op the hub refuses — the existing scope tests pass
+  unchanged.
+
+### Stage 3 — presence rides the connection that already exists
+
+19% of hub traffic to say "I am still looking at this page", from tabs where
+nobody is doing anything.
+
+Presence stops being a heartbeat and becomes **a property of the SSE
+connection**, which the hub already tracks in `eventHub.subs`. Liveness is the
+connection; the only uplink left is a path change, which is an event, not a
+timer.
+
+- [ ] Presence derived from the subscriber registry (`events.go:90`) — a
+      connected subscriber *is* present; `presenceTTL` keyed to the connection,
+      not to a 15s window
+- [ ] The uplink fires **on navigation only**. No interval
+- [ ] Per-browser, not per-tab: the existing Web Lock leader (which already
+      owns the stream) reports the set of paths its tabs are on
+- [ ] Anyone with an editor open already announces via ycollab awareness —
+      reconcile so one person is not two rosters
+- [ ] e2e: a tab idle for 70s with no navigation issues **zero** presence
+      requests, and the roster still shows them
+- [ ] **Verified the gate FAILS** on the pre-stage bundle (it must catch ≥6
+      beats in that window)
+
+**Success criteria**
+
+- e2e: zero presence requests in a 70s idle window; roster still correct.
+- Production: `POST /presence` falls from ~19% of traffic to **<1%**.
+- A teammate opening a file still appears in the roster within **2s**, and
+  disappears within **20s** of closing the tab.
+
+### Stage 4 — one writer for a co-edited file
+
+Three writers of identical bytes, which is also the history-noise complaint.
+
+The hub holds the document (`ycollab.go`) and already snapshots it. With a
+hub-held room live, the browser's idle save is redundant — and worse, it is
+redundant **per co-editor**.
+
+- [ ] `sharedfile.ts` — the idle save does not fire for changes that arrived
+      from a peer; only local edits arm the timer
+- [ ] With a live hub-held room, the client defers the write to the hub
+      entirely; the solo path (no room) keeps saving exactly as today
+- [ ] `ycollab.go` — a periodic snapshot while a room is live, so a long
+      session is not one write at the end. Identical content still journals
+      nothing (`upload.go`), so cadence is cheap
+- [ ] The crash case stays covered: `OnLastPeer`/`OnUnloadDocument` unchanged
+- [ ] Test: four simulated editors typing for 60s produce **one** journal
+      version per quiet period, not four
+- [ ] **Verified the test FAILS** against the current client (it must count the
+      N identical PUTs)
+
+**Success criteria**
+
+- Four co-editors typing for a minute produce `PUT /upload/content` counts that
+  scale with *edits*, not with `editors × edits` — target **≥70% fewer** writes.
+- History shows one version per quiet period, not N.
+- No lost edits: the existing collab, stress and concurrency suites pass,
+  including under `-race`.
+
+### Stage 5 — the tree poll goes away
+
+- [ ] `useBrowse.ts:29` — the 5-minute `refetchInterval` removed
+- [ ] Replaced by stream-liveness detection: the hub already sends
+      `: keepalive` every 20s (`events.go:53`); a client that has heard nothing
+      for ~3 keepalives refetches once and re-dials
+- [ ] e2e: an idle tab with a **healthy** stream issues zero `tree` requests
+      over 6 minutes; an idle tab whose stream is killed refetches within 90s
+- [ ] **Verified both halves FAIL** appropriately on the pre-stage bundle
+
+**Success criteria**
+
+- e2e: zero `tree` requests in a 6-minute healthy-stream idle window
+  (today: 1), and recovery within 90s when the stream is severed.
+- Production: `/tree` falls to **<1%** of requests.
+
+---
+
+# Phase 2 — three things broken today, at one instance
+
+None of these need scale-out. All three are live now.
+
+### Stage 6 — a hub identity that survives a cold start
+
+`BDRIVE_HOME=/tmp/bdrive` is per-instance tmpfs, so `config.LoadDevice()`
+(`config.go:69`) mints a **new random device id on every cold start and every
+revision**. Each one becomes a permanent `journal/<rand>.jsonl` per project,
+and every reader's cold fold pays a round trip per id that has ever existed.
+This is unbounded growth and it is already happening.
+
+- [ ] The hub's device id becomes durable and explicit — derived from config or
+      persisted in the metadata store, not minted onto a tmpfs
+- [ ] A migration/compaction story for the ids already stranded in prod
+      (count them first; do not delete a journal that holds real ops)
+- [ ] Test: two sequential hub starts with a wiped `BDRIVE_HOME` journal to the
+      **same** key
+- [ ] **Verified the test FAILS** against the current binary
+
+**Success criteria**
+
+- Restarting the hub adds **zero** new journal keys.
+- `List("journal/")` on `p-c01bde39` returns a count that stops growing across
+  deploys.
+
+### Stage 7 — the two registries that never refresh
+
+- [ ] `MCPAuth` (`mcpauth.go:113`) — grants/tokens loaded once in
+      `NewMCPAuth` and never refreshed, though `sqlMCPRepo.Version()` already
+      exists. **A revocation is not honoured for the life of the process.**
+      Add the `versionGate` every other registry has
+- [ ] `ReadLedger` (`reads.go:142`) — `byKey` never refreshed, and
+      `PutBatch` upserts **absolute** counts. At one instance this is merely
+      stale; it is also the reason read telemetry cannot survive scale-out.
+      Add the gate, and make the flush additive rather than absolute
+- [ ] `cloud/cmd/bdrive-cloud/main.go` never sets `Refresh`, so the snapshot
+      cache is **off** in prod and every request refolds journals. Set it
+- [ ] Test each: a second process's write is observed after the gate ticks
+
+**Success criteria**
+
+- An MCP token revoked through one path is a 401 on the next request, not after
+  a restart.
+- Read counts survive a concurrent flush without loss.
+- p95 latency on `/tree` and `/store/list` improves measurably with the
+  snapshot cache on (record before/after).
+
+---
+
+# Phase 3 — unpin `max_instance_count`
+
+**The reason written in `run.tf` is false today.** Two instances would not both
+append one journal — under `BDRIVE_HOME=/tmp` they mint different ids
+(Stage 6 makes that *deliberate* rather than accidental). The real blockers are
+elsewhere and are worse. Ordered; each is a prerequisite for the next.
+
+### Stage 8 — in-memory auth state to SQL
+
+Sign-in would fail roughly half the time on two instances.
+
+- [ ] PropelAuth OAuth state nonce (`authpropel/provider.go:68`) — minted on
+      one instance, consumed on another
+- [ ] CLI one-time codes and device-flow grants (`authcli.go:32`) —
+      `bdrive login` spans three requests and becomes a coin flip
+- [ ] Builtin email-verify / reset grants (`authlocal.go:78`) — not prod, but
+      the same shape
+
+**Success criteria:** two instances behind a non-sticky LB complete 50/50
+browser sign-ins and 20/20 `bdrive login` flows.
+
+### Stage 9 — cross-instance fan-out
+
+`eventHub` is a per-process map, so a frame reaches only clients pinned to the
+writing instance. **Postgres `LISTEN/NOTIFY`** — already in prod, no new
+infrastructure, and comfortably within its envelope at a handful of listener
+instances. Redis only if that envelope is exceeded.
+
+- [ ] Publish/subscribe behind one seam so the backend is swappable
+- [ ] Presence roster follows the same path (it splits and *flaps* otherwise)
+- [ ] Per-process caps (`maxSubsTotal`) reconsidered — they multiply by N
+
+**Success criteria:** a write on instance A reaches a browser on instance B in
+<2s; rosters agree across instances.
+
+### Stage 10 — conditional writes in the storage layer
+
+`upload.go:471`'s `lockPath` is a process-local `sync.Map` and no backend
+issues a storage precondition, so two instances can both pass `If-Match` and
+both journal. This is the lost-update hazard, and it is worth doing **even at
+one instance** for the MCP compare-and-swap that currently advertises more than
+it delivers (`mcp.go:1352` already admits this).
+
+- [ ] GCS generation preconditions (and the S3 equivalent) on journal writes
+- [ ] Quota reservations and the invite seat lock stop being per-process
+
+### Stage 11 — co-editing across instances
+
+Two instances = two `crdt.Doc`s per file, each seeding from storage and each
+snapshotting back: precisely the failure the relay rewrite eliminated,
+restored at the server.
+
+`github.com/reearth/ygo` ships a `cluster` package for exactly this —
+`Server.AttachRelay(cluster.Relay)`, with a Redis implementation. **Caveat that
+must be designed for:** the relay shares CRDT state but does *not* dedupe
+`OnLoadDocument`/`OnLastPeer`/`OnUnloadDocument`, so N nodes would fire N
+snapshots and reintroduce the history noise. A snapshot owner per room is part
+of this stage, not a follow-up.
+
+- [ ] Choose: ygo `cluster` + Redis, or room affinity by consistent hash with
+      internal forwarding (no new infrastructure, but a routing layer)
+- [ ] Snapshot ownership elected per room either way
+- [ ] Cloud Run session affinity is **best-effort only** and is not a
+      substitute for either
+
+### Stage 12 — raise the cap
+
+- [ ] `max_instance_count` raised only after 8–11, with the `run.tf` comment
+      rewritten to say what is actually true
+- [ ] Load test that reproduces the 2026-09-21 burst and shows zero shedding
+
+**Success criteria:** the burst that shed 378 requests sheds zero.
+
+## Backlog (filed, not scheduled)
+
+- **Web Push for the closed-tab case only** — "a teammate changed this while
+  you were away". Never as a sync channel (see §Non-goals).
+- **Agent hook cost** — `bdrive sync .` fires per `Write|Edit` tool call *and*
+  per user turn, on top of the daemon's own cycle. `read-log` is already
+  correct (spools locally, never touches the network); the sync hooks could
+  spool a wakeup for the daemon instead of running a full cycle each.
+- **`Setup.tsx:262`** — a 400ms poll with no timeout or attempt cap; a sidecar
+  stuck in `syncing` polls at 2.5 Hz for as long as the window is open.
+- **`db-f1-micro` connection ceiling** (~25) — not a problem at one instance,
+  a hard one at N.
+- **Journal compaction** — `appendOps` reads and rewrites the *whole* journal
+  object per commit (`upload.go:231`), which is O(journal) per write forever.
+
+## Status
+
+| Stage | State | Measured |
+|---|---|---|
+| 1 — daemon stands down | not started | |
+| 2 — scope on push | not started | |
+| 3 — presence on the connection | not started | |
+| 4 — one writer per file | not started | |
+| 5 — tree poll removed | not started | |
+| 6 — durable hub identity | not started | |
+| 7 — refreshing registries | not started | |
+| 8 — auth state to SQL | not started | |
+| 9 — cross-instance fan-out | not started | |
+| 10 — conditional writes | not started | |
+| 11 — co-editing across instances | not started | |
+| 12 — raise the cap | not started | |
+
+Already landed ahead of this PRD (2026-09-21, `beardrive-cloud` #43/#44):
+Cloud Run `timeout` 300s → 3600s (every `/events` and `/ycollab` request was
+ending at exactly 301.0s, all day — the "realtime editing is unstable" report
+and, via `OnLastPeer`, the history-noise one), memory 512Mi → 1Gi (production
+had logged `Memory limit of 512 MiB exceeded with 636 MiB used` four times on
+2026-09-17), concurrency → 1000 and startup CPU boost on.
+
+### Measurements
+
+Record each stage's before/after here, from the two production queries in
+§How success is measured. The baseline row is the one to beat:
+
+| date | req/24h | peak:trough | daemon share | idle daemon req/day |
+|---|---|---|---|---|
+| 2026-09-21 (baseline) | 183,150 | 1.6× | 67% | 17,280 |
