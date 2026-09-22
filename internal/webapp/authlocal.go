@@ -139,6 +139,23 @@ func NewBuiltinAuth(store AccountRepo, allowSignup bool, mail *Mailer) (*Builtin
 	return a, nil
 }
 
+/*
+UsePending gives this provider's CLI sign-in flow a shared, durable home
+
+	for pending grants, so `bdrive login` can span two hub processes.
+
+	On the provider rather than reaching through to a.cli: CLIAuth is an
+	internal collaborator, and a caller that has a MetaStore should be able to
+	hand it over without knowing that. Without this the flow keeps its
+	in-memory store and behaves exactly as it always has, which is right for a
+	single-instance hub.
+*/
+func (a *BuiltinAuth) UsePending(r PendingRepo) {
+	if a != nil && a.cli != nil {
+		a.cli.UsePending(r)
+	}
+}
+
 // OpenBuiltinAuth loads (or starts) the file-backed account registry at path.
 func OpenBuiltinAuth(path string, allowSignup bool, mail *Mailer) (*BuiltinAuth, error) {
 	return NewBuiltinAuth(newFileAccountRepo(path), allowSignup, mail)

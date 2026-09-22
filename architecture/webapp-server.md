@@ -275,6 +275,9 @@ classDiagram
     }
     note for BuiltinAuth "Revocation is now a real edge, not a cookie change: revokeTokensFor / revokeGrantsForLocked kill every device token and pending CLI grant an account holds, DELETE /api/auth/token revokes one by name, and the same path runs on offboarding. BaseURL replaces trusting the request's Host when composing a reset or verification link — a mail link built from an attacker's Host header is a credential delivered to the attacker"
     class CLIAuth {
+        +UsePending(PendingRepo)
+        -pending PendingRepo
+        -seen map[id]ip
         +Register(mux)
         -session func(r) User
         -issue func(w, r, user, device)
@@ -284,7 +287,7 @@ classDiagram
         -atGrantCap per-IP and global caps
     }
     note for CLIAuth "The paths bdrive login POSTs by name, served the same way for every provider: /auth/cli, /auth/device/&lt;token&gt;, /api/auth/exchange, /api/auth/device/start, /api/auth/device/poll."
-    note for CLIAuth "The loopback flow is PKCE (S256) with NO compatibility arm — a grant without a challenge is refused, because the code rides in a URL the browser and anything watching it can see. cliGrant now separates the LINK the human opens from the credential the CLI polls with, takeGranted consumes a grant inside one critical section (peek-then-take let two pollers win the same code), and pending grants are capped globally and per IP with heaviest-first eviction so the map is not a free memory sink"
+    note for CLIAuth "The loopback flow is PKCE (S256) with NO compatibility arm — a grant without a challenge is refused, because the code rides in a URL the browser and anything watching it can see. cliGrant now separates the LINK the human opens from the credential the CLI polls with, takeGranted consumes a grant inside one critical section (peek-then-take let two pollers win the same code), and pending grants are capped globally and per IP with heaviest-first eviction so the map is not a free memory sink. Grants now live in a PendingRepo rather than a map, because `bdrive login` is THREE separate connections — mint, a human approving in a browser, poll — and behind two instances there is no reason any two of them reach the same process. takeGranted therefore reads through the store's ATOMIC Take, so the two-pollers race stays closed across processes and not merely within one. The caps stay per-process on purpose: they bound MEMORY, which is per-process, so `seen` is this process's index of what it holds and the store is the truth. The link resolves through a keyed sidecar row rather than a scan over every grant — a store has no find-by-field, and that scan was already the flagged thing to fix if the ceiling rose"
     class Mailer
     class User {
         +ID +Email +Name +Admin
