@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -158,11 +159,23 @@ func TestStopRecoversLegacyDaemon(t *testing.T) {
 	vdir := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=TestHelperLegacyDaemon", "daemon", "run")
 	cmd.Env = append(os.Environ(), "BDRIVE_TEST_LEGACY_VDIR="+vdir)
+	/* Capture the helper's output and its exit error.
+
+	   Without them the only thing this test could ever say was "never took the
+	   lock", which is true of a helper that is slow, a helper that exited at
+	   once, and a helper that never started — three different bugs behind one
+	   sentence. It failed intermittently on macOS CI for months and every
+	   report was that sentence, so the first guess (too slow) got a longer
+	   deadline and the next failure arrived at exactly the new deadline. That
+	   is what an undiagnosable test costs. */
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	exited := make(chan struct{})
-	go func() { cmd.Wait(); close(exited) }()
+	var waitErr error
+	go func() { waitErr = cmd.Wait(); close(exited) }()
 	defer func() {
 		cmd.Process.Kill()
 		<-exited
@@ -183,8 +196,17 @@ func TestStopRecoversLegacyDaemon(t *testing.T) {
 		if _, ok := Running(vdir); ok {
 			break
 		}
+		select {
+		case <-exited:
+			// It is gone. Say WHY, rather than waiting out a deadline to
+			// report the one thing we already knew.
+			t.Fatalf("the helper exited before taking the lock: %v\noutput: %s",
+				waitErr, strings.TrimSpace(out.String()))
+		default:
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("helper daemon never took the lock")
+			t.Fatalf("helper daemon never took the lock in %v (still running); output: %s",
+				20*time.Second, strings.TrimSpace(out.String()))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
