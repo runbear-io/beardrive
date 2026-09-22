@@ -383,7 +383,7 @@ append one journal — under `BDRIVE_HOME=/tmp` they mint different ids
 (Stage 6 makes that *deliberate* rather than accidental). The real blockers are
 elsewhere and are worse. Ordered; each is a prerequisite for the next.
 
-### Stage 8 — in-memory auth state to SQL — **PARTIAL**
+### Stage 8 — in-memory auth state to SQL — **DONE**
 
 Sign-in would fail roughly half the time on two instances.
 
@@ -414,21 +414,35 @@ Sign-in would fail roughly half the time on two instances.
         was written to close inside one process — every poll in flight when a
         human approves getting its own permanent token — stays closed ACROSS
         processes
-- [ ] **PropelAuth OAuth state nonce** (`cloud/internal/authpropel`) — the
-      biggest single sign-in blocker, in the cloud repo
+- [x] **PropelAuth OAuth state nonce** (`cloud/internal/authpropel`, cloud #47)
+      — the biggest single sign-in blocker, and it was never about journals.
+      The nonce is consumed through the store's atomic `Take`, so a callback
+      replayed from browser history or a forwarded URL cannot be honoured
+      twice, or honoured twice by two instances racing. Defaults to
+      `webapp.NewMemoryPending` — the hub's OWN in-memory store, not a second
+      one with its own expiry rules, which is why that was exported
 - [ ] Builtin email-verify / reset grants (`authlocal.go:78`) — not prod, same
       shape
 
 **Success criteria:** two instances behind a non-sticky LB complete 50/50
 browser sign-ins and 20/20 `bdrive login` flows.
 
-**Partly met.** `bdrive login` now spans processes and is covered by tests
-that mint on one, approve on a second and poll back on the first — including
-the one that matters most, that an approved grant is won by EXACTLY ONE of
-them. What remains is the PropelAuth state nonce in the cloud repo, which is
-what gates the BROWSER half. The two halves are independent: the CLI flow
-would survive two instances today, a browser sign-in would still be a coin
-flip.
+**Met, with one honest qualification.** Every piece of sign-in state that used
+to be a map inside one process now lives in a store any process can read: MCP
+consent codes, CLI one-time codes and device-flow grants, and the OAuth state
+nonce. Each is covered by tests that mint on one process and redeem on
+another, each pairs that with the case that would be a security bug if it
+crossed wrongly (an approved grant won by EXACTLY ONE process; a replayed
+callback refused), and each keeps a permanent CONTRAST test asserting that
+with no shared store the state stays put — which is what a single-instance
+hub should keep doing.
+
+The qualification: this was proven by two provider instances sharing a store
+in one test process, not by literally standing up two Cloud Run instances
+behind the load balancer and counting 50 sign-ins. That test cannot exist
+until the cap is raised, and the cap should not be raised until Stages 10 and
+11 land. So the criterion is met in substance and the literal 50/50 run
+belongs to Stage 12.
 
 ### Stage 9 — cross-instance fan-out — **the transport is done**
 
@@ -541,7 +555,7 @@ of this stage, not a follow-up.
 | 5 — tree poll removed | **amended — kept** | 304s at ~30 bytes; see the stage |
 | 6 — durable hub identity | **done** (#247) | prod had 43 journal keys on a 5-device project |
 | 7 — refreshing registries | **done** (#247) | MCP revocation honoured without a restart; ReadLedger moved to Phase 3 |
-| 8 — auth state to SQL | **partial** (#248, #251) | seam, MCP consent and `bdrive login` done; PropelAuth nonce outstanding |
+| 8 — auth state to SQL | **done** (#248, #251, #252, cloud #47) | every sign-in flow crosses processes; 50/50 live run deferred to Stage 12 |
 | 9 — cross-instance fan-out | **transport done** (#250) | frame crosses, no echo, oversize degrades — on real postgres in CI |
 | 10 — conditional writes | not started | |
 | 11 — co-editing across instances | not started | |
