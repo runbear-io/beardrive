@@ -538,3 +538,16 @@ Record each stage's before/after here, from the two production queries in
 | date | req/24h | peak:trough | daemon share | idle daemon req/day |
 |---|---|---|---|---|
 | 2026-09-21 (baseline) | 183,150 | 1.6× | 67% | 17,280 |
+| 2026-09-22 (Phase 1+2 deployed) | *pending — needs 24h at the new cadence* | | | |
+
+**Journal-key growth (Stage 6).** Recorded so the next reader can check it
+stopped rather than take my word for it. On 2026-09-22, immediately after the
+Phase 2 deploy (`70f2c46`): **103 journal objects hub-wide, 43 of them on
+`p-c01bde39`** — a project with about five real devices. The id this hub now
+derives from its storage root is `9882b418dfba`; it appears once, the first
+time the hub journals, and then never again. The test of the fix is that the
+count does not move across the NEXT few deploys. It is not proof yet.
+
+The 43 already there are NOT cleaned up. They hold real ops mixed with
+near-empty ones and a journal is append-only, so compaction is its own careful
+job — filed in the backlog, not done.
