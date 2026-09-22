@@ -41,6 +41,12 @@ type sqlMetaStore struct {
 	pending  *sqlPendingRepo
 }
 
+// pgMaxOpenConns bounds this store's share of a Postgres server's connection
+// budget. Ten against the ~25 a db-f1-micro allows leaves room for the auth
+// pool, the relay when it is on, and a human with psql trying to find out
+// what is wrong — which is exactly when the last free connection matters.
+const pgMaxOpenConns = 10
+
 // OpenSQLStore opens (and migrates) a SQL metadata store. driver is "sqlite"
 // or "pgx" (Postgres/Supabase); dsn is the connection string / file path.
 func OpenSQLStore(driver, dsn string) (MetaStore, error) {
@@ -52,6 +58,29 @@ func OpenSQLStore(driver, dsn string) (MetaStore, error) {
 	switch driver {
 	case "pgx", "postgres", "pgx/v5":
 		d = dialectPostgres
+		/* Bound the pool. database/sql opens connections without limit by
+		   default, and a Postgres server does not: a db-f1-micro allows about
+		   25 in total, and every other pool in the process is drawing from
+		   that same budget.
+
+		   Unbounded, a burst of requests opens connections until the server
+		   refuses — and what fails then is not the burst, it is whatever
+		   asks next. On 2026-09-22 that was the SESSION LOOKUP: the hub
+		   started answering 401 for a signed-in user, the SPA bounced to
+		   /auth/login, the login page saw a valid session and bounced back,
+		   and the reload put more load on the pool that caused it. A hub
+		   reloading itself forever, out of one missing line.
+
+		   Conservative on purpose. The cost of being too low is queueing
+		   inside one process, which is invisible and self-correcting; the
+		   cost of being too high is a database that refuses everyone,
+		   including the requests that would have told you why. */
+		db.SetMaxOpenConns(pgMaxOpenConns)
+		db.SetMaxIdleConns(4)
+		// Cloud SQL hangs up on idle connections, and a pooled-but-dead one
+		// surfaces as a random query error rather than a reconnect.
+		db.SetConnMaxLifetime(30 * time.Minute)
+		db.SetConnMaxIdleTime(5 * time.Minute)
 	case "sqlite", "sqlite3":
 		d = dialectSQLite
 	default:

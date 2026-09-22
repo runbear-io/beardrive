@@ -217,3 +217,56 @@ test("a peer's write costs the rest of us almost nothing", async ({ page, browse
   expect(seen.length, `a one-file write cost ${seen.length} requests: ${seen.join(", ")}`)
     .toBeLessThanOrEqual(2);
 });
+
+/* A 401 must never become an infinite reload.
+
+   On 2026-09-22 the hub ran out of database connections, session lookups
+   began failing intermittently, and a signed-in user got a 401. The app
+   bounced to /auth/login, which saw a perfectly valid session and bounced it
+   straight back — and the reload issued the same requests against the pool
+   whose exhaustion had caused the 401. The page reloaded about once a second,
+   indefinitely, and every lap made the underlying problem worse.
+
+   The redirect is still right for someone genuinely signed out. What is wrong
+   is doing it a second time after it has just failed to help. */
+test("a session the hub keeps rejecting does not reload the page forever", async ({ page }) => {
+  test.setTimeout(90_000);
+  await login(page, ADMIN);
+  const pid = await wikiId(page);
+
+  let loads = 0;
+  page.on("framenavigated", (f) => {
+    if (f === page.mainFrame()) loads++;
+  });
+
+  // Every project call 401s, the way an exhausted connection pool made them.
+  await page.route("**/api/p/**", (r) =>
+    r.fulfill({ status: 401, body: "unauthorized" }),
+  );
+  /* And /auth/login sends the browser straight back, which is the half that
+     makes this a LOOP rather than a dead end.
+
+     This hub uses the builtin provider, whose login page renders a form and
+     stays there — so without this route the app bounces once, lands on a
+     form, and stops. The first version of this test did exactly that and
+     passed with the guard deliberately disabled: it was asserting that a
+     loop which could not form did not form. Production loops because an SSO
+     provider sees a valid session and redirects back, every time. */
+  await page.route("**/auth/login*", (r) =>
+    r.fulfill({
+      status: 303,
+      headers: { location: `/${pid}/` },
+      body: "",
+    }),
+  );
+
+  await page.goto(`/${pid}/`);
+  await page.waitForTimeout(20_000);
+
+  // One bounce is legitimate. Anything beyond that is the loop.
+  expect(
+    loads,
+    `the page navigated ${loads} times under a persistent 401; a hub having a ` +
+      `bad moment must not turn into a browser that reloads itself forever`,
+  ).toBeLessThanOrEqual(3);
+});
