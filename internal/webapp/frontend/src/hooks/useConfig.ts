@@ -13,6 +13,30 @@ export function useConfig() {
     queryFn: async () => {
       const cfg = await getJSON<ServerConfig>("/api/config");
       if (cfg.auth.enabled && !cfg.me) {
+        /* Same loop guard as toLogin, and for the same reason: /auth/login
+           will happily send a signed-in user straight back here, so if the
+           hub says "no session" twice running, bouncing again just reloads
+           the page forever. Throw instead — the app shows the error and the
+           user can act on it. */
+        const KEY = "bdrive:login-bounce";
+        let bounced = 0;
+        try {
+          bounced = Number(sessionStorage.getItem(KEY) || 0);
+        } catch {
+          /* no storage: behave as before */
+        }
+        if (bounced && Date.now() - bounced < 30_000) {
+          throw new Error(
+            "The server does not recognise your session, and signing in again " +
+              "did not help. It is probably having a bad moment — wait a few " +
+              "seconds and reload.",
+          );
+        }
+        try {
+          sessionStorage.setItem(KEY, String(Date.now()));
+        } catch {
+          /* no storage: behave as before */
+        }
         location.href =
           "/auth/login?next=" +
           encodeURIComponent(location.pathname + location.search);

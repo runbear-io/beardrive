@@ -38,7 +38,57 @@ function trackWrite(method: string, url: string) {
   if (hit) track(hit[1]);
 }
 
+/* Bouncing to the login page is a FULL PAGE LOAD, so it must never be
+   something the app can do twice in a row.
+
+   It did, on 2026-09-22. The hub's database ran out of connections, session
+   lookups started failing intermittently, and a signed-in user got a 401.
+   This function sent the browser to /auth/login, which saw a perfectly valid
+   session and sent it straight back — and the reload issued the same requests
+   again, against the pool whose exhaustion caused the 401 in the first place.
+   The page reloaded about once a second, indefinitely, and every lap made the
+   underlying problem worse.
+
+   The redirect is still right for someone who is genuinely signed out. What
+   is wrong is doing it again after it has just failed to help. So: one bounce
+   per window, recorded where a page load can see it, and the second time we
+   surface the error instead. A visible failure is recoverable; a reload loop
+   is not — the user cannot even open devtools on a page that keeps dying. */
+const BOUNCE_KEY = "bdrive:login-bounce";
+const BOUNCE_WINDOW_MS = 30_000;
+
+/* There is deliberately no "auth worked, clear the marker" call.
+
+   The first version of this had one, called when /api/config came back with
+   a user — and it defeated the whole guard, because in the loop /api/config
+   SUCCEEDS. Only the project calls were 401ing. So every lap cleared the
+   marker that was supposed to stop the next lap, and the e2e caught it:
+   234 navigations in twenty seconds with the guard supposedly in place.
+
+   The marker therefore just expires. The cost is narrow and acceptable: a
+   second genuine session expiry within the window shows an error instead of
+   redirecting, and the user reloads. The alternative cost is a page that
+   reloads forever, which a user cannot even open devtools on. */
+
 function toLogin(): never {
+  let bounced = 0;
+  try {
+    bounced = Number(sessionStorage.getItem(BOUNCE_KEY) || 0);
+  } catch {
+    /* no storage: fall through and redirect, as before */
+  }
+  if (bounced && Date.now() - bounced < BOUNCE_WINDOW_MS) {
+    throw new HttpError(
+      401,
+      "The server rejected your session, and signing in again did not help. " +
+        "It is probably having a bad moment — wait a few seconds and reload.",
+    );
+  }
+  try {
+    sessionStorage.setItem(BOUNCE_KEY, String(Date.now()));
+  } catch {
+    /* as above */
+  }
   // Auth required: sign in, then come back to the current route.
   location.href =
     "/auth/login?next=" +
