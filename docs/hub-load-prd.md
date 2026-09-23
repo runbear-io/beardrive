@@ -267,18 +267,39 @@ The hub holds the document (`ycollab.go`) and already snapshots it. With a
 hub-held room live, the browser's idle save is redundant — and worse, it is
 redundant **per co-editor**.
 
-- [x] `sharedfile.ts` — the idle save does not fire for changes that arrived
-      from a peer; only local edits arm the timer
-- [x] With a live hub-held room, the client defers the write to the hub
+**Correction (2026-09-23).** This list was ticked in full in #246 and two of
+its boxes were not true. #246 implemented only the first one — local edits
+alone arm the client's timer. "The client defers the write to the hub" and
+"a periodic snapshot while a room is live" were ticked and not built; the hub
+still snapshotted only on last-peer/unload, and every co-editor still wrote
+the file. That gap is the direct cause of every conflict copy produced between
+#246 and #260, including the 0-byte report and the 8x-duplicated document
+found during the cleanup. Two client-side patches (#257, #258) treated the
+symptom before the cause was recognised. The boxes now say which PR made
+each true.
+
+- [x] (#246) `sharedfile.ts` — the idle save does not fire for changes that
+      arrived from a peer; only local edits arm the timer
+- [x] (#260) With a live hub-held room, the client defers the write to the hub
       entirely; the solo path (no room) keeps saving exactly as today
-- [x] `ycollab.go` — a periodic snapshot while a room is live, so a long
-      session is not one write at the end. Identical content still journals
+- [x] (#260) `ycollab.go` — the hub subscribes to every update
+      (`crdt.Doc.OnUpdate`) and writes once per pause: 2s idle, never later
+      than 10s after the first change. Identical content still journals
       nothing (`upload.go`), so cadence is cheap
+- [x] (#260) An outside writer is never silently overwritten: a hub snapshot
+      carries `If-Match`, and a 409 — which with one writer can only be an
+      agent, the CLI or a device — parks the room's version beside the file
+      under the sync path's conflict name, attributed to the human who was
+      editing, then rebases. Folding the outside write INTO the live document
+      is the better answer and is filed, not done
 - [x] The crash case stays covered: `OnLastPeer`/`OnUnloadDocument` unchanged
-- [x] Test: four simulated editors typing for 60s produce **one** journal
-      version per quiet period, not four
-- [x] **Verified the test FAILS** against the current client (it must count the
-      N identical PUTs)
+- [x] (#246) Test: a bystander in a shared document issues zero writes;
+      (#260) in a live room NO client writes and the file still updates — the
+      second fails against the pre-#260 bundle with "clients in a live room
+      wrote the file themselves: A"
+- [x] (#260) Five server tests, each seen to fail with its mechanism removed:
+      no watcher (two), no `If-Match` (one), seeding-is-not-a-write, and
+      dropped-room-does-not-write. Race-clean
 
 **Success criteria**
 
@@ -678,7 +699,7 @@ habit worth carrying out of this document.
 | 1 — daemon stands down | **done** (#246) | 10 polls in 3s → 1, gate re-run against unfixed daemon |
 | 2 — scope on push | **done** (#246) | rule change reaches a device in <1s, was up to 5 min |
 | 3 — presence on the connection | **done** (#246) | zero presence requests in a 70s idle window |
-| 4 — one writer per file | **done** (#246) | a bystander in a room issues zero writes |
+| 4 — one writer per file | **done** (#246 half, #260 the rest) | the hub is the sole writer for a live room; ticked early in #246, corrected 09-23 |
 | 5 — tree poll removed | **amended — kept** | 304s at ~30 bytes; see the stage |
 | 6 — durable hub identity | **done** (#247) | prod had 43 journal keys on a 5-device project |
 | 7 — refreshing registries | **done** (#247) | MCP revocation honoured without a restart; ReadLedger moved to Phase 3 |
@@ -687,6 +708,19 @@ habit worth carrying out of this document.
 | 10 — conditional writes | **journal done** (#254) | the lost-update interleaving, injected and survived; quota/seat caps deferred |
 | 11 — co-editing across instances | **blocked** | room affinity impossible on Cloud Run; needs Redis |
 | 12 — raise the cap | **blocked on 11** | every other blocker cleared |
+
+### Stage 4 postscript (2026-09-23)
+
+The lesson is not about co-editing. Three boxes were ticked by a script that
+replaced `- [ ]` with `- [x]` across a stage, on the strength of the stage's
+first item being done. Nothing re-read the list against the code. The two
+untrue ticks then sat under "done" for two days while the bug they described
+produced a 0-byte file, an 8x-duplicated document and forty-four conflict
+copies, and two PRs patched around it because the PRD said the cause could not
+be the cause.
+
+A tick is a claim. Each one now names the PR that made it true, and a stage is
+not "done" until every box has one.
 
 ### Phase 1 notes (2026-09-21)
 
