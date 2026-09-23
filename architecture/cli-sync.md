@@ -259,7 +259,7 @@ classDiagram
 
     class Commands {
         init login logout
-        sync stop scope grep stale forget status log
+        sync stop scope grep stale forget status log lesson
         restore url share export import
         web desktop daemon hooks read-log
         resume autostart mcp
@@ -269,6 +269,7 @@ classDiagram
     note for Commands "desktopRoutes classifies every per-project hub route as local (with a required reason) or proxied, and desktopHandler REGISTERS FROM IT — so &quot;classified as proxied&quot; and &quot;actually proxied&quot; cannot drift. It exists because the desktop mux falls through to a local server, which makes forgetting a route invisible: the local registry answers plausibly and wrongly. TestDesktopRoutesClassified fails on any hub route not listed, reading the hub's own list from webapp.APIRoutes"
     note for Commands "cmd/bdrive — thin cobra layer; init is the front door (one command: login + hooks + sync + link), stop pauses"
     note for Commands "grep searches file CONTENTS in the working folder via syncer.SyncedFiles — LoadProject not ResolveMount (a read must not enroll the device), no session, no flock, and the volume store is opened only if it already exists, so a search creates nothing. Exit 1 on no match is a status, not an error (errNoMatch + SilenceErrors). stale copies that whole posture and swaps the predicate: it extracts path-shaped references from synced markdown, keeps only the ones resolving into the SyncedFiles set, and flags a doc whose reference was written later. It dates a path from the JOURNAL, not os.Stat — materialize stamps a peer's file with this device's mtime, so mtime comparison reports nothing on a freshly cloned machine — folding st.AllOps() to the max syncer.DisplayTime per path, which drops a forged future stamp instead of dating that path to year 1. Unlike grep it exits 0 either way: advisory output, not a gate"
+    note for Commands "lesson appends one line to lessons/&lt;device-id&gt;.md — one file per DEVICE, so two people recording at once never share a writer and never produce a conflict copy — after refusing anything that would not reach the hub (SkipUp, persisted ReadOnly/Denied/Access), then runs one cycle. sync --hook injects teammates' NEW lesson lines from the paths it already drained (never a second drain, never a walk): lines are hashed against lessons-seen.json in the volume store, a file must open with the lesson header, cap 10 per turn, and the seen set is saved only after the context is emitted"
     note for Commands "Every peer-authored string status / log / whoami print goes through safeField first — a teammate's file name is attacker-controlled text landing in your terminal, and an escape sequence there rewrites the line above it. grep runs BOTH the path and the matched line through it — a matched line is a teammate's file content, the widest version of that surface. login now does PKCE on the loopback callback (no compat arm) and both its client and init's refuse to follow a redirect off the hub's origin with the device token attached"
 
     class Templates {
