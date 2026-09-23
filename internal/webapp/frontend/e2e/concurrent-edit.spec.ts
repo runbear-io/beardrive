@@ -292,6 +292,87 @@ test("a save refused for a stale base is retried, not parked beside the file", a
   expect(text, "the retried save never landed").toContain("TYPED");
 });
 
+/* The other direction: the FILE is ahead of us.
+
+   Shipped the first version of the retry and four more conflict copies
+   appeared within minutes, each a strict SUBSET of the file beside it:
+
+     live:  status: active aaaasdfasdfjoais djfoi
+     copy:  status: active aaa
+
+   A peer had saved a newer state of the shared document while our save was in
+   flight. Our text held nothing the file lacked, so there was nothing to
+   write and nothing to preserve — and parking it produced a copy of the file
+   against an older version of itself.
+
+   Containment has two directions and only one was handled. This is the
+   other. */
+test("a save the file has already moved past is dropped, not parked", async ({ page }) => {
+  test.setTimeout(60_000);
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = `file-ahead-${Date.now()}.md`;
+  await page.request.put(
+    `/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`,
+    { data: "BASE\n" },
+  );
+
+  await page.goto(`/${id}/edit/${file}`);
+  await page.waitForSelector(".cm-host .cm-content");
+  await page.waitForTimeout(2_000);
+
+  /* Refuse the save, and have the hub's copy be a SUPERSET of what the editor
+     is holding — which is what a peer saving a newer state looks like from
+     here. The browser's own text is "BASE TYPED"; the file gets more after
+     it, so the editor's version is strictly behind. */
+  let refused = false;
+  await page.route("**/upload/content*", async (r) => {
+    const u = r.request().url();
+    if (!refused && r.request().method() === "PUT" && !u.includes("bdrive-conflict")) {
+      refused = true;
+      // Put the ahead-version on the server for the client to re-read.
+      await page.request.put(
+        `/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`,
+        { data: "BASE TYPED AND-MORE-FROM-A-PEER\n" },
+      );
+      await r.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "this file changed since you last read it", path: file, sha: "0".repeat(64) }),
+      });
+      return;
+    }
+    await r.continue();
+  });
+
+  await page.locator(".cm-host .cm-line").first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" TYPED");
+  await page.waitForTimeout(6_000);
+
+  expect(refused, "the 409 was never delivered, so nothing was tested").toBeTruthy();
+
+  const feed = await (await page.request.get(`/api/p/${id}/history?prefix=&n=100`)).json();
+  const copies: string[] = [
+    ...new Set(
+      feed.entries
+        .map((e: { path: string }) => e.path)
+        .filter((p: string) => p.includes(".bdrive-conflict-")),
+    ),
+  ];
+  expect(
+    copies,
+    `the file had already moved past this save, yet it was parked as ` +
+      `${copies.join(", ")} — a conflict copy that is a subset of the file beside it`,
+  ).toHaveLength(0);
+
+  // And the peer's newer text is what survived.
+  const text = await (
+    await page.request.get(`/api/p/${id}/file?path=${encodeURIComponent(file)}`)
+  ).text();
+  expect(text, "the newer version was overwritten by the stale save").toContain("AND-MORE-FROM-A-PEER");
+});
+
 /* NOT KEPT: a timing-based version of the test above.
 
    Three attempts tried to provoke the 409 by racing two real editors — hold

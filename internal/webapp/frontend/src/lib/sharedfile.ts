@@ -175,13 +175,41 @@ export function openSharedFile(opts: {
   /* rebaseOnLostRace turns a refused save into a retried one, ONCE, when the
      refusal was a race rather than a disagreement.
 
-     Returns true when the retry landed. Deliberately not a loop: a second
-     failure means the path is genuinely contended by someone outside the
-     room, and a conflict copy is the honest answer to that. */
+     Two ways a refusal is a race rather than a disagreement, and BOTH have
+     to be handled — shipping only the first is what produced conflict copies
+     that were subsets of the files they sat beside:
+
+       ours contains theirs  -> our write is the superset; rebase and retry
+       theirs contains ours  -> the file is ahead; drop the write entirely
+
+     Returns true when there is nothing left to do. Deliberately not a loop:
+     if neither containment holds, the path is genuinely contended by someone
+     outside the room and a conflict copy is the honest answer. */
   const rebaseOnLostRace = async (text: string): Promise<boolean> => {
     try {
       const head = await fetchBlobText(fileURLFor(opts.apiBase, opts.path));
       if (head.kind !== "text" || !head.sha) return false;
+
+      /* THE FILE IS AHEAD OF US.
+
+         Our text holds nothing the file lacks — a peer saved a newer state of
+         the document we share while our save was in flight, so what we were
+         writing is simply out of date. There is nothing to write and nothing
+         to preserve: parking it beside the file produces a conflict copy that
+         is a SUBSET of the file it sits next to, which is what shipped in the
+         first version of this fix and what put four more copies in a project
+         minutes after it deployed.
+
+         Record where the file is and go clean. Our own document catches up
+         over the websocket like everyone else's. */
+      const oursToTheirs = textEdit(text, head.text);
+      if (!oursToTheirs || oursToTheirs.from === oursToTheirs.to) {
+        saved = head.text;
+        rebase(head.sha);
+        setState("clean");
+        return true;
+      }
+
       // Their text must be contained in ours, or we would be erasing work
       // this document never saw. Same test merge() uses, same reason.
       const theirsToOurs = textEdit(head.text, text);
