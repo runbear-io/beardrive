@@ -2,11 +2,14 @@ package webapp
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 	ygows "github.com/reearth/ygo/provider/websocket"
@@ -57,7 +60,13 @@ func (s *Server) ydocs() *ygows.Server {
 		// last editor leaves.
 		srv.OnLoadDocument = func(_ context.Context, room string, doc *crdt.Doc) error {
 			s.rooms().load(room, doc)
-			return s.seedDoc(room, doc)
+			if err := s.seedDoc(room, doc); err != nil {
+				return err
+			}
+			// AFTER the seed, so the bytes the document was built from are
+			// never mistaken for an edit that needs writing back.
+			s.watchRoom(room, doc)
+			return nil
 		}
 		srv.OnLastPeer = func(ctx context.Context, room string) { s.snapshotRoom(ctx, room) }
 		srv.OnUnloadDocument = func(ctx context.Context, room string) {
@@ -145,10 +154,11 @@ func (s *Server) handleYCollab(v *volume, w http.ResponseWriter, r *http.Request
 // The hub can just do it. This runs once, when the room is created and before
 // any client is attached, so there is nothing to claim and nothing to race.
 func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
-	body, ok := s.roomBytes(room)
+	body, sha, ok := s.roomBytes(room)
 	if !ok || len(body) == 0 {
 		return nil // a file that does not exist yet starts empty
 	}
+	s.rooms().rebase(room, sha)
 	txt := doc.GetText("body")
 	doc.Transact(func(txn *crdt.Transaction) {
 		txt.Insert(txn, 0, string(body), nil)
@@ -156,35 +166,36 @@ func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
 	return nil
 }
 
-// roomBytes is the file behind a room, bounded.
-func (s *Server) roomBytes(room string) ([]byte, bool) {
+// roomBytes is the file behind a room, bounded, with the blob it currently is
+// — the sha every write to it must name in If-Match.
+func (s *Server) roomBytes(room string) ([]byte, string, bool) {
 	project, path, ok := strings.Cut(room, "/")
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	_, v, err := s.projectVolume(project)
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
 	ctx := context.Background()
 	snap, err := v.snapshot(ctx)
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
 	fi, ok := snap.files[path]
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	rc, err := v.source.Open(ctx, path, fi)
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
 	defer rc.Close()
 	body, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes))
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
-	return body, true
+	return body, fi.Blob, true
 }
 
 // snapshotRoom writes the document back to the file.
@@ -211,19 +222,92 @@ func (s *Server) snapshotRoom(ctx context.Context, room string) {
 		return // nobody with write access ever joined: nothing to attribute
 	}
 	text := doc.GetText("body").ToString()
-	if cur, ok := s.roomBytes(room); ok && string(cur) == text {
+	cur, curSha, have := s.roomBytes(room)
+	if have && string(cur) == text {
+		s.rooms().rebase(room, curSha)
 		return // the file already says this
 	}
+	if s.apiMux == nil {
+		return
+	}
+	base := s.rooms().base(room)
+	w := s.putAs(ctx, who, project, path, text, base)
+	switch w.code {
+	case http.StatusOK:
+		if sha := reportedSha(w); sha != "" {
+			s.rooms().rebase(room, sha)
+		}
+	case http.StatusConflict:
+		/* Somebody OUTSIDE the room wrote the file — an agent, the CLI, a
+		   device — since the hub last did. Everyone inside the room shares
+		   this document, so a 409 here can never be a co-editor; the room
+		   itself is the only thing that writes on their behalf.
+
+		   Same answer the client gave when it held the pen: theirs is the
+		   file, ours goes beside it under the conflict name the sync path has
+		   always used, attributed to the human who was editing. Then the room
+		   rebases onto the new head, so the NEXT snapshot is not refused for
+		   the same reason forever. Nothing is lost on either side; a reader
+		   is told, via the change frame the copy raises, that two versions
+		   exist. Folding the outside write INTO the live document is the
+		   better answer and is the hub's to give, since it is the one place
+		   the splice could be made exactly once — filed, not done. */
+		copy := conflictPath(path, who, time.Now())
+		s.putAs(ctx, who, project, copy, text, "")
+		if head := reportedSha(w); head != "" {
+			s.rooms().rebase(room, head)
+		}
+		log.Printf("bdrive: %s was written outside its co-editing room; the room's version is beside it as %s", path, copy)
+	}
+}
+
+// putAs writes one path through the ordinary upload door as a human, with
+// the base the write is conditional on ("" for unconditional).
+func (s *Server) putAs(ctx context.Context, who User, project, path, text, base string) *memWriter {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
 		"/api/p/"+url.PathEscape(project)+"/upload/content?path="+url.QueryEscape(path),
 		strings.NewReader(text))
-	if err != nil || s.apiMux == nil {
-		return
+	if err != nil {
+		return &memWriter{code: 0, hdr: http.Header{}}
+	}
+	if base != "" {
+		req.Header.Set("If-Match", base)
 	}
 	// The human, never the hub: an op authored by "the server" is a
 	// regression in History even when the server is holding the pen.
 	req = withUser(req, who)
-	s.apiMux.ServeHTTP(newMemWriter(), req)
+	w := newMemWriter()
+	s.apiMux.ServeHTTP(w, req)
+	return w
+}
+
+// reportedSha reads the blob the upload door reports — on a 200 the one it wrote,
+// on a 409 the one that is there instead.
+func reportedSha(w *memWriter) string {
+	var out struct {
+		Sha string `json:"sha"`
+	}
+	_ = json.Unmarshal(w.body.Bytes(), &out)
+	return out.Sha
+}
+
+// conflictPath is the sync path's conflict name, for a room's version parked
+// beside a file somebody else wrote: <name>.bdrive-conflict-<who>-<utc>.
+func conflictPath(path string, who User, at time.Time) string {
+	name := who.Name
+	if name == "" {
+		name = who.Email
+	}
+	if name == "" {
+		name = "hub"
+	}
+	safe := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, name)
+	return path + ".bdrive-conflict-" + safe + "-" + at.UTC().Format("20060102T150405Z")
 }
 
 // roomRegistry keeps a live room's document addressable, and remembers who may
@@ -234,11 +318,28 @@ type roomRegistry struct {
 	mu    sync.Mutex
 	docs  map[string]*crdt.Doc
 	users map[string]User
+	// bases is the blob each room last wrote or was seeded from: the If-Match
+	// of its next snapshot. It is what turns "the hub is the only writer" from
+	// a convention into a guarantee that an outside writer is never silently
+	// overwritten.
+	bases map[string]string
+	// pending is a room's armed snapshot, and the wall-clock deadline it may
+	// not be pushed past by more typing.
+	pending map[string]*roomFlush
+	unsubs  map[string]func()
+}
+
+type roomFlush struct {
+	timer    *time.Timer
+	deadline time.Time
 }
 
 func (s *Server) rooms() *roomRegistry {
 	s.roomOnce.Do(func() {
-		s.roomReg = &roomRegistry{docs: map[string]*crdt.Doc{}, users: map[string]User{}}
+		s.roomReg = &roomRegistry{
+			docs: map[string]*crdt.Doc{}, users: map[string]User{},
+			bases: map[string]string{}, pending: map[string]*roomFlush{}, unsubs: map[string]func(){},
+		}
 	})
 	return s.roomReg
 }
@@ -247,6 +348,83 @@ func (r *roomRegistry) load(room string, doc *crdt.Doc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.docs[room] = doc
+}
+
+func (r *roomRegistry) rebase(room, sha string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bases[room] = sha
+}
+
+func (r *roomRegistry) base(room string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.bases[room]
+}
+
+/*
+The hub is the only writer while a room is live.
+
+	Every co-editor used to write the file themselves, 700ms after their own
+	last keystroke, each against whatever If-Match they last saw. With one
+	document shared by N people that is N writers racing for one file, and
+	every lost race parked somebody's text beside the file as a "conflict" that
+	was the file against itself. Two rounds of client-side retry logic later,
+	it was still happening, because the race is between reading the base and
+	the write arriving, and no amount of care about timing closes that.
+
+	So nobody in the room writes. The hub holds the document, sees every
+	update, and writes ONCE per pause: two seconds after the last change, or
+	ten seconds after the first if the typing never pauses — the numbers
+	Hocuspocus settled on for onStoreDocument, for the same reasons. One
+	writer means an If-Match refusal can only ever come from someone outside
+	the room, which is exactly the case it should be reserved for.
+
+	OnUpdate must return at once — nothing on it may block or re-enter the
+	document — so all it does is (re)arm a timer. The write runs on the
+	timer's goroutine.
+*/
+// Vars, not consts: a test that waits ten real seconds to see a deadline fire
+// is a test nobody runs. Production never sets them.
+var (
+	snapshotIdle = 2 * time.Second
+	snapshotMax  = 10 * time.Second
+)
+
+func (s *Server) watchRoom(room string, doc *crdt.Doc) {
+	unsub := doc.OnUpdate(func(_ []byte, _ any) { s.rooms().touched(room, func() { s.snapshotRoom(context.Background(), room) }) })
+	r := s.rooms()
+	r.mu.Lock()
+	if old := r.unsubs[room]; old != nil {
+		old()
+	}
+	r.unsubs[room] = unsub
+	r.mu.Unlock()
+}
+
+// touched (re)arms a room's snapshot: idle from now, but never later than
+// max from when the burst began.
+func (r *roomRegistry) touched(room string, flush func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	p := r.pending[room]
+	if p == nil {
+		p = &roomFlush{deadline: now.Add(snapshotMax)}
+		r.pending[room] = p
+	} else {
+		p.timer.Stop()
+	}
+	wait := snapshotIdle
+	if left := p.deadline.Sub(now); left < wait {
+		wait = max(left, 0)
+	}
+	p.timer = time.AfterFunc(wait, func() {
+		r.mu.Lock()
+		delete(r.pending, room)
+		r.mu.Unlock()
+		flush()
+	})
 }
 
 func (r *roomRegistry) writer(room string, u User) {
@@ -265,8 +443,17 @@ func (r *roomRegistry) get(room string) (*crdt.Doc, User, bool) {
 func (r *roomRegistry) drop(room string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if p := r.pending[room]; p != nil {
+		p.timer.Stop() // OnUnloadDocument has already snapshotted; nothing left to flush
+		delete(r.pending, room)
+	}
+	if u := r.unsubs[room]; u != nil {
+		u()
+		delete(r.unsubs, room)
+	}
 	delete(r.docs, room)
 	delete(r.users, room)
+	delete(r.bases, room)
 }
 
 // maxSeedBytes bounds what becomes a held document. Editing costs roughly ten
