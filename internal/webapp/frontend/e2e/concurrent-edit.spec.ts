@@ -209,6 +209,20 @@ test("a bystander in a shared document does not write the file", async ({ browse
   ).toHaveLength(0);
 });
 
+/* Force the SOLO path: a client whose room never comes up.
+
+   Both 409 tests below exercise the client's own save-and-retry. That path
+   now exists only when the hub does NOT hold the document — in a live room
+   the hub is the sole writer and the client never PUTs, so there is no save
+   to refuse and both tests fail on their own "409 was never delivered" guard.
+   That is the right outcome for a live room, and it is why these tests must
+   run in the other mode: the older-hub / no-websocket-proxy case the retry
+   was kept for. Refusing the upgrade is how a test gets there; the client
+   gives up on the room after UNREACHABLE_MS and mounts solo. */
+async function forceSolo(page: Page) {
+  await page.routeWebSocket(/\/ycollab/, (ws) => ws.close({ code: 1006 }));
+}
+
 /* A save refused for a stale base must be retried, not parked.
 
    From a real session (2026-09-23). The HAR reads:
@@ -240,9 +254,10 @@ test("a save refused for a stale base is retried, not parked beside the file", a
     { data: "BASE\n" },
   );
 
+  await forceSolo(page);
   await page.goto(`/${id}/edit/${file}`);
   await page.waitForSelector(".cm-host .cm-content");
-  await page.waitForTimeout(2_000);
+  await page.waitForTimeout(9_500); // past UNREACHABLE_MS: the editor is solo now
 
   // Refuse exactly one save the way a peer winning the race would, then let
   // everything through. The retry must land on the real path.
@@ -317,9 +332,10 @@ test("a save the file has already moved past is dropped, not parked", async ({ p
     { data: "BASE\n" },
   );
 
+  await forceSolo(page);
   await page.goto(`/${id}/edit/${file}`);
   await page.waitForSelector(".cm-host .cm-content");
-  await page.waitForTimeout(2_000);
+  await page.waitForTimeout(9_500); // past UNREACHABLE_MS: the editor is solo now
 
   /* Refuse the save, and have the hub's copy be a SUPERSET of what the editor
      is holding — which is what a peer saving a newer state looks like from
@@ -371,6 +387,57 @@ test("a save the file has already moved past is dropped, not parked", async ({ p
     await page.request.get(`/api/p/${id}/file?path=${encodeURIComponent(file)}`)
   ).text();
   expect(text, "the newer version was overwritten by the stale save").toContain("AND-MORE-FROM-A-PEER");
+});
+
+/* Nobody in a live room writes the file. The hub does.
+
+   Every co-editor used to PUT the whole file 700ms after their own last
+   keystroke, each against whatever If-Match they last saw — N writers racing
+   for one file. The hub holds the document now and writes once per pause
+   (ycollab.go, watchRoom), so a client that is in a live room must send NO
+   upload at all: not the typist, not the bystander. The file still updates,
+   because the hub did it.
+
+   NOT YET RUN when written: Chromium could not launch on the machine. Must be
+   seen to fail against the pre-change bundle before it is believed. */
+test("in a live room no client writes the file, and the file still updates", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const a = await (await browser.newContext()).newPage();
+  await login(a, ADMIN);
+  const id = await project(a);
+  const file = `hub-writes-${Date.now()}.md`;
+  await a.request.put(`/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`, { data: "BASE\n" });
+
+  const b = await (await browser.newContext()).newPage();
+  await login(b, MEMBER);
+  for (const pg of [a, b]) {
+    await pg.goto(`/${id}/edit/${file}`);
+    await pg.waitForSelector(".cm-host .cm-content");
+  }
+  await a.waitForTimeout(3_000); // both live
+
+  const puts: string[] = [];
+  for (const [pg, who] of [[a, "A"], [b, "B"]] as const) {
+    pg.on("request", (r) => {
+      if (r.method() === "PUT" && r.url().includes("/upload/content")) puts.push(who);
+    });
+  }
+
+  await a.locator(".cm-host .cm-line").first().click();
+  await a.keyboard.press("End");
+  await a.keyboard.type(" FROM-A");
+  await b.locator(".cm-host .cm-line").first().click();
+  await b.keyboard.press("End");
+  await b.keyboard.type(" FROM-B");
+  await a.waitForTimeout(6_000); // past the hub's idle window with margin
+
+  expect(puts, `clients in a live room wrote the file themselves: ${puts.join(",")}`).toHaveLength(0);
+
+  const text = await (await a.request.get(`/api/p/${id}/file?path=${encodeURIComponent(file)}`)).text();
+  expect(text, "the hub never wrote the room's text").toContain("FROM-A");
+  expect(text, "the hub never wrote the room's text").toContain("FROM-B");
+  // And the status line reflects the hub's write landing, not a local one.
+  await expect(a.locator("#editor-state")).toHaveAttribute("data-state", "clean", { timeout: 10_000 });
 });
 
 /* NOT KEPT: a timing-based version of the test above.

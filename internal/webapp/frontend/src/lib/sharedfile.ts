@@ -260,9 +260,27 @@ export function openSharedFile(opts: {
     }
   };
 
+  /* Whether the hub holds this document.
+
+     Once it does, the hub is the ONLY writer (ycollab.go, watchRoom): it sees
+     every update and writes the file once per pause. This client's own save
+     timer used to run beside that — and beside every other co-editor's — and
+     N writers racing for one file is what turned a lost race into a conflict
+     copy of the file against itself. So the moment the room is live the
+     timer here stops being armed, and stays stopped: the hub is now the one
+     that knows the file's version, and a client that reconnects after a blip
+     writing "its" version is exactly the race coming back.
+
+     Never live means solo — an older hub, a proxy that will not upgrade —
+     and then this client saves exactly as it always did. */
+  let hubHoldsIt = false;
+
   const collab = new CollabDoc(
     opts.apiBase + "ycollab?path=" + encodeURIComponent(opts.path),
-    (s) => opts.onCollab?.(s),
+    (s) => {
+      if (s === "live") hubHoldsIt = true;
+      opts.onCollab?.(s);
+    },
     () => opts.onReady(collab),
     () => opts.onSolo(),
     opts.me,
@@ -291,6 +309,10 @@ export function openSharedFile(opts: {
   const onDocChange = (_e: unknown, tx: { origin?: unknown }) => {
     if (collab.isRemote(tx?.origin)) return;
     setState("dirty");
+    // The hub writes for a live room; "dirty" clears when its write comes
+    // back through the change stream and merge() finds the file equal to the
+    // document. Honest, rather than "saved" the moment a key is pressed.
+    if (hubHoldsIt) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => save(collab.text.toString()), SAVE_IDLE_MS);
   };
@@ -354,6 +376,9 @@ export function openSharedFile(opts: {
     if (next === cur) {
       saved = next;
       rebase(nextSha);
+      // For a live room this IS the save landing — the hub's write, back
+      // through the stream — so this is where "dirty" honestly ends.
+      if (hubHoldsIt) setState("clean");
       return "same";
     }
     /* Two different questions, which used to be one.
@@ -417,12 +442,17 @@ export function openSharedFile(opts: {
     current,
     merge,
     rebase,
-    saveNow: () => save(current()),
+    // An explicit save from a live room is a request to the hub, and the
+    // hub is already going to; there is nothing for this client to send.
+    saveNow: () => (hubHoldsIt ? Promise.resolve() : save(current())),
     destroy() {
       if (timer) clearTimeout(timer);
-      // Closing the tab mid-word must not lose the word.
+      // Closing the tab mid-word must not lose the word. For a live room
+      // the hub has the word — it writes on last peer, and on the debounce
+      // for everyone still there — and a parting write from here would be
+      // one more racer against it.
       const text = current();
-      if (text && text !== saved) void save(text);
+      if (!hubHoldsIt && text && text !== saved) void save(text);
       collab.awareness.off("change", onPeerChange);
       collab.text.unobserve(onDocChange);
       collab.destroy();
