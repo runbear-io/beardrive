@@ -209,6 +209,20 @@ test("a bystander in a shared document does not write the file", async ({ browse
   ).toHaveLength(0);
 });
 
+/* Force the SOLO path: a client whose room never comes up.
+
+   Both 409 tests below exercise the client's own save-and-retry. That path
+   now exists only when the hub does NOT hold the document — in a live room
+   the hub is the sole writer and the client never PUTs, so there is no save
+   to refuse and both tests fail on their own "409 was never delivered" guard.
+   That is the right outcome for a live room, and it is why these tests must
+   run in the other mode: the older-hub / no-websocket-proxy case the retry
+   was kept for. Refusing the upgrade is how a test gets there; the client
+   gives up on the room after UNREACHABLE_MS and mounts solo. */
+async function forceSolo(page: Page) {
+  await page.routeWebSocket(/\/ycollab/, (ws) => ws.close({ code: 1006 }));
+}
+
 /* A save refused for a stale base must be retried, not parked.
 
    From a real session (2026-09-23). The HAR reads:
@@ -240,9 +254,10 @@ test("a save refused for a stale base is retried, not parked beside the file", a
     { data: "BASE\n" },
   );
 
+  await forceSolo(page);
   await page.goto(`/${id}/edit/${file}`);
   await page.waitForSelector(".cm-host .cm-content");
-  await page.waitForTimeout(2_000);
+  await page.waitForTimeout(9_500); // past UNREACHABLE_MS: the editor is solo now
 
   // Refuse exactly one save the way a peer winning the race would, then let
   // everything through. The retry must land on the real path.
@@ -317,9 +332,10 @@ test("a save the file has already moved past is dropped, not parked", async ({ p
     { data: "BASE\n" },
   );
 
+  await forceSolo(page);
   await page.goto(`/${id}/edit/${file}`);
   await page.waitForSelector(".cm-host .cm-content");
-  await page.waitForTimeout(2_000);
+  await page.waitForTimeout(9_500); // past UNREACHABLE_MS: the editor is solo now
 
   /* Refuse the save, and have the hub's copy be a SUPERSET of what the editor
      is holding — which is what a peer saving a newer state looks like from
@@ -371,6 +387,8 @@ test("a save the file has already moved past is dropped, not parked", async ({ p
     await page.request.get(`/api/p/${id}/file?path=${encodeURIComponent(file)}`)
   ).text();
   expect(text, "the newer version was overwritten by the stale save").toContain("AND-MORE-FROM-A-PEER");
+});
+
 /* Nobody in a live room writes the file. The hub does.
 
    Every co-editor used to PUT the whole file 700ms after their own last
