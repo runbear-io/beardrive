@@ -2,6 +2,7 @@ import { CollabDoc, type CollabStatus } from "./collab";
 import { textEdit } from "./diff";
 import { HttpError, putText } from "../api/http";
 import { conflictName } from "./conflict";
+import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
 
 /* One open file, shared with everyone else who has it open, and written back
    to the hub when the typing stops.
@@ -140,6 +141,26 @@ export function openSharedFile(opts: {
     } catch (e) {
       if (e instanceof HttpError && e.status === 409) {
         inFlight.delete(text); // preserve() writes under a different path
+        /* A 409 in a shared room is usually a LOST RACE, not a disagreement.
+
+           Everyone in the room holds one document, so a co-editor's save is
+           a past state of the text we are about to write: their bytes are
+           already in our CRDT. If they land between our reading `base` and
+           our PUT arriving, the hub is right to refuse us — our base moved —
+           but parking the result beside the file is nonsense, because our
+           text already contains theirs. A real session did exactly that and
+           collected dozens of conflict copies of files against themselves.
+
+           No amount of care about WHEN we adopt a peer's sha closes this:
+           the window is between the read and the write, and something has to
+           happen after the refusal. So, once: re-read, check that our text
+           still contains theirs, rebase and try again. Same shape as the
+           hub's own journal append (appendConditional), for the same reason.
+
+           If containment fails, the writer was an outsider — an agent, the
+           CLI, another device — whose work is NOT in our document, and the
+           conflict copy below is exactly right. */
+        if (await rebaseOnLostRace(text)) return;
         await preserve(text, e);
         return;
       }
@@ -148,6 +169,32 @@ export function openSharedFile(opts: {
       setState("error");
     } finally {
       inFlight.delete(text);
+    }
+  };
+
+  /* rebaseOnLostRace turns a refused save into a retried one, ONCE, when the
+     refusal was a race rather than a disagreement.
+
+     Returns true when the retry landed. Deliberately not a loop: a second
+     failure means the path is genuinely contended by someone outside the
+     room, and a conflict copy is the honest answer to that. */
+  const rebaseOnLostRace = async (text: string): Promise<boolean> => {
+    try {
+      const head = await fetchBlobText(fileURLFor(opts.apiBase, opts.path));
+      if (head.kind !== "text" || !head.sha) return false;
+      // Their text must be contained in ours, or we would be erasing work
+      // this document never saw. Same test merge() uses, same reason.
+      const theirsToOurs = textEdit(head.text, text);
+      if (theirsToOurs && theirsToOurs.from !== theirsToOurs.to) return false;
+      rebase(head.sha);
+      const out = await putText(contentURL(opts.path), text, base);
+      saved = text;
+      if (out.sha) base = out.sha;
+      setState("clean");
+      opts.onSaved?.(text);
+      return true;
+    } catch {
+      return false; // fall through to the conflict copy
     }
   };
 
@@ -264,11 +311,10 @@ export function openSharedFile(opts: {
     // back through the change stream, or nothing new at all. `inFlight`
     // covers the common case that `saved` cannot — the frame announcing our
     // own write arriving before that write's own response does.
-    /* Adopting the sha is the same decision as accepting the content, so it
-       happens at each ACCEPT below and never here. On "blocked" we are holding
-       work the file does not have; taking their sha would make our next save
-       overwrite them cleanly instead of being refused — turning If-Match from
-       a guard into a rubber stamp. */
+    /* Adopting the sha is NOT the same decision as accepting the content —
+       see the two-questions note below. It never happens here, though: at
+       this point we have not yet read the buffer, so we cannot know whether
+       their bytes are already in it. */
     if (next === saved || inFlight.has(next)) {
       rebase(nextSha);
       return "same";
@@ -282,13 +328,41 @@ export function openSharedFile(opts: {
       rebase(nextSha);
       return "same";
     }
+    /* Two different questions, which used to be one.
+
+       "Can we splice their write into the buffer?" and "is their VERSION a
+       valid base for our next write?" are not the same question, and
+       answering only the first is what put a co-editing session into a loop
+       of conflict copies.
+
+       In a room everyone shares one document, so a peer's save is a PAST
+       STATE of the text we are holding: their bytes are already in our CRDT,
+       arriving over the websocket rather than through this function. We must
+       not splice it (it is already applied, and splicing would apply it
+       twice) — but their sha is exactly the right base for our next save,
+       because our text is theirs plus whatever we have typed since.
+
+       Not assumed, checked. Turning their text into ours deletes nothing iff
+       ours is a strict superset of theirs, which is precisely the condition
+       that makes their version a safe base. An outsider's write — an agent,
+       the CLI, another device — fails that test, keeps the old base, and is
+       still refused with a conflict copy, which is what If-Match is for. */
+    const theirsToOurs = textEdit(next, cur);
+    const oursContainsTheirs = !theirsToOurs || theirsToOurs.from === theirsToOurs.to;
+
     // Unsaved local edits: not ours to resolve. Splicing over a half-typed
     // sentence is the one thing this must never do.
-    if (cur !== saved) return "blocked";
+    if (cur !== saved) {
+      if (oursContainsTheirs) rebase(nextSha);
+      return "blocked";
+    }
     // A co-editor in the room: they are looking at the same stale document
     // and would compute the same splice, and two identical splices into one
     // CRDT is the change applied twice.
-    if (collab.peerCount() > 0) return "blocked";
+    if (collab.peerCount() > 0) {
+      if (oursContainsTheirs) rebase(nextSha);
+      return "blocked";
+    }
     const e = textEdit(cur, next);
     if (!e) return "same";
     if (!collab.text.length && !opts.soloApply) return "blocked";
