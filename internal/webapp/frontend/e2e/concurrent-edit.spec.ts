@@ -208,3 +208,96 @@ test("a bystander in a shared document does not write the file", async ({ browse
       `in a room of N editors that is N writes of identical text per quiet period`,
   ).toHaveLength(0);
 });
+
+/* A save refused for a stale base must be retried, not parked.
+
+   From a real session (2026-09-23). The HAR reads:
+
+     02:59:51  your save        -> 200, base becomes a360…
+     03:00:00  a PEER saves     -> the head moves to 40d2…
+     03:00:01  your next save   -> If-Match: a360… -> 409
+     03:00:02  your work parked -> .bdrive-conflict-…
+
+   The window is between reading `base` and the PUT arriving, so no amount of
+   care about WHEN a peer's sha is adopted can close it — something has to
+   happen after the refusal. In a room a 409 is a LOST RACE, not a
+   disagreement: everyone holds one document, so the peer's bytes are already
+   in our CRDT and our text contains theirs. Re-read, confirm that, rebase,
+   retry once.
+
+   Forced rather than raced. Three earlier versions of this test tried to
+   provoke the 409 with timing and all three passed against the broken code,
+   which is worse than having no test: the window is milliseconds wide and
+   losing it silently is exactly how this shipped. The first PUT is answered
+   409 outright, which is the only part that needs to be true. */
+test("a save refused for a stale base is retried, not parked beside the file", async ({ page }) => {
+  test.setTimeout(60_000);
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = `stale-base-${Date.now()}.md`;
+  await page.request.put(
+    `/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`,
+    { data: "BASE\n" },
+  );
+
+  await page.goto(`/${id}/edit/${file}`);
+  await page.waitForSelector(".cm-host .cm-content");
+  await page.waitForTimeout(2_000);
+
+  // Refuse exactly one save the way a peer winning the race would, then let
+  // everything through. The retry must land on the real path.
+  let refused = false;
+  await page.route("**/upload/content*", async (r) => {
+    const u = r.request().url();
+    if (!refused && r.request().method() === "PUT" && !u.includes("bdrive-conflict")) {
+      refused = true;
+      await r.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "this file changed since you last read it",
+          path: file,
+          sha: "0".repeat(64),
+        }),
+      });
+      return;
+    }
+    await r.continue();
+  });
+
+  await page.locator(".cm-host .cm-line").first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" TYPED");
+  await page.waitForTimeout(6_000);
+
+  expect(refused, "the 409 was never delivered, so nothing was tested").toBeTruthy();
+
+  const feed = await (await page.request.get(`/api/p/${id}/history?prefix=&n=100`)).json();
+  const copies: string[] = [
+    ...new Set(
+      feed.entries
+        .map((e: { path: string }) => e.path)
+        .filter((p: string) => p.includes(".bdrive-conflict-")),
+    ),
+  ];
+  expect(
+    copies,
+    `a stale base produced ${copies.join(", ")} — a conflict copy of the file ` +
+      `against itself, when the text already contained everything the hub had`,
+  ).toHaveLength(0);
+
+  const text = await (
+    await page.request.get(`/api/p/${id}/file?path=${encodeURIComponent(file)}`)
+  ).text();
+  expect(text, "the retried save never landed").toContain("TYPED");
+});
+
+/* NOT KEPT: a timing-based version of the test above.
+
+   Three attempts tried to provoke the 409 by racing two real editors — hold
+   one client's saves, have the other save in the window, type through it.
+   All three passed against the broken code. The window between reading
+   `base` and the PUT arriving is milliseconds wide, and a test that cannot
+   lose that race is a test that cannot fail, which is worse than no test:
+   it reports confidence it has not earned. The forced-409 version above
+   asserts the only thing that actually needs to be true. */
