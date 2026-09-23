@@ -67,16 +67,31 @@ export class CollabDoc {
     const base =
       (u.protocol === "https:" ? "wss://" : "ws://") + u.host + u.pathname;
 
-    /* The room argument is decoration.
+    /* The room name is NOT decoration, and this comment used to say it was.
 
-       y-websocket appends it to the URL, but the hub names the room itself
-       from (project, path) after it has resolved who is asking — because a
-       caller who could name the room could join any project's document by
-       asking for its name. */
-    const provider = new WebsocketProvider(base, "held", this.doc, {
+       To the SERVER it is: the hub names the room itself from (project, path)
+       after resolving who is asking, because a caller who could name the room
+       could join any project's document by asking for its name. That part
+       still holds.
+
+       To the BROWSER it is the whole identity of the document. y-websocket
+       keys its cross-tab BroadcastChannel on serverUrl + "/" + roomname and
+       nothing else — the query params are not in it. With one fixed name for
+       every file, every editor open in the same browser shared one channel
+       and applied each other's updates: two different files, opened in two
+       tabs, mixed into each other. Shipped that way.
+
+       Two fixes, both kept. The channel is DISABLED, because the hub holds
+       the document and is the one source of truth — a tab-to-tab side channel
+       is a second path for the same bytes and is exactly what let the mistake
+       matter. And the name carries the path anyway, so that if anybody ever
+       turns the channel back on it is keyed correctly. encodeURIComponent
+       because y-websocket puts the name straight into the URL. */
+    const provider = new WebsocketProvider(base, encodeURIComponent(path), this.doc, {
       params: { path },
       awareness: this.awareness,
       connect: true,
+      disableBc: true,
     });
     this.ws = provider;
 
