@@ -639,6 +639,9 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			if res.LocalOps > 0 && !doRemote {
 				lastRemote = time.Time{} // push local edits on the next tick
 			}
+			if res.Backfilling {
+				lastRemote = time.Time{} // fetch the next batch on the next tick
+			}
 		}
 
 		select {

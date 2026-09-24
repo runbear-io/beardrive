@@ -106,11 +106,16 @@ type fakeHub struct {
 	lists, scopes, events int
 	streams               []chan struct{}
 	dead                  bool
+
+	// objects are peer journals and blobs the hub serves; failBlobs refuses
+	// that many blob GETs before serving any.
+	objects   map[string][]byte
+	failBlobs int
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
 	t.Helper()
-	h := &fakeHub{}
+	h := &fakeHub{objects: map[string][]byte{}}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/p/{project}/scope", func(w http.ResponseWriter, r *http.Request) {
@@ -123,15 +128,37 @@ func newFakeHub(t *testing.T) *fakeHub {
 	mux.HandleFunc("/api/p/{project}/store/list", func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		h.lists++
+		prefix := r.URL.Query().Get("prefix")
+		objs := []map[string]any{}
+		for k, v := range h.objects {
+			if strings.HasPrefix(k, prefix) {
+				objs = append(objs, map[string]any{"Key": k, "Size": len(v)})
+			}
+		}
 		h.mu.Unlock()
-		writeJSON(w, map[string]any{"objects": []any{}})
+		writeJSON(w, map[string]any{"objects": objs})
 	})
 
 	// Pushes: accept and forget. What this test measures is the polling, and a
 	// push only happens when there is something to push.
 	mux.HandleFunc("/api/p/{project}/store/object", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			http.NotFound(w, r)
+			key := r.URL.Query().Get("key")
+			h.mu.Lock()
+			body, ok := h.objects[key]
+			refuse := ok && strings.HasPrefix(key, "blobs/") && h.failBlobs > 0
+			if refuse {
+				h.failBlobs--
+			}
+			h.mu.Unlock()
+			switch {
+			case refuse:
+				http.Error(w, "shedding load", http.StatusServiceUnavailable)
+			case ok:
+				w.Write(body)
+			default:
+				http.NotFound(w, r)
+			}
 			return
 		}
 		w.WriteHeader(http.StatusOK)
