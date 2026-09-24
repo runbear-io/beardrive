@@ -26,7 +26,7 @@ import { ShareDialog } from "../components/ShareDialog";
 import { ShareBanner } from "../components/ShareBanner";
 import { Palette, type PaletteItem } from "../components/Palette";
 import { ConnectGuide } from "../components/ConnectGuide";
-import { Insights, useInsightsDevices } from "../components/Insights";
+import { Insights, useAgentWeeks, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
 import type { Run } from "../lib/runs";
 import { armGoal, applyGoal, noteScroll, type Goal } from "../lib/scroll";
@@ -84,6 +84,7 @@ export default function Browser(props: {
   const isHome = hub && !!project && !route.path && !route.view;
   const insightsOpen = route.view === "dashboard" || isHome;
   const devices = useInsightsDevices(apiBase, insightsOpen);
+  const agentWeeks = useAgentWeeks(apiBase, insightsOpen && hub && !!project && !!config.reads?.enabled);
   useEffect(() => {
     if (insightsOpen) qc.invalidateQueries({ queryKey: ["heat", apiBase] });
   }, [insightsOpen, apiBase, qc]);
@@ -718,6 +719,7 @@ export default function Browser(props: {
         flatFiles={flatFiles}
         heatMap={heatMap}
         devices={devices}
+        agentWeeks={agentWeeks}
         scope={route.viewTarget || ""}
         loading={!loaded}
         installHref={project ? urlForView("install", project.id) : undefined}
@@ -844,6 +846,7 @@ export default function Browser(props: {
             flatFiles={flatFiles}
             heatMap={heatMap}
             devices={devices}
+            agentWeeks={agentWeeks}
             loading={!loaded}
             onOpenFile={openPath}
             onOpenFolder={openPath}

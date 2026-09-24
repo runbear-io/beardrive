@@ -273,3 +273,50 @@ test("the reads × freshness caption says own views count, scoped or not", async
     );
   }
 });
+
+/* BEA-244: agent reads per doc, this week vs last. The seed puts index.md's
+   30 agent reads today and deploy.md's 5 ten days back — so one doc is "new"
+   and one fell to zero, and the caveat about auto-loaded files is on screen
+   without hovering anything. */
+test("agent reads, this week vs last: trend per doc, caveat visible, scope respected", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/dashboard`);
+
+  const section = page.locator(".in-weeks");
+  await expect(section.locator("h3")).toHaveText("Agent reads, this week vs last");
+  await expect(section.locator(".in-wk-caveat")).toBeVisible();
+  await expect(section.locator(".in-wk-caveat")).toContainText(
+    "Auto-loaded instruction files (CLAUDE.md, AGENTS.md) are loaded without a tool call",
+  );
+
+  const cells = (path: string) =>
+    section.locator(".in-wk-row", { has: page.locator(".in-wk-name", { hasText: new RegExp(`^${path}$`) }) });
+  await expect(cells("index.md").locator(".in-wk-n")).toHaveText(["30", "0"]);
+  await expect(cells("index.md").locator(".in-wk-d")).toHaveText("new");
+  await expect(cells("deploy.md").locator(".in-wk-n")).toHaveText(["0", "5"]);
+  await expect(cells("deploy.md").locator(".in-wk-d")).toHaveText("▼ 5");
+  // Unread docs are listed too — a stale doc must be visible.
+  await expect(cells("runbook.md")).toHaveCount(1);
+  // Human reads never count: guide.md's 9 agent reads, not its 14 total.
+  await expect(cells("guide.md").locator(".in-wk-n").first()).toHaveText("9");
+
+  // Scoped to a folder, only its docs remain.
+  await page.goto(`/${pid}/dashboard/notes`);
+  await expect(section.locator("h3")).toBeVisible();
+  const names = await section.locator(".in-wk-row:not(.in-wk-head) .in-wk-name").allTextContents();
+  expect(names.length).toBeGreaterThan(0);
+  for (const n of names) expect(n.startsWith("notes/")).toBe(true);
+});
+
+// A hub that can't answer the windowed heat hides the section, nothing else.
+test("agent reads section hides when the windowed heat request fails", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.route(/\/heat\?days=(7|14)$/, (r) => r.fulfill({ status: 500, body: "{}" }));
+  await page.goto(`/${pid}/dashboard`);
+  await expect(page.locator(".in-hotpath .in-hp-row").first()).toBeVisible();
+  await expect(page.locator(".in-weeks")).toHaveCount(0);
+});

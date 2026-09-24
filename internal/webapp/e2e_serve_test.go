@@ -370,6 +370,11 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 		stats = append(stats, ReadStat{Project: projectID, Path: rd.path, Day: day,
 			Kind: rd.kind, Actor: rd.actor, Count: rd.n, Last: now})
 	}
+	// The only read older than today: ten days back is "last week" for the
+	// Dashboard's this-week-vs-last section, on a path no other spec counts.
+	stats = append(stats, ReadStat{Project: projectID, Path: "deploy.md",
+		Day: now.AddDate(0, 0, -10).Format("2006-01-02"), Kind: ReadKindAgent, Actor: "seed",
+		Count: 5, Last: now.AddDate(0, 0, -10)})
 	if err := newFileReadRepo(filepath.Join(state, "reads.json")).PutBatch(stats); err != nil {
 		t.Fatal(err)
 	}
