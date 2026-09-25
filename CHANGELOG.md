@@ -4,6 +4,34 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## v0.16.1 — 2026-09-25
+
+**Update your devices.** The fix that matters here is in the client, and a
+hub cannot apply it on a device's behalf.
+
+- **A device no longer keeps a partial copy of a project forever.** A blob
+  whose download failed in the cycle that pulled its op — a dropped
+  connection, a hub shedding load, a `bdrive init` interrupted mid-download —
+  was never requested again, because the peer journal naming it was already
+  on disk and yielded nothing on later pulls. The path stayed unwritten while
+  `bdrive status` reported a healthy mount, and a device joining a large
+  project could hold a small fraction of its files indefinitely. Each remote
+  pass now backfills content the merged state names but the store lacks,
+  in batches bounded by count and bytes; while a backfill is landing
+  content the daemon runs its remote passes back to back instead of waiting
+  out the five-minute watched cadence. Devices already in this state heal
+  on their own after upgrading — no re-init. (#264)
+
+Hub and web editor fixes, live on the managed hub already:
+
+- Co-editing: while a room is live the hub is the only writer of the file,
+  so co-editors no longer race each other into conflict copies (#257, #258,
+  #260), and two files open in one browser no longer mix (#259).
+- The hub bounds its Postgres pool, and a transient 401 no longer turns into
+  an endless login redirect loop (#256).
+- Multi-process hubs: journal appends are compare-and-swap (#254), and
+  `bdrive login` survives landing on a different hub process (#251, #252).
+
 ## v0.16.0 — 2026-09-22
 
 **Deploy hubs before clients.** A hub older than this release refuses the
