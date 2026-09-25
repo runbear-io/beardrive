@@ -218,3 +218,50 @@ export function staleNote(e: HeatEntry | null, time: string | undefined): string
   if (!e || days === null || !isDanger(heatTotal(e), days)) return "";
   return `stale · last changed ${agoLabel(days)}`;
 }
+
+/* ---- agent reads, this week vs last (BEA-244) ----
+   Built from two /heat windows rather than a new endpoint: heat?days=7 is
+   "this week", heat?days=14 minus it is "last week". The server counts a day
+   bucket when Day >= now - days, so days=7 spans today plus the 7 prior UTC
+   days and days=14 spans 15 — the difference is exactly days -14..-8, while
+   "this week" carries one extra, partial day. Close enough for a trend; the
+   UI says "last 7 days" and leaves it there. */
+
+// Instruction files the agent platforms load without a tool call, so the read
+// hook never sees their real use. Ranking them would show the most important
+// doc as the least read. Case-sensitive basenames — that is how platforms match.
+export const AUTO_LOADED = new Set(["CLAUDE.md", "AGENTS.md", "GEMINI.md"]);
+
+export const isDoc = (path: string) => /\.mdx?$/i.test(path);
+
+export interface DocWeek {
+  path: string;
+  thisWeek: number;
+  lastWeek: number;
+}
+
+/* Indexes the maps by tree path, never iterates their (peer-controlled) keys. */
+export function weeklyAgentReads(
+  paths: string[],
+  week: HeatMap,
+  twoWeeks: HeatMap,
+): { rows: DocWeek[]; pinned: DocWeek[] } {
+  const rows: DocWeek[] = [];
+  const pinned: DocWeek[] = [];
+  for (const path of paths) {
+    if (!isDoc(path)) continue;
+    const thisWeek = week[path]?.agent || 0;
+    // A write landing between the two requests can make days=7 exceed days=14.
+    const lastWeek = Math.max(0, (twoWeeks[path]?.agent || 0) - thisWeek);
+    (AUTO_LOADED.has(path.split("/").pop()!) ? pinned : rows).push({ path, thisWeek, lastWeek });
+  }
+  rows.sort((a, b) => b.thisWeek - a.thisWeek || b.lastWeek - a.lastWeek || a.path.localeCompare(b.path));
+  pinned.sort((a, b) => a.path.localeCompare(b.path));
+  return { rows, pinned };
+}
+
+export function weekChange(d: DocWeek): string {
+  if (d.thisWeek === d.lastWeek) return "-";
+  if (d.lastWeek === 0) return "new";
+  return d.thisWeek > d.lastWeek ? `▲ ${d.thisWeek - d.lastWeek}` : `▼ ${d.lastWeek - d.thisWeek}`;
+}

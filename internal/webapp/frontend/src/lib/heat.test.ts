@@ -8,6 +8,7 @@ import { ageRange, ageSpanLabel, isFlatRange, FLAT_AGE_SPREAD, orphanPaths } fro
 import { placeLabels, LABEL_MAX } from "./heat.ts";
 import { HEAT_DISCLOSURE } from "./heat.ts";
 import { HOT_READS, STALE_DAYS, isDanger, daysSince, agoLabel, staleNote } from "./heat.ts";
+import { weeklyAgentReads, weekChange } from "./heat.ts";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { HeatMap } from "../api/types.ts";
@@ -248,7 +249,9 @@ test("agoLabel steps days → months → years", () => {
 });
 
 test("staleNote flags only hot-and-stale files, and says how long", () => {
-  const now = Date.parse("2026-08-18T00:00:00Z");
+  // staleNote measures from the real clock, so the fixtures must too — a
+  // pinned date turned "yesterday" stale once the calendar moved past it.
+  const now = Date.now();
   const jan = new Date(now - 210 * 86400000).toISOString();
   const yesterday = new Date(now - 86400000).toISOString();
   const hot = { agent: 14 };
@@ -262,4 +265,39 @@ test("staleNote flags only hot-and-stale files, and says how long", () => {
   assert.equal(staleNote(null, jan), "");
   assert.equal(staleNote(hot, undefined), "");
   assert.equal(staleNote(FIXTURE["notes/untouched.md"], jan), "");
+});
+
+test("weeklyAgentReads: last week is days=14 minus days=7, clamped, auto-loaded pinned", () => {
+  const week: HeatMap = {
+    "a.md": { agent: 3 },
+    "b.md": { agent: 2, human: 50 },
+    "race.md": { agent: 5 },
+    "notes/CLAUDE.md": { agent: 1 },
+    "x.mdx": { agent: 1 },
+  };
+  const two: HeatMap = {
+    "a.md": { agent: 10 },
+    "b.md": { agent: 2 },
+    "race.md": { agent: 4 },
+    "notes/CLAUDE.md": { agent: 4 },
+    "x.mdx": { agent: 1 },
+    "old.md": { agent: 6 },
+  };
+  const paths = ["a.md", "b.md", "race.md", "notes/CLAUDE.md", "AGENTS.md", "claude.md", "x.mdx", "c.txt", "old.md", "z.md", "y.md"];
+  const { rows, pinned } = weeklyAgentReads(paths, week, two);
+  const get = (p: string) => rows.find((r) => r.path === p)!;
+  assert.deepEqual(get("a.md"), { path: "a.md", thisWeek: 3, lastWeek: 7 });
+  assert.equal(weekChange(get("a.md")), "▼ 4");
+  assert.equal(weekChange(get("b.md")), "new"); // human reads never count
+  assert.equal(get("race.md").lastWeek, 0);
+  assert.equal(weekChange(get("y.md")), "-"); // absent from both maps: 0/0
+  assert.equal(weekChange({ path: "", thisWeek: 9, lastWeek: 4 }), "▲ 5");
+  assert.equal(weekChange({ path: "", thisWeek: 0, lastWeek: 6 }), "▼ 6");
+  assert.deepEqual(pinned.map((p) => p.path), ["AGENTS.md", "notes/CLAUDE.md"]);
+  assert.deepEqual(pinned[1], { path: "notes/CLAUDE.md", thisWeek: 1, lastWeek: 3 });
+  assert.ok(get("claude.md"), "lowercase claude.md is not auto-loaded");
+  assert.ok(get("x.mdx"));
+  assert.ok(!rows.some((r) => r.path === "c.txt"));
+  // thisWeek desc, then lastWeek desc, then path
+  assert.deepEqual(rows.map((r) => r.path), ["race.md", "a.md", "b.md", "x.mdx", "old.md", "claude.md", "y.md", "z.md"]);
 });

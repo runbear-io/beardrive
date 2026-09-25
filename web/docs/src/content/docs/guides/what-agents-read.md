@@ -40,7 +40,7 @@ are decoration.
 ## The project Dashboard
 
 Every project member gets a **Dashboard** with an all/human/agent
-lens — four views:
+lens — five views:
 
 - **Treemap** — every file, cell size by reads, color by staleness, with ⚠ on
   hot-and-stale. Click through to any file.
@@ -52,6 +52,13 @@ lens — four views:
 - **Agent coverage matrix** — which agent devices read which folders. Useful for
   spotting an agent that never discovered the folder at all, which usually means
   a missing [root pointer](/guides/shared-agent-memory/).
+- **Agent reads, this week vs last** — every markdown doc in scope, with its
+  agent reads over the last 7 days against the 7 before, and a ▲/▼ change. Unread
+  docs show as 0 / 0 on purpose: that's how you spot the doc you rewrote for
+  agents that none of them opens. Only reads an agent makes with a tool
+  (Read/Grep/Bash) count. `CLAUDE.md`, `AGENTS.md` and `GEMINI.md` are loaded
+  automatically, without a tool call, so they're pinned below the table as
+  "auto-loaded - not counted" rather than ranked as unused.
 
 ## One session, read and written
 

@@ -13,6 +13,8 @@ import {
   isFlatRange,
   orphanPaths,
   placeLabels,
+  weekChange,
+  weeklyAgentReads,
 } from "../lib/heat";
 import { linkProps } from "../nav";
 
@@ -41,6 +43,28 @@ export function useInsightsDevices(apiBase: string, enabled: boolean) {
     staleTime: 60_000,
   });
   return q.data?.devices ?? null;
+}
+
+export interface AgentWeeks {
+  week: HeatMap;
+  twoWeeks: HeatMap;
+}
+
+// This week vs last for the agent-reads section: heat?days=7 and days=14,
+// null unless BOTH answered — a half pair would print a fake trend. Keys sit
+// under ["heat", apiBase] so Browser.tsx's refresh-on-open prefix-matches
+// them, without colliding with useHeat's exact 30-day key.
+export function useAgentWeeks(apiBase: string, enabled: boolean): AgentWeeks | null {
+  const opts = (days: number) => ({
+    queryKey: ["heat", apiBase, "days", days],
+    queryFn: () => getJSON<{ entries: HeatMap }>(apiBase + "heat?days=" + days),
+    enabled,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const week = useQuery(opts(7)).data?.entries;
+  const twoWeeks = useQuery(opts(14)).data?.entries;
+  return week && twoWeeks ? { week, twoWeeks } : null;
 }
 
 interface Pt {
@@ -82,6 +106,7 @@ export function Insights(props: {
   flatFiles: Node[];
   heatMap: HeatMap | null;
   devices: DeviceHeat[] | null;
+  agentWeeks?: AgentWeeks | null;
   scope?: string; // "" = whole project; a folder scopes to its subtree, a file to itself
   loading?: boolean; // tree not in yet — "this project has no files" would be a lie for a frame
   installHref?: string; // omitted on the project home, which already leads with ConnectGuide
@@ -231,6 +256,14 @@ export function Insights(props: {
         onOpenFile={props.onOpenFile}
         onOpenHistory={props.onOpenHistory}
       />
+
+      {props.agentWeeks && (
+        <AgentWeekTable
+          paths={scoped.map((f) => f.path)}
+          weeks={props.agentWeeks}
+          onOpenFile={props.onOpenFile}
+        />
+      )}
 
       {scopedDevices && scopedDevices.length > 0 && (
         <>
@@ -653,6 +686,98 @@ function HotPath({
         )}
       </p>
     </>
+  );
+}
+
+/* ---- agent reads per doc, this week vs last (BEA-244) ----
+   Rows come from the tree, so an unread doc shows as 0/0 — a stale doc must
+   be visible — and a hidden path can't appear (the tree and /heat share one
+   visibility filter). Auto-loaded instruction files are pinned, not ranked:
+   their real use never passes through the read hook. */
+const WEEK_TOP = 20;
+
+function AgentWeekTable({
+  paths,
+  weeks,
+  onOpenFile,
+}: {
+  paths: string[];
+  weeks: AgentWeeks;
+  onOpenFile: (p: string) => void;
+}) {
+  const [all, setAll] = useState(false);
+  const { rows, pinned } = weeklyAgentReads(paths, weeks.week, weeks.twoWeeks);
+  if (!rows.length && !pinned.length) return null;
+  const shown = all ? rows : rows.slice(0, WEEK_TOP);
+  const quiet = [...rows, ...pinned].every((d) => !d.thisWeek && !d.lastWeek);
+  const row = (path: string, cells: React.ReactNode) => (
+    <div
+      key={path}
+      className="in-wk-row"
+      tabIndex={0}
+      role="button"
+      title={path}
+      onClick={() => onOpenFile(path)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpenFile(path);
+        }
+      }}
+    >
+      <span className="in-wk-name">{path}</span>
+      {cells}
+    </div>
+  );
+  return (
+    <section className="in-weeks">
+      <h3 className="dl-h3">Agent reads, this week vs last</h3>
+      <p className="in-legend in-wk-caveat">
+        Only reads an agent makes with a tool (Read/Grep/Bash) count. Auto-loaded instruction files
+        (CLAUDE.md, AGENTS.md) are loaded without a tool call, so most of their use is invisible
+        here. This week = the last 7 days, today included.
+      </p>
+      <div className="in-hotpath in-weeks-table">
+        <div className="in-wk-row in-wk-head">
+          <span className="in-wk-name">doc</span>
+          <span className="in-wk-n">this wk</span>
+          <span className="in-wk-n">last wk</span>
+          <span className="in-wk-d">change</span>
+        </div>
+        {shown.map((d) => {
+          const c = weekChange(d);
+          return row(
+            d.path,
+            <>
+              <span className="in-wk-n">{d.thisWeek}</span>
+              <span className="in-wk-n">{d.lastWeek}</span>
+              <span className={"in-wk-d" + (c[0] === "▲" || c === "new" ? " up" : c[0] === "▼" ? " down" : "")}>
+                {c}
+              </span>
+            </>,
+          );
+        })}
+        {pinned.map((d) =>
+          row(
+            d.path,
+            <span className="in-wk-pin">
+              auto-loaded - not counted ({plural(d.thisWeek + d.lastWeek, "explicit read")} in 14 days)
+            </span>,
+          ),
+        )}
+      </div>
+      {rows.length > WEEK_TOP && (
+        <button className="in-lens-btn in-wk-more" onClick={() => setAll(!all)}>
+          {all ? "show top " + WEEK_TOP : "show all " + rows.length}
+        </button>
+      )}
+      {quiet && (
+        <p className="in-legend">
+          No agent reads in the last 14 days. Agents' reads are logged by the BearDrive hook (
+          <code>bdrive init</code> installs it).
+        </p>
+      )}
+    </section>
   );
 }
 
