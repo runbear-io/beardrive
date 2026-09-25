@@ -33,6 +33,7 @@ import (
 	"io/fs"
 	"log"
 	"math"
+	"math/rand/v2"
 	"os"
 	"path"
 	"path/filepath"
@@ -118,6 +119,10 @@ type Session struct {
 	// Result.Inbound. Reset at the top of every cycle — a Session is reused
 	// across cycles by the daemon and by the tests.
 	inbound []store.InboundEvent
+
+	// fetched holds the blobs this cycle has already asked the remote for, so
+	// the backfill never downloads one twice in a cycle. Reset with inbound.
+	fetched map[string]bool
 }
 
 // logInbound records one materialized peer path both ways: on this cycle's
@@ -280,6 +285,11 @@ type Result struct {
 	Pruned       int  // paths removed from the hub by --prune (kept on disk)
 	Materialized int  // files written/removed in the working folder
 	Pushed       bool // own journal/blobs uploaded
+	// Backfilling reports that this cycle's backfill landed content and left
+	// more waiting for a later batch, so the next remote pass should come
+	// soon. It stays false while the backfill lands nothing, which is what
+	// keeps blobs the hub cannot serve from holding a daemon at full cadence.
+	Backfilling bool
 	// Inbound names the paths this cycle materialized on a peer's behalf —
 	// the same events the inbound spool queues, carried out of the cycle that
 	// made them so the post_sync hook can hand them to a local command. It
@@ -405,6 +415,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	defer unlock()
 
 	s.inbound = nil
+	s.fetched = map[string]bool{}
 	res := &Result{}
 	cache, err := s.Store.LoadCache(s.mountID())
 	if err != nil {
@@ -712,6 +723,28 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("read journals: %w", err)
 	}
 	target := journal.Replay(all)
+
+	// 4a. Backfill content the merged state names but this store lacks. pull
+	// fetches blobs only for the ops it just downloaded, and a peer journal
+	// already on disk is never downloaded again — so a blob lost in that cycle
+	// (a dropped connection, a hub that shed load, a killed `bdrive init`)
+	// would leave its path unwritten on this device for good.
+	if s.Backend != nil && !blocked {
+		ops, more := s.backfillOps(target, cache, filter)
+		landed, err := s.fetchBlobs(ctx, ops, cache)
+		res.Backfilling = more && landed > 0
+		switch {
+		case err == nil:
+		case errors.Is(err, errBlobContent):
+			// Logged, not reported: the pull that first met these bytes
+			// already said so, and repeating it as Offline on every later
+			// pass would show a device stuck offline over one peer's line.
+			log.Printf("beardrive: backfill: %v", err)
+		default:
+			res.Offline, res.OfflineErr = true, err
+			blocked = true
+		}
+	}
 
 	// The ignore rules sync like any other file, so a peer can receive the new
 	// .bdriveignore and the delete ops it justifies in the same batch. The
@@ -1309,18 +1342,31 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		newOps = append(newOps, fresh...)
 	}
 
-	// Fetch content for new ops. Blobs are uploaded before journals on push,
-	// so anything referenced should exist — but Op.Blob is a string a peer
-	// chose, so "missing" is a case this loop has to survive rather than a
-	// contradiction. A blob that cannot be fetched is left unfetched:
-	// materializeFile skips a path whose content is not in the store yet and
-	// the next cycle retries, which is this package's posture for everything
-	// transient. Abandoning the loop instead meant one op naming a blob that
+	_, err = s.fetchBlobs(ctx, newOps, cache)
+	return newOps, gone, err
+}
+
+// fetchBlobs downloads the content the given put ops name into the blob store
+// and reports how many blobs landed. It returns an error only for a local
+// write failure or, once every other op has been tried, for a blob whose bytes
+// do not hash to its address (errBlobContent).
+func (s *Session) fetchBlobs(ctx context.Context, ops []journal.Op, cache map[string]store.CachedFile) (int, error) {
+	// Blobs are uploaded before journals on push, so anything referenced
+	// should exist — but Op.Blob is a string a peer chose, so "missing" is a
+	// case this loop has to survive rather than a contradiction. A blob that
+	// cannot be fetched is left unfetched: materializeFile skips a path whose
+	// content is not in the store yet and backfillOps hands it back here on a
+	// later cycle, which is this package's posture for everything transient.
+	// Abandoning the loop instead meant one op naming a blob that
 	// was never pushed stopped every complete op behind it from ever landing.
 	var bad error
-	for _, op := range newOps {
-		if op.Kind != journal.KindPut || op.Blob == "" || s.Store.HasBlob(op.Blob) {
+	landed := 0
+	for _, op := range ops {
+		if op.Kind != journal.KindPut || op.Blob == "" || s.fetched[op.Blob] || s.Store.HasBlob(op.Blob) {
 			continue
+		}
+		if s.fetched != nil {
+			s.fetched[op.Blob] = true
 		}
 		// Large files: try the manifest first, sourcing unchanged chunks from
 		// the version of this path we already hold. EVERY failure falls
@@ -1338,6 +1384,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 			}
 			cerr := s.fetchChunked(ctx, op, basis)
 			if cerr == nil {
+				landed++
 				continue
 			}
 			// Fall through to the whole blob only when one actually EXISTS
@@ -1366,7 +1413,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		sum, _, err := s.Store.PutBlobReader(io.LimitReader(rc, pullBound(op.Size)))
 		rc.Close()
 		if err != nil {
-			return newOps, gone, err
+			return landed, err
 		}
 		if sum != op.Blob {
 			// Report it, but do NOT abandon the batch. Content addressing
@@ -1392,8 +1439,55 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 			}
 			continue
 		}
+		landed++
 	}
-	return newOps, gone, bad
+	return landed, bad
+}
+
+// maxBackfill and maxBackfillBytes cap one cycle's retries by count and by the
+// bytes their declared sizes allow it to read. The paths and sizes come from
+// peers' journals, so a peer naming thousands of blobs it never uploaded, or a
+// hub serving wrong bytes under a large declared size, would otherwise cost
+// that much on every remote pass. The shuffle keeps such entries from starving
+// real content that happens to sort first.
+var (
+	maxBackfill      = 512
+	maxBackfillBytes = int64(2 * maxPullBytes)
+)
+
+// backfillOps lists put ops for the paths of the merged state this device
+// would write but holds no content for, one cycle's worth, and whether any were
+// left for a later cycle. A path the state cache already records at the wanted
+// blob is on disk, so a converged volume yields nothing.
+func (s *Session) backfillOps(target map[string]journal.FileState, cache map[string]store.CachedFile, filter *Filter) (picked []journal.Op, more bool) {
+	var ops []journal.Op
+	for rel, want := range target {
+		if want.Blob == "" || filter.Skip(rel) || neverSync(rel) || unsafeRel(rel) {
+			continue
+		}
+		if c, ok := cache[rel]; ok && c.Blob == want.Blob {
+			continue
+		}
+		if s.fetched[want.Blob] || s.Store.HasBlob(want.Blob) {
+			continue
+		}
+		ops = append(ops, journal.Op{Kind: journal.KindPut, Path: rel, Blob: want.Blob, Size: want.Size, Mode: want.Mode})
+	}
+	rand.Shuffle(len(ops), func(i, j int) { ops[i], ops[j] = ops[j], ops[i] })
+	var budget int64
+	for _, op := range ops {
+		if len(picked) == maxBackfill {
+			return picked, true
+		}
+		b := pullBound(op.Size)
+		if len(picked) > 0 && budget+b > maxBackfillBytes {
+			more = true
+			continue
+		}
+		picked = append(picked, op)
+		budget += b
+	}
+	return picked, more
 }
 
 // shortSha trims a blob string for a message. Op.Blob is arbitrary JSON off a
