@@ -219,7 +219,9 @@ two copies.
 
 `bdrive init` already did this — do not run a separate hooks command. It
 registers turn-boundary hooks (pull before every turn, push right after
-edits, stamp changes with the agent session) **once per machine**, in each
+edits, stamp changes with the agent session, and — Claude Code only — a
+turn-end check that tells the agent if any file it wrote never reached the
+hub) **once per machine**, in each
 platform's own user config: `~/.claude/settings.json`, `~/.codex/hooks.json`,
 `~/.gemini/settings.json`, `~/.hermes/config.yaml`. That covers every session
 in every folder, and nothing is written inside the project — a hook file in a

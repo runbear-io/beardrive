@@ -22,6 +22,7 @@ func syncCmd() *cobra.Command {
 	var note string
 	var noteTTL time.Duration
 	var hookLabel string
+	var hookStop string
 	var prune bool
 	c := &cobra.Command{
 		Use:   "sync [folder]",
@@ -114,6 +115,13 @@ list in .bdrive/config.json is never pruned against either.`,
 				return nil
 			}
 
+			if hookStop != "" {
+				// Turn-end receipt (hookstop.go): Stop event JSON on stdin,
+				// a block decision on stdout only when this session's files
+				// are still not on the hub. Never fails.
+				runHookStopAll(cmd, folder, hookStop)
+				return nil
+			}
 			if hookLabel != "" {
 				// Agent-hook mode: event JSON on stdin, silent best-effort
 				// sync, link-formula context on stdout. Never fails. Every
@@ -163,6 +171,7 @@ list in .bdrive/config.json is never pruned against either.`,
 	c.Flags().BoolVar(&prune, "prune", false, "also remove from the hub what .bdriveignore now excludes (files stay on disk everywhere)")
 	c.Flags().StringVar(&note, "note", "", "session context stamped onto changes (e.g. an agent session id); shown in history; empty clears")
 	c.Flags().DurationVar(&noteTTL, "note-ttl", 30*time.Minute, "how long the note keeps applying to daemon-committed changes")
+	c.Flags().StringVar(&hookStop, "hook-stop", "", "agent turn-end receipt: read the platform's Stop event JSON from stdin, sync once, and — only if this session's own changes are still not on the hub — emit a Claude Code {\"decision\":\"block\"} JSON naming them and why")
 	c.Flags().StringVar(&hookLabel, "hook", "", "agent-hook mode: read the platform's hook event JSON from stdin, sync with a session note labeled by this value, and emit the project's link-formula context (Claude Code hook JSON) on stdout")
 	return c
 }

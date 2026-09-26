@@ -176,7 +176,11 @@ machine, so every session in every folder is covered:
 - an **async push** after every file edit, so artifacts are on the hub
   seconds after the agent writes them;
 - **read tracking**, so the hub's Dashboard can show what your agents
-  actually read.
+  actually read;
+- a **turn-end receipt** (Claude Code only): before the agent says "done",
+  one blocking sync checks its own writes reached the hub, and if any did not
+  (offline, refused, paused) the agent is told which files and why — once,
+  never in a loop.
 
 Each hook no-ops instantly outside BearDrive projects, which is what makes a
 machine-wide registration safe. `bdrive hooks` prints what's set up on this
@@ -263,8 +267,8 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first, and warns on stderr if the hub refused that push; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
 | `bdrive mcp list|revoke` | Agents connected to your hub over MCP; revoke disconnects one immediately |
-| `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. A plain `bdrive sync` with no `--note` clears it, so a hand edit is never stamped with the last agent session's note. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
-| `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
+| `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. A plain `bdrive sync` with no `--note` clears it, so a hand edit is never stamped with the last agent session's note. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout. `--hook-stop <label>` is the turn-end receipt: Stop event JSON on stdin, one sync, and — only if this session's own changes are still not on the hub — a Claude Code `{"decision":"block"}` JSON naming them and why |
+| `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking, and a turn-end receipt (Claude Code) naming any file that did not reach the hub. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads from a hook event (JSON on stdin) for the hub's read heatmap — native reads, grep matches, and files named in shell commands; drained on the next sync. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, two separate change counts — `pending` (journalled, not yet pushed) and `local` (on disk, not yet scanned — what a stopped daemon leaves invisible) — and any synced files that looked like they held credentials when they last changed. Warns when this device's sync clock has fallen behind the project, which neither count can express; `bdrive sync` clears it. Pure local read: no ops, no journal writes, no network |
 | `bdrive log [folder] [-p path] [-n N]` | Change history: account, device, time, file — newest first by the time shown, which is when the change was journaled; a file written more than a minute before it arrived (a rename, or an old document added today) also shows `written <time>` |

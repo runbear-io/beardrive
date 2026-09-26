@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +63,15 @@ func TestDriftSeesUnscannedWork(t *testing.T) {
 	add, mod, rm := drift(t, a)
 	if add != 1 || mod != 1 || rm != 1 {
 		t.Fatalf("drift = %d added, %d modified, %d removed; want 1, 1, 1", add, mod, rm)
+	}
+	// DriftPaths names the puts behind those counts (the turn-end receipt's
+	// paused-mount answer); the removal is not a file "not on the hub".
+	cache, _ := a.Store.LoadCache(a.MountID)
+	st, _ := a.Store.LoadSync()
+	paths, err := DriftPaths(a.Folder, nil, st.IgnoreAccepted, cache)
+	slices.Sort(paths)
+	if err != nil || strings.Join(paths, ",") != "index.md,notes/new.md" {
+		t.Fatalf("DriftPaths = %v, %v; want [index.md notes/new.md]", paths, err)
 	}
 
 	// And the cycle that follows agrees: three ops, no more, no fewer.
