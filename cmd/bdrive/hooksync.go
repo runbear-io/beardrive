@@ -14,6 +14,7 @@ import (
 
 	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
+	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
 // `bdrive sync --hook <label>` is the agent-hook flavor of sync, run by the
@@ -93,18 +94,7 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	}
 	defer closeSession(sess)
 
-	if sessionID != "" {
-		note := label + " session " + sessionID
-		if err := sess.Store.SaveNote(note, hookNoteTTL); err == nil {
-			sess.Note = note
-		}
-		// The hook is the ONLY writer of Op.Session — `bdrive sync --note`
-		// cannot reach it, which is what makes a run card's identity
-		// un-forgeable. Unlike the note it is not persisted with a TTL: a
-		// later daemon scan should not credit its own changes to a session
-		// that has moved on.
-		sess.SessionID = sessionID
-	}
+	stampHookSession(sess, sessionID, label)
 
 	// The pull. Offline is fine — the link formula below is still valid
 	// for teammates who are online.
@@ -125,6 +115,25 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 		return hookSync{}, false // non-hub remote: nothing to link to
 	}
 	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found}, true
+}
+
+// stampHookSession attributes this cycle's changes (and, via the persisted
+// note, the daemon's follow-up scans) to the agent session. Shared by the
+// turn-start and turn-end hooks so both stamp identically.
+func stampHookSession(sess *syncer.Session, sessionID, label string) {
+	if sessionID == "" {
+		return
+	}
+	note := label + " session " + sessionID
+	if err := sess.Store.SaveNote(note, hookNoteTTL); err == nil {
+		sess.Note = note
+	}
+	// The hook is the ONLY writer of Op.Session — `bdrive sync --note`
+	// cannot reach it, which is what makes a run card's identity
+	// un-forgeable. Unlike the note it is not persisted with a TTL: a
+	// later daemon scan should not credit its own changes to a session
+	// that has moved on.
+	sess.SessionID = sessionID
 }
 
 // hookLinkFor places one mount relative to the folder the hook ran in.

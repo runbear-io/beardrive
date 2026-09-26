@@ -82,11 +82,19 @@ func TestInstallJSONPlatforms(t *testing.T) {
 	if !strings.Contains(string(raw), "bdrive read-log") || !strings.Contains(string(raw), `"matcher":"Read|Grep|Bash"`) {
 		t.Fatalf("claude read hook missing: %s", raw)
 	}
+	// …and the turn-end receipt: blocking (no async), stdout kept.
+	stop, _ := json.Marshal(hooks["Stop"])
+	if !strings.Contains(string(stop), "bdrive sync . --hook-stop claude-code 2") || strings.Contains(string(stop), "async") {
+		t.Fatalf("claude Stop hook wrong: %s", stop)
+	}
 
 	// Codex: same schema, its own label and matcher, no async field.
 	cx, _ := json.Marshal(readJSON(t, ConfigPath("", "codex")))
 	if !strings.Contains(string(cx), "codex session $s") || !strings.Contains(string(cx), "apply_patch") {
 		t.Fatalf("codex hooks wrong: %s", cx)
+	}
+	if strings.Contains(string(cx), "Stop") || strings.Contains(string(cx), "hook-stop") {
+		t.Fatalf("codex should not get the claude-only Stop hook: %s", cx)
 	}
 	if strings.Contains(string(cx), "async") {
 		t.Fatal("codex should not get the claude-only async field")
@@ -97,6 +105,9 @@ func TestInstallJSONPlatforms(t *testing.T) {
 
 	// Gemini: its own event names and ms timeout.
 	gm, _ := json.Marshal(readJSON(t, ConfigPath("", "gemini")))
+	if strings.Contains(string(gm), "hook-stop") {
+		t.Fatalf("gemini should not get the claude-only Stop hook: %s", gm)
+	}
 	for _, want := range []string{"BeforeAgent", "AfterTool", "gemini session $s", "30000", "bdrive read-log", "read_file|read_many_files|search_file_content|run_shell_command"} {
 		if !strings.Contains(string(gm), want) {
 			t.Fatalf("gemini hooks missing %q: %s", want, gm)
@@ -486,6 +497,36 @@ func runShell(t *testing.T, script, stdin string) error {
 
 // Uninstall is the exact inverse of install: our blocks go, everything the
 // user had stays, and a config we never touched is left byte-identical.
+// Stop is where a user hand-writes their own `bdrive sync .`. Install must
+// add the receipt beside it (not converge over it), and uninstall must remove
+// only the receipt.
+func TestInstallStopKeepsUsersOwnStopHook(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	folder := t.TempDir()
+	os.MkdirAll(filepath.Dir(ConfigPath("", "claude")), 0o755)
+	pre := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"cd ~/wiki && bdrive sync ."}]}]}}`
+	os.WriteFile(ConfigPath("", "claude"), []byte(pre), 0o644)
+
+	for range 2 { // the second install converges, and must not touch it either
+		if _, err := Install(folder, []string{"claude"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop := readJSON(t, ConfigPath("", "claude"))["hooks"].(map[string]any)["Stop"].([]any)
+	raw, _ := json.Marshal(stop)
+	if len(stop) != 2 || !strings.Contains(string(raw), `wiki \u0026\u0026 bdrive sync ."`) || !strings.Contains(string(raw), "--hook-stop") {
+		t.Fatalf("Stop after install = %s, want the user's hook + our receipt", raw)
+	}
+
+	if _, err := Uninstall([]string{"claude"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = json.Marshal(readJSON(t, ConfigPath("", "claude")))
+	if strings.Contains(string(raw), "--hook-stop") || !strings.Contains(string(raw), `wiki \u0026\u0026 bdrive sync ."`) {
+		t.Fatalf("uninstall: %s, want only the user's Stop hook left", raw)
+	}
+}
+
 func TestUninstallRemovesOnlyOurHooks(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
