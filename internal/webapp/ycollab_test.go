@@ -351,3 +351,119 @@ func TestYCollabSnapshotNeedsSomeoneToAttribute(t *testing.T) {
 		t.Errorf("file says %q — a room with no writer wrote anyway", got)
 	}
 }
+
+/*
+A browser that reconnects into a rebuilt room must not get the file twice.
+
+	The room is evicted when its last peer drops, and the browser that dropped
+	still holds the document. If the next room is a fresh insert of the same
+	bytes, the merge keeps both — one more copy of the whole file per
+	reconnect, which is what a user saw. So a room is rebuilt from the state
+	the last one stored, and a returning document merges as a no-op; an
+	outside write in between is spliced in as one edit, so unsynced typing
+	lands beside it.
+*/
+func TestYCollabRebuiltRoomMergesAReturningDocumentOnce(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	room := p.ID + "/notes.md"
+	who := User{Email: "editor@example.com", Name: "An Editor"}
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "before\n", ""); rec.Code != http.StatusOK {
+		t.Fatalf("seed write: %d", rec.Code)
+	}
+	open := func() *crdt.Doc {
+		t.Helper()
+		doc := crdt.New()
+		if err := srv.seedDoc(room, doc); err != nil {
+			t.Fatal(err)
+		}
+		srv.rooms().load(room, doc)
+		srv.rooms().writer(room, who)
+		return doc
+	}
+	// merged is what the hub's document says after a returning browser's
+	// state is applied to it — the handshake, in one call.
+	merged := func(hub, browser *crdt.Doc) string {
+		t.Helper()
+		if err := hub.ApplyUpdate(browser.EncodeStateAsUpdate()); err != nil {
+			t.Fatal(err)
+		}
+		return hub.GetText("body").ToString()
+	}
+	sync := func(from *crdt.Doc) *crdt.Doc {
+		t.Helper()
+		d := crdt.New()
+		if err := d.ApplyUpdate(from.EncodeStateAsUpdate()); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	typeAtEnd := func(doc *crdt.Doc, s string) {
+		txt := doc.GetText("body")
+		doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, txt.Len(), s, nil) })
+	}
+
+	// 1. Nothing was typed: the browser leaves, the room is evicted, the
+	//    browser comes back.
+	browser := sync(open())
+	srv.rooms().drop(room)
+	if got := merged(open(), browser); got != "before\n" {
+		t.Fatalf("untouched file after reconnect: %q", got)
+	}
+
+	// 2. Typed, snapshotted, evicted, back.
+	srv.rooms().drop(room)
+	hub := open()
+	typeAtEnd(hub, "and after\n")
+	browser = sync(hub)
+	srv.snapshotRoom(context.Background(), room)
+	srv.rooms().drop(room)
+	if got := merged(open(), browser); got != "before\nand after\n" {
+		t.Fatalf("after a snapshot and reconnect: %q", got)
+	}
+
+	// 3. Evicted, then somebody OUTSIDE the room wrote the file, while the
+	//    browser typed on unsynced. Both must survive, once each.
+	srv.rooms().drop(room)
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "before\nand after\noutside\n", ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d %s", rec.Code, rec.Body.String())
+	}
+	typeAtEnd(browser, "typed offline\n")
+	got := merged(open(), browser)
+	for _, want := range []string{"before\n", "and after\n", "outside\n", "typed offline\n"} {
+		if n := strings.Count(got, want); n != 1 {
+			t.Errorf("%q appears %d times in %q, want once", want, n, got)
+		}
+	}
+}
+
+// The text a snapshot writes and the history it files under that blob must
+// agree exactly, or the next room refuses the replay and starts a second copy.
+func TestYCollabSnapshotStoresTheHistoryOfWhatItWrote(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	room := p.ID + "/notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "x\n", "")
+	doc := crdt.New()
+	if err := srv.seedDoc(room, doc); err != nil {
+		t.Fatal(err)
+	}
+	srv.rooms().load(room, doc)
+	srv.rooms().writer(room, User{Email: "editor@example.com"})
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "ünï 日本 ✅ ", nil) })
+	srv.snapshotRoom(context.Background(), room)
+
+	sha := srv.rooms().base(room)
+	state := srv.roomHistory(p.ID, sha)
+	if state == nil {
+		t.Fatalf("no history stored for %s", sha)
+	}
+	text, ok := replayed(state)
+	if !ok || text != "ünï 日本 ✅ x\n" {
+		t.Fatalf("history spells %q", text)
+	}
+	if got := get(t, h, "/api/p/"+p.ID+"/file?path=notes.md").Body.String(); got != text {
+		t.Fatalf("file %q, history %q", got, text)
+	}
+}

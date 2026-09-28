@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -10,9 +11,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"github.com/reearth/ygo/crdt"
 	ygows "github.com/reearth/ygo/provider/websocket"
+	"github.com/runbear-io/beardrive/internal/remote"
 )
 
 /* The hub holding the document, instead of relaying bytes between browsers.
@@ -158,12 +161,144 @@ func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
 	if !ok || len(body) == 0 {
 		return nil // a file that does not exist yet starts empty
 	}
+	project, _, _ := strings.Cut(room, "/")
+	prev := s.rooms().base(room) // what the last room for this file wrote, if any
 	s.rooms().rebase(room, sha)
 	txt := doc.GetText("body")
+
+	/* The document is rebuilt from the same HISTORY, not from the bytes.
+
+	   A room is evicted the moment its last peer disconnects, and the browser
+	   that disconnected still holds the document — a laptop lid, a proxy
+	   dropping an idle socket — and y-websocket reconnects it into whatever
+	   room exists then. If that room was seeded from the file as a fresh
+	   insert, the browser's copy and the hub's copy are two documents that
+	   happen to spell the same text, and the CRDT keeps both: the whole file,
+	   twice. Every reconnect appended one more copy. Shipped that way.
+
+	   So a snapshot stores the document's state beside the blob it wrote
+	   (ydoc/<sha>), and a room for a file that IS that blob replays it: the
+	   same items, the same ids, and a returning browser's state is a no-op to
+	   merge. A file somebody wrote from outside in the meantime has no state
+	   of its own, so the previous room's state is replayed and the outside
+	   change spliced in as one edit — which is also how a returning browser's
+	   unsynced typing lands beside that write instead of on top of a second
+	   copy of the file. Only a hub that never saw this file being edited, or
+	   was restarted since, starts from the bytes. */
+	if state := s.roomHistory(project, sha); state != nil && replayInto(doc, state, string(body)) {
+		return nil
+	}
+	if prev != "" && prev != sha {
+		if state := s.roomHistory(project, prev); state != nil {
+			if was, ok := replayed(state); ok && replayInto(doc, state, was) {
+				splice(doc, txt, was, string(body))
+				s.storeRoomHistory(project, sha, doc.EncodeStateAsUpdate())
+				return nil
+			}
+		}
+	}
 	doc.Transact(func(txn *crdt.Transaction) {
 		txt.Insert(txn, 0, string(body), nil)
 	})
+	s.storeRoomHistory(project, sha, doc.EncodeStateAsUpdate())
 	return nil
+}
+
+// replayed is the text a stored state spells, on a scratch document, so a
+// corrupt or foreign state is found out before it touches a live one.
+func replayed(state []byte) (string, bool) {
+	tmp := crdt.New()
+	if err := tmp.ApplyUpdate(state); err != nil {
+		return "", false
+	}
+	return tmp.GetText("body").ToString(), true
+}
+
+// replayInto applies a stored state to the room's document only when it
+// spells exactly `want` — the file the room is for.
+func replayInto(doc *crdt.Doc, state []byte, want string) bool {
+	if got, ok := replayed(state); !ok || got != want {
+		return false
+	}
+	return doc.ApplyUpdate(state) == nil
+}
+
+// splice turns txt from one text into another with a single edit: the common
+// prefix and suffix are kept, the middle replaced. Offsets are UTF-16 units,
+// which is what Yjs counts in.
+func splice(doc *crdt.Doc, txt *crdt.YText, from, to string) {
+	a, b := []rune(from), []rune(to)
+	p := 0
+	for p < len(a) && p < len(b) && a[p] == b[p] {
+		p++
+	}
+	n := 0
+	for n < len(a)-p && n < len(b)-p && a[len(a)-1-n] == b[len(b)-1-n] {
+		n++
+	}
+	at := len(utf16.Encode(a[:p]))
+	del := len(utf16.Encode(a[p : len(a)-n]))
+	ins := string(b[p : len(b)-n])
+	if del == 0 && ins == "" {
+		return
+	}
+	doc.Transact(func(txn *crdt.Transaction) {
+		if del > 0 {
+			txt.Delete(txn, at, del)
+		}
+		if ins != "" {
+			txt.Insert(txn, at, ins, nil)
+		}
+	})
+}
+
+// A room's history lives in the project's own storage as ydoc/<sha>: the
+// document state that spells the blob. Never exported, never quota'd, never a
+// read — hub-internal, like a journal. Absent is ordinary (a file no room has
+// held, an older hub, an import); failing to store one is logged and the
+// room still works, it just cannot be rebuilt losslessly.
+func historyKey(sha string) string { return "ydoc/" + sha }
+
+func (s *Server) roomHistory(project, sha string) []byte {
+	be, ok := s.projectBackend(project)
+	if !ok || sha == "" {
+		return nil
+	}
+	rc, err := be.Get(context.Background(), historyKey(sha))
+	if err != nil {
+		if !remote.IsNotExist(err) {
+			log.Printf("bdrive: reading room history %s/%s: %v", project, sha, err)
+		}
+		return nil
+	}
+	defer rc.Close()
+	state, err := io.ReadAll(io.LimitReader(rc, maxHistoryBytes))
+	if err != nil {
+		return nil
+	}
+	return state
+}
+
+func (s *Server) storeRoomHistory(project, sha string, state []byte) {
+	be, ok := s.projectBackend(project)
+	if !ok || sha == "" || len(state) > maxHistoryBytes {
+		return
+	}
+	if err := be.Put(context.Background(), historyKey(sha), bytes.NewReader(state), int64(len(state))); err != nil {
+		log.Printf("bdrive: storing room history %s/%s: %v", project, sha, err)
+	}
+}
+
+func (s *Server) projectBackend(project string) (remote.Backend, bool) {
+	_, v, err := s.projectVolume(project)
+	if err != nil {
+		return nil, false
+	}
+	src, ok := v.source.(*RemoteSource)
+	if !ok {
+		return nil, false
+	}
+	return src.Backend, true
 }
 
 // roomBytes is the file behind a room, bounded, with the blob it currently is
@@ -221,10 +356,21 @@ func (s *Server) snapshotRoom(ctx context.Context, room string) {
 	if !ok || who.Email == "" {
 		return // nobody with write access ever joined: nothing to attribute
 	}
-	text := doc.GetText("body").ToString()
+	// The text is derived FROM the captured state, not read beside it: a
+	// keystroke landing between the two would store a history that spells a
+	// different file than the blob it is filed under, and a room rebuilt
+	// from it would refuse the replay and duplicate exactly as before.
+	state := doc.EncodeStateAsUpdate()
+	text, ok := replayed(state)
+	if !ok {
+		return
+	}
 	cur, curSha, have := s.roomBytes(room)
 	if have && string(cur) == text {
-		s.rooms().rebase(room, curSha)
+		if s.rooms().base(room) != curSha {
+			s.storeRoomHistory(project, curSha, state)
+			s.rooms().rebase(room, curSha)
+		}
 		return // the file already says this
 	}
 	if s.apiMux == nil {
@@ -235,6 +381,7 @@ func (s *Server) snapshotRoom(ctx context.Context, room string) {
 	switch w.code {
 	case http.StatusOK:
 		if sha := reportedSha(w); sha != "" {
+			s.storeRoomHistory(project, sha, state)
 			s.rooms().rebase(room, sha)
 		}
 	case http.StatusConflict:
@@ -453,10 +600,17 @@ func (r *roomRegistry) drop(room string) {
 	}
 	delete(r.docs, room)
 	delete(r.users, room)
-	delete(r.bases, room)
+	// bases outlives the room on purpose: it is how the NEXT room for this
+	// file finds the history to rebuild from when somebody wrote the file
+	// from outside in between (seedDoc). One sha per file ever edited.
 }
 
 // maxSeedBytes bounds what becomes a held document. Editing costs roughly ten
 // times the content in CRDT items, so this is a memory ceiling rather than an
 // opinion about file size.
 const maxSeedBytes = 2 << 20
+
+// maxHistoryBytes bounds a stored room history, which carries every edit ever
+// made in a room and not just the text. Past it the room still works from the
+// bytes; what it loses is a lossless rebuild for a returning browser.
+const maxHistoryBytes = 8 << 20
