@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { requestSearch } from "../search";
 import { isMac } from "../util";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -332,10 +332,15 @@ export type PageWidth = "read" | "app" | "wide";
 export function Page(props: {
   width?: PageWidth;
   className?: string; // a view's own styling hook (e.g. markdown typography)
+  style?: CSSProperties; // the reader-dragged reading width (--page-read)
   children: ReactNode;
 }) {
   const cls = ["page", props.width ?? "app", props.className].filter(Boolean).join(" ");
-  return <div className={cls}>{props.children}</div>;
+  return (
+    <div className={cls} style={props.style}>
+      {props.children}
+    </div>
+  );
 }
 
 // Applies the initial inert state as soon as the element exists, so the first
