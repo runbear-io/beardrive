@@ -478,6 +478,28 @@ button, input, a.btn { font-family: inherit; }
 .page { width: 100%; max-width: var(--page-app); margin-inline: auto; min-width: 0; }
 .page.read { max-width: var(--page-read); }
 .page.wide { max-width: var(--page-wide); }
+/* Reading-width handles (components/WidthHandle.tsx): a hit strip just
+   outside each edge of the prose column, invisible until hovered, with a thin
+   line drawn in its middle. Beside the frontmatter rail the right one moves
+   into the gap between prose and rail — see the @media block there. */
+.page.read { position: relative; }
+.rw-handle {
+  position: absolute; top: 0; bottom: 0; width: 14px; z-index: 5;
+  cursor: col-resize; touch-action: none; outline: none;
+}
+.rw-left { left: -26px; }
+.rw-right { right: -26px; }
+.rw-handle::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 6px; width: 2px;
+  border-radius: 1px; background: var(--border-2); opacity: 0; transition: opacity .12s ease;
+}
+.rw-handle:hover::after, .rw-handle:focus-visible::after { opacity: 1; }
+.rw-handle.dragging::after { opacity: 1; background: var(--accent); }
+/* The cursor and no-text-selection belong to the whole page while dragging:
+   the pointer leaves the 14px strip long before the drag ends. */
+body.rw-dragging { cursor: col-resize; user-select: none; }
+/* Phones and tablets have no room to give and no hover to find it with. */
+@media (max-width: 900px) { .rw-handle { display: none; } }
 .empty { color: var(--text-faint); text-align: center; margin-top: var(--hero-top); }
 .empty-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--text-faint); }
 
@@ -1222,6 +1244,11 @@ a.ai-main:hover { color: var(--accent); }
   .page.read:has(.fmpanel) { max-width: calc(var(--page-read) + 268px); display: grid; grid-template-columns: minmax(0, var(--page-read)) 240px; column-gap: 28px; align-items: start; }
   .page.read:has(.fmpanel) > * { grid-column: 1; min-width: 0; }
   .page.read:has(.fmpanel) > .fmpanel { grid-column: 2; grid-row: 1; position: sticky; top: 0; margin: 0; }
+  /* The right drag handle belongs at the prose edge, centered in the 28px gap
+     — not outside the rail. 100% is the .page's width here (its padding box
+     is the handle's containing block), so the min() mirrors the grid's
+     minmax(0, --page-read) when the window squeezes the column. */
+  .page.read:has(.fmpanel) > .rw-right { right: auto; left: calc(min(var(--page-read), 100% - 268px) + 7px); }
 }
 .markdown .admin input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .admin input[aria-invalid="true"]:focus-visible { outline-color: var(--del); }
@@ -1537,7 +1564,7 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
      content, so printing a file that is open fullscreen would stamp the Exit
      button onto the page. Its reserved strip goes with it. */
   #sidebar, #sb-backdrop, #topbar, #palette, .modal, #more-menu, #presence,
-  #exit-full, [data-slot="dialog-overlay"], [data-sonner-toaster] { display: none !important; }
+  #exit-full, .rw-handle, [data-slot="dialog-overlay"], [data-sonner-toaster] { display: none !important; }
   body.full-view #content, body.full-view #content:has(.page.bleed) { padding: 0; }
   html, body { height: auto; }
   body { display: block; background: #fff; }

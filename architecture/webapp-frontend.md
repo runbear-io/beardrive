@@ -50,7 +50,9 @@ classDiagram
         +moved: /resolve?path= on a tree miss only
         +scroll restoration: contentRef, memo, goal from lib/scroll
         +fullscreen: body.full-view from route.full, Exit / Esc / Back
+        +readWidth: dragged reading width, tab memory only
     }
+    note for Browser "readWidth is the reading column's width as the reader drags it (components/WidthHandle.tsx), held in Browser's state and nowhere else: it follows the reader across files and in and out of fullscreen because Browser outlives both, and a reload or a new tab is the reset — no storage, by design. It reaches the DOM as ONE variable, --page-read on the .page element, so the frontmatter rail's grid arithmetic follows without its own rule. During a drag the handle writes that variable straight onto the element and commits to state only on release, so the file page is not re-rendered on every pointer move"
     note for Browser "Fullscreen is a QUERY PARAM on the file route (?full=1), for the reason ?v= is one: the first segment after the project id is reserved for view names, and a fullscreen file is the same page with different chrome. Two things the code forced: routeKey is withoutFull(useLocationPath()), because a ?full=1 push otherwise looks like a fresh route and arms a scroll goal of 0 — the reader is thrown to the top of the document the moment they ask for more of it; and the chrome is HIDDEN by a body class, never unmounted, so &lt;article id=content&gt; survives the toggle and keeps its scrollTop in both directions. display:none also takes the hidden controls out of the tab order and the accessibility tree together, which is what syncSidebarInert already encodes for the off-canvas sidebar. The Exit control is rendered by AppShell OUTSIDE the topbar it hides and painted over the content: the HTML sandbox is an opaque origin and the PDF viewer is the browser's own, so Esc can never reach the app from inside either one (BEA-195)"
     note for Browser "A missing path is decided from /tree alone — the file is never fetched — so the X-Bdrive-Canonical-Path header /file answers with would never reach the browser, and a moved FOLDER has no content fetch to hang a header on. The not-found branch asks GET /resolve?path= instead, then replaceState-navigates to the destination and prints one Moved from … line above it (BEA-81)"
 
@@ -126,7 +128,7 @@ classDiagram
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
-        Palette shell AccountBar ...
+        Palette shell AccountBar WidthHandles ...
     }
     note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; the initial selection is options[0].value — the same array element the RECOMMENDED badge indexes, so the badged row and the checked row are one row by construction (on a template-less hub that row is 'I already have a folder', which still creates an empty project). modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
     note for components "HistoryFilters drives the SERVER (?q=/?user=/?since=/?until= on the history API), never the loaded page — filtering what is on screen would lie about everything below the fold and break next_cursor. Its state is Route.filters, so a narrowed feed is linkable, survives reload, and Back undoes it; the author list accumulates across fetches, because filtering by one author leaves only their rows loaded"

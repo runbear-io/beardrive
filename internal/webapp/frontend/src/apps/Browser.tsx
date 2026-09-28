@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
@@ -28,6 +28,7 @@ import { Palette, type PaletteItem } from "../components/Palette";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
+import { WidthHandles } from "../components/WidthHandle";
 import type { Run } from "../lib/runs";
 import { armGoal, applyGoal, noteScroll, type Goal } from "../lib/scroll";
 import { VersionBanner } from "../components/VersionBanner";
@@ -288,6 +289,11 @@ export default function Browser(props: {
      before the chrome vanished. A path is a file until the tree says
      otherwise, and a folder carrying ?full=1 simply drops back out. */
   const full = !!route.full && !route.view && !!path && !isDir && !panel;
+  // The reading column's dragged width (WidthHandles). Kept here, above the
+  // file view, so it holds while the reader moves between files and in and
+  // out of fullscreen; null is the default measure. Not persisted — a reload
+  // is the reset.
+  const [readWidth, setReadWidth] = useState<number | null>(null);
   const fullBtnRef = useRef<HTMLButtonElement>(null);
   const exitRef = useRef<HTMLButtonElement>(null);
   // Whether WE pushed the fullscreen entry. Exit then goes back, collapsing
@@ -1063,7 +1069,11 @@ export default function Browser(props: {
         contentRef={contentRef}
         onContentScroll={onScroll}
       >
-        <Page width={pageWidth} className={pageClass}>
+        <Page
+          width={pageWidth}
+          className={pageClass}
+          style={pageWidth === "read" && readWidth !== null ? ({ "--page-read": readWidth + "px" } as CSSProperties) : undefined}
+        >
           {!panel && isFile && (
             <ShareBanner
               shares={fileShares}
@@ -1072,6 +1082,8 @@ export default function Browser(props: {
             />
           )}
           {view}
+          {/* Last, so nothing that reads .page's first child mistakes a handle for the document. */}
+          {pageWidth === "read" && <WidthHandles width={readWidth} onChange={setReadWidth} />}
         </Page>
       </AppShell>
       {shareOpen && project && (
