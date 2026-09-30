@@ -12,15 +12,20 @@ import {
 } from "./router.ts";
 
 
-test("tab titles put the active route before the project name", () => {
+// Sibling documents deep in one folder share a long prefix, so a full path
+// truncates to the same text in every tab — only the file's own name is shown.
+test("tab titles put the document name before the project name", () => {
   const cases: Array<[string, string]> = [
     ["/p-1", "team"],
     ["/p-1/docs", "docs — team"],
-    ["/p-1/docs/roadmap.md", "docs/roadmap.md — team"],
+    ["/p-1/docs/roadmap.md", "roadmap — team"],
+    ["/p-1/projects/searchd/engagement/kickoff.md", "kickoff — team"],
+    ["/p-1/docs/diagram.png", "diagram.png — team"],
+    ["/p-1/edit/docs/roadmap.md", "roadmap · Editing — team"],
     ["/p-1/dashboard", "Dashboard — team"],
     ["/p-1/history", "History — team"],
-    ["/p-1/history/docs/roadmap.md", "docs/roadmap.md · History — team"],
-    ["/p-1/docs/roadmap.md?v=abc123", "docs/roadmap.md · Version — team"],
+    ["/p-1/history/docs/roadmap.md", "roadmap · History — team"],
+    ["/p-1/docs/roadmap.md?v=abc123", "roadmap · Version — team"],
     ["/p-1/settings", "Settings — team"],
   ];
   for (const [url, want] of cases) {
@@ -28,11 +33,11 @@ test("tab titles put the active route before the project name", () => {
   }
 });
 
-test("volume tab titles use the same path-first format", () => {
+test("volume tab titles use the same name-first format", () => {
   assert.equal(titleForRoute(parseRoute("/", "volume"), "wiki"), "wiki");
   assert.equal(
     titleForRoute(parseRoute("/docs/roadmap.md", "volume"), "wiki"),
-    "docs/roadmap.md — wiki",
+    "roadmap — wiki",
   );
 });
 // A trailing slash is what a browser hands you when you copy a folder URL,

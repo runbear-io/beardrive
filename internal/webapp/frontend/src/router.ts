@@ -151,6 +151,15 @@ const VIEW_TITLES: Record<ViewName, string> = {
   settings: "Settings",
 };
 
+// A tab names the document, not where it lives: siblings deep in one folder
+// share a prefix longer than a tab is wide, so full paths all truncate to the
+// same text. Markdown drops its extension because that is the document's
+// title; any other file keeps it, since the type is part of what it is.
+function docTitle(path: string): string {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return name.replace(/\.md$/i, "") || name;
+}
+
 // Browser tabs have little horizontal space, so the route-specific part goes
 // first and the project/volume name provides context at the end. Product
 // identity stays in the favicon; callers use their configured brand only when
@@ -159,9 +168,9 @@ export function titleForRoute(route: Route, scope: string): string {
   let page = "";
   if (route.view) {
     page = VIEW_TITLES[route.view];
-    if (route.viewTarget) page = `${route.viewTarget} · ${page}`;
+    if (route.viewTarget) page = `${docTitle(route.viewTarget)} · ${page}`;
   } else if (route.path) {
-    page = route.path + (route.editing ? " · Editing" : route.version ? " · Version" : "");
+    page = docTitle(route.path) + (route.editing ? " · Editing" : route.version ? " · Version" : "");
   }
   return page ? `${page} — ${scope}` : scope;
 }
