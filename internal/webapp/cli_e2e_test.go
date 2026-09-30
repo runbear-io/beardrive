@@ -12,6 +12,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -1111,5 +1112,94 @@ func TestCLIStatusReportsUnscannedWork(t *testing.T) {
 	}
 	if !strings.Contains(out, "local:    0 change(s) not yet scanned") {
 		t.Fatalf("drift did not clear after a sync:\n%s", out)
+	}
+}
+
+// A lesson recorded on one device reaches a teammate's agent on its next
+// turn, once — and because every device writes its own lessons file, two
+// devices recording at the same moment never produce a conflict copy.
+func TestCLILessonReachesTeammateHook(t *testing.T) {
+	a := newCLIEnv(t)
+	b := newCLIEnvOn(t, a.hub)
+	c := newCLIEnvOn(t, a.hub)
+
+	dirA, dirB, dirC := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b"), filepath.Join(t.TempDir(), "c")
+	for _, d := range []string{dirA, dirB, dirC} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dirA, "readme.md"), []byte("# R\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := a.run(dirA, "init", "--name", "lessons", "--yes"); err != nil {
+		t.Fatalf("init a: %v\n%s", err, out)
+	}
+	defer a.run(dirA, "stop", dirA)
+	id := projectIDByName(t, a.browser, a.hub.URL, "lessons")
+	for _, e := range []struct {
+		env cliEnv
+		dir string
+	}{{b, dirB}, {c, dirC}} {
+		if out, err := e.env.run(e.dir, "init", "--project", id, "--yes"); err != nil {
+			t.Fatalf("init: %v\n%s", err, out)
+		}
+		defer e.env.run(e.dir, "stop", e.dir)
+	}
+
+	hookCtx := func(env cliEnv, dir string) string {
+		t.Helper()
+		out, err := env.run(dir, "sync", "--hook", "claude")
+		if err != nil {
+			t.Fatalf("hook: %v\n%s", err, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "{") {
+				return line
+			}
+		}
+		t.Fatalf("hook emitted no JSON:\n%s", out)
+		return ""
+	}
+
+	if out, err := a.run(dirA, "lesson", "use pnpm, never npm"); err != nil || !strings.Contains(out, "next turn") {
+		t.Fatalf("lesson: %v\n%s", err, out)
+	}
+	if got := hookCtx(b, dirB); !strings.Contains(got, "use pnpm, never npm") {
+		t.Fatalf("teammate's turn missed the lesson:\n%s", got)
+	}
+	if got := hookCtx(b, dirB); strings.Contains(got, "use pnpm, never npm") {
+		t.Fatalf("a lesson is told once:\n%s", got)
+	}
+
+	// Two devices at the same moment: separate files, so no conflict.
+	errs := make(chan error, 2)
+	for _, e := range []struct {
+		env       cliEnv
+		dir, text string
+	}{{a, dirA, "lesson from a"}, {b, dirB, "lesson from b"}} {
+		go func() {
+			out, err := e.env.run(e.dir, "lesson", e.text)
+			if err != nil {
+				err = fmt.Errorf("%v\n%s", err, out)
+			}
+			errs <- err
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.run(dirA, "sync")
+	b.run(dirB, "sync")
+	got := hookCtx(c, dirC)
+	if !strings.Contains(got, "lesson from a") || !strings.Contains(got, "lesson from b") {
+		t.Fatalf("a third device must see both lessons:\n%s", got)
+	}
+	for _, d := range []string{dirA, dirB, dirC} {
+		if cc := conflictCopiesUnder(t, d); len(cc) > 0 {
+			t.Fatalf("per-device lesson files must never conflict: %v", cc)
+		}
 	}
 }
