@@ -172,7 +172,10 @@ machine, so every session in every folder is covered:
 
 - a **blocking pull** when you send a message, so the agent always reads
   fresh team files — it also injects the project's link convention, so the
-  agent appends a hub link to any synced path it mentions;
+  agent appends a hub link to any synced path it mentions, and — if you
+  turned on the robot button in the hub's top bar — names the doc you have
+  open there, so "fix this section" needs no path (off by default, only
+  devices signed in as you get it, forgotten after 30 idle minutes);
 - an **async push** after every file edit, so artifacts are on the hub
   seconds after the agent writes them;
 - **read tracking**, so the hub's Dashboard can show what your agents

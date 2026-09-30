@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -12,6 +16,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
@@ -49,6 +55,11 @@ type hookLink struct {
 	// is: the daemon usually scanned the agent's write seconds ago, so this
 	// cycle's own scan sees an unchanged file and finds nothing.
 	secrets map[string][]secrets.Finding
+	// viewing is the mount-relative path the signed-in user has open in the
+	// hub right now, if they opted in to sharing it (presence/me); viewedAt
+	// is when that view was last announced.
+	viewing  string
+	viewedAt time.Time
 }
 
 // hookChangedMax caps the changed-file list the turn pays for. Past it the
@@ -79,9 +90,11 @@ func eventSessionID(data []byte) string {
 // hookSync is one mount's contribution to the turn: where its files live on
 // the hub, and which of them moved since the last turn.
 type hookSync struct {
-	base    string
-	paths   []store.InboundEvent
-	secrets map[string][]secrets.Finding
+	base     string
+	paths    []store.InboundEvent
+	secrets  map[string][]secrets.Finding
+	viewing  string
+	viewedAt time.Time
 }
 
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
@@ -124,7 +137,55 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	if err != nil {
 		return hookSync{}, false // non-hub remote: nothing to link to
 	}
-	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found}, true
+	viewing, viewedAt := hookPresence(cmd.Context(), server, projectID)
+	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found, viewing: viewing, viewedAt: viewedAt}, true
+}
+
+// hookPresenceTimeout bounds the one extra hub round-trip the turn pays for.
+// Not serverDo: its client allows 10s, and a turn must not wait that long for
+// a nice-to-have.
+const hookPresenceTimeout = time.Second
+
+// hookPresence asks the hub which doc this account has open there, if the
+// user opted in to sharing it with their agent. Every failure — offline, slow,
+// an older hub that 404s the route, nothing open — is the empty answer.
+func hookPresence(ctx context.Context, server, projectID string) (string, time.Time) {
+	ctx, cancel := context.WithTimeout(ctx, hookPresenceTimeout)
+	defer cancel()
+	u := server + "/api/p/" + url.PathEscape(projectID) + "/presence/me"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", time.Time{}
+	}
+	token := os.Getenv("BDRIVE_TOKEN")
+	if token == "" {
+		s, _ := config.LoadSettings()
+		token = s.Token
+	}
+	// The folder's config names the server; only the origin `bdrive login`
+	// signed in to gets the credential.
+	if token == "" || !tokenGoesTo(u) {
+		return "", time.Time{}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := initClient.Do(req)
+	if err != nil {
+		return "", time.Time{}
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Path string    `json:"path"`
+		Seen time.Time `json:"seen"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<14)).Decode(&out) != nil {
+		return "", time.Time{}
+	}
+	// The hub checked it on ingest; this is untrusted text headed into an
+	// agent's context all the same.
+	if len(out.Path) > 1024 || !journal.SafePath(out.Path) {
+		return "", time.Time{}
+	}
+	return out.Path, out.Seen
 }
 
 // hookLinkFor places one mount relative to the folder the hook ran in.
@@ -202,6 +263,9 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 	if found := hookSecrets(links); found != "" {
 		context += " " + found
 	}
+	if viewing := hookViewing(links, time.Now()); viewing != "" {
+		context += " " + viewing
+	}
 
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
@@ -251,6 +315,36 @@ func hookChanged(links []hookLink) string {
 		s += fmt.Sprintf(", +%d more", over)
 	}
 	return s + "."
+}
+
+// hookViewing names the doc the user has open in the hub, per mount that
+// reported one, as the agent sees its path from here — so "this doc" in the
+// user's prompt has a referent. A path outside a sub-folder session is not
+// the agent's to act on and is skipped, like hookChanged skips it.
+func hookViewing(links []hookLink, now time.Time) string {
+	var parts []string
+	for _, l := range links {
+		if l.viewing == "" {
+			continue
+		}
+		p, ok := hookAgentPath(l, l.viewing)
+		if !ok {
+			continue
+		}
+		// base already carries a sub-folder session's subpath, so the URL
+		// takes the stripped path there and the hub path everywhere else.
+		rel := l.viewing
+		if l.sub != "" {
+			rel = p
+		}
+		ago := ""
+		if !l.viewedAt.IsZero() {
+			ago = fmt.Sprintf(" (viewed %d min ago)", int(now.Sub(l.viewedAt).Minutes()))
+		}
+		parts = append(parts, fmt.Sprintf("The user currently has `%s` [🔗](%s/%s) open in the BearDrive hub%s; \"this doc\" / \"this section\" most likely means it.",
+			p, l.base, encodePathSegments(rel), ago))
+	}
+	return strings.Join(parts, " ")
 }
 
 // hookAgentPath maps one mount-relative spool path to the path an agent

@@ -51,6 +51,24 @@ codex_hooks = true
 
 Codex then asks once to trust the hook definition. Answer yes.
 
+## What the agent is told about your open doc
+
+The pull hook can also name the doc you are reading in the hub: "the user
+currently has `docs/guide.md` open in the BearDrive hub". It is **off by
+default**. Turn it on per browser with the robot button in the hub's top bar,
+next to the presence avatars. While it is on:
+
+- only a device signed in as **the same account** gets the path — teammates'
+  agents never see it, and it never appears on the presence roster;
+- the view is forgotten after **30 idle minutes** (coming back to the tab
+  re-arms it) and the moment you close the last tab;
+- the hook asks with a 1-second timeout, and a slow, offline or older hub
+  simply adds nothing — the turn never waits on it.
+
+The path is mapped the way your agent sees it from the session's folder; a doc
+outside a sub-folder session is left out. On a hub running several processes
+the answer is best-effort: it can come back empty.
+
 ## Both are safe to re-run
 
 Merging is idempotent and preserves hooks you already have. Each hook carries

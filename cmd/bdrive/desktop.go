@@ -149,6 +149,7 @@ var desktopRoutes = []struct {
 	// forever.
 	{"GET /api/p/{project}/events", routeProxy, ""},
 	{"POST /api/p/{project}/presence", routeProxy, ""},
+	{"GET /api/p/{project}/presence/me", routeProxy, ""},
 	// /ycollab carries the co-editing document. Proxied for a sharper reason
 	// than a stream: the document IS hub state, so a desktop that answered
 	// from local state would hand the editor a second, private document —

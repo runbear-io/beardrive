@@ -944,6 +944,8 @@ func (s *Server) Handler() http.Handler {
 		// Saying "I am reading this" is not a write — a read-only member is
 		// exactly who a teammate most wants to see on a file.
 		mux.HandleFunc("POST "+prefix+"presence", resolve(PermRead, s.handlePresence))
+		// Your own open doc, for your own agent's hook (presence.go).
+		mux.HandleFunc("GET "+prefix+"presence/me", resolve(PermRead, s.handlePresenceMe))
 		// Co-editing is a write channel: a read-only member has nothing to
 		// send on it, so both halves need write rather than read.
 		// The co-editing document (ycollab.go). PermRead, because a read-only

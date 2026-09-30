@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { Org } from "../api/types";
 import { linkProps } from "../nav";
 import { Icon } from "./shell";
@@ -77,6 +77,7 @@ export function AccountBar({
   // here works for both destinations without giving up a real <a>
   // (middle-click, copy link address).
   const [menuOpen, setMenuOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const orgLink = org ? linkProps(org.manage_url) : null;
   const billingLink = billing ? linkProps(billing.url) : null;
   const connectionsLink = linkProps("/connections");
@@ -85,7 +86,7 @@ export function AccountBar({
       <StarOnGitHub />
       <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
-          <button id="account-btn" className={orgActive ? "active" : undefined} aria-label="Account menu">
+          <button ref={triggerRef} id="account-btn" className={orgActive ? "active" : undefined} aria-label="Account menu">
             <span className="avatar" style={{ background: projColor(me.email) }} aria-hidden="true">
               {(display.trim()[0] || "?").toUpperCase()}
             </span>
@@ -96,7 +97,21 @@ export function AccountBar({
             <Icon name="chev" />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent id="account-menu" side="top" align="start" sideOffset={6} className="acct-menu">
+        <DropdownMenuContent
+          id="account-menu"
+          side="top"
+          align="start"
+          sideOffset={6}
+          className="acct-menu"
+          // A press on the trigger is the trigger's to handle (it toggles).
+          // Without this, a layer still mounted for its close animation —
+          // closing after the org link navigated — saw the press that
+          // reopens the menu as "outside" and dismissed it in the same tick,
+          // so the menu would not reopen until the animation happened to end.
+          onPointerDownOutside={(e) => {
+            if (triggerRef.current?.contains(e.target as Node)) e.preventDefault();
+          }}
+        >
           {org && (
             <>
               <DropdownMenuLabel className="menu-sec">Organization</DropdownMenuLabel>

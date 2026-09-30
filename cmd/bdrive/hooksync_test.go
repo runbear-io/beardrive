@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/secrets"
@@ -521,6 +525,93 @@ func TestSyncHookModeNoSecretsSaysNothing(t *testing.T) {
 	for _, unwanted := range []string{"credential", "secret"} {
 		if strings.Contains(strings.ToLower(got), unwanted) {
 			t.Errorf("a clean mount mentions %q on every turn:\n%s", unwanted, got)
+		}
+	}
+}
+
+// The doc the user has open in the hub, mapped to the path the agent sees
+// from the hook's folder — the same three placements hookChanged uses.
+func TestHookViewingPlacement(t *testing.T) {
+	now := time.Now()
+	for _, c := range []struct {
+		name string
+		link hookLink
+		want string // "" = skipped
+	}{
+		{"root", hookLink{base: "https://h/p1"}, "`docs/guide.md` [🔗](https://h/p1/docs/guide.md)"},
+		{"prefix", hookLink{prefix: "wiki/", base: "https://h/p1"}, "`wiki/docs/guide.md` [🔗](https://h/p1/docs/guide.md)"},
+		{"inside", hookLink{sub: "docs", base: "https://h/p1/docs"}, "`guide.md` [🔗](https://h/p1/docs/guide.md)"},
+		{"outside", hookLink{sub: "notes", base: "https://h/p1/notes"}, ""},
+	} {
+		c.link.viewing, c.link.viewedAt = "docs/guide.md", now.Add(-3*time.Minute)
+		got := hookViewing([]hookLink{c.link}, now)
+		if c.want == "" {
+			if got != "" {
+				t.Errorf("%s: want skipped, got %q", c.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, c.want) || !strings.Contains(got, "viewed 3 min ago") {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	if got := hookViewing([]hookLink{{base: "https://h/p1"}}, now); got != "" {
+		t.Errorf("nothing open must add nothing, got %q", got)
+	}
+}
+
+// End to end through `bdrive sync --hook`: the signed-in device asks the hub,
+// with its token, and anything but a clean answer adds nothing and fails nothing.
+func TestSyncHookModeReportsViewing(t *testing.T) {
+	var auth atomic.Value
+	var answer atomic.Value
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/p/p-12345678/presence/me" {
+			http.NotFound(w, r)
+			return
+		}
+		auth.Store(r.Header.Get("Authorization"))
+		switch a := answer.Load().(string); a {
+		case "404":
+			http.NotFound(w, r)
+		case "slow":
+			time.Sleep(2 * time.Second)
+			fmt.Fprint(w, `{"path":"docs/guide.md"}`)
+		default:
+			fmt.Fprint(w, a)
+		}
+	}))
+	defer hub.Close()
+
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	if err := config.SaveSettings(config.Settings{Server: hub.URL, Token: "tok-1"}); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	mountAt(t, root, "wiki", hub.URL+"/p/p-12345678")
+	folder := filepath.Join(root, "wiki")
+
+	answer.Store(`{"path":"docs/guide.md","seen":"` + time.Now().UTC().Format(time.RFC3339) + `"}`)
+	got := runHook(t, folder)
+	if !strings.Contains(got, "`docs/guide.md` [🔗]("+hub.URL+"/p-12345678/docs/guide.md) open in the BearDrive hub") {
+		t.Fatalf("no viewing line: %s", got)
+	}
+	if auth.Load() != "Bearer tok-1" {
+		t.Fatalf("presence/me sent without the device token: %v", auth.Load())
+	}
+
+	for _, a := range []string{`{}`, "404", "slow", `{"path":"../etc/passwd"}`} {
+		answer.Store(a)
+		start := time.Now()
+		got := runHook(t, folder)
+		if strings.Contains(got, "open in the BearDrive hub") {
+			t.Fatalf("answer %s added a viewing line: %s", a, got)
+		}
+		if !strings.Contains(got, "additionalContext") {
+			t.Fatalf("answer %s broke the hook output: %s", a, got)
+		}
+		if a == "slow" && time.Since(start) > 1900*time.Millisecond {
+			t.Fatalf("a slow hub held the turn for %v", time.Since(start))
 		}
 	}
 }

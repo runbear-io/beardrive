@@ -103,6 +103,10 @@ agent gets the fact and decides. That needs the turn-start hooks `bdrive init`
 registers ([Hooks in detail](/manual/hooks/)) — without them nothing drains
 the list, and the agent hears nothing.
 
+The same hook can also tell your agent which doc **you** have open in the hub,
+so "fix this section" needs no pasted path. Turn it on with the robot button in
+the hub's top bar ([What the agent is told](/manual/hooks/#what-the-agent-is-told-about-your-open-doc)).
+
 The list is capped, so the first turn after joining a project names some of
 what arrived rather than the whole project.
 

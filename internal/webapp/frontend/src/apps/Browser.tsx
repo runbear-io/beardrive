@@ -13,7 +13,7 @@ import { useFolders, useShares } from "../hooks/useHub";
 import { ruleFor } from "../lib/folders";
 import { urlForPath, urlForView, withoutFull, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, copyText } from "../util";
+import { HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, agentShareOn, copyText, setAgentShare } from "../util";
 import { toast } from "../toast";
 import { modalConfirm } from "../modal";
 import { onSearchRequest } from "../search";
@@ -67,7 +67,8 @@ export default function Browser(props: {
   // what it touched as it happens. Same gate as the tree — in hub mode there
   // is nothing to stream until a project is chosen.
   const live = !hub || !!project;
-  const { people, setPeople } = usePresence(apiBase, route.path ?? "", live);
+  const [agentShare, setAgentShareState] = useState(agentShareOn);
+  const { people, setPeople } = usePresence(apiBase, route.path ?? "", live, hub && agentShare);
   useProjectEvents(apiBase, live, setPeople);
   const heatMap = useHeat(apiBase, hub && !!project && !!config.reads?.enabled);
   // Folder rules, for the badge on a restricted folder's row. Same shape as
@@ -916,6 +917,25 @@ export default function Browser(props: {
       actions={
         <>
           <PresenceBar people={people} path={path} />
+          {hub && project && (
+            <Button
+              id="agent-share"
+              variant="toolbar"
+              className="icon-only"
+              aria-pressed={agentShare}
+              aria-label="Share the doc I have open with my agent"
+              title={
+                (agentShare ? "On: " : "Off: ") +
+                "share the doc you have open with your own agent. Only devices signed in as you see it, and it's forgotten after 30 idle minutes."
+              }
+              onClick={() => {
+                setAgentShare(!agentShare);
+                setAgentShareState(!agentShare);
+              }}
+            >
+              <Icon name="bot" />
+            </Button>
+          )}
           {canEdit && (
             <Button
               id="edit-btn"
