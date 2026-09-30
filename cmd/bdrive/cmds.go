@@ -131,6 +131,7 @@ list in .bdrive/config.json is never pruned against either.`,
 						link := hookLinkFor(folder, target, h.base)
 						link.paths = h.paths
 						link.secrets = h.secrets
+						link.viewing, link.viewedAt = h.viewing, h.viewedAt
 						links = append(links, link)
 					}
 				}

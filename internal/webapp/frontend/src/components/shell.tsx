@@ -5,6 +5,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import {
   Beaker,
   BookOpen,
+  Bot,
   Briefcase,
   Bug,
   Calendar,
@@ -193,6 +194,7 @@ if (typeof window !== "undefined") {
 // `.ico` sizing/stroke rules apply unchanged.
 const ICONS: Record<string, LucideIcon> = {
   alert: TriangleAlert,
+  bot: Bot,
   card: CreditCard,
   check: Check,
   chev: ChevronRight,

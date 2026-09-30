@@ -37,12 +37,21 @@ const (
 	// presencePathMax bounds the path a client claims to be looking at. It is
 	// echoed to every other member, so it is untrusted text like any other.
 	presencePathMax = 1024
+	// presenceAgentIdle is how long an opted-in view stays reportable to the
+	// viewer's own agent (presence/me) after the last announce that carried
+	// agent:true. Past it, an overnight tab is not "what I'm looking at".
+	presenceAgentIdle = 30 * time.Minute
 )
 
 type presenceEntry struct {
 	name string
 	path string
 	seen time.Time
+	// agent/agentSeen: the viewer opted in to sharing this view with their
+	// OWN agent (presence/me). Never serialized — person is built from name
+	// and path only — so the roster fans out exactly what it always did.
+	agent     bool
+	agentSeen time.Time
 }
 
 // person is one roster row as clients receive it.
@@ -103,6 +112,31 @@ func (h *presenceHub) mark(project, actor, name, path string, now time.Time, sti
 	}
 	room[actor] = presenceEntry{name: name, path: path, seen: now}
 	return rosterOf(room), changed, true
+}
+
+// setAgent records the opt-in flag on an actor's existing entry. Kept out of
+// mark (and of its changed report) on purpose: a toggle flip or a refocus
+// re-announce changes nothing any teammate sees, so it must publish no frame.
+func (h *presenceHub) setAgent(project, actor string, agent bool, now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, ok := h.at[project][actor]
+	if !ok {
+		return // mark refused it (room full): nothing to annotate
+	}
+	e.agent, e.agentSeen = agent, time.Time{}
+	if agent {
+		e.agentSeen = now
+	}
+	h.at[project][actor] = e
+}
+
+// self returns one actor's own entry.
+func (h *presenceHub) self(project, actor string) (presenceEntry, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, ok := h.at[project][actor]
+	return e, ok
 }
 
 // drop removes an actor immediately, for a client that says it is leaving.
@@ -198,6 +232,7 @@ func (s *Server) handlePresence(v *volume, w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Path  string `json:"path"`
 		Leave bool   `json:"leave,omitempty"`
+		Agent bool   `json:"agent,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
@@ -227,6 +262,38 @@ func (s *Server) handlePresence(v *volume, w http.ResponseWriter, r *http.Reques
 	if len(path) > presencePathMax || (path != "" && !journal.SafePath(path)) {
 		path = ""
 	}
-	people, _, _ := s.markPresence(project, actor, name, path, time.Now())
+	now := time.Now()
+	people, _, _ := s.markPresence(project, actor, name, path, now)
+	// Every announce states the flag; a missing one means off, so nothing is
+	// carried over from an earlier opt-in.
+	s.presence().setAgent(project, actor, req.Agent, now)
 	writeJSON(w, map[string]any{"ok": true, "people": people})
+}
+
+// handlePresenceMe serves GET {prefix}presence/me — the doc the CALLER has
+// open in the hub, for their own agent's hook context (bdrive sync --hook).
+//
+// Account-only: presenceIdentity falls back to the X-Bdrive-Device header on an
+// auth-less hub, and anyone can set a header, so a caller without an account
+// is answered with nothing. The key is the caller's own email, so no request
+// can name someone else's entry. Answers {} unless the viewer opted in, the
+// view is under presenceAgentIdle old, and the viewer is still here — expiry in
+// mark is lazy (it runs on someone else's announce), so liveness is re-checked
+// on read rather than trusted from the map.
+func (s *Server) handlePresenceMe(v *volume, w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.presenceMe(projectID(r), s.requestUser(r).Email, time.Now()))
+}
+
+func (s *Server) presenceMe(project, email string, now time.Time) map[string]string {
+	if email == "" {
+		return map[string]string{}
+	}
+	e, ok := s.presence().self(project, email)
+	if !ok || !e.agent || e.path == "" || now.Sub(e.agentSeen) > presenceAgentIdle {
+		return map[string]string{}
+	}
+	if now.Sub(e.seen) > presenceTTL && !s.events().hasActor(project, email) {
+		return map[string]string{}
+	}
+	return map[string]string{"path": e.path, "seen": e.agentSeen.UTC().Format(time.RFC3339)}
 }

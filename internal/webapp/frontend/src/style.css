@@ -429,6 +429,7 @@ button, input, a.btn { font-family: inherit; }
 }
 .btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-2); }
 .btn .ico { width: 15px; height: 15px; }
+.btn[aria-pressed="true"] { color: var(--accent-bright); border-color: var(--accent); }
 .btn.ghost { color: var(--text-dim); }
 /* Radix tooltip card (house style) */
 .tipcard {

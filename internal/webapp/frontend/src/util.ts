@@ -125,3 +125,24 @@ export function rememberFmPanel(open: boolean) {
 export function whoChanged(e: { user?: string; user_name?: string; author?: string }): string {
   return e.user_name ? `${e.user_name} <${e.user}>` : e.user || e.author || "unknown";
 }
+
+/* Whether this browser shares the doc it has open with the signed-in
+   account's own agent (the hub's presence/me, read by `bdrive sync --hook`).
+   Off unless turned on here; per browser, like the preferences above. */
+const AGENT_SHARE = "bdrive.agentShare";
+
+export function agentShareOn(): boolean {
+  try {
+    return localStorage.getItem(AGENT_SHARE) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setAgentShare(on: boolean) {
+  try {
+    localStorage.setItem(AGENT_SHARE, on ? "1" : "0");
+  } catch {
+    /* preference only: the toggle still works for this page's lifetime */
+  }
+}

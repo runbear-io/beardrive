@@ -27,12 +27,14 @@ import { postJSON } from "../api/http";
 
 export type Person = { name: string; path?: string };
 
-export function usePresence(apiBase: string, path: string, enabled = true) {
+export function usePresence(apiBase: string, path: string, enabled = true, agent = false) {
   const [people, setPeople] = useState<Person[]>([]);
   // Read through a ref by the unmount path, which must report the path this
   // tab was actually on rather than whatever it was when the effect ran.
   const pathRef = useRef(path);
   pathRef.current = path;
+  const agentRef = useRef(agent);
+  agentRef.current = agent;
 
   useEffect(() => {
     if (!enabled) return;
@@ -42,6 +44,9 @@ export function usePresence(apiBase: string, path: string, enabled = true) {
         const out = await postJSON<{ people: Person[] }>(apiBase + "presence", {
           path: pathRef.current,
           ...(leave ? { leave: true } : {}),
+          // Opted in to "share my open doc with my agent": the hub keeps it
+          // off the roster and hands it only to this account (presence/me).
+          ...(agentRef.current ? { agent: true } : {}),
         });
         if (live && !leave) setPeople(out.people ?? []);
       } catch {
@@ -55,10 +60,20 @@ export function usePresence(apiBase: string, path: string, enabled = true) {
     // navigation IS the reason to send one of these, so re-running the effect
     // is the whole mechanism rather than something to avoid.
     void announce();
+    // While shared with the agent, coming back to the tab re-arms the hub's
+    // 30-minute idle window. Events, not a timer — see the header.
+    const refocus = () => {
+      if (agentRef.current && document.visibilityState === "visible") void announce();
+    };
+    document.addEventListener("visibilitychange", refocus);
+    window.addEventListener("focus", refocus);
     return () => {
       live = false;
+      document.removeEventListener("visibilitychange", refocus);
+      window.removeEventListener("focus", refocus);
     };
-  }, [apiBase, enabled, path]);
+    // `agent` too: flipping the toggle IS the announce that says so.
+  }, [apiBase, enabled, path, agent]);
 
   /* Leaving is its own effect, and deliberately does NOT depend on `path`.
 

@@ -110,7 +110,7 @@ classDiagram
         +useHub
         +useBrowse
         +useProjectEvents (one SSE per BROWSER → invalidate)
-        +usePresence (announces on arrive/navigate/leave)
+        +usePresence (announces on arrive/navigate/leave; agent opt-in re-announces on refocus)
         +useTextAt (any URL) → useBlobText (sha-keyed, immutable)
         +fetchBlobText(url) BlobText
         +fileURLFor(apiBase, path, version) string
