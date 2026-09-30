@@ -25,11 +25,49 @@ import (
 // scan applies Filter.SkipUp, and a drift count that omitted it would disagree
 // with the very next cycle.
 func Drift(folder string, include []string, accepted string, cache map[string]store.CachedFile) (added, modified, removed int, err error) {
+	err = walkDrift(folder, include, accepted, cache, func(_ string, k driftKind) {
+		switch k {
+		case driftAdded:
+			added++
+		case driftModified:
+			modified++
+		default:
+			removed++
+		}
+	})
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return added, modified, removed, nil
+}
+
+// DriftPaths is Drift by name: the added and edited paths, the ones a scan
+// would commit as puts. Removals are left out — they name files that are no
+// longer anywhere to be "not on the hub".
+func DriftPaths(folder string, include []string, accepted string, cache map[string]store.CachedFile) ([]string, error) {
+	var paths []string
+	err := walkDrift(folder, include, accepted, cache, func(rel string, k driftKind) {
+		if k != driftRemoved {
+			paths = append(paths, rel)
+		}
+	})
+	return paths, err
+}
+
+type driftKind int
+
+const (
+	driftAdded driftKind = iota
+	driftModified
+	driftRemoved
+)
+
+func walkDrift(folder string, include []string, accepted string, cache map[string]store.CachedFile, found func(rel string, k driftKind)) error {
 	// A fresh filter: addNestedMount mutates it during the walk, so this must
 	// never be shared with a live cycle.
 	filter, err := loadFilter(folder, include)
 	if err != nil {
-		return 0, 0, 0, err
+		return err
 	}
 	filter.AcceptRules(accepted)
 
@@ -46,14 +84,14 @@ func Drift(folder string, include []string, accepted string, cache map[string]st
 		c, ok := cache[rel]
 		switch {
 		case !ok:
-			added++
+			found(rel, driftAdded)
 		case c.Size != info.Size() || c.MTimeNS != info.ModTime().UnixNano():
-			modified++
+			found(rel, driftModified)
 		}
 		return nil
 	})
 	if err != nil {
-		return 0, 0, 0, err
+		return err
 	}
 
 	for rel := range cache {
@@ -63,7 +101,7 @@ func Drift(folder string, include []string, accepted string, cache map[string]st
 		if seen[rel] || neverSync(rel) || filter.Skip(rel) {
 			continue
 		}
-		removed++
+		found(rel, driftRemoved)
 	}
-	return added, modified, removed, nil
+	return nil
 }

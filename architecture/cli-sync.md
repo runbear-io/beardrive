@@ -132,6 +132,7 @@ classDiagram
 
     class Drift {
         +Drift(folder, include, accepted, cache) added, modified, removed
+        +DriftPaths(folder, include, accepted, cache) paths
     }
     note for Drift "drift.go — the `local:` line in bdrive status: what is on disk that the state cache has not seen, using the scan's own size+mtime compare. Pure read like its siblings, and load-bearing that it stays one: status is what someone runs when sync is stuck, so it stores no blob, mints no op, rewrites no cache — it does not even mutate the cache map it is handed, which status prints `files:` from"
 
@@ -343,6 +344,7 @@ classDiagram
         turn-start: sync --hook
         post-edit: sync --note
         post-read: read-log
+        turn-end: sync --hook-stop (claude)
     }
     note for AgentHooks "internal/agenthooks — registers per-platform hook commands (claude, codex, gemini, hermes) in each platform's USER config, once per machine; they fire in every folder, every turn, and no-op outside mounts"
     note for AgentHooks "config.AgentHookConfig is the OTHER half of this story and deliberately NOT this package: it names the files an agent READS hooks from, so sync refuses to carry them. A teammate must never be able to push .claude/settings.json into your mount and have your next turn run their command. The two lists are kept apart on purpose — one is what we write, one is what the agent executes — and internal/config imports nothing to say it"
@@ -372,6 +374,7 @@ classDiagram
     Commands --> AgentHooks : hooks install/uninstall (init runs install automatically)
     AgentHooks --> Commands : runs sync and read-log
     Commands --> syncBlocked : sync and read-log gate first
+    Commands --> Drift : sync --hook-stop names a paused mount's unscanned paths
     syncBlocked --> MountRegistry : reads only, never enrolls
     syncBlocked --> PausedMarker : Paused check
     Commands --> openSession : after the gate
