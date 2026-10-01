@@ -23,7 +23,7 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive url [path]` | Internal hub link for a file or folder — sign-in and membership required. `--sync` pushes first, and warns on stderr if the hub refused that push; no argument gives the project home. Computed locally |
 | `bdrive share <file>` | Public URL for a synced file — links are per-file, so a folder is refused with a file inside it named instead. `--list`, `--revoke`, `--expires` (the hub's Share dialog can also set an expiry on an existing link). Refuses a file whose first 1 MiB holds credential-shaped strings — `--force` shares it anyway |
 | `bdrive mcp list` / `bdrive mcp revoke <id>` | Agents connected to your account over MCP. Connections are created in a browser (the hub's consent screen, where you pick which projects to share); revoking takes effect on the agent's next call and kills its refresh token with it. See [Connect an agent over MCP](/guides/mcp/) |
-| `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it, and a plain `bdrive sync` with no `--note` clears it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: it also reports the files teammates changed since the agent's last turn |
+| `bdrive sync [folder]` | Run one sync cycle now. Refuses folders this device never `init`ed and folders paused by `bdrive stop`. `--note <text>` stamps session context onto changes; `--note-ttl` (default 30m) bounds it, and a plain `bdrive sync` with no `--note` clears it. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: it also reports the files teammates changed since the agent's last turn, and any synced doc that links one of them and is now older than it |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each detected agent platform's user config — once per machine, covering every folder. Run automatically by `bdrive init`; idempotent; `--agent` overrides detection. `uninstall` removes only BearDrive's own hook entries |
 | `bdrive read-log [folder]` | Hook plumbing: queue agent file reads for the hub's read heatmap. Registered by `bdrive hooks install` |
 | `bdrive status [folder]` | Projects, daemon state, pending changes, and any synced files that looked like they held credentials when they last changed |
@@ -207,9 +207,15 @@ identical on every device and available offline.
 
 **Exit status is 0 whether or not anything is stale.** Unlike `bdrive grep`,
 this is advisory output, not a gate — grep's "1 means nothing found" convention
-would invert here and fail on a clean project. Read heat, a badge on the hub's
-file view, and injecting the flag into an agent's session context are not built
-yet; this ships the signal.
+would invert here and fail on a clean project.
+
+The same meaning of outgrown shows up in two more places. The hub's file page
+puts a **May be out of date** strip above an outgrown doc, naming each newer
+linked file and how much later it changed — a linked file in a folder you
+cannot read is never named, dated or counted. And the turn-start agent hook,
+when a teammate's change lands, names the synced docs that link the changed
+file and are now older than it, so the agent checks them before relying on
+them.
 
 ### `bdrive forget` and `bdrive sync --prune` — cleaning up the hub
 

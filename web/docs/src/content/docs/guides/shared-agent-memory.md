@@ -96,7 +96,10 @@ Six people's agents in one folder means an agent can start a turn holding a
 copy of a file a teammate's agent rewrote an hour ago. So it is told: at turn
 start, the sync hook names the files that arrived from teammates since the
 last turn — "changed since your last turn, re-read before editing" — with
-deletions marked.
+deletions marked. When a synced doc links one of those files and is now older
+than it, the doc is named too — "docs that link a file changed since your last
+turn may be out of date" — so a runbook describing a config a teammate's agent
+just rewrote is checked before it is trusted.
 
 It is advisory. Nothing blocks, nothing prompts, no write is refused; the
 agent gets the fact and decides. That needs the turn-start hooks `bdrive init`

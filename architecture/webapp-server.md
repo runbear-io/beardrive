@@ -430,6 +430,21 @@ classDiagram
     note for secretScan "Mint-time gate on handleShareCreate: the one place a member turns private bytes into a public URL is the one place the bytes are read first. It returns rule ids and LINE NUMBERS only — the matched text never reaches a response body, a log line, or a metric label, the same rule ReadLedger keeps for actor identity. Bypassed by confirm:true (bdrive share --force, the UI's Share anyway) and by Server.alreadyPublic, since a path that already has a live link is public already. Fails CLOSED: an unreadable blob is 503, not a silent pass"
     note for renderFindings "The SECOND caller, and the reason the gate is no longer the only one (BEA-147): minting is the rarest path in the product, so a hub that could name an AWS key on line 3 well enough to refuse to publish a file rendered that same key to every member as prose. handleRender and renderVersion already hold the bytes RenderMarkdown needs, so the cap is a slice rather than the LimitReader the two streaming callers use — same ScanLimit, so the badge and the share dialog can never disagree about one file. Advisory: findings ride along on the render response (omitted when empty), nothing is blocked and nothing is redacted, because a member who can open the file could already read the key"
 
+    class renderOutgrown {
+        <<Server, server.go>>
+        +renderOutgrown(v, r, path, fi, src) []outgrownRef
+        resolve on the FULL snapshot, then drop !canRead
+        outgrown path, time, gap on the render response, omitted when empty
+    }
+    class docrefs {
+        <<internal/docrefs>>
+        +Candidates(r) []string
+        +Resolve(doc, cands, exists) []string
+        +WriteTimes(ops) / WriteTime(op)
+        +Outgrown(docTime, refs, written) []Ref
+    }
+    note for renderOutgrown "bdrive stale for one doc (BEA-279): linked files written after it. Dated by FileInfo.Written — the newest put's clamped journal.DisplayTime, stamped by RemoteSource.FilesWithMoves (DirSource: mtime) — never by FileInfo.Time, so the hub and the CLI agree. Resolve-then-filter, not filter-then-resolve: resolving against the visible set could re-point a hidden docDir/x at a visible root x and answer differently than the owner sees. A hidden ref is absent: never named, dated or counted. renderVersion (?sha=) never carries it — a past version is outgrown by definition"
+
     class sandboxInline {
         <<Server, every bytes-out route>>
         inlineMarkup(ct) / inlineType(ct)
@@ -602,6 +617,8 @@ classDiagram
     ShareDB ..> QuotaProvider : CheckRead before the stream, RecordEgress after
     Server ..> secretScan : handleShareCreate scans the first 1 MiB unless confirmed or alreadyPublic
     Server ..> renderFindings : handleRender + renderVersion, every markdown view
+    Server ..> renderOutgrown : handleRender only, current version
+    renderOutgrown ..> docrefs
     renderFindings ..> secretScan
     secretScan ..> secretFinding
     Server ..> countingWriter : every bytes-out route that bills

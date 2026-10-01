@@ -49,6 +49,9 @@ type hookLink struct {
 	// is: the daemon usually scanned the agent's write seconds ago, so this
 	// cycle's own scan sees an unchanged file and finds nothing.
 	secrets map[string][]secrets.Finding
+	// outgrown is the docs that link one of paths and are now older than it
+	// (BEA-279); nil whenever building it failed.
+	outgrown []outgrownDoc
 }
 
 // hookChangedMax caps the changed-file list the turn pays for. Past it the
@@ -79,9 +82,10 @@ func eventSessionID(data []byte) string {
 // hookSync is one mount's contribution to the turn: where its files live on
 // the hub, and which of them moved since the last turn.
 type hookSync struct {
-	base    string
-	paths   []store.InboundEvent
-	secrets map[string][]secrets.Finding
+	base     string
+	paths    []store.InboundEvent
+	secrets  map[string][]secrets.Finding
+	outgrown []outgrownDoc
 }
 
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
@@ -119,12 +123,14 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// Not drained: findings are state, not events. They stand until the file
 	// changes without them, so every turn sees the ones still true.
 	found, _ := sess.Store.LoadSecrets(sess.MountID)
+	// An error drops only this sentence: the rest of the context stands.
+	outgrown, _ := inboundOutgrown(sess.Store, sess.MountID, paths)
 
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {
 		return hookSync{}, false // non-hub remote: nothing to link to
 	}
-	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found}, true
+	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found, outgrown: outgrown}, true
 }
 
 // hookLinkFor places one mount relative to the folder the hook ran in.
@@ -198,6 +204,9 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 
 	if changed := hookChanged(links); changed != "" {
 		context += " " + changed
+	}
+	if docs := hookOutgrown(links); docs != "" {
+		context += " " + docs
 	}
 	if found := hookSecrets(links); found != "" {
 		context += " " + found
