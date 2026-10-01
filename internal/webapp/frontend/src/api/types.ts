@@ -198,6 +198,16 @@ export interface RenderDoc {
   // Omitted by the server when the file is clean, so a truthiness test is
   // the whole check. Rule ids and line numbers only — never the matched text.
   findings?: SecretFinding[];
+  // Linked files written after this doc, worst gap first — `bdrive stale`'s
+  // meaning (BEA-279). Omitted when there are none, and never on a past
+  // version. Files this viewer cannot read are never listed. gap is seconds.
+  outgrown?: OutgrownRef[];
+}
+
+export interface OutgrownRef {
+  path: string;
+  time: string;
+  gap: number;
 }
 
 // GET .../heat (handleHeat, reads.go) — counts only, never who.

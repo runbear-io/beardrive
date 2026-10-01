@@ -40,7 +40,7 @@ test("dragging the edge widens the column and it follows the reader until a relo
   expect(await colWidth(page)).toBe(968);
 
   // Another file, reached in-app: same width.
-  await page.locator(".markdown a", { hasText: "notes" }).click();
+  await page.locator(".markdown a:not(.obadge a)", { hasText: "notes" }).click();
   await expect(page).toHaveURL(new RegExp(`/${pid}/notes/readme\\.md$`));
   await page.waitForSelector("#content > .page.read");
   expect(await colWidth(page)).toBe(968);

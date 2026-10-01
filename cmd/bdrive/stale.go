@@ -1,40 +1,20 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/docrefs"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
-
-// staleLinkRe matches a markdown inline link's target: [label](target).
-var staleLinkRe = regexp.MustCompile(`\[[^\]]*\]\(([^)\s]+)`)
-
-// staleWikiRe matches Obsidian-style [[target]] and [[target|label]] links.
-// Copied from internal/webapp/markdown.go rather than shared: importing the
-// server package into a local read command to save one line is the wrong
-// trade.
-var staleWikiRe = regexp.MustCompile(`\[\[([^\]|]+)(?:\|([^\]]+))?\]\]`)
-
-// stalePathRe matches a bare path-shaped token — at least one slash, and no
-// wrapping punctuation, so a backticked `cmd/bdrive/grep.go` yields the path
-// and not the backticks. Resolution is the real filter, so this stays loose.
-var stalePathRe = regexp.MustCompile(`[A-Za-z0-9._~@+-]+(?:/[A-Za-z0-9._~@+-]+)+`)
-
-// staleSchemeRe matches a URL scheme, so https:// and mailto: never resolve.
-var staleSchemeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 
 func staleCmd() *cobra.Command {
 	var (
@@ -127,7 +107,7 @@ func runStale(cmd *cobra.Command, folderArg []string, filesOnly bool, limit int)
 	}
 
 	out := cmd.OutOrStdout()
-	written := staleWriteTimes(ops)
+	written := docrefs.WriteTimes(ops)
 	if len(written) == 0 {
 		fmt.Fprintln(out, "no history yet")
 		return nil
@@ -140,7 +120,7 @@ func runStale(cmd *cobra.Command, folderArg []string, filesOnly bool, limit int)
 
 	var docs []staleDoc
 	for _, rel := range paths {
-		if !isMarkdownPath(rel) {
+		if !docrefs.IsMarkdown(rel) {
 			continue
 		}
 		docTime, ok := written[rel]
@@ -148,17 +128,12 @@ func runStale(cmd *cobra.Command, folderArg []string, filesOnly bool, limit int)
 			continue // never synced: nothing to date it by
 		}
 		var refs []staleRef
-		for _, ref := range staleRefs(filepath.Join(folder, rel), rel, synced) {
-			refTime, ok := written[ref]
-			if !ok || !refTime.After(docTime) {
-				continue
-			}
-			refs = append(refs, staleRef{path: ref, gap: refTime.Sub(docTime)})
+		for _, r := range docrefs.Outgrown(docTime, staleRefs(filepath.Join(folder, rel), rel, synced), lookupTime(written)) {
+			refs = append(refs, staleRef{path: r.Path, gap: r.Gap})
 		}
 		if len(refs) == 0 {
 			continue
 		}
-		sort.Slice(refs, func(i, j int) bool { return refs[i].gap > refs[j].gap })
 		docs = append(docs, staleDoc{path: rel, refs: refs})
 	}
 	// Worst first: the doc with the reference that has outrun it furthest.
@@ -205,35 +180,14 @@ func runStale(cmd *cobra.Command, folderArg []string, filesOnly bool, limit int)
 	return nil
 }
 
-// staleWriteTimes dates every path from the journal, newest write wins.
-//
-// Max by DisplayTime, not the newest op under journal.Less: DisplayTime is
-// what `bdrive log` sorts by, and it returns the zero time for an op stamped
-// in the future — so taking the causally-newest op would date that path to
-// year 1 and flag every doc referencing it. Max discards the zero naturally.
-func staleWriteTimes(ops []journal.Op) map[string]time.Time {
-	written := make(map[string]time.Time, len(ops))
-	for _, op := range ops {
-		if op.Kind != journal.KindPut {
-			continue
-		}
-		t := syncer.DisplayTime(op)
-		if t.IsZero() {
-			continue // an op we cannot date does not get to date a path
-		}
-		if cur, ok := written[op.Path]; !ok || t.After(cur) {
-			written[op.Path] = t
-		}
+// staleGap renders how far a reference has outrun its doc. Sub-day gaps read
+// as <1d rather than 0d, which would look like no gap at all.
+func staleGap(d time.Duration) string {
+	days := int(d.Hours() / 24)
+	if days < 1 {
+		return "<1d"
 	}
-	return written
-}
-
-func isMarkdownPath(rel string) bool {
-	switch strings.ToLower(path.Ext(rel)) {
-	case ".md", ".markdown":
-		return true
-	}
-	return false
+	return fmt.Sprintf("%dd", days)
 }
 
 // staleRefs returns the synced paths one doc references, deduped. Unreadable
@@ -244,75 +198,9 @@ func staleRefs(abs, rel string, synced map[string]bool) []string {
 		return nil
 	}
 	defer f.Close()
-
-	docDir := path.Dir(rel)
-	seen := map[string]bool{}
-	var refs []string
-	keep := func(cand string) {
-		target, ok := resolveRef(docDir, cand, synced)
-		if !ok || target == rel || seen[target] {
-			return
-		}
-		seen[target] = true
-		refs = append(refs, target)
-	}
-
-	// grep's bounded scanner: a minified file that happens to be named .md
-	// must not be buffered whole.
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), maxLineScan)
-	for sc.Scan() {
-		line := sc.Text()
-		for _, m := range staleLinkRe.FindAllStringSubmatch(line, -1) {
-			keep(m[1])
-		}
-		for _, m := range staleWikiRe.FindAllStringSubmatch(line, -1) {
-			// A wikilink names a doc, usually without its extension.
-			keep(m[1])
-			keep(m[1] + ".md")
-		}
-		for _, m := range stalePathRe.FindAllString(line, -1) {
-			keep(m)
-		}
-	}
-	return refs // sc.Err() ignored: an over-long line ends this file, not the run
+	return docrefs.Resolve(rel, docrefs.Candidates(f), func(p string) bool { return synced[p] })
 }
 
-// resolveRef turns one candidate string into a synced path, or drops it.
-// Resolution IS the filter: anything that does not land on a file this project
-// syncs is not a reference, so a loose extractor upstream costs nothing.
-func resolveRef(docDir, cand string, synced map[string]bool) (string, bool) {
-	cand = strings.TrimSpace(cand)
-	// A trailing anchor or query is not part of the path.
-	if i := strings.IndexAny(cand, "#?"); i >= 0 {
-		cand = cand[:i]
-	}
-	cand = strings.TrimRight(cand, `.,;:!?"'`)
-	if cand == "" || strings.HasPrefix(cand, "/") || staleSchemeRe.MatchString(cand) {
-		return "", false // absolute, protocol-relative (//host), or a URL
-	}
-	tries := []string{path.Clean(cand)}
-	if docDir != "." {
-		tries = append([]string{path.Join(docDir, cand)}, tries...)
-	}
-	for _, p := range tries {
-		// Never leave the mount, and never name the root itself.
-		if p == "." || p == "/" || strings.HasPrefix(p, "../") || strings.HasPrefix(p, "/") {
-			continue
-		}
-		if synced[p] {
-			return p, true
-		}
-	}
-	return "", false
-}
-
-// staleGap renders how far a reference has outrun its doc. Sub-day gaps read
-// as <1d rather than 0d, which would look like no gap at all.
-func staleGap(d time.Duration) string {
-	days := int(d.Hours() / 24)
-	if days < 1 {
-		return "<1d"
-	}
-	return fmt.Sprintf("%dd", days)
+func lookupTime(m map[string]time.Time) func(string) (time.Time, bool) {
+	return func(p string) (time.Time, bool) { t, ok := m[p]; return t, ok }
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
-import type { FrontmatterPair, HeatMap, Node, RenderDoc } from "../api/types";
+import type { FrontmatterPair, HeatMap, Node, OutgrownRef, RenderDoc } from "../api/types";
 import { heatTotal, heatText } from "../hooks/useBrowse";
 import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
 import { fileURLFor, useTextAt } from "../hooks/useBlob";
@@ -20,6 +20,7 @@ import {
   whoChanged,
 } from "../util";
 import { urlForPath } from "../router";
+import { linkProps } from "../nav";
 import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
 import { hasMermaid, renderMermaid } from "../lib/mermaid";
 import { secretsBadge, type SecretFinding } from "../lib/secrets";
@@ -511,6 +512,7 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   return (
     <>
       <SecretBadge findings={doc.findings} />
+      <OutgrownBanner refs={doc.outgrown} projectId={projectId} />
       {doc.frontmatter?.length ? (
         <FrontmatterPanel pairs={doc.frontmatter} />
       ) : null}
@@ -579,6 +581,46 @@ function SecretBadge({ findings }: { findings?: SecretFinding[] }) {
       </div>
     </div>
   );
+}
+
+/* A file this doc links to changed after the doc was written — `bdrive
+   stale`'s meaning, not the Dashboard's age (BEA-279), so the copy never
+   says "old" or "fresh". Same strip shape as SecretBadge: role="status", no
+   actions; each path is an ordinary in-app link. */
+const OUTGROWN_SHOWN = 5;
+function OutgrownBanner({ refs, projectId }: { refs?: OutgrownRef[]; projectId?: string }) {
+  if (!refs?.length) return null;
+  const n = refs.length;
+  return (
+    <div className="obadge" role="status">
+      <span className="sb-icon">
+        <Icon name="alert" />
+      </span>
+      <div className="sb-text">
+        <b>May be out of date</b>
+        <span>
+          {n === 1 ? "1 linked file" : n + " linked files"} changed after this doc:{" "}
+          {refs.slice(0, OUTGROWN_SHOWN).map((r, i) => (
+            <span key={r.path}>
+              {i > 0 ? ", " : ""}
+              <a {...linkProps(urlForPath(r.path, projectId))}>
+                <code>{r.path}</code>
+              </a>{" "}
+              ({gapText(r.gap)} later)
+            </span>
+          ))}
+          {n > OUTGROWN_SHOWN ? `, +${n - OUTGROWN_SHOWN} more` : ""}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// The CLI's staleGap rule: whole days, and "<1d" rather than a "0d" that
+// would read as no gap at all.
+function gapText(seconds: number): string {
+  const days = Math.floor(seconds / 86400);
+  return days < 1 ? "<1d" : days + "d";
 }
 
 /* Delegated click handling for rendered-markdown links: wikilinks (already

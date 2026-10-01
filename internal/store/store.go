@@ -196,6 +196,13 @@ func (s *Store) cachePath(mountID string) (string, error) {
 	return s.mountStatePath("state-", mountID)
 }
 
+// DocIndexPath names the per-mount reverse-link index the agent hook keeps
+// (docrefs-<mount>.json): each synced doc's unresolved references, keyed on
+// the doc's blob so only a changed doc is ever re-parsed.
+func (s *Store) DocIndexPath(mountID string) (string, error) {
+	return s.mountStatePath("docrefs-", mountID)
+}
+
 func (s *Store) LoadCache(mountID string) (map[string]CachedFile, error) {
 	p, err := s.cachePath(mountID)
 	if err != nil {

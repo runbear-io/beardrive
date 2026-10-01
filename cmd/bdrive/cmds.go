@@ -131,6 +131,7 @@ list in .bdrive/config.json is never pruned against either.`,
 						link := hookLinkFor(folder, target, h.base)
 						link.paths = h.paths
 						link.secrets = h.secrets
+						link.outgrown = h.outgrown
 						links = append(links, link)
 					}
 				}
@@ -406,7 +407,7 @@ func logCmd() *cobra.Command {
 				// predates its arrival here — a rename, or an old document
 				// added today — and that is the case the reader has to see.
 				// Deletes have no file left to stat, so they never carry it.
-				if written := syncer.DisplayTime(op); commit.Sub(written) >= writeGap {
+				if written := journal.DisplayTime(op); commit.Sub(written) >= writeGap {
 					line += fmt.Sprintf("  (written %s)", written.Local().Format("2006-01-02 15:04:05"))
 				}
 				if note := safeField(op.Note, 200); note != "" {

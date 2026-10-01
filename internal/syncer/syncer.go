@@ -2123,33 +2123,6 @@ func pruneEmptyDirs(root, dir string) {
 	}
 }
 
-// DisplayTime is the timestamp to show a human for an op: when the file was
-// written if we know it, otherwise when the op was committed. Ops written
-// before Op.Mtime existed, and deletes (no file left to stat), fall back.
-func DisplayTime(op journal.Op) time.Time {
-	// Clamped to the moment the op was journaled. Mtime comes off the
-	// filesystem, so a peer chooses it: an op stamped in the year 9999 sits
-	// above every real entry in `bdrive log` forever, and a handful of them
-	// pushes the genuine history off a screen that prints 50 rows. Lagging
-	// Time is legitimate (an old file, journaled today); leading it is not a
-	// write time, it is a sort key someone picked.
-	//
-	// Op.Time is no more verified than Op.Mtime — same JSON line, same peer —
-	// so bounding one by the other only moves the value a field to the left.
-	// The one clock a peer does not own is this machine's: a stamp later than
-	// now is not a write time at all, and an op we cannot date does not get to
-	// outrank the changes we can. It sorts last rather than first, which is
-	// the direction that cannot be aimed.
-	now := time.Now()
-	if !op.Mtime.IsZero() && !op.Mtime.After(op.Time) && !op.Mtime.After(now) {
-		return op.Mtime
-	}
-	if op.Time.After(now) {
-		return time.Time{}
-	}
-	return op.Time
-}
-
 // CommitTime is when a change entered the project, which is the question
 // `bdrive log` answers. It is not DisplayTime: `mv` preserves mtime, so the put
 // half of a rename carries the original file's write time and sorts away from
@@ -2180,7 +2153,7 @@ func SortForDisplay(ops []journal.Op) {
 		if !ti.Equal(tj) {
 			return ti.After(tj)
 		}
-		di, dj := DisplayTime(ops[i]), DisplayTime(ops[j])
+		di, dj := journal.DisplayTime(ops[i]), journal.DisplayTime(ops[j])
 		if !di.Equal(dj) {
 			return di.After(dj)
 		}
