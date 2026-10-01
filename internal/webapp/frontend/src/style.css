@@ -1287,6 +1287,15 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .sbadge .sb-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; line-height: 1.45; }
 .sbadge .sb-text b { color: #e07070; font-weight: 600; }
 .sbadge .sb-text span { color: var(--text-dim); }
+/* Outgrown-doc strip (BEA-279): .sbadge's geometry in amber — a linked file
+   changed after this doc, which is a "check it" rather than the red "a key is
+   in here". Its own class, so a .sbadge count still means credentials only. */
+.obadge { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; padding: 11px 14px; border: 1px solid rgba(230,170,60,.34); border-radius: var(--r-card); background: rgba(230,170,60,.08); }
+.obadge .sb-icon { flex: none; display: flex; color: #d9a03a; }
+.obadge .sb-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; line-height: 1.45; }
+.obadge .sb-text b { color: #d9a03a; font-weight: 600; }
+.obadge .sb-text > span { color: var(--text-dim); }
+.obadge .sb-text a { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
 
 /* plain file / binary views */
 pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: var(--text-body); white-space: pre-wrap; overflow-wrap: anywhere; }

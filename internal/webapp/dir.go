@@ -50,6 +50,8 @@ func (d *DirSource) Files(_ context.Context) (map[string]FileInfo, error) {
 			Blob: fmt.Sprintf("dir-%d-%d", info.ModTime().UnixNano(), info.Size()),
 			Size: info.Size(),
 			Time: info.ModTime().UTC(),
+			// No journal in volume mode: mtime is the only write time there is.
+			Written: info.ModTime().UTC(),
 		}
 		return nil
 	})

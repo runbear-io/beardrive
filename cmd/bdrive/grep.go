@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/docrefs"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
@@ -28,7 +29,7 @@ const binarySniff = 8 << 10
 
 // maxLineScan bounds one line, so a minified bundle that syncs cannot make
 // grep buffer it whole. Past this the rest of that file is skipped.
-const maxLineScan = 1 << 20
+const maxLineScan = docrefs.MaxLineScan
 
 func grepCmd() *cobra.Command {
 	var (

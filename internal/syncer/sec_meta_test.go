@@ -133,7 +133,7 @@ func TestSec_SyncMeta_FutureMtimeCannotOutrankRealHistory(t *testing.T) {
 	SortForDisplay(entries)
 
 	for _, op := range entries {
-		if shown := DisplayTime(op); shown.After(op.Time.Add(time.Hour)) {
+		if shown := journal.DisplayTime(op); shown.After(op.Time.Add(time.Hour)) {
 			t.Errorf("%s displays as %v, %v after the op was journaled (%v) — a peer chose the sort key",
 				op.Path, shown, shown.Sub(op.Time), op.Time)
 		}

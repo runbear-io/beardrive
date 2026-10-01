@@ -12,6 +12,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -1111,5 +1112,98 @@ func TestCLIStatusReportsUnscannedWork(t *testing.T) {
 	}
 	if !strings.Contains(out, "local:    0 change(s) not yet scanned") {
 		t.Fatalf("drift did not clear after a sync:\n%s", out)
+	}
+}
+
+// TestOutgrownHubMatchesStaleCLI is the "one meaning of stale" check
+// (BEA-279): the hub's /render `outgrown` and `bdrive stale` on the synced
+// copy name the same (doc, ref) pairs — across an inline link, a wikilink, a
+// bare path, an unresolvable path and a ref older than its doc.
+func TestOutgrownHubMatchesStaleCLI(t *testing.T) {
+	e := newCLIEnv(t)
+	work := t.TempDir()
+	now := time.Now()
+	files := map[string]struct {
+		body string
+		age  time.Duration
+	}{
+		"docs/guide.md":   {"# Guide\n\n[cfg](../config/app.yaml), [[notes]], `src/main.go`, nope/missing.go, src/old.go\n", 10 * 24 * time.Hour},
+		"docs/notes.md":   {"notes\n", 2 * 24 * time.Hour},
+		"config/app.yaml": {"port: 9090\n", 24 * time.Hour},
+		"src/main.go":     {"package main\n", 3 * 24 * time.Hour},
+		"src/old.go":      {"package main\n", 20 * 24 * time.Hour},
+		"clean.md":        {"see src/old.go\n", 5 * 24 * time.Hour},
+	}
+	for rel, f := range files {
+		abs := filepath.Join(work, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(f.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		at := now.Add(-f.age)
+		if err := os.Chtimes(abs, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := e.run(work, "init", "--name", "outgrown", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	defer e.run(work, "stop", work)
+	if out, err := e.run(work, "sync"); err != nil {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+
+	out, err := e.run(work, "stale", "-n", "0")
+	if err != nil {
+		t.Fatalf("stale: %v\n%s", err, out)
+	}
+	cli := map[string]bool{}
+	doc := ""
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 0 || !strings.Contains(line, "newer"):
+		case strings.HasPrefix(line, "  "):
+			cli[doc+" -> "+f[0]] = true
+		default:
+			doc = f[0]
+		}
+	}
+
+	id := projectIDByName(t, e.browser, e.hub.URL, "outgrown")
+	hub := map[string]bool{}
+	for rel := range files {
+		if !strings.HasSuffix(rel, ".md") {
+			continue
+		}
+		resp, err := e.browser.Get(e.hub.URL + "/api/p/" + id + "/render?path=" + rel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Outgrown []struct{ Path string } `json:"outgrown"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range body.Outgrown {
+			hub[rel+" -> "+o.Path] = true
+		}
+	}
+
+	want := map[string]bool{
+		"docs/guide.md -> config/app.yaml": true,
+		"docs/guide.md -> docs/notes.md":   true,
+		"docs/guide.md -> src/main.go":     true,
+	}
+	if fmt.Sprint(cli) != fmt.Sprint(want) {
+		t.Errorf("bdrive stale = %v, want %v\n%s", cli, want, out)
+	}
+	if fmt.Sprint(hub) != fmt.Sprint(cli) {
+		t.Errorf("hub outgrown %v != bdrive stale %v", hub, cli)
 	}
 }

@@ -722,8 +722,8 @@ func TestLogDisplayOrder(t *testing.T) {
 		t.Fatalf("display order should lead with the most recently journaled file early.md, got %q", entries[0].Path)
 	}
 	// Its write time is two hours old and still available to print.
-	if gap := entries[0].Time.Sub(DisplayTime(entries[0])); gap < time.Hour {
-		t.Fatalf("early.md's write time was lost: commit %v, display %v", entries[0].Time, DisplayTime(entries[0]))
+	if gap := entries[0].Time.Sub(journal.DisplayTime(entries[0])); gap < time.Hour {
+		t.Fatalf("early.md's write time was lost: commit %v, display %v", entries[0].Time, journal.DisplayTime(entries[0]))
 	}
 	assertNonIncreasing(t, entries)
 }
@@ -760,7 +760,7 @@ func TestLogDisplayTimeIsEditTime(t *testing.T) {
 		}
 		byPath[op.Path] = op
 	}
-	gap := DisplayTime(byPath["second.md"]).Sub(DisplayTime(byPath["first.md"]))
+	gap := journal.DisplayTime(byPath["second.md"]).Sub(journal.DisplayTime(byPath["first.md"]))
 	if gap < 30*time.Second {
 		t.Fatalf("display times only %v apart; one scan collapsed them again", gap)
 	}

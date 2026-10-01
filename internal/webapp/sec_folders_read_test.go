@@ -447,3 +447,54 @@ func TestSec_Folder_RunCardDoesNotLeakHiddenPathsAnAgentRead(t *testing.T) {
 		t.Fatalf("the run card lost the path bob may see: %s", got.Body)
 	}
 }
+
+// The outgrown banner (BEA-279) names a linked file and when it changed. A
+// linked file in a folder the viewer cannot read counts as missing: no entry,
+// and neither its path nor its time anywhere in the raw body — asserted on the
+// bytes, not the decoded struct, so a stray count or field cannot slip by.
+func TestSec_Folder_RenderOutgrownNeverNamesAHiddenRef(t *testing.T) {
+	h, _, c, p, _ := hiddenHub(t)
+	base := "/api/p/" + p.ID + "/"
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=notes/runbook.md",
+		[]byte("# Runbook\n\nsee vault/secret.md\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("seed runbook: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "PUT", base+"upload/content?path=vault/secret.md",
+		[]byte("# the secret, rotated\n"), c["alice"]); rec.Code != 200 {
+		t.Fatalf("rewrite secret: %d %s", rec.Code, rec.Body)
+	}
+	url := base + "render?path=notes/runbook.md"
+
+	// The owner sees it — without this the test passes against a hub that
+	// never computes outgrown at all.
+	rec := doAs(t, h, "GET", url, nil, c["alice"])
+	var doc struct {
+		Outgrown []outgrownRef `json:"outgrown"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil || len(doc.Outgrown) != 1 || doc.Outgrown[0].Path != "vault/secret.md" {
+		t.Fatalf("owner: want the hidden ref listed, got %d %s", rec.Code, rec.Body)
+	}
+	stamp, _ := doc.Outgrown[0].Time.MarshalJSON()
+
+	rec = doAs(t, h, "GET", url, nil, c["bob"])
+	if rec.Code != 200 {
+		t.Fatalf("bob render: %d %s", rec.Code, rec.Body)
+	}
+	// The doc's own text names the path, and bob may read the doc: what must
+	// not appear is the path anywhere ELSE in the response.
+	var raw map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "html")
+	rest, _ := json.Marshal(raw)
+	body := rec.Body.String()
+	if strings.Contains(body, "outgrown") || strings.Contains(string(rest), "vault/secret.md") {
+		t.Errorf("bob's render named the hidden ref: %s", body)
+	}
+	for _, leak := range []string{strings.Trim(string(stamp), `"`)} {
+		if strings.Contains(body, leak) {
+			t.Errorf("bob's render leaked %q: %s", leak, body)
+		}
+	}
+}

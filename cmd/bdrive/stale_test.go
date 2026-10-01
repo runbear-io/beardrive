@@ -137,50 +137,6 @@ func TestStaleDatesFromTheJournalNotMtime(t *testing.T) {
 	}
 }
 
-// Resolution is the filter: a candidate that does not land on a synced file is
-// not a reference, however path-shaped it looks.
-func TestStaleReferenceResolution(t *testing.T) {
-	synced := map[string]bool{
-		"internal/syncer/syncer.go": true,
-		"docs/hub-config.md":        true,
-		"docs/nested/deep.go":       true,
-		"README.md":                 true,
-	}
-	cases := []struct {
-		name, docDir, cand, want string
-	}{
-		{"inline link, root-relative", ".", "internal/syncer/syncer.go", "internal/syncer/syncer.go"},
-		{"relative to the doc's own dir", "docs/nested", "deep.go", "docs/nested/deep.go"},
-		{"falls back to the root", "docs", "internal/syncer/syncer.go", "internal/syncer/syncer.go"},
-		{"wikilink retried with .md", ".", "docs/hub-config.md", "docs/hub-config.md"},
-		{"anchor stripped", ".", "README.md#install", "README.md"},
-		{"query stripped", ".", "README.md?raw=1", "README.md"},
-		{"trailing sentence period", ".", "README.md.", "README.md"},
-		{"dot-slash prefix", ".", "./README.md", "README.md"},
-		{"http url", ".", "https://example.com/README.md", ""},
-		{"mailto", ".", "mailto:someone@example.com", ""},
-		{"protocol-relative", ".", "//example.com/README.md", ""},
-		{"absolute path", ".", "/etc/passwd", ""},
-		{"escapes the mount", "docs", "../../../etc/passwd", ""},
-		{"made up", ".", "internal/nope/missing.go", ""},
-		{"empty", ".", "", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := resolveRef(tc.docDir, tc.cand, synced)
-			if tc.want == "" {
-				if ok {
-					t.Fatalf("resolved %q to %q, want dropped", tc.cand, got)
-				}
-				return
-			}
-			if !ok || got != tc.want {
-				t.Fatalf("resolveRef(%q, %q) = %q,%v want %q", tc.docDir, tc.cand, got, ok, tc.want)
-			}
-		})
-	}
-}
-
 // A URL, a ../ escape and a made-up path reach the command as real document
 // text — and none of them may be counted.
 func TestStaleIgnoresUnresolvableReferences(t *testing.T) {

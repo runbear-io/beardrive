@@ -54,7 +54,7 @@ test("wikilink navigates to the target file", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/index.md`);
-  const link = page.locator('#content a:has-text("guide")');
+  const link = page.locator('#content a:not(.obadge a):has-text("guide")');
   // BEA-136: the href itself, not just the click. Copy-link-address,
   // middle-click and open-in-new-tab all read this attribute, and it used to
   // be the unresolvable string "wiki:guide".
@@ -73,7 +73,7 @@ test("wikilinks: modified click is the browser's, a dangling one has no href", a
   const pid = await wikiId(page);
   await page.goto(`/${pid}/index.md`);
   // A cmd/ctrl-click belongs to the browser (new tab), so THIS page stays put.
-  await page.locator('#content a:has-text("guide")').click({ modifiers: ["ControlOrMeta"] });
+  await page.locator('#content a:not(.obadge a):has-text("guide")').click({ modifiers: ["ControlOrMeta"] });
   await page.waitForTimeout(300);
   expect(new URL(page.url()).pathname).toBe(`/${pid}/index.md`);
   // [[nowhere]] matches no file: unresolved, and no dead href to copy.
@@ -313,6 +313,27 @@ test("a file holding a key carries a badge in the file view", async ({ page }) =
   await page.goto(`/${pid}/index.md`);
   await expect(page.locator("#content h1")).toHaveText("Wiki");
   await expect(page.locator(".sbadge")).toHaveCount(0);
+});
+
+// BEA-279: index.md (seeded 72h ago) links guide.md and notes/readme.md, both
+// rewritten since — `bdrive stale`'s meaning of out of date, never age.
+test("a doc whose linked files changed after it says so", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/index.md`);
+  const strip = page.locator(".obadge");
+  await expect(strip).toBeVisible();
+  await expect(strip).toHaveAttribute("role", "status");
+  await expect(strip).toContainText("May be out of date");
+  await expect(strip).toContainText("2 linked files changed after this doc");
+  await expect(strip.locator("a", { hasText: "guide.md" })).toHaveAttribute("href", `/${pid}/guide.md`);
+  await expect(strip).not.toContainText(/old|fresh|ago/i);
+  // An in-app link: a plain click SPA-routes to the file.
+  await strip.locator("a", { hasText: "notes/readme.md" }).click();
+  await page.waitForURL(`/${pid}/notes/readme.md`);
+  // A doc that links nothing newer carries no strip.
+  await expect(page.locator("#content h1")).toHaveText("Notes");
+  await expect(page.locator(".obadge")).toHaveCount(0);
 });
 
 // BEA-111: sharing a file that looks like it holds credentials asks first.

@@ -242,7 +242,7 @@ func TestSec_SyncMeta_AFutureOpTimeCannotOutrankRealHistory(t *testing.T) {
 
 	limit := time.Now().Add(time.Hour)
 	for _, op := range entries {
-		if shown := DisplayTime(op); shown.After(limit) {
+		if shown := journal.DisplayTime(op); shown.After(limit) {
 			t.Errorf("%s displays as %v, in the future — Op.Time is a sort key the peer picked, "+
 				"exactly like Op.Mtime was", op.Path, shown)
 		}

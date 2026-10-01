@@ -44,6 +44,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/runbear-io/beardrive/internal/docrefs"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/secrets"
@@ -248,6 +249,11 @@ type FileInfo struct {
 	Blob string
 	Size int64
 	Time time.Time
+	// Written is when the content was last written, dated the way `bdrive
+	// stale` dates it (docrefs.WriteTimes): the newest put's clamped
+	// DisplayTime, not the winning op's raw Time. Only the outgrown banner
+	// reads it, so the hub and the CLI can never disagree about one doc.
+	Written time.Time
 	// User/UserName are the signed-in account behind the change; Author is
 	// the git/OS identity an offline device falls back to. History renders
 	// the account and falls back to Author, so the viewer needs all three
@@ -796,6 +802,7 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 	}
 	journal.Sort(all)
 	files := make(map[string]FileInfo)
+	written := make(map[string]time.Time)
 	for _, op := range all {
 		switch op.Kind {
 		case journal.KindPut:
@@ -808,6 +815,9 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 			if !blobRe.MatchString(op.Blob) {
 				continue
 			}
+			if t := docrefs.WriteTime(op); t.After(written[op.Path]) {
+				written[op.Path] = t
+			}
 			files[op.Path] = FileInfo{
 				Blob: op.Blob, Size: op.Size, Time: op.Time,
 				User: op.User, UserName: op.UserName,
@@ -816,6 +826,12 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 		case journal.KindDelete:
 			delete(files, op.Path)
 		}
+	}
+	// A path deleted and re-created keeps its pre-delete puts in the max,
+	// exactly like the CLI's WriteTimes.
+	for p, fi := range files {
+		fi.Written = written[p]
+		files[p] = fi
 	}
 	return files, buildMoveIndex(all), nil
 }
@@ -1738,7 +1754,51 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 	if f := renderFindings(src); len(f) > 0 {
 		doc["findings"] = f
 	}
+	if o := s.renderOutgrown(v, r, p, fi, src); len(o) > 0 {
+		doc["outgrown"] = o
+	}
 	writeJSON(w, doc)
+}
+
+// outgrownRef is one linked file written after the doc that links it.
+type outgrownRef struct {
+	Path string    `json:"path"`
+	Time time.Time `json:"time"`
+	Gap  int64     `json:"gap"` // seconds; the client cannot derive it, doc.time is not Written
+}
+
+// renderOutgrown is `bdrive stale` for one doc (BEA-279): the refs it links
+// that were written after it. Refs resolve against the FULL snapshot and only
+// then drop what this viewer cannot read — resolving against the visible set
+// could re-point a hidden docDir/x at a visible root x and answer differently
+// than the owner sees. A hidden ref is simply absent: never named, never
+// dated, never counted.
+func (s *Server) renderOutgrown(v *volume, r *http.Request, p string, fi FileInfo, src []byte) []outgrownRef {
+	if !docrefs.IsMarkdown(p) || fi.Written.IsZero() {
+		return nil
+	}
+	snap, err := v.snapshot(r.Context())
+	if err != nil {
+		return nil // advisory: never fail a render over it
+	}
+	vis := s.visibility(r)
+	var refs []string
+	for _, ref := range docrefs.Resolve(p, docrefs.Candidates(bytes.NewReader(src)), func(q string) bool {
+		_, ok := snap.files[q]
+		return ok
+	}) {
+		if vis.canRead(ref) {
+			refs = append(refs, ref)
+		}
+	}
+	var out []outgrownRef
+	for _, o := range docrefs.Outgrown(fi.Written, refs, func(q string) (time.Time, bool) {
+		t := snap.files[q].Written
+		return t, !t.IsZero()
+	}) {
+		out = append(out, outgrownRef{Path: o.Path, Time: o.Time, Gap: int64(o.Gap / time.Second)})
+	}
+	return out
 }
 
 // renderFindings is the share gate's credential scan on the path every file
