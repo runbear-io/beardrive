@@ -518,10 +518,8 @@ func installAgentHooks(folder string) {
 		if r.Migrated != "" {
 			fmt.Printf("           moved out of %s (project hooks are no longer used)\n", r.Migrated)
 		}
-		if r.Note != "" {
-			fmt.Printf("           note: %s\n", r.Note)
-		}
 	}
+	printHookNotes(results)
 }
 
 // installAutostart registers the login unit so a reboot doesn't quietly stop
@@ -612,10 +610,8 @@ func installHooksIn(folder string) {
 			state = "hooks already registered"
 		}
 		fmt.Printf("  %-8s %s  →  %s\n", r.Agent, state, r.Path)
-		if r.Note != "" {
-			fmt.Printf("           note: %s\n", r.Note)
-		}
 	}
+	printHookNotes(results)
 }
 
 // ensureLogin returns settings with a working session, running the login

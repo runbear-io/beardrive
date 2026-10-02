@@ -129,11 +129,13 @@ func hookCommand(label string) string {
 		`else bdrive sync . >/dev/null 2>&1 || true; fi'`
 }
 
-// hookPullCommand is Claude Code's turn-start hook: `bdrive sync --hook`
-// pulls, stamps the session note, and emits the project's gated-link
-// formula as additionalContext (hookSpecificOutput JSON on stdout — which
-// is why stdout must NOT be discarded here). Claude-only: the JSON
-// contract is Claude Code's.
+// hookPullCommand is the turn-start hook of every JSON-hook platform
+// (Claude Code, Codex, Gemini): `bdrive sync --hook` pulls, stamps the
+// session, and emits the project's gated-link formula and the "changed
+// since your last turn" list as additionalContext (hookSpecificOutput JSON
+// on stdout — which is why stdout must NOT be discarded here). All three
+// harnesses read that shape; only the event name differs, and `--hook
+// <label>` picks it.
 func hookPullCommand(label string) string {
 	return `sh -c '` + mountGuard() +
 		`bdrive sync . --hook ` + label + ` 2>/dev/null'`
@@ -146,6 +148,11 @@ func readHookCommand() string {
 	return `sh -c '` + mountGuard() +
 		`bdrive read-log . >/dev/null 2>&1 || true'`
 }
+
+// CodexTrustNote is the one manual step Codex needs, printed on its own line
+// by `bdrive init` and `bdrive hooks` — registering the hook is not the same
+// as it running.
+const CodexTrustNote = "Codex: open /hooks in Codex once and trust the beardrive hook — it does nothing until you do. (Older Codex builds also need [features] hooks = true in ~/.codex/config.toml.)"
 
 type platform struct {
 	label      string // session-note label
@@ -176,11 +183,11 @@ var platforms = map[string]platform{
 			// Codex reads mostly happen through shell commands; read-log
 			// mines the command line for the files it names.
 			return mergeJSONHooks(ConfigPath("", "codex"),
-				"UserPromptSubmit", "PostToolUse", "apply_patch", "read_file|shell", "codex", 30, false, "")
+				"UserPromptSubmit", "PostToolUse", "apply_patch", "read_file|shell", "codex", 30, false, hookPullCommand("codex"))
 		},
-		// Codex hooks are experimental and off by default, and Codex asks
-		// the user to trust each hook definition once.
-		note: "enable hooks in ~/.codex/config.toml ([features] codex_hooks = true), then trust the hook when Codex asks",
+		// Codex runs no hook until the user has reviewed and trusted it
+		// once; hooks themselves are on by default in current builds.
+		note: CodexTrustNote,
 	},
 	"gemini": {
 		label:      "gemini",
@@ -189,7 +196,7 @@ var platforms = map[string]platform{
 			// Gemini uses its own event names and millisecond timeouts.
 			return mergeJSONHooks(ConfigPath("", "gemini"),
 				"BeforeAgent", "AfterTool", "write_file|replace|edit",
-				"read_file|read_many_files|search_file_content|run_shell_command", "gemini", 30000, false, "")
+				"read_file|read_many_files|search_file_content|run_shell_command", "gemini", 30000, false, hookPullCommand("gemini"))
 		},
 	},
 	"hermes": {

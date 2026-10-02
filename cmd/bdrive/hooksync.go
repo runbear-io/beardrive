@@ -17,7 +17,8 @@ import (
 )
 
 // `bdrive sync --hook <label>` is the agent-hook flavor of sync, run by the
-// Claude Code UserPromptSubmit hook at every turn start. It does three
+// turn-start hook (Claude Code and Codex UserPromptSubmit, Gemini
+// BeforeAgent) at every turn start. It does three
 // things: pulls (a normal cycle), stamps the session note so every change
 // this turn is attributed to the agent session, and — the part that keeps
 // agents current no matter how stale their skill copy is — emits the
@@ -160,7 +161,7 @@ func hookLinkFor(folder, target, base string) hookLink {
 
 // emitHookContext writes the turn's additionalContext — one JSON object, no
 // matter how many mounts the run covered.
-func emitHookContext(cmd *cobra.Command, links []hookLink) {
+func emitHookContext(cmd *cobra.Command, label string, links []hookLink) {
 	if len(links) == 0 {
 		return
 	}
@@ -205,7 +206,7 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
-			"hookEventName":     "UserPromptSubmit",
+			"hookEventName":     hookEventName(label),
 			"additionalContext": context,
 		},
 	}
@@ -214,6 +215,16 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 		return
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), string(enc))
+}
+
+// hookEventName names the turn-start event each platform's hook JSON must
+// answer for: Gemini's is BeforeAgent; Claude Code and Codex share
+// UserPromptSubmit.
+func hookEventName(label string) string {
+	if label == "gemini" {
+		return "BeforeAgent"
+	}
+	return "UserPromptSubmit"
 }
 
 // hookChanged renders what teammates' devices pulled in since the last turn:

@@ -93,6 +93,8 @@ func secfixHooks() []struct{ label, cmd string } {
 	return []struct{ label, cmd string }{
 		{"sync hook (PostToolUse)", hookCommand("claude-code")},
 		{"pull hook (UserPromptSubmit)", hookPullCommand("claude-code")},
+		{"pull hook (codex UserPromptSubmit)", hookPullCommand("codex")},
+		{"pull hook (gemini BeforeAgent)", hookPullCommand("gemini")},
 		{"read hook (Read/Grep/Bash)", readHookCommand()},
 	}
 }

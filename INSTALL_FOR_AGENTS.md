@@ -226,9 +226,10 @@ in every folder, and nothing is written inside the project — a hook file in a
 synced folder would travel to the whole team.
 
 Read init's output for the platforms it registered and tell the user. One
-platform needs a manual step worth passing on: **Codex hooks are experimental
-and off by default** — the user enables them with `[features] codex_hooks =
-true` in `~/.codex/config.toml`, and Codex asks once to trust the hook.
+platform needs a manual step worth passing on: **Codex runs no hook until the
+user trusts it** — they open `/hooks` in Codex once and trust the beardrive
+hook (init prints this on its own `!` line). Older Codex builds also need
+`[features] hooks = true` in `~/.codex/config.toml`.
 
 Only if a platform the user works with is missing from init's output: run
 `bdrive hooks install --agent <name>`. `bdrive hooks` shows the status table,

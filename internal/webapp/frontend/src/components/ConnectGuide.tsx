@@ -73,7 +73,11 @@ export function ConnectGuide({ project, existing }: { project: Project; existing
               Insights. They register once per machine in your agent's own config, so every
               session is covered and nothing is written into the synced folder.
             </li>
-            <li>Codex hooks are off by default: set [features] codex_hooks = true in ~/.codex/config.toml.</li>
+            <li>
+              Codex runs a hook only after you trust it: open /hooks in Codex once and trust the
+              beardrive hook. (Older Codex builds also need [features] hooks = true in
+              ~/.codex/config.toml.)
+            </li>
           </ul>
         </details>
         <details className="gd-manual">

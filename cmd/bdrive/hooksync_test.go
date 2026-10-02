@@ -14,10 +14,21 @@ import (
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
-// `bdrive sync --hook` must emit the gated-link formula as Claude Code
-// hook JSON, stamp the session note, and stay a silent no-op everywhere
-// else — a hook must never fail the turn.
+// `bdrive sync --hook` must emit the gated-link formula as agent hook JSON
+// — the same shape for Claude Code, Codex and Gemini, only the event name
+// differs — stamp the session note, and stay a silent no-op everywhere else:
+// a hook must never fail the turn.
 func TestSyncHookMode(t *testing.T) {
+	for _, tc := range []struct{ label, event string }{
+		{"claude-code", "UserPromptSubmit"},
+		{"codex", "UserPromptSubmit"},
+		{"gemini", "BeforeAgent"},
+	} {
+		t.Run(tc.label, func(t *testing.T) { testSyncHookMode(t, tc.label, tc.event) })
+	}
+}
+
+func testSyncHookMode(t *testing.T, label, event string) {
 	t.Setenv("BDRIVE_HOME", t.TempDir())
 	folder := t.TempDir()
 	folder, _ = filepath.EvalSymlinks(folder)
@@ -36,14 +47,32 @@ func TestSyncHookMode(t *testing.T) {
 	var out bytes.Buffer
 	c.SetOut(&out)
 	c.SetIn(strings.NewReader(`{"session_id":"sess-42","prompt":"hello"}`))
-	c.SetArgs([]string{folder, "--hook", "claude-code"})
+	c.SetArgs([]string{folder, "--hook", label})
 	if err := c.Execute(); err != nil {
 		t.Fatalf("hook mode must never fail: %v", err)
 	}
 	got := out.String()
+	// The stdout contract is exactly one JSON object with a non-empty
+	// additionalContext under this platform's event name.
+	var obj struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	dec := json.NewDecoder(strings.NewReader(got))
+	if err := dec.Decode(&obj); err != nil {
+		t.Fatalf("hook output is not one JSON object: %v\n%s", err, got)
+	}
+	if dec.More() {
+		t.Errorf("hook output carries more than one JSON value:\n%s", got)
+	}
+	if obj.HookSpecificOutput.HookEventName != event || obj.HookSpecificOutput.AdditionalContext == "" {
+		t.Errorf("hookSpecificOutput = %+v, want event %q and a context", obj.HookSpecificOutput, event)
+	}
 	for _, want := range []string{
 		`"hookSpecificOutput"`,
-		`"hookEventName":"UserPromptSubmit"`,
+		`"hookEventName":"` + event + `"`,
 		"https://hub.example.com/p-12345678", // base URL: remote minus /p
 		"[🔗](",                               // the emoji-link convention
 		"code blocks",                        // paths in code blocks stay plain
@@ -63,7 +92,7 @@ func TestSyncHookMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if note := st.LoadNote(); note != "claude-code session sess-42" {
+	if note := st.LoadNote(); note != label+" session sess-42" {
 		t.Errorf("note = %q, want the stamped session", note)
 	}
 }
@@ -174,11 +203,16 @@ func mountAt(t *testing.T, parent, name, remote string) config.Project {
 
 func runHook(t *testing.T, folder string) string {
 	t.Helper()
+	return runHookAs(t, folder, "claude-code")
+}
+
+func runHookAs(t *testing.T, folder, label string) string {
+	t.Helper()
 	c := syncCmd()
 	var out bytes.Buffer
 	c.SetOut(&out)
 	c.SetIn(strings.NewReader(`{"session_id":"sess-42"}`))
-	c.SetArgs([]string{folder, "--hook", "claude-code"})
+	c.SetArgs([]string{folder, "--hook", label})
 	if err := c.Execute(); err != nil {
 		t.Fatalf("hook mode must never fail: %v", err)
 	}
@@ -333,6 +367,13 @@ func seedInbound(t *testing.T, proj config.Project, paths ...string) {
 // daemon's) is still reported by the hook, whose own cycle sees nothing. A
 // Result field would report nothing here.
 func TestSyncHookModeReportsInboundChanges(t *testing.T) {
+	// Codex and Gemini teammates get the same list Claude Code does.
+	for _, label := range []string{"claude-code", "codex", "gemini"} {
+		t.Run(label, func(t *testing.T) { testSyncHookModeReportsInboundChanges(t, label) })
+	}
+}
+
+func testSyncHookModeReportsInboundChanges(t *testing.T, label string) {
 	t.Setenv("BDRIVE_HOME", t.TempDir())
 	root := t.TempDir()
 	root, _ = filepath.EvalSymlinks(root)
@@ -340,7 +381,7 @@ func TestSyncHookModeReportsInboundChanges(t *testing.T) {
 
 	seedInbound(t, proj, "notes/readme.md", "-old.md")
 
-	got := runHook(t, filepath.Join(root, "wiki"))
+	got := runHookAs(t, filepath.Join(root, "wiki"), label)
 	for _, want := range []string{
 		"re-read before editing",
 		"`notes/readme.md`",
@@ -352,7 +393,7 @@ func TestSyncHookModeReportsInboundChanges(t *testing.T) {
 	}
 
 	// The drain cleared: a second run with no peer activity says nothing.
-	if again := runHook(t, filepath.Join(root, "wiki")); strings.Contains(again, "re-read before editing") {
+	if again := runHookAs(t, filepath.Join(root, "wiki"), label); strings.Contains(again, "re-read before editing") {
 		t.Errorf("second run repeated the changed list:\n%s", again)
 	}
 }

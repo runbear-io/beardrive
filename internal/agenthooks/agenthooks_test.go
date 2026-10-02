@@ -95,6 +95,17 @@ func TestInstallJSONPlatforms(t *testing.T) {
 		t.Fatalf("codex read hook missing: %s", cx)
 	}
 
+	// Codex and Gemini get the same briefing-emitting turn-start hook as
+	// Claude: guarded, stdout kept (the push hook still discards its own).
+	for _, tc := range []struct{ agent, event, label string }{
+		{"codex", "UserPromptSubmit", "codex"},
+		{"gemini", "BeforeAgent", "gemini"},
+	} {
+		if got, want := turnStartCommand(t, tc.agent, tc.event), hookPullCommand(tc.label); got != want {
+			t.Errorf("%s turn-start command = %s, want %s", tc.agent, got, want)
+		}
+	}
+
 	// Gemini: its own event names and ms timeout.
 	gm, _ := json.Marshal(readJSON(t, ConfigPath("", "gemini")))
 	for _, want := range []string{"BeforeAgent", "AfterTool", "gemini session $s", "30000", "bdrive read-log", "read_file|read_many_files|search_file_content|run_shell_command"} {
@@ -258,6 +269,74 @@ func TestInstallUpgradesPullCommand(t *testing.T) {
 	results, _ = Install(folder, []string{"claude"})
 	if results[0].Changed {
 		t.Fatal("re-install after upgrade reported a change")
+	}
+}
+
+// turnStartCommand is the command of the single beardrive group on an
+// agent's turn-start event.
+func turnStartCommand(t *testing.T, agent, event string) string {
+	t.Helper()
+	groups, _ := readJSON(t, ConfigPath("", agent))["hooks"].(map[string]any)[event].([]any)
+	var cmds []string
+	for _, g := range groups {
+		for _, h := range g.(map[string]any)["hooks"].([]any) {
+			if c, _ := h.(map[string]any)["command"].(string); strings.Contains(c, marker) {
+				cmds = append(cmds, c)
+			}
+		}
+	}
+	if len(cmds) != 1 {
+		t.Fatalf("%s %s: %d beardrive groups, want 1: %v", agent, event, len(cmds), cmds)
+	}
+	c := cmds[0]
+	if !strings.HasPrefix(c, `sh -c '`+mountGuard()) || strings.Contains(c, ">/dev/null 2>&1 || true'") {
+		t.Fatalf("%s turn-start hook must be guarded and keep stdout: %s", agent, c)
+	}
+	return c
+}
+
+// Machines registered before Codex and Gemini got the briefing carry the
+// old stdout-discarding pull group; re-install converges it in place,
+// leaving the user's own hooks alone.
+func TestInstallUpgradesCodexGeminiPullCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	folder := t.TempDir()
+	for _, tc := range []struct{ agent, event, label string }{
+		{"codex", "UserPromptSubmit", "codex"},
+		{"gemini", "BeforeAgent", "gemini"},
+	} {
+		old, _ := json.Marshal(map[string]any{"hooks": map[string]any{tc.event: []any{
+			map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "echo mine"}}},
+			map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hookCommand(tc.label), "timeout": 30}}},
+		}}})
+		os.MkdirAll(filepath.Dir(ConfigPath("", tc.agent)), 0o755)
+		os.WriteFile(ConfigPath("", tc.agent), old, 0o644)
+
+		if _, err := Install(folder, []string{tc.agent}); err != nil {
+			t.Fatal(err)
+		}
+		if got := turnStartCommand(t, tc.agent, tc.event); got != hookPullCommand(tc.label) {
+			t.Errorf("%s pull command not upgraded: %s", tc.agent, got)
+		}
+		raw, _ := json.Marshal(readJSON(t, ConfigPath("", tc.agent)))
+		if !strings.Contains(string(raw), "echo mine") {
+			t.Errorf("%s: user hook dropped: %s", tc.agent, raw)
+		}
+		if results, _ := Install(folder, []string{tc.agent}); results[0].Changed {
+			t.Errorf("%s: re-install after upgrade reported a change", tc.agent)
+		}
+	}
+}
+
+// The Codex follow-up leads with the trust step, not the deprecated flag.
+func TestCodexNoteLeadsWithTrust(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	results, err := Install(t.TempDir(), []string{"codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := results[0].Note; !strings.Contains(n, "/hooks") || strings.Contains(n, "codex_hooks") {
+		t.Fatalf("codex note = %q", n)
 	}
 }
 
