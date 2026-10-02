@@ -69,8 +69,7 @@ func hooksCmd() *cobra.Command {
 			fmt.Println("\nhooks are registered once per machine, in each platform's own user config —")
 			fmt.Println("they cover every session in every folder, and no project file is written.")
 			if detected["codex"] {
-				fmt.Println("\ncodex: hooks are experimental and off by default — enable them with")
-				fmt.Println("  [features] codex_hooks = true   in ~/.codex/config.toml")
+				fmt.Println("\n! " + agenthooks.CodexTrustNote)
 			}
 			fmt.Println("\nregister with:   bdrive hooks install [--agent claude,codex,gemini,hermes]")
 			fmt.Println("remove with:     bdrive hooks uninstall")
@@ -84,7 +83,9 @@ func hooksCmd() *cobra.Command {
 		Short: "Register sync hooks for detected agent platforms (or --agent list)",
 		Long: "Registers beardrive's sync hooks with each agent platform's own hook\n" +
 			"config: files pull before every turn and push after edits, and changes\n" +
-			"are stamped with the agent session that made them (`bdrive sync --note`).\n" +
+			"are stamped with the agent session that made them (the turn-start hook\n" +
+			"runs `bdrive sync --hook`, which also briefs the agent on teammates'\n" +
+			"changes).\n" +
 			"Merging is idempotent and preserves hooks you already have.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -114,10 +115,8 @@ func hooksCmd() *cobra.Command {
 				if r.Migrated != "" {
 					fmt.Printf("           moved out of %s (project hooks are no longer used)\n", r.Migrated)
 				}
-				if r.Note != "" {
-					fmt.Printf("           note: %s\n", r.Note)
-				}
 			}
+			printHookNotes(results)
 			return nil
 		},
 	}
@@ -156,4 +155,15 @@ func hooksCmd() *cobra.Command {
 	uninstall.Flags().StringVar(&uninstallAgents, "agent", "auto", "comma-separated platforms (claude,codex,gemini,hermes) or auto")
 	c.AddCommand(install, uninstall)
 	return c
+}
+
+// printHookNotes prints each platform's manual follow-up step on its own
+// line after the per-agent list, so it reads as something to do rather than
+// a footnote under "hooks registered".
+func printHookNotes(results []agenthooks.Result) {
+	for _, r := range results {
+		if r.Note != "" {
+			fmt.Printf("\n  ! %s\n", r.Note)
+		}
+	}
 }

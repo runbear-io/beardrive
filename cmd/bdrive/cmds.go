@@ -134,7 +134,7 @@ list in .bdrive/config.json is never pruned against either.`,
 						links = append(links, link)
 					}
 				}
-				emitHookContext(cmd, links)
+				emitHookContext(cmd, hookLabel, links)
 				return nil
 			}
 			if len(targets) == 0 {
@@ -163,7 +163,7 @@ list in .bdrive/config.json is never pruned against either.`,
 	c.Flags().BoolVar(&prune, "prune", false, "also remove from the hub what .bdriveignore now excludes (files stay on disk everywhere)")
 	c.Flags().StringVar(&note, "note", "", "session context stamped onto changes (e.g. an agent session id); shown in history; empty clears")
 	c.Flags().DurationVar(&noteTTL, "note-ttl", 30*time.Minute, "how long the note keeps applying to daemon-committed changes")
-	c.Flags().StringVar(&hookLabel, "hook", "", "agent-hook mode: read the platform's hook event JSON from stdin, sync with a session note labeled by this value, and emit the project's link-formula context (Claude Code hook JSON) on stdout")
+	c.Flags().StringVar(&hookLabel, "hook", "", "agent-hook mode: read the platform's hook event JSON from stdin, sync with a session note labeled by this value, and emit the project's link-formula context (agent hook JSON: Claude Code, Codex, Gemini) on stdout")
 	return c
 }
 

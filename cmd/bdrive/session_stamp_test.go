@@ -64,13 +64,21 @@ func thisDevice(t *testing.T) string {
 
 // The hook sets BOTH the note and the session id — the note is the label a
 // reader sees, the session is the key a run card joins its reads on.
+// Every turn-start platform stamps it: Codex and Gemini runs must show up as
+// History run cards exactly like Claude Code's.
 func TestHookStampsSession(t *testing.T) {
+	for _, label := range []string{"claude-code", "codex", "gemini"} {
+		t.Run(label, func(t *testing.T) { testHookStampsSession(t, label) })
+	}
+}
+
+func testHookStampsSession(t *testing.T, label string) {
 	folder, proj := stampFixture(t)
 
 	c := syncCmd()
 	c.SetOut(&bytes.Buffer{})
 	c.SetIn(strings.NewReader(`{"session_id":"sess-42"}`))
-	c.SetArgs([]string{folder, "--hook", "claude-code"})
+	c.SetArgs([]string{folder, "--hook", label})
 	if err := c.Execute(); err != nil {
 		t.Fatalf("hook mode must never fail: %v", err)
 	}
@@ -83,7 +91,7 @@ func TestHookStampsSession(t *testing.T) {
 		if op.Session != "sess-42" {
 			t.Errorf("op %q Session = %q, want sess-42", op.Path, op.Session)
 		}
-		if op.Note != "claude-code session sess-42" {
+		if op.Note != label+" session sess-42" {
 			t.Errorf("op %q Note = %q", op.Path, op.Note)
 		}
 	}

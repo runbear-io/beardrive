@@ -37,19 +37,22 @@ Three hooks, three jobs:
   on the next sync. This is what fills the [Dashboard](/guides/what-agents-read/).
   Listing tools are deliberately excluded: seeing a filename is not reading it.
 
-Every platform pipes hook JSON with a session id, so one hook command serves all
-four, and changes are stamped with `<agent> session <id>` — visible in
-`bdrive log` and the hub's history.
+Every platform pipes hook JSON with a session id, and changes are stamped with
+`<agent> session <id>` — visible in `bdrive log` and the hub's history. On
+Claude Code, Codex and Gemini CLI the pull hook runs `bdrive sync --hook
+<agent>`, which also briefs the agent at the start of every turn: which files
+teammates changed since its last turn (re-read before editing) and how to link
+a synced path to the hub. It also groups the session's edits into one run card
+in History. Hermes gets the pull and the session note, not the briefing.
 
-Codex hooks are experimental and off by default. Turn them on in
+Codex runs no hook until you trust it: open `/hooks` in Codex once and trust
+the beardrive hook. Older Codex builds also need hooks switched on in
 `~/.codex/config.toml`:
 
 ```toml
 [features]
-codex_hooks = true
+hooks = true
 ```
-
-Codex then asks once to trust the hook definition. Answer yes.
 
 ## Both are safe to re-run
 
