@@ -15,7 +15,8 @@
 const SEL = "pre > code.language-mermaid";
 
 // Colours come from the surrounding surface rather than mermaid's stock
-// palette. The hub app is dark-only; the share page follows the OS.
+// palette. The hub app passes the palette of its current theme (light or
+// dark, see lib/theme.ts); the share page follows the OS.
 export type Palette = {
   bg: string; // diagram node fill
   line: string; // node borders and edges

@@ -21,7 +21,8 @@ import {
 } from "../util";
 import { urlForPath } from "../router";
 import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
-import { hasMermaid, renderMermaid } from "../lib/mermaid";
+import { DARK, LIGHT, hasMermaid, renderMermaid } from "../lib/mermaid";
+import { useTheme } from "../lib/theme";
 import { secretsBadge, type SecretFinding } from "../lib/secrets";
 import { Icon } from "./shell";
 import { toast } from "../toast";
@@ -424,20 +425,28 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   // so the one dangerouslySetInnerHTML below re-mounts with the SVG already
   // in it — the same reason transformHTML runs before the mount and not after
   // it. Runs on transformHTML's output, so a diagram's SVG never goes through
-  // the img/link rewriting pass.
+  // the img/link rewriting pass. The palette follows the current theme, and a
+  // theme switch re-renders: the SVG bakes its colours in, so CSS alone
+  // cannot recolour it.
+  const { theme } = useTheme();
   const [diagrams, setDiagrams] = useState<string | null>(null);
+  const diagramsFor = useRef<string | null>(null);
   useEffect(() => {
-    setDiagrams(null);
+    // A new document drops the old diagrams at once; a theme switch keeps
+    // them on screen until the recoloured ones are ready, rather than
+    // flashing the raw fences in between.
+    if (diagramsFor.current !== html) setDiagrams(null);
+    diagramsFor.current = html;
     if (!hasMermaid(html)) return; // no fence: mermaid is never downloaded
     let cancelled = false;
-    renderMermaid(html).then((out) => {
+    renderMermaid(html, theme === "light" ? LIGHT : DARK).then((out) => {
       // A slow render of the file we just left must not paint over this one.
       if (!cancelled) setDiagrams(out);
     });
     return () => {
       cancelled = true;
     };
-  }, [html]);
+  }, [html, theme]);
 
   useEffect(() => {
     if (!doc) return;

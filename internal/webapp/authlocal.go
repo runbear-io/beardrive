@@ -964,22 +964,37 @@ func authPage(w http.ResponseWriter, title, body string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	// The inline script is the SPA's theme bootstrap (frontend/index.html,
+	// src/lib/theme.ts): same origin, same localStorage key, so a user who
+	// picked Light in the app does not sign in on a dark page. Inline is
+	// allowed — the CSP above only sets frame-ancestors. No-JS keeps the
+	// dark default.
 	fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>%s — BearDrive</title>
+<script>(function(){var p="system";try{p=localStorage.getItem("bdrive-theme")||"system"}catch(e){}
+if(p!=="light"&&p!=="dark"){p=window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}
+document.documentElement.dataset.theme=p})()</script>
 <style>
 /* The app's tokens, name for name, so sign-in and the app read as one
-   product. Source of truth: frontend/src/tw.css @theme — keep the values
-   here identical to the token of the same name there. */
+   product. Source of truth: frontend/src/tw.css @theme (dark) and its
+   :root[data-theme="light"] block — keep the values here identical to the
+   token of the same name there. --honey-hover and --shadow are local: the
+   light honey-bright is a link ink, too dark to sit under button text. */
 :root{--bg:#0a0b0d;--raise:#15171b;--surface:rgba(255,255,255,.03);--hovered:rgba(255,255,255,.06);
 --line:rgba(255,255,255,.07);--line-2:rgba(255,255,255,.11);--text:#eef0f3;--dim:#9aa0a9;--faint:#868b93;
 --honey:#f5a623;--honey-bright:#ffcf85;--on-honey:#1a1204;--add:#4cc38a;--del:#f26d6d;
+--honey-hover:var(--honey-bright);--shadow:rgba(0,0,0,.7);
 --radius-ctl:7px;--radius-over:14px;
 --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace}
+:root[data-theme="light"]{color-scheme:light;--bg:#ffffff;--raise:#ffffff;--surface:rgba(0,0,0,.03);
+--hovered:rgba(0,0,0,.05);--line:rgba(0,0,0,.09);--line-2:rgba(0,0,0,.14);--text:#1b1d21;--dim:#565c66;
+--faint:#686d76;--honey:#f5a623;--honey-bright:#a35f00;--on-honey:#1a1204;--add:#1a8f59;--del:#d14343;
+--honey-hover:#e0951a;--shadow:rgba(0,0,0,.12)}
 body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",Roboto,sans-serif;
 background:var(--bg);color:var(--text);display:flex;justify-content:center;padding:13vh 16px;margin:0;
 letter-spacing:-.006em;-webkit-font-smoothing:antialiased}
 .card{background:var(--raise);border:1px solid var(--line);border-radius:var(--radius-over);padding:28px 30px;
-width:344px;max-width:100%%;box-sizing:border-box;box-shadow:0 24px 70px -24px rgba(0,0,0,.7)}
+width:344px;max-width:100%%;box-sizing:border-box;box-shadow:0 24px 70px -24px var(--shadow)}
 .logo{width:30px;height:30px;display:grid;place-items:center;color:var(--honey);margin-bottom:16px}
 .logo svg{width:30px;height:30px;fill:currentColor}
 h1{font-size:18px;font-weight:640;letter-spacing:-.02em;margin:0 0 18px}
@@ -989,7 +1004,7 @@ border:1px solid var(--line-2);background:var(--surface);color:var(--text);font:
 input:focus-visible{outline:2px solid var(--honey);outline-offset:1px;border-color:var(--honey)}
 button{margin-top:20px;width:100%%;height:40px;border:none;border-radius:var(--radius-ctl);background:var(--honey);
 color:var(--on-honey);font:inherit;font-size:14px;font-weight:600;cursor:pointer}
-button:hover{background:var(--honey-bright)}
+button:hover{background:var(--honey-hover)}
 button:focus-visible{outline:2px solid var(--honey-bright);outline-offset:2px}
 .err{color:var(--del);font-size:13px;margin:12px 0 0}
 .msg{color:var(--add);font-size:13px;margin:12px 0 0}
