@@ -6,6 +6,10 @@
 @import "tailwindcss/utilities.css" layer(utilities);
 @import "tw-animate-css";
 
+/* `dark:` follows the resolved theme on <html data-theme> (src/lib/theme.ts),
+   not the OS media query, so the account menu's Light/Dark choice wins. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 @theme {
   /* BearDrive tokens (source of truth: style.css :root) */
   --color-bg: #0a0b0d;
@@ -53,4 +57,49 @@
 
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+/* Light theme. The @theme block above stays the literal dark palette — it is
+   the default (no JS, print) and web/docs/scripts/tokens.mjs and the cloud
+   landing's token check read it verbatim — so light is an override on the
+   attribute src/lib/theme.ts writes. Tailwind utilities reference these as
+   var(--color-*), so overriding the variables is the whole switch. Mirrors
+   style.css's :root[data-theme="light"] block. */
+:root[data-theme="light"] {
+  --color-bg: #ffffff;
+  --color-side: #f6f7f8;
+  --color-raise: #ffffff;
+  --color-surface: rgba(0, 0, 0, 0.03);
+  --color-hovered: rgba(0, 0, 0, 0.05);
+  --color-line: rgba(0, 0, 0, 0.09);
+  --color-line-2: rgba(0, 0, 0, 0.14);
+  --color-text: #1b1d21;
+  --color-dim: #565c66;
+  --color-faint: #686d76;
+  --color-ghost: #70757e;
+  --color-honey: #f5a623;
+  --color-honey-bright: #a35f00;
+  --color-honey-dim: #b86e0e;
+  --color-glow: rgba(245, 166, 35, 0.16);
+  --color-add: #17804f;
+  --color-del: #d14343;
+
+  --color-background: #ffffff;
+  --color-foreground: #1b1d21;
+  --color-card: #ffffff;
+  --color-card-foreground: #1b1d21;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #1b1d21;
+  --color-primary: #f5a623;
+  --color-primary-foreground: #1a1204;
+  --color-secondary: rgba(0, 0, 0, 0.03);
+  --color-secondary-foreground: #1b1d21;
+  --color-muted: rgba(0, 0, 0, 0.05);
+  --color-muted-foreground: #565c66;
+  --color-accent: rgba(0, 0, 0, 0.05);
+  --color-accent-foreground: #1b1d21;
+  --color-destructive: #d14343;
+  --color-border: rgba(0, 0, 0, 0.09);
+  --color-input: rgba(0, 0, 0, 0.14);
+  --color-ring: #b86e0e;
 }

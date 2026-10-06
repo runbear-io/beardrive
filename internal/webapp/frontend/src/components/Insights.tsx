@@ -15,6 +15,7 @@ import {
   placeLabels,
 } from "../lib/heat";
 import { linkProps } from "../nav";
+import { useTheme, type Theme } from "../lib/theme";
 
 /* ---- the project Dashboard: the read×write matrix ----
    Every file plotted by how much it is read (30 days, from the heat API)
@@ -245,8 +246,10 @@ export function Insights(props: {
 /* The fill when the scope has no usable age range: a grey, deliberately not a
    point on the freshness ramp. An all-0–3d project is "not enough range to
    rank", not "all clear" — painting the ramp's healthy green and then
-   disclaiming it in the legend told the reader the opposite of the truth. */
-const TM_FLAT = "rgb(150,156,164)";
+   disclaiming it in the legend told the reader the opposite of the truth.
+   Per theme: the dark grey reads as a mid-tone on a white page, so light
+   mode lifts it; both keep the dark .in-tm-label text legible on top. */
+const TM_FLAT: Record<Theme, string> = { dark: "rgb(150,156,164)", light: "rgb(200,204,210)" };
 
 /* Staleness color: fresh green → amber → red over 0..300 days. */
 function staleColor(days: number): string {
@@ -344,6 +347,7 @@ function Treemap({
   onOpenFolder: (p: string) => void;
   isFolder: (p: string) => boolean;
 }) {
+  const { theme } = useTheme();
   const W = 720,
     H = 480;
   // Whether the colour says anything at all, decided once here and shared with
@@ -409,7 +413,7 @@ function Treemap({
           width={Math.max(0.4, c.w - 1.2)}
           height={Math.max(0.4, c.h - 1.2)}
           rx={1.5}
-          fill={flat ? TM_FLAT : staleColor(c.item.days)}
+          fill={flat ? TM_FLAT[theme] : staleColor(c.item.days)}
           className="in-tm-cell"
           data-path={c.item.path}
         >
@@ -674,9 +678,12 @@ function CoverageMatrix({ devices }: { devices: DeviceHeat[] }) {
   const W = 720,
     H = top + rows.length * ch + 58;
   const max = Math.max(1, ...rows.flatMap((d) => cols.map((c) => (d.folders || {})[c] || 0)));
+  const { theme } = useTheme();
   const shade = (t: number) => {
-    // #17191f → amber by intensity
-    const a = [23, 25, 31],
+    // page-ish base → amber by intensity. The base is a step off the page
+    // background (#17191f on dark, #eef0f3 on light) so an unread cell still
+    // shows as a cell rather than a hole.
+    const a = theme === "light" ? [238, 240, 243] : [23, 25, 31],
       b = [245, 166, 35];
     const c = a.map((v, i) => Math.round(v + (b[i] - v) * t));
     return `rgb(${c[0]},${c[1]},${c[2]})`;

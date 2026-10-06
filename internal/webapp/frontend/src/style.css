@@ -2,10 +2,11 @@
    Design language: Linear-grade restraint; the one accent (honey) is spent
    only on active state, the live/brand mark, and the palette selection. */
 :root {
-  /* The app is dark-only. Without this, anything the UA paints itself —
-     scrollbars, autofill, select/date popups, and any control that loses its
-     author `color` — resolves in the light scheme. That trapdoor is how
-     BEA-54 turned one dead selector into black-on-black text. */
+  /* Dark is the default theme; :root[data-theme="light"] below overrides it
+     (src/lib/theme.ts sets the attribute). Without this, anything the UA
+     paints itself — scrollbars, autofill, select/date popups, and any control
+     that loses its author `color` — resolves in the light scheme. That
+     trapdoor is how BEA-54 turned one dead selector into black-on-black text. */
   color-scheme: dark;
   --bg: #0a0b0d;              /* main ground */
   --bg-side: #0c0e10;         /* sidebar / panels */
@@ -22,10 +23,10 @@
   --text-ghost: #666b74;      /* decorative icons only */
 
   /* The reading view's own ink. These were eight and four repeated hex
-     literals; they are variables because @media print has to flip them (the
-     app is dark-only, so the document's text is near-white by default) and a
-     print block that re-listed every selector would go stale on the first
-     new rule. Same values, so nothing changes on screen. */
+     literals; they are variables because @media print and the light theme
+     have to flip them (dark is the default, so the document's text is
+     near-white unless something overrides it) and a block that re-listed
+     every selector would go stale on the first new rule. */
   --text-bright: #f4f6f9;     /* headings and view titles — above --text */
   --text-body: #c6cbd3;       /* prose, code blocks, table cells */
   --code-ink: #e4d9c4;        /* inline code */
@@ -39,6 +40,18 @@
   --add: #4cc38a;
   --del: #f26d6d;
 
+  /* Colours that used to be literals tuned for a near-black ground. They are
+     variables so the light theme can swap them; the dark values are the old
+     literals, so dark renders exactly as before. */
+  --accent-ink: var(--accent);        /* honey as text/icon colour */
+  --accent-hover-bg: var(--accent-bright); /* .pbtn hover fill under dark text */
+  --danger-ink: #e07070;              /* hot+stale verdict, credential badge */
+  --danger-bright: #ff8b8b;           /* delete kinds, removed diff lines */
+  --danger-title: #d2695e;            /* Danger zone card title */
+  --shadow-pop: rgba(0, 0, 0, .35);   /* menus and tooltips */
+  --row-hover: rgba(255,255,255,.02);
+  --row-hover-faint: rgba(255,255,255,.015);
+
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
 
@@ -51,6 +64,50 @@
   --page-app: 768px;    /* structured views: guide, listings, history, insights, settings, admin — Tailwind md */
   --page-wide: 1200px;  /* data-dense: treemap, coverage matrix, big tables */
   --hero-top: clamp(32px, 8vh, 88px); /* one vertical start for short centered states */
+}
+
+/* Light theme. Same tokens, light values; every rule above reads them, so
+   this block plus the few `:root[data-theme="light"] …` shadow/overlay
+   overrides next to their rules is the whole theme. --accent stays honey
+   (fills, rings), but honey on white is ~2:1, so anything that uses it as
+   ink goes through --accent-ink / --accent-bright, which are dark ambers. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-side: #f6f7f8;
+  --bg-raise: #ffffff;
+  --surface: rgba(0,0,0,.03);
+  --hover: rgba(0,0,0,.05);
+  --border: rgba(0,0,0,.09);
+  --border-2: rgba(0,0,0,.14);
+  --code-bg: #f5f6f8;
+
+  --text: #1b1d21;
+  --text-dim: #565c66;
+  --text-faint: #686d76;
+  --text-ghost: #70757e;      /* ghost carries real text (hints, metadata): AA on white */
+
+  --text-bright: #0b0c0e;
+  --text-body: #2b2f36;
+  --code-ink: #7a4f00;
+  --quote-ink: #4a4033;
+
+  --accent: #f5a623;
+  --accent-bright: #a35f00;
+  --accent-dim: #b86e0e;
+  --accent-press: #e0951a;
+  --glow: rgba(245,166,35,.16);
+  --add: #17804f;             /* 4.9:1 on white, 4.6:1 on --bg-side */
+  --del: #d14343;
+
+  --accent-ink: var(--accent-bright);
+  --accent-hover-bg: var(--accent-press);
+  --danger-ink: #b8322a;
+  --danger-bright: #b42318;
+  --danger-title: #b8322a;
+  --shadow-pop: rgba(0, 0, 0, .12);
+  --row-hover: rgba(0,0,0,.025);
+  --row-hover-faint: rgba(0,0,0,.02);
 }
 
 /* Jersey 10 — the logo face, and only the logo (a pixel face is a logo, not a
@@ -128,7 +185,7 @@ button, input, a.btn { font-family: inherit; }
 /* Brand lockup: the mark in honey, the name in text colour, so the accent
    lands once. Same mark and same face as the landing page and the docs — the
    three surfaces are one identity. */
-#vault-badge { flex: none; display: grid; place-items: center; color: var(--accent); }
+#vault-badge { flex: none; display: grid; place-items: center; color: var(--accent-ink); }
 #vault-name {
   font-family: "Jersey 10", "Logo Fallback", var(--ui);
   /* Jersey 10 is a condensed pixel face with a single weight: 18px here sets
@@ -205,7 +262,7 @@ button, input, a.btn { font-family: inherit; }
 #tree .ticon { flex: none; display: flex; color: var(--text-ghost); }
 #tree .ticon .ico { width: 15px; height: 15px; }
 #tree .row:hover .ticon, #tree .row:hover .chev { color: var(--text-faint); }
-#tree .row.active .ticon, #tree .row.active .chev { color: var(--accent); }
+#tree .row.active .ticon, #tree .row.active .chev { color: var(--accent-ink); }
 #tree .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 #tree .file .label { font-size: 12.5px; }
 #tree .file .chev { visibility: hidden; }
@@ -281,7 +338,7 @@ button, input, a.btn { font-family: inherit; }
   font-size: 13px; color: var(--text);
 }
 .share-banner .sb-head .ico, .share-banner .sb-head svg {
-  width: 15px; height: 15px; flex: none; color: var(--accent);
+  width: 15px; height: 15px; flex: none; color: var(--accent-ink);
 }
 .share-banner .sb-count { color: var(--text-faint); font-size: 12px; }
 .share-banner .sb-note {
@@ -322,7 +379,7 @@ button, input, a.btn { font-family: inherit; }
 .proj-menu {
   z-index: 80; min-width: var(--radix-select-trigger-width, 200px);
   border: 1px solid var(--border-2); border-radius: 9px; padding: 4px;
-  background: var(--bg-raise); box-shadow: 0 10px 32px rgba(0, 0, 0, .35);
+  background: var(--bg-raise); box-shadow: 0 10px 32px var(--shadow-pop);
 }
 .proj-menu [role="option"] { font-size: 12.5px; color: var(--text-dim); border-radius: 6px; outline: none; }
 .proj-menu [role="option"][data-highlighted] { background: var(--hover); color: var(--text); }
@@ -355,7 +412,7 @@ button, input, a.btn { font-family: inherit; }
 #account-menu {
   min-width: var(--radix-dropdown-menu-trigger-width, 220px);
   padding: 5px; border: 1px solid var(--border-2); border-radius: 9px;
-  background: var(--bg-raise); box-shadow: 0 10px 32px rgba(0, 0, 0, .35);
+  background: var(--bg-raise); box-shadow: 0 10px 32px var(--shadow-pop);
   display: flex; flex-direction: column; z-index: 80; outline: none;
 }
 #account-menu [role="menuitem"] { outline: none; }
@@ -372,12 +429,12 @@ button, input, a.btn { font-family: inherit; }
 #account-menu [role="menuitem"]:hover { background: var(--hover); color: var(--text); }
 #account-menu [role="menuitem"] b { font-weight: 600; }
 #account-menu [role="menuitem"] .ico { width: 15px; height: 15px; }
-#account-menu .plan-chip { margin-left: auto; color: var(--accent); border-color: var(--border-2); }
+#account-menu .plan-chip { margin-left: auto; color: var(--accent-ink); border-color: var(--border-2); }
 #account-menu #signout { color: var(--del); }
 #account-menu #signout:hover { color: var(--del); background: var(--hover); }
 
 /* ---- billing view (managed hubs) ---- */
-#billing-view .plan-chip { color: var(--accent); }
+#billing-view .plan-chip { color: var(--accent-ink); }
 .plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 700px) { .plan-grid { grid-template-columns: 1fr; } }
 .usage-bar { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; height: 6px; overflow: hidden; }
@@ -419,7 +476,7 @@ button, input, a.btn { font-family: inherit; }
 /* The Dashboard's hot+stale verdict, carried onto the file's own page. Same
    red as the danger quadrant (.in-pt.danger) on purpose — one verdict, one
    colour, whichever screen you meet it on. */
-.meta-stale { color: #e07070; }
+.meta-stale { color: var(--danger-ink); }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px; flex: none;
@@ -435,7 +492,7 @@ button, input, a.btn { font-family: inherit; }
   display: flex; align-items: center; gap: 7px; white-space: nowrap;
   padding: 6px 9px; border-radius: 8px; border: 1px solid var(--border-2);
   background: var(--surface-solid, var(--bg-raise)); color: var(--text); font-size: 12.5px; font-weight: 500;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .35); z-index: 80;
+  box-shadow: 0 8px 24px var(--shadow-pop); z-index: 80;
 }
 .tipcard kbd {
   font: 11px var(--ui); color: var(--text-faint);
@@ -448,6 +505,7 @@ button, input, a.btn { font-family: inherit; }
   border-radius: var(--r-card); box-shadow: 0 18px 44px -14px rgba(0,0,0,.75);
   padding: 6px; min-width: 168px;
 }
+:root[data-theme="light"] #more-menu { box-shadow: 0 18px 44px -14px rgba(0,0,0,.18); }
 .more-item { display: block; width: 100%; text-align: left; min-height: 40px; padding: 0 12px; background: transparent; border: none; cursor: pointer; color: var(--text); font: inherit; font-size: 13.5px; border-radius: var(--r-ctl); }
 .more-item:hover { background: var(--hover); }
 
@@ -528,7 +586,7 @@ body.rw-dragging { cursor: col-resize; user-select: none; }
 
 /* primary + secondary buttons */
 .pbtn { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: var(--accent); color: #241704; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; text-decoration: none; }
-.pbtn:hover { background: var(--accent-bright); }
+.pbtn:hover { background: var(--accent-hover-bg); }
 .pbtn .ico { width: 15px; height: 15px; }
 .danger-btn { display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: var(--r-ctl); border: none; background: #b3382e; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
 .danger-btn:hover { background: #c94336; }
@@ -570,7 +628,7 @@ body.rw-dragging { cursor: col-resize; user-select: none; }
 .ps-icon-cell:hover { background: var(--hover); color: var(--text); }
 .ps-icon-cell.active { border-color: var(--accent); color: var(--accent-bright); }
 /* Irreversible actions keep their own, clearly-marked card. */
-.ps-danger [data-slot="card-title"] { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: #d2695e; font-weight: 600; }
+.ps-danger [data-slot="card-title"] { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--danger-title); font-weight: 600; }
 /* Who can do what — one more card in the same stack. The read-only view is
    the same markup with its controls disabled, so nothing shifts when the
    caller's level changes. Native selects here rather than the shadcn Select:
@@ -613,13 +671,13 @@ body.rw-dragging { cursor: col-resize; user-select: none; }
 .admin-list.admin-card-table { overflow-x: auto; overflow-y: hidden; }
 .admin-item { display: flex; align-items: center; gap: 11px; padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
 .modal-actions .ai-btn { height: 32px; }
-.empty a { color: var(--accent); text-decoration: none; display: inline-block; padding: 6px 10px; }
+.empty a { color: var(--accent-ink); text-decoration: none; display: inline-block; padding: 6px 10px; }
 .empty a:hover { text-decoration: underline; }
 .empty h3 { margin: 0 0 8px; font-size: 16px; color: var(--text); }
 .ai-copy { text-align: left; background: none; border: 0; padding: 6px 0; cursor: pointer; }
 .ai-copy:hover { color: var(--text); }
 a.ai-main { color: var(--text-dim); text-decoration: none; padding: 6px 0; }
-a.ai-main:hover { color: var(--accent); }
+a.ai-main:hover { color: var(--accent-ink); }
 .th-sort { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 6px 10px; font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
 .th-sort:hover { color: var(--text-dim); }
 /* Role controls share one track so the value sits at the same x on every
@@ -656,7 +714,7 @@ a.ai-main:hover { color: var(--accent); }
 /* One destructive treatment: Delete removes a whole project and was rendering
    as bare text beside a bordered Rename. */
 .ai-del { color: var(--del); border-color: rgba(242, 109, 109, .28); }
-.ai-del:hover { background: rgba(242, 109, 109, .12); border-color: var(--del); color: #ff8b8b; }
+.ai-del:hover { background: rgba(242, 109, 109, .12); border-color: var(--del); color: var(--danger-bright); }
 .ai-btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-2); }
 .admin-empty { padding: 14px; color: var(--text-faint); font-size: 13px; }
 .admin-item.toggle { cursor: pointer; align-items: flex-start; }
@@ -668,7 +726,7 @@ a.ai-main:hover { color: var(--accent); }
 /* ---- folder listing ---- */
 /* .dirlist width comes from .page (app) */
 .dl-title { display: flex; align-items: center; gap: 10px; font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 0 0 4px; color: var(--text-bright); }
-.dl-title-icon { display: flex; color: var(--accent); }
+.dl-title-icon { display: flex; color: var(--accent-ink); }
 .dl-title-icon .ico { width: 20px; height: 20px; }
 .dl-sub { color: var(--text-faint); font-size: 12.5px; margin: 0 0 18px; }
 /* The read-count disclosure, printed under the folder's summary line: the
@@ -725,7 +783,7 @@ a.ai-main:hover { color: var(--accent); }
 .heatdot.lvl3 { opacity: .8; }
 .heatdot.lvl4 { opacity: 1; box-shadow: 0 0 6px rgba(245, 166, 35, .55); }
 /* Hot + stale, beside the heat dot that shows the "hot" half. */
-.stalemark { flex: none; font-size: 11px; line-height: 1; color: #e07070; }
+.stalemark { flex: none; font-size: 11px; line-height: 1; color: var(--danger-ink); }
 .dl-empty { padding: 24px 14px; color: var(--text-faint); font-size: 13px; border: 1px dashed var(--border); border-radius: var(--r-card); text-align: center; }
 .dl-h3 { margin: 28px 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); font-weight: 600; }
 .dl-hlist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); overflow: hidden; max-width: none; }
@@ -773,14 +831,14 @@ a.ai-main:hover { color: var(--accent); }
 .in-lens { display: flex; gap: 6px; margin: 0 0 14px; }
 .in-lens-btn { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--text-faint); cursor: pointer; }
 .in-lens-btn:hover { color: var(--text); }
-.in-lens-btn.active { color: var(--accent); border-color: var(--accent); }
+.in-lens-btn.active { color: var(--accent-ink); border-color: var(--accent); }
 .in-chart { width: 100%; max-width: 760px; height: auto; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); margin-bottom: 6px; }
 .in-axis { stroke: var(--border); stroke-width: 1; }
 .in-threshold { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 4; }
 .in-danger-zone { fill: rgba(242, 109, 109, .05); }
 .in-label { fill: var(--text-ghost); font-size: 11px; }
 .in-quad { fill: var(--text-ghost); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
-.in-quad-danger { fill: #e07070; }
+.in-quad-danger { fill: var(--danger-ink); }
 .in-pt { fill: var(--accent); opacity: .5; cursor: pointer; }
 .in-pt:hover { opacity: 1; }
 .in-pt.cold { fill: var(--text-ghost); opacity: .25; }
@@ -799,13 +857,17 @@ a.ai-main:hover { color: var(--accent); }
 .in-tm-cell { cursor: pointer; }
 .in-tm-cell:hover { stroke: #fff; stroke-width: 1; }
 .in-tm-label { fill: #0c0d10; font-size: 10.5px; font-weight: 620; cursor: pointer; pointer-events: none; }
+/* The cells keep their freshness hues and dark labels in both themes; only
+   the ground between them and the hover ring follow the page. */
+:root[data-theme="light"] .in-treemap { background: var(--bg-side); }
+:root[data-theme="light"] .in-tm-cell:hover { stroke: var(--text); }
 /* hot path */
 .in-hotpath { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg-side); overflow: hidden; }
 .in-hp-row { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
 .in-hp-row:last-child { border-bottom: none; }
 .in-hp-row:hover { background: var(--hover); }
 .in-hp-name { flex: 0 0 300px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--text); }
-.in-hp-name.danger { color: var(--accent); }
+.in-hp-name.danger { color: var(--accent-ink); }
 .in-hp-bar { flex: 1; display: flex; height: 10px; border-radius: 3px; overflow: hidden; }
 .in-hp-agent { background: var(--accent); }
 .in-hp-human { background: #5b8def; }
@@ -849,14 +911,14 @@ a.ai-main:hover { color: var(--accent); }
 .hf-clear-empty { margin-top: 12px; }
 /* .history width comes from .page (app) */
 .hentry { padding: 11px 12px; border-bottom: 1px solid var(--border); --hindent: 72px; }
-.hentry:hover { background: rgba(255,255,255,.015); }
+.hentry:hover { background: var(--row-hover-faint); }
 .hline { display: flex; gap: 10px; align-items: center; }
 /* The kind is a status badge, not a control: a fixed-width pill of text,
    so nothing in the row's leftmost slot has the size or shape of a
    disclosure toggle. --hindent keeps meta and note aligned under the path. */
 .hkind { flex: none; width: 62px; white-space: nowrap; text-align: center; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: 2px 6px; border-radius: 4px; color: var(--add); background: rgba(76,195,138,.12); }
 .hentry.edit .hkind { color: var(--accent-bright); background: var(--glow); }
-.hentry.delete .hkind { color: #ff8b8b; background: rgba(242,109,109,.12); }
+.hentry.delete .hkind { color: var(--danger-bright); background: rgba(242,109,109,.12); }
 .hpath { font-weight: 500; cursor: pointer; color: var(--text); font-size: 13px; }
 .hpath:hover { color: var(--accent-bright); }
 .htime { margin-left: auto; color: var(--text-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -919,7 +981,7 @@ a.ai-main:hover { color: var(--accent); }
 .hrun-reads { border-top: 1px solid var(--border); padding: 4px 0 6px; }
 .hrun-reads-head { padding: 6px 14px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); }
 .hrun-read { display: flex; gap: 10px; align-items: center; width: 100%; padding: 5px 14px; border: none; background: none; font: inherit; text-align: left; cursor: pointer; }
-.hrun-read:hover { background: rgba(255,255,255,.015); }
+.hrun-read:hover { background: var(--row-hover-faint); }
 .hrun-read .hkind { color: var(--text-dim); background: var(--hover); }
 .hrun-foot { padding: 8px 14px 10px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-faint); }
 
@@ -956,11 +1018,12 @@ a.ai-main:hover { color: var(--accent); }
 .dv-mark { flex: none; width: 16px; text-align: center; user-select: none; }
 .dv-text { padding-right: 12px; }
 .dv-ins { background: rgba(76,195,138,.10); color: var(--add); }
-.dv-rm { background: rgba(242,109,109,.10); color: #ff8b8b; }
+.dv-rm { background: rgba(242,109,109,.10); color: var(--danger-bright); }
 .dv-ctx { color: var(--text-dim); }
 
 /* ---- command palette ---- */
 #palette { position: fixed; top: 12vh; left: 50%; transform: translateX(-50%); z-index: 151; display: block; width: min(560px, 92vw); background: var(--bg-raise); border: 1px solid var(--border-2); border-radius: var(--r-over); box-shadow: 0 24px 70px -18px rgba(0,0,0,.8); overflow: hidden; outline: none; padding: 0; }
+:root[data-theme="light"] #palette { box-shadow: 0 24px 70px -18px rgba(0,0,0,.25); }
 #palette-inputwrap { display: flex; align-items: center; gap: 11px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 #palette-inputwrap [data-slot="command-input-wrapper"] { flex: 1; display: flex; border-bottom: 0; padding: 0; height: auto; }
 #palette-inputwrap [data-slot="command-input-wrapper"] > svg:not(.ico) { display: none; }
@@ -976,7 +1039,7 @@ a.ai-main:hover { color: var(--accent); }
 #palette [cmdk-list] { list-style: none; margin: 0; padding: 8px; max-height: 46vh; overflow-y: auto; }
 #palette [cmdk-item] { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--text-dim); font-size: 13.5px; }
 #palette [cmdk-item][data-selected="true"] { background: var(--glow); }
-#palette [cmdk-item][data-selected="true"] .picon { color: var(--accent); }
+#palette [cmdk-item][data-selected="true"] .picon { color: var(--accent-ink); }
 #palette [cmdk-item][data-selected="true"] .plabel { color: var(--accent-bright); }
 #palette [cmdk-item][data-selected="true"] .plabel b { color: var(--accent-bright); }
 #palette [cmdk-item] .picon { width: 18px; flex: none; display: flex; justify-content: center; color: var(--text-faint); }
@@ -989,7 +1052,9 @@ a.ai-main:hover { color: var(--accent); }
 
 /* ---- modal ---- */
 [data-slot="dialog-overlay"] { position: fixed; inset: 0; background: rgba(6,7,9,.6); backdrop-filter: blur(3px); z-index: 150; }
+:root[data-theme="light"] [data-slot="dialog-overlay"] { background: rgba(15,17,21,.35); }
 .modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 151; display: block; background: var(--bg-raise); border: 1px solid var(--border-2); border-radius: var(--r-over); padding: 22px 24px; width: min(460px, calc(100vw - 40px)); box-shadow: 0 24px 70px -18px rgba(0,0,0,.8); outline: none; }
+:root[data-theme="light"] .modal { box-shadow: 0 24px 70px -18px rgba(0,0,0,.25); }
 .modal h3 { margin: 0 0 10px; font-size: 16px; font-weight: 620; letter-spacing: -.01em; }
 .modal p { margin: 0 0 16px; font-size: 13.5px; color: var(--text-dim); line-height: 1.55; }
 .modal p b { color: var(--text); }
@@ -1014,7 +1079,7 @@ a.ai-main:hover { color: var(--accent); }
 .start-point input { accent-color: var(--accent); margin: 2px 0 0; flex: none; }
 .sp-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .sp-title { font-size: 13.5px; color: var(--text); display: flex; align-items: center; gap: 8px; }
-.sp-rec { font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px; line-height: 15px; }
+.sp-rec { font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--accent-ink); border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px; line-height: 15px; }
 .sp-blurb { font-size: 12px; color: var(--text-dim); overflow-wrap: anywhere; }
 /* Extra space separates "seed something" from "seed nothing" — the two rows
    below it produce the same empty project and differ only in intent. A
@@ -1032,6 +1097,8 @@ a.ai-main:hover { color: var(--accent); }
 /* ---- toast ---- */
 [data-sonner-toast] { background: var(--bg-raise) !important; color: var(--text) !important; border: 1px solid var(--border-2) !important; border-radius: 10px !important; font-size: 13.5px !important; box-shadow: 0 18px 44px -12px rgba(0,0,0,.7) !important; }
 [data-sonner-toast][data-type="error"] { border-color: rgba(242,109,109,.5) !important; color: #ffb0aa !important; }
+:root[data-theme="light"] [data-sonner-toast] { box-shadow: 0 18px 44px -12px rgba(0,0,0,.18) !important; }
+:root[data-theme="light"] [data-sonner-toast][data-type="error"] { color: var(--danger-bright) !important; }
 
 #sb-backdrop { display: none; }
 
@@ -1044,6 +1111,8 @@ a.ai-main:hover { color: var(--accent); }
   #sidebar { position: fixed; z-index: 60; top: 0; left: 0; height: 100%; transform: translateX(-100%); transition: transform .2s ease; box-shadow: 0 0 40px rgba(0,0,0,.6); }
   body.sb-open #sidebar { transform: translateX(0); }
   body.sb-open #sb-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 50; }
+  :root[data-theme="light"] #sidebar { box-shadow: 0 0 40px rgba(0,0,0,.18); }
+  :root[data-theme="light"] body.sb-open #sb-backdrop { background: rgba(15,17,21,.35); }
   .icon-btn, #search-btn { display: inline-flex; width: 44px; height: 44px; }
   #content { padding: 24px 18px 70px; }
   #topbar { padding: 0 8px; gap: 4px; }
@@ -1201,7 +1270,7 @@ a.ai-main:hover { color: var(--accent); }
 .markdown table { border-collapse: collapse; margin: 1.3em 0; font-size: 13.5px; }
 .markdown th, .markdown td { border-bottom: 1px solid var(--border); padding: 9px 13px; text-align: left; }
 .markdown th { color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; border-bottom-color: var(--border-2); }
-.markdown tr:hover td { background: rgba(255,255,255,.02); }
+.markdown tr:hover td { background: var(--row-hover); }
 .markdown img { max-width: 100%; border-radius: 8px; border: 1px solid var(--border); }
 .markdown hr { border: none; border-top: 1px solid var(--border); margin: 2.2em 0; }
 /* Rendered mermaid. The note is what a fence that doesn't parse gets, sitting
@@ -1280,12 +1349,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
    the path every file takes. Same strip geometry as .vbanner above; the red
    family rather than the accent, because accent+glow already means "you are
    looking at an old version" and the two strips can appear together. The hue
-   is .meta-stale's (#e07070, style.css:385), which is the warning colour this
+   is .meta-stale's (--danger-ink), which is the warning colour this
    same view already speaks. */
 .sbadge { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; padding: 11px 14px; border: 1px solid rgba(242,109,109,.32); border-radius: var(--r-card); background: rgba(242,109,109,.08); }
-.sbadge .sb-icon { flex: none; display: flex; color: #e07070; }
+.sbadge .sb-icon { flex: none; display: flex; color: var(--danger-ink); }
 .sbadge .sb-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; line-height: 1.45; }
-.sbadge .sb-text b { color: #e07070; font-weight: 600; }
+.sbadge .sb-text b { color: var(--danger-ink); font-weight: 600; }
 .sbadge .sb-text span { color: var(--text-dim); }
 
 /* plain file / binary views */
@@ -1303,7 +1372,7 @@ pre.plain { background: var(--code-bg); border: 1px solid var(--border); border-
 .csvbox .csvview th, .csvbox .csvview td { border-bottom: 1px solid var(--border); padding: 8px 14px; text-align: left; white-space: pre; vertical-align: top; color: var(--text-body); font-size: 12.5px; }
 .csvbox .csvview th { background: var(--surface); color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; border-bottom-color: var(--border-2); }
 .csvbox .csvview tr:last-child td { border-bottom: none; }
-.csvbox .csvview tbody tr:hover td { background: rgba(255,255,255,.02); }
+.csvbox .csvview tbody tr:hover td { background: var(--row-hover); }
 .csvnote { color: var(--text-faint); font-size: 12px; margin: 10px 2px 0; }
 .filecard { margin-top: var(--hero-top); text-align: center; color: var(--text-dim); }
 .filecard .name { font-size: 1.2em; color: var(--text); margin-bottom: .3em; }
@@ -1341,6 +1410,7 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
   font-size: 12.5px; font-family: inherit; cursor: pointer;
   box-shadow: 0 8px 24px -8px rgba(0,0,0,.7);
 }
+:root[data-theme="light"] #exit-full { box-shadow: 0 8px 24px -8px rgba(0,0,0,.18); }
 #exit-full:hover { background: var(--hover); border-color: var(--accent); }
 #exit-full kbd {
   font: inherit; font-size: 10.5px; color: var(--text-faint);
@@ -1417,7 +1487,7 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
 .setup-helper code { font-family: var(--mono); font-size: 11.5px; color: var(--text);
   background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px;
   word-break: break-all; }
-.setup-helper button { font: inherit; font-size: 11.5px; color: var(--accent); background: none;
+.setup-helper button { font: inherit; font-size: 11.5px; color: var(--accent-ink); background: none;
   border: 1px solid var(--border-2); border-radius: 5px; padding: 2px 8px; cursor: pointer; }
 .setup-helper button:hover { background: var(--hover); }
 .setup-tree { width: 290px; flex: none; background: var(--bg); border: 1px solid var(--border);
@@ -1428,7 +1498,7 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
 .setup-dim { color: var(--text-dim); }
 .setup-tree-shared { color: var(--accent-bright); background: var(--glow); border: 1px solid rgba(245,166,35,.4);
   border-radius: 5px; padding: 2px 6px; margin: 3px 0; display: inline-block; }
-.setup-shared-tag { color: var(--accent); font-size: 10px; }
+.setup-shared-tag { color: var(--accent-ink); font-size: 10px; }
 .setup-tree-foot { color: var(--text-ghost); font-size: 10.5px; line-height: 1.5; margin: 10px 0 0;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
 .setup-syncing h2, .setup-done h2 { font-size: 20px; font-weight: 640; margin: 0 0 10px; color: var(--text-bright); }
@@ -1482,7 +1552,7 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
 /* Save state sits in the meta line beside the byline, so it reads as part of
    the file's status rather than as a toolbar control. */
 #editor-state { color: var(--text-faint); }
-#editor-state[data-state="saving"] { color: var(--accent); }
+#editor-state[data-state="saving"] { color: var(--accent-ink); }
 #editor-state[data-state="error"] { color: var(--del); }
 
 #peer-wrote {
@@ -1528,18 +1598,23 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
    app draws AROUND the document — sidebar, topbar, overlays, toasts — is
    chrome, and chrome on paper is wasted ink and a wasted first page.
 
-   The tokens flip rather than the rules: the app is dark-only (see :root),
-   so a straight print puts near-white text on white paper. Overriding the
-   ~20 variables here means every rule that already reads them — code blocks,
-   tables, hairlines, dim captions — resolves light with no !important and no
-   second stylesheet to keep in sync.
+   The tokens flip rather than the rules: dark is the default theme (see
+   :root), so a straight print puts near-white text on white paper.
+   Overriding the ~20 variables here means every rule that already reads
+   them — code blocks, tables, hairlines, dim captions — resolves light with
+   no !important and no second stylesheet to keep in sync. The selector also
+   names the light theme so its (more specific) screen palette does not win
+   on paper: a page prints the same whichever theme it was viewed in.
 
    Synced HTML is not printed through here: it renders in a cross-origin
    frame, which prints clipped to its box. That one gets a top-level print
    view instead (server.go's printView). */
 @media print {
-  :root {
-    color-scheme: light;
+  :root, :root[data-theme="light"] {
+    /* !important: theme.ts and the index.html bootstrap write color-scheme
+       inline on <html>, which outranks any stylesheet rule — without it a
+       dark-themed page prints its UA canvas dark under black ink. */
+    color-scheme: light !important;
     --bg: #fff;
     --bg-side: #fff;
     --bg-raise: #fff;

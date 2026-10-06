@@ -166,6 +166,7 @@ classDiagram
         +prompt.ts INSTALL_DOC agentPrompt
         +secrets.ts SecretFinding secretsMessage secretsBadge
         +mermaid.ts hasMermaid renderMermaid Palette DARK LIGHT
+        +theme.ts ThemePref Theme useTheme setThemePref initTheme (System/Light/Dark onto html data-theme)
         +utils.ts
     }
     note for lib "mermaid.ts is the one exception to 'pure, no React, unit-tested on node': it needs a DOM and a browser-only library, so its coverage is Playwright. html in → html out, so neither caller can be tempted to patch a live subtree. It imports mermaid only when hasMermaid() says a document has a fence — that gate is what keeps a diagram-free page from downloading any of it — and every failure (unparseable fence, render throw, chunk that never loads) returns the untouched &lt;pre&gt;&lt;code&gt; instead of throwing"
@@ -176,6 +177,7 @@ classDiagram
     note for lib "fuzzy.ts is the palette matcher, lifted out of Palette.tsx so it can be tested at all. scoreLabel is the whole query: it splits on whitespace and every token must match the label (AND, order irrelevant, scores summed) — a space used to be just another character to the subsequence walk, and a path never contains one, so any two-word query matched NOTHING (BEA-194). Its typo pass is one rule, not an edit-distance routine: retry a token of 4+ characters with each single character dropped, which covers a transposition, a substitution and an insertion because subsequence matching already tolerates the other direction. Three properties are load-bearing and each has a test: a blank query returns score 0 with no hits BEFORE it splits (the stable sort over that is what keeps the project's own destinations on top — BEA-52, BEA-105), an errored token costs a flat penalty no bonus can climb over (so exact beats approximate by construction, not by tuning), and hits come back sorted and de-duplicated — Highlight slices forward from the last index and would silently duplicate letters otherwise. Palette runs it strict over every candidate and retries only the misses, only when the strict pass came back short of the 40-row cap, so a query that already matches never pays for the typo pass"
     note for lib "prompt.ts is the agent paste-prompt — the single most important string in onboarding, and it was assembled by hand in ConnectGuide, EmptyState and Setup's Done frame, three wordings drifting independently. They differ only in what is being set up, so they are one function with one varying clause. Pure and origin-injected so the node suite can test it: each previous wording is pinned by a test, and one more pins that every variant still ASKS which folder, which is the runbook's hard gate"
     note for lib "csv.ts parses .csv/.tsv for FileView's table view — ~50 lines against RFC 4180, so no papaparse. It NEVER throws: null means 'not a table' (unterminated quote, no delimiter) and the caller falls back to the plain-text preview, which is why the fallback is a type-level guarantee rather than a try/catch someone can forget"
+    note for lib "theme.ts owns the one appearance preference: System (default), Light or Dark, kept per browser in localStorage and resolved onto html[data-theme]. index.html's inline bootstrap applies it before first paint, so a light reader never sees a dark flash. The dark tokens stay the unprefixed :root default and light overrides them under :root[data-theme=light], which leaves tw.css's @theme literals — the ones web/docs and the cloud landing read — untouched. JS-side palettes (mermaid, the Insights treemap, toasts) read useTheme rather than the OS, so the choice in AccountBar reaches every surface"
 
     ErrorBoundary --> App : wraps the whole tree
     App --> HubApp
@@ -190,6 +192,7 @@ classDiagram
     HubApp --> components
     components --> nav : linkProps navigate
     components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid parseConflict secretsBadge scoreLabel
+    components --> lib : useTheme (AccountBar's radio group, FileView mermaid, Insights, toasts)
     Browser --> lib : secretsMessage (the share dialog's half of lib/secrets)
     Browser --> lib : armGoal applyGoal noteScroll
     hooks --> lib : re-exports heat.ts, sniffBytes

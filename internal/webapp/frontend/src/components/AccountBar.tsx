@@ -1,17 +1,32 @@
 import { useState } from "react";
+import { Monitor, Moon, Sun } from "lucide-react";
 import type { Org } from "../api/types";
 import { linkProps } from "../nav";
 import { Icon } from "./shell";
+import { useTheme, type ThemePref } from "@/lib/theme";
 import { projColor } from "./ProjectNav";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
 const REPO_URL = "https://github.com/runbear-io/beardrive";
+
+// The theme choices, in menu order. Radix renders these as menuitemradio,
+// which style.css's [role="menuitem"] rules do not reach, so the house menu
+// row (12.5px dim text, hover tint) is restated here in utilities.
+const THEMES: { value: ThemePref; label: string; Glyph: typeof Monitor }[] = [
+  { value: "system", label: "System", Glyph: Monitor },
+  { value: "light", label: "Light", Glyph: Sun },
+  { value: "dark", label: "Dark", Glyph: Moon },
+];
+const THEME_ROW =
+  "gap-2 rounded-[6px] py-[7px] pr-[9px] text-[12.5px] text-dim cursor-pointer data-[highlighted]:bg-hovered data-[highlighted]:text-text data-[state=checked]:text-text";
 
 // The GitHub mark, inline: lucide dropped its brand icons in v1, and one
 // glyph is not worth a second icon dependency. Filled (not stroked) like
@@ -27,8 +42,8 @@ function GithubMark() {
 
 // The sidebar footer is the account row: avatar, name, email. Clicking it
 // opens a menu with the workspace (org) and account actions — settings,
-// hub administration for admins, and sign-out. Radix owns open/dismiss
-// behavior (Escape, outside click, focus).
+// hub administration for admins, the light/dark theme, and sign-out. Radix
+// owns open/dismiss behavior (Escape, outside click, focus).
 //
 // The org entry is a plain link to org.manage_url: this hub's own org page
 // when it owns its orgs, the identity provider's page when it does not. The
@@ -77,6 +92,7 @@ export function AccountBar({
   // here works for both destinations without giving up a real <a>
   // (middle-click, copy link address).
   const [menuOpen, setMenuOpen] = useState(false);
+  const { pref, setPref } = useTheme();
   const orgLink = org ? linkProps(org.manage_url) : null;
   const billingLink = billing ? linkProps(billing.url) : null;
   const connectionsLink = linkProps("/connections");
@@ -151,6 +167,23 @@ export function AccountBar({
               </DropdownMenuItem>
             </>
           )}
+          <DropdownMenuLabel className="menu-sec">Theme</DropdownMenuLabel>
+          <DropdownMenuRadioGroup value={pref} onValueChange={(v) => setPref(v as ThemePref)}>
+            {THEMES.map(({ value, label, Glyph }) => (
+              // preventDefault keeps the menu open: the page re-themes behind
+              // it, so the choice is visible before the user commits to it.
+              <DropdownMenuRadioItem
+                key={value}
+                id={`menu-theme-${value}`}
+                value={value}
+                className={THEME_ROW}
+                onSelect={(e) => e.preventDefault()}
+              >
+                <Glyph className="ico" aria-hidden="true" />
+                <span>{label}</span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
           <DropdownMenuLabel className="menu-sec">Account</DropdownMenuLabel>
           {mcp && (
             <DropdownMenuItem asChild>

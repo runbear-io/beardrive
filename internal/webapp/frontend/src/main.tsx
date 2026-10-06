@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import ErrorBoundary from "./ErrorBoundary";
+import { initTheme } from "./lib/theme";
 import "./tw.css";
 import "./style.css";
 
@@ -15,6 +16,8 @@ const queryClient = new QueryClient({
     queries: { retry: 1, refetchOnWindowFocus: false, staleTime: 30_000 },
   },
 });
+
+initTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

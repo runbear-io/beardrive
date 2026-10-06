@@ -16,6 +16,10 @@ export default defineConfig({
     // reports failure, so a spec that clicks one measures the "select and
     // copy it yourself" fallback and never the path a user is on.
     permissions: ["clipboard-write"],
+    // The app follows the OS theme by default, and headless Chromium reports
+    // light. Specs that pin colours were written against the dark palette, so
+    // the suite runs dark; theme.spec.ts drives the light/system cases itself.
+    colorScheme: "dark",
   },
   projects: [
     { name: "hub", testIgnore: "**/desktop*.spec.ts" },
