@@ -97,7 +97,7 @@
   --accent-dim: #b86e0e;
   --accent-press: #e0951a;
   --glow: rgba(245,166,35,.16);
-  --add: #1a8f59;
+  --add: #17804f;             /* 4.9:1 on white, 4.6:1 on --bg-side */
   --del: #d14343;
 
   --accent-ink: var(--accent-bright);
@@ -1611,7 +1611,10 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
    view instead (server.go's printView). */
 @media print {
   :root, :root[data-theme="light"] {
-    color-scheme: light;
+    /* !important: theme.ts and the index.html bootstrap write color-scheme
+       inline on <html>, which outranks any stylesheet rule — without it a
+       dark-themed page prints its UA canvas dark under black ink. */
+    color-scheme: light !important;
     --bg: #fff;
     --bg-side: #fff;
     --bg-raise: #fff;

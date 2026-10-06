@@ -47,6 +47,11 @@ test("Light overrides a dark OS, persists across reload, and System hands back",
   await page.click("#menu-theme-system");
   expect(await theme(page)).toBe("dark");
   expect(await page.evaluate(() => localStorage.getItem("bdrive-theme"))).toBeNull();
+
+  // Printing a dark-themed page: the inline color-scheme the theme writes on
+  // <html> must not keep the UA canvas dark under the print block's black ink.
+  await page.emulateMedia({ media: "print" });
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe("light");
 });
 
 test("the sign-in page honours the same preference", async ({ browser }) => {
@@ -57,5 +62,8 @@ test("the sign-in page honours the same preference", async ({ browser }) => {
   await page.evaluate(() => localStorage.setItem("bdrive-theme", "dark"));
   await page.reload();
   expect(await theme(page)).toBe("dark");
+  // Dark chosen on a light OS: the UA-painted parts (autofill, scrollbars,
+  // native controls) must go dark with the card, not stay light.
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe("dark");
   await ctx.close();
 });
