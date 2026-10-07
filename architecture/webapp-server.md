@@ -72,6 +72,7 @@ classDiagram
         +Files(ctx) map path→FileInfo
         +Open(ctx, path, fi) io.ReadCloser
     }
+    note for Source "A symlink entry (FileInfo.Link — from an Op.Link folded by RemoteSource, or Readlink in DirSource) is listed as a link: name, target, no size, no blob. Open REFUSES it on both sources (errLinkHasNoContent), and DirSource Lstat-checks the disk as well so a link placed after the last listing is not followed either. Every content door — serveBlob, render, download, shares, MCP, the co-editing room — goes through Open, so the refusal lives once"
     class DirSource {
         +Dir string
     }

@@ -399,6 +399,12 @@ func TestSec_Path_DirViewerRefusesTraversal(t *testing.T) {
 
 // A symlink inside the served folder pointing outside it must not become a
 // readable file: the viewer promises "this folder", and a link is not content.
+//
+// A link IS listed — as a link, carrying its target string and no size — since
+// sync now carries symlinks as their target (syncer/symlink_test.go) and the
+// viewer shows them. What must never happen is the content behind one being
+// served: not through the link itself, not through a path that walks a
+// symlinked directory, on any of the content routes.
 func TestSec_Path_DirSymlinkIsNotServed(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(filepath.Dir(root), "linked-secret.txt")
@@ -412,13 +418,27 @@ func TestSec_Path_DirSymlinkIsNotServed(t *testing.T) {
 	}
 	h := secpathDirServer(t, root, false)
 
-	if body := get(t, h, "/api/tree").Body.String(); strings.Contains(body, "leak.txt") || strings.Contains(body, `"up"`) {
-		t.Errorf("tree exposes symlinks out of the folder: %s", body)
+	var tree struct {
+		Children []struct {
+			Name string `json:"name"`
+			Link string `json:"link"`
+			Size int64  `json:"size"`
+		} `json:"children"`
 	}
-	for _, p := range []string{"leak.txt", "up/linked-secret.txt", "up/../linked-secret.txt"} {
-		rec := get(t, h, "/api/file?path="+p)
-		if rec.Code == 200 || strings.Contains(rec.Body.String(), "LINKED-SECRET") {
-			t.Errorf("/api/file?path=%s served a symlinked file (%d): %s", p, rec.Code, rec.Body)
+	if err := json.Unmarshal(get(t, h, "/api/tree").Body.Bytes(), &tree); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range tree.Children {
+		if (n.Name == "leak.txt" || n.Name == "up") && (n.Link == "" || n.Size != 0) {
+			t.Errorf("tree lists %s as a file rather than a link: %+v", n.Name, n)
+		}
+	}
+	for _, route := range []string{"file", "download", "render"} {
+		for _, p := range []string{"leak.txt", "up", "up/linked-secret.txt", "up/../linked-secret.txt"} {
+			rec := get(t, h, "/api/"+route+"?path="+p)
+			if rec.Code == 200 || strings.Contains(rec.Body.String(), "LINKED-SECRET") {
+				t.Errorf("/api/%s?path=%s served a symlinked file (%d): %s", route, p, rec.Code, rec.Body)
+			}
 		}
 	}
 }

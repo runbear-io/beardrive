@@ -61,6 +61,22 @@ export function FileView(props: {
 
   useEffect(() => () => onMeta(""), [path, onMeta]); // leaving a file clears its meta line
 
+  // A symlink has no content of its own: show the link and its target, never
+  // resolve it. This takes precedence over every reader and the editor below —
+  // there are no bytes here to render or edit.
+  const link = props.flatFiles.find((f) => f.path === path)?.link;
+  if (link) {
+    return (
+      <SymlinkView
+        path={path}
+        target={link}
+        flatFiles={props.flatFiles}
+        onOpenFile={props.onOpenFile}
+        onRendered={props.onRendered}
+      />
+    );
+  }
+
   // One editor for every text kind: markdown, csv, code, plain. The rendered
   // views below are what you get when you are reading rather than writing.
   if (props.editing) return <EditView {...props} />;
@@ -204,6 +220,74 @@ function FileCard(props: {
       >
         Download
       </a>
+    </div>
+  );
+}
+
+// resolveLink resolves a symlink target against the link's own directory, the
+// way a filesystem would, and returns the in-project path — or null if the
+// target is absolute or climbs above the project root, i.e. points outside.
+function resolveLink(fromPath: string, target: string): string | null {
+  if (target.startsWith("/")) return null; // absolute: outside the project
+  const dir = fromPath.split("/").slice(0, -1);
+  for (const seg of target.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (!dir.length) return null; // climbs above the root
+      dir.pop();
+    } else dir.push(seg);
+  }
+  return dir.join("/");
+}
+
+/* A symbolic link: shown, never followed. It has no content, so this is the
+   whole view — the target string, and a click-through when the target lands
+   on a file inside the project. A link pointing outside is shown as inert
+   text, because BearDrive never resolves it. */
+function SymlinkView(props: {
+  path: string;
+  target: string;
+  flatFiles: Node[];
+  onOpenFile: (path: string) => void;
+  onRendered?: () => void;
+}) {
+  const { path, target, flatFiles, onOpenFile, onRendered } = props;
+  useEffect(() => onRendered?.(), [onRendered]);
+  const resolved = resolveLink(path, target);
+  const inProject = resolved !== null && flatFiles.some((f) => f.path === resolved);
+  return (
+    <div className="filecard">
+      <div className="sb-icon" style={{ justifyContent: "center", color: "var(--text-dim)", marginBottom: 6 }}>
+        <Icon name="link" />
+      </div>
+      <div className="name">{path.split("/").pop()}</div>
+      <p>
+        This is a symbolic link. BearDrive shows the link and never follows it.
+      </p>
+      <p>
+        Target:{" "}
+        {inProject ? (
+          <a
+            href="#"
+            onClick={(e) => {
+              e.preventDefault();
+              onOpenFile(resolved!);
+            }}
+          >
+            <code>{target}</code>
+          </a>
+        ) : (
+          <code>{target}</code>
+        )}
+        {!inProject && (
+          <>
+            <br />
+            <span style={{ color: "var(--text-dim)" }}>
+              Points outside this project — no content is served here.
+            </span>
+          </>
+        )}
+      </p>
     </div>
   );
 }

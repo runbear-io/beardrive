@@ -17,6 +17,7 @@ const (
 	vNested                  // directory is a mount of its own (syncs separately)
 	vSkipFile                // file excluded (non-regular, .DS_Store/.bdrive-tmp-*, Skip)
 	vSync                    // file syncs
+	vSymlink                 // a symbolic link: syncs as its target string, never its content
 )
 
 // walkFolder walks a mount applying the exact predicate the sync cycle uses.
@@ -45,11 +46,18 @@ func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.Dir
 			// SkipUp, not Skip: this walk is the upload door, and a negation a
 			// TEAMMATE pushed must not widen what leaves this machine. See
 			// Filter.SkipUp.
-			if !d.Type().IsRegular() || !journal.SafePath(rel) ||
-				config.ReservedPath(rel) || filter.SkipUp(rel) {
+			switch {
+			case !journal.SafePath(rel) || config.ReservedPath(rel) || filter.SkipUp(rel):
 				v = vSkipFile
-			} else {
+			case d.Type()&fs.ModeSymlink != 0:
+				// A symlink syncs as the eleven characters of its target,
+				// never its content: the scan reads the link with Readlink and
+				// never opens what it points at. See scan() and materialize.
+				v = vSymlink
+			case d.Type().IsRegular():
 				v = vSync
+			default:
+				v = vSkipFile // socket, device, fifo: nothing to sync
 			}
 		case ignoredDir(d.Name()) || filter.PruneDir(rel):
 			v = vPruneDir

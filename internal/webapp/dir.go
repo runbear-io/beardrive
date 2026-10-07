@@ -37,11 +37,29 @@ func (d *DirSource) Files(_ context.Context) (map[string]FileInfo, error) {
 			}
 			return nil
 		}
-		if !e.Type().IsRegular() || skipNames[e.Name()] || strings.HasPrefix(e.Name(), ".bdrive-tmp-") {
+		if skipNames[e.Name()] || strings.HasPrefix(e.Name(), ".bdrive-tmp-") {
 			return nil
 		}
 		info, err := e.Info()
 		if err != nil {
+			return nil
+		}
+		if e.Type()&fs.ModeSymlink != 0 {
+			// A symlink is reported as its target, never resolved: Readlink,
+			// not Open. A link pointing outside the served folder shows up in
+			// the tree but serves no content.
+			target, err := os.Readlink(p)
+			if err != nil {
+				return nil
+			}
+			files[filepath.ToSlash(rel)] = FileInfo{
+				Blob: fmt.Sprintf("link-%d-%s", info.ModTime().UnixNano(), target),
+				Time: info.ModTime().UTC(),
+				Link: target,
+			}
+			return nil
+		}
+		if !e.Type().IsRegular() {
 			return nil
 		}
 		files[filepath.ToSlash(rel)] = FileInfo{
@@ -61,6 +79,24 @@ func (d *DirSource) Files(_ context.Context) (map[string]FileInfo, error) {
 
 // Open streams a file from disk. Paths are only ever snapshot map keys
 // (produced by Files above), so they cannot escape Root.
-func (d *DirSource) Open(_ context.Context, path string, _ FileInfo) (io.ReadCloser, error) {
-	return os.Open(filepath.Join(d.Root, filepath.FromSlash(path)))
+//
+// A symlink is never opened: os.Open follows it, and a link inside the folder
+// pointing at ~/.ssh/id_rsa would then serve the key to anyone who can see the
+// tree. The listing marks a link (fi.Link) and Lstat re-checks the disk, since
+// a link placed after the last listing has no FileInfo saying so. This is the
+// one door every reader goes through — viewer, download, render, shares, MCP,
+// the co-editing room — so the refusal lives here and nowhere else.
+func (d *DirSource) Open(_ context.Context, path string, fi FileInfo) (io.ReadCloser, error) {
+	if fi.Link != "" {
+		return nil, errLinkHasNoContent
+	}
+	abs := filepath.Join(d.Root, filepath.FromSlash(path))
+	if st, err := os.Lstat(abs); err == nil && st.Mode()&fs.ModeSymlink != 0 {
+		return nil, errLinkHasNoContent
+	}
+	return os.Open(abs)
 }
+
+// errLinkHasNoContent is what opening a symlink answers, on every Source: a
+// link is its target string, shown in the tree, and has no bytes of its own.
+var errLinkHasNoContent = fmt.Errorf("a symbolic link has no content of its own")

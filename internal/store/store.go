@@ -177,6 +177,10 @@ type CachedFile struct {
 	Size    int64  `json:"size"`
 	Mode    uint32 `json:"mode"`
 	MTimeNS int64  `json:"mtime_ns"`
+	// Link is the target of a symbolic link. When set, Blob is empty: the
+	// cached entry describes a link, not content, and change detection also
+	// compares this so retargeting a link to a same-length path is still seen.
+	Link string `json:"link,omitempty"`
 }
 
 // mountStatePath names a per-mount state file. The mount id comes from a

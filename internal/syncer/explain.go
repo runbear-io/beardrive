@@ -48,7 +48,7 @@ func Explain(folder string, include []string, accepted string) (synced []string,
 
 	err = walkFolder(folder, filter, func(abs, rel string, d fs.DirEntry, v verdict) error {
 		switch v {
-		case vSync:
+		case vSync, vSymlink:
 			synced = append(synced, rel)
 			for _, a := range ancestors(rel) {
 				keep[a] = true

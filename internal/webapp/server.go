@@ -191,7 +191,6 @@ type Server struct {
 	presOnce sync.Once
 	pres     *presenceHub // who is looking at what (presence.go)
 
-
 	resMu  sync.Mutex
 	grants []grant // outstanding presigned upload reservations (reserve.go)
 
@@ -248,6 +247,10 @@ type FileInfo struct {
 	Blob string
 	Size int64
 	Time time.Time
+	// Link is the target of a symbolic link, verbatim. When set the entry has
+	// no Blob and no content: the viewer shows the link and its target and
+	// never resolves it, so a link pointing outside the project serves nothing.
+	Link string
 	// User/UserName are the signed-in account behind the change; Author is
 	// the git/OS identity an offline device falls back to. History renders
 	// the account and falls back to Author, so the viewer needs all three
@@ -799,6 +802,17 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 	for _, op := range all {
 		switch op.Kind {
 		case journal.KindPut:
+			// A symlink op carries a target and no blob: record it as a link
+			// (no content) before the blob check below, which an empty Blob
+			// would fail. The target is a string, never resolved here.
+			if op.Link != "" {
+				files[op.Path] = FileInfo{
+					Link: op.Link, Time: op.Time,
+					User: op.User, UserName: op.UserName,
+					Author: op.Author, Device: op.DeviceName,
+				}
+				continue
+			}
 			// A journal is arbitrary JSONL a device pushed: Blob is a storage
 			// key suffix ("blobs/"+Blob), not a checked field, so anything but
 			// a bare sha256 is a path the writer chose — another project's
@@ -821,6 +835,9 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 }
 
 func (r *RemoteSource) Open(ctx context.Context, _ string, fi FileInfo) (io.ReadCloser, error) {
+	if fi.Link != "" {
+		return nil, errLinkHasNoContent // a link has a target, never a blob (dir.go)
+	}
 	// Files already drops ops with a bogus Blob; re-checked in OpenBlob because
 	// that is where the key is built, and a FileInfo can reach it from anywhere.
 	return r.OpenBlob(ctx, fi.Blob)
@@ -1432,10 +1449,13 @@ type Node struct {
 	Time time.Time `json:"time,omitzero"`
 	// Same three-field "who" shape as HistoryEntry (history.go), so the
 	// frontend has one attribution helper for every surface.
-	User     string  `json:"user,omitempty"`
-	UserName string  `json:"user_name,omitempty"`
-	Author   string  `json:"author,omitempty"`
-	Device   string  `json:"device,omitempty"`
+	User     string `json:"user,omitempty"`
+	UserName string `json:"user_name,omitempty"`
+	Author   string `json:"author,omitempty"`
+	Device   string `json:"device,omitempty"`
+	// Link is the symlink target, verbatim. Set only on symlink entries; the
+	// viewer shows it and never follows it.
+	Link     string  `json:"link,omitempty"`
 	Children []*Node `json:"children,omitempty"`
 }
 
@@ -1508,7 +1528,7 @@ func buildTree(files map[string]FileInfo) *Node {
 		}
 		parent.Children = append(parent.Children, &Node{
 			Name: segs[len(segs)-1], Path: p,
-			Size: fi.Size, Time: fi.Time,
+			Size: fi.Size, Time: fi.Time, Link: fi.Link,
 			User: fi.User, UserName: fi.UserName, Author: fi.Author, Device: fi.Device,
 		})
 	}

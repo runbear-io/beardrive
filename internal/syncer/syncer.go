@@ -921,7 +921,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 	}
 
 	err := walkFolder(s.Folder, filter, func(p, rel string, d fs.DirEntry, v verdict) error {
-		if v != vSync {
+		if v != vSync && v != vSymlink {
 			return nil
 		}
 		info, err := d.Info()
@@ -947,6 +947,27 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		c, ok := cache[rel]
 		if ok && c.Size == size && c.MTimeNS == mt {
 			return nil // unchanged (cheap path)
+		}
+		if v == vSymlink {
+			// A symlink is journaled as its target string and nothing else:
+			// Readlink, not Open — a link to ~/.ssh/id_rsa ships the eleven
+			// characters of the path and not one byte of the key. No blob is
+			// put, so no content is ever read, hashed, or secret-scanned.
+			target, err := os.Readlink(p)
+			if err != nil {
+				return nil // vanished or unreadable; next cycle
+			}
+			if ok && c.Link == target {
+				c.Size, c.MTimeNS = size, mt // touched, same target
+				cache[rel] = c
+				return nil
+			}
+			op := nextOp(journal.KindPut, rel)
+			op.Link = target
+			op.Mtime = info.ModTime().UTC()
+			ops = append(ops, op)
+			cache[rel] = store.CachedFile{Link: target, Size: size, MTimeNS: mt}
+			return nil
 		}
 		sum, n, err := s.Store.PutBlobFile(p)
 		if err != nil {
@@ -1804,6 +1825,9 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 // since the scan earlier in this cycle. Split out of materialize so the cycle
 // can land .bdriveignore on its own, before the rules are needed.
 func (s *Session) materializeFile(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
+	if want.Link != "" {
+		return s.materializeSymlink(rel, want, cache)
+	}
 	want.Mode = safeMode(want.Mode) // before the cache compare, or every cycle rewrites
 	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
 	c, ok := cache[rel]
@@ -1953,6 +1977,79 @@ func unsafeRel(rel string) bool { return !journal.SafePath(rel) }
 // peer's op into a setuid binary in every teammate's folder. Group/other write
 // goes too: a synced file is never a drop box for other users on the machine.
 func safeMode(m uint32) uint32 { return m & 0o777 &^ 0o022 }
+
+// materializeSymlink recreates a peer's symbolic link. It writes only the link
+// entry: the target string is reproduced verbatim and never resolved, so a link
+// pointing outside the mount lands as a dangling or escaping link that this
+// device's own filesystem may resolve, but that the sync engine never opens.
+func (s *Session) materializeSymlink(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
+	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
+	c, ok := cache[rel]
+	if ok && c.Link == want.Link {
+		if cur, err := os.Readlink(abs); err == nil && cur == want.Link {
+			return false, nil // already the right link
+		}
+	}
+	if fi, err := os.Lstat(abs); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			// A link already here: adopt it if it points where we want, else
+			// (an untracked, differing link) leave it for the next scan.
+			cur, rerr := os.Readlink(abs)
+			if rerr == nil && cur == want.Link {
+				cache[rel] = store.CachedFile{Link: want.Link, Size: fi.Size(), MTimeNS: fi.ModTime().UnixNano()}
+				return false, nil
+			}
+			if !ok {
+				return false, nil
+			}
+		} else if !ok {
+			// An untracked real file sits at this path: never clobber it.
+			return false, nil
+		}
+	}
+	if err := s.writeSymlink(abs, want.Link); err != nil {
+		return false, fmt.Errorf("symlink %s: %w", rel, err)
+	}
+	fi, err := os.Lstat(abs)
+	if err != nil {
+		return false, err
+	}
+	cache[rel] = store.CachedFile{Link: want.Link, Size: fi.Size(), MTimeNS: fi.ModTime().UnixNano()}
+	s.logInbound(rel, false)
+	return true, nil
+}
+
+// writeSymlink atomically places a link at abs pointing at target. The root
+// check is on the PARENT directory, not abs: os.Symlink writes the link entry
+// into the parent, and a symlink is deliberately allowed to POINT outside the
+// mount — what must stay inside is where the link itself is created. (UnderRoot
+// on abs would also reject replacing an existing dangling link, which is us.)
+func (s *Session) writeSymlink(abs, target string) error {
+	dir := filepath.Dir(abs)
+	if !store.UnderRoot(s.Folder, dir) {
+		return fmt.Errorf("resolves outside the mount root")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".bdrive-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	tmp.Close()
+	if err := os.Remove(tmpName); err != nil {
+		return err
+	}
+	if err := os.Symlink(target, tmpName); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, abs); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
 
 func (s *Session) writeFile(abs string, want journal.FileState) error {
 	// unsafeRel judged the path's SPELLING; this is the same boundary on disk.

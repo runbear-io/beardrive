@@ -169,6 +169,9 @@ export interface Node {
   user_name?: string;
   author?: string;
   device?: string;
+  // Symlink target, verbatim. Present only on symlink entries; the viewer
+  // shows it and never follows it.
+  link?: string;
   children?: Node[];
 }
 
