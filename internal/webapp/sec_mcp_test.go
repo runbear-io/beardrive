@@ -453,6 +453,48 @@ func TestSecMCPHonorsFolderPermissions(t *testing.T) {
 	}
 }
 
+// A guide inside a folder the caller cannot see is a file like any other in
+// it: never named, never inlined, never hinted at — by any tool.
+func TestSecMCPGuidesHonorFolderPermissions(t *testing.T) {
+	f := newMCPHub(t)
+	for p, body := range map[string]string{
+		"AGENTS.md":         "root guide\n",
+		"public/x.md":       "x\n",
+		"private/AGENTS.md": "SECRET-GUIDE-MARKER\n",
+		"private/CLAUDE.md": "SECRET-GUIDE-MARKER\n",
+	} {
+		rec := doAs(t, f.h, "PUT", "/api/p/"+f.wiki.ID+"/upload/content?path="+p, body, f.cookies["alice"])
+		if rec.Code != 200 {
+			t.Fatalf("seed %s: %d %s", p, rec.Code, rec.Body)
+		}
+	}
+	rec := doAs(t, f.h, "PUT", "/api/p/"+f.wiki.ID+"/folders",
+		map[string]any{"prefix": "private/", "default": PermNone}, f.cookies["alice"])
+	if rec.Code != 200 {
+		t.Fatalf("set folder rule: %d %s", rec.Code, rec.Body)
+	}
+
+	cs := f.session(f.connect("bob", f.wiki.ID))
+	root := "/" + f.wiki.ID
+	outs := []string{
+		mustCall(t, cs, "list", map[string]any{"path": "/"}),
+		mustCall(t, cs, "list", map[string]any{"path": root}),
+		mustCall(t, cs, "list", map[string]any{"path": root, "depth": 5}),
+		mustCall(t, cs, "list", map[string]any{"path": root + "/public"}),
+		mustCall(t, cs, "read", map[string]any{"path": root + "/public/x.md"}),
+		mustCall(t, cs, "write", map[string]any{"path": root + "/public/y.md", "content": "y\n"}),
+	}
+	for _, out := range outs {
+		if strings.Contains(out, "private") || strings.Contains(out, "SECRET-GUIDE-MARKER") {
+			t.Fatalf("hidden guide leaked:\n%s", out)
+		}
+	}
+	// And the visible root guide still reaches bob.
+	if !strings.Contains(outs[1], "root guide") {
+		t.Fatalf("visible root guide missing for bob:\n%s", outs[1])
+	}
+}
+
 // An MCP read is an agent read, and its actor must never surface as a device.
 // ?by=device is documented as reporting DEVICE ids — something every project
 // member already sees in History. A grant id has never appeared there, and

@@ -705,6 +705,12 @@ then have to go find. Same gated URL `bdrive url` prints — sign-in plus projec
 membership, safe to paste in a ticket; `bdrive share` is still the only way to
 mint a public one.
 
+The project's own **`AGENTS.md` / `CLAUDE.md`** reaches the agent too, the way
+it would on disk: listing a project shows its root guide (up to 8 KB, marked as
+written by project members), and every single-file tool ends with a
+`guides: …` line naming the guides that govern that path, nearest folder first.
+A project with no guide looks exactly as before.
+
 Everything is scoped and attributed: the grant reaches only the ticked
 projects, can never exceed the permission you already have (lose access to a
 project and every connection loses it with you, nothing to revoke), writes land

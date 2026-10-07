@@ -404,6 +404,8 @@ Implemented on branch `homeless-bird`. Full `go test ./...` green (webapp 410s),
 | 5 — management + telemetry | **Done.** `GET/DELETE /api/mcp/grants` plus a `bdrive mcp list/revoke` CLI, both tested. Plus the Connected agents page at `/connections`. Reads land as agent traffic. |
 | 6 — docs | **Done.** README, `reference/hub-config.md`, and `guides/mcp.md` (sidebar-listed). |
 
+Follow-up: project guides (`AGENTS.md` / `CLAUDE.md`) surfaced through tool output — see `docs/mcp-agent-guides-prd.md`.
+
 ### What the implementation decided that the spec did not
 
 - **Tools are internal clients of the hub's own HTTP handlers.** A write is a
