@@ -59,6 +59,19 @@ type Op struct {
 	// when the op was committed. Display only — never an input to Less or
 	// Replay, since it comes from the filesystem and can be anything.
 	Mtime time.Time `json:"mtime,omitzero"` // put only
+
+	/* Link is the target of a symbolic link, verbatim, and marks the op as
+	   a link rather than a file. A put with Link set has NO blob: nothing
+	   about the target is read, hashed or shipped — a link to ~/.ssh/id_rsa
+	   journals the eleven characters "~/.ssh/id_rsa" and not one byte of the
+	   key. Materialize recreates the link; only the user's own filesystem
+	   ever resolves it, exactly as it did before sync knew links existed.
+
+	   The string is untrusted text chosen by whoever committed the op. It is
+	   passed to os.Symlink, which does not resolve it, and shown to readers,
+	   which do not either. Not an input to Less or Replay's ORDER — but it is
+	   part of the folded state, because a link with no target is not a link. */
+	Link string `json:"link,omitempty"` // put only
 }
 
 // opWire is Op without its JSON methods, so the marshallers below can reuse
@@ -311,6 +324,9 @@ type FileState struct {
 	Blob string
 	Size int64
 	Mode uint32
+	// Link marks a symbolic link and carries its target; see Op.Link. A state
+	// with Link set has Blob == "".
+	Link string
 }
 
 // Replay folds a set of ops (from any number of devices) into the
@@ -322,7 +338,7 @@ func Replay(ops []Op) map[string]FileState {
 	for _, op := range sorted {
 		switch op.Kind {
 		case KindPut:
-			state[op.Path] = FileState{Blob: op.Blob, Size: op.Size, Mode: op.Mode}
+			state[op.Path] = FileState{Blob: op.Blob, Size: op.Size, Mode: op.Mode, Link: op.Link}
 		case KindDelete:
 			delete(state, op.Path)
 		}

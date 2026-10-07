@@ -118,9 +118,11 @@ export function FileTree(props: {
                 <Icon name="chevd" />
               </span>
               <span className="ticon">
-                <Icon name={n.dir ? "folder" : "doc"} />
+                <Icon name={n.dir ? "folder" : n.link ? "link" : "doc"} />
               </span>
-              <span className="label">{n.name}</span>
+              <span className="label" title={n.link ? `${n.name} → ${n.link}` : undefined}>
+                {n.name}
+              </span>
               {n.dir && restricted.has(n.path) && (
                 <span
                   className="trestricted"

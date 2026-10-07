@@ -116,7 +116,7 @@ classDiagram
 
     class walkFolder {
         +walkFolder(folder, filter, fn)
-        verdict: vSync vSkipFile vDescend vPruneDir vNested
+        verdict: vSync vSymlink vSkipFile vDescend vPruneDir vNested
     }
     note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure, SyncedFiles and Drift all go through it, so what --explain reports, what init warns about, what bdrive grep searches and what status calls unscanned cannot drift from what leaves"
 
@@ -179,10 +179,12 @@ classDiagram
         +Author +User +UserName
         +Kind put or delete
         +Path +Blob +Size +Mode +Note
+        +Link symlink target, no blob
         +Session agent session, hook-set
         +Mtime when the file was written
     }
     note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay. Session holds the same standing: set only by `bdrive sync --hook` (never by --note, which any member can spell), display/join-only, and the key History run cards group on — a note is forgeable, a session id is not"
+    note for Op "Link (put only) marks a symbolic link: the target string verbatim and NO blob — the scan uses Readlink, never Open, so a link to ~/.ssh/id_rsa journals eleven characters and not one byte of the key. Replay carries it into FileState.Link; materializeSymlink recreates the link entry on peers and never resolves it; a link pointing outside the mount is an ordinary op that only the user's own filesystem ever follows. walkFolder answers vSymlink for it, so Explain, Measure and Drift see the same thing scan does"
     note for Op "Op now owns its own JSON: a Path that is not valid UTF-8 rides as a base64 `path_raw` sidecar and is restored only when the lossy form still matches, so one line can never name two different files on two readers. Less falls through to Kind/Path/Blob/Size/Mode, making the order TOTAL — two ops can no longer tie and replay differently per device. Parse skips an undecodable line and drops an unknown Kind instead of failing the whole journal"
 
     class Manifest {

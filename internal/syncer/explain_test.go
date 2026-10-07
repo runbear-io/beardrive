@@ -119,8 +119,10 @@ func TestExplainMatchesScan(t *testing.T) {
 				t.Fatalf("not-synced list should stay small, got %d entries: %v", len(notSynced), notSynced)
 			}
 
-			// the builtin exclusions are visible — that is the reassurance
-			for _, want := range []string{".git/", ".DS_Store", ".bdrive-tmp-x", "docs/link.md"} {
+			// the builtin exclusions are visible — that is the reassurance.
+			// docs/link.md is NOT here: a symlink now syncs (as its target
+			// string), so it lands in the synced set asserted above.
+			for _, want := range []string{".git/", ".DS_Store", ".bdrive-tmp-x"} {
 				if find(notSynced, want) == nil {
 					t.Fatalf("%s missing from not-synced: %v", want, notSynced)
 				}
