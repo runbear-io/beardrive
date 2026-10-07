@@ -81,6 +81,27 @@ about. When it is *copying* a file it should pass `raw: true` and get the exact
 bytes back — numbered output is lossy (a file with and without a trailing
 newline look identical), so a copy made from it would not match the original.
 
+## The project's own guide
+
+An agent working in a synced folder reads the project's `AGENTS.md` (or
+`CLAUDE.md`) on its own. Over MCP there is no folder, so the tools hand it
+over instead:
+
+- **Listing a project** shows its root `AGENTS.md` and `CLAUDE.md` under the
+  file list, up to 8 KB, marked as written by project members.
+- **Every tool that works on one file** (`read`, `write`, `edit`, `delete`,
+  `move`, `restore`) and every subfolder listing ends with a line naming the
+  guides that apply to it, nearest folder first:
+
+  ```
+  guides: /wiki/meetings/AGENTS.md, /wiki/AGENTS.md
+  ```
+
+So a guide that says "meeting notes go in `meetings/YYYY-MM-DD.md`" is followed
+by an agent nobody told about it. A project without a guide looks exactly as it
+did before. A guide inside a [restricted folder](/guides/scoping/) you cannot
+see is never shown.
+
 ## Links back to the hub
 
 Every file the tools name comes back with its hub page beside the path:

@@ -88,7 +88,9 @@ never written onto a teammate's disk — regardless of `.bdriveignore`:
 Everything else under an agent-config directory — `.claude/skills`,
 `.claude/commands`, `.claude/agents`, `AGENTS.md`, `CLAUDE.md` — syncs
 normally. Sharing what an agent *reads* is the product; sharing what it *runs*
-is not. See [What agents read](/guides/what-agents-read/).
+is not. See [What agents read](/guides/what-agents-read/). An agent connected
+[over MCP](/guides/mcp/#the-projects-own-guide) has no folder to load
+`AGENTS.md` / `CLAUDE.md` from, so the hub's tools show it to them instead.
 
 ## `.bdrive/workspace.json` — a workspace root
 
