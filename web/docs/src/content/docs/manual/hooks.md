@@ -21,7 +21,7 @@ in its own format:
 
 | Platform | Config it writes | Pull / push / read events |
 |---|---|---|
-| Claude Code | `~/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse` (Write\|Edit\|MultiEdit) / `PostToolUse` (Read\|Grep\|Bash) |
+| Claude Code | `~/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse` (Write\|Edit\|MultiEdit) / `PostToolUse` (Read\|Grep\|Bash), plus `Stop` (turn-end receipt) |
 | Codex | `~/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse` (apply_patch) / `PostToolUse` (read_file\|shell) |
 | Gemini CLI | `~/.gemini/settings.json` | `BeforeAgent` / `AfterTool` (write_file\|replace\|edit) / `AfterTool` (read tools) |
 | Hermes | `~/.hermes/config.yaml` | `pre_llm_call` / `post_tool_call` (write_file\|patch) / `post_tool_call` (read_file\|grep\|bash) |
@@ -36,6 +36,22 @@ Three hooks, three jobs:
 - **Read tracking**, on the agent's read-shaped tools, queued locally and sent
   on the next sync. This is what fills the [Dashboard](/guides/what-agents-read/).
   Listing tools are deliberately excluded: seeing a filename is not reading it.
+
+Claude Code gets a fourth: the **turn-end receipt**, on `Stop`. The push hook
+runs in the background and throws its output away, so on its own nothing checks
+that the agent's files actually reached the hub before it says "done". The
+receipt runs one blocking sync, and if any file this session wrote is still not
+on the hub, it stops the agent once with a line like:
+
+```
+BearDrive: not on the hub yet — `wiki/b.html` (offline: …). Retry `bdrive sync`,
+or tell the user these files are local only.
+```
+
+The reason is one of offline, the hub's own refusal (read-only access), sync
+paused by `bdrive stop`, or a revert under a read-only folder. When everything
+landed it says nothing. It fires once per stop and never loops, and files
+`.bdriveignore` excludes are never journaled, so it cannot see them.
 
 Every platform pipes hook JSON with a session id, so one hook command serves all
 four, and changes are stamped with `<agent> session <id>` — visible in
