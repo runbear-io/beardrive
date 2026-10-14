@@ -35,6 +35,9 @@ export interface ServerConfig {
   // the feature is off, not merely unconfigured — so the account menu hides
   // connection management entirely rather than offering an empty page.
   mcp?: boolean;
+  // Review comments are available (hub mode; never the desktop sidecar or a
+  // plain-folder viewer, which have nowhere to keep them).
+  comments?: boolean;
   // Managed deployments only: PostHog project key + ingestion host. Absent
   // on a self-hosted hub, and absence is what keeps analytics.ts inert.
   analytics?: { key: string; host: string };
@@ -314,4 +317,41 @@ export interface McpGrant {
   projects: string[];
   created: string;
   last_used?: string;
+}
+
+// GET /api/p/<id>/comments (handleCommentList, comments.go)
+export interface CommentAnchor {
+  quote?: string;
+  prefix?: string;
+  suffix?: string;
+  line?: number;
+  element?: string;
+}
+
+export interface CommentMessage {
+  id: string;
+  author?: string;
+  name?: string;
+  body: string;
+  time: string;
+}
+
+export interface CommentThread {
+  id: string;
+  // Where the file is now: a thread follows its file across renames.
+  path: string;
+  anchor: CommentAnchor;
+  sha?: string;
+  author?: string;
+  name?: string;
+  created: string;
+  updated: string;
+  messages: CommentMessage[];
+  resolved: boolean;
+  resolved_by?: string;
+  resolved_name?: string;
+  resolved_at?: string;
+  // The file changed since the comment was left / no longer exists.
+  outdated?: boolean;
+  missing?: boolean;
 }

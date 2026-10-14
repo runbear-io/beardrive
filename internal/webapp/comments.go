@@ -1,0 +1,792 @@
+package webapp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/runbear-io/beardrive/internal/remote"
+)
+
+/* Review comments: a person leaves feedback on a file while reading it in the
+   viewer, and an agent sweeps the open ones with `bdrive comments`.
+
+   Storage is the project's own object store, under comments/ — hub-internal
+   like ydoc/, never synced to devices, never quota'd. Each change to a thread
+   (open, reply, resolve, reopen, delete) is its own immutable object:
+
+       comments/<thread>/<unix-nanos>-<rand>.json
+
+   so a thread is the fold of its events and no object ever has two writers.
+   That is the property journals rely on, for the same reason: two hub
+   processes answering two people at once cannot lose either write, and there
+   is no read-modify-write to race. Immutable objects also make the cache
+   trivial — an event read once is never read again.
+
+   A comment is anchored by what the reader SAW: the quoted text plus a little
+   context either side (the W3C TextQuoteSelector shape), not an offset into
+   the source. The viewer renders markdown and HTML, so the source offset is
+   not something the browser knows, and an offset would go stale with the
+   first edit anyway. The quote is also exactly what an agent needs: it greps
+   the file for it.
+
+   Nothing here decides who may READ the project; proj() has. Every handler
+   still filters by path, because a folder rule can hide one file's comments
+   from a member who can see the rest of the project. */
+
+const (
+	commentsPrefix = "comments/"
+	// maxCommentBody bounds one message. Review feedback, not a document.
+	maxCommentBody = 8000
+	maxQuote       = 2000
+	maxQuoteCtx    = 200
+	maxElement     = 500
+	// maxCommentEvent bounds what a stored event may cost to read back, so a
+	// corrupt or foreign object under comments/ cannot balloon a listing.
+	maxCommentEvent = 64 << 10
+	// commentListTTL is how long one process trusts its own listing of
+	// comments/. A write through THIS process drops it at once; the window
+	// only delays a write made through another hub process, and keeps a file
+	// backend from walking the whole project root on every viewer poll.
+	commentListTTL = 3 * time.Second
+	// commentFetchers bounds concurrent reads when a listing names events this
+	// process has not seen yet — a cold start against an object store.
+	commentFetchers = 8
+)
+
+var (
+	commentKeyRe    = regexp.MustCompile(`^comments/([0-9a-f]{12})/([0-9]{19}-[0-9a-f]{8})\.json$`)
+	commentThreadRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
+	shaRe           = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+	errCommentsOff = errors.New("comments are not available on this server")
+)
+
+// CommentAnchor is where on the page a thread was started. Every field is
+// optional: a thread with no anchor is about the whole file.
+type CommentAnchor struct {
+	// Quote is the text the reader selected, as rendered.
+	Quote string `json:"quote,omitempty"`
+	// Prefix and Suffix are the rendered text just before and after Quote,
+	// for telling apart two places that say the same thing.
+	Prefix string `json:"prefix,omitempty"`
+	Suffix string `json:"suffix,omitempty"`
+	// Line is the 1-based source line, when the viewer showed the source
+	// itself (plain text, code) and therefore knew it.
+	Line int `json:"line,omitempty"`
+	// Element describes a picked element on a rendered HTML page, as a CSS
+	// selector path. Set for a pin on something with no text to quote.
+	Element string `json:"element,omitempty"`
+}
+
+type CommentMessage struct {
+	ID     string    `json:"id"`
+	Author string    `json:"author,omitempty"`
+	Name   string    `json:"name,omitempty"`
+	Body   string    `json:"body"`
+	Time   time.Time `json:"time"`
+}
+
+type CommentThread struct {
+	ID string `json:"id"`
+	// Path is where the file is NOW. A thread follows its file across renames
+	// the way a share link does (resolveShare), so feedback left before a
+	// move is still found on the moved file.
+	Path         string           `json:"path"`
+	Anchor       CommentAnchor    `json:"anchor"`
+	Sha          string           `json:"sha,omitempty"` // the file version commented on
+	Author       string           `json:"author,omitempty"`
+	Name         string           `json:"name,omitempty"`
+	Created      time.Time        `json:"created"`
+	Updated      time.Time        `json:"updated"`
+	Messages     []CommentMessage `json:"messages"`
+	Resolved     bool             `json:"resolved"`
+	ResolvedBy   string           `json:"resolved_by,omitempty"`
+	ResolvedName string           `json:"resolved_name,omitempty"`
+	ResolvedAt   *time.Time       `json:"resolved_at,omitempty"`
+	// Outdated: the file has changed since the comment was left, so the
+	// quote may already be gone. Missing: the file itself is gone.
+	Outdated bool `json:"outdated,omitempty"`
+	Missing  bool `json:"missing,omitempty"`
+
+	origPath string
+	deleted  bool
+}
+
+// commentEvent is one stored object. Anchor and Sha are set on "open" only;
+// Body on open and reply, and optionally on resolve/reopen (a note saying
+// what was done). Path is authoritative on "open"; on the others it is the
+// file's path at the time, carried for the change notification alone.
+type commentEvent struct {
+	Kind   string         `json:"kind"` // open | reply | resolve | reopen | delete
+	Thread string         `json:"thread"`
+	Path   string         `json:"path,omitempty"`
+	Anchor *CommentAnchor `json:"anchor,omitempty"`
+	Sha    string         `json:"sha,omitempty"`
+	Body   string         `json:"body,omitempty"`
+	Author string         `json:"author,omitempty"`
+	Name   string         `json:"name,omitempty"`
+	Time   time.Time      `json:"time"`
+
+	key string
+}
+
+// commentCache holds every event this process has read, keyed by project and
+// object key. Events are immutable, so an entry is never invalidated; only
+// the listing of which events exist expires.
+type commentCache struct {
+	mu     sync.Mutex
+	events map[string]commentEvent
+	lists  map[string]commentListing
+	// One lock per project serializes this process's writers, so a reply
+	// and a resolve sent together still land in the order they were sent.
+	locks sync.Map
+}
+
+type commentListing struct {
+	keys []string
+	at   time.Time
+}
+
+func (s *Server) commentStore() *commentCache {
+	s.commentsOnce.Do(func() {
+		s.comments = &commentCache{events: map[string]commentEvent{}, lists: map[string]commentListing{}}
+	})
+	return s.comments
+}
+
+func (c *commentCache) lock(project string) *sync.Mutex {
+	m, _ := c.locks.LoadOrStore(project, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+// commentsAvailable reports whether this server can hold comments at all:
+// hub mode, where every project has an object store of its own. The
+// single-folder viewer and the desktop sidecar have nowhere to put them.
+func (s *Server) commentsAvailable() bool { return s.Root != nil && !s.Desktop }
+
+// loadThreads folds every stored event for a project into threads, deleted
+// ones dropped. Path is still the path the thread was opened on; callers
+// resolve it against a snapshot (placeThreads).
+func (s *Server) loadThreads(ctx context.Context, project string) (map[string]*CommentThread, error) {
+	if !s.commentsAvailable() {
+		return nil, errCommentsOff
+	}
+	be, ok := s.projectBackend(project)
+	if !ok {
+		return nil, errCommentsOff
+	}
+	c := s.commentStore()
+	keys, err := c.list(ctx, project, be)
+	if err != nil {
+		return nil, err
+	}
+	evs, err := c.fetch(ctx, project, be, keys)
+	if err != nil {
+		return nil, err
+	}
+	return foldComments(evs), nil
+}
+
+func (c *commentCache) list(ctx context.Context, project string, be remote.Backend) ([]string, error) {
+	c.mu.Lock()
+	l, ok := c.lists[project]
+	c.mu.Unlock()
+	if ok && time.Since(l.at) < commentListTTL {
+		return l.keys, nil
+	}
+	objs, err := be.List(ctx, commentsPrefix)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(objs))
+	for _, o := range objs {
+		if commentKeyRe.MatchString(o.Key) {
+			keys = append(keys, o.Key)
+		}
+	}
+	c.mu.Lock()
+	c.lists[project] = commentListing{keys: keys, at: time.Now()}
+	c.mu.Unlock()
+	return keys, nil
+}
+
+// fetch returns the events behind keys, reading only the ones this process
+// has never seen. An unreadable object is skipped rather than failing the
+// listing: one damaged comment must not hide every other one.
+func (c *commentCache) fetch(ctx context.Context, project string, be remote.Backend, keys []string) ([]commentEvent, error) {
+	out := make([]commentEvent, 0, len(keys))
+	var missing []string
+	c.mu.Lock()
+	for _, k := range keys {
+		if ev, ok := c.events[project+"\x00"+k]; ok {
+			out = append(out, ev)
+		} else {
+			missing = append(missing, k)
+		}
+	}
+	c.mu.Unlock()
+	if len(missing) == 0 {
+		return out, nil
+	}
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		sem  = make(chan struct{}, commentFetchers)
+		read []commentEvent
+	)
+	for _, k := range missing {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(k string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			ev, err := readCommentEvent(ctx, be, k)
+			if err != nil {
+				if !remote.IsNotExist(err) {
+					log.Printf("beardrive: reading comment %s/%s: %v", project, k, err)
+				}
+				return
+			}
+			mu.Lock()
+			read = append(read, ev)
+			mu.Unlock()
+		}(k)
+	}
+	wg.Wait()
+	c.mu.Lock()
+	for _, ev := range read {
+		c.events[project+"\x00"+ev.key] = ev
+	}
+	c.mu.Unlock()
+	return append(out, read...), ctx.Err()
+}
+
+func readCommentEvent(ctx context.Context, be remote.Backend, key string) (commentEvent, error) {
+	rc, err := be.Get(ctx, key)
+	if err != nil {
+		return commentEvent{}, err
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, maxCommentEvent+1))
+	if err != nil {
+		return commentEvent{}, err
+	}
+	if len(data) > maxCommentEvent {
+		return commentEvent{}, fmt.Errorf("comment event too large")
+	}
+	var ev commentEvent
+	if err := json.Unmarshal(data, &ev); err != nil {
+		return commentEvent{}, err
+	}
+	// The key is the authority on which thread an event belongs to; a body
+	// that disagrees with it was not written by this code.
+	m := commentKeyRe.FindStringSubmatch(key)
+	if m == nil || ev.Thread != m[1] {
+		return commentEvent{}, fmt.Errorf("comment event does not match its key")
+	}
+	ev.key = key
+	return ev, nil
+}
+
+// foldComments replays events into threads. Order within a thread is (time,
+// key): the key's nanosecond stamp breaks ties between events written in the
+// same instant, and its random tail makes the order total.
+func foldComments(evs []commentEvent) map[string]*CommentThread {
+	sort.Slice(evs, func(i, j int) bool {
+		if !evs[i].Time.Equal(evs[j].Time) {
+			return evs[i].Time.Before(evs[j].Time)
+		}
+		return evs[i].key < evs[j].key
+	})
+	threads := map[string]*CommentThread{}
+	for _, ev := range evs {
+		t := threads[ev.Thread]
+		if ev.Kind == "open" {
+			if t != nil || ev.Path == "" {
+				continue // a second open for one id is not something this code writes
+			}
+			t = &CommentThread{
+				ID: ev.Thread, Path: ev.Path, origPath: ev.Path, Sha: ev.Sha,
+				Author: ev.Author, Name: ev.Name, Created: ev.Time, Updated: ev.Time,
+			}
+			if ev.Anchor != nil {
+				t.Anchor = *ev.Anchor
+			}
+			t.Messages = []CommentMessage{eventMessage(ev)}
+			threads[ev.Thread] = t
+			continue
+		}
+		if t == nil || t.deleted {
+			continue // an event for a thread whose open we never saw
+		}
+		t.Updated = ev.Time
+		switch ev.Kind {
+		case "reply":
+			t.Messages = append(t.Messages, eventMessage(ev))
+		case "resolve", "reopen":
+			if ev.Body != "" {
+				t.Messages = append(t.Messages, eventMessage(ev))
+			}
+			t.Resolved = ev.Kind == "resolve"
+			if t.Resolved {
+				at := ev.Time
+				t.ResolvedBy, t.ResolvedName, t.ResolvedAt = ev.Author, ev.Name, &at
+			} else {
+				t.ResolvedBy, t.ResolvedName, t.ResolvedAt = "", "", nil
+			}
+		case "delete":
+			t.deleted = true
+		}
+	}
+	for id, t := range threads {
+		if t.deleted {
+			delete(threads, id)
+		}
+	}
+	return threads
+}
+
+func eventMessage(ev commentEvent) CommentMessage {
+	return CommentMessage{
+		ID:     strings.TrimSuffix(ev.key[strings.LastIndexByte(ev.key, '/')+1:], ".json"),
+		Author: ev.Author, Name: ev.Name, Body: ev.Body, Time: ev.Time,
+	}
+}
+
+// placeThreads resolves each thread against the current file listing — where
+// its file lives now, whether it changed since, whether it is gone — and
+// drops the ones this caller may not see. Both the original path and the
+// current one must be readable: a comment quotes its file, and a file moved
+// out of a hidden folder does not make what was said about it there public.
+func placeThreads(threads map[string]*CommentThread, snap *snapshot, f pathFilter) []*CommentThread {
+	out := make([]*CommentThread, 0, len(threads))
+	for _, t := range threads {
+		if !f.canRead(t.origPath) {
+			continue
+		}
+		if fi, ok := snap.files[t.origPath]; ok {
+			t.Path = t.origPath
+			t.Outdated = t.Sha != "" && fi.Blob != t.Sha
+		} else if to, ok := resolveShare(snap.moves, snap.files, t.origPath, t.Created); ok {
+			t.Path = to
+			t.Outdated = t.Sha != "" && snap.files[to].Blob != t.Sha
+		} else {
+			t.Missing = true
+		}
+		if !f.canRead(t.Path) {
+			continue
+		}
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Created.Before(out[j].Created)
+	})
+	return out
+}
+
+// writeCommentEvent stores one event and makes it visible to this process at
+// once — the listing cache would otherwise hide a person's own comment from
+// them for up to commentListTTL.
+func (s *Server) writeCommentEvent(ctx context.Context, project string, ev commentEvent) error {
+	be, ok := s.projectBackend(project)
+	if !ok {
+		return errCommentsOff
+	}
+	ev.key = fmt.Sprintf("%s%s/%019d-%s.json", commentsPrefix, ev.Thread, ev.Time.UnixNano(), randHex(4))
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	if err := be.Put(ctx, ev.key, bytes.NewReader(data), int64(len(data))); err != nil {
+		return err
+	}
+	c := s.commentStore()
+	c.mu.Lock()
+	c.events[project+"\x00"+ev.key] = ev
+	delete(c.lists, project)
+	c.mu.Unlock()
+	// Viewers of the file refetch; the frame is the same shape as a change,
+	// but a distinct type so an open editor does not read it as a peer's
+	// write to the file.
+	s.events().publish(project, changeEvent{Type: "comments", Paths: []string{ev.Path}})
+	return nil
+}
+
+// cleanCommentText keeps what a person typed, minus what renders as nothing:
+// C0/C1 controls other than newline and tab, and every format character
+// (category Cf, plus the tag block). Comments are read by agents, and text a
+// reviewer cannot see in the UI must not reach an agent as instruction —
+// trimText's rule, with line breaks kept because feedback has paragraphs.
+func cleanCommentText(s string, max int) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		switch {
+		case r == '\n', r == '\t':
+		case r == '\r', r == 0x2028, r == 0x2029:
+			r = '\n'
+		case unicode.IsControl(r):
+			continue
+		case unicode.Is(unicode.Cf, r), r >= 0xe0000 && r <= 0xe01ef:
+			continue
+		case r == utf8.RuneError:
+			continue
+		}
+		if n >= max {
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// cleanQuote is cleanCommentText for anchor text, which is matched against
+// the file rather than read: whitespace inside it is kept as it was, only the
+// ends are not trimmed away from the context fields.
+func cleanQuote(s string, max int) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			continue
+		}
+		if unicode.Is(unicode.Cf, r) || (r >= 0xe0000 && r <= 0xe01ef) || r == utf8.RuneError {
+			continue
+		}
+		if n >= max {
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
+
+func cleanAnchor(a CommentAnchor) CommentAnchor {
+	out := CommentAnchor{
+		Quote:   strings.TrimSpace(cleanQuote(a.Quote, maxQuote)),
+		Prefix:  cleanQuote(a.Prefix, maxQuoteCtx),
+		Suffix:  cleanQuote(a.Suffix, maxQuoteCtx),
+		Element: strings.TrimSpace(cleanQuote(strings.ReplaceAll(a.Element, "\n", " "), maxElement)),
+	}
+	if a.Line > 0 && a.Line < 1<<30 {
+		out.Line = a.Line
+	}
+	if out.Quote == "" {
+		out.Prefix, out.Suffix = "", ""
+	}
+	return out
+}
+
+// commentActor is who a write is attributed to. A hub always has auth; the
+// auth-less fallback exists for fixtures and is attributed to nobody.
+func (s *Server) commentActor(r *http.Request) (email, name string) {
+	u := s.requestUser(r)
+	name = u.Name
+	if name == "" {
+		name = u.Email
+	}
+	return normEmail(u.Email), name
+}
+
+// ---- HTTP ----
+
+func commentsErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, errCommentsOff) {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	storageErr(w, http.StatusBadGateway, "comments are temporarily unavailable", err)
+}
+
+// handleCommentList: GET /api/p/<id>/comments?path=|prefix=&status=open|resolved|all
+//
+// status defaults to open — the sweep an agent runs is "what is still asking
+// for something".
+func (s *Server) handleCommentList(v *volume, w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	status := q.Get("status")
+	switch status {
+	case "":
+		status = "open"
+	case "open", "resolved", "all":
+	default:
+		http.Error(w, "status must be open, resolved or all", http.StatusBadRequest)
+		return
+	}
+	path, prefix := q.Get("path"), strings.TrimPrefix(q.Get("prefix"), "/")
+	threads, err := s.loadThreads(r.Context(), r.PathValue("project"))
+	if err != nil {
+		commentsErr(w, err)
+		return
+	}
+	snap, err := v.snapshot(r.Context())
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
+		return
+	}
+	out := []*CommentThread{}
+	for _, t := range placeThreads(threads, snap, s.visibility(r)) {
+		if path != "" && t.Path != path {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(t.Path, strings.TrimSuffix(prefix, "/")+"/") && t.Path != prefix {
+			continue
+		}
+		if (status == "open" && t.Resolved) || (status == "resolved" && !t.Resolved) {
+			continue
+		}
+		out = append(out, t)
+	}
+	writeJSON(w, map[string]any{"comments": out})
+}
+
+// handleCommentCreate: POST /api/p/<id>/comments {path, body, anchor?, sha?}
+//
+// Read access is enough to comment. Review feedback mostly comes from the
+// people who read a document rather than the ones who write it, and a
+// comment changes nothing but the comment list: whoever acts on it does so
+// with their own write access.
+func (s *Server) handleCommentCreate(v *volume, w http.ResponseWriter, r *http.Request) {
+	if !s.commentsAvailable() {
+		http.Error(w, errCommentsOff.Error(), http.StatusNotFound)
+		return
+	}
+	var req struct {
+		Path   string        `json:"path"`
+		Body   string        `json:"body"`
+		Anchor CommentAnchor `json:"anchor"`
+		Sha    string        `json:"sha"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxCommentEvent)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	p, err := cleanUploadPath(req.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	body := cleanCommentText(req.Body, maxCommentBody)
+	if body == "" {
+		http.Error(w, "a comment needs some text", http.StatusBadRequest)
+		return
+	}
+	// 404 for a hidden path, like every read door: a 403 would confirm the
+	// file is there.
+	if !s.visibility(r).canRead(p) {
+		http.Error(w, "no such file", http.StatusNotFound)
+		return
+	}
+	snap, err := v.snapshot(r.Context())
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
+		return
+	}
+	fi, ok := snap.files[p]
+	if !ok {
+		http.Error(w, "no such file", http.StatusNotFound)
+		return
+	}
+	// The version the reader was looking at, when they say and it is one;
+	// otherwise the current one. Only ever used to say "this file changed
+	// since", so a wrong claim costs the claimant a wrong hint and nothing else.
+	sha := fi.Blob
+	if shaRe.MatchString(req.Sha) {
+		sha = req.Sha
+	}
+	anchor := cleanAnchor(req.Anchor)
+	email, name := s.commentActor(r)
+	ev := commentEvent{
+		Kind: "open", Thread: randHex(6), Path: p, Sha: sha, Body: body,
+		Author: email, Name: name, Time: time.Now().UTC(),
+	}
+	if anchor != (CommentAnchor{}) {
+		ev.Anchor = &anchor
+	}
+	project := r.PathValue("project")
+	mu := s.commentStore().lock(project)
+	mu.Lock()
+	err = s.writeCommentEvent(r.Context(), project, ev)
+	mu.Unlock()
+	if err != nil {
+		commentsErr(w, err)
+		return
+	}
+	s.answerThread(v, w, r, ev.Thread)
+}
+
+// handleCommentUpdate: POST /api/p/<id>/comments/<thread> {action, body?}
+//
+// action is reply, resolve or reopen. Resolving and reopening take an
+// optional note — what was changed, or why it is not done — which joins the
+// thread as a message. Repeating a resolve on a resolved thread with no note
+// writes nothing: an agent re-running its sweep must not stack events.
+func (s *Server) handleCommentUpdate(v *volume, w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string `json:"action"`
+		Body   string `json:"body"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxCommentEvent)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	body := cleanCommentText(req.Body, maxCommentBody)
+	switch req.Action {
+	case "reply":
+		if body == "" {
+			http.Error(w, "a reply needs some text", http.StatusBadRequest)
+			return
+		}
+	case "resolve", "reopen":
+	default:
+		http.Error(w, "action must be reply, resolve or reopen", http.StatusBadRequest)
+		return
+	}
+	project := r.PathValue("project")
+	mu := s.commentStore().lock(project)
+	mu.Lock()
+	t, ok := s.visibleThread(v, w, r)
+	if !ok {
+		mu.Unlock()
+		return
+	}
+	if body == "" && ((req.Action == "resolve" && t.Resolved) || (req.Action == "reopen" && !t.Resolved)) {
+		mu.Unlock()
+		s.answerThread(v, w, r, t.ID)
+		return
+	}
+	email, name := s.commentActor(r)
+	err := s.writeCommentEvent(r.Context(), project, commentEvent{
+		Kind: req.Action, Thread: t.ID, Path: t.Path, Body: body,
+		Author: email, Name: name, Time: s.nextCommentTime(t),
+	})
+	mu.Unlock()
+	if err != nil {
+		commentsErr(w, err)
+		return
+	}
+	s.answerThread(v, w, r, t.ID)
+}
+
+// handleCommentDelete: DELETE /api/p/<id>/comments/<thread>. The thread's
+// author or a project admin; resolving is how everyone else closes one.
+func (s *Server) handleCommentDelete(v *volume, w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	mu := s.commentStore().lock(project)
+	mu.Lock()
+	defer mu.Unlock()
+	t, ok := s.visibleThread(v, w, r)
+	if !ok {
+		return
+	}
+	email, name := s.commentActor(r)
+	isAdmin := false
+	if p, ok := projectFromCtx(r); ok {
+		isAdmin = s.projectPermOf(r, p) == PermAdmin
+	}
+	if !isAdmin && (email == "" || email != t.Author) {
+		http.Error(w, "only the comment's author or a project admin can delete it", http.StatusForbidden)
+		return
+	}
+	err := s.writeCommentEvent(r.Context(), project, commentEvent{
+		Kind: "delete", Thread: t.ID, Path: t.Path,
+		Author: email, Name: name, Time: s.nextCommentTime(t),
+	})
+	if err != nil {
+		commentsErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// nextCommentTime is now, nudged past the thread's last event: fold orders by
+// time, and a hub clock that stepped backwards must not land a resolve
+// before the reply it follows.
+func (s *Server) nextCommentTime(t *CommentThread) time.Time {
+	now := time.Now().UTC()
+	if !now.After(t.Updated) {
+		now = t.Updated.Add(time.Microsecond)
+	}
+	return now
+}
+
+// visibleThread finds the {thread} in the URL among the threads this caller
+// may see, answering 404 itself when it is not one of them — absent and
+// hidden look the same from outside.
+func (s *Server) visibleThread(v *volume, w http.ResponseWriter, r *http.Request) (*CommentThread, bool) {
+	id := r.PathValue("thread")
+	if !commentThreadRe.MatchString(id) {
+		http.Error(w, "no such comment", http.StatusNotFound)
+		return nil, false
+	}
+	threads, err := s.loadThreads(r.Context(), r.PathValue("project"))
+	if err != nil {
+		commentsErr(w, err)
+		return nil, false
+	}
+	snap, err := v.snapshot(r.Context())
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
+		return nil, false
+	}
+	t, ok := threads[id]
+	if !ok {
+		http.Error(w, "no such comment", http.StatusNotFound)
+		return nil, false
+	}
+	placed := placeThreads(map[string]*CommentThread{id: t}, snap, s.visibility(r))
+	if len(placed) == 0 {
+		http.Error(w, "no such comment", http.StatusNotFound)
+		return nil, false
+	}
+	return placed[0], true
+}
+
+func (s *Server) answerThread(v *volume, w http.ResponseWriter, r *http.Request, id string) {
+	r.SetPathValue("thread", id)
+	t, ok := s.visibleThread(v, w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, map[string]any{"comment": t})
+}
+
+// commentSuffix is appended to an HTML file served for commenting. Appended
+// rather than spliced in, as printSuffix is: HTML's parser moves trailing
+// content into the body, so the stored bytes stream through untouched and
+// nothing has to be buffered or parsed.
+//
+// The bootstrap is a classic script at the static root for inline-edit.js's
+// reasons (htmledit.go, editScriptURL): the frame is sandboxed without
+// allow-same-origin, and a module load from an opaque origin would need CORS.
+const commentSuffix = `<script src="/inline-comment.js"></script>`
+
+// commentView reports whether this request asked for the commentable variant
+// of an inline HTML render. text/html only, for printView's reason: trailing
+// content after the root element is fatal to an XML parse.
+func commentView(r *http.Request, ct string) bool {
+	if r.URL.Query().Get("comment") != "1" {
+		return false
+	}
+	ct = strings.ToLower(ct)
+	return strings.HasPrefix(ct, "text/html")
+}

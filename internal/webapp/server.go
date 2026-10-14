@@ -108,6 +108,10 @@ type Server struct {
 	roomOnce sync.Once
 	roomReg  *roomRegistry
 
+	// Review comments (comments.go), built on first use.
+	commentsOnce sync.Once
+	comments     *commentCache
+
 	mcpOnce sync.Once
 	mcpSrv  *mcp.Server // the tool registry, built once (see mcpServer)
 	// Reads, when set, aggregates read telemetry (viewer, share, and agent
@@ -1008,6 +1012,11 @@ func (s *Server) Handler() http.Handler {
 	// The run-wide form of the two above: one journal write that puts every
 	// path an agent run touched back where it was.
 	mux.HandleFunc("POST /api/p/{project}/undo-run", proj(PermWrite, s.handleUndoRun))
+	// Read is enough to comment: see handleCommentCreate.
+	mux.HandleFunc("GET /api/p/{project}/comments", proj(PermRead, s.handleCommentList))
+	mux.HandleFunc("POST /api/p/{project}/comments", proj(PermRead, s.handleCommentCreate))
+	mux.HandleFunc("POST /api/p/{project}/comments/{thread}", proj(PermRead, s.handleCommentUpdate))
+	mux.HandleFunc("DELETE /api/p/{project}/comments/{thread}", proj(PermRead, s.handleCommentDelete))
 	mux.HandleFunc("GET /api/p/{project}/heat", proj(PermRead, s.handleHeat))
 	mux.HandleFunc("POST /api/p/{project}/reads", proj(PermRead, s.handleReadReport))
 	mux.HandleFunc("POST /api/p/{project}/shares", proj(PermWrite, s.handleShareCreate))
@@ -1247,6 +1256,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// than merely unconfigured.
 	if s.MCP != nil {
 		out["mcp"] = true
+	}
+	if s.commentsAvailable() {
+		out["comments"] = true
 	}
 	if me.Email != "" {
 		out["me"] = map[string]string{"email": me.Email, "name": me.Name}
@@ -1604,9 +1616,12 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	// 304 for ?edit=1 and shows a page with nothing to click, which looks
 	// exactly like the feature being broken.
 	edit := !attach && editView(r, ct, true) && s.mayWritePath(r, p)
+	comment := !attach && !edit && commentView(r, ct) && s.commentsAvailable()
 	etag := `"` + fi.Blob + `"`
 	if edit {
 		etag = `"` + fi.Blob + `-edit"`
+	} else if comment {
+		etag = `"` + fi.Blob + `-comment"`
 	}
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -1647,15 +1662,17 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 		}
 		pv = printView(w, r, ct, true)
 	}
-	// A print view appends printSuffix after the stored bytes, so the source's
-	// own length stops being the body's length — promising it would truncate
-	// the script right back off again.
-	if !pv {
+	// A print view appends printSuffix after the stored bytes, and the comment
+	// view its bootstrap, so the source's own length stops being the body's
+	// length — promising it would truncate the script right back off again.
+	if !pv && !comment {
 		setContentLength(w, body)
 	}
 	io.Copy(w, body)
 	if pv {
 		io.WriteString(w, printSuffix)
+	} else if comment {
+		io.WriteString(w, commentSuffix)
 	}
 }
 

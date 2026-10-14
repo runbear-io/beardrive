@@ -55,6 +55,9 @@ export function FileView(props: {
   // refuses to open. Ignored for every other file type, which has only ever
   // had the one surface.
   editSource?: boolean;
+  // An HTML file renders its commentable variant (comments.go's ?comment=1),
+  // which carries the bootstrap Comments.tsx talks to.
+  commentable?: boolean;
 }) {
   const { apiBase, path, version, onMeta } = props;
   const fileURL = fileURLFor(apiBase, path, version);
@@ -154,7 +157,7 @@ function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
       key={rev}
       className="htmlview"
       sandbox="allow-scripts"
-      src={fileURL}
+      src={props.commentable ? fileURL + (fileURL.includes("?") ? "&" : "?") + "comment=1" : fileURL}
       title={path}
       onLoad={onRendered}
     />

@@ -22,6 +22,14 @@ classDiagram
     }
     note for shareMermaid "The only script the server-rendered /s/ share page ever loads, and only when shares.go finds a mermaid fence in the document. Built as a SECOND rollup input with a fixed, unhashed name at the static root — sharedMarkdownShell is a Go const and cannot know a content hash, and server.go marks assets/ immutable for a year, so an unhashed file there would pin a stale bundle in shared caches. Mermaid's own chunks keep their hashed assets/ names, which is why the share page needs the ACAO header: its sandbox origin is opaque"
 
+    class inlineComment {
+        <<third Vite pass, IIFE>>
+        src/inline-comment.ts → static/inline-comment.js
+        selection / pick up, anchors down, by postMessage
+    }
+    note for inlineComment "Injected into a commented HTML page by the server's ?comment=1 view, IIFE for inline-edit.js's reason (an opaque-origin frame cannot load a module without CORS). It reports what the reader selected or, in pick mode, clicked (a cssPath plus short text), paints the anchors the app sends down with the Custom Highlight API and numbered pins in a closed shadow root, and reports a click on one. Only anchors come down, never a comment's text: the frame runs the page's own scripts, which can reach the network"
+    note for components "Comments.tsx: CommentSurface sits around FileView and adds NO element — .page's children are a layout other code reads (the frontmatter rail is a grid on .page) — finding the page through a hidden marker and putting everything it draws after the file view, marked data-bd-ignore. Markdown and text are handled in this document: selections become TextQuote anchors (lib/anchor.ts), highlights are painted with the CSS Custom Highlight API rather than &lt;mark&gt;s because MarkdownView's dangerouslySetInnerHTML re-applies its markup and would drop DOM patches, and pins re-place on any document mutation. HTML is handled by trading messages with inlineComment. CommentPanel is the thread list (open/resolved, reply, resolve, reopen, delete); Browser owns its open state, the focused thread and ?comment=&lt;id&gt; (the link `bdrive comments` prints)"
+
     class App {
         mode from /api/config
     }
@@ -108,6 +116,7 @@ classDiagram
     class hooks {
         +useConfig
         +useHub
+        +useComments useCommentActions (["comments", apiBase, path])
         +useBrowse
         +useProjectEvents (one SSE per BROWSER → invalidate)
         +usePresence (announces on arrive/navigate/leave)
@@ -125,6 +134,7 @@ classDiagram
         FileView FolderListing FileTree
         HistoryView HistoryRow HistoryFilters DiffView VersionBanner ConflictBanner
         PresenceBar Editor VisualEdit
+        Comments (CommentSurface CommentPanel)
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
@@ -144,6 +154,7 @@ classDiagram
     note for components "components/ui — shadcn/ui primitives (Radix, copied in), themed from BearDrive tokens in tw.css; rendered markdown is transformed as a string before mounting, link clicks delegated on the container — never patch the dangerouslySetInnerHTML subtree"
 
     class lib {
+        +anchor.ts squash locate bestMatch rangeFor describe cssPath hitTest
         +diff.ts splitLines lcsDiff diffText
         +diff.ts textEdit (the one splice that folds an outside write in)
         +runs.ts groupRuns runFileCount
@@ -197,8 +208,11 @@ classDiagram
     Browser --> lib : armGoal applyGoal noteScroll
     hooks --> lib : re-exports heat.ts, sniffBytes
     shareMermaid --> lib : renderMermaid
+    inlineComment --> lib : anchor.ts (no app imports)
+    components --> lib : rangeFor describe hitTest (Comments)
+    components ..> inlineComment : postMessage via the ?comment=1 iframe
     hooks --> api
-    Browser --> hooks : useTree useHeat useShares useProjectEvents, fetchBlobText + fileURLFor (Copy)
+    Browser --> hooks : useTree useHeat useShares useProjectEvents useComments, fetchBlobText + fileURLFor (Copy)
     HubApp --> hooks
     HubApp --> Setup : desktop mode only, /setup/* frames
     HubApp --> McpConnections : /connections, account-level
