@@ -116,7 +116,7 @@ func TestInlineHTMLIsSandboxed(t *testing.T) {
 			t.Fatalf("%s: %d", path, rec.Code)
 		}
 		csp := rec.Header().Get("Content-Security-Policy")
-		if wantCSP && csp != "sandbox allow-scripts" {
+		if wantCSP && csp != "sandbox allow-scripts allow-downloads" {
 			t.Errorf("%s: CSP = %q, want sandbox", path, csp)
 		}
 		if !wantCSP && csp != "" {

@@ -418,13 +418,34 @@ test("html file renders as a page in a sandboxed iframe", async ({ page }) => {
   await page.goto(`/${pid}/pages/hello.html`);
   const frame = page.locator("#content iframe.htmlview");
   await expect(frame).toBeVisible();
-  await expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+  await expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-downloads");
   await expect(page.frameLocator("#content iframe.htmlview").locator("#t")).toHaveText(
     "Hello from HTML",
   );
   // Server-side wall: inline HTML carries the sandbox CSP (same as /s/*).
   const res = await page.request.get(`/api/p/${pid}/file?path=${encodeURIComponent("pages/hello.html")}`);
-  expect(res.headers()["content-security-policy"]).toBe("sandbox allow-scripts");
+  expect(res.headers()["content-security-policy"]).toBe("sandbox allow-scripts allow-downloads");
+});
+
+// The export button every generated report has: a Blob, an object URL, a
+// synthetic click. The sandbox blocked all of it until allow-downloads was on
+// BOTH the iframe and the CSP — the browser takes the intersection, so the
+// header assertions above cannot catch one side going missing; this can.
+test("an html page's own download button saves a file", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const html =
+    "<button id='dl' onclick=\"var a=document.createElement('a');" +
+    "a.href=window.URL.createObjectURL(new Blob(['a,b\\n1,2\\n']));a.download='export.csv';" +
+    "document.body.appendChild(a);a.click()\">Export</button>";
+  await page.request.put(
+    `/api/p/${pid}/upload/content?path=${encodeURIComponent("pages/export.html")}`,
+    { data: html },
+  );
+  await page.goto(`/${pid}/pages/export.html`);
+  const download = page.waitForEvent("download");
+  await page.frameLocator("#content iframe.htmlview").locator("#dl").click();
+  expect((await download).suggestedFilename()).toBe("export.csv");
 });
 
 test("missing path gets the not-found view; Check again finds a late upload", async ({ page }) => {

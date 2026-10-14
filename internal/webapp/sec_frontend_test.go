@@ -99,7 +99,7 @@ func TestSec_Frontend_InlineXMLIsWalledOffLikeEveryOtherMarkup(t *testing.T) {
 	// under a .html name come back sandboxed. So a bare CSP below is a
 	// decision about the content type, not a route that never sandboxes.
 	ctl := sec11feGet(t, h, "/api/p/"+p.ID+"/blob?sha="+sha+"&name=x.html", nil)
-	if ctl.Code != 200 || ctl.Header().Get("Content-Security-Policy") != "sandbox allow-scripts" {
+	if ctl.Code != 200 || ctl.Header().Get("Content-Security-Policy") != "sandbox allow-scripts allow-downloads" {
 		t.Fatalf("control x.html: %d CSP=%q — expected the wall to be present here",
 			ctl.Code, ctl.Header().Get("Content-Security-Policy"))
 	}
@@ -128,7 +128,7 @@ func TestSec_Frontend_InlineXMLIsWalledOffLikeEveryOtherMarkup(t *testing.T) {
 			if !sec11feMarkup(ct) {
 				return // the browser will not parse it as a document
 			}
-			if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts" {
+			if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-downloads" {
 				t.Errorf("%s serves attacker-written bytes as %s on the hub's own origin with "+
 					"CSP %q — an XML document applies its own <?xml-stylesheet type=\"text/xsl\"?> "+
 					"and the XSLT output is HTML in THIS origin, with the reader's session cookie. "+
