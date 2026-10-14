@@ -222,14 +222,17 @@ func (h commentHub) resolveID(arg string) (string, error) {
 
 // commentOut is one thread as printed with --json: the hub's fields plus what
 // only this machine knows — where the quote sits in the local file.
+//
+// The anchor's prefix/suffix context locates the quote and is NOT printed: it
+// is the page's text beside the selection, reported by the page itself, and
+// a reviewer never wrote it — so it must not reach an agent as part of what
+// the reviewer said.
 type commentOut struct {
 	ID       string          `json:"id"`
 	Path     string          `json:"path"`
 	Line     int             `json:"line,omitempty"`
 	Located  bool            `json:"located"`
 	Quote    string          `json:"quote,omitempty"`
-	Prefix   string          `json:"prefix,omitempty"`
-	Suffix   string          `json:"suffix,omitempty"`
 	Element  string          `json:"element,omitempty"`
 	Resolved bool            `json:"resolved"`
 	Outdated bool            `json:"outdated,omitempty"`
@@ -274,8 +277,8 @@ func listComments(w io.Writer, args []string, status string, asJSON bool) error 
 			continue
 		}
 		o := commentOut{
-			ID: c.ID, Path: c.Path, Quote: c.Anchor.Quote, Prefix: c.Anchor.Prefix,
-			Suffix: c.Anchor.Suffix, Element: c.Anchor.Element, Resolved: c.Resolved,
+			ID: c.ID, Path: c.Path, Quote: c.Anchor.Quote,
+			Element: c.Anchor.Element, Resolved: c.Resolved,
 			Outdated: c.Outdated, Missing: c.Missing,
 			URL: commentURLPath(h.server, h.project, c.Path, c.ID),
 		}

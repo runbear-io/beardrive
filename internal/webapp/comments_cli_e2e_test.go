@@ -73,6 +73,11 @@ func TestCLICommentsSweep(t *testing.T) {
 	if list[0].Messages[0].Body != "Finance says 14%." || !strings.Contains(list[0].URL, "?comment="+list[0].ID) {
 		t.Fatalf("listing = %+v", list)
 	}
+	// The page-reported context located the quote; it is not what the
+	// reviewer said, and is not handed to the agent.
+	if strings.Contains(out, `"prefix"`) || strings.Contains(out, `"suffix"`) {
+		t.Fatalf("--json carries the anchor context:\n%s", out)
+	}
 
 	text, err := run(work, "comments", "wiki")
 	if err != nil || !strings.Contains(text, "wiki/report.md:5") || !strings.Contains(text, "Finance says 14%.") {

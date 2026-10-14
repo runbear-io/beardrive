@@ -49,10 +49,23 @@ import (
 const (
 	commentsPrefix = "comments/"
 	// maxCommentBody bounds one message. Review feedback, not a document.
-	maxCommentBody = 8000
-	maxQuote       = 2000
-	maxQuoteCtx    = 200
-	maxElement     = 500
+	maxCommentBody = 4000
+	maxQuote       = 1000
+	maxQuoteCtx    = 100
+	maxElement     = 300
+	// A read member can comment, and every comment is a stored object, so the
+	// number of events is bounded twice: per author, so one account cannot
+	// crowd everyone else out of a project, and per project, so the listing
+	// a viewer folds on every request stays a size worth folding.
+	//
+	// ponytail: fixed caps, not a plan knob. Real review traffic is orders of
+	// magnitude below them; a hub that hits one wants a config field.
+	maxCommentEventsPerAuthor  = 2000
+	maxCommentEventsPerProject = 20000
+	// commentCacheBudget bounds the bytes of decoded events this process
+	// keeps across all projects. Past it the least recently read project's
+	// events are dropped and re-read from storage next time.
+	commentCacheBudget = 64 << 20
 	// maxCommentEvent bounds what a stored event may cost to read back, so a
 	// corrupt or foreign object under comments/ cannot balloon a listing.
 	maxCommentEvent = 64 << 10
@@ -69,7 +82,12 @@ const (
 var (
 	commentKeyRe    = regexp.MustCompile(`^comments/([0-9a-f]{12})/([0-9]{19}-[0-9a-f]{8})\.json$`)
 	commentThreadRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
-	shaRe           = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	// elementPathRe is the only shape an element anchor may take: what
+	// cssPath in lib/anchor.ts builds. Anything else — prose, an instruction
+	// to whoever reads the comment — is dropped, because an element path is
+	// shown to a reviewer as code and read by an agent as a location.
+	elementPathRe = regexp.MustCompile(`^[a-z][a-z0-9-]*(#[A-Za-z][\w-]*|:nth-of-type\([0-9]{1,4}\))?( > [a-z][a-z0-9-]*(#[A-Za-z][\w-]*|:nth-of-type\([0-9]{1,4}\))?){0,11}$`)
+	shaRe         = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 	errCommentsOff = errors.New("comments are not available on this server")
 )
@@ -140,31 +158,76 @@ type commentEvent struct {
 	Name   string         `json:"name,omitempty"`
 	Time   time.Time      `json:"time"`
 
-	key string
+	key  string
+	size int // stored bytes, for the cache budget
 }
 
-// commentCache holds every event this process has read, keyed by project and
-// object key. Events are immutable, so an entry is never invalidated; only
-// the listing of which events exist expires.
+// commentCache holds the events this process has read, per project. Events
+// are immutable, so an entry is never stale — only the listing of which
+// events exist expires, and a whole project is dropped when the cache is
+// over its byte budget.
 type commentCache struct {
-	mu     sync.Mutex
-	events map[string]commentEvent
-	lists  map[string]commentListing
+	mu       sync.Mutex
+	projects map[string]*projectComments
+	bytes    int
 	// One lock per project serializes this process's writers, so a reply
 	// and a resolve sent together still land in the order they were sent.
 	locks sync.Map
 }
 
-type commentListing struct {
-	keys []string
-	at   time.Time
+type projectComments struct {
+	events   map[string]commentEvent // by object key
+	bytes    int
+	used     time.Time
+	keys     []string
+	listedAt time.Time
+}
+
+func newCommentCache() *commentCache {
+	return &commentCache{projects: map[string]*projectComments{}}
 }
 
 func (s *Server) commentStore() *commentCache {
-	s.commentsOnce.Do(func() {
-		s.comments = &commentCache{events: map[string]commentEvent{}, lists: map[string]commentListing{}}
-	})
+	s.commentsOnce.Do(func() { s.comments = newCommentCache() })
 	return s.comments
+}
+
+// project returns a project's entry, creating it. Callers hold c.mu.
+func (c *commentCache) project(id string) *projectComments {
+	pc := c.projects[id]
+	if pc == nil {
+		pc = &projectComments{events: map[string]commentEvent{}}
+		c.projects[id] = pc
+	}
+	pc.used = time.Now()
+	return pc
+}
+
+// add caches events for a project, then evicts least recently used OTHER
+// projects until the cache fits its budget. Callers hold c.mu.
+func (c *commentCache) add(id string, evs ...commentEvent) {
+	pc := c.project(id)
+	for _, ev := range evs {
+		if _, ok := pc.events[ev.key]; ok {
+			continue
+		}
+		pc.events[ev.key] = ev
+		pc.bytes += ev.size
+		c.bytes += ev.size
+	}
+	for c.bytes > commentCacheBudget {
+		oldest := ""
+		for k, p := range c.projects {
+			if k != id && (oldest == "" || p.used.Before(c.projects[oldest].used)) {
+				oldest = k
+			}
+		}
+		if oldest == "" {
+			return // one project alone is over budget; it is still the one being read
+		}
+		c.bytes -= c.projects[oldest].bytes
+		delete(c.projects, oldest)
+	}
 }
 
 func (c *commentCache) lock(project string) *sync.Mutex {
@@ -181,6 +244,14 @@ func (s *Server) commentsAvailable() bool { return s.Root != nil && !s.Desktop }
 // ones dropped. Path is still the path the thread was opened on; callers
 // resolve it against a snapshot (placeThreads).
 func (s *Server) loadThreads(ctx context.Context, project string) (map[string]*CommentThread, error) {
+	evs, err := s.loadCommentEvents(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	return foldComments(evs), nil
+}
+
+func (s *Server) loadCommentEvents(ctx context.Context, project string) ([]commentEvent, error) {
 	if !s.commentsAvailable() {
 		return nil, errCommentsOff
 	}
@@ -193,32 +264,30 @@ func (s *Server) loadThreads(ctx context.Context, project string) (map[string]*C
 	if err != nil {
 		return nil, err
 	}
-	evs, err := c.fetch(ctx, project, be, keys)
-	if err != nil {
-		return nil, err
-	}
-	return foldComments(evs), nil
+	return c.fetch(ctx, project, be, keys)
 }
 
 func (c *commentCache) list(ctx context.Context, project string, be remote.Backend) ([]string, error) {
 	c.mu.Lock()
-	l, ok := c.lists[project]
+	pc := c.project(project)
+	keys, at := pc.keys, pc.listedAt
 	c.mu.Unlock()
-	if ok && time.Since(l.at) < commentListTTL {
-		return l.keys, nil
+	if !at.IsZero() && time.Since(at) < commentListTTL {
+		return keys, nil
 	}
 	objs, err := be.List(ctx, commentsPrefix)
 	if err != nil {
 		return nil, err
 	}
-	keys := make([]string, 0, len(objs))
+	keys = make([]string, 0, len(objs))
 	for _, o := range objs {
 		if commentKeyRe.MatchString(o.Key) {
 			keys = append(keys, o.Key)
 		}
 	}
 	c.mu.Lock()
-	c.lists[project] = commentListing{keys: keys, at: time.Now()}
+	pc = c.project(project)
+	pc.keys, pc.listedAt = keys, time.Now()
 	c.mu.Unlock()
 	return keys, nil
 }
@@ -230,8 +299,9 @@ func (c *commentCache) fetch(ctx context.Context, project string, be remote.Back
 	out := make([]commentEvent, 0, len(keys))
 	var missing []string
 	c.mu.Lock()
+	pc := c.project(project)
 	for _, k := range keys {
-		if ev, ok := c.events[project+"\x00"+k]; ok {
+		if ev, ok := pc.events[k]; ok {
 			out = append(out, ev)
 		} else {
 			missing = append(missing, k)
@@ -267,9 +337,7 @@ func (c *commentCache) fetch(ctx context.Context, project string, be remote.Back
 	}
 	wg.Wait()
 	c.mu.Lock()
-	for _, ev := range read {
-		c.events[project+"\x00"+ev.key] = ev
-	}
+	c.add(project, read...)
 	c.mu.Unlock()
 	return append(out, read...), ctx.Err()
 }
@@ -297,7 +365,7 @@ func readCommentEvent(ctx context.Context, be remote.Backend, key string) (comme
 	if m == nil || ev.Thread != m[1] {
 		return commentEvent{}, fmt.Errorf("comment event does not match its key")
 	}
-	ev.key = key
+	ev.key, ev.size = key, len(data)
 	return ev, nil
 }
 
@@ -377,10 +445,11 @@ func placeThreads(threads map[string]*CommentThread, snap *snapshot, f pathFilte
 		if !f.canRead(t.origPath) {
 			continue
 		}
-		if fi, ok := snap.files[t.origPath]; ok {
-			t.Path = t.origPath
-			t.Outdated = t.Sha != "" && fi.Blob != t.Sha
-		} else if to, ok := resolveShare(snap.moves, snap.files, t.origPath, t.Created); ok {
+		// Always resolved, never "the old path still has a file": a file that
+		// moved or was deleted after the comment is not the one now sitting
+		// at its address, and pinning the thread there would show a reader
+		// a quote from wherever the real file went.
+		if to, ok := resolveShare(snap.moves, snap.files, t.origPath, t.Created); ok {
 			t.Path = to
 			t.Outdated = t.Sha != "" && snap.files[to].Blob != t.Sha
 		} else {
@@ -400,31 +469,66 @@ func placeThreads(threads map[string]*CommentThread, snap *snapshot, f pathFilte
 	return out
 }
 
+// errCommentLimit is a write refused by a cap or by the plan; the message is
+// shown to the person commenting.
+type errCommentLimit struct{ msg string }
+
+func (e errCommentLimit) Error() string { return e.msg }
+
 // writeCommentEvent stores one event and makes it visible to this process at
 // once — the listing cache would otherwise hide a person's own comment from
 // them for up to commentListTTL.
+//
+// A comment is stored bytes in the org's storage like any other write, so it
+// is checked against the plan and recorded as usage. ydoc/ is exempt because
+// the hub writes it on its own, once per blob; these are written on request
+// by anyone who can read the project.
 func (s *Server) writeCommentEvent(ctx context.Context, project string, ev commentEvent) error {
 	be, ok := s.projectBackend(project)
 	if !ok {
 		return errCommentsOff
+	}
+	evs, err := s.loadCommentEvents(ctx, project)
+	if err != nil {
+		return err
+	}
+	// Deleting is exempt: it is how a crowded project gets room back, and it
+	// is bounded by the threads that already exist.
+	if ev.Kind != "delete" && len(evs) >= maxCommentEventsPerProject {
+		return errCommentLimit{"this project has reached its limit of comments"}
+	}
+	mine := 0
+	for _, e := range evs {
+		if e.Author == ev.Author {
+			mine++
+		}
+	}
+	if ev.Kind != "delete" && mine >= maxCommentEventsPerAuthor {
+		return errCommentLimit{"you have reached the limit of comments in this project"}
 	}
 	ev.key = fmt.Sprintf("%s%s/%019d-%s.json", commentsPrefix, ev.Thread, ev.Time.UnixNano(), randHex(4))
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err
 	}
+	ev.size = len(data)
+	org := s.orgOf(project)
+	if err := s.quota().CheckWrite(org, int64(len(data))); err != nil {
+		return errCommentLimit{err.Error()}
+	}
 	if err := be.Put(ctx, ev.key, bytes.NewReader(data), int64(len(data))); err != nil {
 		return err
 	}
+	s.quota().RecordUsage(org, int64(len(data)))
 	c := s.commentStore()
 	c.mu.Lock()
-	c.events[project+"\x00"+ev.key] = ev
-	delete(c.lists, project)
+	c.add(project, ev)
+	c.project(project).listedAt = time.Time{}
 	c.mu.Unlock()
-	// Viewers of the file refetch; the frame is the same shape as a change,
-	// but a distinct type so an open editor does not read it as a peer's
-	// write to the file.
-	s.events().publish(project, changeEvent{Type: "comments", Paths: []string{ev.Path}})
+	// No paths: the stream has no per-reader filter, and a path under a
+	// folder hidden from some subscriber must not reach them. A viewer only
+	// needs to know to refetch its comment list, which is filtered.
+	s.events().publish(project, changeEvent{Type: "comments"})
 	return nil
 }
 
@@ -482,10 +586,12 @@ func cleanQuote(s string, max int) string {
 
 func cleanAnchor(a CommentAnchor) CommentAnchor {
 	out := CommentAnchor{
-		Quote:   strings.TrimSpace(cleanQuote(a.Quote, maxQuote)),
-		Prefix:  cleanQuote(a.Prefix, maxQuoteCtx),
-		Suffix:  cleanQuote(a.Suffix, maxQuoteCtx),
-		Element: strings.TrimSpace(cleanQuote(strings.ReplaceAll(a.Element, "\n", " "), maxElement)),
+		Quote:  strings.TrimSpace(cleanQuote(a.Quote, maxQuote)),
+		Prefix: cleanQuote(a.Prefix, maxQuoteCtx),
+		Suffix: cleanQuote(a.Suffix, maxQuoteCtx),
+	}
+	if el := strings.TrimSpace(a.Element); len(el) <= maxElement && elementPathRe.MatchString(el) {
+		out.Element = el
 	}
 	if a.Line > 0 && a.Line < 1<<30 {
 		out.Line = a.Line
@@ -512,6 +618,11 @@ func (s *Server) commentActor(r *http.Request) (email, name string) {
 func commentsErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, errCommentsOff) {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var limit errCommentLimit
+	if errors.As(err, &limit) {
+		http.Error(w, limit.msg, http.StatusForbidden)
 		return
 	}
 	storageErr(w, http.StatusBadGateway, "comments are temporarily unavailable", err)

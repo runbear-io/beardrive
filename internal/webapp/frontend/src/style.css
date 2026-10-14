@@ -1647,6 +1647,10 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
   color: var(--text-dim); font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere;
 }
 .cm-quote.cm-el { font-family: var(--mono); font-size: 11.5px; }
+.cm-anchor { flex: 1; min-width: 0; }
+.cm-anchor .cm-quote + .cm-quote { margin-top: -4px; }
+.cm-q { color: var(--text); }
+.cm-ctx { color: var(--text-faint); }
 
 #comments-btn .cm-count { margin-left: 2px; font-size: 12px; font-weight: 600; color: var(--accent); }
 #comments-btn[aria-pressed="true"] { background: var(--hover); color: var(--text); }

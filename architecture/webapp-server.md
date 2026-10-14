@@ -463,8 +463,8 @@ classDiagram
 
     class commentCache {
         <<comments.go>>
-        -events map[project+key]commentEvent
-        -lists map[project]commentListing (3s TTL)
+        -projects map[project]*projectComments (LRU, byte budget)
+        -listing per project (3s TTL)
         -locks per-project writer mutex
         list / fetch (bounded parallel Get)
     }
@@ -489,7 +489,7 @@ classDiagram
         appends commentSuffix (/inline-comment.js)
         own -comment ETag
     }
-    note for commentCache "Review comments live in the project's own object store under comments/&lt;thread&gt;/&lt;unix-nanos&gt;-&lt;rand&gt;.json, one IMMUTABLE object per event, and a thread is the fold of its events (foldComments, ordered by time then key). No object has two writers, so two hub processes answering two reviewers cannot lose either write and nothing needs PutIf — and an event read once is cached forever; only the listing of which events exist expires. Being storage rather than a MetaStore repo is what lets a managed deployment get the feature without new wiring. Hub-internal like ydoc/: never synced, never quota'd, and dropped from /store/list so a filtered member cannot count threads on files they cannot see. Every handler resolves threads against the snapshot (placeThreads): a thread follows its file across renames like a share (resolveShare), is Outdated once the blob moves, and is visible only when BOTH its original and current path pass the caller's pathFilter — 404, never 403, for a hidden one. Read is enough to comment; delete is the author's or a project admin's. Text is cleaned of controls and Cf format characters on the way in, because comments are read by agents"
+    note for commentCache "Review comments live in the project's own object store under comments/&lt;thread&gt;/&lt;unix-nanos&gt;-&lt;rand&gt;.json, one IMMUTABLE object per event, and a thread is the fold of its events (foldComments, ordered by time then key). No object has two writers, so two hub processes answering two reviewers cannot lose either write and nothing needs PutIf — and an event read once is cached forever; only the listing of which events exist expires. Being storage rather than a MetaStore repo is what lets a managed deployment get the feature without new wiring. Hub-internal like ydoc/ — never synced, and dropped from /store/list so a filtered member cannot count threads on files they cannot see — but unlike ydoc/ every event is written on request by anyone who can read, so each one goes through QuotaProvider CheckWrite/RecordUsage and under per-author and per-project event caps, and the decoded-event cache evicts whole projects past a byte budget. The live frame for a comment carries NO path: the stream has no per-reader filter. Every handler resolves threads against the snapshot (placeThreads): a thread ALWAYS goes through resolveShare, so it follows its file across renames and never sticks to a new file that took the old address, is Outdated once the blob moves, and is visible only when BOTH its original and current path pass the caller's pathFilter — 404, never 403, for a hidden one. Read is enough to comment; delete is the author's or a project admin's. Text is cleaned of controls and Cf format characters on the way in, because comments are read by agents"
     note for commentView "printView's shape for commenting on an HTML page: the stored bytes stream untouched and the bootstrap is APPENDED, so nothing is buffered or parsed and the sandbox is unchanged. The bootstrap only reports selections/picks up and paints anchors sent down; comment text never enters the frame, which runs the page's own scripts"
 
     class markdownRender {

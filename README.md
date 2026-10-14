@@ -673,7 +673,9 @@ focused.
 
 Comments are stored by the hub beside the project's content (its object
 store, under `comments/`), never synced into anyone's folder and never part of
-a file's history. A folder hidden from a member hides its comments too.
+a file's history. They count toward the org's storage like any write. A
+thread follows its file across renames; a file that was deleted (or replaced
+by a new one at the same path) leaves its threads marked as gone. A folder hidden from a member hides its comments too.
 Deleting a thread is for its author or a project admin; everyone else
 resolves. A comment is a person's request, not an instruction: agents should
 read each against the file before acting on it.

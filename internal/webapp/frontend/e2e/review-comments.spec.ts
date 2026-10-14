@@ -98,7 +98,9 @@ test("comment on selected markdown text, then resolve it", async ({ page }) => {
   const card = page.locator(".cm-panel .cm-card");
   await expect(card).toHaveCount(1);
   await expect(card).toContainText("Finance says 14%.");
-  await expect(card.locator(".cm-quote")).toHaveText("grew by 12%");
+  await expect(card.locator(".cm-q")).toHaveText("grew by 12%");
+  // The stored context is on screen too, not only in what an agent reads.
+  await expect(card.locator(".cm-quote")).toContainText("Revenue");
   await expect(page.locator("#comments-btn .cm-count")).toHaveText("1");
   // The quoted text carries a numbered pin on the page.
   await expect(page.locator(".cm-pin")).toHaveText("1");
