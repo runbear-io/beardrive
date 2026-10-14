@@ -254,7 +254,7 @@ func TestSec_Path_BlobInlineHTMLIsSandboxed(t *testing.T) {
 
 	// Control: the live-file route already walls it off.
 	rec := get(t, h, "/api/p/"+p.ID+"/file?path=page.html")
-	if rec.Code != 200 || rec.Header().Get("Content-Security-Policy") != "sandbox allow-scripts" {
+	if rec.Code != 200 || rec.Header().Get("Content-Security-Policy") != "sandbox allow-scripts allow-downloads" {
 		t.Fatalf("control /file: %d CSP=%q", rec.Code, rec.Header().Get("Content-Security-Policy"))
 	}
 
@@ -267,7 +267,7 @@ func TestSec_Path_BlobInlineHTMLIsSandboxed(t *testing.T) {
 		if !strings.HasPrefix(ct, "text/html") && !strings.Contains(ct, "svg") && !strings.Contains(ct, "xhtml") {
 			continue // served as something inert
 		}
-		if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts" {
+		if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-downloads" {
 			t.Errorf("/blob?name=%s serves %s on the hub origin with CSP %q, want sandbox", name, ct, csp)
 		}
 	}

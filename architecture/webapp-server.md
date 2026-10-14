@@ -435,7 +435,7 @@ classDiagram
         <<Server, every bytes-out route>>
         inlineMarkup(ct) / inlineType(ct)
         nosniff always
-        CSP sandbox allow-scripts for markup
+        CSP sandbox allow-scripts allow-downloads for markup
         setContentLength from the stream
         storageErr logs detail, says little
     }

@@ -1889,9 +1889,23 @@ func inlineType(ct string) string {
 func sandboxInline(w http.ResponseWriter, ct string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if inlineMarkup(ct) {
-		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
+		w.Header().Set("Content-Security-Policy", inlineSandbox)
 	}
 }
+
+// inlineSandbox is the CSP on every inline render of stored markup. Without
+// allow-downloads a sandboxed document can save nothing — not a data: link,
+// not a blob a "Download CSV" button builds, not even a link to an
+// attachment — so every export button in a synced report did nothing at all.
+// What it grants is the disk, not the hub: the origin stays opaque (no
+// allow-same-origin, ever), so the page still cannot reach the API or the
+// session, and it cannot read back what it saved. The cost is that a page
+// can start a download without a click — anyone who could author that page
+// can already put the same file in the project for the reader to download.
+// The app's iframe (FileView.tsx's HtmlView) carries the same flags; a
+// browser applies the intersection, so dropping it from either side would
+// block downloads again.
+const inlineSandbox = "sandbox allow-scripts allow-downloads"
 
 // printSuffix is appended to an HTML print view so the document opens the
 // browser's print dialog itself. Nothing else can open it: the app shell
@@ -1922,7 +1936,7 @@ func printView(w http.ResponseWriter, r *http.Request, ct string, inline bool) b
 	if !strings.HasPrefix(strings.ToLower(ct), "text/html") {
 		return false
 	}
-	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-modals")
+	w.Header().Set("Content-Security-Policy", inlineSandbox+" allow-modals")
 	return true
 }
 

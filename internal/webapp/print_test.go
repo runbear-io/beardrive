@@ -27,7 +27,7 @@ func TestPrintViewSelfPrintsInsideTheSandbox(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("print view: %d %s", rec.Code, rec.Body)
 	}
-	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-modals" {
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-downloads allow-modals" {
 		t.Fatalf("print CSP = %q, want the inline sandbox plus allow-modals only", csp)
 	}
 	if strings.Contains(rec.Header().Get("Content-Security-Policy"), "allow-same-origin") {
@@ -88,7 +88,7 @@ func TestPrintViewOnAPinnedVersion(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("pinned print view: %d %s", rec.Code, rec.Body)
 	}
-	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-modals" {
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-downloads allow-modals" {
 		t.Fatalf("pinned print CSP = %q", csp)
 	}
 	if body := rec.Body.String(); !strings.HasPrefix(body, "<p>v1</p>") || !strings.HasSuffix(body, printSuffix) {
