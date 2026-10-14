@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,6 +76,27 @@ func SetPausedMount(dir, mountID string, on bool) error {
 				if strings.HasPrefix(name, "state-") && strings.HasSuffix(name, ".json") {
 					ids[strings.TrimSuffix(strings.TrimPrefix(name, "state-"), ".json")] = true
 				}
+			}
+			mountsPath := filepath.Join(filepath.Dir(filepath.Dir(dir)), "mounts.json")
+			data, readErr := os.ReadFile(mountsPath)
+			if readErr == nil {
+				var mounts map[string]struct {
+					VolumeID string `json:"volume_id"`
+				}
+				if err := json.Unmarshal(data, &mounts); err != nil {
+					return err
+				}
+				for id, mi := range mounts {
+					resolvedVol := mi.VolumeID
+					if resolvedVol == "" {
+						resolvedVol = id
+					}
+					if resolvedVol == filepath.Base(dir) {
+						ids[id] = true
+					}
+				}
+			} else if !os.IsNotExist(readErr) {
+				return readErr
 			}
 			for otherID := range ids {
 				if otherID == "" || otherID == mountID {

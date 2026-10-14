@@ -583,9 +583,14 @@ func TestWorktree_SiblingResumeDoesNotClearPrePRLegacyPause(t *testing.T) {
 	wt1 := t.TempDir()
 	proj1 := initWorktree(t, wt1, rawRemote)
 	cycleWorktree(t, wt1)
+	wtUncycled := t.TempDir()
+	projUncycled := initWorktree(t, wtUncycled, rawRemote)
 	vdir, err := config.VolumeDir(proj1.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(vdir, "state-"+projUncycled.ID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("uncycled mount already has a state cache (stat err: %v)", err)
 	}
 	if err := store.SetPaused(vdir, true); err != nil {
 		t.Fatal(err)
@@ -598,6 +603,9 @@ func TestWorktree_SiblingResumeDoesNotClearPrePRLegacyPause(t *testing.T) {
 	}
 	if !store.PausedMount(vdir, proj1.ID) {
 		t.Fatal("pre-PR legacy pause was cleared for the primary mount")
+	}
+	if !store.PausedMount(vdir, projUncycled.ID) {
+		t.Fatal("pre-PR legacy pause was cleared for the uncycled mount")
 	}
 	if store.PausedMount(vdir, proj2.ID) {
 		t.Fatal("sibling mount remains paused after resume")
