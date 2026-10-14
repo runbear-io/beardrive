@@ -164,7 +164,7 @@ classDiagram
         +Lock() flock
     }
     note for Store "secrets-mount-id.json is the credential-finding record: what `bdrive status` prints and what the agent hook appends a sentence about. Like the inbound spool it outlives the cycle that wrote it — the daemon scans the write seconds before the turn starts — but unlike it, it is STATE and is never drained: a finding stands until the file changes without it"
-    note for Store "internal/store — ~/.bdrive/volumes/mount-id: content-addressed blobs, per-device journal copies, state cache, paused marker (free funcs Paused/SetPaused, no flock)"
+    note for Store "internal/store — ~/.bdrive/volumes/mount-id: content-addressed blobs, per-device journal copies, state cache, paused marker (free funcs Paused/SetPaused and PausedMount/SetPausedMount, no flock)"
     note for Store "inbound.jsonl is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle. Result.Inbound now carries the SAME events for the post_sync hook and is not a duplicate to delete: that consumer fires from the cycle itself, and a second drainer would silently empty the agent hook's context"
 
     class secretLog {
@@ -216,7 +216,7 @@ classDiagram
         +Run(folder, scan, remote)
         +Start / Stop / Running
     }
-    note for daemon "per-mount detached loop; re-reads .bdrive/config.json each tick, exits without deletes if it vanishes"
+    note for daemon "per-volume detached loop cycling all enrolled worktrees sharing volDir; re-reads .bdrive/config.json each tick, promotes a live sibling or exits without deletes if it vanishes"
     note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back"
 
     note for daemon "The tick now selects on a THIRD arm: remote.Watcher's channel, when the backend is a hub that implements it. A peer's push clears lastRemote so the next cycle is a remote one, turning ~10s of latency into ~1s. The stream is torn down wherever the backend is dropped (token change, offline) since its connection carries the old credential to the old host, and a failed or ended dial backs off watchRetry (1m) rather than retrying per tick — an older hub 404s here forever and must not become a log line every few seconds. NO LONGER strictly an accelerator: a live stream now also SETS the remote cadence, which drops to remoteInterval x watchedPollFactor (5m at the default) and snaps back to remoteInterval the moment watch goes nil — a failed dial, a token change, an offline cycle or the hub&apos;s own streamMaxAge all do that, so losing the stream restores the tight cadence on the very next tick. The tick is still the guarantee: a stream can die silently and nothing trusts it further than that factor. This is the largest single item in docs/hub-load-prd.md — an idle device on one project cost 17,280 requests a day, 9.4% of the production hub&apos;s entire daily traffic, to be told nothing by a poll while an open stream told it the same nothing for free. A hub with no stream syncs exactly as it always did"
@@ -357,6 +357,7 @@ classDiagram
 
     class PausedMarker {
         volumes/id/paused
+        volumes/id/paused-mount-id
     }
     note for PausedMarker "set by bdrive stop, cleared only by bdrive init (startSync)"
 

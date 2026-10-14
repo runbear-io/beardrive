@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 )
@@ -289,27 +290,46 @@ func RememberVolumeRemote(mountID, remote string) error {
 		return fmt.Errorf("%s is not a volume directory", vdir)
 	}
 	syncPath := filepath.Join(vdir, "sync.json")
-	m := map[string]any{}
 	if data, readErr := os.ReadFile(syncPath); readErr == nil {
-		if len(strings.TrimSpace(string(data))) > 0 {
-			if err := json.Unmarshal(data, &m); err != nil {
-				return err
-			}
-			if m == nil {
-				m = map[string]any{}
+		var state map[string]any
+		if json.Unmarshal(data, &state) == nil {
+			if existing, ok := state["remote"].(string); ok && strings.TrimSpace(existing) != "" {
+				return nil
 			}
 		}
 	} else if !os.IsNotExist(readErr) {
 		return readErr
 	}
-	current, present := m["remote"]
-	if present && current != nil {
-		if value, ok := current.(string); !ok || value != "" {
-			return nil
-		}
+
+	lockPath := filepath.Join(vdir, "lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
 	}
-	m["remote"] = remote
-	return writeJSON(syncPath, m)
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	state := map[string]any{}
+	if data, readErr := os.ReadFile(syncPath); readErr == nil {
+		if len(strings.TrimSpace(string(data))) > 0 {
+			if err := json.Unmarshal(data, &state); err != nil {
+				return err
+			}
+			if state == nil {
+				state = map[string]any{}
+			}
+		}
+	} else if !os.IsNotExist(readErr) {
+		return readErr
+	}
+	if existing, ok := state["remote"].(string); ok && strings.TrimSpace(existing) != "" {
+		return nil
+	}
+	state["remote"] = remote
+	return writeJSON(syncPath, state)
 }
 
 // VolumeDir returns the local store dir of a mount, keyed by its stable

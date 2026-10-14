@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
@@ -853,6 +854,57 @@ func TestWorktree_SharedVolumeRejectsMismatchedSiblingRemote(t *testing.T) {
 	}
 	if got := remoteOps(t, remote2, dev.ID); len(got) != 0 {
 		t.Fatalf("mismatched sibling pushed wt1 journal to remote2: %#v", got)
+	}
+}
+
+func TestWorktree_RememberVolumeRemoteSerializesWithStoreLock(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	folder := t.TempDir()
+	proj := initWorktree(t, folder, rawRemote)
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveSync(store.SyncState{Lamport: 1, PushedOps: 1}); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := st.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		done <- config.RememberVolumeRemote(proj.ID, proj.Remote)
+	}()
+	<-started
+	time.Sleep(20 * time.Millisecond)
+	if err := st.SaveSync(store.SyncState{
+		Lamport: 42, PushedOps: 10, IgnoreAccepted: "# rules\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Lamport != 42 || got.PushedOps != 10 || got.IgnoreAccepted != "# rules\n" {
+		t.Fatalf("RememberVolumeRemote overwrote newer sync state: %#v", got)
+	}
+	if got.Remote != proj.Remote {
+		t.Fatalf("RememberVolumeRemote Remote = %q, want %q", got.Remote, proj.Remote)
 	}
 }
 
