@@ -492,9 +492,15 @@ func SharedVolumeHasIgnoreState(remote, excludeMountID string) bool {
 		want.Link != "" || state.Blob != want.Blob || state.Link != "" {
 		return false
 	}
+	for i := range want.Blob {
+		c := want.Blob[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
 	blobPath := filepath.Join(vdir, "blobs", want.Blob[:2], want.Blob)
-	info, err := os.Stat(blobPath)
-	return err == nil && !info.IsDir()
+	info, err := os.Lstat(blobPath)
+	return err == nil && info.Mode().IsRegular()
 
 }
 func writeJSON(path string, v any) error {
