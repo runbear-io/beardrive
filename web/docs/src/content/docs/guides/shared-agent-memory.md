@@ -106,6 +106,22 @@ the list, and the agent hears nothing.
 The list is capped, so the first turn after joining a project names some of
 what arrived rather than the whole project.
 
+## Correct one agent, every agent learns
+
+When you correct your agent — "use pnpm, never npm", "notes/readme.md is
+generated, edit notes/src" — ask it to **record that as a BearDrive lesson**.
+It runs `bdrive lesson "<the correction>"`, which appends one line to this
+device's own `lessons/<device-id>.md` and syncs it. On their next turn, every
+teammate's agent is told the new line, once, as a correction to follow from
+now on.
+
+Only lines an agent on that machine has not been shown yet are injected, at
+most ten per turn, and a quiet turn pays nothing. Each device writes its own
+file, so two people recording lessons at the same moment never conflict.
+To change or drop a lesson, edit the file. A later session learns old lessons
+only by reading `lessons/`, so if you want them always in force, point your
+`AGENTS.md` at that folder.
+
 ## What belongs in shared memory
 
 Good candidates are the things that are expensive to rediscover and cheap to

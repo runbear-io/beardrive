@@ -131,10 +131,16 @@ list in .bdrive/config.json is never pruned against either.`,
 						link := hookLinkFor(folder, target, h.base)
 						link.paths = h.paths
 						link.secrets = h.secrets
+						link.lessons, link.saveSeen = h.lessons, h.saveSeen
 						links = append(links, link)
 					}
 				}
 				emitHookContext(cmd, links)
+				for _, l := range links {
+					if l.saveSeen != nil {
+						l.saveSeen()
+					}
+				}
 				return nil
 			}
 			if len(targets) == 0 {

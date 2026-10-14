@@ -1,10 +1,14 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
+	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -49,6 +53,12 @@ type hookLink struct {
 	// is: the daemon usually scanned the agent's write seconds ago, so this
 	// cycle's own scan sees an unchanged file and finds nothing.
 	secrets map[string][]secrets.Finding
+	// lessons are teammates' lesson lines this mount has not shown an agent
+	// before (see hookLessons); saveSeen records them as shown, and runs only
+	// after the context is out, so a crash re-shows lines instead of losing
+	// them.
+	lessons  []hookLesson
+	saveSeen func()
 }
 
 // hookChangedMax caps the changed-file list the turn pays for. Past it the
@@ -79,9 +89,11 @@ func eventSessionID(data []byte) string {
 // hookSync is one mount's contribution to the turn: where its files live on
 // the hub, and which of them moved since the last turn.
 type hookSync struct {
-	base    string
-	paths   []store.InboundEvent
-	secrets map[string][]secrets.Finding
+	base     string
+	paths    []store.InboundEvent
+	secrets  map[string][]secrets.Finding
+	lessons  []hookLesson
+	saveSeen func()
 }
 
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
@@ -124,7 +136,8 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	if err != nil {
 		return hookSync{}, false // non-hub remote: nothing to link to
 	}
-	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found}, true
+	lessons, saveSeen := newLessons(target, sess.Store.Dir(), paths)
+	return hookSync{base: server + "/" + projectID, paths: paths, secrets: found, lessons: lessons, saveSeen: saveSeen}, true
 }
 
 // hookLinkFor places one mount relative to the folder the hook ran in.
@@ -201,6 +214,9 @@ func emitHookContext(cmd *cobra.Command, links []hookLink) {
 	}
 	if found := hookSecrets(links); found != "" {
 		context += " " + found
+	}
+	if learned := hookLessons(links); learned != "" {
+		context += " " + learned
 	}
 
 	out := map[string]any{
@@ -301,4 +317,142 @@ func hookSecrets(links []hookLink) string {
 		s += fmt.Sprintf(", +%d more", over)
 	}
 	return s + ". They have already synced to the hub and to teammates, so this is not a blocker to work around — tell the user, and suggest rotating the credential and keeping it out of the folder."
+}
+
+// hookLesson is one teammate lesson line waiting for this turn.
+type hookLesson struct {
+	path string // mount-relative, "lessons/<device-id>.md"
+	line string // without its "- " marker
+}
+
+// hookLessonsMax caps the lessons one turn pays for. Past it the tail is a
+// count — the first sync on a fresh mount can bring every lesson at once.
+const hookLessonsMax = 10
+
+// lessonsSeenFile, in the volume store, maps each lessons path to the hashes
+// of the lines an agent on this mount has already been shown.
+const lessonsSeenFile = "lessons-seen.json"
+
+// lessonFileMax bounds how much of one lesson file the hook reads per turn.
+const lessonFileMax = 256 << 10
+
+// newLessons picks the lesson lines this mount has not shown an agent yet,
+// out of the paths the hook just drained — never a walk of lessons/, and
+// never a second drain of the spool (it has one consumer). Lines are tracked
+// by hash rather than byte offset, so a teammate hand-editing or reordering
+// their file re-shows only what actually changed. The returned save marks
+// every new line shown, including those past the cap: the spool event is
+// already drained, so there is no later turn to show them in, and the
+// "+N more" tail is what points at them. Every error degrades to "nothing
+// new" — the hook never fails a turn.
+func newLessons(target, volDir string, events []store.InboundEvent) ([]hookLesson, func()) {
+	seenPath := filepath.Join(volDir, lessonsSeenFile)
+	seen := map[string][]string{}
+	if data, err := os.ReadFile(seenPath); err == nil {
+		_ = json.Unmarshal(data, &seen) // corrupt: start over, re-show once
+	}
+	var out []hookLesson
+	touched := false
+	done := map[string]bool{}
+	for _, e := range events {
+		if done[e.Path] {
+			continue
+		}
+		if ok, _ := path.Match(lessonsDir+"/*.md", e.Path); !ok {
+			continue
+		}
+		done[e.Path] = true
+		lines, ok := lessonLines(filepath.Join(target, filepath.FromSlash(e.Path)))
+		if e.Deleted || !ok {
+			if _, had := seen[e.Path]; had {
+				delete(seen, e.Path)
+				touched = true
+			}
+			continue
+		}
+		old := make(map[string]bool, len(seen[e.Path]))
+		for _, h := range seen[e.Path] {
+			old[h] = true
+		}
+		// Replaced, not merged: a removed line drops out, so the set tracks
+		// the file and cannot grow forever.
+		cur := make([]string, 0, len(lines))
+		for _, line := range lines {
+			h := lessonHash(line)
+			if !slices.Contains(cur, h) {
+				cur = append(cur, h)
+				if !old[h] {
+					out = append(out, hookLesson{path: e.Path, line: line})
+				}
+			}
+		}
+		seen[e.Path] = cur
+		touched = true
+	}
+	if !touched {
+		return out, nil
+	}
+	return out, func() { _ = store.WriteJSONAtomic(seenPath, seen) }
+}
+
+// lessonLines reads a lesson file's "- " lines, reporting false for a file
+// that is not one: it must open with the header `bdrive lesson` writes, so an
+// unrelated lessons/ folder is never handed to agents as rules to follow.
+func lessonLines(p string) ([]string, bool) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, lessonFileMax))
+	if err != nil || !strings.HasPrefix(string(data), lessonHeader) {
+		return nil, false
+	}
+	var lines []string
+	for _, l := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(l), "- "); ok && strings.TrimSpace(rest) != "" {
+			lines = append(lines, strings.TrimSpace(rest))
+		}
+	}
+	return lines, true
+}
+
+func lessonHash(line string) string {
+	sum := sha256.Sum256([]byte(line))
+	return hex.EncodeToString(sum[:8])
+}
+
+// hookLessons renders the teammates' lessons new since the last turn. Each
+// line is a teammate's file content landing in this agent's context, so it
+// goes through safeField like any other synced string. A session running in
+// a subfolder that does not contain lessons/ still gets the lesson — it
+// applies to the whole project — just without a path it could not resolve.
+func hookLessons(links []hookLink) string {
+	var parts []string
+	over := 0
+	dir := lessonsDir + "/"
+	for _, l := range links {
+		for _, ls := range l.lessons {
+			if len(parts) >= hookLessonsMax {
+				over++
+				continue
+			}
+			part := fmt.Sprintf("%q", safeField(ls.line, 300))
+			if p, ok := hookAgentPath(l, ls.path); ok {
+				part += " (`" + p + "`)"
+				if len(parts) == 0 {
+					dir = strings.TrimSuffix(p, path.Base(p))
+				}
+			}
+			parts = append(parts, part)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	s := "Teammates recorded these corrections for agents on this project — follow them from now on: " + strings.Join(parts, "; ")
+	if over > 0 {
+		s += fmt.Sprintf("; +%d more in %s", over, dir)
+	}
+	return s + ". All project lessons live in " + dir + "."
 }
