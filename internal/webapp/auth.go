@@ -100,6 +100,12 @@ type SignupPolicy struct {
 // The static frontend and the provider's own surface stay reachable so a
 // browser can get to the login page; everything else under /api/ needs a
 // valid identity.
+//
+// The identity it resolves rides the context to every requestUser below, so a
+// request authenticates exactly once. That matters because Authenticate is not
+// cheap for every provider (a managed one may hit a database per call), and
+// handlers ask "who is this" per item — /api/projects once per project on the
+// hub.
 func (s *Server) authGate(next http.Handler) http.Handler {
 	if s.Auth == nil {
 		return next
@@ -111,10 +117,12 @@ func (s *Server) authGate(next http.Handler) http.Handler {
 			p == "/api/config" ||
 			!strings.HasPrefix(p, "/api/") // static frontend; its API calls are gated
 		if !open {
-			if _, ok := s.Auth.Authenticate(r); !ok {
+			u, ok := s.Auth.Authenticate(r)
+			if !ok {
 				http.Error(w, "authentication required (bdrive login, or sign in at /auth/login)", http.StatusUnauthorized)
 				return
 			}
+			r = withUser(r, u)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -123,15 +131,16 @@ func (s *Server) authGate(next http.Handler) http.Handler {
 // requestUser returns the authenticated user, or a zero User when auth is
 // disabled (everything then runs as an anonymous single user).
 func (s *Server) requestUser(r *http.Request) User {
-	// A user already resolved onto the context wins. This is how the MCP door
-	// tells the rest of the hub who a re-entrant internal call acts as: the
-	// bearer token on such a request is an MCP access token, which no
-	// AuthProvider has ever heard of, so asking Authenticate would answer
-	// "nobody" and every tool would act as an anonymous caller.
+	// A user already resolved onto the context wins. authGate puts one there
+	// so a request authenticates once, and it is how the MCP door tells the
+	// rest of the hub who a re-entrant internal call acts as: the bearer token
+	// on such a request is an MCP access token, which no AuthProvider has ever
+	// heard of, so asking Authenticate would answer "nobody" and every tool
+	// would act as an anonymous caller.
 	//
 	// Safe because a context cannot cross a network: only in-process code sets
-	// this, and the only thing that sets it is MCPHandler, after the token has
-	// been resolved to a live grant.
+	// this, and only after the credential has been resolved (authGate via
+	// Authenticate, MCPHandler via a live grant).
 	if u, ok := userFrom(r.Context()); ok {
 		return u
 	}
