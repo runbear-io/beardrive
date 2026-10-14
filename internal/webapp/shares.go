@@ -571,8 +571,11 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	// shared content executes in an opaque origin (scripts allowed — charts in
 	// reports — but no cookies, no same-origin reach back into the hub), and
 	// an error page is a /s/ response like any other. Set here, not at the
-	// end, so the 429 and the 404s cannot go out bare.
-	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-popups")
+	// end, so the 429 and the 404s cannot go out bare. allow-downloads is
+	// there for the same reason as inlineSandbox's: a shared report's export
+	// button has to work, and the link already serves any file as an
+	// attachment through ?download=1, so it hands a sender nothing new.
+	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-popups allow-downloads")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 

@@ -121,7 +121,7 @@ test("html opens a top-level print view that prints itself", async ({ page }) =>
   // own bytes, then the script that opens the dialog, inside a sandbox that
   // gained allow-modals and nothing else.
   const res = await page.request.get(href!);
-  expect(res.headers()["content-security-policy"]).toBe("sandbox allow-scripts allow-modals");
+  expect(res.headers()["content-security-policy"]).toBe("sandbox allow-scripts allow-downloads allow-modals");
   const body = await res.text();
   expect(body).toContain("<h1 id='t'>Printable</h1>");
   expect(body).toMatch(/print\(\)\}\)<\/script>$/);

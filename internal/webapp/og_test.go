@@ -285,7 +285,7 @@ func TestShareOpenGraph(t *testing.T) {
 		}
 	}
 	for _, hdr := range [][2]string{
-		{"Content-Security-Policy", "sandbox allow-scripts allow-popups"},
+		{"Content-Security-Policy", "sandbox allow-scripts allow-popups allow-downloads"},
 		{"X-Content-Type-Options", "nosniff"},
 		{"Referrer-Policy", "no-referrer"},
 	} {

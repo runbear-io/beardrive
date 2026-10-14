@@ -397,7 +397,7 @@ func TestShareLastUpdatedStamp(t *testing.T) {
 		t.Fatal("stamp must render before the content")
 	}
 	// the sandbox + footer survive
-	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-popups" {
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-popups allow-downloads" {
 		t.Fatalf("CSP = %q", csp)
 	}
 	if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("Referrer-Policy") != "no-referrer" {
@@ -536,7 +536,7 @@ func TestShareMermaidScriptOnlyWhenNeeded(t *testing.T) {
 	// The tag only works because the page is sandboxed with scripts allowed
 	// and its origin is opaque; adding allow-same-origin to make loading
 	// easier would hand shared content the hub's origin.
-	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-popups" {
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "sandbox allow-scripts allow-popups allow-downloads" {
 		t.Errorf("share CSP = %q, want the unchanged sandbox", csp)
 	}
 

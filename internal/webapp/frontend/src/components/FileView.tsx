@@ -130,7 +130,10 @@ export function FileView(props: {
 
    Rendered, not shown as source — inside a sandboxed iframe so synced HTML
    never runs with the hub origin's session (the server also stamps the
-   response with a sandbox CSP; this is belt and braces).
+   response with a sandbox CSP; this is belt and braces). allow-downloads is
+   on BOTH sides, and has to be: the browser applies the intersection, so a
+   flag missing from either one blocks the page's own export buttons
+   (server.go's inlineSandbox says what it does and does not grant).
 
    The reload is the part worth explaining. An iframe loads once and then sits
    there, so the page a reader is looking at is the file as it was when they
@@ -156,7 +159,7 @@ function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
       // does not reload, and the src IS unchanged — it is the same file.
       key={rev}
       className="htmlview"
-      sandbox="allow-scripts"
+      sandbox="allow-scripts allow-downloads"
       src={props.commentable ? fileURL + (fileURL.includes("?") ? "&" : "?") + "comment=1" : fileURL}
       title={path}
       onLoad={onRendered}

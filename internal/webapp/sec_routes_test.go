@@ -269,7 +269,7 @@ func TestSec_Row6_RemoveCannotAuthorItselfIntoAnotherDevicesJournal(t *testing.T
 // ---------------------------------------------------------------------------
 
 // /download is the one blob door that does NOT call sandboxInline: handleFile
-// passes attach=false and gets the "sandbox allow-scripts" CSP for active
+// passes attach=false and gets the "sandbox allow-scripts allow-downloads" CSP for active
 // types, handleDownload passes attach=true and gets a Content-Disposition
 // instead. That is a real defence, but it is the ONLY one, so it has to
 // actually be on every response — including for the types that would execute
