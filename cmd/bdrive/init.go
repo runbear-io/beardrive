@@ -387,7 +387,7 @@ the folder was renamed or moved.`,
 			if err != nil {
 				return err
 			}
-			if config.SharedVolumeIDForRemote(remoteURL, proj.ID) == "" {
+			if !config.SharedVolumeHasIgnoreState(remoteURL, proj.ID) {
 				ignorePath := filepath.Join(folder, ".bdriveignore")
 				if _, err := os.Stat(ignorePath); os.IsNotExist(err) {
 					if err := os.WriteFile(ignorePath, []byte(starterIgnore), 0o644); err != nil {

@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 // Home returns the beardrive home directory ($BDRIVE_HOME or ~/.bdrive).
@@ -445,7 +447,56 @@ func betterVolumeRank(a, b volumeRank) bool {
 	}
 	return a.id < b.id
 }
+// SharedVolumeHasIgnoreState reports whether a shared project volume currently
+// resolves .bdriveignore to a real file whose blob is present locally.
+func SharedVolumeHasIgnoreState(remote, excludeMountID string) bool {
+	vid := SharedVolumeIDForRemote(remote, excludeMountID)
+	if vid == "" || !ValidMountID(vid) {
+		return false
+	}
+	home, err := Home()
+	if err != nil {
+		return false
+	}
+	vdir := filepath.Join(home, "volumes", vid)
 
+	var ops []journal.Op
+	entries, err := os.ReadDir(filepath.Join(vdir, "journal"))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		fileOps, err := journal.ReadFile(filepath.Join(vdir, "journal", entry.Name()))
+		if err != nil {
+			continue
+		}
+		ops = append(ops, fileOps...)
+	}
+	if len(ops) == 0 {
+		return false
+	}
+	journal.Sort(ops)
+	var want journal.Op
+	found := false
+	for _, op := range ops {
+		if op.Path == ".bdriveignore" {
+			want = op
+			found = true
+		}
+	}
+	state, replayed := journal.Replay(ops)[".bdriveignore"]
+	if !found || !replayed || want.Kind != journal.KindPut || len(want.Blob) != 64 ||
+		want.Link != "" || state.Blob != want.Blob || state.Link != "" {
+		return false
+	}
+	blobPath := filepath.Join(vdir, "blobs", want.Blob[:2], want.Blob)
+	info, err := os.Stat(blobPath)
+	return err == nil && !info.IsDir()
+
+}
 func writeJSON(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

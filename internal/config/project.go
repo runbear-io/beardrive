@@ -417,36 +417,6 @@ func EnrollMount(folder string) (Project, bool, error) {
 		}
 	}
 
-	if p.Remote != "" {
-		for otherID, otherMI := range mounts {
-			if otherID == p.ID || !SameRemote(otherMI.Remote, p.Remote) {
-				continue
-			}
-			if otherMI.Path != "" && IsMount(otherMI.Path) {
-				continue
-			}
-			delete(mounts, otherID)
-			otherVolID := otherMI.VolumeID
-			if otherVolID == "" {
-				otherVolID = otherID
-			}
-			if !ValidMountID(otherID) || !ValidMountID(otherVolID) {
-				continue
-			}
-			if home, homeErr := Home(); homeErr == nil {
-				volumeDir := filepath.Join(home, "volumes", otherVolID)
-				for _, name := range []string{
-					"state-" + otherID + ".json",
-					"secrets-" + otherID + ".json",
-					"inbound-" + otherID + ".jsonl",
-					"inbound-draining-" + otherID + ".jsonl",
-				} {
-					_ = os.Remove(filepath.Join(volumeDir, name))
-				}
-			}
-		}
-	}
-
 	// init is also the repair gesture: it re-points a row unconditionally, which
 	// is the documented remedy every "run `bdrive init` here" message names —
 	// including for the one case ResolveMount deliberately will not decide (a

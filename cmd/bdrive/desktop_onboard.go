@@ -498,7 +498,7 @@ func runDesktopInit(target, name string, settings config.Settings, hooks bool) {
 		fmt.Fprintf(os.Stderr, "workspace root not designated at %s: %v\n", root, werr)
 	}
 	createdRoot = rootCreated
-	if config.SharedVolumeIDForRemote(remoteURL, proj.ID) == "" {
+	if !config.SharedVolumeHasIgnoreState(remoteURL, proj.ID) {
 		ignorePath := filepath.Join(target, ".bdriveignore")
 		if _, err := os.Stat(ignorePath); os.IsNotExist(err) {
 			if err := os.WriteFile(ignorePath, []byte(starterIgnore), 0o644); err != nil {

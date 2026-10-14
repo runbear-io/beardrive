@@ -30,7 +30,7 @@ func initWorktree(t *testing.T, folder, rawRemote string) config.Project {
 	if err := os.MkdirAll(folder, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	hasShared := config.SharedVolumeIDForRemote(rawRemote, "") != ""
+	hasShared := config.SharedVolumeHasIgnoreState(rawRemote, "")
 	proj, err := config.SaveProject(folder, config.Project{
 		Volume: "worktree-project",
 		Remote: rawRemote,
@@ -184,14 +184,11 @@ func TestWorktree_DeleteAndReinitReusesVolumeAndNever409s(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(mounts) != 1 {
-		t.Fatalf("mounts.json has %d rows after reinit, want one: %#v", len(mounts), mounts)
-	}
-	if _, ok := mounts[proj1.ID]; ok {
-		t.Fatalf("stale worktree row %s survived reinit: %#v", proj1.ID, mounts)
-	}
 	if _, ok := mounts[proj2.ID]; !ok {
 		t.Fatalf("new worktree row %s missing: %#v", proj2.ID, mounts)
+	}
+	if mounts[proj2.ID].VolumeID != proj1.ID {
+		t.Fatalf("new worktree VolumeID = %q, want shared volume %q: %#v", mounts[proj2.ID].VolumeID, proj1.ID, mounts)
 	}
 	newVolume, err := config.VolumeDir(proj2.ID)
 	if err != nil {
@@ -448,6 +445,59 @@ func TestWorktree_SharedVolumePicksMostProgressedStore(t *testing.T) {
 
 	if got := config.SharedVolumeIDForRemote(rawRemote, ""); got != "m-zzz" {
 		t.Fatalf("SharedVolumeIDForRemote selected %q, want most-progressed m-zzz", got)
+	}
+}
+
+func TestWorktree_UncycledFirstMountStillSeedsStarterIgnore(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1, wt2 := t.TempDir(), t.TempDir()
+	initWorktree(t, wt1, rawRemote)
+	proj2 := initWorktree(t, wt2, rawRemote)
+
+	ignorePath := filepath.Join(wt2, ".bdriveignore")
+	if got, err := os.ReadFile(ignorePath); err != nil || string(got) != starterIgnore {
+		t.Fatalf("wt2 .bdriveignore = %q (%v), want starterIgnore", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(wt2, ".env"), []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res := cycleWorktree(t, wt2); res == nil {
+		t.Fatal("wt2 sync returned no result")
+	}
+	for _, op := range localOps(t, proj2.ID) {
+		if op.Path == ".env" {
+			t.Fatal("starterIgnore failed to exclude .env on wt2's first cycle")
+		}
+	}
+}
+
+func TestWorktree_MovedMountSelfHealsAfterSiblingInit(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1 := t.TempDir()
+	proj1 := initWorktree(t, wt1, rawRemote)
+	cycleWorktree(t, wt1)
+	movedWT1 := filepath.Join(filepath.Dir(wt1), "moved-worktree")
+	if err := os.Rename(wt1, movedWT1); err != nil {
+		t.Fatal(err)
+	}
+	wt2 := t.TempDir()
+	initWorktree(t, wt2, rawRemote)
+
+	if _, ok, err := config.ResolveMount(movedWT1); err != nil || !ok {
+		t.Fatalf("ResolveMount(movedWT1) = ok=%v, err=%v", ok, err)
+	}
+	mounts, err := config.LoadMounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mi, ok := mounts[proj1.ID]
+	if !ok {
+		t.Fatalf("moved mount row %s missing after sibling init: %#v", proj1.ID, mounts)
+	}
+	if mi.Path != movedWT1 {
+		t.Fatalf("moved mount path = %q, want %q: %#v", mi.Path, movedWT1, mounts)
 	}
 }
 
