@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/runbear-io/beardrive/internal/journal"
@@ -203,6 +204,32 @@ type MountInfo struct {
 	Dev uint64 `json:"dev,omitempty"`
 	Ino uint64 `json:"ino,omitempty"`
 }
+var mountsMu sync.Mutex
+
+func lockMounts() (func(), error) {
+	mountsMu.Lock()
+	home, err := ensureHome()
+	if err != nil {
+		mountsMu.Unlock()
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(home, "mounts.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		mountsMu.Unlock()
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		mountsMu.Unlock()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+		mountsMu.Unlock()
+	}, nil
+}
+
 
 func mountsPath() (string, error) {
 	home, err := Home()
@@ -241,6 +268,14 @@ func LoadMounts() (map[string]MountInfo, error) {
 // unambiguous; a row whose path has already stopped answering is left alone
 // rather than given the identity of whatever is sitting there now.
 func SaveMounts(m map[string]MountInfo) error {
+	unlock, err := lockMounts()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return saveMountsLocked(m)
+}
+func saveMountsLocked(m map[string]MountInfo) error {
 	p, err := mountsPath()
 	if err != nil {
 		return err
@@ -401,40 +436,50 @@ func normalizedRemoteOrigin(u *url.URL) string {
 
 // SharedVolumeIDForRemote finds a local volume already associated with remote.
 func SharedVolumeIDForRemote(remote, excludeMountID string) string {
-	if strings.TrimSpace(remote) == "" {
+	unlock, err := lockMounts()
+	if err != nil {
 		return ""
 	}
+	defer unlock()
 	home, err := Home()
 	if err != nil {
 		return ""
 	}
+	mounts, err := LoadMounts()
+	if err != nil {
+		mounts = map[string]MountInfo{}
+	}
+	return sharedVolumeIDForRemoteIn(home, mounts, remote, excludeMountID)
+}
 
+func sharedVolumeIDForRemoteIn(home string, mounts map[string]MountInfo, remote, excludeMountID string) string {
+	if strings.TrimSpace(remote) == "" {
+		return ""
+	}
 	candidates := map[string]bool{}
-	if mounts, err := LoadMounts(); err == nil {
-		for id, mi := range mounts {
-			if id == excludeMountID {
-				ownID := mi.VolumeID
-				if ownID == "" {
-					ownID = id
-				}
-				if !ValidMountID(ownID) {
-					continue
-				}
-				info, err := os.Stat(filepath.Join(home, "volumes", ownID))
-				if err != nil || !info.IsDir() {
-					continue
-				}
+	for id, mi := range mounts {
+		if id == excludeMountID {
+			ownID := mi.VolumeID
+			if ownID == "" {
+				ownID = id
 			}
-			if !ValidMountID(id) || !SameRemote(mi.Remote, remote) {
+			if !ValidMountID(ownID) {
 				continue
 			}
-			vid := mi.VolumeID
-			if vid == "" {
-				vid = id
+			info, err := os.Stat(filepath.Join(home, "volumes", ownID))
+			if err != nil || !info.IsDir() {
+				continue
 			}
-			if ValidMountID(vid) {
-				candidates[vid] = true
-			}
+		}
+		if !ValidMountID(id) || !SameRemote(mi.Remote, remote) {
+			continue
+		}
+		vid := mi.VolumeID
+		if vid == "" {
+			vid = id
+		}
+		if ValidMountID(vid) {
+			candidates[vid] = true
 		}
 	}
 
@@ -480,8 +525,11 @@ func SharedVolumeIDForRemote(remote, excludeMountID string) string {
 	return best.id
 }
 
+const maxRankLamport = int64(1) << 62
+
 type volumeRank struct {
 	id          string
+	ownOps      int64
 	pushedOps   int64
 	lamport     int64
 	hasSyncJSON bool
@@ -497,26 +545,64 @@ func rankVolume(home, id string) volumeRank {
 		return rank
 	}
 	rank.dirExists = true
-	if info, err := os.Stat(filepath.Join(dir, "journal")); err == nil && info.IsDir() {
+	journalDir := filepath.Join(dir, "journal")
+	if info, err := os.Stat(journalDir); err == nil && info.IsDir() {
 		rank.hasJournal = true
+		if dev, err := LoadDevice(); err == nil && dev.ID != "" {
+			ownOps, err := journal.ReadFile(filepath.Join(journalDir, dev.ID+".jsonl"))
+			if err == nil {
+				rank.ownOps = int64(len(ownOps))
+				for _, op := range ownOps {
+					if op.Lamport > rank.lamport && op.Lamport <= maxRankLamport {
+						rank.lamport = op.Lamport
+					}
+				}
+			}
+		}
+		if entries, err := os.ReadDir(journalDir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+					continue
+				}
+				ops, err := journal.ReadFile(filepath.Join(journalDir, entry.Name()))
+				if err != nil {
+					continue
+				}
+				for _, op := range ops {
+					if op.Lamport > rank.lamport && op.Lamport <= maxRankLamport {
+						rank.lamport = op.Lamport
+					}
+				}
+			}
+		}
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "sync.json"))
-	if err != nil {
-		return rank
-	}
-	rank.hasSyncJSON = true
-	var state struct {
-		Lamport   int64 `json:"lamport"`
-		PushedOps int64 `json:"pushed_ops"`
-	}
-	if json.Unmarshal(data, &state) == nil {
-		rank.lamport = state.Lamport
-		rank.pushedOps = state.PushedOps
+	if data, err := os.ReadFile(filepath.Join(dir, "sync.json")); err == nil {
+		rank.hasSyncJSON = true
+		var state struct {
+			Lamport   int64 `json:"lamport"`
+			PushedOps int64 `json:"pushed_ops"`
+		}
+		if json.Unmarshal(data, &state) == nil {
+			if state.Lamport > rank.lamport && state.Lamport <= maxRankLamport {
+				rank.lamport = state.Lamport
+			}
+			if state.PushedOps > 0 && state.PushedOps <= maxRankLamport {
+				if rank.ownOps > 0 && state.PushedOps > rank.ownOps {
+					rank.pushedOps = rank.ownOps
+				} else {
+					rank.pushedOps = state.PushedOps
+				}
+			}
+		}
 	}
 	return rank
 }
 
+
 func betterVolumeRank(a, b volumeRank, preferredID string) bool {
+	if a.ownOps != b.ownOps {
+		return a.ownOps > b.ownOps
+	}
 	if a.pushedOps != b.pushedOps {
 		return a.pushedOps > b.pushedOps
 	}

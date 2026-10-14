@@ -151,6 +151,28 @@ func mergeInboundEvents(groups ...[]InboundEvent) []InboundEvent {
 	return out
 }
 
+func (s *Store) legacyOwnerForgotten(mountID string) bool {
+	if mountID == "" {
+		return false
+	}
+	mountsPath := filepath.Join(filepath.Dir(filepath.Dir(s.dir)), "mounts.json")
+	data, err := os.ReadFile(mountsPath)
+	if err != nil {
+		return false
+	}
+	var mounts map[string]struct {
+		VolumeID string `json:"volume_id"`
+	}
+	if err := json.Unmarshal(data, &mounts); err != nil {
+		return false
+	}
+	ownerID := filepath.Base(s.dir)
+	if _, ownerPresent := mounts[ownerID]; ownerPresent {
+		return false
+	}
+	return true
+}
+
 // DrainInbound returns the queued batch from the legacy spool.
 func (s *Store) DrainInbound() ([]InboundEvent, error) {
 	return s.drainInboundPaths(s.inboundSpoolPath(), s.inboundDrainPath())
@@ -171,7 +193,7 @@ func (s *Store) DrainInboundForMount(mountID string) ([]InboundEvent, error) {
 		return nil, err
 	}
 	var legacyEvents []InboundEvent
-	if mountID == filepath.Base(s.dir) {
+	if mountID == filepath.Base(s.dir) || s.legacyOwnerForgotten(mountID) {
 		_, spoolErr := os.Stat(s.inboundSpoolPath())
 		_, drainErr := os.Stat(s.inboundDrainPath())
 		if spoolErr == nil || drainErr == nil {

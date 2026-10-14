@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -905,6 +906,152 @@ func TestWorktree_RememberVolumeRemoteSerializesWithStoreLock(t *testing.T) {
 	}
 	if got.Remote != proj.Remote {
 		t.Fatalf("RememberVolumeRemote Remote = %q, want %q", got.Remote, proj.Remote)
+	}
+}
+
+func TestWorktree_ConcurrentEnrollMountPreservesAllRowsAndSharesVolume(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1, wt2 := t.TempDir(), t.TempDir()
+	proj1, err := config.SaveProject(wt1, config.Project{Remote: rawRemote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj2, err := config.SaveProject(wt2, config.Project{Remote: rawRemote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, folder := range []string{wt1, wt2} {
+		wg.Add(1)
+		go func(folder string) {
+			defer wg.Done()
+			_, _, err := config.EnrollMount(folder)
+			errs <- err
+		}(folder)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	mounts, err := config.LoadMounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mounts[proj1.ID]; !ok {
+		t.Fatalf("concurrent enrollment lost wt1 row %s: %#v", proj1.ID, mounts)
+	}
+	if _, ok := mounts[proj2.ID]; !ok {
+		t.Fatalf("concurrent enrollment lost wt2 row %s: %#v", proj2.ID, mounts)
+	}
+	v1, err := config.VolumeDir(proj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, err := config.VolumeDir(proj2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v1 != v2 {
+		t.Fatalf("concurrent enrollments selected different volumes: %q != %q", v1, v2)
+	}
+}
+
+func TestWorktree_CrashAfterAppendOpsBeforeSaveSyncStillWinsVolumeRank(t *testing.T) {
+	bhome := worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	dev, err := config.LoadDevice()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveMounts(map[string]config.MountInfo{
+		"m-zzz": {Remote: rawRemote},
+		"m-aaa": {Remote: rawRemote},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeCandidate := func(id string, pushed, lamport int64, count int) {
+		t.Helper()
+		dir := filepath.Join(bhome, "volumes", id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SaveSync(store.SyncState{Remote: rawRemote, PushedOps: pushed, Lamport: lamport}); err != nil {
+			t.Fatal(err)
+		}
+		ops := make([]journal.Op, count)
+		for i := range ops {
+			seq := int64(i + 1)
+			ops[i] = journal.Op{
+				Seq: seq, Lamport: seq, Device: dev.ID,
+				Kind: journal.KindPut, Path: id + "-" + string(rune('a'+i)) + ".md",
+			}
+		}
+		if err := st.AppendOps(dev.ID, ops); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCandidate("m-zzz", 1, 1, 4)
+	writeCandidate("m-aaa", 2, 2, 2)
+
+	if got := config.SharedVolumeIDForRemote(rawRemote, ""); got != "m-zzz" {
+		t.Fatalf("SharedVolumeIDForRemote selected %q, want crash-recovered m-zzz", got)
+	}
+}
+
+func TestWorktree_StopForgetPreservesLegacyInboundSpoolForReenrolledMount(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1 := t.TempDir()
+	proj1 := initWorktree(t, wt1, rawRemote)
+	vdir, err := config.VolumeDir(proj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.LogInbound("queued-before-forget.md", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveSync(store.SyncState{Remote: rawRemote}); err != nil {
+		t.Fatal(err)
+	}
+	stop := stopCmd()
+	stop.SetArgs([]string{wt1, "--forget"})
+	if err := stop.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(wt1); err != nil {
+		t.Fatal(err)
+	}
+	wt2 := t.TempDir()
+	proj2 := initWorktree(t, wt2, rawRemote)
+	if proj2.ID == proj1.ID {
+		t.Fatal("reenrolled worktree unexpectedly reused the deleted mount ID")
+	}
+	vdir2, err := config.VolumeDir(proj2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vdir2 != vdir {
+		t.Fatalf("reenrolled worktree selected volume %q, want %q", vdir2, vdir)
+	}
+	got, err := st.DrainInboundForMount(proj2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Path != "queued-before-forget.md" {
+		t.Fatalf("reenrolled mount inbound = %#v, want queued-before-forget.md", got)
 	}
 }
 
