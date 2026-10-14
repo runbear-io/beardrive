@@ -57,7 +57,7 @@ func initWorktree(t *testing.T, folder, rawRemote string) config.Project {
 		t.Fatal(err)
 	}
 	// `bdrive init` clears a prior stop marker as part of re-enrollment.
-	if err := store.SetPaused(vdir, false); err != nil {
+	if err := store.SetPausedMount(vdir, proj.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	return proj
@@ -346,6 +346,52 @@ func TestWorktree_ConcurrentMountsShareVolumeAndIsolateInbound(t *testing.T) {
 	}
 }
 
+func TestWorktree_SiblingForgetReloadsIgnoreBeforeMaterializeDelete(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1, wt2 := t.TempDir(), t.TempDir()
+	initWorktree(t, wt1, rawRemote)
+	initWorktree(t, wt2, rawRemote)
+	if err := os.WriteFile(filepath.Join(wt1, "keep.txt"), []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !cycleWorktree(t, wt1).Pushed {
+		t.Fatal("initial wt1 sync did not push")
+	}
+	cycleWorktree(t, wt2)
+	if _, err := os.Stat(filepath.Join(wt2, "keep.txt")); err != nil {
+		t.Fatalf("keep.txt did not materialize in wt2: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(wt1, ".bdriveignore"), []byte("keep.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess, _, err := openSession(t.Context(), wt1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Prune = true
+	pruned, cycleErr := sess.Cycle(t.Context())
+	closeSession(sess)
+	if cycleErr != nil {
+		t.Fatal(cycleErr)
+	}
+	if pruned == nil {
+		t.Fatal("wt1 prune returned no result")
+	}
+
+	pulled := cycleWorktree(t, wt2)
+	if pulled.PulledOps != 0 {
+		t.Fatalf("wt2 pulled %d ops from the hub, want shared-local-journal replay", pulled.PulledOps)
+	}
+	if got, err := os.ReadFile(filepath.Join(wt2, ".bdriveignore")); err != nil || string(got) != "keep.txt\n" {
+		t.Fatalf("wt2 .bdriveignore = %q (%v), want keep.txt rule", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(wt2, "keep.txt")); err != nil {
+		t.Fatalf("wt2 keep.txt was deleted while applying the new ignore rule: %v", err)
+	}
+}
+
 func TestWorktree_StopForgetThenReinitRecoversVolumeViaSyncStateRemote(t *testing.T) {
 	worktreeHome(t)
 	rawRemote := "file://" + t.TempDir()
@@ -488,6 +534,73 @@ func TestWorktree_LegacyInboundSpoolNotConsumedBySecondaryMount(t *testing.T) {
 	}
 	if len(gotPrimary) != 1 || gotPrimary[0].Path != "legacy-event.md" {
 		t.Fatalf("primary mount legacy inbound = %#v, want legacy-event.md", gotPrimary)
+	}
+}
+
+func TestWorktree_ReinitEnrolledLegacyMountKeepsOwnAuthoritativeVolume(t *testing.T) {
+	bhome := worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1 := t.TempDir()
+	proj1 := initWorktree(t, wt1, rawRemote)
+	ownVolume, err := config.VolumeDir(proj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownStore, err := store.Open(ownVolume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ownStore.SaveSync(store.SyncState{Remote: rawRemote, PushedOps: 5, Lamport: 10}); err != nil {
+		t.Fatal(err)
+	}
+	staleVolume := filepath.Join(bhome, "volumes", "m-00000000")
+	if err := os.MkdirAll(staleVolume, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleStore, err := store.Open(staleVolume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := staleStore.SaveSync(store.SyncState{Remote: rawRemote}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := config.EnrollMount(wt1); err != nil {
+		t.Fatal(err)
+	}
+	reloadedVolume, err := config.VolumeDir(proj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(reloadedVolume) != proj1.ID {
+		t.Fatalf("re-enrolled legacy mount selected volume %q, want own volume %q", reloadedVolume, proj1.ID)
+	}
+}
+
+func TestWorktree_SiblingResumeDoesNotClearPrePRLegacyPause(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1 := t.TempDir()
+	proj1 := initWorktree(t, wt1, rawRemote)
+	cycleWorktree(t, wt1)
+	vdir, err := config.VolumeDir(proj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPaused(vdir, true); err != nil {
+		t.Fatal(err)
+	}
+
+	wt2 := t.TempDir()
+	proj2 := initWorktree(t, wt2, rawRemote)
+	if err := store.SetPausedMount(vdir, proj2.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if !store.PausedMount(vdir, proj1.ID) {
+		t.Fatal("pre-PR legacy pause was cleared for the primary mount")
+	}
+	if store.PausedMount(vdir, proj2.ID) {
+		t.Fatal("sibling mount remains paused after resume")
 	}
 }
 

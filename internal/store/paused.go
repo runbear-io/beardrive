@@ -61,6 +61,38 @@ func SetPausedMount(dir, mountID string, on bool) error {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		if Paused(dir) {
+			ids := map[string]bool{}
+			if ownerID := filepath.Base(dir); ownerID != "" {
+				ids[ownerID] = true
+			}
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				return readErr
+			}
+			for _, entry := range entries {
+				name := entry.Name()
+				if strings.HasPrefix(name, "state-") && strings.HasSuffix(name, ".json") {
+					ids[strings.TrimSuffix(strings.TrimPrefix(name, "state-"), ".json")] = true
+				}
+			}
+			for otherID := range ids {
+				if otherID == "" || otherID == mountID {
+					continue
+				}
+				otherPause, err := pausedMountPath(dir, otherID)
+				if err != nil {
+					return err
+				}
+				if _, statErr := os.Stat(otherPause); os.IsNotExist(statErr) {
+					if err := WriteFileAtomic(otherPause, []byte("paused by `bdrive stop`; `bdrive init` resumes\n"), 0o644); err != nil {
+						return err
+					}
+				} else if statErr != nil {
+					return statErr
+				}
+			}
+		}
 		if err := os.Remove(pausedPath(dir)); err != nil && !os.IsNotExist(err) {
 			return err
 		}

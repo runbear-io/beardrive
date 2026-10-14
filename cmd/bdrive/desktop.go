@@ -258,6 +258,26 @@ func mountOf(w http.ResponseWriter, r *http.Request) (desktopMount, bool) {
 	}
 	return m, ok
 }
+func mountsOf(w http.ResponseWriter, r *http.Request) ([]desktopMount, bool) {
+	target := r.PathValue("project")
+	mounts := desktopMountList()
+	for _, m := range mounts {
+		if m.id == target {
+			return []desktopMount{m}, true
+		}
+	}
+	matched := make([]desktopMount, 0)
+	for _, m := range mounts {
+		if m.hubID == target {
+			matched = append(matched, m)
+		}
+	}
+	if len(matched) > 0 {
+		return matched, true
+	}
+	http.Error(w, "no such project", http.StatusNotFound)
+	return nil, false
+}
 
 func writeDesktopJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -268,6 +288,7 @@ func writeDesktopJSON(w http.ResponseWriter, v any) {
 // daemon.lock flock (never the pidfile), pause is the store's paused marker.
 func desktopStatus(w http.ResponseWriter, _ *http.Request) {
 	type mountStatus struct {
+		ID      string `json:"id"`
 		Project string `json:"project"`
 		Name    string `json:"name"`
 		Path    string `json:"path"`
@@ -279,14 +300,22 @@ func desktopStatus(w http.ResponseWriter, _ *http.Request) {
 		Paused  bool   `json:"paused"`
 	}
 	out := []mountStatus{}
-	for _, m := range desktopMounts() {
+	for _, m := range desktopMountList() {
 		pid, running := daemon.Running(m.volDir)
 		out = append(out, mountStatus{
-			Project: m.hubID, Name: filepath.Base(m.path), Path: m.path, Server: m.server,
+			ID: m.id, Project: m.hubID, Name: filepath.Base(m.path), Path: m.path, Server: m.server,
 			Running: running, Pid: pid, Paused: store.PausedMount(m.volDir, m.id),
 		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].ID < out[j].ID
+	})
 	writeDesktopJSON(w, map[string]any{"mounts": out})
 }
 
@@ -388,45 +417,49 @@ func desktopLogout(w http.ResponseWriter, _ *http.Request) {
 // desktopPause is `bdrive stop` without --forget: stop the daemon, and leave
 // a pause that outlives it so agent hooks don't silently resume.
 func desktopPause(w http.ResponseWriter, r *http.Request) {
-	m, ok := mountOf(w, r)
+	mounts, ok := mountsOf(w, r)
 	if !ok {
 		return
 	}
-	mounts, err := config.LoadMounts()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	sibling := false
-	for otherID, otherMI := range mounts {
-		if otherID == m.id || otherMI.Path == "" || !config.IsMount(otherMI.Path) {
-			continue
-		}
-		ov, err := config.VolumeDir(otherID)
-		if err != nil || ov != m.volDir || store.PausedMount(m.volDir, otherID) {
-			continue
-		}
-		sibling = true
-		break
-	}
-	var stopped bool
-	if sibling {
-		_, stopped = daemon.Running(m.volDir)
-	} else {
-		stopped, err = daemon.Stop(m.volDir)
+	stopped := false
+	for _, m := range mounts {
+		registry, err := config.LoadMounts()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-	}
-	if err := store.SetPausedMount(m.volDir, m.id, true); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !sibling {
-		if err := store.SetPaused(m.volDir, true); err != nil {
+		sibling := false
+		for otherID, otherMI := range registry {
+			if otherID == m.id || otherMI.Path == "" || !config.IsMount(otherMI.Path) {
+				continue
+			}
+			ov, err := config.VolumeDir(otherID)
+			if err != nil || ov != m.volDir || store.PausedMount(m.volDir, otherID) {
+				continue
+			}
+			sibling = true
+			break
+		}
+		if sibling {
+			_, running := daemon.Running(m.volDir)
+			stopped = stopped || running
+		} else {
+			didStop, err := daemon.Stop(m.volDir)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			stopped = stopped || didStop
+		}
+		if err := store.SetPausedMount(m.volDir, m.id, true); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if !sibling {
+			if err := store.SetPaused(m.volDir, true); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 	}
 	writeDesktopJSON(w, map[string]any{"ok": true, "stopped": stopped})
@@ -437,20 +470,22 @@ func desktopPause(w http.ResponseWriter, r *http.Request) {
 // best-effort: syncing is unpaused either way, and the next bdrive command in
 // the folder starts a daemon regardless (self-heal on next touch).
 func desktopResume(w http.ResponseWriter, r *http.Request) {
-	m, ok := mountOf(w, r)
+	mounts, ok := mountsOf(w, r)
 	if !ok {
 		return
 	}
-	if err := store.SetPausedMount(m.volDir, m.id, false); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	out := map[string]any{"ok": true}
-	if _, running := daemon.Running(m.volDir); !running {
-		if pid, err := daemon.Start(m.path, m.volDir, 3*time.Second, 10*time.Second); err != nil {
-			out["daemon_error"] = err.Error()
-		} else {
-			out["pid"] = pid
+	for _, m := range mounts {
+		if err := store.SetPausedMount(m.volDir, m.id, false); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, running := daemon.Running(m.volDir); !running {
+			if pid, err := daemon.Start(m.path, m.volDir, 3*time.Second, 10*time.Second); err != nil {
+				out["daemon_error"] = err.Error()
+			} else if _, exists := out["pid"]; !exists {
+				out["pid"] = pid
+			}
 		}
 	}
 	writeDesktopJSON(w, out)
@@ -459,33 +494,41 @@ func desktopResume(w http.ResponseWriter, r *http.Request) {
 // desktopSync runs one sync cycle now, exactly like `bdrive sync` in the
 // folder: refused while paused, degrades to offline rather than failing.
 func desktopSync(w http.ResponseWriter, r *http.Request) {
-	m, ok := mountOf(w, r)
+	mounts, ok := mountsOf(w, r)
 	if !ok {
 		return
 	}
-	proj, ok, err := config.LoadProject(m.path)
-	if err != nil || !ok {
-		http.Error(w, "folder is not a beardrive project any more", http.StatusConflict)
-		return
-	}
-	if blocked := syncBlocked(proj); blocked != "" {
-		http.Error(w, "syncing is "+blocked+" for this folder", http.StatusConflict)
-		return
-	}
-	sess, _, err := openSession(r.Context(), m.path, true)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer closeSession(sess)
-	res, err := sess.Cycle(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	var localOps, pulledOps, materialized int
+	offline := false
+	for _, m := range mounts {
+		proj, ok, err := config.LoadProject(m.path)
+		if err != nil || !ok {
+			http.Error(w, "folder is not a beardrive project any more", http.StatusConflict)
+			return
+		}
+		if blocked := syncBlocked(proj); blocked != "" {
+			http.Error(w, "syncing is "+blocked+" for this folder", http.StatusConflict)
+			return
+		}
+		sess, _, err := openSession(r.Context(), m.path, true)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		res, cycleErr := sess.Cycle(r.Context())
+		closeSession(sess)
+		if cycleErr != nil {
+			http.Error(w, cycleErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		localOps += res.LocalOps
+		pulledOps += res.PulledOps
+		materialized += res.Materialized
+		offline = offline || res.Offline
 	}
 	writeDesktopJSON(w, map[string]any{
-		"ok": true, "offline": res.Offline, "local_ops": res.LocalOps,
-		"pulled_ops": res.PulledOps, "materialized": res.Materialized,
+		"ok": true, "offline": offline, "local_ops": localOps,
+		"pulled_ops": pulledOps, "materialized": materialized,
 	})
 }
 
@@ -506,17 +549,23 @@ type desktopMount struct {
 	volDir string // ~/.bdrive/volumes/<mount-id>
 }
 
-// desktopMounts enumerates this machine's mounts, keyed by hub project id.
+// desktopMountList enumerates this machine's mounts in stable local-ID order.
 // Mounts whose remote is not a hub URL (nothing writes those any more) or
 // whose folder config is unreadable are skipped, not fatal: the viewer shows
 // what it can.
-func desktopMounts() map[string]desktopMount {
+func desktopMountList() []desktopMount {
 	mounts, err := config.LoadMounts()
 	if err != nil {
 		return nil
 	}
-	out := make(map[string]desktopMount, len(mounts))
-	for id, mi := range mounts {
+	ids := make([]string, 0, len(mounts))
+	for id := range mounts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]desktopMount, 0, len(ids))
+	for _, id := range ids {
+		mi := mounts[id]
 		proj, ok, err := config.LoadProject(mi.Path)
 		remoteURL := mi.Remote
 		if err == nil && ok && proj.Remote != "" {
@@ -530,7 +579,34 @@ func desktopMounts() map[string]desktopMount {
 		if err != nil {
 			continue
 		}
-		out[hubID] = desktopMount{id: id, hubID: hubID, server: server, path: mi.Path, volDir: volDir}
+		out = append(out, desktopMount{
+			id: id, hubID: hubID, server: server, path: mi.Path, volDir: volDir,
+		})
+	}
+	return out
+}
+
+func preferDesktopMount(candidate, current desktopMount) bool {
+	candidateLive := candidate.path != "" && config.IsMount(candidate.path)
+	currentLive := current.path != "" && config.IsMount(current.path)
+	if candidateLive != currentLive {
+		return candidateLive
+	}
+	candidatePaused := store.PausedMount(candidate.volDir, candidate.id)
+	currentPaused := store.PausedMount(current.volDir, current.id)
+	if candidatePaused != currentPaused {
+		return !candidatePaused
+	}
+	return false
+}
+
+func desktopMounts() map[string]desktopMount {
+	out := make(map[string]desktopMount)
+	for _, candidate := range desktopMountList() {
+		current, ok := out[candidate.hubID]
+		if !ok || preferDesktopMount(candidate, current) {
+			out[candidate.hubID] = candidate
+		}
 	}
 	return out
 }

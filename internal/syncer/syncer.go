@@ -482,6 +482,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// cache the derived max against a per-journal (name, size) fingerprint in
 	// SyncState — do NOT hand-scan the JSONL for "lamport": Op.Path and Op.Note
 	// are peer-chosen strings that can contain that literal.
+	_, hadCachedIgnore := cache[IgnoreFile]
 	ops, err := s.Store.AllOps()
 	var existingState map[string]journal.FileState
 	if err != nil {
@@ -489,14 +490,17 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 		// from capturing local edits. The stored clock stands for this cycle.
 		log.Printf("beardrive: could not re-derive the sync clock: %v", err)
 	} else {
-		existingState = journal.Replay(ops)
+		if mountJoining || hadCachedIgnore {
+			existingState = journal.Replay(ops)
+			if want, ok := existingState[IgnoreFile]; ok {
+				wrote, _ := s.materializeFile(IgnoreFile, want, cache)
+				if wrote {
+					res.Materialized++
+				}
+			}
+		}
 		for _, op := range ops {
 			st.Lamport = absorbLamport(st.Lamport, op.Lamport)
-		}
-		if mountJoining {
-			if want, ok := existingState[IgnoreFile]; ok {
-				_, _ = s.materializeFile(IgnoreFile, want, cache)
-			}
 		}
 	}
 	filter, err := loadFilter(s.Folder, proj.Include)
@@ -817,6 +821,22 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// rules first and reload from them — otherwise materialize's delete loop
 	// runs against stale rules, its filter guard never fires, and it unlinks
 	// files that merely left sync scope.
+	ignoreFromPeer := false
+	if want, ok := target[IgnoreFile]; ok {
+		var latest journal.Op
+		found := false
+		for _, op := range all {
+			if op.Path != IgnoreFile || op.Kind != journal.KindPut ||
+				op.Blob != want.Blob || op.Link != want.Link ||
+				op.Size != want.Size || op.Mode != want.Mode {
+				continue
+			}
+			if !found || journal.Less(latest, op) {
+				latest, found = op, true
+			}
+		}
+		ignoreFromPeer = found && latest.Device != s.Device.ID
+	}
 	if want, ok := target[IgnoreFile]; !ok {
 		// A peer DELETED the shared rules — the maximal widening there is, and
 		// the one shape the bookkeeping below cannot see, since it is written in
@@ -824,10 +844,10 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 		// the local copy either way; recording the deletion as PULLED is what
 		// stops the next cycle reading the now-absent file as locally authored
 		// and dropping the accepted floor with it.
-		if len(pulled) > 0 {
+		if len(pulled) > 0 || hadCachedIgnore {
 			st.IgnorePulled = ""
 		}
-	} else if len(pulled) > 0 || mountJoining {
+	} else {
 		wrote, err := s.materializeFile(IgnoreFile, want, cache)
 		if err != nil {
 			log.Printf("beardrive: could not write %s this cycle: %v", IgnoreFile, err)
@@ -850,8 +870,10 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 			// came from a peer, so they may narrow what this device uploads but
 			// never widen it until somebody here authors a change. The accepted
 			// floor carries over unchanged.
-			if cur, err := os.ReadFile(filepath.Join(s.Folder, IgnoreFile)); err == nil {
-				st.IgnorePulled = string(cur)
+			if len(pulled) > 0 || ignoreFromPeer {
+				if cur, err := os.ReadFile(filepath.Join(s.Folder, IgnoreFile)); err == nil {
+					st.IgnorePulled = string(cur)
+				}
 			}
 			filter.AcceptRules(st.IgnoreAccepted)
 		}

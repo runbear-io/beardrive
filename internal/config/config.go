@@ -392,7 +392,20 @@ func SharedVolumeIDForRemote(remote, excludeMountID string) string {
 	candidates := map[string]bool{}
 	if mounts, err := LoadMounts(); err == nil {
 		for id, mi := range mounts {
-			if id == excludeMountID || !ValidMountID(id) || !SameRemote(mi.Remote, remote) {
+			if id == excludeMountID {
+				ownID := mi.VolumeID
+				if ownID == "" {
+					ownID = id
+				}
+				if !ValidMountID(ownID) {
+					continue
+				}
+				info, err := os.Stat(filepath.Join(home, "volumes", ownID))
+				if err != nil || !info.IsDir() {
+					continue
+				}
+			}
+			if !ValidMountID(id) || !SameRemote(mi.Remote, remote) {
 				continue
 			}
 			vid := mi.VolumeID
@@ -409,7 +422,7 @@ func SharedVolumeIDForRemote(remote, excludeMountID string) string {
 	// the durable identity that lets a recreated worktree find the old store.
 	if entries, err := os.ReadDir(filepath.Join(home, "volumes")); err == nil {
 		for _, e := range entries {
-			if !e.IsDir() || e.Name() == excludeMountID || !ValidMountID(e.Name()) {
+			if !e.IsDir() || !ValidMountID(e.Name()) {
 				continue
 			}
 			data, err := os.ReadFile(filepath.Join(home, "volumes", e.Name(), "sync.json"))
@@ -439,7 +452,7 @@ func SharedVolumeIDForRemote(remote, excludeMountID string) string {
 	haveBest := false
 	for _, id := range ids {
 		rank := rankVolume(home, id)
-		if !haveBest || betterVolumeRank(rank, best) {
+		if !haveBest || betterVolumeRank(rank, best, excludeMountID) {
 			best = rank
 			haveBest = true
 		}
@@ -483,7 +496,7 @@ func rankVolume(home, id string) volumeRank {
 	return rank
 }
 
-func betterVolumeRank(a, b volumeRank) bool {
+func betterVolumeRank(a, b volumeRank, preferredID string) bool {
 	if a.pushedOps != b.pushedOps {
 		return a.pushedOps > b.pushedOps
 	}
@@ -498,6 +511,14 @@ func betterVolumeRank(a, b volumeRank) bool {
 	}
 	if a.dirExists != b.dirExists {
 		return a.dirExists
+	}
+	if preferredID != "" {
+		if a.id == preferredID && b.id != preferredID {
+			return true
+		}
+		if b.id == preferredID && a.id != preferredID {
+			return false
+		}
 	}
 	return a.id < b.id
 }
