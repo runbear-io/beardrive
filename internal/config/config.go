@@ -256,7 +256,60 @@ func SaveMounts(m map[string]MountInfo) error {
 			m[id] = mi
 		}
 	}
-	return writeJSON(p, m)
+	if err := writeJSON(p, m); err != nil {
+		return err
+	}
+	for id, mi := range m {
+		if mi.Remote != "" {
+			_ = RememberVolumeRemote(id, mi.Remote)
+		}
+	}
+	return nil
+}
+
+// RememberVolumeRemote records a mount's remote in an existing volume store.
+// It never creates the volume directory: forgotten legacy stores are stamped
+// only when their data is already present on disk.
+func RememberVolumeRemote(mountID, remote string) error {
+	if remote == "" {
+		return nil
+	}
+	vdir, err := VolumeDir(mountID)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(vdir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a volume directory", vdir)
+	}
+	syncPath := filepath.Join(vdir, "sync.json")
+	m := map[string]any{}
+	if data, readErr := os.ReadFile(syncPath); readErr == nil {
+		if len(strings.TrimSpace(string(data))) > 0 {
+			if err := json.Unmarshal(data, &m); err != nil {
+				return err
+			}
+			if m == nil {
+				m = map[string]any{}
+			}
+		}
+	} else if !os.IsNotExist(readErr) {
+		return readErr
+	}
+	current, present := m["remote"]
+	if present && current != nil {
+		if value, ok := current.(string); !ok || value != "" {
+			return nil
+		}
+	}
+	m["remote"] = remote
+	return writeJSON(syncPath, m)
 }
 
 // VolumeDir returns the local store dir of a mount, keyed by its stable
@@ -371,6 +424,7 @@ func SharedVolumeIDForRemote(remote, excludeMountID string) string {
 			}
 		}
 	}
+
 	if len(candidates) == 0 {
 		return ""
 	}

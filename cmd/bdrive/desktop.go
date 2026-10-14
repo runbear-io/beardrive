@@ -283,7 +283,7 @@ func desktopStatus(w http.ResponseWriter, _ *http.Request) {
 		pid, running := daemon.Running(m.volDir)
 		out = append(out, mountStatus{
 			Project: m.hubID, Name: filepath.Base(m.path), Path: m.path, Server: m.server,
-			Running: running, Pid: pid, Paused: store.Paused(m.volDir),
+			Running: running, Pid: pid, Paused: store.PausedMount(m.volDir, m.id),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -392,14 +392,42 @@ func desktopPause(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	stopped, err := daemon.Stop(m.volDir)
+	mounts, err := config.LoadMounts()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := store.SetPaused(m.volDir, true); err != nil {
+	sibling := false
+	for otherID, otherMI := range mounts {
+		if otherID == m.id || otherMI.Path == "" || !config.IsMount(otherMI.Path) {
+			continue
+		}
+		ov, err := config.VolumeDir(otherID)
+		if err != nil || ov != m.volDir || store.PausedMount(m.volDir, otherID) {
+			continue
+		}
+		sibling = true
+		break
+	}
+	var stopped bool
+	if sibling {
+		_, stopped = daemon.Running(m.volDir)
+	} else {
+		stopped, err = daemon.Stop(m.volDir)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := store.SetPausedMount(m.volDir, m.id, true); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if !sibling {
+		if err := store.SetPaused(m.volDir, true); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	writeDesktopJSON(w, map[string]any{"ok": true, "stopped": stopped})
 }
@@ -413,7 +441,7 @@ func desktopResume(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := store.SetPaused(m.volDir, false); err != nil {
+	if err := store.SetPausedMount(m.volDir, m.id, false); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -471,6 +499,7 @@ func mustProjects() *webapp.ProjectDB {
 
 // desktopMount is one entry of mounts.json resolved into hub-project shape.
 type desktopMount struct {
+	id     string // local mount id, for per-mount pause state
 	hubID  string // project id on the hub, from the mount's remote URL
 	server string // hub base URL, from the same remote
 	path   string // working folder (display name source)
@@ -501,7 +530,7 @@ func desktopMounts() map[string]desktopMount {
 		if err != nil {
 			continue
 		}
-		out[hubID] = desktopMount{hubID: hubID, server: server, path: mi.Path, volDir: volDir}
+		out[hubID] = desktopMount{id: id, hubID: hubID, server: server, path: mi.Path, volDir: volDir}
 	}
 	return out
 }

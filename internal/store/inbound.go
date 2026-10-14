@@ -171,12 +171,14 @@ func (s *Store) DrainInboundForMount(mountID string) ([]InboundEvent, error) {
 		return nil, err
 	}
 	var legacyEvents []InboundEvent
-	_, spoolErr := os.Stat(s.inboundSpoolPath())
-	_, drainErr := os.Stat(s.inboundDrainPath())
-	if spoolErr == nil || drainErr == nil {
-		legacyEvents, err = s.DrainInbound()
-		if err != nil {
-			return nil, err
+	if mountID == filepath.Base(s.dir) {
+		_, spoolErr := os.Stat(s.inboundSpoolPath())
+		_, drainErr := os.Stat(s.inboundDrainPath())
+		if spoolErr == nil || drainErr == nil {
+			legacyEvents, err = s.DrainInbound()
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	return mergeInboundEvents(mountEvents, legacyEvents), nil

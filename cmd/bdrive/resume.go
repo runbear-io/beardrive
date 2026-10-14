@@ -60,7 +60,7 @@ Projects paused with ` + "`bdrive stop`" + ` stay paused — resume never overri
 					failed++
 					continue
 				}
-				if store.Paused(vdir) {
+				if store.PausedMount(vdir, id) {
 					skipped++
 					if !quiet {
 						fmt.Printf("  paused   %s (bdrive init resumes it)\n", mi.Path)

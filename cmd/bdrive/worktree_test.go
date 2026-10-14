@@ -380,6 +380,10 @@ func TestWorktree_StopForgetThenReinitRecoversVolumeViaSyncStateRemote(t *testin
 	if got := remoteOps(t, rawRemote, dev.ID); len(got) == 0 {
 		t.Fatal("initial journal was not written to the hub")
 	}
+	syncState.Remote = ""
+	if err := st.SaveSync(syncState); err != nil {
+		t.Fatal(err)
+	}
 
 	stop := stopCmd()
 	stop.SetArgs([]string{wt1, "--forget"})
@@ -416,6 +420,74 @@ func TestWorktree_StopForgetThenReinitRecoversVolumeViaSyncStateRemote(t *testin
 	assertNo409(t, pushed)
 	if got := remoteOps(t, rawRemote, dev.ID); maxSeq(got) <= 1 {
 		t.Fatalf("hub journal did not append after reinit: %#v", got)
+	}
+}
+
+func TestWorktree_StopOneWorktreeDoesNotPauseSibling(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1, wt2 := t.TempDir(), t.TempDir()
+	proj1 := initWorktree(t, wt1, rawRemote)
+	proj2 := initWorktree(t, wt2, rawRemote)
+	if !cycleWorktree(t, wt1).Pushed {
+		t.Fatal("wt1 initial sync did not push")
+	}
+	cycleWorktree(t, wt2)
+
+	out, err := seccliRun(t, stopCmd(), []string{wt1})
+	if err != nil {
+		t.Fatalf("stop wt1: %v\n%s", err, out)
+	}
+	if got := syncBlocked(proj1); got != "paused" {
+		t.Fatalf("syncBlocked(proj1) = %q, want paused", got)
+	}
+	if got := syncBlocked(proj2); got != "" {
+		t.Fatalf("syncBlocked(proj2) = %q, want runnable sibling", got)
+	}
+	if err := os.WriteFile(filepath.Join(wt2, "sibling.md"), []byte("still live\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seccliRun(t, syncCmd(), []string{wt2}); err != nil {
+		t.Fatalf("sync wt2 after stopping wt1: %v", err)
+	}
+}
+
+func TestWorktree_LegacyInboundSpoolNotConsumedBySecondaryMount(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1, wt2 := t.TempDir(), t.TempDir()
+	proj1 := initWorktree(t, wt1, rawRemote)
+	proj2 := initWorktree(t, wt2, rawRemote)
+	vdir, err := config.VolumeDir(proj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(vdir) != proj1.ID {
+		t.Fatalf("primary volume dir base = %q, want %q", filepath.Base(vdir), proj1.ID)
+	}
+	if got, err := config.VolumeDir(proj2.ID); err != nil || got != vdir {
+		t.Fatalf("secondary volume dir = %q (%v), want primary %q", got, err, vdir)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.LogInbound("legacy-event.md", false); err != nil {
+		t.Fatal(err)
+	}
+	gotSecondary, err := st.DrainInboundForMount(proj2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotSecondary) != 0 {
+		t.Fatalf("secondary mount consumed legacy inbound spool: %#v", gotSecondary)
+	}
+	gotPrimary, err := st.DrainInboundForMount(proj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotPrimary) != 1 || gotPrimary[0].Path != "legacy-event.md" {
+		t.Fatalf("primary mount legacy inbound = %#v, want legacy-event.md", gotPrimary)
 	}
 }
 

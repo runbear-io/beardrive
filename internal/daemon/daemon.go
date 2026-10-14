@@ -480,6 +480,42 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	defer stopWatch()
 
 	for {
+		// A pause is per mount, not per shared volume. If the mount that
+		// started this daemon is paused, hand the volume to an unpaused sibling
+		// before reading the active folder below.
+		if store.PausedMount(volDir, proj.ID) {
+			promoted := false
+			if m, merr := config.LoadMounts(); merr == nil {
+				ids := make([]string, 0, len(m))
+				for id := range m {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				for _, id := range ids {
+					mi := m[id]
+					if id == proj.ID || mi.Path == "" || store.PausedMount(volDir, id) {
+						continue
+					}
+					v, verr := config.VolumeDir(id)
+					if verr != nil || v != volDir {
+						continue
+					}
+					c, cok, cerr := config.LoadProject(mi.Path)
+					if cerr == nil && cok && c.ID == id &&
+						config.SameRemote(c.Remote, proj.Remote) {
+						folder = mi.Path
+						proj = c
+						promoted = true
+						break
+					}
+				}
+			}
+			if !promoted {
+				log.Printf("mount paused; exiting")
+				return nil
+			}
+		}
+
 		// Re-read the project config each tick. A vanished primary folder may
 		// have been replaced by another enrolled worktree sharing this volume;
 		// promote that sibling before deciding the project is gone.
@@ -514,7 +550,8 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 					sort.Strings(ids)
 					for _, id := range ids {
 						sibling := m[id]
-						if id == proj.ID || sibling.Path == "" || sibling.Path == folder {
+						if id == proj.ID || sibling.Path == "" || sibling.Path == folder ||
+							store.PausedMount(volDir, id) {
 							continue
 						}
 						sv, sverr := config.VolumeDir(id)
@@ -567,7 +604,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 				sort.Strings(ids)
 				for _, id := range ids {
 					mi := m[id]
-					if mi.Path == "" || mi.Path == folder {
+					if mi.Path == "" || mi.Path == folder || store.PausedMount(volDir, id) {
 						continue
 					}
 					v, verr := config.VolumeDir(id)
@@ -604,7 +641,8 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			sort.Strings(ids)
 			for _, id := range ids {
 				mi := m[id]
-				if id == proj.ID || mi.Path == "" || mi.Path == folder {
+				if id == proj.ID || mi.Path == "" || mi.Path == folder ||
+					store.PausedMount(volDir, id) {
 					continue
 				}
 				v, verr := config.VolumeDir(id)
