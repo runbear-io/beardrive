@@ -6,7 +6,7 @@
 // command, pipe event JSON (with a session_id) on stdin — so one hook command
 // works everywhere; only the config file format and event names differ:
 //
-//	claude  ~/.claude/settings.json  UserPromptSubmit / PostToolUse
+//	claude  ~/.claude/settings.json  UserPromptSubmit / PostToolUse / Stop
 //	codex   ~/.codex/hooks.json      UserPromptSubmit / PostToolUse
 //	gemini  ~/.gemini/settings.json  BeforeAgent / AfterTool
 //	hermes  ~/.hermes/config.yaml    pre_llm_call / post_tool_call
@@ -51,6 +51,11 @@ import (
 const (
 	marker     = "bdrive sync"
 	readMarker = "bdrive read-log"
+	// stopMarker identifies the turn-end receipt. Stop is exactly where a
+	// user hand-writes their own `bdrive sync .`, so under Stop "ours" is
+	// judged by this flag alone — never by marker, which would converge (on
+	// install) or delete (on uninstall) the user's hook.
+	stopMarker = "--hook-stop"
 )
 
 // ourEvents is every event name any platform above registers under. Removal is
@@ -67,6 +72,8 @@ const (
 var ourEvents = map[string]bool{
 	// claude, codex
 	"UserPromptSubmit": true, "PostToolUse": true,
+	// claude only: the turn-end receipt
+	"Stop": true,
 	// gemini
 	"BeforeAgent": true, "AfterTool": true,
 	// hermes
@@ -139,6 +146,14 @@ func hookPullCommand(label string) string {
 		`bdrive sync . --hook ` + label + ` 2>/dev/null'`
 }
 
+// hookStopCommand is Claude Code's turn-end receipt: one blocking cycle,
+// then — only when this session's writes still are not on the hub — a
+// {"decision":"block"} JSON on stdout naming them. Not async, stdout kept.
+func hookStopCommand(label string) string {
+	return `sh -c '` + mountGuard() +
+		`bdrive sync . ` + stopMarker + ` ` + label + ` 2>/dev/null'`
+}
+
 // readHookCommand queues agent file reads for the hub's read heatmap:
 // `bdrive read-log` parses the hook's stdin JSON itself and only appends to
 // a local spool, so this stays cheap enough to run on every read-tool call.
@@ -166,7 +181,7 @@ var platforms = map[string]platform{
 			// Glob stays unmatched on purpose — listing names isn't reading.
 			return mergeJSONHooks(ConfigPath("", "claude"),
 				"UserPromptSubmit", "PostToolUse", "Write|Edit|MultiEdit", "Read|Grep|Bash", "claude-code", 30, true,
-				hookPullCommand("claude-code"))
+				hookPullCommand("claude-code"), hookStopCommand("claude-code"))
 		},
 	},
 	"codex": {
@@ -176,7 +191,7 @@ var platforms = map[string]platform{
 			// Codex reads mostly happen through shell commands; read-log
 			// mines the command line for the files it names.
 			return mergeJSONHooks(ConfigPath("", "codex"),
-				"UserPromptSubmit", "PostToolUse", "apply_patch", "read_file|shell", "codex", 30, false, "")
+				"UserPromptSubmit", "PostToolUse", "apply_patch", "read_file|shell", "codex", 30, false, "", "")
 		},
 		// Codex hooks are experimental and off by default, and Codex asks
 		// the user to trust each hook definition once.
@@ -189,7 +204,7 @@ var platforms = map[string]platform{
 			// Gemini uses its own event names and millisecond timeouts.
 			return mergeJSONHooks(ConfigPath("", "gemini"),
 				"BeforeAgent", "AfterTool", "write_file|replace|edit",
-				"read_file|read_many_files|search_file_content|run_shell_command", "gemini", 30000, false, "")
+				"read_file|read_many_files|search_file_content|run_shell_command", "gemini", 30000, false, "", "")
 		},
 	},
 	"hermes": {
@@ -426,7 +441,7 @@ func removeHooks(path string, isYAML bool) (bool, error) {
 		arr, _ := v.([]any)
 		var kept []any
 		for _, it := range arr {
-			left, dropped := stripOwnHooks(it)
+			left, dropped := stripOwnHooks(event, it)
 			changed = changed || dropped
 			if left != nil {
 				kept = append(kept, left)
@@ -458,14 +473,14 @@ func removeHooks(path string, isYAML bool) (bool, error) {
 //
 // Hermes' YAML shape has no inner array (a group IS a command), so it is
 // judged as a leaf.
-func stripOwnHooks(group any) (any, bool) {
+func stripOwnHooks(event string, group any) (any, bool) {
 	m, ok := group.(map[string]any)
 	if !ok {
 		return group, false
 	}
 	inner, ok := m["hooks"].([]any)
 	if !ok {
-		if ownHook(m) {
+		if ownHook(event, m) {
 			return nil, true
 		}
 		return group, false
@@ -474,7 +489,7 @@ func stripOwnHooks(group any) (any, bool) {
 	dropped := false
 	for _, h := range inner {
 		hm, ok := h.(map[string]any)
-		if ok && ownHook(hm) {
+		if ok && ownHook(event, hm) {
 			dropped = true
 			continue
 		}
@@ -492,9 +507,13 @@ func stripOwnHooks(group any) (any, bool) {
 
 // ownHook reports whether one hook entry is one this package wrote. Only the
 // command is read (never the whole serialized group), and only inside an event
-// this package registers under — see ourEvents.
-func ownHook(h map[string]any) bool {
+// this package registers under — see ourEvents. Under Stop only the receipt
+// counts (stopMarker): a user's own `bdrive sync .` there is theirs.
+func ownHook(event string, h map[string]any) bool {
 	cmd, _ := h["command"].(string)
+	if event == "Stop" {
+		return strings.Contains(cmd, stopMarker)
+	}
 	return strings.Contains(cmd, marker) || strings.Contains(cmd, readMarker)
 }
 
@@ -502,8 +521,9 @@ func ownHook(h map[string]any) bool {
 // hooks JSON file (Claude, Codex, and Gemini all use this shape:
 // hooks.<Event> is an array of {matcher?, hooks: [{type: "command", ...}]}
 // groups). Push and read share the tool-use event under different matchers,
-// each idempotent on its own marker.
-func mergeJSONHooks(path, pullEvent, pushEvent, pushMatcher, readMatcher, label string, timeout int, async bool, pullCmd string) (string, bool, error) {
+// each idempotent on its own marker. A non-empty stopCmd adds a fourth group,
+// the turn-end receipt under Stop.
+func mergeJSONHooks(path, pullEvent, pushEvent, pushMatcher, readMatcher, label string, timeout int, async bool, pullCmd, stopCmd string) (string, bool, error) {
 	root := map[string]any{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &root); err != nil {
@@ -534,8 +554,7 @@ func mergeJSONHooks(path, pullEvent, pushEvent, pushMatcher, readMatcher, label 
 	push := map[string]any{"matcher": pushMatcher, "hooks": []any{pushHook}}
 	read := map[string]any{"matcher": readMatcher, "hooks": []any{readHook}}
 
-	changed := false
-	for _, g := range []struct {
+	groups := []struct {
 		event  string
 		group  map[string]any
 		marker string
@@ -543,7 +562,20 @@ func mergeJSONHooks(path, pullEvent, pushEvent, pushMatcher, readMatcher, label 
 		{pullEvent, pull, marker},
 		{pushEvent, push, marker},
 		{pushEvent, read, readMarker},
-	} {
+	}
+	if stopCmd != "" {
+		groups = append(groups, struct {
+			event  string
+			group  map[string]any
+			marker string
+		}{"Stop", map[string]any{"hooks": []any{map[string]any{
+			"type": "command", "command": stopCmd, "timeout": timeout,
+			"statusMessage": "beardrive: checking files reached the hub",
+		}}}, stopMarker})
+	}
+
+	changed := false
+	for _, g := range groups {
 		arr, _ := hooks[g.event].([]any)
 		if idx := indexOfMarkerGroup(arr, g.marker); idx >= 0 {
 			// Already registered. These are OUR managed groups (marker-
