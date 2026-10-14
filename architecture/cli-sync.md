@@ -72,6 +72,7 @@ classDiagram
     note for Filter "EscapeIgnore is compile's inverse (escapes the glob metacharacters, the negation and comment markers, and trailing whitespace) so bdrive forget writes a rule matching exactly that path and nothing else"
 
     class SyncState {
+        +string Remote
         +Lamport +PushedOps +Access
         +AccessReason
         +IgnoreAccepted +IgnorePulled
@@ -152,11 +153,13 @@ classDiagram
         +PutBlob / OpenBlob / HasBlob
         +AppendOps / DeviceOps / AllOps
         +LoadCache / SaveCache mountID
+        +HasCache mountID
         +LoadSync / SaveSync
         +SaveNote / LoadNote
         +LogRead(rel, session) read spool
         +PendingReads dedup on path+session
         +LogInbound / DrainInbound
+        +LogInboundForMount / DrainInboundForMount
         +LoadSecrets / SaveSecrets mountID
         +Lock() flock
     }
@@ -329,6 +332,9 @@ classDiagram
         +EnrollMount writes the row
         +ValidMountID(id) bool
     }
+    class MountInfo {
+        +string VolumeID
+    }
     note for MountRegistry "ResolveMount and EnrollMount are now two gestures, not one. ResolveMount NEVER creates a row: it self-heals the path only when Dev/Ino prove it is the same directory (a move), so a COPY of a project folder no longer silently enrolls itself as the original and starts writing that project's journal — it errors and points at bdrive init. EnrollMount is ResolveMount plus the write, and startSync is its only caller. ValidMountID keeps a hand-edited id out of a filesystem path (it names a directory under BDRIVE_HOME)"
     class Device {
         device.json
@@ -375,6 +381,7 @@ classDiagram
     AgentHooks --> Commands : runs sync and read-log
     Commands --> syncBlocked : sync and read-log gate first
     syncBlocked --> MountRegistry : reads only, never enrolls
+    MountRegistry *-- MountInfo : rows
     syncBlocked --> PausedMarker : Paused check
     Commands --> openSession : after the gate
     openSession --> MountRegistry : ResolveMount — self-heal only, never enrolls

@@ -3,8 +3,10 @@ package store
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -39,10 +41,19 @@ const inboundDrainMax = 4096
 func (s *Store) inboundSpoolPath() string { return filepath.Join(s.dir, "inbound.jsonl") }
 func (s *Store) inboundDrainPath() string { return filepath.Join(s.dir, "inbound-draining.jsonl") }
 
-// LogInbound appends one materialized path to the spool. Single-line O_APPEND
-// writes keep the daemon and a concurrent CLI cycle from interleaving.
-func (s *Store) LogInbound(rel string, deleted bool) error {
-	if fi, err := os.Stat(s.inboundSpoolPath()); err == nil && fi.Size() > inboundSpoolMax {
+func (s *Store) inboundMountPaths(mountID string) (spool, drain string, err error) {
+	if mountID == "" {
+		return s.inboundSpoolPath(), s.inboundDrainPath(), nil
+	}
+	if mountID == "." || mountID == ".." || strings.ContainsAny(mountID, `/\`) {
+		return "", "", fmt.Errorf("invalid mount id %q", mountID)
+	}
+	return filepath.Join(s.dir, "inbound-"+mountID+".jsonl"),
+		filepath.Join(s.dir, "inbound-draining-"+mountID+".jsonl"), nil
+}
+
+func (s *Store) logInboundPath(spool, rel string, deleted bool) error {
+	if fi, err := os.Stat(spool); err == nil && fi.Size() > inboundSpoolMax {
 		return nil // spool full: drop, never grow unbounded
 	}
 	line, err := json.Marshal(InboundEvent{Path: rel, Deleted: deleted, Time: time.Now().UTC()})
@@ -50,7 +61,7 @@ func (s *Store) LogInbound(rel string, deleted bool) error {
 		return err
 	}
 	// 0600: the spool is a list of this project's file paths.
-	f, err := os.OpenFile(s.inboundSpoolPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(spool, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -59,38 +70,51 @@ func (s *Store) LogInbound(rel string, deleted bool) error {
 	return err
 }
 
-// DrainInbound returns the queued batch and clears it, deduplicated by path
-// (latest event wins, so a path written and then deleted reports as deleted).
-// The spool is rotated aside first, so events logged during the drain land in
-// a fresh spool — the drain runs outside the volume flock, and a daemon on
-// the same mount may be appending.
-//
-// One call, unlike PendingReads/ClearPendingReads: those are two steps
-// because a read report can fail over the network and must be retried, and
-// rendering a string onto stdout cannot.
-func (s *Store) DrainInbound() ([]InboundEvent, error) {
-	if _, err := os.Stat(s.inboundDrainPath()); os.IsNotExist(err) {
-		if err := os.Rename(s.inboundSpoolPath(), s.inboundDrainPath()); err != nil {
+// LogInbound appends one materialized path to the legacy spool for backward
+// compatibility with callers and installations that do not have a mount id.
+func (s *Store) LogInbound(rel string, deleted bool) error {
+	spool, _, err := s.inboundMountPaths("")
+	if err != nil {
+		return err
+	}
+	return s.logInboundPath(spool, rel, deleted)
+}
+
+// LogInboundForMount appends one materialized path to the mount's spool.
+func (s *Store) LogInboundForMount(mountID, rel string, deleted bool) error {
+	spool, _, err := s.inboundMountPaths(mountID)
+	if err != nil {
+		return err
+	}
+	return s.logInboundPath(spool, rel, deleted)
+}
+
+// drainInboundPaths rotates one spool aside, reads the queued batch, and
+// clears the drain file. Events logged during the drain land in a fresh spool.
+// The drain runs outside the volume flock, and a daemon on the same mount may
+// be appending.
+func (s *Store) drainInboundPaths(spool, drain string) ([]InboundEvent, error) {
+	if _, err := os.Stat(drain); os.IsNotExist(err) {
+		if err := os.Rename(spool, drain); err != nil {
 			if os.IsNotExist(err) {
 				return nil, nil // nothing queued
 			}
 			return nil, err
 		}
 	}
-	data, err := os.ReadFile(s.inboundDrainPath())
+	data, err := os.ReadFile(drain)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		// Unreadable: drop it rather than wedging every future drain behind
 		// it. Losing a turn's list is the cheaper failure.
-		os.Remove(s.inboundDrainPath())
+		os.Remove(drain)
 		return nil, err
 	}
-	defer os.Remove(s.inboundDrainPath())
+	defer os.Remove(drain)
 
-	latest := map[string]InboundEvent{}
-	var order []string
+	var events []InboundEvent
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -99,11 +123,22 @@ func (s *Store) DrainInbound() ([]InboundEvent, error) {
 		if json.Unmarshal(line, &e) != nil || e.Path == "" {
 			continue // torn or corrupt line; drop it
 		}
-		if _, ok := latest[e.Path]; !ok {
-			order = append(order, e.Path)
-		}
-		if prev, ok := latest[e.Path]; !ok || !e.Time.Before(prev.Time) {
-			latest[e.Path] = e
+		events = append(events, e)
+	}
+	return mergeInboundEvents(events), nil
+}
+
+func mergeInboundEvents(groups ...[]InboundEvent) []InboundEvent {
+	latest := map[string]InboundEvent{}
+	var order []string
+	for _, events := range groups {
+		for _, e := range events {
+			if _, ok := latest[e.Path]; !ok {
+				order = append(order, e.Path)
+			}
+			if prev, ok := latest[e.Path]; !ok || !e.Time.Before(prev.Time) {
+				latest[e.Path] = e
+			}
 		}
 	}
 	if len(order) > inboundDrainMax {
@@ -113,5 +148,36 @@ func (s *Store) DrainInbound() ([]InboundEvent, error) {
 	for _, p := range order {
 		out = append(out, latest[p])
 	}
-	return out, nil
+	return out
+}
+
+// DrainInbound returns the queued batch from the legacy spool.
+func (s *Store) DrainInbound() ([]InboundEvent, error) {
+	return s.drainInboundPaths(s.inboundSpoolPath(), s.inboundDrainPath())
+}
+
+// DrainInboundForMount drains a mount-specific spool. Legacy spool events are
+// also drained when present so older callers remain visible to the hook.
+func (s *Store) DrainInboundForMount(mountID string) ([]InboundEvent, error) {
+	if mountID == "" {
+		return s.DrainInbound()
+	}
+	spool, drain, err := s.inboundMountPaths(mountID)
+	if err != nil {
+		return nil, err
+	}
+	mountEvents, err := s.drainInboundPaths(spool, drain)
+	if err != nil {
+		return nil, err
+	}
+	var legacyEvents []InboundEvent
+	_, spoolErr := os.Stat(s.inboundSpoolPath())
+	_, drainErr := os.Stat(s.inboundDrainPath())
+	if spoolErr == nil || drainErr == nil {
+		legacyEvents, err = s.DrainInbound()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return mergeInboundEvents(mountEvents, legacyEvents), nil
 }

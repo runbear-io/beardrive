@@ -115,7 +115,7 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// daemon materialized the peer's change seconds ago, so this cycle saw
 	// nothing and the spool is where the record is. Errors are ignored — the
 	// links matter more than the list.
-	paths, _ := sess.Store.DrainInbound()
+	paths, _ := sess.Store.DrainInboundForMount(sess.MountID)
 	// Not drained: findings are state, not events. They stand until the file
 	// changes without them, so every turn sees the ones still true.
 	found, _ := sess.Store.LoadSecrets(sess.MountID)

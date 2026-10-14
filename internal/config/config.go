@@ -9,10 +9,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -185,6 +187,11 @@ type MountInfo struct {
 	Path   string `json:"path"`
 	Volume string `json:"volume,omitempty"`
 	Remote string `json:"remote,omitempty"`
+	// VolumeID is the shared volume store directory name under ~/.bdrive/volumes/
+	// when multiple mounts (or a re-created worktree) connect to the same remote
+	// project. Empty means VolumeDir uses the mount's own ID (the legacy and
+	// first-mount default).
+	VolumeID string `json:"volume_id,omitempty"`
 	// Dev+Ino are the filesystem's identity for Path at the time this row was
 	// written. They are what tells a MOVED folder (rename: same inode, new
 	// path) from a second folder carrying a copy of the same
@@ -266,7 +273,177 @@ func VolumeDir(mountID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "volumes", mountID), nil
+	volumeID := mountID
+	if mounts, err := LoadMounts(); err == nil {
+		if mi, ok := mounts[mountID]; ok && mi.VolumeID != "" && ValidMountID(mi.VolumeID) {
+			volumeID = mi.VolumeID
+		}
+	}
+	return filepath.Join(home, "volumes", volumeID), nil
+}
+
+// SameRemote reports whether two remote URLs identify the same project.
+func SameRemote(a, b string) bool {
+	a = strings.TrimRight(strings.TrimSpace(a), "/")
+	b = strings.TrimRight(strings.TrimSpace(b), "/")
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil || ua.Scheme == "" || ua.Host == "" || ub.Scheme == "" || ub.Host == "" {
+		return false
+	}
+	// Object-store URLs use trimmed string equality rather than HTTP origin
+	// normalization: bucket and key spelling are part of the remote identity.
+	if strings.EqualFold(ua.Scheme, "file") || strings.EqualFold(ua.Scheme, "s3") ||
+		strings.EqualFold(ua.Scheme, "gs") || strings.EqualFold(ub.Scheme, "file") ||
+		strings.EqualFold(ub.Scheme, "s3") || strings.EqualFold(ub.Scheme, "gs") {
+		return false
+	}
+	return normalizedRemoteOrigin(ua) == normalizedRemoteOrigin(ub) &&
+		strings.TrimRight(ua.Path, "/") == strings.TrimRight(ub.Path, "/")
+}
+
+func normalizedRemoteOrigin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.TrimRight(strings.ToLower(u.Hostname()), ".")
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host
+}
+
+// SharedVolumeIDForRemote finds a local volume already associated with remote.
+func SharedVolumeIDForRemote(remote, excludeMountID string) string {
+	if strings.TrimSpace(remote) == "" {
+		return ""
+	}
+	home, err := Home()
+	if err != nil {
+		return ""
+	}
+
+	candidates := map[string]bool{}
+	if mounts, err := LoadMounts(); err == nil {
+		for id, mi := range mounts {
+			if id == excludeMountID || !ValidMountID(id) || !SameRemote(mi.Remote, remote) {
+				continue
+			}
+			vid := mi.VolumeID
+			if vid == "" {
+				vid = id
+			}
+			if ValidMountID(vid) {
+				candidates[vid] = true
+			}
+		}
+	}
+
+	// A forgotten mount may no longer have a registry row. Its sync state is
+	// the durable identity that lets a recreated worktree find the old store.
+	if entries, err := os.ReadDir(filepath.Join(home, "volumes")); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || e.Name() == excludeMountID || !ValidMountID(e.Name()) {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(home, "volumes", e.Name(), "sync.json"))
+			if err != nil {
+				continue
+			}
+			var state struct {
+				Remote string `json:"remote"`
+			}
+			if json.Unmarshal(data, &state) == nil && SameRemote(state.Remote, remote) {
+				candidates[e.Name()] = true
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	ids := make([]string, 0, len(candidates))
+	for id := range candidates {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	var best volumeRank
+	haveBest := false
+	for _, id := range ids {
+		rank := rankVolume(home, id)
+		if !haveBest || betterVolumeRank(rank, best) {
+			best = rank
+			haveBest = true
+		}
+	}
+	return best.id
+}
+
+type volumeRank struct {
+	id          string
+	pushedOps   int64
+	lamport     int64
+	hasSyncJSON bool
+	hasJournal  bool
+	dirExists   bool
+}
+
+func rankVolume(home, id string) volumeRank {
+	rank := volumeRank{id: id}
+	dir := filepath.Join(home, "volumes", id)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return rank
+	}
+	rank.dirExists = true
+	if info, err := os.Stat(filepath.Join(dir, "journal")); err == nil && info.IsDir() {
+		rank.hasJournal = true
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "sync.json"))
+	if err != nil {
+		return rank
+	}
+	rank.hasSyncJSON = true
+	var state struct {
+		Lamport   int64 `json:"lamport"`
+		PushedOps int64 `json:"pushed_ops"`
+	}
+	if json.Unmarshal(data, &state) == nil {
+		rank.lamport = state.Lamport
+		rank.pushedOps = state.PushedOps
+	}
+	return rank
+}
+
+func betterVolumeRank(a, b volumeRank) bool {
+	if a.pushedOps != b.pushedOps {
+		return a.pushedOps > b.pushedOps
+	}
+	if a.lamport != b.lamport {
+		return a.lamport > b.lamport
+	}
+	if a.hasSyncJSON != b.hasSyncJSON {
+		return a.hasSyncJSON
+	}
+	if a.hasJournal != b.hasJournal {
+		return a.hasJournal
+	}
+	if a.dirExists != b.dirExists {
+		return a.dirExists
+	}
+	return a.id < b.id
 }
 
 func writeJSON(path string, v any) error {
