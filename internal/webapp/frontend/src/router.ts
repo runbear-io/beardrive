@@ -135,6 +135,9 @@ export interface Route {
   // is the same page with different chrome, not a different page. The two
   // compose: ?v=<sha>&full=1 is a past version, read fullscreen.
   full?: boolean;
+  // A review comment to open on arrival (?comment=<id>) — the link
+  // `bdrive comments` prints for each thread.
+  comment?: string;
   // History feed filters (?q=&user=&since=&until=). Only ever set on the
   // history view; absent when nothing is filtered.
   filters?: HistoryFilters;
@@ -188,6 +191,8 @@ export function parseRoute(url: string, mode: "volume" | "hub"): Route {
   // `?full` or `?full=0` names the same intent, and a flag whose only job is
   // to hide chrome has no second state worth parsing.
   if (q?.has("full")) r.full = true;
+  const comment = q?.get("comment") || "";
+  if (/^[0-9a-f]{12}$/.test(comment)) r.comment = comment;
   const filters: HistoryFilters = {};
   for (const k of HISTORY_FILTER_KEYS) {
     const v = q?.get(k);

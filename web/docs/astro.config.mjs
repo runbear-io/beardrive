@@ -138,6 +138,7 @@ export default defineConfig({
             { label: "Connect an agent over MCP", slug: "guides/mcp" },
             { label: "Shared agent memory", slug: "guides/shared-agent-memory" },
             { label: "Artifacts and links", slug: "guides/agent-artifacts" },
+            { label: "Review comments", slug: "guides/review-comments" },
             { label: "What agents read", slug: "guides/what-agents-read" },
             { label: "Scoping the folder", slug: "guides/scoping" },
           ],

@@ -41,7 +41,7 @@ import { fileURLFor } from "./useBlob";
    would be wrong, not thrifty. */
 
 type ChangeEvent = {
-  type: "change" | "resync" | "presence" | "scope";
+  type: "change" | "resync" | "presence" | "scope" | "comments";
   paths?: string[];
   more?: boolean;
   people?: { name: string; path?: string }[];
@@ -121,6 +121,12 @@ export function useProjectEvents(
          from cache. The frame deliberately carries no prefix (see
          publishScope) — the hub answers per reader, so the honest move is to
          re-ask rather than guess which subtree moved. */
+      // Somebody commented: the file is untouched, so this is not a change
+      // an open editor should hear about — only the comment lists refetch.
+      if (ev.type === "comments") {
+        qc.invalidateQueries({ queryKey: ["comments", apiBase] });
+        return;
+      }
       if (ev.type === "scope") {
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         // These two are keyed on the project id, not apiBase (useHub.ts), and

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -262,6 +263,10 @@ func (s *Server) handleStoreList(v *volume, w http.ResponseWriter, r *http.Reque
 		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
 		return
 	}
+	// Review comments live beside the sync layout but are not part of it: a
+	// device has no use for them, and their keys would tell a member whose
+	// folder view is filtered how many threads exist on files they cannot see.
+	objs = slices.DeleteFunc(objs, func(o remote.Object) bool { return strings.HasPrefix(o.Key, commentsPrefix) })
 	objs, err = s.visibleObjects(r, rs, objs)
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)

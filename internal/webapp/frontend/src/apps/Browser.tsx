@@ -13,7 +13,7 @@ import { useFolders, useShares } from "../hooks/useHub";
 import { ruleFor } from "../lib/folders";
 import { urlForPath, urlForView, withoutFull, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
-import { HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, copyText } from "../util";
+import { CSV_EXT, HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, copyText } from "../util";
 import { toast } from "../toast";
 import { modalConfirm } from "../modal";
 import { onSearchRequest } from "../search";
@@ -24,6 +24,8 @@ import { FolderListing } from "../components/FolderListing";
 import { FileView } from "../components/FileView";
 import { ShareDialog } from "../components/ShareDialog";
 import { ShareBanner } from "../components/ShareBanner";
+import { CommentPanel, CommentSurface } from "../components/Comments";
+import { useComments } from "../hooks/useComments";
 import { Palette, type PaletteItem } from "../components/Palette";
 import { ConnectGuide } from "../components/ConnectGuide";
 import { Insights, useInsightsDevices } from "../components/Insights";
@@ -278,6 +280,31 @@ export default function Browser(props: {
     for (let i = 0; i < who.length; i++) h = (h * 31 + who.charCodeAt(i)) % 360;
     return { name: who, colour: `hsl(${h} 70% 45%)` };
   }, [config.me?.name, config.me?.email]);
+
+  /* ---- review comments ----
+     Read access is enough to comment (comments.go), so the gate is only
+     "a hub that keeps them, on the current version of a file being read".
+     Not on a pinned ?v=: a comment there would quote bytes the file no
+     longer has. Not while editing: the editor owns selection then. */
+  const commentsOn = !panel && hub && !!project && !!config.comments && isFile && !version && !route.editing;
+  const { data: threads } = useComments(apiBase, path, commentsOn);
+  const fileThreads = useMemo(() => threads || [], [threads]);
+  const openThreads = fileThreads.filter((t) => !t.resolved).length;
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [commentFocus, setCommentFocus] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
+  const openComments = useCallback(() => setCommentsOpen(true), []);
+  useEffect(() => {
+    setCommentFocus(null);
+    setPicking(false);
+  }, [path]);
+  // The link `bdrive comments` prints lands on the thread.
+  useEffect(() => {
+    if (route.comment) {
+      setCommentsOpen(true);
+      setCommentFocus(route.comment);
+    }
+  }, [route.comment]);
 
   /* ---- fullscreen (?full=1) ----
      The same file page with the app chrome hidden. The flag is derived from
@@ -819,20 +846,42 @@ export default function Browser(props: {
               }
             />
           )}
-          <FileView
-            apiBase={apiBase}
-            path={path}
-            version={version}
-            heatMap={heatMap}
-            flatFiles={flatFiles}
-            projectId={project?.id}
-            onOpenFile={openPath}
-            onMeta={setMeta}
-            onRendered={onRendered}
-            editing={editing}
-            editSource={editSource}
-            me={editorIdentity}
-          />
+          {(() => {
+            const file = (
+              <FileView
+                apiBase={apiBase}
+                path={path}
+                version={version}
+                heatMap={heatMap}
+                flatFiles={flatFiles}
+                projectId={project?.id}
+                onOpenFile={openPath}
+                onMeta={setMeta}
+                onRendered={onRendered}
+                editing={editing}
+                editSource={editSource}
+                me={editorIdentity}
+                commentable={commentsOn}
+              />
+            );
+            if (!commentsOn) return file;
+            return (
+              <CommentSurface
+                apiBase={apiBase}
+                path={path}
+                framed={HTML_EXT.test(path)}
+                lines={!MD_EXT.test(path) && !HTML_EXT.test(path) && !CSV_EXT.test(path)}
+                threads={fileThreads}
+                focus={commentFocus}
+                onFocus={setCommentFocus}
+                onOpenPanel={openComments}
+                picking={picking}
+                onPicking={setPicking}
+              >
+                {file}
+              </CommentSurface>
+            );
+          })()}
         </>
       );
     }
@@ -944,6 +993,20 @@ export default function Browser(props: {
               onClick={() => setEditSource((e) => !e)}
             >
               {editSource ? "Edit page" : "Edit source"}
+            </Button>
+          )}
+          {commentsOn && (
+            <Button
+              id="comments-btn"
+              variant="toolbar"
+              className={openThreads ? undefined : "icon-only"}
+              title={openThreads ? `${openThreads} open comment${openThreads === 1 ? "" : "s"}` : "Comments"}
+              aria-label="Comments"
+              aria-pressed={commentsOpen}
+              onClick={() => setCommentsOpen((o) => !o)}
+            >
+              <Icon name="comment" />
+              {openThreads > 0 && <span className="cm-count">{openThreads}</span>}
             </Button>
           )}
           {canShare && (
@@ -1100,6 +1163,24 @@ export default function Browser(props: {
             // agrees with what it just showed.
             refreshShares();
           }}
+        />
+      )}
+      {commentsOn && commentsOpen && (
+        <CommentPanel
+          apiBase={apiBase}
+          path={path}
+          threads={fileThreads}
+          focus={commentFocus}
+          onFocus={setCommentFocus}
+          onClose={() => {
+            setCommentsOpen(false);
+            setPicking(false);
+          }}
+          framed={HTML_EXT.test(path)}
+          picking={picking}
+          onPicking={setPicking}
+          me={config.me?.email}
+          admin={atLeast(project?.perm, "admin")}
         />
       )}
       <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} candidates={paletteCandidates} />

@@ -29,6 +29,9 @@ const PRODUCT_EVENTS: [RegExp, string][] = [
   [/^POST \/api\/invites\//, "invite_accepted"],
   [/^PUT \/api\/p\/[^/]+\/permissions\/./, "project_access_granted"],
   [/^DELETE \/api\/p\/[^/]+\/permissions\/./, "project_access_revoked"],
+  [/^POST \/api\/p\/[^/]+\/comments$/, "comment_created"],
+  [/^POST \/api\/p\/[^/]+\/comments\/[^/]+$/, "comment_updated"],
+  [/^DELETE \/api\/p\/[^/]+\/comments\/[^/]+$/, "comment_deleted"],
 ];
 
 function trackWrite(method: string, url: string) {

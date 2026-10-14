@@ -207,7 +207,21 @@ func resolveForward(idx moveIndex, files map[string]FileInfo, p string) (string,
 // minted can move it. A path that was deleted rather than moved is gone,
 // even if something now occupies the address.
 func resolveShare(idx moveIndex, files map[string]FileInfo, p string, since time.Time) (string, bool) {
+	if last, _, live := followFile(idx, files, p, since); live {
+		return last, true
+	}
+	return "", false
+}
+
+// followFile is resolveShare's walk, reporting everything it saw: every path
+// the file has held since `since` (starting with p), the last one, and
+// whether the file is still there. A caller that must decide who may see
+// something ABOUT the file — not just open it — needs the whole chain,
+// because the file being gone now does not make what was said about it while
+// it sat in a restricted folder any less restricted.
+func followFile(idx moveIndex, files map[string]FileInfo, p string, since time.Time) (last string, chain []string, live bool) {
 	seen := map[string]bool{p: true}
+	chain = []string{p}
 	for i := 0; i < maxChain; i++ {
 		var next *pathEvent
 		for j := range idx[p] {
@@ -218,18 +232,17 @@ func resolveShare(idx moveIndex, files map[string]FileInfo, p string, since time
 		}
 		if next == nil {
 			// Nothing happened to this path since: it is still the file.
-			if _, ok := files[p]; ok {
-				return p, true
-			}
-			return "", false
+			_, ok := files[p]
+			return p, chain, ok
 		}
 		if next.To == "" || seen[next.To] {
-			return "", false
+			return p, chain, false
 		}
 		seen[next.To] = true
 		p, since = next.To, next.At
+		chain = append(chain, p)
 	}
-	return "", false
+	return p, chain, false
 }
 
 // segment is one path plus the window during which it WAS the file being

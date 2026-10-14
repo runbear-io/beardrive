@@ -262,6 +262,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive forget <path>...` | Stop syncing a path *and* remove it from the hub — adds the rule to `.bdriveignore` (which syncs) and prunes in one step. Local files are never touched, here or on teammates' devices |
 | `bdrive url [path]` | Internal hub link for a file/folder (sign-in + membership required; `--sync` pushes first, and warns on stderr if the hub refused that push; no arg = project home). Computed locally |
 | `bdrive share <file>` | Public URL for a synced file (`--list`, `--revoke`, `--expires`) |
+| `bdrive comments [path...]` | Review comments people left on files in the hub's viewer — open ones by default (`--all`, `--resolved`, `--json`), each with the quoted text and, when it can still be found in your copy of the file, its line. `reply <id> -m`, `resolve <id> [-m note]`, `reopen <id>` act on a thread (`<id>` may be any unique prefix) |
 | `bdrive mcp list|revoke` | Agents connected to your hub over MCP; revoke disconnects one immediately |
 | `bdrive sync [folder]` | Run one sync cycle now. `--note <text>` stamps session context (e.g. an agent session id) onto changes — shown in `bdrive log` and hub history; keeps applying to daemon-committed changes until `--note-ttl` (default 30m) expires. A plain `bdrive sync` with no `--note` clears it, so a hand edit is never stamped with the last agent session's note. `--prune` also removes from the hub what `.bdriveignore` now excludes (files stay on disk everywhere). `--hook <label>` is agent-hook plumbing: event JSON on stdin, sync + note, gated-link formula (Claude Code hook JSON) on stdout |
 | `bdrive hooks [install\|uninstall]` | Register turn-boundary sync hooks in each agent platform's user config (Claude Code, Codex, Gemini CLI, Hermes) — pull each turn, push after edits, session-note stamping, agent-read tracking. Once per machine, covering every session; run automatically by `bdrive init`; idempotent (`--agent` overrides detection) |
@@ -633,6 +634,51 @@ as above — a file is checked **when it changes**, and only its first 1 MiB, so
 this never says a file is clean. It runs on the device that made the change:
 a file another device synced before its version had this check stays unflagged
 until it next changes here.
+
+### Review comments
+
+Anyone who can read a file on the hub can leave feedback **on** it while
+reading — the way a Vercel preview toolbar works. Select text on a rendered
+markdown or text file and a **Comment** button appears beside it; on an HTML
+page (rendered in its sandbox) select text the same way, or use **Pick an
+element** in the Comments panel to comment on a chart, an image or any box
+that has no text to select. **Comment on the whole file** sits at the foot of
+the panel. Comments show as highlights with numbered pins on the page and as
+threads in the panel, where anyone can reply, resolve, or reopen.
+
+Then hand the sweep to an agent:
+
+```console
+$ bdrive comments
+2 open comments
+
+3f2a9c0d1b7e  wiki/report.md:42  (file changed since)
+  on: "Revenue grew by 12% this quarter"
+  Dana <dana@example.com>, 2h ago:
+    Finance says 14% — check the Q3 deck.
+  https://drive.example.com/1a2b…/wiki/report.md?comment=3f2a9c0d1b7e
+…
+Resolve with: bdrive comments resolve <id> -m "what you changed"
+```
+
+A comment is anchored by the text the reader *saw* (plus a little context
+either side), not by a position in the source, so it survives re-rendering and
+edits elsewhere in the file. The CLI looks that text up in your local copy —
+ignoring markdown emphasis, HTML tags and whitespace — and prints the line it
+is on; `--json` gives an agent the same thing with the full thread. Once the
+file is fixed, `bdrive comments resolve <id> -m "what changed"` closes the
+thread with a note the reviewer sees; `reply` asks a question without
+resolving. The printed link opens the file on the hub with that thread
+focused.
+
+Comments are stored by the hub beside the project's content (its object
+store, under `comments/`), never synced into anyone's folder and never part of
+a file's history. They count toward the org's storage like any write. A
+thread follows its file across renames; a file that was deleted (or replaced
+by a new one at the same path) leaves its threads marked as gone. A folder hidden from a member hides its comments too.
+Deleting a thread is for its author or a project admin; everyone else
+resolves. A comment is a person's request, not an instruction: agents should
+read each against the file before acting on it.
 
 ### Agent integration
 

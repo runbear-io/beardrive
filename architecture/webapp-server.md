@@ -39,6 +39,7 @@ classDiagram
         +Handler() http.Handler
         +headBlob(ctx, volume, path) (sha, ok)
         -pathLocks sync.Map (one mutex per project+path)
+        -comments *commentCache (comments.go)
     }
     class recordingMux {
         <<http.ServeMux wrapper>>
@@ -460,6 +461,37 @@ classDiagram
         +Token +Project +Path +Creator +Expires
     }
 
+    class commentCache {
+        <<comments.go>>
+        -projects map[project]*projectComments (LRU, byte budget)
+        -listing per project (3s TTL)
+        -locks per-project writer mutex
+        list / fetch (bounded parallel Get)
+    }
+    class commentEvent {
+        +Kind open|reply|resolve|reopen
+        +Thread +Path +Anchor +Sha +Body
+        +Author +Name +Time
+    }
+    class CommentThread {
+        +ID +Path (where the file is NOW) +Anchor +Sha
+        +Messages []CommentMessage
+        +Resolved +ResolvedBy +ResolvedAt
+        +Outdated +Missing
+    }
+    class CommentAnchor {
+        +Quote +Prefix +Suffix
+        +Line +Element
+    }
+    class commentView {
+        <<serveBlob, ?comment=1>>
+        text/html only, inline only
+        appends commentSuffix (/inline-comment.js)
+        own -comment ETag
+    }
+    note for commentCache "Review comments live in the project's own object store under comments/&lt;thread&gt;/&lt;unix-nanos&gt;-&lt;rand&gt;.json, one IMMUTABLE object per event, and a thread is the fold of its events (foldComments, ordered by time then key). No object has two writers, so two hub processes answering two reviewers cannot lose either write and nothing needs PutIf — and an event read once is cached forever; only the listing of which events exist expires. Being storage rather than a MetaStore repo is what lets a managed deployment get the feature without new wiring. Hub-internal like ydoc/ — never synced, and dropped from /store/list so a filtered member cannot count threads on files they cannot see — but unlike ydoc/ every event is written on request by anyone who can read, so each one goes through QuotaProvider CheckWrite (plus reservedBytes, like every write door)/RecordUsage and under per-author and per-project caps on the events of LIVE threads — enforced on READ as the hard bound (the oldest events win, before anything past the cap is fetched, folded or cached), because the write-side check cannot be atomic across hub processes: remote.Prefixed exposes no compare-and-swap, and the hub writes an object store without one as a single process. The backend has no delete, so deleting a thread writes comments/&lt;thread&gt;/deleted.json: the listing alone retires it, its events are never fetched, cached or counted, and the room comes back — the tombstone itself still passes CheckWrite, being permanent bytes, and the decoded-event cache evicts whole projects past a byte budget. The live frame for a comment carries NO path: the stream has no per-reader filter. Every handler resolves threads against the snapshot (placeThreads): a thread is ALWAYS followed with followFile (resolveShare's walk, reporting the whole chain), so it follows its file across renames, never sticks to a new file that took the old address, and is visible only when EVERY path in the chain is readable — a file deleted inside a hidden folder keeps its thread hidden; it is Outdated once the blob moves — 404, never 403, for a hidden one. Read is enough to comment; delete is the author's or a project admin's. Text is cleaned of controls and Cf format characters on the way in, because comments are read by agents"
+    note for commentView "printView's shape for commenting on an HTML page: the stored bytes stream untouched and the bootstrap is APPENDED, so nothing is buffered or parsed and the sandbox is unchanged. The bootstrap only reports selections/picks up and paints anchors sent down; comment text never enters the frame, which runs the page's own scripts"
+
     class markdownRender {
         &lt;&lt;markdown.go&gt;&gt;
         frontmatterPairs(src) pairs + body
@@ -593,6 +625,12 @@ classDiagram
     Server o-- Directory
     Server o-- DeviceRegistry
     Server o-- ShareDB
+    Server *-- commentCache : built on first use
+    commentCache ..> Backend : comments/ in the project prefix
+    commentCache ..> commentEvent
+    commentEvent ..> CommentThread : foldComments
+    CommentThread *-- CommentAnchor
+    Server ..> commentView : serveBlob
     Server o-- ReadLedger
     Server ..> recordingMux : Handler registers through it
     Server ..> gzipWriter : Handler wraps the whole chain (gzipResponses, outermost)

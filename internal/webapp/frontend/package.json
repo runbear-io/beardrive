@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && vite build -c vite.inline-edit.config.ts",
+    "build": "tsc && vite build && vite build -c vite.inline-edit.config.ts && vite build -c vite.inline-comment.config.ts",
     "test": "node --test 'src/**/*.test.ts'",
     "e2e": "playwright test -c e2e"
   },
