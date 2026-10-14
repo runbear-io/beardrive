@@ -1055,6 +1055,101 @@ func TestWorktree_StopForgetPreservesLegacyInboundSpoolForReenrolledMount(t *tes
 	}
 }
 
+func TestWorktree_StopForgetDoesNotClobberConcurrentEnrollment(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1, wt2 := t.TempDir(), t.TempDir()
+	proj1 := initWorktree(t, wt1, rawRemote)
+	proj2, err := config.SaveProject(wt2, config.Project{Remote: rawRemote})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		stop := stopCmd()
+		stop.SetArgs([]string{wt1, "--forget"})
+		errs <- stop.Execute()
+	}()
+	go func() {
+		defer wg.Done()
+		_, _, err := config.EnrollMount(wt2)
+		errs <- err
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	mounts, err := config.LoadMounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mounts[proj1.ID]; ok {
+		t.Fatalf("stop --forget left proj1 row behind: %#v", mounts)
+	}
+	if _, ok := mounts[proj2.ID]; !ok {
+		t.Fatalf("concurrent enrollment lost proj2 row: %#v", mounts)
+	}
+}
+
+func TestWorktree_PeerJournalCompletenessOutranksSingleOpStaleStore(t *testing.T) {
+	bhome := worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	dev, err := config.LoadDevice()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveMounts(map[string]config.MountInfo{
+		"m-zzz": {Remote: rawRemote},
+		"m-aaa": {Remote: rawRemote},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	peerOps := make([]journal.Op, 5)
+	for i := range peerOps {
+		seq := int64(i + 1)
+		peerOps[i] = journal.Op{
+			Seq: seq, Lamport: seq, Device: "peer12345678",
+			Kind: journal.KindPut, Path: "peer-" + string(rune('a'+i)) + ".md",
+		}
+	}
+	zzzDir := filepath.Join(bhome, "volumes", "m-zzz")
+	zzzStore, err := store.Open(zzzDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := zzzStore.SaveSync(store.SyncState{Remote: rawRemote}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zzzStore.AppendOps("peer12345678", peerOps); err != nil {
+		t.Fatal(err)
+	}
+
+	aaaDir := filepath.Join(bhome, "volumes", "m-aaa")
+	aaaStore, err := store.Open(aaaDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := aaaStore.SaveSync(store.SyncState{Remote: rawRemote, PushedOps: 1, Lamport: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := aaaStore.AppendOps(dev.ID, []journal.Op{{
+		Seq: 1, Lamport: 1, Device: dev.ID, Kind: journal.KindPut, Path: "own.md",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := config.SharedVolumeIDForRemote(rawRemote, ""); got != "m-zzz" {
+		t.Fatalf("SharedVolumeIDForRemote selected %q, want complete peer-journal m-zzz", got)
+	}
+}
+
 func TestWorktree_BackwardCompatLegacyMountUnchanged(t *testing.T) {
 	bhome := worktreeHome(t)
 	rawRemote := "file://" + t.TempDir()

@@ -428,10 +428,7 @@ func runDesktopInit(target, name string, settings config.Settings, hooks bool) {
 		// .bdrive config, plus the folder itself when we created it. A folder
 		// the user already had keeps its contents.
 		if proj, ok, perr := config.LoadProject(target); perr == nil && ok {
-			if mounts, merr := config.LoadMounts(); merr == nil {
-				delete(mounts, proj.ID)
-				config.SaveMounts(mounts)
-			}
+			_ = config.ForgetMount(proj.ID)
 			os.RemoveAll(filepath.Join(target, config.ProjectDir))
 		}
 		if createdFolder {

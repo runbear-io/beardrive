@@ -241,6 +241,10 @@ func mountsPath() (string, error) {
 
 // LoadMounts returns the mount-ID → mount registry.
 func LoadMounts() (map[string]MountInfo, error) {
+	return loadMountsUnlocked()
+}
+
+func loadMountsUnlocked() (map[string]MountInfo, error) {
 	p, err := mountsPath()
 	if err != nil {
 		return nil, err
@@ -257,6 +261,22 @@ func LoadMounts() (map[string]MountInfo, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// ForgetMount removes mountID from mounts.json under the registry lock so
+// concurrent enrollments are never overwritten with a stale snapshot.
+func ForgetMount(mountID string) error {
+	unlock, err := lockMounts()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	mounts, err := loadMountsUnlocked()
+	if err != nil {
+		return err
+	}
+	delete(mounts, mountID)
+	return saveMountsLocked(mounts)
 }
 
 // SaveMounts writes the registry, stamping an identity on any row that has
@@ -529,6 +549,7 @@ const maxRankLamport = int64(1) << 62
 
 type volumeRank struct {
 	id          string
+	totalOps    int64
 	ownOps      int64
 	pushedOps   int64
 	lamport     int64
@@ -569,6 +590,7 @@ func rankVolume(home, id string) volumeRank {
 					continue
 				}
 				for _, op := range ops {
+					rank.totalOps++
 					if op.Lamport > rank.lamport && op.Lamport <= maxRankLamport {
 						rank.lamport = op.Lamport
 					}
@@ -600,14 +622,17 @@ func rankVolume(home, id string) volumeRank {
 
 
 func betterVolumeRank(a, b volumeRank, preferredID string) bool {
+	if a.totalOps != b.totalOps {
+		return a.totalOps > b.totalOps
+	}
+	if a.lamport != b.lamport {
+		return a.lamport > b.lamport
+	}
 	if a.ownOps != b.ownOps {
 		return a.ownOps > b.ownOps
 	}
 	if a.pushedOps != b.pushedOps {
 		return a.pushedOps > b.pushedOps
-	}
-	if a.lamport != b.lamport {
-		return a.lamport > b.lamport
 	}
 	if a.hasSyncJSON != b.hasSyncJSON {
 		return a.hasSyncJSON
@@ -628,6 +653,7 @@ func betterVolumeRank(a, b volumeRank, preferredID string) bool {
 	}
 	return a.id < b.id
 }
+
 // SharedVolumeHasIgnoreState reports whether a shared project volume currently
 // resolves .bdriveignore to a real file whose blob is present locally.
 func SharedVolumeHasIgnoreState(remote, excludeMountID string) bool {

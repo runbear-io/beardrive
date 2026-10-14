@@ -145,8 +145,7 @@ folder's .bdrive settings and the local volume data are kept).`,
 				return err
 			}
 			if forget {
-				delete(mounts, proj.ID)
-				if err := config.SaveMounts(mounts); err != nil {
+				if err := config.ForgetMount(proj.ID); err != nil {
 					return err
 				}
 				fmt.Printf("forgot mount %s (local volume data kept under ~/.bdrive/volumes/%s)\n", proj.ID, proj.ID)
