@@ -548,14 +548,15 @@ func sharedVolumeIDForRemoteIn(home string, mounts map[string]MountInfo, remote,
 const maxRankLamport = int64(1) << 62
 
 type volumeRank struct {
-	id          string
-	totalOps    int64
-	ownOps      int64
-	pushedOps   int64
-	lamport     int64
-	hasSyncJSON bool
-	hasJournal  bool
-	dirExists   bool
+	id                 string
+	totalOps           int64
+	ownOps             int64
+	ownContiguousSeq   int64
+	pushedOps          int64
+	lamport            int64
+	hasSyncJSON        bool
+	hasJournal         bool
+	dirExists          bool
 }
 
 func rankVolume(home, id string) volumeRank {
@@ -573,11 +574,18 @@ func rankVolume(home, id string) volumeRank {
 			ownOps, err := journal.ReadFile(filepath.Join(journalDir, dev.ID+".jsonl"))
 			if err == nil {
 				rank.ownOps = int64(len(ownOps))
+				var contig int64
 				for _, op := range ownOps {
+					if op.Seq == contig+1 {
+						contig = op.Seq
+					} else if op.Seq > contig+1 {
+						break
+					}
 					if op.Lamport > rank.lamport && op.Lamport <= maxRankLamport {
 						rank.lamport = op.Lamport
 					}
 				}
+				rank.ownContiguousSeq = contig
 			}
 		}
 		if entries, err := os.ReadDir(journalDir); err == nil {
@@ -622,6 +630,9 @@ func rankVolume(home, id string) volumeRank {
 
 
 func betterVolumeRank(a, b volumeRank, preferredID string) bool {
+	if a.ownContiguousSeq != b.ownContiguousSeq && (a.ownContiguousSeq > 1 || b.ownContiguousSeq > 1) {
+		return a.ownContiguousSeq > b.ownContiguousSeq
+	}
 	if a.totalOps != b.totalOps {
 		return a.totalOps > b.totalOps
 	}

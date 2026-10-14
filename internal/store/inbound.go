@@ -161,16 +161,39 @@ func (s *Store) legacyOwnerForgotten(mountID string) bool {
 		return false
 	}
 	var mounts map[string]struct {
+		Path     string `json:"path"`
 		VolumeID string `json:"volume_id"`
 	}
 	if err := json.Unmarshal(data, &mounts); err != nil {
 		return false
 	}
 	ownerID := filepath.Base(s.dir)
-	if _, ownerPresent := mounts[ownerID]; ownerPresent {
+	mi, enrolled := mounts[mountID]
+	if !enrolled {
 		return false
 	}
-	return true
+	resolvedVol := mi.VolumeID
+	if resolvedVol == "" {
+		resolvedVol = mountID
+	}
+	if resolvedVol != ownerID {
+		return false
+	}
+	ownerMI, ownerPresent := mounts[ownerID]
+	if !ownerPresent {
+		return true
+	}
+	data, err = os.ReadFile(filepath.Join(ownerMI.Path, ".bdrive", "config.json"))
+	if err != nil {
+		return true
+	}
+	var cfg struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return true
+	}
+	return cfg.ID != ownerID
 }
 
 // DrainInbound returns the queued batch from the legacy spool.

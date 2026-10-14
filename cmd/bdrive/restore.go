@@ -104,7 +104,7 @@ delete the file here and let the next sync carry it.`,
 			note := fmt.Sprintf("restore %s@%s", rel, shortSHA(op.Blob))
 			// Persist the note so a daemon that wins the race to scan the file
 			// stamps it too — otherwise the restore lands in history unlabeled.
-			if err := sess.Store.SaveNote(note, restoreNoteTTL); err != nil {
+			if err := sess.Store.SaveNoteForMount(sess.MountID, note, restoreNoteTTL); err != nil {
 				return err
 			}
 			sess.Note = note

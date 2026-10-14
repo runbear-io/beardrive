@@ -95,7 +95,7 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 
 	if sessionID != "" {
 		note := label + " session " + sessionID
-		if err := sess.Store.SaveNote(note, hookNoteTTL); err == nil {
+		if err := sess.Store.SaveNoteForMount(sess.MountID, note, hookNoteTTL); err == nil {
 			sess.Note = note
 		}
 		// The hook is the ONLY writer of Op.Session — `bdrive sync --note`

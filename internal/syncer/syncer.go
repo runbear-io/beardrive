@@ -77,7 +77,7 @@ type Session struct {
 	Account config.Settings
 	// Note, when set, is stamped into every op this session commits — session
 	// context like "claude-code session <id>". Empty means fall back to the
-	// store's persisted session note (store.LoadNote), which lets a one-shot
+	// store's persisted mount note (store.LoadNoteForMount), which lets a one-shot
 	// `bdrive sync --note` leave context that the daemon's later scans also
 	// stamp. Conflict-copy ops keep their own explanatory note.
 	Note string
@@ -440,8 +440,17 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ok && s.MountID != "" && proj.ID != "" && proj.ID != s.MountID {
-		return nil, fmt.Errorf("project config gone at %s", s.Folder)
+	if s.MountID != "" {
+		registered := false
+		if mounts, merr := config.LoadMounts(); merr == nil {
+			_, registered = mounts[s.MountID]
+		}
+		if registered && (!ok || proj.ID == "" || proj.ID != s.MountID) {
+			return nil, fmt.Errorf("project config gone at %s", s.Folder)
+		}
+		if ok && proj.ID != "" && proj.ID != s.MountID {
+			return nil, fmt.Errorf("project config gone at %s", s.Folder)
+		}
 	}
 	if s.ExpectedRemote != "" && !config.SameRemote(proj.Remote, s.ExpectedRemote) {
 		return nil, fmt.Errorf("project remote changed (%q -> %q)", s.ExpectedRemote, proj.Remote)
@@ -478,9 +487,9 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// disk holds a peer's bytes, and the maxLamport ceiling is what stops a
 	// hostile peer installing a permanent write lock.
 	//
-	// AFTER `joining` is read, never before. joining gates the adoption path,
-	// so deriving first would turn a device whose first cycle crashed into a
-	// non-joiner and change what `bdrive init` adopts.
+	// Determine joining before raising the clock. Existing ops also identify
+	// a populated store whose sync.json was not saved before a crash; a mount
+	// without a cache must adopt that state rather than start a fresh import.
 	//
 	// ponytail: re-reads every journal, so the cycle now parses them twice (the
 	// other read is step 4's). The cycle already walks the whole working folder
@@ -496,6 +505,13 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 		// from capturing local edits. The stored clock stands for this cycle.
 		log.Printf("beardrive: could not re-derive the sync clock: %v", err)
 	} else {
+		if len(ops) > 0 {
+			deviceJoining = false
+			if !hadCache && s.MountID != "" {
+				mountJoining = true
+				joining = true
+			}
+		}
 		if mountJoining || hadCachedIgnore {
 			existingState = journal.Replay(ops)
 			if want, ok := existingState[IgnoreFile]; ok {
@@ -999,7 +1015,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 	var ops []journal.Op
 	note := s.Note
 	if note == "" {
-		note = s.Store.LoadNote()
+		note = s.Store.LoadNoteForMount(s.MountID)
 	}
 	// One scan is one commit: every op it produces carries the same Time. Op
 	// order inside the batch is already carried by Lamport and Seq, which

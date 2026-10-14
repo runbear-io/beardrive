@@ -96,7 +96,7 @@ list in .bdrive/config.json is never pruned against either.`,
 				// The --hook branch below has its own SaveNote and keeps the
 				// TTL, which is what the TTL is for: the daemon's own scans
 				// inside an agent session.
-				if err := sess.Store.SaveNote(note, noteTTL); err != nil {
+				if err := sess.Store.SaveNoteForMount(sess.MountID, note, noteTTL); err != nil {
 					return err
 				}
 				sess.Note = note

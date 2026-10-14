@@ -1055,6 +1055,149 @@ func TestWorktree_StopForgetPreservesLegacyInboundSpoolForReenrolledMount(t *tes
 	}
 }
 
+func TestWorktree_OwnContiguousJournalOutranksPeerHeavyTruncatedStore(t *testing.T) {
+	bhome := worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	dev, err := config.LoadDevice()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveMounts(map[string]config.MountInfo{
+		"m-zzz": {Remote: rawRemote},
+		"m-aaa": {Remote: rawRemote},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendOps := func(id, device string, count int) {
+		t.Helper()
+		dir := filepath.Join(bhome, "volumes", id)
+		st, err := store.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ops := make([]journal.Op, count)
+		for i := range ops {
+			seq := int64(i + 1)
+			ops[i] = journal.Op{
+				Seq: seq, Lamport: seq, Device: device,
+				Kind: journal.KindPut, Path: id + "-" + device + "-" + string(rune('a'+i)) + ".md",
+			}
+		}
+		if err := st.AppendOps(device, ops); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendOps("m-zzz", dev.ID, 5)
+	appendOps("m-zzz", "peer12345678", 1)
+	appendOps("m-aaa", dev.ID, 1)
+	appendOps("m-aaa", "peer12345678", 10)
+	if got := config.SharedVolumeIDForRemote(rawRemote, ""); got != "m-zzz" {
+		t.Fatalf("SharedVolumeIDForRemote selected %q, want own-contiguous m-zzz", got)
+	}
+}
+
+func TestWorktree_CrashBeforeSaveSyncStillBootstrapsSharedIgnore(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1 := t.TempDir()
+	proj1 := initWorktree(t, wt1, rawRemote)
+	vdir, err := config.VolumeDir(proj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ignoreText := "custom_ignored/\n"
+	blob, size, err := st.PutBlobBytes([]byte(ignoreText))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev, err := config.LoadDevice()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendOps(dev.ID, []journal.Op{{
+		Seq: 1, Lamport: 1, Device: dev.ID, Kind: journal.KindPut,
+		Path: ".bdriveignore", Blob: blob, Size: size,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	wt2 := t.TempDir()
+	proj2 := initWorktree(t, wt2, rawRemote)
+	secret := filepath.Join(wt2, "custom_ignored", "secret.txt")
+	if err := os.MkdirAll(filepath.Dir(secret), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("must remain local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res := cycleWorktree(t, wt2); res == nil {
+		t.Fatal("wt2 cycle returned no result")
+	}
+	if got, err := os.ReadFile(filepath.Join(wt2, ".bdriveignore")); err != nil || string(got) != ignoreText {
+		t.Fatalf("wt2 .bdriveignore = %q (%v), want crash-recovered rules", got, err)
+	}
+	for _, op := range localOps(t, proj2.ID) {
+		if op.Path == "custom_ignored/secret.txt" {
+			t.Fatal("custom-ignored secret was journaled before crash-recovered ignore materialized")
+		}
+	}
+}
+
+func TestWorktree_ReinitWithoutForgetDrainsLegacyInboundAndIsolatesMountNotes(t *testing.T) {
+	worktreeHome(t)
+	rawRemote := "file://" + t.TempDir()
+	wt1, wt2 := t.TempDir(), t.TempDir()
+	proj1 := initWorktree(t, wt1, rawRemote)
+	proj2 := initWorktree(t, wt2, rawRemote)
+	vdir, err := config.VolumeDir(proj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveNoteForMount(proj1.ID, "wt1-note", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.LoadNoteForMount(proj1.ID); got != "wt1-note" {
+		t.Fatalf("wt1 mount note = %q, want wt1-note", got)
+	}
+	if got := st.LoadNoteForMount(proj2.ID); got != "" {
+		t.Fatalf("wt2 mount note = %q, want empty", got)
+	}
+	if err := st.ClearNoteForMount(proj2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.LoadNoteForMount(proj1.ID); got != "wt1-note" {
+		t.Fatalf("clearing wt2 note cleared wt1 note: %q", got)
+	}
+	if err := st.LogInbound("before-reinit.md", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(wt1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(wt2); err != nil {
+		t.Fatal(err)
+	}
+	wt2 = t.TempDir()
+	proj2 = initWorktree(t, wt2, rawRemote)
+	if proj2.ID == proj1.ID {
+		t.Fatal("reinitialized worktree unexpectedly reused deleted mount ID")
+	}
+	got, err := st.DrainInboundForMount(proj2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Path != "before-reinit.md" {
+		t.Fatalf("reinitialized mount inbound = %#v, want before-reinit.md", got)
+	}
+}
+
 func TestWorktree_StopForgetDoesNotClobberConcurrentEnrollment(t *testing.T) {
 	worktreeHome(t)
 	rawRemote := "file://" + t.TempDir()

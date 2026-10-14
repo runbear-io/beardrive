@@ -624,6 +624,35 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 				// whatever it then says, which is a user action.
 				log.Printf("remote changed in .bdrive/config.json (%q -> %q); exiting — run bdrive in this folder to resume",
 					proj.Remote, cur.Remote)
+				promoted = false
+				if m, merr := config.LoadMounts(); merr == nil {
+					ids := make([]string, 0, len(m))
+					for id := range m {
+						ids = append(ids, id)
+					}
+					sort.Strings(ids)
+					for _, id := range ids {
+						mi := m[id]
+						if mi.Path == "" || mi.Path == folder || store.PausedMount(volDir, id) {
+							continue
+						}
+						v, verr := config.VolumeDir(id)
+						if verr != nil || v != volDir {
+							continue
+						}
+						sc, scok, scerr := config.LoadProject(mi.Path)
+						if scerr == nil && scok && sc.ID == id &&
+							config.SameRemote(sc.Remote, proj.Remote) {
+							folder = mi.Path
+							proj = sc
+							promoted = true
+							break
+						}
+					}
+				}
+				if promoted {
+					continue
+				}
 				return nil
 			}
 			if promoted {
