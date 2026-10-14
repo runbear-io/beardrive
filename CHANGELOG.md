@@ -4,6 +4,17 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## v0.17.1 — 2026-10-14
+
+A hub-only fix; clients are unchanged. Live on the managed hub already.
+
+- **The web app's first screen no longer stalls on a busy hub.** Every
+  request now authenticates once. The project list used to re-authenticate
+  once per project on the whole hub — other organizations' projects
+  included — so on a hub whose auth provider looks sessions up in a database,
+  opening the app could wait 20+ seconds on `/api/projects` and slow every
+  other request sharing that database. (#275)
+
 ## v0.17.0 — 2026-10-14
 
 **Update your devices to get `bdrive comments` and symlink sync.** The hub
