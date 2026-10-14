@@ -1125,6 +1125,9 @@ func TestWorktree_CrashBeforeSaveSyncStillBootstrapsSharedIgnore(t *testing.T) {
 		t.Fatal(err)
 	}
 	wt2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt2, ".bdriveignore"), []byte("# stale checkout rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	proj2 := initWorktree(t, wt2, rawRemote)
 	secret := filepath.Join(wt2, "custom_ignored", "secret.txt")
 	if err := os.MkdirAll(filepath.Dir(secret), 0o755); err != nil {

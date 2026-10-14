@@ -553,25 +553,26 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 					synced = append(synced, rel)
 				}
 			}
-			if text != "" {
-				st.IgnoreAccepted, st.IgnorePulled = vouchedFloor(text, synced), text
-			} else {
-				var prior journal.Op
-				found := false
-				for _, op := range ops {
-					if op.Path == IgnoreFile && op.Kind == journal.KindPut &&
-						(!found || journal.Less(prior, op)) {
-						prior, found = op, true
-					}
+			var prior journal.Op
+			found := false
+			for _, op := range ops {
+				if op.Path == IgnoreFile && op.Kind == journal.KindPut &&
+					(!found || journal.Less(prior, op)) {
+					prior, found = op, true
 				}
-				if found {
-					st.IgnoreAccepted = vouchedFloor("/*\n", synced)
-					if prior.Blob != "" && prior.Link == "" {
-						if f, err := s.Store.OpenBlob(prior.Blob); err == nil {
-							data, readErr := io.ReadAll(f)
-							_ = f.Close()
-							if readErr == nil && len(data) > 0 {
-								st.IgnoreAccepted = vouchedFloor(string(data), synced)
+			}
+			if (!mountJoining && text != "") || (mountJoining && !found && text != "") {
+				st.IgnoreAccepted, st.IgnorePulled = vouchedFloor(text, synced), text
+			} else if found {
+				st.IgnoreAccepted = vouchedFloor("/*\n", synced)
+				if prior.Blob != "" && prior.Link == "" {
+					if f, err := s.Store.OpenBlob(prior.Blob); err == nil {
+						data, readErr := io.ReadAll(f)
+						_ = f.Close()
+						if readErr == nil && len(data) > 0 {
+							st.IgnoreAccepted = vouchedFloor(string(data), synced)
+							if _, live := existingState[IgnoreFile]; live {
+								st.IgnorePulled = string(data)
 							}
 						}
 					}
