@@ -86,6 +86,9 @@ func TestDaemon_CyclesConcurrentWorktreesAndSurvivesDeletedPrimary(t *testing.T)
 		return worktreeFileEquals(wt1, "from-wt2.txt", "from wt2\n")
 	})
 
+	if err := os.RemoveAll(filepath.Join(wt1, ".bdrive")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.RemoveAll(wt1); err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +104,9 @@ func TestDaemon_CyclesConcurrentWorktreesAndSurvivesDeletedPrimary(t *testing.T)
 		t.Fatal("deleting wt1 published a delete for from-wt1.txt to the remote")
 	}
 
+	if err := os.RemoveAll(filepath.Join(wt2, ".bdrive")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.RemoveAll(wt2); err != nil {
 		t.Fatal(err)
 	}

@@ -436,9 +436,12 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read own journal: %w", err)
 	}
-	proj, _, err := config.LoadProject(s.Folder)
+	proj, ok, err := config.LoadProject(s.Folder)
 	if err != nil {
 		return nil, err
+	}
+	if ok && s.MountID != "" && proj.ID != "" && proj.ID != s.MountID {
+		return nil, fmt.Errorf("project config gone at %s", s.Folder)
 	}
 	if s.ExpectedRemote != "" && !config.SameRemote(proj.Remote, s.ExpectedRemote) {
 		return nil, fmt.Errorf("project remote changed (%q -> %q)", s.ExpectedRemote, proj.Remote)
@@ -582,6 +585,12 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	commitLocal := func() error {
 		if len(localOps) == 0 {
 			return nil
+		}
+		if ok {
+			cur, stillOK, cerr := config.LoadProject(s.Folder)
+			if cerr != nil || !stillOK || cur.ID != proj.ID {
+				return fmt.Errorf("project config gone at %s", s.Folder)
+			}
 		}
 		if err := s.Store.AppendOps(s.Device.ID, localOps); err != nil {
 			return fmt.Errorf("append journal: %w", err)
