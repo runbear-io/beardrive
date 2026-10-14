@@ -500,15 +500,20 @@ func desktopSync(w http.ResponseWriter, r *http.Request) {
 	}
 	var localOps, pulledOps, materialized int
 	offline := false
+	syncedAny := false
+	firstMissing := false
+	firstBlocked := ""
 	for _, m := range mounts {
 		proj, ok, err := config.LoadProject(m.path)
 		if err != nil || !ok {
-			http.Error(w, "folder is not a beardrive project any more", http.StatusConflict)
-			return
+			firstMissing = true
+			continue
 		}
 		if blocked := syncBlocked(proj); blocked != "" {
-			http.Error(w, "syncing is "+blocked+" for this folder", http.StatusConflict)
-			return
+			if firstBlocked == "" {
+				firstBlocked = blocked
+			}
+			continue
 		}
 		sess, _, err := openSession(r.Context(), m.path, true)
 		if err != nil {
@@ -521,10 +526,21 @@ func desktopSync(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, cycleErr.Error(), http.StatusInternalServerError)
 			return
 		}
+		syncedAny = true
 		localOps += res.LocalOps
 		pulledOps += res.PulledOps
 		materialized += res.Materialized
 		offline = offline || res.Offline
+	}
+	if !syncedAny {
+		if firstBlocked != "" {
+			http.Error(w, "syncing is "+firstBlocked+" for this folder", http.StatusConflict)
+			return
+		}
+		if firstMissing {
+			http.Error(w, "folder is not a beardrive project any more", http.StatusConflict)
+			return
+		}
 	}
 	writeDesktopJSON(w, map[string]any{
 		"ok": true, "offline": offline, "local_ops": localOps,

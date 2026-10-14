@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -691,6 +694,119 @@ func TestWorktree_MovedMountSelfHealsAfterSiblingInit(t *testing.T) {
 	}
 	if mi.Path != movedWT1 {
 		t.Fatalf("moved mount path = %q, want %q: %#v", mi.Path, movedWT1, mounts)
+	}
+}
+
+func TestWorktree_DesktopControlsIsolateMountsAndSkipStaleSiblingOnProjectSync(t *testing.T) {
+	worktreeHome(t)
+	remoteServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "remote unavailable", http.StatusBadGateway)
+	}))
+	defer remoteServer.Close()
+	hubRemote := remoteServer.URL + "/p/p-12345678"
+
+	setup := func(folder, id string) config.Project {
+		t.Helper()
+		proj, err := config.SaveProject(folder, config.Project{
+			ID: id, Volume: "desktop-project", Remote: hubRemote,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := config.EnrollMount(folder); err != nil {
+			t.Fatal(err)
+		}
+		vdir, err := config.VolumeDir(proj.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Open(vdir); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetPausedMount(vdir, proj.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		return proj
+	}
+	wt1, wt2 := t.TempDir(), t.TempDir()
+	proj1 := setup(wt1, "m-aaa")
+	proj2 := setup(wt2, "m-bbb")
+	app := httptest.NewServer(desktopHandler())
+	defer app.Close()
+
+	pauseReq, err := http.NewRequest(http.MethodPost, app.URL+"/api/desktop/p/"+proj1.ID+"/pause", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pauseReq.Header.Set("X-Bdrive-Desktop", "1")
+	pauseResp, err := http.DefaultClient.Do(pauseReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pauseResp.Body.Close()
+	if pauseResp.StatusCode != http.StatusOK {
+		t.Fatalf("pause wt1 status = %d, want 200", pauseResp.StatusCode)
+	}
+
+	statusResp, err := http.Get(app.URL + "/api/desktop/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusResp.Body.Close()
+	var status struct {
+		Mounts []struct {
+			ID     string `json:"id"`
+			Paused bool   `json:"paused"`
+		} `json:"mounts"`
+	}
+	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	seen1, seen2 := false, false
+	for _, mount := range status.Mounts {
+		switch mount.ID {
+		case proj1.ID:
+			seen1 = true
+			if !mount.Paused {
+				t.Fatal("desktop pause did not pause wt1")
+			}
+		case proj2.ID:
+			seen2 = true
+			if mount.Paused {
+				t.Fatal("desktop pause incorrectly paused wt2")
+			}
+		}
+	}
+	if !seen1 || !seen2 {
+		t.Fatalf("desktop status omitted mounts: %#v", status.Mounts)
+	}
+
+	if err := os.RemoveAll(wt1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt2, "desktop-sync.md"), []byte("still live\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncReq, err := http.NewRequest(http.MethodPost, app.URL+"/api/desktop/p/p-12345678/sync", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncReq.Header.Set("X-Bdrive-Desktop", "1")
+	syncResp, err := http.DefaultClient.Do(syncReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syncResp.Body.Close()
+	if syncResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(syncResp.Body)
+		t.Fatalf("desktop project sync status = %d, want 200: %s", syncResp.StatusCode, body)
+	}
+	vdir2, err := config.VolumeDir(proj2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(vdir2, "state-"+proj2.ID+".json")); err != nil {
+		t.Fatalf("desktop sync did not cycle live wt2 (state cache missing): %v", err)
 	}
 }
 

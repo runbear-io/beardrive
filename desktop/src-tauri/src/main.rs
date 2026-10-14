@@ -58,6 +58,8 @@ struct MountStatus {
     project: String,
     name: String,
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     path: String,
     running: bool,
     paused: bool,
@@ -134,13 +136,14 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         } else {
             format!("{} — in {} · {}", m.name, parent, state)
         };
+        let target = if m.id.is_empty() { &m.project } else { &m.id };
         let sub = SubmenuBuilder::new(app, label)
-            .text(format!("sync:{}", m.project), "Sync now")
+            .text(format!("sync:{}", target), "Sync now")
             .text(
                 if m.paused {
-                    format!("resume:{}", m.project)
+                    format!("resume:{}", target)
                 } else {
-                    format!("pause:{}", m.project)
+                    format!("pause:{}", target)
                 },
                 if m.paused { "Resume syncing" } else { "Pause syncing" },
             )
