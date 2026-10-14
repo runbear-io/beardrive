@@ -165,3 +165,20 @@ test("comment on text and on an element inside an HTML page", async ({ page }) =
   const quotes = stored.map((t) => t.anchor.quote || t.anchor.element).sort();
   expect(quotes).toEqual(["beta on March 3", "div#chart"]);
 });
+
+// What is stored is what was shown: a long selection is never cut short on
+// screen, so a reviewer can read every word an agent will later be handed.
+test("a long quote is shown whole, before and after posting", async ({ page }) => {
+  await login(page);
+  const id = await project(page);
+  const long = "Lorem ipsum dolor sit amet ".repeat(12).trim() + " TAIL-MARKER";
+  const file = await ownFile(page, id, "md", "# Long\n\n" + long + "\n");
+  await page.goto(`/${id}/${file}`);
+  await expect(page.locator("#content h1")).toHaveText("Long");
+  await page.evaluate(selectText, long);
+  await page.click(".cm-float");
+  await expect(page.locator(".cm-compose .cm-q")).toHaveText(long);
+  await page.fill(".cm-compose textarea", "too long");
+  await page.click(".cm-compose .pbtn");
+  await expect(page.locator(".cm-panel .cm-card .cm-q")).toHaveText(long);
+});

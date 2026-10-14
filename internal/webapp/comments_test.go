@@ -367,3 +367,66 @@ func TestCommentElementMustBeASelectorPath(t *testing.T) {
 		}
 	}
 }
+
+// A file that moved into a hidden folder and was deleted there is gone, but
+// what was said about it in that folder is still not for a member who could
+// never see the folder.
+func TestCommentOnAFileDeletedInAHiddenFolderStaysHidden(t *testing.T) {
+	h, _, c, p, f := commentHub(t)
+	f.put("dev1", "notes.md", "the original notes\n")
+	th := postComment(t, h, p.ID, map[string]any{"path": "notes.md", "body": "public remark"}, c["alice"])
+	at := time.Now().UTC().Add(time.Second)
+	f.move("dev1", "notes.md", "secret/notes.md", "the original notes\n", at)
+	rule := map[string]any{"prefix": "secret", "default": PermNone, "perms": map[string]string{"carol@x.io": PermWrite}}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, c["alice"]); rec.Code != 200 {
+		t.Fatalf("set rule: %d %s", rec.Code, rec.Body)
+	}
+	doAs(t, h, "POST", "/api/p/"+p.ID+"/comments/"+th.ID, map[string]string{"action": "reply", "body": "private detail"}, c["alice"])
+	f.delAt("dev1", "secret/notes.md", at.Add(time.Minute))
+
+	if got := listComments(t, h, p.ID, "?status=all", c["bob"]); len(got) != 0 {
+		t.Fatalf("bob sees a thread whose file was deleted inside a folder hidden from him: %+v", got)
+	}
+	got := listComments(t, h, p.ID, "?status=all", c["alice"])
+	if len(got) != 1 || !got[0].Missing || got[0].Path != "secret/notes.md" {
+		t.Fatalf("admin sees %+v, want the thread missing at secret/notes.md", got)
+	}
+}
+
+// Limits count live threads, so deleting a thread gives its room back — on
+// this process and on a cold one reading the same storage.
+func TestDeletingAThreadGivesRoomBack(t *testing.T) {
+	h, srv, c, p, _ := commentHub(t)
+	defer func(n int) { maxCommentEventsPerAuthor = n }(maxCommentEventsPerAuthor)
+	maxCommentEventsPerAuthor = 3
+	th := postComment(t, h, p.ID, map[string]any{"path": "wiki/report.md", "body": "one"}, c["bob"])
+	doAs(t, h, "POST", "/api/p/"+p.ID+"/comments/"+th.ID, map[string]string{"action": "reply", "body": "two"}, c["bob"])
+	doAs(t, h, "POST", "/api/p/"+p.ID+"/comments/"+th.ID, map[string]string{"action": "reply", "body": "three"}, c["bob"])
+	if rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/comments", map[string]string{"path": "wiki/report.md", "body": "four"}, c["bob"]); rec.Code != 403 {
+		t.Fatalf("comment past the author limit: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doAs(t, h, "DELETE", "/api/p/"+p.ID+"/comments/"+th.ID, nil, c["bob"]); rec.Code != 204 {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body)
+	}
+	postComment(t, h, p.ID, map[string]any{"path": "wiki/report.md", "body": "room again"}, c["bob"])
+
+	srv.comments = newCommentCache()
+	got := listComments(t, h, p.ID, "?status=all", c["bob"])
+	if len(got) != 1 || got[0].Messages[0].Body != "room again" {
+		t.Fatalf("cold read after delete = %+v", got)
+	}
+}
+
+// A comment is checked against what is already promised to presigned
+// uploads, like every other write.
+func TestCommentQuotaCountsReservedUploads(t *testing.T) {
+	h, srv, c, p, _ := commentHub(t)
+	q := &recQuota{}
+	srv.Quota = q
+	org := srv.orgOf(p.ID)
+	srv.reserve(p.ID, org, "blobs/"+strings.Repeat("a", 64), 1<<20, time.Hour)
+	postComment(t, h, p.ID, map[string]any{"path": "wiki/report.md", "body": "x"}, c["bob"])
+	if n := len(q.writes); n == 0 || q.writes[n-1].bytes < 1<<20 {
+		t.Fatalf("CheckWrite did not include the reservation: %+v", q.writes)
+	}
+}

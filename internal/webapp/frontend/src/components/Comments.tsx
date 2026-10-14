@@ -349,7 +349,7 @@ export function CommentSurface(props: {
       )}
       {draft && pos && draft.composing && (
         <div data-bd-ignore="" className="cm-compose" style={{ left: pos.x, top: pos.y }} role="dialog" aria-label="New comment">
-          <AnchorView a={draft.anchor} max={140} />
+          <AnchorView a={draft.anchor} />
           <textarea
             autoFocus
             value={body}
@@ -523,7 +523,7 @@ function ThreadCard(props: {
     <div ref={card} className={"cm-card" + (active ? " active" : "") + (t.resolved ? " resolved" : "")} data-comment={t.id}>
       <div className="cm-card-top" onClick={onFocus}>
         <span className="cm-n">{t.n}</span>
-        <AnchorView a={t.anchor} max={200} />
+        <AnchorView a={t.anchor} />
       </div>
       {(t.outdated || t.missing) && (
         <div className="cm-flag">{t.missing ? "The file no longer exists" : "The file changed since this comment"}</div>
@@ -581,29 +581,25 @@ function ThreadCard(props: {
   );
 }
 
-/* Everything stored in an anchor is shown, context included. On an HTML page
-   the context and the element path come from the page's own script, and what
-   an agent later reads about a comment must be something the reviewer saw
-   when they posted it — not text that rode along out of sight. */
-function AnchorView({ a, max }: { a: CommentAnchor; max: number }) {
+/* Everything stored in an anchor is shown, whole — context included, never
+   clipped. On an HTML page all of it comes from the page's own script, and
+   what an agent later reads about a comment must be something the reviewer
+   could read before posting it, not a tail that rode along out of sight. A
+   long quote scrolls inside its box rather than being cut. */
+function AnchorView({ a }: { a: CommentAnchor }) {
   if (!a.quote && !a.element) return <div className="cm-quote cm-el">Whole file</div>;
   return (
     <div className="cm-anchor">
       {a.quote && (
         <div className="cm-quote">
-          {a.prefix && <span className="cm-ctx">…{clipStart(a.prefix, 40)}</span>}
-          <span className="cm-q">{clip(a.quote, max)}</span>
-          {a.suffix && <span className="cm-ctx">{clip(a.suffix, 40)}…</span>}
+          {a.prefix && <span className="cm-ctx">{a.prefix}</span>}
+          <span className="cm-q">{a.quote}</span>
+          {a.suffix && <span className="cm-ctx">{a.suffix}</span>}
         </div>
       )}
-      {a.element && <div className="cm-quote cm-el">{clip(a.element, 120)}</div>}
+      {a.element && <div className="cm-quote cm-el">{a.element}</div>}
     </div>
   );
-}
-
-function clipStart(s: string, n: number) {
-  const one = s.replace(/\s+/g, " ");
-  return one.length > n ? one.slice(one.length - n) : one;
 }
 
 // Numbers follow creation order, so a pin and its card agree and a number
@@ -631,10 +627,6 @@ function clampToViewport(x: number, y: number, w: number, h: number) {
   };
 }
 
-function clip(s: string, n: number) {
-  const one = s.replace(/\s+/g, " ").trim();
-  return one.length > n ? one.slice(0, n - 1) + "…" : one;
-}
 
 function ago(iso: string): string {
   const s = (Date.now() - new Date(iso).getTime()) / 1000;

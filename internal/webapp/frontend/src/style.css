@@ -1648,6 +1648,7 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
 }
 .cm-quote.cm-el { font-family: var(--mono); font-size: 11.5px; }
 .cm-anchor { flex: 1; min-width: 0; }
+.cm-anchor .cm-quote { max-height: 7.5em; overflow-y: auto; white-space: pre-wrap; }
 .cm-anchor .cm-quote + .cm-quote { margin-top: -4px; }
 .cm-q { color: var(--text); }
 .cm-ctx { color: var(--text-faint); }

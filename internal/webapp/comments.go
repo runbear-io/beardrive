@@ -24,8 +24,9 @@ import (
    viewer, and an agent sweeps the open ones with `bdrive comments`.
 
    Storage is the project's own object store, under comments/ — hub-internal
-   like ydoc/, never synced to devices, never quota'd. Each change to a thread
-   (open, reply, resolve, reopen, delete) is its own immutable object:
+   like ydoc/, never synced to devices, but charged to the org's storage like
+   any write. Each change to a thread (open, reply, resolve, reopen) is its
+   own immutable object:
 
        comments/<thread>/<unix-nanos>-<rand>.json
 
@@ -34,6 +35,11 @@ import (
    processes answering two people at once cannot lose either write, and there
    is no read-modify-write to race. Immutable objects also make the cache
    trivial — an event read once is never read again.
+
+   Deleting a thread writes comments/<thread>/deleted.json. The backend has no
+   delete, so the tombstone is what retires a thread: the listing alone says
+   which threads are gone, so their events are never fetched, never cached
+   and never counted against the limits below — deleting gives room back.
 
    A comment is anchored by what the reader SAW: the quoted text plus a little
    context either side (the W3C TextQuoteSelector shape), not an offset into
@@ -58,10 +64,6 @@ const (
 	// crowd everyone else out of a project, and per project, so the listing
 	// a viewer folds on every request stays a size worth folding.
 	//
-	// ponytail: fixed caps, not a plan knob. Real review traffic is orders of
-	// magnitude below them; a hub that hits one wants a config field.
-	maxCommentEventsPerAuthor  = 2000
-	maxCommentEventsPerProject = 20000
 	// commentCacheBudget bounds the bytes of decoded events this process
 	// keeps across all projects. Past it the least recently read project's
 	// events are dropped and re-read from storage next time.
@@ -79,8 +81,19 @@ const (
 	commentFetchers = 8
 )
 
+// Both caps count the events of LIVE threads only; see the tombstone above.
+// Variables so a test can reach them without writing thousands of objects.
+//
+// ponytail: fixed caps, not a plan knob. Real review traffic is orders of
+// magnitude below them; a hub that hits one wants a config field.
+var (
+	maxCommentEventsPerAuthor  = 2000
+	maxCommentEventsPerProject = 20000
+)
+
 var (
 	commentKeyRe    = regexp.MustCompile(`^comments/([0-9a-f]{12})/([0-9]{19}-[0-9a-f]{8})\.json$`)
+	tombstoneKeyRe  = regexp.MustCompile(`^comments/([0-9a-f]{12})/deleted\.json$`)
 	commentThreadRe = regexp.MustCompile(`^[0-9a-f]{12}$`)
 	// elementPathRe is the only shape an element anchor may take: what
 	// cssPath in lib/anchor.ts builds. Anything else — prose, an instruction
@@ -140,7 +153,6 @@ type CommentThread struct {
 	Missing  bool `json:"missing,omitempty"`
 
 	origPath string
-	deleted  bool
 }
 
 // commentEvent is one stored object. Anchor and Sha are set on "open" only;
@@ -148,7 +160,7 @@ type CommentThread struct {
 // what was done). Path is authoritative on "open"; on the others it is the
 // file's path at the time, carried for the change notification alone.
 type commentEvent struct {
-	Kind   string         `json:"kind"` // open | reply | resolve | reopen | delete
+	Kind   string         `json:"kind"` // open | reply | resolve | reopen
 	Thread string         `json:"thread"`
 	Path   string         `json:"path,omitempty"`
 	Anchor *CommentAnchor `json:"anchor,omitempty"`
@@ -279,15 +291,28 @@ func (c *commentCache) list(ctx context.Context, project string, be remote.Backe
 	if err != nil {
 		return nil, err
 	}
+	dead := map[string]bool{}
+	for _, o := range objs {
+		if m := tombstoneKeyRe.FindStringSubmatch(o.Key); m != nil {
+			dead[m[1]] = true
+		}
+	}
 	keys = make([]string, 0, len(objs))
 	for _, o := range objs {
-		if commentKeyRe.MatchString(o.Key) {
+		if m := commentKeyRe.FindStringSubmatch(o.Key); m != nil && !dead[m[1]] {
 			keys = append(keys, o.Key)
 		}
 	}
 	c.mu.Lock()
 	pc = c.project(project)
 	pc.keys, pc.listedAt = keys, time.Now()
+	for k, ev := range pc.events {
+		if dead[ev.Thread] {
+			delete(pc.events, k)
+			pc.bytes -= ev.size
+			c.bytes -= ev.size
+		}
+	}
 	c.mu.Unlock()
 	return keys, nil
 }
@@ -397,7 +422,7 @@ func foldComments(evs []commentEvent) map[string]*CommentThread {
 			threads[ev.Thread] = t
 			continue
 		}
-		if t == nil || t.deleted {
+		if t == nil {
 			continue // an event for a thread whose open we never saw
 		}
 		t.Updated = ev.Time
@@ -415,13 +440,6 @@ func foldComments(evs []commentEvent) map[string]*CommentThread {
 			} else {
 				t.ResolvedBy, t.ResolvedName, t.ResolvedAt = "", "", nil
 			}
-		case "delete":
-			t.deleted = true
-		}
-	}
-	for id, t := range threads {
-		if t.deleted {
-			delete(threads, id)
 		}
 	}
 	return threads
@@ -436,26 +454,28 @@ func eventMessage(ev commentEvent) CommentMessage {
 
 // placeThreads resolves each thread against the current file listing — where
 // its file lives now, whether it changed since, whether it is gone — and
-// drops the ones this caller may not see. Both the original path and the
-// current one must be readable: a comment quotes its file, and a file moved
-// out of a hidden folder does not make what was said about it there public.
+// drops the ones this caller may not see: every path the file has held since
+// the comment must be readable. A comment quotes its file, and neither a move
+// out of a hidden folder nor a delete inside one makes what was said about it
+// there public.
 func placeThreads(threads map[string]*CommentThread, snap *snapshot, f pathFilter) []*CommentThread {
 	out := make([]*CommentThread, 0, len(threads))
 	for _, t := range threads {
-		if !f.canRead(t.origPath) {
-			continue
-		}
-		// Always resolved, never "the old path still has a file": a file that
+		// Always followed, never "the old path still has a file": a file that
 		// moved or was deleted after the comment is not the one now sitting
-		// at its address, and pinning the thread there would show a reader
-		// a quote from wherever the real file went.
-		if to, ok := resolveShare(snap.moves, snap.files, t.origPath, t.Created); ok {
-			t.Path = to
-			t.Outdated = t.Sha != "" && snap.files[to].Blob != t.Sha
-		} else {
-			t.Missing = true
+		// at its address. And EVERY path the file has held must be readable,
+		// gone or not — a reply written while it sat in a restricted folder
+		// does not become public because the file was then deleted there.
+		last, chain, live := followFile(snap.moves, snap.files, t.origPath, t.Created)
+		t.Path, t.Missing = last, !live
+		if live {
+			t.Outdated = t.Sha != "" && snap.files[last].Blob != t.Sha
 		}
-		if !f.canRead(t.Path) {
+		visible := true
+		for _, p := range chain {
+			visible = visible && f.canRead(p)
+		}
+		if !visible {
 			continue
 		}
 		out = append(out, t)
@@ -492,9 +512,7 @@ func (s *Server) writeCommentEvent(ctx context.Context, project string, ev comme
 	if err != nil {
 		return err
 	}
-	// Deleting is exempt: it is how a crowded project gets room back, and it
-	// is bounded by the threads that already exist.
-	if ev.Kind != "delete" && len(evs) >= maxCommentEventsPerProject {
+	if len(evs) >= maxCommentEventsPerProject {
 		return errCommentLimit{"this project has reached its limit of comments"}
 	}
 	mine := 0
@@ -503,7 +521,7 @@ func (s *Server) writeCommentEvent(ctx context.Context, project string, ev comme
 			mine++
 		}
 	}
-	if ev.Kind != "delete" && mine >= maxCommentEventsPerAuthor {
+	if mine >= maxCommentEventsPerAuthor {
 		return errCommentLimit{"you have reached the limit of comments in this project"}
 	}
 	ev.key = fmt.Sprintf("%s%s/%019d-%s.json", commentsPrefix, ev.Thread, ev.Time.UnixNano(), randHex(4))
@@ -512,8 +530,11 @@ func (s *Server) writeCommentEvent(ctx context.Context, project string, ev comme
 		return err
 	}
 	ev.size = len(data)
+	// Against what is already promised to presigned uploads too, the same
+	// boundary every other write door checks (reserve.go).
 	org := s.orgOf(project)
-	if err := s.quota().CheckWrite(org, int64(len(data))); err != nil {
+	s.reconcileGrants(ctx, project, be)
+	if err := s.quota().CheckWrite(org, int64(len(data))+s.reservedBytes(org)); err != nil {
 		return errCommentLimit{err.Error()}
 	}
 	if err := be.Put(ctx, ev.key, bytes.NewReader(data), int64(len(data))); err != nil {
@@ -818,15 +839,44 @@ func (s *Server) handleCommentDelete(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, "only the comment's author or a project admin can delete it", http.StatusForbidden)
 		return
 	}
-	err := s.writeCommentEvent(r.Context(), project, commentEvent{
-		Kind: "delete", Thread: t.ID, Path: t.Path,
-		Author: email, Name: name, Time: s.nextCommentTime(t),
-	})
-	if err != nil {
+	if err := s.retireThread(r.Context(), project, t.ID, email, name); err != nil {
 		commentsErr(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// retireThread writes a thread's tombstone and drops its events from this
+// process. Never refused by the plan or the caps: deleting is how a crowded
+// project gets room back. The tombstone is a few dozen bytes, recorded as
+// usage like any write.
+func (s *Server) retireThread(ctx context.Context, project, thread, email, name string) error {
+	be, ok := s.projectBackend(project)
+	if !ok {
+		return errCommentsOff
+	}
+	data, err := json.Marshal(map[string]any{"author": email, "name": name, "time": time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	if err := be.Put(ctx, commentsPrefix+thread+"/deleted.json", bytes.NewReader(data), int64(len(data))); err != nil {
+		return err
+	}
+	s.quota().RecordUsage(s.orgOf(project), int64(len(data)))
+	c := s.commentStore()
+	c.mu.Lock()
+	pc := c.project(project)
+	for k, ev := range pc.events {
+		if ev.Thread == thread {
+			delete(pc.events, k)
+			pc.bytes -= ev.size
+			c.bytes -= ev.size
+		}
+	}
+	pc.listedAt = time.Time{}
+	c.mu.Unlock()
+	s.events().publish(project, changeEvent{Type: "comments"})
+	return nil
 }
 
 // nextCommentTime is now, nudged past the thread's last event: fold orders by
