@@ -443,8 +443,11 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	if s.ExpectedRemote != "" && !config.SameRemote(proj.Remote, s.ExpectedRemote) {
 		return nil, fmt.Errorf("project remote changed (%q -> %q)", s.ExpectedRemote, proj.Remote)
 	}
+	if st.Remote != "" && !config.SameRemote(proj.Remote, st.Remote) {
+		return nil, fmt.Errorf("volume remote mismatch (%q -> %q)", st.Remote, proj.Remote)
+	}
 	hadCache := s.Store.HasCache(s.mountID())
-	if proj.Remote != "" && (st.Remote == "" || config.SameRemote(st.Remote, proj.Remote)) {
+	if proj.Remote != "" {
 		st.Remote = proj.Remote
 	}
 	deviceJoining := st.Lamport == 0 && st.PushedOps == 0

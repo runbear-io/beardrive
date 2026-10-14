@@ -810,6 +810,52 @@ func TestWorktree_DesktopControlsIsolateMountsAndSkipStaleSiblingOnProjectSync(t
 	}
 }
 
+func TestWorktree_SharedVolumeRejectsMismatchedSiblingRemote(t *testing.T) {
+	worktreeHome(t)
+	remote1 := "file://" + t.TempDir()
+	remote2 := "file://" + t.TempDir()
+	wt1, wt2 := t.TempDir(), t.TempDir()
+	proj1 := initWorktree(t, wt1, remote1)
+	proj2 := initWorktree(t, wt2, remote1)
+	if !cycleWorktree(t, wt1).Pushed {
+		t.Fatal("wt1 initial sync did not push")
+	}
+	cycleWorktree(t, wt2)
+	beforeOps := localOps(t, proj1.ID)
+
+	proj2.Remote = remote2
+	if _, err := config.SaveProject(wt2, proj2); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt2, "wrong-remote.md"), []byte("must not journal\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess, _, err := openSession(t.Context(), wt2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cycleErr := sess.Cycle(t.Context())
+	closeSession(sess)
+	if cycleErr == nil {
+		t.Fatal("sync with a sibling remote mismatch succeeded")
+	}
+	errText := strings.ToLower(cycleErr.Error())
+	if !strings.Contains(errText, "remote") || !strings.Contains(errText, "mismatch") {
+		t.Fatalf("sync mismatch error = %q, want a volume remote mismatch", cycleErr)
+	}
+	afterOps := localOps(t, proj1.ID)
+	if len(afterOps) != len(beforeOps) {
+		t.Fatalf("mismatched sibling appended to shared journal: before=%d after=%d", len(beforeOps), len(afterOps))
+	}
+	dev, err := config.LoadDevice()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := remoteOps(t, remote2, dev.ID); len(got) != 0 {
+		t.Fatalf("mismatched sibling pushed wt1 journal to remote2: %#v", got)
+	}
+}
+
 func TestWorktree_BackwardCompatLegacyMountUnchanged(t *testing.T) {
 	bhome := worktreeHome(t)
 	rawRemote := "file://" + t.TempDir()

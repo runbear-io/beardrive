@@ -763,12 +763,16 @@ With `--upload` set, the server decides per upload how the bytes travel:
 
 ```
 working folder  ←materialize/scan→  local volume store  ←push/pull→  object store
- (real files)                       ~/.bdrive/volumes/<vol>              s3:// gs:// file://
+ (real files)                       ~/.bdrive/volumes/<volume-id>       s3:// gs:// file://
                                     ├─ blobs/   content-addressed (sha256)
                                     ├─ journal/ one append-only op log per device
-                                    ├─ state.json  what's materialized
+                                    ├─ state-<mount-id>.json  per-mount materialization cache
+                                    ├─ paused-<mount-id>  per-mount pause marker
+                                    ├─ inbound-<mount-id>.jsonl  per-mount inbound spool
                                     └─ sync.json   lamport clock + push cursor
 ```
+
+Each enrolled worktree has a mount entry in `mounts.json`. Multiple worktrees for the same project share one volume store through `volume_id`.
 
 - Every change becomes an **op** (`put`/`delete`) in this device's
   append-only journal, stamped with a lamport clock, wall-clock time, device
@@ -790,10 +794,7 @@ working folder  ←materialize/scan→  local volume store  ←push/pull→  obj
   by `(lamport, time, device)` — every device converges to the same view.
   Concurrent edits keep the last writer at the path; the loser is preserved
   as a conflict-copy file by the device that detects the overlap.
-- A per-mount **daemon** scans the folder every few seconds (cheap
-  size+mtime check) and exchanges with the remote every ~10s — or
-  immediately after local edits. Tunable with --scan-interval and
-  --remote-interval on the daemon (defaults 3s / 10s).
+- One background daemon runs per project volume. It scans each enrolled worktree folder every few seconds (cheap size+mtime check) and exchanges with the remote every ~10s, or immediately after local edits. Tunable with --scan-interval and --remote-interval on the daemon (defaults 3s / 10s).
 - Against a hub, the daemon also holds a **live change stream** open, so a
   teammate's push arrives in about a second instead of waiting out the
   remote interval. It is an accelerator only: a hub that is down, too old to
