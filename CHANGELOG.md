@@ -4,6 +4,42 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## v0.17.0 — 2026-10-14
+
+**Update your devices to get `bdrive comments` and symlink sync.** The hub
+side of this release is already live on the managed hub. Older clients keep
+syncing: they never see comments, and they skip a synced symlink rather than
+materializing it.
+
+- **Review comments.** Anyone who can read a file on the hub can leave
+  feedback on it while reading, the way a Vercel preview toolbar works. Select
+  text in rendered markdown, text or HTML, or pick any element on an HTML
+  page. Comments show as highlights with numbered pins and as threads in a
+  side panel. An agent sweeps the open ones with the new `bdrive comments`
+  command: each thread shows the quoted text and its line in the local copy
+  of the file. Then `bdrive comments resolve <id> -m "what changed"`;
+  `reply` and `reopen` too, and `--json` for scripts. Comments follow their
+  file across renames, are hidden with it by folder rules, and count toward
+  the org's storage. (#276)
+- **Symlinks sync as links.** A symbolic link in a mount used to vanish
+  without a word. It now syncs as a link carrying its target string — never
+  the target's bytes — and the hub lists it with its target, never serving
+  content through it. (#273)
+- **MCP agents see the project's `AGENTS.md` / `CLAUDE.md`**, marked as
+  teammate-written, and every single-file tool names the guides that apply
+  to its path. (#274)
+
+Web app, live on the managed hub already:
+
+- A light theme, with a System / Light / Dark switch in the profile menu;
+  System is the default. (#272)
+- Drag the reading column wider or narrower. (#266)
+- Browser tabs are named after the document, not its folder path. (#268)
+- Download and export buttons inside a synced HTML page work, in the viewer
+  and on share links. (#277)
+- Reconnecting to a co-editing room no longer duplicates the file's
+  content. (#267)
+
 ## v0.16.1 — 2026-09-25
 
 **Update your devices.** The fix that matters here is in the client, and a
