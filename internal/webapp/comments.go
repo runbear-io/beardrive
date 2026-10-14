@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -83,6 +84,17 @@ const (
 
 // Both caps count the events of LIVE threads only; see the tombstone above.
 // Variables so a test can reach them without writing thousands of objects.
+//
+// They are enforced where they protect something: on READ, where a listing is
+// cut to the oldest maxCommentEventsPerProject events and each author to their
+// oldest maxCommentEventsPerAuthor before anything is fetched past that,
+// folded or cached. A write is also refused at the cap, but that check cannot
+// be atomic across hub processes — the project's store is reached through
+// remote.Prefixed, which offers no compare-and-swap, and a hub writing an
+// object store without one runs as a single process (upload.go,
+// appendLastWriterWins). Two processes racing at the cap therefore cannot
+// grow what any reader holds; the loser's event stays stored, unread, and its
+// writer is told it hit the limit (writeCommentEvent).
 //
 // ponytail: fixed caps, not a plan knob. Real review traffic is orders of
 // magnitude below them; a hub that hits one wants a config field.
@@ -276,7 +288,11 @@ func (s *Server) loadCommentEvents(ctx context.Context, project string) ([]comme
 	if err != nil {
 		return nil, err
 	}
-	return c.fetch(ctx, project, be, keys)
+	evs, err := c.fetch(ctx, project, be, keys)
+	if err != nil {
+		return nil, err
+	}
+	return boundByAuthor(evs), nil
 }
 
 func (c *commentCache) list(ctx context.Context, project string, be remote.Backend) ([]string, error) {
@@ -302,6 +318,12 @@ func (c *commentCache) list(ctx context.Context, project string, be remote.Backe
 		if m := commentKeyRe.FindStringSubmatch(o.Key); m != nil && !dead[m[1]] {
 			keys = append(keys, o.Key)
 		}
+	}
+	// The project cap, as a hard bound: the oldest events win, by the time
+	// stamp every key carries, so a late writer cannot displace an earlier one.
+	sort.Slice(keys, func(i, j int) bool { return keyStamp(keys[i]) < keyStamp(keys[j]) })
+	if len(keys) > maxCommentEventsPerProject {
+		keys = keys[:maxCommentEventsPerProject]
 	}
 	c.mu.Lock()
 	pc = c.project(project)
@@ -365,6 +387,24 @@ func (c *commentCache) fetch(ctx context.Context, project string, be remote.Back
 	c.add(project, read...)
 	c.mu.Unlock()
 	return append(out, read...), ctx.Err()
+}
+
+// keyStamp is an event key's "<unix-nanos>-<rand>" part, which sorts in time
+// order because the nanos are zero-padded.
+func keyStamp(key string) string { return key[strings.LastIndexByte(key, '/')+1:] }
+
+// boundByAuthor keeps each author's oldest maxCommentEventsPerAuthor events.
+func boundByAuthor(evs []commentEvent) []commentEvent {
+	sort.Slice(evs, func(i, j int) bool { return keyStamp(evs[i].key) < keyStamp(evs[j].key) })
+	per := map[string]int{}
+	out := evs[:0:0]
+	for _, ev := range evs {
+		if per[ev.Author] < maxCommentEventsPerAuthor {
+			per[ev.Author]++
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 func readCommentEvent(ctx context.Context, be remote.Backend, key string) (commentEvent, error) {
@@ -546,6 +586,11 @@ func (s *Server) writeCommentEvent(ctx context.Context, project string, ev comme
 	c.add(project, ev)
 	c.project(project).listedAt = time.Time{}
 	c.mu.Unlock()
+	// Read back through the bounds: another hub process may have taken the
+	// last slot between the check above and this write (see the caps).
+	if after, err := s.loadCommentEvents(ctx, project); err == nil && !slices.ContainsFunc(after, func(e commentEvent) bool { return e.key == ev.key }) {
+		return errCommentLimit{"this project has reached its limit of comments"}
+	}
 	// No paths: the stream has no per-reader filter, and a path under a
 	// folder hidden from some subscriber must not reach them. A viewer only
 	// needs to know to refetch its comment list, which is filtered.
@@ -847,9 +892,9 @@ func (s *Server) handleCommentDelete(v *volume, w http.ResponseWriter, r *http.R
 }
 
 // retireThread writes a thread's tombstone and drops its events from this
-// process. Never refused by the plan or the caps: deleting is how a crowded
-// project gets room back. The tombstone is a few dozen bytes, recorded as
-// usage like any write.
+// process. Not subject to the caps — deleting is how a crowded project gets
+// room back — but checked against the plan like any write: the backend has no
+// delete, so a tombstone is permanent bytes.
 func (s *Server) retireThread(ctx context.Context, project, thread, email, name string) error {
 	be, ok := s.projectBackend(project)
 	if !ok {
@@ -859,10 +904,15 @@ func (s *Server) retireThread(ctx context.Context, project, thread, email, name 
 	if err != nil {
 		return err
 	}
+	org := s.orgOf(project)
+	s.reconcileGrants(ctx, project, be)
+	if err := s.quota().CheckWrite(org, int64(len(data))+s.reservedBytes(org)); err != nil {
+		return errCommentLimit{err.Error()}
+	}
 	if err := be.Put(ctx, commentsPrefix+thread+"/deleted.json", bytes.NewReader(data), int64(len(data))); err != nil {
 		return err
 	}
-	s.quota().RecordUsage(s.orgOf(project), int64(len(data)))
+	s.quota().RecordUsage(org, int64(len(data)))
 	c := s.commentStore()
 	c.mu.Lock()
 	pc := c.project(project)

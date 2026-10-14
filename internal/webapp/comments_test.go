@@ -430,3 +430,45 @@ func TestCommentQuotaCountsReservedUploads(t *testing.T) {
 		t.Fatalf("CheckWrite did not include the reservation: %+v", q.writes)
 	}
 }
+
+// A tombstone is permanent bytes on a store with no delete, so the plan is
+// asked first; a refusal leaves the thread in place.
+func TestDeletingAThreadGoesThroughQuota(t *testing.T) {
+	h, srv, c, p, _ := commentHub(t)
+	th := postComment(t, h, p.ID, map[string]any{"path": "wiki/report.md", "body": "x"}, c["bob"])
+	srv.Quota = &recQuota{denyW: true}
+	if rec := doAs(t, h, "DELETE", "/api/p/"+p.ID+"/comments/"+th.ID, nil, c["bob"]); rec.Code != 403 {
+		t.Fatalf("over-quota delete: %d %s", rec.Code, rec.Body)
+	}
+	if got := listComments(t, h, p.ID, "?status=all", c["bob"]); len(got) != 1 {
+		t.Fatalf("a refused delete removed the thread: %+v", got)
+	}
+}
+
+// The caps bound what a reader folds, whoever wrote past them — another hub
+// process racing at the cap, here events placed in storage directly. The
+// oldest events win, per project and per author.
+func TestCommentCapsBoundWhatIsRead(t *testing.T) {
+	h, srv, c, p, _ := commentHub(t)
+	defer func(a, b int) { maxCommentEventsPerProject, maxCommentEventsPerAuthor = a, b }(maxCommentEventsPerProject, maxCommentEventsPerAuthor)
+	first := postComment(t, h, p.ID, map[string]any{"path": "wiki/report.md", "body": "first"}, c["bob"])
+	postComment(t, h, p.ID, map[string]any{"path": "wiki/report.md", "body": "second"}, c["carol"])
+	postComment(t, h, p.ID, map[string]any{"path": "wiki/report.md", "body": "third"}, c["bob"])
+
+	maxCommentEventsPerProject = 2
+	srv.comments = newCommentCache()
+	got := listComments(t, h, p.ID, "?status=all", c["alice"])
+	if len(got) != 2 || got[0].Messages[0].Body != "first" || got[1].Messages[0].Body != "second" {
+		t.Fatalf("project cap read = %+v, want the two oldest", got)
+	}
+	if rec := doAs(t, h, "POST", "/api/p/"+p.ID+"/comments", map[string]string{"path": "wiki/report.md", "body": "fourth"}, c["alice"]); rec.Code != 403 {
+		t.Fatalf("comment past the project cap: %d %s", rec.Code, rec.Body)
+	}
+
+	maxCommentEventsPerProject, maxCommentEventsPerAuthor = 100, 1
+	srv.comments = newCommentCache()
+	got = listComments(t, h, p.ID, "?status=all", c["alice"])
+	if len(got) != 2 || got[0].ID != first.ID {
+		t.Fatalf("author cap read = %+v, want bob's oldest and carol's", got)
+	}
+}
