@@ -3,6 +3,7 @@ package webapp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"html"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/runbear-io/beardrive/internal/remote"
@@ -107,6 +109,52 @@ func TestAuthGatesAPI(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("bad token: %d, want 401", rec.Code)
+	}
+}
+
+// countingAuth counts Authenticate calls on the provider it wraps.
+type countingAuth struct {
+	AuthProvider
+	calls atomic.Int64
+}
+
+func (c *countingAuth) Authenticate(r *http.Request) (User, bool) {
+	c.calls.Add(1)
+	return c.AuthProvider.Authenticate(r)
+}
+
+// A managed provider may pay a database round trip per Authenticate, so a
+// request must resolve its caller once no matter how many times handlers ask.
+// /api/projects asks once per project on the whole hub, which on a busy hub
+// turned one page load into hundreds of serial session lookups.
+func TestAuthenticateOncePerRequest(t *testing.T) {
+	_, srv, alice, _, pa := orgHubSrv(t)
+	for i := 0; i < 20; i++ {
+		if _, _, err := srv.Projects.GetOrCreate(fmt.Sprintf("other-%d", i), "o-elsewhere"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	auth := &countingAuth{AuthProvider: srv.Auth}
+	srv.Auth = auth
+	h := srv.Handler()
+
+	base := "/api/p/" + pa.ID + "/"
+	for _, u := range []string{
+		"/api/config", "/api/orgs", "/api/projects",
+		base + "tree?slim=1", base + "folders", base + "shares",
+		base + "store/list?prefix=journal/",
+	} {
+		auth.calls.Store(0)
+		req := httptest.NewRequest("GET", u, nil)
+		req.AddCookie(alice)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d %s", u, rec.Code, rec.Body)
+		}
+		if n := auth.calls.Load(); n != 1 {
+			t.Errorf("%s: Authenticate called %d times, want 1", u, n)
+		}
 	}
 }
 
