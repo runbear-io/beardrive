@@ -89,6 +89,31 @@ func TestDaemon_CyclesConcurrentWorktreesAndSurvivesDeletedPrimary(t *testing.T)
 	if err := os.RemoveAll(filepath.Join(wt1, ".bdrive")); err != nil {
 		t.Fatal(err)
 	}
+	p3, err := config.SaveProject(wt1, config.Project{Remote: remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p3.ID == p1.ID {
+		t.Fatalf("re-initialization reused the old mount ID %q", p3.ID)
+	}
+	if _, _, err := config.EnrollMount(wt1); err != nil {
+		t.Fatal(err)
+	}
+	vol3, err := config.VolumeDir(p3.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vol3 != vol1 {
+		t.Fatalf("re-initialized worktree changed volumes: old=%q new=%q", vol1, vol3)
+	}
+	writeWorktreeFile(t, wt1, "after-wt1-reinit.txt", "after wt1 reinit\n")
+	worktreeWaitFor(t, "after-wt1-reinit.txt in wt2", done, func() bool {
+		return worktreeFileEquals(wt2, "after-wt1-reinit.txt", "after wt1 reinit\n")
+	})
+
+	if err := os.RemoveAll(filepath.Join(wt1, ".bdrive")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.RemoveAll(wt1); err != nil {
 		t.Fatal(err)
 	}

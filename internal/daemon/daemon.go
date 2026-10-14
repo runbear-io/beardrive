@@ -522,6 +522,43 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		cur, ok, err := config.LoadProject(folder)
 		if err == nil && ok {
 			if cur.ID != proj.ID {
+				promoted := false
+				if m, merr := config.LoadMounts(); merr == nil {
+					if mi, ok := m[cur.ID]; ok && mi.Path == folder &&
+						!store.PausedMount(volDir, cur.ID) &&
+						config.SameRemote(cur.Remote, proj.Remote) {
+						if v, verr := config.VolumeDir(cur.ID); verr == nil && v == volDir {
+							proj = cur
+							continue
+						}
+					}
+					ids := make([]string, 0, len(m))
+					for id := range m {
+						ids = append(ids, id)
+					}
+					sort.Strings(ids)
+					for _, id := range ids {
+						mi := m[id]
+						if mi.Path == "" || mi.Path == folder || store.PausedMount(volDir, id) {
+							continue
+						}
+						v, verr := config.VolumeDir(id)
+						if verr != nil || v != volDir {
+							continue
+						}
+						sc, scok, scerr := config.LoadProject(mi.Path)
+						if scerr == nil && scok && sc.ID == id &&
+							config.SameRemote(sc.Remote, proj.Remote) {
+							folder = mi.Path
+							proj = sc
+							promoted = true
+							break
+						}
+					}
+				}
+				if promoted {
+					continue
+				}
 				log.Printf("mount identity changed; exiting")
 				return nil
 			}
