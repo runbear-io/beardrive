@@ -404,7 +404,8 @@ func startBlockedSupervisor(t *testing.T) (string, string, int) {
 	for {
 		pidA, a := lockPid(volA)
 		pidB, b := lockPid(volB)
-		if a && b && pidA == cmd.Process.Pid && pidB == pidA {
+		pidG, g := GlobalRunning()
+		if a && b && g && pidA == cmd.Process.Pid && pidB == pidA && pidG == pidA {
 			break
 		}
 		select {

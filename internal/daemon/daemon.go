@@ -279,6 +279,10 @@ func currentBinaryFingerprint() string {
 	if err != nil {
 		return ""
 	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	exe = filepath.Clean(exe)
 	info, err := os.Stat(exe)
 	if err != nil {
 		return ""
