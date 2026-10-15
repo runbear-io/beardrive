@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,8 +28,8 @@ import (
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
-// The volume store is keyed by the mount id, so exactly one daemon runs per
-// mount and its pid/log live in the store dir.
+// The volume store is keyed by the shared project volume, so exactly one
+// daemon runs per volume and its pid/log live in the store dir.
 func PidPath(volDir string) string {
 	return filepath.Join(volDir, "daemon.pid")
 }
@@ -479,44 +480,250 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	defer stopWatch()
 
 	for {
-		// Re-read the project config each tick: picks up `bdrive remote set`
-		// and hand-edits. A vanished config means the folder was moved,
-		// renamed, or deleted — exit cleanly (propagating nothing); the next
-		// bdrive command in the folder's new location resumes the daemon.
-		cur, ok, err := config.LoadProject(folder)
-		if err != nil || !ok {
-			log.Printf("project config gone (folder moved or deleted); exiting")
-			return nil
-		}
-		if cur.ID != proj.ID {
-			log.Printf("mount identity changed; exiting")
-			return nil
-		}
-		// If the registry says this mount now lives elsewhere, a new
-		// location has taken over — stand down.
-		if m, err := config.LoadMounts(); err == nil {
-			if mi, ok := m[proj.ID]; ok && mi.Path != folder {
-				log.Printf("mount re-registered at %s; exiting", mi.Path)
+		// A pause is per mount, not per shared volume. If the mount that
+		// started this daemon is paused, hand the volume to an unpaused sibling
+		// before reading the active folder below.
+		if store.PausedMount(volDir, proj.ID) {
+			promoted := false
+			if m, merr := config.LoadMounts(); merr == nil {
+				ids := make([]string, 0, len(m))
+				for id := range m {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				for _, id := range ids {
+					mi := m[id]
+					if id == proj.ID || mi.Path == "" || store.PausedMount(volDir, id) {
+						continue
+					}
+					v, verr := config.VolumeDir(id)
+					if verr != nil || v != volDir {
+						continue
+					}
+					c, cok, cerr := config.LoadProject(mi.Path)
+					if cerr == nil && cok && c.ID == id &&
+						config.SameRemote(c.Remote, proj.Remote) {
+						folder = mi.Path
+						proj = c
+						promoted = true
+						break
+					}
+				}
+			}
+			if !promoted {
+				log.Printf("mount paused; exiting")
 				return nil
 			}
 		}
-		if cur.Remote != proj.Remote {
-			// A running daemon never follows a folder config to a new remote.
-			// .bdrive/config.json is untrusted input (anything with write
-			// access inside the mount writes it: an agent session, a
-			// dependency's install script), and following it moved the whole
-			// project — every path, device name and signed-in email in the
-			// journal — to a host the user never chose, on the next 3s tick,
-			// with no credential needed for a file:// target. The daemon then
-			// PULLED from there too, which is an arbitrary write into the
-			// mount. Standing down is the same self-heal as a moved folder:
-			// the next bdrive command in this folder starts a daemon for
-			// whatever it then says, which is a user action.
-			log.Printf("remote changed in .bdrive/config.json (%q -> %q); exiting — run bdrive in this folder to resume",
-				proj.Remote, cur.Remote)
-			return nil
+
+		// Re-read the project config each tick. A vanished primary folder may
+		// have been replaced by another enrolled worktree sharing this volume;
+		// promote that sibling before deciding the project is gone.
+		cur, ok, err := config.LoadProject(folder)
+		if err == nil && ok {
+			if cur.ID != proj.ID {
+				promoted := false
+				if m, merr := config.LoadMounts(); merr == nil {
+					if mi, ok := m[cur.ID]; ok && mi.Path == folder &&
+						!store.PausedMount(volDir, cur.ID) &&
+						config.SameRemote(cur.Remote, proj.Remote) {
+						if v, verr := config.VolumeDir(cur.ID); verr == nil && v == volDir {
+							proj = cur
+							continue
+						}
+					}
+					ids := make([]string, 0, len(m))
+					for id := range m {
+						ids = append(ids, id)
+					}
+					sort.Strings(ids)
+					for _, id := range ids {
+						mi := m[id]
+						if mi.Path == "" || mi.Path == folder || store.PausedMount(volDir, id) {
+							continue
+						}
+						v, verr := config.VolumeDir(id)
+						if verr != nil || v != volDir {
+							continue
+						}
+						sc, scok, scerr := config.LoadProject(mi.Path)
+						if scerr == nil && scok && sc.ID == id &&
+							config.SameRemote(sc.Remote, proj.Remote) {
+							folder = mi.Path
+							proj = sc
+							promoted = true
+							break
+						}
+					}
+				}
+				if promoted {
+					continue
+				}
+				log.Printf("mount identity changed; exiting")
+				return nil
+			}
+			// If the registry says this mount now lives elsewhere, a new
+			// location has taken over — stand down.
+			promotedSibling := config.Project{}
+			promoted := false
+			if m, err := config.LoadMounts(); err == nil {
+				if mi, ok := m[proj.ID]; ok && mi.Path != folder {
+					c, cok, cerr := config.LoadProject(mi.Path)
+					validReRegistered := cerr == nil && cok && c.ID == proj.ID &&
+						config.SameRemote(c.Remote, proj.Remote)
+					if !validReRegistered {
+						log.Printf("mount re-registered at %s; exiting", mi.Path)
+						return nil
+					}
+					v, verr := config.VolumeDir(proj.ID)
+					if verr != nil || v != volDir || !config.IsMount(mi.Path) {
+						log.Printf("mount re-registered at %s; exiting", mi.Path)
+						return nil
+					}
+					ids := make([]string, 0, len(m))
+					for id := range m {
+						ids = append(ids, id)
+					}
+					sort.Strings(ids)
+					for _, id := range ids {
+						sibling := m[id]
+						if id == proj.ID || sibling.Path == "" || sibling.Path == folder ||
+							store.PausedMount(volDir, id) {
+							continue
+						}
+						sv, sverr := config.VolumeDir(id)
+						if sverr != nil || sv != volDir {
+							continue
+						}
+						sc, scok, scerr := config.LoadProject(sibling.Path)
+						if scerr == nil && scok && sc.ID == id &&
+							config.SameRemote(sc.Remote, proj.Remote) {
+							promotedSibling = sc
+							folder = sibling.Path
+							promoted = true
+							break
+						}
+					}
+					if !promoted {
+						log.Printf("mount re-registered at %s; exiting", mi.Path)
+						return nil
+					}
+				}
+			}
+			if cur.Remote != proj.Remote {
+				// A running daemon never follows a folder config to a new remote.
+				// .bdrive/config.json is untrusted input (anything with write
+				// access inside the mount writes it: an agent session, a
+				// dependency's install script), and following it moved the whole
+				// project — every path, device name and signed-in email in the
+				// journal — to a host the user never chose, on the next 3s tick,
+				// with no credential needed for a file:// target. The daemon then
+				// PULLED from there too, which is an arbitrary write into the
+				// mount. Standing down is the same self-heal as a moved folder:
+				// the next bdrive command in this folder starts a daemon for
+				// whatever it then says, which is a user action.
+				log.Printf("remote changed in .bdrive/config.json (%q -> %q); exiting — run bdrive in this folder to resume",
+					proj.Remote, cur.Remote)
+				promoted = false
+				if m, merr := config.LoadMounts(); merr == nil {
+					ids := make([]string, 0, len(m))
+					for id := range m {
+						ids = append(ids, id)
+					}
+					sort.Strings(ids)
+					for _, id := range ids {
+						mi := m[id]
+						if mi.Path == "" || mi.Path == folder || store.PausedMount(volDir, id) {
+							continue
+						}
+						v, verr := config.VolumeDir(id)
+						if verr != nil || v != volDir {
+							continue
+						}
+						sc, scok, scerr := config.LoadProject(mi.Path)
+						if scerr == nil && scok && sc.ID == id &&
+							config.SameRemote(sc.Remote, proj.Remote) {
+							folder = mi.Path
+							proj = sc
+							promoted = true
+							break
+						}
+					}
+				}
+				if promoted {
+					continue
+				}
+				return nil
+			}
+			if promoted {
+				proj = promotedSibling
+			} else {
+				proj = cur
+			}
+		} else {
+			promoted := false
+			if m, merr := config.LoadMounts(); merr == nil {
+				ids := make([]string, 0, len(m))
+				for id := range m {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				for _, id := range ids {
+					mi := m[id]
+					if mi.Path == "" || mi.Path == folder || store.PausedMount(volDir, id) {
+						continue
+					}
+					v, verr := config.VolumeDir(id)
+					if verr != nil || v != volDir {
+						continue
+					}
+					c, cok, cerr := config.LoadProject(mi.Path)
+					if cerr == nil && cok && c.ID == id && config.SameRemote(c.Remote, proj.Remote) {
+						folder = mi.Path
+						proj = c
+						promoted = true
+						break
+					}
+				}
+			}
+			if !promoted {
+				log.Printf("project config gone (folder moved or deleted); exiting")
+				return nil
+			}
 		}
-		proj = cur
+
+		// All live enrolled worktrees sharing this volume get a cycle in a
+		// deterministic order. Each mount has its own folder and state cache,
+		// while the store, journal and backend remain shared.
+		targets := []struct {
+			folder string
+			proj   config.Project
+		}{{folder: folder, proj: proj}}
+		if m, merr := config.LoadMounts(); merr == nil {
+			ids := make([]string, 0, len(m))
+			for id := range m {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			for _, id := range ids {
+				mi := m[id]
+				if id == proj.ID || mi.Path == "" || mi.Path == folder ||
+					store.PausedMount(volDir, id) {
+					continue
+				}
+				v, verr := config.VolumeDir(id)
+				if verr != nil || v != volDir {
+					continue
+				}
+				c, cok, cerr := config.LoadProject(mi.Path)
+				if cerr == nil && cok && c.ID == id && config.SameRemote(c.Remote, proj.Remote) {
+					targets = append(targets, struct {
+						folder string
+						proj   config.Project
+					}{folder: mi.Path, proj: c})
+				}
+			}
+		}
 
 		// Re-read settings each tick too, so a login/logout/account switch
 		// after the daemon started is reflected in op authorship — otherwise
@@ -581,17 +788,98 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 		}
 
-		sess := &syncer.Session{Folder: folder, MountID: proj.ID, Store: st, Device: dev, Account: settings}
-		if doRemote {
-			sess.Backend = be
+		var res syncer.Result
+		var cycleErr error
+		haveResult := false
+		mergeResult := func(r *syncer.Result) {
+			if r == nil {
+				return
+			}
+			if !haveResult {
+				res = *r
+				haveResult = true
+				return
+			}
+			res.LocalOps += r.LocalOps
+			res.PulledOps += r.PulledOps
+			res.Conflicts += r.Conflicts
+			res.Merged += r.Merged
+			res.Adopted += r.Adopted
+			res.Pruned += r.Pruned
+			res.Materialized += r.Materialized
+			res.Pushed = res.Pushed || r.Pushed
+			res.Backfilling = res.Backfilling || r.Backfilling
+			res.Inbound = append(res.Inbound, r.Inbound...)
+			res.Reverted = append(res.Reverted, r.Reverted...)
+			res.Offline = res.Offline || r.Offline
+			if res.OfflineErr == nil {
+				res.OfflineErr = r.OfflineErr
+			}
+			res.ReadOnly = res.ReadOnly || r.ReadOnly
+			res.NoAccess = res.NoAccess || r.NoAccess
+			if res.AccessErr == nil {
+				res.AccessErr = r.AccessErr
+			}
 		}
-		res, err := sess.Cycle(ctx)
+
+		// Run the primary target first, then each sibling. A sibling gets the
+		// backend on a remote tick, or when an earlier sibling committed local
+		// ops that must be published before this target catches up.
+		maxLocalTarget := -1
+		for i, target := range targets {
+			if i > 0 && ctx.Err() != nil {
+				break
+			}
+			sess := &syncer.Session{
+				Folder:         target.folder,
+				MountID:        target.proj.ID,
+				ExpectedRemote: target.proj.Remote,
+				Store:          st,
+				Device:         dev,
+				Account:        settings,
+			}
+			if doRemote || res.LocalOps > 0 {
+				sess.Backend = be
+			}
+			r, rerr := sess.Cycle(ctx)
+			if rerr != nil && cycleErr == nil {
+				cycleErr = rerr
+			}
+			mergeResult(r)
+			if r != nil && r.LocalOps > 0 {
+				maxLocalTarget = i
+			}
+		}
+
+		// A later target may have committed after an earlier target's cycle.
+		// Replay the shared journal into those earlier folders immediately,
+		// without another remote request, so concurrent worktrees converge in
+		// the same daemon tick.
+		if maxLocalTarget > 0 && ctx.Err() == nil {
+			for i := range maxLocalTarget {
+				target := targets[i]
+				sess := &syncer.Session{
+					Folder:         target.folder,
+					MountID:        target.proj.ID,
+					ExpectedRemote: target.proj.Remote,
+					Store:          st,
+					Device:         dev,
+					Account:        settings,
+				}
+				r, rerr := sess.Cycle(ctx)
+				if rerr != nil && cycleErr == nil {
+					cycleErr = rerr
+				}
+				mergeResult(r)
+			}
+		}
+
 		switch {
 		case ctx.Err() != nil:
 			log.Printf("daemon stopping")
 			return nil
-		case err != nil:
-			log.Printf("cycle error: %v", err)
+		case cycleErr != nil:
+			log.Printf("cycle error: %v", cycleErr)
 		case res.NoAccess:
 			// The connection is fine, the answer isn't: keep the backend and
 			// keep ticking cheaply so a re-grant self-heals. Log the

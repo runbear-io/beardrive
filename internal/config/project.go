@@ -389,8 +389,21 @@ func ResolveMount(folder string) (Project, bool, error) {
 	}
 	if mi.Path != folder || mi.Volume != p.Volume || mi.Remote != p.Remote ||
 		mi.Dev != dev || mi.Ino != ino {
-		mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote, Dev: dev, Ino: ino}
-		if err := SaveMounts(mounts); err != nil {
+		unlock, err := lockMounts()
+		if err != nil {
+			return p, true, err
+		}
+		defer unlock()
+		mounts, err = LoadMounts()
+		if err != nil {
+			return p, true, err
+		}
+		mi, registered = mounts[p.ID]
+		if !registered {
+			return p, true, nil
+		}
+		mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote, VolumeID: mi.VolumeID, Dev: dev, Ino: ino}
+		if err := saveMountsLocked(mounts); err != nil {
 			return p, true, err
 		}
 	}
@@ -406,16 +419,43 @@ func EnrollMount(folder string) (Project, bool, error) {
 	if err != nil || !ok {
 		return p, ok, err
 	}
+	unlock, err := lockMounts()
+	if err != nil {
+		return p, true, err
+	}
+	defer unlock()
+	home, err := Home()
+	if err != nil {
+		return p, true, err
+	}
 	mounts, err := LoadMounts()
 	if err != nil {
 		return p, true, err
 	}
+	volID := mounts[p.ID].VolumeID
+	if volID == "" && p.Remote != "" {
+		if shared := sharedVolumeIDForRemoteIn(home, mounts, p.Remote, p.ID); shared != "" && shared != p.ID {
+			volID = shared
+		}
+	}
+	if p.Remote != "" {
+		if volID == "" {
+			volID = p.ID
+		}
+		if !ValidMountID(volID) {
+			return p, true, fmt.Errorf("invalid volume id %q", volID)
+		}
+		if err := os.MkdirAll(filepath.Join(home, "volumes", volID), 0o755); err != nil {
+			return p, true, err
+		}
+	}
+
 	// init is also the repair gesture: it re-points a row unconditionally, which
 	// is the documented remedy every "run `bdrive init` here" message names —
 	// including for the one case ResolveMount deliberately will not decide (a
 	// move whose old path is gone and whose new directory has a new identity,
 	// e.g. across filesystems).
 	dev, ino := dirID(folder)
-	mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote, Dev: dev, Ino: ino}
-	return p, true, SaveMounts(mounts)
+	mounts[p.ID] = MountInfo{Path: folder, Volume: p.Volume, Remote: p.Remote, VolumeID: volID, Dev: dev, Ino: ino}
+	return p, true, saveMountsLocked(mounts)
 }

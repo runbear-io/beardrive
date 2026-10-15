@@ -387,10 +387,12 @@ the folder was renamed or moved.`,
 			if err != nil {
 				return err
 			}
-			ignorePath := filepath.Join(folder, ".bdriveignore")
-			if _, err := os.Stat(ignorePath); os.IsNotExist(err) {
-				if err := os.WriteFile(ignorePath, []byte(starterIgnore), 0o644); err != nil {
-					return err
+			if !config.SharedVolumeHasIgnoreState(remoteURL, proj.ID) {
+				ignorePath := filepath.Join(folder, ".bdriveignore")
+				if _, err := os.Stat(ignorePath); os.IsNotExist(err) {
+					if err := os.WriteFile(ignorePath, []byte(starterIgnore), 0o644); err != nil {
+						return err
+					}
 				}
 			}
 			if len(scope) > 0 {
@@ -573,27 +575,9 @@ func installAutostart(interactive bool) {
 	fmt.Printf("  login:   %s  →  %s\n", state, res.Path)
 }
 
-// checkNotAlreadyMounted refuses a second folder for a project this device
-// already syncs. Each device writes one journal per project on the remote, so
-// two local mounts of one project are two writers of the same journal: the
-// second one's push overwrites the first one's ops and those files disappear
-// from the hub. Stale registry entries (folder gone) are ignored.
+// checkNotAlreadyMounted is retained for the init call flow, but mounts of the
+// same remote are allowed to share one local volume store and journal.
 func checkNotAlreadyMounted(remote, folder, name string) error {
-	mounts, err := config.LoadMounts()
-	if err != nil {
-		return nil // registry unreadable: don't block setup over it
-	}
-	for _, mi := range mounts {
-		if mi.Remote != remote || mi.Path == folder || mi.Path == "" {
-			continue
-		}
-		if !config.IsMount(mi.Path) {
-			continue // moved or deleted; the registry entry is stale
-		}
-		return fmt.Errorf("this device already syncs project %q at %s\n"+
-			"one folder per project per device: a second mount would overwrite that folder's history on the hub\n"+
-			"use that folder, or release it first with `bdrive stop --forget %s`", name, mi.Path, mi.Path)
-	}
 	return nil
 }
 

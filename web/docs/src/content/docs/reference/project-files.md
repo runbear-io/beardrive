@@ -144,8 +144,8 @@ Everything else lives under `$BDRIVE_HOME` (default `~/.bdrive`):
 |---|---|
 | `device.json` | This device's identity, used in change tracking |
 | `settings.json` | Default server, device token, signed-in account |
-| `mounts.json` | Mount registry, keyed by stable mount id, holding each mount's last-known path |
-| `volumes/<mount-id>/` | The local volume store: blobs, journals, materialization cache, sync state |
+| `mounts.json` | Mount registry, keyed by stable mount id, holding each mount's last-known path and shared `volume_id` when multiple worktrees connect to the same project |
+| `volumes/<volume-id>/` | Shared local volume store: blobs, journals, sync state, and per-mount files |
 
 Nothing is keyed by folder path, which is why moves and renames are free.
 `ResolveMount` self-heals the registry path on the next command.
@@ -153,10 +153,12 @@ Nothing is keyed by folder path, which is why moves and renames are free.
 ## The volume store
 
 ```
-~/.bdrive/volumes/<mount-id>/
+~/.bdrive/volumes/<volume-id>/
 ├─ blobs/      content-addressed file content (sha256)
 ├─ journal/    one append-only op log per device
-├─ state.json  what's materialized
+├─ state-<mount-id>.json  per-mount materialization cache
+├─ inbound-<mount-id>.jsonl per-mount inbound spool
+├─ paused-<mount-id>       per-mount pause marker
 ├─ sync.json   lamport clock + push cursor
 └─ secrets-<mount-id>.json  files that looked like they held credentials when
                             they last changed (what `bdrive status` reports)

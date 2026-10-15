@@ -9,11 +9,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"syscall"
+
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 // Home returns the beardrive home directory ($BDRIVE_HOME or ~/.bdrive).
@@ -185,6 +191,11 @@ type MountInfo struct {
 	Path   string `json:"path"`
 	Volume string `json:"volume,omitempty"`
 	Remote string `json:"remote,omitempty"`
+	// VolumeID is the shared volume store directory name under ~/.bdrive/volumes/
+	// when multiple mounts (or a re-created worktree) connect to the same remote
+	// project. Empty means VolumeDir uses the mount's own ID (the legacy and
+	// first-mount default).
+	VolumeID string `json:"volume_id,omitempty"`
 	// Dev+Ino are the filesystem's identity for Path at the time this row was
 	// written. They are what tells a MOVED folder (rename: same inode, new
 	// path) from a second folder carrying a copy of the same
@@ -193,6 +204,32 @@ type MountInfo struct {
 	Dev uint64 `json:"dev,omitempty"`
 	Ino uint64 `json:"ino,omitempty"`
 }
+var mountsMu sync.Mutex
+
+func lockMounts() (func(), error) {
+	mountsMu.Lock()
+	home, err := ensureHome()
+	if err != nil {
+		mountsMu.Unlock()
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(home, "mounts.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		mountsMu.Unlock()
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		mountsMu.Unlock()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+		mountsMu.Unlock()
+	}, nil
+}
+
 
 func mountsPath() (string, error) {
 	home, err := Home()
@@ -204,6 +241,10 @@ func mountsPath() (string, error) {
 
 // LoadMounts returns the mount-ID → mount registry.
 func LoadMounts() (map[string]MountInfo, error) {
+	return loadMountsUnlocked()
+}
+
+func loadMountsUnlocked() (map[string]MountInfo, error) {
 	p, err := mountsPath()
 	if err != nil {
 		return nil, err
@@ -222,6 +263,22 @@ func LoadMounts() (map[string]MountInfo, error) {
 	return out, nil
 }
 
+// ForgetMount removes mountID from mounts.json under the registry lock so
+// concurrent enrollments are never overwritten with a stale snapshot.
+func ForgetMount(mountID string) error {
+	unlock, err := lockMounts()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	mounts, err := loadMountsUnlocked()
+	if err != nil {
+		return err
+	}
+	delete(mounts, mountID)
+	return saveMountsLocked(mounts)
+}
+
 // SaveMounts writes the registry, stamping an identity on any row that has
 // none. Every row written before Dev/Ino existed carries zeros, and the
 // move-vs-copy discriminator is only consulted when a row HAS one — so without
@@ -231,6 +288,14 @@ func LoadMounts() (map[string]MountInfo, error) {
 // unambiguous; a row whose path has already stopped answering is left alone
 // rather than given the identity of whatever is sitting there now.
 func SaveMounts(m map[string]MountInfo) error {
+	unlock, err := lockMounts()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return saveMountsLocked(m)
+}
+func saveMountsLocked(m map[string]MountInfo) error {
 	p, err := mountsPath()
 	if err != nil {
 		return err
@@ -247,7 +312,102 @@ func SaveMounts(m map[string]MountInfo) error {
 			m[id] = mi
 		}
 	}
-	return writeJSON(p, m)
+	if err := writeJSON(p, m); err != nil {
+		return err
+	}
+	stampMountRemotes(m)
+	return nil
+}
+
+// RememberVolumeRemote records a mount's remote in an existing volume store.
+// It never creates the volume directory: forgotten legacy stores are stamped
+// only when their data is already present on disk.
+func RememberVolumeRemote(mountID, remote string) error {
+	if remote == "" {
+		return nil
+	}
+	vdir, err := VolumeDir(mountID)
+	if err != nil {
+		return err
+	}
+	return rememberVolumeRemoteAt(vdir, remote)
+}
+
+func stampMountRemotes(m map[string]MountInfo) {
+	home, err := Home()
+	if err != nil {
+		return
+	}
+	for id, mi := range m {
+		if mi.Remote == "" {
+			continue
+		}
+		vid := mi.VolumeID
+		if vid == "" {
+			vid = id
+		}
+		if !ValidMountID(vid) {
+			continue
+		}
+		_ = rememberVolumeRemoteAt(filepath.Join(home, "volumes", vid), mi.Remote)
+	}
+}
+
+func rememberVolumeRemoteAt(vdir, remote string) error {
+	if remote == "" {
+		return nil
+	}
+	info, err := os.Stat(vdir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a volume directory", vdir)
+	}
+	syncPath := filepath.Join(vdir, "sync.json")
+	if data, readErr := os.ReadFile(syncPath); readErr == nil {
+		var state map[string]any
+		if json.Unmarshal(data, &state) == nil {
+			if existing, ok := state["remote"].(string); ok && strings.TrimSpace(existing) != "" {
+				return nil
+			}
+		}
+	} else if !os.IsNotExist(readErr) {
+		return readErr
+	}
+
+	lockPath := filepath.Join(vdir, "lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	state := map[string]any{}
+	if data, readErr := os.ReadFile(syncPath); readErr == nil {
+		if len(strings.TrimSpace(string(data))) > 0 {
+			if err := json.Unmarshal(data, &state); err != nil {
+				return err
+			}
+			if state == nil {
+				state = map[string]any{}
+			}
+		}
+	} else if !os.IsNotExist(readErr) {
+		return readErr
+	}
+	if existing, ok := state["remote"].(string); ok && strings.TrimSpace(existing) != "" {
+		return nil
+	}
+	state["remote"] = remote
+	return writeJSON(syncPath, state)
 }
 
 // VolumeDir returns the local store dir of a mount, keyed by its stable
@@ -266,9 +426,324 @@ func VolumeDir(mountID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "volumes", mountID), nil
+	volumeID := mountID
+	if mounts, err := LoadMounts(); err == nil {
+		if mi, ok := mounts[mountID]; ok && mi.VolumeID != "" && ValidMountID(mi.VolumeID) {
+			volumeID = mi.VolumeID
+		}
+	}
+	return filepath.Join(home, "volumes", volumeID), nil
 }
 
+// SameRemote reports whether two remote URLs identify the same project.
+func SameRemote(a, b string) bool {
+	a = strings.TrimRight(strings.TrimSpace(a), "/")
+	b = strings.TrimRight(strings.TrimSpace(b), "/")
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil || ua.Scheme == "" || ua.Host == "" || ub.Scheme == "" || ub.Host == "" {
+		return false
+	}
+	// Object-store URLs use trimmed string equality rather than HTTP origin
+	// normalization: bucket and key spelling are part of the remote identity.
+	if strings.EqualFold(ua.Scheme, "file") || strings.EqualFold(ua.Scheme, "s3") ||
+		strings.EqualFold(ua.Scheme, "gs") || strings.EqualFold(ub.Scheme, "file") ||
+		strings.EqualFold(ub.Scheme, "s3") || strings.EqualFold(ub.Scheme, "gs") {
+		return false
+	}
+	return normalizedRemoteOrigin(ua) == normalizedRemoteOrigin(ub) &&
+		strings.TrimRight(ua.Path, "/") == strings.TrimRight(ub.Path, "/")
+}
+
+func normalizedRemoteOrigin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.TrimRight(strings.ToLower(u.Hostname()), ".")
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host
+}
+
+// SharedVolumeIDForRemote finds a local volume already associated with remote.
+func SharedVolumeIDForRemote(remote, excludeMountID string) string {
+	unlock, err := lockMounts()
+	if err != nil {
+		return ""
+	}
+	defer unlock()
+	home, err := Home()
+	if err != nil {
+		return ""
+	}
+	mounts, err := LoadMounts()
+	if err != nil {
+		mounts = map[string]MountInfo{}
+	}
+	return sharedVolumeIDForRemoteIn(home, mounts, remote, excludeMountID)
+}
+
+func sharedVolumeIDForRemoteIn(home string, mounts map[string]MountInfo, remote, excludeMountID string) string {
+	if strings.TrimSpace(remote) == "" {
+		return ""
+	}
+	candidates := map[string]bool{}
+	for id, mi := range mounts {
+		if id == excludeMountID {
+			ownID := mi.VolumeID
+			if ownID == "" {
+				ownID = id
+			}
+			if !ValidMountID(ownID) {
+				continue
+			}
+			info, err := os.Stat(filepath.Join(home, "volumes", ownID))
+			if err != nil || !info.IsDir() {
+				continue
+			}
+		}
+		if !ValidMountID(id) || !SameRemote(mi.Remote, remote) {
+			continue
+		}
+		vid := mi.VolumeID
+		if vid == "" {
+			vid = id
+		}
+		if ValidMountID(vid) {
+			candidates[vid] = true
+		}
+	}
+
+	// A forgotten mount may no longer have a registry row. Its sync state is
+	// the durable identity that lets a recreated worktree find the old store.
+	if entries, err := os.ReadDir(filepath.Join(home, "volumes")); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || !ValidMountID(e.Name()) {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(home, "volumes", e.Name(), "sync.json"))
+			if err != nil {
+				continue
+			}
+			var state struct {
+				Remote string `json:"remote"`
+			}
+			if json.Unmarshal(data, &state) == nil && SameRemote(state.Remote, remote) {
+				candidates[e.Name()] = true
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	ids := make([]string, 0, len(candidates))
+	for id := range candidates {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	var best volumeRank
+	haveBest := false
+	for _, id := range ids {
+		rank := rankVolume(home, id)
+		if !haveBest || betterVolumeRank(rank, best, excludeMountID) {
+			best = rank
+			haveBest = true
+		}
+	}
+	return best.id
+}
+
+const maxRankLamport = int64(1) << 62
+
+type volumeRank struct {
+	id                 string
+	totalOps           int64
+	ownOps             int64
+	ownContiguousSeq   int64
+	pushedOps          int64
+	lamport            int64
+	hasSyncJSON        bool
+	hasJournal         bool
+	dirExists          bool
+}
+
+func rankVolume(home, id string) volumeRank {
+	rank := volumeRank{id: id}
+	dir := filepath.Join(home, "volumes", id)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return rank
+	}
+	rank.dirExists = true
+	journalDir := filepath.Join(dir, "journal")
+	if info, err := os.Stat(journalDir); err == nil && info.IsDir() {
+		rank.hasJournal = true
+		if dev, err := LoadDevice(); err == nil && dev.ID != "" {
+			ownOps, err := journal.ReadFile(filepath.Join(journalDir, dev.ID+".jsonl"))
+			if err == nil {
+				rank.ownOps = int64(len(ownOps))
+				var contig int64
+				for _, op := range ownOps {
+					if op.Seq == contig+1 {
+						contig = op.Seq
+					} else if op.Seq > contig+1 {
+						break
+					}
+					if op.Lamport > rank.lamport && op.Lamport <= maxRankLamport {
+						rank.lamport = op.Lamport
+					}
+				}
+				rank.ownContiguousSeq = contig
+			}
+		}
+		if entries, err := os.ReadDir(journalDir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+					continue
+				}
+				ops, err := journal.ReadFile(filepath.Join(journalDir, entry.Name()))
+				if err != nil {
+					continue
+				}
+				for _, op := range ops {
+					rank.totalOps++
+					if op.Lamport > rank.lamport && op.Lamport <= maxRankLamport {
+						rank.lamport = op.Lamport
+					}
+				}
+			}
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "sync.json")); err == nil {
+		rank.hasSyncJSON = true
+		var state struct {
+			Lamport   int64 `json:"lamport"`
+			PushedOps int64 `json:"pushed_ops"`
+		}
+		if json.Unmarshal(data, &state) == nil {
+			if state.Lamport > rank.lamport && state.Lamport <= maxRankLamport {
+				rank.lamport = state.Lamport
+			}
+			if state.PushedOps > 0 && state.PushedOps <= maxRankLamport {
+				if rank.ownOps > 0 && state.PushedOps > rank.ownOps {
+					rank.pushedOps = rank.ownOps
+				} else {
+					rank.pushedOps = state.PushedOps
+				}
+			}
+		}
+	}
+	return rank
+}
+
+
+func betterVolumeRank(a, b volumeRank, preferredID string) bool {
+	if a.ownContiguousSeq != b.ownContiguousSeq && (a.ownContiguousSeq > 1 || b.ownContiguousSeq > 1) {
+		return a.ownContiguousSeq > b.ownContiguousSeq
+	}
+	if a.totalOps != b.totalOps {
+		return a.totalOps > b.totalOps
+	}
+	if a.lamport != b.lamport {
+		return a.lamport > b.lamport
+	}
+	if a.ownOps != b.ownOps {
+		return a.ownOps > b.ownOps
+	}
+	if a.pushedOps != b.pushedOps {
+		return a.pushedOps > b.pushedOps
+	}
+	if a.hasSyncJSON != b.hasSyncJSON {
+		return a.hasSyncJSON
+	}
+	if a.hasJournal != b.hasJournal {
+		return a.hasJournal
+	}
+	if a.dirExists != b.dirExists {
+		return a.dirExists
+	}
+	if preferredID != "" {
+		if a.id == preferredID && b.id != preferredID {
+			return true
+		}
+		if b.id == preferredID && a.id != preferredID {
+			return false
+		}
+	}
+	return a.id < b.id
+}
+
+// SharedVolumeHasIgnoreState reports whether a shared project volume currently
+// resolves .bdriveignore to a real file whose blob is present locally.
+func SharedVolumeHasIgnoreState(remote, excludeMountID string) bool {
+	vid := SharedVolumeIDForRemote(remote, excludeMountID)
+	if vid == "" || !ValidMountID(vid) {
+		return false
+	}
+	home, err := Home()
+	if err != nil {
+		return false
+	}
+	vdir := filepath.Join(home, "volumes", vid)
+
+	var ops []journal.Op
+	entries, err := os.ReadDir(filepath.Join(vdir, "journal"))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		fileOps, err := journal.ReadFile(filepath.Join(vdir, "journal", entry.Name()))
+		if err != nil {
+			continue
+		}
+		ops = append(ops, fileOps...)
+	}
+	if len(ops) == 0 {
+		return false
+	}
+	journal.Sort(ops)
+	var want journal.Op
+	found := false
+	for _, op := range ops {
+		if op.Path == ".bdriveignore" {
+			want = op
+			found = true
+		}
+	}
+	state, replayed := journal.Replay(ops)[".bdriveignore"]
+	if !found || !replayed || want.Kind != journal.KindPut || len(want.Blob) != 64 ||
+		want.Link != "" || state.Blob != want.Blob || state.Link != "" {
+		return false
+	}
+	for i := range want.Blob {
+		c := want.Blob[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	blobPath := filepath.Join(vdir, "blobs", want.Blob[:2], want.Blob)
+	info, err := os.Lstat(blobPath)
+	return err == nil && info.Mode().IsRegular()
+
+}
 func writeJSON(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

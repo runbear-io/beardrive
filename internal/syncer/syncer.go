@@ -66,17 +66,18 @@ type Progress struct {
 
 // Session ties a working folder to its volume store and (optionally) remote.
 type Session struct {
-	Folder  string
-	MountID string // the stable project mount id from .bdrive/config.json
-	Store   *store.Store
-	Device  config.Device
+	Folder         string
+	MountID        string // the stable project mount id from .bdrive/config.json
+	ExpectedRemote string
+	Store          *store.Store
+	Device         config.Device
 	// Account is the signed-in user (from `bdrive login`); ops carry it so
 	// history shows who changed what. Zero on offline/no-auth setups —
 	// Device.Author remains the fallback identity.
 	Account config.Settings
 	// Note, when set, is stamped into every op this session commits — session
 	// context like "claude-code session <id>". Empty means fall back to the
-	// store's persisted session note (store.LoadNote), which lets a one-shot
+	// store's persisted mount note (store.LoadNoteForMount), which lets a one-shot
 	// `bdrive sync --note` leave context that the daemon's later scans also
 	// stamp. Conflict-copy ops keep their own explanatory note.
 	Note string
@@ -132,7 +133,7 @@ type Session struct {
 // other's copy.
 func (s *Session) logInbound(rel string, deleted bool) {
 	s.inbound = append(s.inbound, store.InboundEvent{Path: rel, Deleted: deleted, Time: time.Now().UTC()})
-	_ = s.Store.LogInbound(rel, deleted) // best-effort: never fails a cycle
+	_ = s.Store.LogInboundForMount(s.MountID, rel, deleted) // best-effort: never fails a cycle
 }
 
 // readOnlyPath reports whether rel sits under a folder this account may read
@@ -435,13 +436,35 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read own journal: %w", err)
 	}
-	proj, _, err := config.LoadProject(s.Folder)
+	proj, ok, err := config.LoadProject(s.Folder)
 	if err != nil {
 		return nil, err
 	}
-	// This device has never contributed to this volume: it is JOINING a project,
-	// not editing one. Step 1b is what that changes.
-	joining := st.Lamport == 0 && st.PushedOps == 0
+	if s.MountID != "" {
+		registered := false
+		if mounts, merr := config.LoadMounts(); merr == nil {
+			_, registered = mounts[s.MountID]
+		}
+		if registered && (!ok || proj.ID == "" || proj.ID != s.MountID) {
+			return nil, fmt.Errorf("project config gone at %s", s.Folder)
+		}
+		if ok && proj.ID != "" && proj.ID != s.MountID {
+			return nil, fmt.Errorf("project config gone at %s", s.Folder)
+		}
+	}
+	if s.ExpectedRemote != "" && !config.SameRemote(proj.Remote, s.ExpectedRemote) {
+		return nil, fmt.Errorf("project remote changed (%q -> %q)", s.ExpectedRemote, proj.Remote)
+	}
+	if st.Remote != "" && !config.SameRemote(proj.Remote, st.Remote) {
+		return nil, fmt.Errorf("volume remote mismatch (%q -> %q)", st.Remote, proj.Remote)
+	}
+	hadCache := s.Store.HasCache(s.mountID())
+	if proj.Remote != "" {
+		st.Remote = proj.Remote
+	}
+	deviceJoining := st.Lamport == 0 && st.PushedOps == 0
+	mountJoining := !hadCache && s.MountID != "" && (st.Lamport > 0 || st.PushedOps > 0)
+	joining := deviceJoining || mountJoining
 	// Re-derive the clock from the journals this device ALREADY holds.
 	//
 	// Nothing else does. st.Lamport is only ever raised from a pull's new tail
@@ -464,9 +487,9 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// disk holds a peer's bytes, and the maxLamport ceiling is what stops a
 	// hostile peer installing a permanent write lock.
 	//
-	// AFTER `joining` is read, never before. joining gates the adoption path,
-	// so deriving first would turn a device whose first cycle crashed into a
-	// non-joiner and change what `bdrive init` adopts.
+	// Determine joining before raising the clock. Existing ops also identify
+	// a populated store whose sync.json was not saved before a crash; a mount
+	// without a cache must adopt that state rather than start a fresh import.
 	//
 	// ponytail: re-reads every journal, so the cycle now parses them twice (the
 	// other read is step 4's). The cycle already walks the whole working folder
@@ -474,11 +497,30 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// cache the derived max against a per-journal (name, size) fingerprint in
 	// SyncState — do NOT hand-scan the JSONL for "lamport": Op.Path and Op.Note
 	// are peer-chosen strings that can contain that literal.
-	if ops, err := s.Store.AllOps(); err != nil {
+	_, hadCachedIgnore := cache[IgnoreFile]
+	ops, err := s.Store.AllOps()
+	var existingState map[string]journal.FileState
+	if err != nil {
 		// Never break sync: a journal we cannot read must not stop the scan
 		// from capturing local edits. The stored clock stands for this cycle.
 		log.Printf("beardrive: could not re-derive the sync clock: %v", err)
 	} else {
+		if len(ops) > 0 {
+			deviceJoining = false
+			if !hadCache && s.MountID != "" {
+				mountJoining = true
+				joining = true
+			}
+		}
+		if mountJoining || hadCachedIgnore {
+			existingState = journal.Replay(ops)
+			if want, ok := existingState[IgnoreFile]; ok {
+				wrote, _ := s.materializeFile(IgnoreFile, want, cache)
+				if wrote {
+					res.Materialized++
+				}
+			}
+		}
 		for _, op := range ops {
 			st.Lamport = absorbLamport(st.Lamport, op.Lamport)
 		}
@@ -501,13 +543,47 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 		// has already synced is an upgrade, not a new joiner: seed the pair from
 		// what this mount is demonstrably syncing already (vouchedFloor) instead
 		// of taking the file's word for it.
-		if st.IgnoreAccepted == "" && st.IgnorePulled == "" && text != "" && !joining {
-			synced := make([]string, 0, len(cache))
+		if st.IgnoreAccepted == "" && st.IgnorePulled == "" && !deviceJoining {
+			synced := make([]string, 0, len(cache)+len(existingState))
 			for rel := range cache {
 				synced = append(synced, rel)
 			}
-			st.IgnoreAccepted, st.IgnorePulled = vouchedFloor(text, synced), text
-		} else if text != st.IgnorePulled {
+			if mountJoining {
+				for rel := range existingState {
+					synced = append(synced, rel)
+				}
+			}
+			var prior journal.Op
+			found := false
+			for _, op := range ops {
+				if op.Path == IgnoreFile && op.Kind == journal.KindPut &&
+					(!found || journal.Less(prior, op)) {
+					prior, found = op, true
+				}
+			}
+			if (!mountJoining && text != "") || (mountJoining && !found && text != "") {
+				st.IgnoreAccepted, st.IgnorePulled = vouchedFloor(text, synced), text
+			} else if found {
+				st.IgnoreAccepted = vouchedFloor("/*\n", synced)
+				if prior.Blob != "" && prior.Link == "" {
+					if f, err := s.Store.OpenBlob(prior.Blob); err == nil {
+						data, readErr := io.ReadAll(f)
+						_ = f.Close()
+						if readErr == nil && len(data) > 0 {
+							st.IgnoreAccepted = vouchedFloor(string(data), synced)
+							if _, live := existingState[IgnoreFile]; live {
+								st.IgnorePulled = string(data)
+							}
+						}
+					}
+				}
+				if mountJoining && text != "" {
+					if _, live := existingState[IgnoreFile]; !live {
+						st.IgnorePulled = text
+					}
+				}
+			}
+		} else if text != st.IgnorePulled && !(mountJoining && (st.IgnorePulled != "" || st.IgnoreAccepted != "")) {
 			st.IgnoreAccepted = text
 		}
 	}
@@ -531,6 +607,12 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	commitLocal := func() error {
 		if len(localOps) == 0 {
 			return nil
+		}
+		if ok {
+			cur, stillOK, cerr := config.LoadProject(s.Folder)
+			if cerr != nil || !stillOK || cur.ID != proj.ID {
+				return fmt.Errorf("project config gone at %s", s.Folder)
+			}
 		}
 		if err := s.Store.AppendOps(s.Device.ID, localOps); err != nil {
 			return fmt.Errorf("append journal: %w", err)
@@ -624,21 +706,42 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// lamport 0 loses to all of them on every device). It is still journaled and
 	// pushed, so nothing is lost — the folder's content at join time is in
 	// History and `bdrive restore` brings it back — it just never materializes.
-	if joining && len(localOps) > 0 && len(pulled) > 0 {
-		theirs := map[string]journal.Op{}
-		for _, op := range pulled {
-			if prev, ok := theirs[op.Path]; !ok || journal.Less(prev, op) {
-				theirs[op.Path] = op
+	if joining && len(localOps) > 0 {
+		candidateOps := append([]journal.Op(nil), pulled...)
+		if mountJoining {
+			existing, err := s.Store.AllOps()
+			if err != nil {
+				return nil, fmt.Errorf("read journals for adoption: %w", err)
 			}
+			candidateOps = append(candidateOps, existing...)
 		}
-		for i, op := range localOps {
-			// Only a path the project actually HOLDS is adopted. Where its
-			// last op is a delete there is no version to adopt, so the local
-			// file is this device's own and keeps its clock.
-			if t, ok := theirs[op.Path]; ok && t.Kind == journal.KindPut {
-				localOps[i].Lamport = 0
-				localOps[i].Note = adoptNote
-				res.Adopted++
+		if len(candidateOps) > 0 {
+			theirs := map[string]journal.Op{}
+			for _, op := range candidateOps {
+				if prev, ok := theirs[op.Path]; !ok || journal.Less(prev, op) {
+					theirs[op.Path] = op
+				}
+			}
+			kept := localOps[:0]
+			for _, op := range localOps {
+				// Only a path the project actually HOLDS is adopted. Where its
+				// last op is a delete there is no version to adopt, so the local
+				// file is this device's own and keeps its clock.
+				if t, ok := theirs[op.Path]; ok && t.Kind == journal.KindPut {
+					if mountJoining && op.Kind == journal.KindPut && op.Blob == t.Blob && op.Link == t.Link {
+						continue
+					}
+					op.Lamport = 0
+					op.Note = adoptNote
+					res.Adopted++
+				}
+				kept = append(kept, op)
+			}
+			localOps = kept
+			if mountJoining {
+				for i := range localOps {
+					localOps[i].Seq = int64(len(myOps) + i + 1)
+				}
 			}
 		}
 	}
@@ -752,6 +855,22 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// rules first and reload from them — otherwise materialize's delete loop
 	// runs against stale rules, its filter guard never fires, and it unlinks
 	// files that merely left sync scope.
+	ignoreFromPeer := false
+	if want, ok := target[IgnoreFile]; ok {
+		var latest journal.Op
+		found := false
+		for _, op := range all {
+			if op.Path != IgnoreFile || op.Kind != journal.KindPut ||
+				op.Blob != want.Blob || op.Link != want.Link ||
+				op.Size != want.Size || op.Mode != want.Mode {
+				continue
+			}
+			if !found || journal.Less(latest, op) {
+				latest, found = op, true
+			}
+		}
+		ignoreFromPeer = found && latest.Device != s.Device.ID
+	}
 	if want, ok := target[IgnoreFile]; !ok {
 		// A peer DELETED the shared rules — the maximal widening there is, and
 		// the one shape the bookkeeping below cannot see, since it is written in
@@ -759,10 +878,10 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 		// the local copy either way; recording the deletion as PULLED is what
 		// stops the next cycle reading the now-absent file as locally authored
 		// and dropping the accepted floor with it.
-		if len(pulled) > 0 {
+		if len(pulled) > 0 || hadCachedIgnore {
 			st.IgnorePulled = ""
 		}
-	} else if len(pulled) > 0 {
+	} else {
 		wrote, err := s.materializeFile(IgnoreFile, want, cache)
 		if err != nil {
 			log.Printf("beardrive: could not write %s this cycle: %v", IgnoreFile, err)
@@ -785,8 +904,10 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 			// came from a peer, so they may narrow what this device uploads but
 			// never widen it until somebody here authors a change. The accepted
 			// floor carries over unchanged.
-			if cur, err := os.ReadFile(filepath.Join(s.Folder, IgnoreFile)); err == nil {
-				st.IgnorePulled = string(cur)
+			if len(pulled) > 0 || ignoreFromPeer {
+				if cur, err := os.ReadFile(filepath.Join(s.Folder, IgnoreFile)); err == nil {
+					st.IgnorePulled = string(cur)
+				}
 			}
 			filter.AcceptRules(st.IgnoreAccepted)
 		}
@@ -900,7 +1021,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 	var ops []journal.Op
 	note := s.Note
 	if note == "" {
-		note = s.Store.LoadNote()
+		note = s.Store.LoadNoteForMount(s.MountID)
 	}
 	// One scan is one commit: every op it produces carries the same Time. Op
 	// order inside the batch is already carried by Lamport and Seq, which

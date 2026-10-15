@@ -46,7 +46,7 @@ func startSync(ctx context.Context, folder string, proj config.Project, foregrou
 	}
 	// init is the one gesture that (re)consents to syncing: clear any pause
 	// left by `bdrive stop` so the daemon and the agent hooks run again.
-	if err := store.SetPaused(vdir, false); err != nil {
+	if err := store.SetPausedMount(vdir, proj.ID, false); err != nil {
 		return err
 	}
 
@@ -101,28 +101,51 @@ folder's .bdrive settings and the local volume data are kept).`,
 			if err != nil {
 				return err
 			}
-			stopped, err := daemon.Stop(vdir)
+			mounts, err := config.LoadMounts()
 			if err != nil {
 				return err
 			}
-			// The pause must outlive the daemon: agent turn hooks run
-			// `bdrive sync` in this folder on every turn and would silently
-			// resume without it. Cleared by `bdrive init`.
-			if err := store.SetPaused(vdir, true); err != nil {
+			sibling := false
+			for otherID, otherMI := range mounts {
+				if otherID == proj.ID || otherMI.Path == "" || !config.IsMount(otherMI.Path) {
+					continue
+				}
+				ov, err := config.VolumeDir(otherID)
+				if err != nil || ov != vdir || store.PausedMount(vdir, otherID) {
+					continue
+				}
+				sibling = true
+				break
+			}
+			var stopped bool
+			if sibling {
+				_, stopped = daemon.Running(vdir)
+			} else {
+				stopped, err = daemon.Stop(vdir)
+				if err != nil {
+					return err
+				}
+			}
+			// Pause only this mount. A shared sibling keeps the volume daemon
+			// alive and continues syncing through the shared store.
+			if err := store.SetPausedMount(vdir, proj.ID, true); err != nil {
 				return err
+			}
+			if !sibling {
+				if err := store.SetPaused(vdir, true); err != nil {
+					return err
+				}
 			}
 			if stopped {
 				fmt.Printf("stopped syncing %s (run `bdrive init` to resume)\n", folder)
 			} else {
 				fmt.Printf("no sync daemon running for %s; syncing paused (run `bdrive init` to resume)\n", folder)
 			}
+			if err := config.RememberVolumeRemote(proj.ID, proj.Remote); err != nil {
+				return err
+			}
 			if forget {
-				mounts, err := config.LoadMounts()
-				if err != nil {
-					return err
-				}
-				delete(mounts, proj.ID)
-				if err := config.SaveMounts(mounts); err != nil {
+				if err := config.ForgetMount(proj.ID); err != nil {
 					return err
 				}
 				fmt.Printf("forgot mount %s (local volume data kept under ~/.bdrive/volumes/%s)\n", proj.ID, proj.ID)

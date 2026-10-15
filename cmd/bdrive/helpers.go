@@ -183,7 +183,7 @@ func syncBlocked(proj config.Project) string {
 	if _, enrolled := mounts[proj.ID]; !enrolled {
 		return "init"
 	}
-	if vdir, err := config.VolumeDir(proj.ID); err == nil && store.Paused(vdir) {
+	if vdir, err := config.VolumeDir(proj.ID); err == nil && store.PausedMount(vdir, proj.ID) {
 		return "paused"
 	}
 	return ""

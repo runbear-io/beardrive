@@ -7,12 +7,16 @@ Data flows in two hops, and the local volume store is the pivot.
 
 ```
 working folder  ←materialize/scan→  local volume store  ←push/pull→  object store
- (real files)                       ~/.bdrive/volumes/<vol>              s3:// gs:// file://
+ (real files)                       ~/.bdrive/volumes/<volume-id>       s3:// gs:// file://
                                     ├─ blobs/   content-addressed (sha256)
                                     ├─ journal/ one append-only op log per device
-                                    ├─ state.json  what's materialized
+                                    ├─ state-<mount-id>.json  per-mount materialization cache
+                                    ├─ inbound-<mount-id>.jsonl per-mount inbound spool
+                                    ├─ paused-<mount-id>       per-mount pause marker
                                     └─ sync.json   lamport clock + push cursor
 ```
+
+Multiple worktrees for the same project share the volume store at `~/.bdrive/volumes/<volume-id>`.
 
 ## Ops and journals
 
@@ -61,14 +65,9 @@ copy is still journaled and pushed as a superseded version of that path, so
 
 ## The daemon
 
-A per-mount daemon scans the folder every few seconds and exchanges with the
-remote every ~10s — or immediately after local edits. Tune with
-`--scan-interval` and `--remote-interval` on `bdrive daemon run` (init always
-uses the defaults).
+A single background daemon runs per project volume. It scans each enrolled worktree folder every few seconds and exchanges with the remote every ~10s, or immediately after local edits. Tune it with `--scan-interval` and `--remote-interval` on `bdrive daemon run` (init always uses the defaults).
 
-It re-reads `.bdrive/config.json` each tick. If that file vanishes because the
-folder was moved, renamed, or deleted, the daemon **exits cleanly without
-propagating deletes**. The next bdrive command at the new location resumes it.
+It re-reads `.bdrive/config.json` each tick. If a folder vanishes because it was moved, renamed, or deleted, the daemon promotes any surviving sibling worktree that shares the volume. If no sibling remains, it exits cleanly without propagating deletes.
 
 ## The change stream
 

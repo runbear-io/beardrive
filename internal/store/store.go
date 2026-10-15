@@ -200,6 +200,19 @@ func (s *Store) cachePath(mountID string) (string, error) {
 	return s.mountStatePath("state-", mountID)
 }
 
+// HasCache reports whether a materialization cache file already exists on
+// disk for mountID. A mount with no cache file has never completed a sync
+// cycle in its working folder, even when it attaches to a volume store
+// another worktree already populated.
+func (s *Store) HasCache(mountID string) bool {
+	p, err := s.cachePath(mountID)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(p)
+	return err == nil
+}
+
 func (s *Store) LoadCache(mountID string) (map[string]CachedFile, error) {
 	p, err := s.cachePath(mountID)
 	if err != nil {
@@ -252,6 +265,7 @@ const (
 )
 
 type SyncState struct {
+	Remote    string `json:"remote,omitempty"`
 	Lamport   int64  `json:"lamport"`
 	PushedOps int64  `json:"pushed_ops"`       // how many of our own ops the remote has
 	Access    string `json:"access,omitempty"` // "", "read-only", or "no-access"

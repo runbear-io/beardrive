@@ -428,10 +428,7 @@ func runDesktopInit(target, name string, settings config.Settings, hooks bool) {
 		// .bdrive config, plus the folder itself when we created it. A folder
 		// the user already had keeps its contents.
 		if proj, ok, perr := config.LoadProject(target); perr == nil && ok {
-			if mounts, merr := config.LoadMounts(); merr == nil {
-				delete(mounts, proj.ID)
-				config.SaveMounts(mounts)
-			}
+			_ = config.ForgetMount(proj.ID)
 			os.RemoveAll(filepath.Join(target, config.ProjectDir))
 		}
 		if createdFolder {
@@ -498,11 +495,13 @@ func runDesktopInit(target, name string, settings config.Settings, hooks bool) {
 		fmt.Fprintf(os.Stderr, "workspace root not designated at %s: %v\n", root, werr)
 	}
 	createdRoot = rootCreated
-	ignorePath := filepath.Join(target, ".bdriveignore")
-	if _, err := os.Stat(ignorePath); os.IsNotExist(err) {
-		if err := os.WriteFile(ignorePath, []byte(starterIgnore), 0o644); err != nil {
-			undo(err)
-			return
+	if !config.SharedVolumeHasIgnoreState(remoteURL, proj.ID) {
+		ignorePath := filepath.Join(target, ".bdriveignore")
+		if _, err := os.Stat(ignorePath); os.IsNotExist(err) {
+			if err := os.WriteFile(ignorePath, []byte(starterIgnore), 0o644); err != nil {
+				undo(err)
+				return
+			}
 		}
 	}
 	if created {
