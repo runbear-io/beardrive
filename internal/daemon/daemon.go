@@ -877,6 +877,8 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-reloadCh:
+			wake = true
 		case <-workerDoneCh:
 		case <-ticker.C:
 		}
