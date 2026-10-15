@@ -250,6 +250,25 @@ func supervisorRun(t *testing.T, mounts ...supervisorFixture) <-chan error {
 			t.Error("supervisor did not exit during cleanup")
 		}
 	})
+	pidPath, err := GlobalPidPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			t.Fatalf("supervisor exited before starting: %v", err)
+		default:
+		}
+		if _, err := os.Stat(pidPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("supervisor did not announce its global pid within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	return done
 }
 

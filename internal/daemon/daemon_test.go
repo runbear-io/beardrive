@@ -139,7 +139,8 @@ func TestHelperLegacyDaemon(t *testing.T) {
 	if err != nil {
 		os.Exit(1)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		os.Exit(1)
 	}
 	ch := make(chan os.Signal, 1)
@@ -339,7 +340,17 @@ func TestHelperBlockedGlobalSupervisor(t *testing.T) {
 	if err != nil {
 		os.Exit(1)
 	}
-	global, err := holdLock(globalPath)
+	holdHelperLock := func(path string) (*os.File, error) {
+		deadline := time.Now().Add(time.Second)
+		for {
+			f, err := holdLock(path)
+			if err == nil || time.Now().After(deadline) {
+				return f, err
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	global, err := holdHelperLock(globalPath)
 	if err != nil {
 		os.Exit(1)
 	}
@@ -348,7 +359,7 @@ func TestHelperBlockedGlobalSupervisor(t *testing.T) {
 		os.Exit(1)
 	}
 	for _, name := range []string{"vol-a", "vol-b"} {
-		f, err := holdLock(LockPath(filepath.Join(root, name)))
+		f, err := holdHelperLock(LockPath(filepath.Join(root, name)))
 		if err != nil {
 			os.Exit(1)
 		}
