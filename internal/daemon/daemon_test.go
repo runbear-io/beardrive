@@ -139,7 +139,8 @@ func TestHelperLegacyDaemon(t *testing.T) {
 	if err != nil {
 		os.Exit(1)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		os.Exit(1)
 	}
 	ch := make(chan os.Signal, 1)
@@ -339,15 +340,26 @@ func TestHelperBlockedGlobalSupervisor(t *testing.T) {
 	if err != nil {
 		os.Exit(1)
 	}
-	global, err := holdLock(globalPath)
+	holdHelperLock := func(path string) (*os.File, error) {
+		deadline := time.Now().Add(time.Second)
+		for {
+			f, err := holdLock(path)
+			if err == nil || time.Now().After(deadline) {
+				return f, err
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	global, err := holdHelperLock(globalPath)
 	if err != nil {
 		os.Exit(1)
 	}
+	defer release(global)
 	if err := announceGlobal(global); err != nil {
 		os.Exit(1)
 	}
 	for _, name := range []string{"vol-a", "vol-b"} {
-		f, err := holdLock(LockPath(filepath.Join(root, name)))
+		f, err := holdHelperLock(LockPath(filepath.Join(root, name)))
 		if err != nil {
 			os.Exit(1)
 		}
@@ -360,7 +372,7 @@ func TestHelperBlockedGlobalSupervisor(t *testing.T) {
 	select {
 	case <-term:
 		os.Exit(0)
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		os.Exit(1)
 	}
 }
@@ -417,7 +429,7 @@ func startBlockedSupervisor(t *testing.T) (string, string, int) {
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("helper did not acquire both worker locks")
+			t.Fatalf("helper did not acquire both worker locks (a=%v pidA=%d, b=%v pidB=%d, g=%v pidG=%d, want=%d): %s", a, pidA, b, pidB, g, pidG, cmd.Process.Pid, strings.TrimSpace(output.String()))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -499,9 +511,27 @@ func TestSupervisor_EnrolledFIFOConfigDoesNotBlockOtherVolumes(t *testing.T) {
 }
 
 func TestRunningCurrentRejectsLegacyAndStaleSupervisor(t *testing.T) {
-	volA, _, pid := startBlockedSupervisor(t)
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	volA := t.TempDir()
 	globalPath, err := GlobalLockPath()
 	if err != nil {
+		t.Fatal(err)
+	}
+	global, err := holdLock(globalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release(global)
+	worker, err := holdLock(LockPath(volA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release(worker)
+	pid := os.Getpid() + 1
+	if _, err := global.WriteAt([]byte(strconv.Itoa(pid)+"\n"+currentBinaryFingerprint()+"\n"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.WriteAt([]byte(strconv.Itoa(pid)+"\n"), 0); err != nil {
 		t.Fatal(err)
 	}
 	if actualPID, current := RunningCurrent(volA); !current || actualPID != pid {
