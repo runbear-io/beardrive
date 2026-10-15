@@ -577,6 +577,11 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 						}
 					}
 				}
+				if mountJoining && text != "" {
+					if _, live := existingState[IgnoreFile]; !live {
+						st.IgnorePulled = text
+					}
+				}
 			}
 		} else if text != st.IgnorePulled && !(mountJoining && (st.IgnorePulled != "" || st.IgnoreAccepted != "")) {
 			st.IgnoreAccepted = text

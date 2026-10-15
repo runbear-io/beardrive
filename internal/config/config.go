@@ -315,11 +315,7 @@ func saveMountsLocked(m map[string]MountInfo) error {
 	if err := writeJSON(p, m); err != nil {
 		return err
 	}
-	for id, mi := range m {
-		if mi.Remote != "" {
-			_ = RememberVolumeRemote(id, mi.Remote)
-		}
-	}
+	stampMountRemotes(m)
 	return nil
 }
 
@@ -333,6 +329,33 @@ func RememberVolumeRemote(mountID, remote string) error {
 	vdir, err := VolumeDir(mountID)
 	if err != nil {
 		return err
+	}
+	return rememberVolumeRemoteAt(vdir, remote)
+}
+
+func stampMountRemotes(m map[string]MountInfo) {
+	home, err := Home()
+	if err != nil {
+		return
+	}
+	for id, mi := range m {
+		if mi.Remote == "" {
+			continue
+		}
+		vid := mi.VolumeID
+		if vid == "" {
+			vid = id
+		}
+		if !ValidMountID(vid) {
+			continue
+		}
+		_ = rememberVolumeRemoteAt(filepath.Join(home, "volumes", vid), mi.Remote)
+	}
+}
+
+func rememberVolumeRemoteAt(vdir, remote string) error {
+	if remote == "" {
+		return nil
 	}
 	info, err := os.Stat(vdir)
 	if os.IsNotExist(err) {
