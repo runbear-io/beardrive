@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,6 +56,10 @@ import (
 // many files is latency-bound on serial round-trips, so uploading in parallel
 // is the main speedup.
 const pushConcurrency = 16
+
+// pullConcurrency is pushConcurrency's mirror for fetchBlobs: a peer's large
+// batch of real changes is just as latency-bound on the download side.
+const pullConcurrency = 16
 
 // Progress reports upload progress during a cycle's push phase, so the CLI can
 // draw a bar. Total/TotalBytes are set once when the push starts; Done/Bytes
@@ -1501,8 +1506,16 @@ func (s *Session) fetchBlobs(ctx context.Context, ops []journal.Op, cache map[st
 	// later cycle, which is this package's posture for everything transient.
 	// Abandoning the loop instead meant one op naming a blob that
 	// was never pushed stopped every complete op behind it from ever landing.
-	var bad error
-	landed := 0
+	var (
+		mu     sync.Mutex
+		bad    error
+		landed atomic.Int64
+	)
+	// Downloads run in parallel like push's uploads: a peer's large batch of
+	// real changes is bound on serial round-trips, not bandwidth. The dispatch
+	// loop below — not the workers — owns s.fetched, so it stays a plain map.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(pullConcurrency)
 	for _, op := range ops {
 		if op.Kind != journal.KindPut || op.Blob == "" || s.fetched[op.Blob] || s.Store.HasBlob(op.Blob) {
 			continue
@@ -1510,80 +1523,102 @@ func (s *Session) fetchBlobs(ctx context.Context, ops []journal.Op, cache map[st
 		if s.fetched != nil {
 			s.fetched[op.Blob] = true
 		}
-		// Large files: try the manifest first, sourcing unchanged chunks from
-		// the version of this path we already hold. EVERY failure falls
-		// through to the whole-blob path, not just errNoManifest: the whole
-		// blob is independently hash-verified, so there is nothing to lose by
-		// trying it — and not falling through let one member-written manifest
-		// (the only object in the key space that is neither content-addressed
-		// nor hash-checked at ingest) permanently deny a file whose correct
-		// whole blob was sitting right there. A hash contradiction is still
-		// remembered as the one signal worth surfacing (errBlobContent).
-		if op.Size > chunkThreshold {
-			var basis string
-			if c, ok := cache[op.Path]; ok {
-				basis = c.Blob
+		g.Go(func() error {
+			ok, cerr, abort := s.fetchOneBlob(gctx, op, cache)
+			if ok {
+				landed.Add(1)
 			}
-			cerr := s.fetchChunked(ctx, op, basis)
-			if cerr == nil {
-				landed++
-				continue
-			}
-			// Fall through to the whole blob only when one actually EXISTS
-			// (Exists never triggers hub reassembly). When it does, the
-			// fallthrough is unconditional — the whole blob is independently
-			// hash-verified, so a poisoned manifest cannot deny it. When it
-			// does not — the normal chunked-only case — a transient chunk
-			// failure retries chunks next cycle instead of asking the hub to
-			// reassemble and re-download the entire file every tick.
-			//
-			// A chunked-path hash contradiction is recorded ONLY when no
-			// fallback can land the file: when the whole blob arrives fine,
-			// "blob corrupt on remote" would page an operator about a file
-			// that just converged.
-			if ok, eerr := s.Backend.Exists(ctx, "blobs/"+op.Blob); eerr != nil || !ok {
-				if errors.Is(cerr, errBlobContent) && bad == nil {
+			if cerr != nil {
+				mu.Lock()
+				if bad == nil {
 					bad = cerr
 				}
-				continue
+				mu.Unlock()
 			}
-		}
-		rc, err := s.Backend.Get(ctx, "blobs/"+op.Blob)
-		if err != nil {
-			continue
-		}
-		sum, _, err := s.Store.PutBlobReader(io.LimitReader(rc, pullBound(op.Size)))
-		rc.Close()
-		if err != nil {
-			return landed, err
-		}
-		if sum != op.Blob {
-			// Report it, but do NOT abandon the batch. Content addressing
-			// already protects the disk (PutBlobReader files bytes under their
-			// COMPUTED hash, so HasBlob(op.Blob) stays false and materializeFile
-			// keeps skipping the path); the check earns its place as the only
-			// SIGNAL that a hub is serving bytes that are not what they are
-			// addressed as, since otherwise the case is indistinguishable from
-			// "not uploaded yet".
-			//
-			// Returning here made that signal a weapon. op.Size bounds the read,
-			// and op.Size is a field the PEER wrote with no relation to the
-			// object it names — so declaring 1 byte for a real 3 MiB blob
-			// truncated an honest read, failed the sha, and dropped every blob
-			// queued BEHIND it in the same batch. The journal is on local disk
-			// by then, so the next cycle yields no new ops and the loop is never
-			// re-entered: one integer in one journal line decided which of a
-			// peer's files each teammate never received. The mismatch is now
-			// remembered and returned once the rest of the batch has been
-			// fetched, so it still lands in res.Offline/OfflineErr.
-			if bad == nil {
-				bad = fmt.Errorf("%w: blob %s corrupt on remote (got %s)", errBlobContent, shortSha(op.Blob), shortSha(sum))
-			}
-			continue
-		}
-		landed++
+			return abort
+		})
 	}
-	return landed, bad
+	if err := g.Wait(); err != nil {
+		return int(landed.Load()), err
+	}
+	return int(landed.Load()), bad
+}
+
+// fetchOneBlob fetches the content a single put op names, trying the
+// manifest/chunk path first for large files and falling back to the whole
+// blob. ok reports whether the blob landed. cerr is a non-fatal problem worth
+// surfacing once the rest of the batch has been tried (errBlobContent); it
+// never aborts the batch. abort is a genuine local write failure, serious
+// enough to cancel the rest of the batch — fetchBlobs returns it directly.
+func (s *Session) fetchOneBlob(ctx context.Context, op journal.Op, cache map[string]store.CachedFile) (ok bool, cerr error, abort error) {
+	// Large files: try the manifest first, sourcing unchanged chunks from
+	// the version of this path we already hold. EVERY failure falls
+	// through to the whole-blob path, not just errNoManifest: the whole
+	// blob is independently hash-verified, so there is nothing to lose by
+	// trying it — and not falling through let one member-written manifest
+	// (the only object in the key space that is neither content-addressed
+	// nor hash-checked at ingest) permanently deny a file whose correct
+	// whole blob was sitting right there. A hash contradiction is still
+	// remembered as the one signal worth surfacing (errBlobContent).
+	if op.Size > chunkThreshold {
+		var basis string
+		if c, has := cache[op.Path]; has {
+			basis = c.Blob
+		}
+		cerr2 := s.fetchChunked(ctx, op, basis)
+		if cerr2 == nil {
+			return true, nil, nil
+		}
+		// Fall through to the whole blob only when one actually EXISTS
+		// (Exists never triggers hub reassembly). When it does, the
+		// fallthrough is unconditional — the whole blob is independently
+		// hash-verified, so a poisoned manifest cannot deny it. When it
+		// does not — the normal chunked-only case — a transient chunk
+		// failure retries chunks next cycle instead of asking the hub to
+		// reassemble and re-download the entire file every tick.
+		//
+		// A chunked-path hash contradiction is recorded ONLY when no
+		// fallback can land the file: when the whole blob arrives fine,
+		// "blob corrupt on remote" would page an operator about a file
+		// that just converged.
+		if existsOK, eerr := s.Backend.Exists(ctx, "blobs/"+op.Blob); eerr != nil || !existsOK {
+			if errors.Is(cerr2, errBlobContent) {
+				return false, cerr2, nil
+			}
+			return false, nil, nil
+		}
+	}
+	rc, err := s.Backend.Get(ctx, "blobs/"+op.Blob)
+	if err != nil {
+		return false, nil, nil
+	}
+	sum, _, err := s.Store.PutBlobReader(io.LimitReader(rc, pullBound(op.Size)))
+	rc.Close()
+	if err != nil {
+		return false, nil, err
+	}
+	if sum != op.Blob {
+		// Report it, but do NOT abandon the batch. Content addressing
+		// already protects the disk (PutBlobReader files bytes under their
+		// COMPUTED hash, so HasBlob(op.Blob) stays false and materializeFile
+		// keeps skipping the path); the check earns its place as the only
+		// SIGNAL that a hub is serving bytes that are not what they are
+		// addressed as, since otherwise the case is indistinguishable from
+		// "not uploaded yet".
+		//
+		// Returning here made that signal a weapon. op.Size bounds the read,
+		// and op.Size is a field the PEER wrote with no relation to the
+		// object it names — so declaring 1 byte for a real 3 MiB blob
+		// truncated an honest read, failed the sha, and dropped every blob
+		// queued BEHIND it in the same batch. The journal is on local disk
+		// by then, so the next cycle yields no new ops and the loop is never
+		// re-entered: one integer in one journal line decided which of a
+		// peer's files each teammate never received. The mismatch is now
+		// remembered and returned once the rest of the batch has been
+		// fetched, so it still lands in res.Offline/OfflineErr.
+		return false, fmt.Errorf("%w: blob %s corrupt on remote (got %s)", errBlobContent, shortSha(op.Blob), shortSha(sum)), nil
+	}
+	return true, nil, nil
 }
 
 // maxBackfill and maxBackfillBytes cap one cycle's retries by count and by the
