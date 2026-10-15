@@ -615,6 +615,22 @@ type volumeWorker struct {
 	cancel         context.CancelFunc
 	wakeCh         chan struct{}
 	done           chan struct{}
+	cancelling     bool
+	err            error
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // loadProjectRegular opens and validates one project config without a
@@ -757,6 +773,8 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		return err
 	}
 	workers := make(map[string]*volumeWorker)
+	backoffUntil := make(map[string]time.Time)
+	backoffDelay := make(map[string]time.Duration)
 	workerDoneCh := make(chan string, 1)
 	defer func() {
 		for _, w := range workers {
@@ -784,14 +802,28 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 			select {
 			case <-w.done:
+				w.cancel()
+				if w.err != nil && !w.cancelling {
+					delay := backoffDelay[volDir]
+					if delay <= 0 {
+						delay = maxDuration(scanInterval, 50*time.Millisecond)
+					} else {
+						delay *= 2
+					}
+					delay = minDuration(delay, maxDuration(remoteInterval, 5*time.Second))
+					backoffDelay[volDir] = delay
+					backoffUntil[volDir] = time.Now().Add(delay)
+				} else {
+					delete(backoffDelay, volDir)
+					delete(backoffUntil, volDir)
+				}
 				delete(workers, volDir)
 				continue
 			default:
 			}
 			if !matches {
 				w.cancel()
-				<-w.done
-				delete(workers, volDir)
+				w.cancelling = true
 			} else if wake {
 				select {
 				case w.wakeCh <- struct{}{}:
@@ -799,8 +831,17 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 				}
 			}
 		}
+		for volDir := range backoffUntil {
+			if _, active := volumes[volDir]; !active {
+				delete(backoffUntil, volDir)
+				delete(backoffDelay, volDir)
+			}
+		}
 		for volDir, mounts := range volumes {
 			if _, exists := workers[volDir]; exists {
+				continue
+			}
+			if until, ok := backoffUntil[volDir]; ok && time.Now().Before(until) {
 				continue
 			}
 			if err := reapLegacyDaemonIfNeeded(volDir); err != nil {
@@ -813,32 +854,37 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 			workers[volDir] = w
 			go func(volDir string, w *volumeWorker) {
+				var runErr error
 				defer func() {
+					w.err = runErr
+					w.cancel()
 					close(w.done)
 					select {
 					case workerDoneCh <- volDir:
 					default:
 					}
+					if runErr != nil {
+						log.Printf("volume worker %s exited: %v", volDir, runErr)
+					}
 				}()
-				if err := runVolumeWorker(wctx, volDir, w.expectedRemote, scanInterval, remoteInterval, w.wakeCh); err != nil {
-					log.Printf("volume worker %s exited: %v", volDir, err)
-				}
+				runErr = runVolumeWorker(wctx, volDir, w.expectedRemote, scanInterval, remoteInterval, w.wakeCh)
 			}(volDir, w)
 		}
-		if len(workers) == 0 {
+		if len(workers) == 0 && len(volumes) == 0 {
 			return nil
 		}
 		wake = false
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-reloadCh:
-			wake = true
 		case <-workerDoneCh:
 		case <-ticker.C:
 		}
 	}
 }
+
+// workerInitHook is a test seam for observing worker initialization attempts.
+var workerInitHook func(string)
 
 // workerCycleHook is a test seam set before starting workers and cleared only
 // after all workers finish; production leaves it nil.
@@ -860,6 +906,9 @@ func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logge
 }
 
 func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInterval, remoteInterval time.Duration, wakeCh <-chan struct{}) error {
+	if workerInitHook != nil {
+		workerInitHook(volDir)
+	}
 	st, err := store.Open(volDir)
 	if err != nil {
 		return err

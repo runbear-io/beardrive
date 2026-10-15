@@ -8,10 +8,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -540,5 +543,91 @@ func TestRunningCurrentRejectsStandaloneDaemon(t *testing.T) {
 	}
 	if pid, current := RunningCurrent(volDir); current || pid != 0 {
 		t.Fatalf("standalone daemon is not a current supervisor worker: (%d, %v)", pid, current)
+	}
+}
+
+func TestSupervisor_CancellingBlockedWorkerDoesNotBlockStartingNewProject(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	projA := supervisorMount(t)
+	entered := make(chan struct{})
+	unblock := make(chan struct{})
+	var once sync.Once
+	workerCycleHook = func(volDir string) {
+		if volDir != projA.volDir {
+			return
+		}
+		once.Do(func() { close(entered) })
+		<-unblock
+	}
+	t.Cleanup(func() { workerCycleHook = nil })
+	done := supervisorRun(t, projA)
+	select {
+	case <-entered:
+	case err := <-done:
+		t.Fatalf("supervisor exited before blocked worker entered cycle: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("project A worker did not enter its blocked cycle")
+	}
+	if err := store.SetPausedMount(projA.volDir, projA.mountID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPaused(projA.volDir, true); err != nil {
+		t.Fatal(err)
+	}
+	projB := supervisorMount(t)
+	t.Cleanup(func() {
+		_ = store.SetPausedMount(projB.volDir, projB.mountID, true)
+	})
+	if !WakeSupervisor() {
+		t.Fatal("failed to wake supervisor after enrolling project B")
+	}
+	writeWorktreeFile(t, projB.folder, "b-while-a-blocked.txt", "B starts independently\n")
+	worktreeWaitFor(t, "project B worker while A is blocked", done, func() bool {
+		pid, running := Running(projB.volDir)
+		return running && pid == os.Getpid() &&
+			worktreeRemoteHasOp(projB.remote, "b-while-a-blocked.txt", journal.KindPut)
+	})
+	close(unblock)
+	if err := store.SetPausedMount(projB.volDir, projB.mountID, true); err != nil {
+		t.Fatal(err)
+	}
+	WakeSupervisor()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("supervisor exited with error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor did not exit after both projects were paused")
+	}
+}
+
+func TestSupervisor_BacksOffPersistentWorkerInitFailure(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	projA, projB := supervisorMount(t), supervisorMount(t)
+	if err := os.RemoveAll(filepath.Join(projA.volDir, "blobs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projA.volDir, "blobs"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var attempts atomic.Int32
+	workerInitHook = func(volDir string) {
+		if volDir == projA.volDir {
+			attempts.Add(1)
+		}
+	}
+	t.Cleanup(func() { workerInitHook = nil })
+	done := supervisorRun(t, projA, projB)
+	worktreeWaitFor(t, "project A initialization attempt", done, func() bool {
+		return attempts.Load() > 0
+	})
+	writeWorktreeFile(t, projB.folder, "b-while-a-fails.txt", "B remains healthy\n")
+	worktreeWaitFor(t, "project B sync while A initialization fails", done, func() bool {
+		return worktreeRemoteHasOp(projB.remote, "b-while-a-fails.txt", journal.KindPut)
+	})
+	time.Sleep(250 * time.Millisecond)
+	if got := attempts.Load(); got > 10 {
+		t.Fatalf("persistent worker initialization hot-looped: %d attempts in 250ms", got)
 	}
 }
