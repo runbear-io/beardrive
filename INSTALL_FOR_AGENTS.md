@@ -128,9 +128,9 @@ folder" as consent is the single most common way this step goes wrong, and it
 lands the user on the one outcome this section says never to recommend: the
 whole folder, mounted bare, chosen by you.
 
-Run init BEFORE the git handoff: init can refuse (e.g. this device already
-syncs that project somewhere else), and a refusal after you have already
-rewritten `.gitignore` and unstaged files leaves the repo half-changed. If
+Run init BEFORE the git handoff: init can refuse (e.g. on a workspace root or
+a protected directory), and a refusal after you have already rewritten
+`.gitignore` and unstaged files leaves the repo half-changed. If
 the chosen folder is git-tracked, git and BearDrive would both write it
 (silent-revert hazard). Get consent, then `git rm -r --cached <dir>` and add
 `<dir>/` to `.gitignore`; stage but let the user commit.
