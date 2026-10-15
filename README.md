@@ -246,8 +246,8 @@ both sets of files.
 worktrees left, the worker releases that volume's lock without interrupting
 other projects. The supervisor exits cleanly when no active volumes remain.
 `bdrive stop --all` pauses every enrolled project on this device.
-`bdrive init`, `bdrive resume`, `bdrive sync`, `bdrive status`, and agent sync
-hooks start or wake it for unpaused projects. After a binary upgrade, these entry points
+`bdrive init`, `bdrive resume`, `bdrive sync`, `bdrive status <folder>`, and
+agent sync hooks start or wake it for unpaused projects. After a binary upgrade, these entry points
 replace the old supervisor with the current binary automatically.
 
 ### Credentials
@@ -325,8 +325,9 @@ Their `mounts.json` entries share a `volume_id`, pointing at
 `~/.bdrive/volumes/<volume-id>/` for blobs, journals, and sync state. Each mount
 keeps its own `state-<mount-id>.json`, `paused-<mount-id>`,
 `note-<mount-id>.json`, `secrets-<mount-id>.json`, and
-`inbound-<mount-id>.jsonl`. Joining an existing project preserves its
-`.bdriveignore` instead of replacing it with the starter template.
+`inbound-<mount-id>.jsonl`. A new worktree or folder joining a project already
+synced on this device reuses the shared local volume's `.bdriveignore` instead
+of replacing it with the starter template.
 
 - **`.bdrive/workspace.json`** — only in a folder that *holds* projects rather
   than being one (the Mac app writes it at the folder you connect; the CLI

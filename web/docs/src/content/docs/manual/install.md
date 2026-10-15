@@ -50,8 +50,8 @@ Clients and hub are the same binary — keep them roughly in step. The sync
 protocol is append-only journals plus blobs, which old clients read forward.
 
 After upgrading the binary, the next `bdrive init`, `bdrive resume`, `bdrive sync`,
-`bdrive status`, or agent turn automatically replaces the running background sync
-daemon with the new binary.
+`bdrive status <folder>`, or agent turn automatically replaces the running
+background sync daemon with the new binary.
 
 After upgrading a client, re-run `bdrive hooks install` to pick up hook
 improvements — once per machine, since it writes to your user config.

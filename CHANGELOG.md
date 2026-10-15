@@ -9,7 +9,7 @@ minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#s
 **Update your devices.** Everything here is in the client; the hub is
 unchanged, and older clients keep syncing with it. Running sync daemons switch
 over to the new supervisor the first time the updated `bdrive` runs on a
-machine (`bdrive init`, `resume`, `sync`, `status`, or an agent turn), with
+machine (`bdrive init`, `resume`, `sync`, `status <folder>`, or an agent turn), with
 nothing to re-init.
 
 - **One project, several folders on the same device.** Git worktrees and extra
@@ -21,8 +21,8 @@ nothing to re-init.
   (`inbound-<mount-id>.jsonl`). `bdrive init` used to refuse a second folder,
   and deleting a worktree before running `init` in a fresh one started the
   device's journal over and hit `409 Conflict` on every push. A folder joining
-  an existing project also keeps the project's `.bdriveignore` instead of
-  overwriting it with the starter template. (#278)
+  a project already synced on this device reuses the shared local volume's
+  `.bdriveignore` instead of overwriting it with the starter template. (#278)
 - **One background sync supervisor per user session instead of one process per
   project.** A single `bdrive daemon run` supervisor (`~/.bdrive/daemon.lock`)
   runs one worker goroutine per active project volume
