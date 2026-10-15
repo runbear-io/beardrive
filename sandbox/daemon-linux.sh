@@ -46,16 +46,12 @@ rmdir /run/systemd/system 2>/dev/null
 
 echo
 echo "== daemon.pid must name the lock holder =="
-# TestCLIDaemonPidFileNamesTheLockHolder covers this too, but only catches it
-# about one run in five on macOS — the window is tight there. On Linux it is
-# deterministic, which is why this stays until the pidfile ordering is fixed.
-# Scoped to ONE folder on purpose: the section above left its own mount and
-# daemon running, and counting "any daemon" or picking "any daemon.pid" made
-# this report the other project's process.
-live_daemons() {  # live_daemons <folder>
+# A single foreground supervisor owns every volume lock. Its command line
+# never names a folder; each volume's pidfile must name that same lock holder.
+live_daemons() {
   for p in /proc/[0-9]*; do
     c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-    case "$c" in *"bdrive daemon"*"$1"*) echo "${p#/proc/}" ;; esac
+    case "$c" in *"bdrive daemon run "*) echo "${p#/proc/}" ;; esac
   done
 }
 
@@ -68,23 +64,52 @@ MOUNT=$(node -e 'console.log(require("/work/race/.bdrive/config.json").id)')
 PIDFILE="$HOME/.bdrive/volumes/$MOUNT/daemon.pid"
 info "mount $MOUNT"
 FILEPID=$(cat "$PIDFILE" 2>/dev/null)
-LIVE=$(live_daemons "$S" | tr '\n' ' ')
+GLOBALPID=$(cat "$HOME/.bdrive/daemon.pid" 2>/dev/null)
+UNITMOUNT=$(node -e 'console.log(require("/work/unit/.bdrive/config.json").id)')
+UNITPIDFILE="$HOME/.bdrive/volumes/$UNITMOUNT/daemon.pid"
+UNITPID=$(cat "$UNITPIDFILE" 2>/dev/null)
+LIVE=$(live_daemons | tr '\n' ' ')
 info "daemon.pid says ${FILEPID:-<empty>}; actually alive: ${LIVE:-<none>}"
 case " $LIVE " in
   *" $FILEPID "*) pass "daemon.pid names a live daemon" ;;
   *)              fail "daemon.pid names $FILEPID, which is not running" ;;
 esac
+[ -n "$FILEPID" ] && [ "$FILEPID" = "$GLOBALPID" ] && [ "$UNITPID" = "$GLOBALPID" ] \
+  && pass "two projects share the global daemon PID $GLOBALPID" \
+  || fail "project PIDs ($FILEPID, $UNITPID) differ from global PID $GLOBALPID"
+COUNT=$(live_daemons | wc -l)
+[ "$COUNT" -eq 1 ] \
+  && pass "exactly one global bdrive daemon run process" \
+  || fail "expected one global daemon, found $COUNT: $LIVE"
 
 STOPOUT=$(bdrive stop 2>&1)
 sleep 2
-STILL=$(live_daemons "$S" | tr '\n' ' ')
+STILL=$(live_daemons | tr '\n' ' ')
 case "$STOPOUT" in
   *"no such process"*) fail "stop failed: $STOPOUT" ;;
   *)                   pass "stop reported no error" ;;
 esac
+! [ -f "$PIDFILE" ] \
+  && pass "/work/race is no longer syncing after stop" \
+  || fail "stop left /work/race's daemon.pid behind"
+[ -f "$UNITPIDFILE" ] && [ "$(cat "$UNITPIDFILE")" = "$GLOBALPID" ] \
+  && pass "/work/unit is still syncing under the same global PID" \
+  || fail "stopping /work/race also stopped /work/unit"
+[ "$(live_daemons | wc -l)" -eq 1 ] \
+  && pass "the shared supervisor stays alive for /work/unit" \
+  || fail "expected one supervisor after stopping /work/race: $STILL"
+UNITSTATUS=$(bdrive status /work/unit 2>&1)
+case "$UNITSTATUS" in
+  *"daemon:   running (pid $GLOBALPID)"*) pass "/work/unit reports running" ;;
+  *) fail "/work/unit is not running: $UNITSTATUS" ;;
+esac
+bdrive stop /work/unit >/dev/null 2>&1 \
+  || fail "could not stop /work/unit"
+sleep 2
+STILL=$(live_daemons | tr '\n' ' ')
 [ -z "$STILL" ] \
-  && pass "nothing syncing after stop" \
-  || fail "stop left daemon(s) running: $STILL — sync cannot be turned off"
+  && pass "no bdrive daemon remains after stopping the final project" \
+  || fail "final stop left global daemon(s) running: $STILL"
 
 echo
 echo "== done: $FAILED failure(s) =="

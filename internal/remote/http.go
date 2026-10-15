@@ -37,6 +37,18 @@ const maxJSONBytes = 1 << 20
 // other than "does not exist" — which is how one listed key hid every peer.
 const maxKeySegment = 255
 
+// sharedHTTPTransport pools hub connections across all projects and their
+// change streams. It owns no project credentials; doWith attaches those to
+// each request. Its lifetime is the process, not any one backend's Close.
+var sharedHTTPTransport = func() *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConns = 100
+	tr.MaxIdleConnsPerHost = 20
+	tr.IdleConnTimeout = 90 * time.Second
+	tr.ForceAttemptHTTP2 = true
+	return tr
+}()
+
 // httpBackend syncs one project through a bdrive web server instead of
 // talking to an object store. The client device is storage-blind: it only
 // knows the server URL and a project id (https://host:4173/p/<project-id>,
@@ -72,7 +84,7 @@ func newHTTPBackend(raw string) (*httpBackend, error) {
 	}
 	base := (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
 	dev, _ := config.LoadDevice()
-	hc := &http.Client{Timeout: 5 * time.Minute, CheckRedirect: refuseOffOriginRedirect}
+	hc := &http.Client{Transport: sharedHTTPTransport, Timeout: 5 * time.Minute, CheckRedirect: refuseOffOriginRedirect}
 	return &httpBackend{base: base, project: m[1], token: deviceToken(base), device: dev, hc: hc}, nil
 }
 
@@ -586,8 +598,9 @@ func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
 	// b.hc carries a 5 minute whole-request timeout, which is right for every
 	// other call here and fatal for this one: a stream that is working
 	// perfectly and simply has nothing to say would be severed on the dot.
-	// Same redirect policy — the token must not follow a hub off-origin.
-	resp, err := b.doWith(&http.Client{CheckRedirect: refuseOffOriginRedirect}, req)
+	// Same pool and redirect policy — the token must not follow a hub off-origin.
+	streamClient := &http.Client{Transport: sharedHTTPTransport, Timeout: 0, CheckRedirect: refuseOffOriginRedirect}
+	resp, err := b.doWith(streamClient, req)
 	if err != nil {
 		return nil, err
 	}
@@ -647,4 +660,6 @@ func (b *httpBackend) Scope(ctx context.Context) (Scope, error) {
 	return sc, nil
 }
 
+// Close leaves the process-wide connection pool intact for sibling projects.
+// Watch streams are owned by their caller's context, not this backend.
 func (b *httpBackend) Close() error { return nil }

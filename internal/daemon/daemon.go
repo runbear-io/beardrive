@@ -1,20 +1,18 @@
-// Package daemon runs the per-mount background sync loop and manages its
-// lifecycle (detached start, pidfile, graceful stop).
-//
-// The loop scans the working folder every scan-interval (cheap: size+mtime
-// against the state cache) and talks to the remote every remote-interval —
-// or immediately after local changes, so edits propagate quickly without
-// hammering the object store.
+// Package daemon runs one user-session supervisor with an independently locked
+// sync worker for each project volume.
 package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,27 +74,54 @@ func Running(volDir string) (int, bool) {
 	return 0, true
 }
 
+// RunningCurrent reports workers owned by the current-version global daemon.
+// Resume must not mistake a standalone legacy daemon for a current supervisor.
+func RunningCurrent(volDir string) (int, bool) {
+	pid, running := Running(volDir)
+	if !running || pid <= 0 {
+		return 0, false
+	}
+	globalPID, global := GlobalRunning()
+	if !global || globalPID != pid {
+		return 0, false
+	}
+	if _, upgrade := globalNeedsUpgrade(); upgrade {
+		return 0, false
+	}
+	return pid, true
+}
+
 // lockPid reports whether a daemon holds the mount's lock and, if it announced
 // one, its pid. This is the only pid anything ever signals: it is written
 // inside the lock and truncated when the lock is released, so it cannot name a
 // process that has exited.
 func lockPid(volDir string) (int, bool) {
-	f, err := openLock(LockPath(volDir))
+	pid, _, running := readLockInfo(LockPath(volDir))
+	return pid, running
+}
+
+func readLockInfo(path string) (int, string, bool) {
+	f, err := openLock(path)
 	if err != nil {
-		return 0, unopenableLockIsRunning(LockPath(volDir))
+		return 0, "", unopenableLockIsRunning(path)
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
 		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		return 0, false // nobody holds it: no daemon
+		return 0, "", false
 	}
-	buf := make([]byte, 32)
-	n, _ := f.ReadAt(buf, 0)
-	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
-	if err != nil || pid <= 0 {
-		return 0, true // alive, but it announced no pid we can signal
+	var buf [8192]byte
+	n, _ := f.ReadAt(buf[:], 0)
+	lines := strings.SplitN(strings.TrimSpace(string(buf[:n])), "\n", 2)
+	pid, _ := strconv.Atoi(lines[0])
+	if pid < 0 {
+		pid = 0
 	}
-	return pid, true
+	fingerprint := ""
+	if len(lines) == 2 {
+		fingerprint = strings.TrimSpace(lines[1])
+	}
+	return pid, fingerprint, true
 }
 
 // openLock opens the lock file without following a symlink. Following one put
@@ -211,69 +236,219 @@ func announce(f *os.File) error {
 	return err
 }
 
-// Start launches a detached daemon for the folder (no-op if already running).
-func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (int, error) {
-	if pid, ok := Running(volDir); ok {
-		return pid, nil
+// GlobalLockPath identifies the user-session supervisor's lifetime lock.
+func GlobalLockPath() (string, error) {
+	home, err := config.Home()
+	if err != nil {
+		return "", err
 	}
+	return filepath.Join(home, "daemon.lock"), nil
+}
+
+func GlobalPidPath() (string, error) {
+	home, err := config.Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "daemon.pid"), nil
+}
+
+func GlobalLogPath() (string, error) {
+	home, err := config.Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "daemon.log"), nil
+}
+
+func globalLockInfo() (int, string, bool) {
+	path, err := GlobalLockPath()
+	if err != nil {
+		return 0, "", false
+	}
+	return readLockInfo(path)
+}
+
+func GlobalRunning() (int, bool) {
+	pid, _, running := globalLockInfo()
+	return pid, running
+}
+
+func currentBinaryFingerprint() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	info, err := os.Stat(exe)
+	if err != nil {
+		return ""
+	}
+	return "fp:" + exe + ":" + strconv.FormatInt(info.Size(), 10) + ":" +
+		strconv.FormatInt(info.ModTime().UnixNano(), 10)
+}
+
+func announceGlobal(f *os.File) error {
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := f.WriteAt([]byte(fmt.Sprintf("%d\n%s\n", os.Getpid(), currentBinaryFingerprint())), 0); err != nil {
+		return err
+	}
+	path, err := GlobalPidPath()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+}
+
+func globalNeedsUpgrade() (int, bool) {
+	pid, fingerprint, running := globalLockInfo()
+	return pid, running && pid > 0 && pid != os.Getpid() &&
+		fingerprint != "" && fingerprint != currentBinaryFingerprint()
+}
+
+func WakeSupervisor() bool {
+	pid, running := GlobalRunning()
+	return running && pid > 0 && syscall.Kill(pid, syscall.SIGHUP) == nil
+}
+
+func isTestExecutable(exe string) bool {
+	return strings.HasSuffix(exe, ".test") || strings.Contains(exe, "/_test/")
+}
+
+func EnsureRunningBestEffort(volDir string, scanInterval, remoteInterval time.Duration) {
+	exe, err := os.Executable()
+	if err != nil || isTestExecutable(exe) {
+		return
+	}
+	_, _ = Start("", volDir, scanInterval, remoteInterval)
+}
+
+// EnsureRunningAsync starts the detached process before a short-lived hook
+// exits, without waiting for the supervisor or volume worker to announce.
+func EnsureRunningAsync(volDir string, scanInterval, remoteInterval time.Duration) {
+	exe, err := os.Executable()
+	if err != nil || isTestExecutable(exe) {
+		return
+	}
+	_, fingerprint, global := globalLockInfo()
+	if global && fingerprint != "" && fingerprint == currentBinaryFingerprint() {
+		if volDir == "" {
+			WakeSupervisor()
+		} else if _, running := Running(volDir); !running {
+			WakeSupervisor()
+		}
+		return
+	}
+	if oldPID, upgrade := globalNeedsUpgrade(); upgrade {
+		path, err := GlobalLockPath()
+		if err != nil {
+			return
+		}
+		if err := terminateLockedProcess(oldPID, path); err != nil {
+			return
+		}
+	}
+	globalLog, err := GlobalLogPath()
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(globalLog), 0o700); err != nil {
+		return
+	}
+	logf, err := os.OpenFile(globalLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer logf.Close()
+	cmd := exec.Command(exe, "daemon", "run",
+		"--scan-interval", scanInterval.String(),
+		"--remote-interval", remoteInterval.String())
+	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	_ = cmd.Process.Release()
+}
+
+// Start starts or wakes the global supervisor and waits for the requested worker.
+// folder is retained for source compatibility; discovery uses the mount registry.
+func Start(folder, volDir string, scanInterval, remoteInterval time.Duration) (int, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return 0, err
 	}
-	// 0600: daemon.log names the mount id, the folder's absolute path, the
-	// remote URL and the device name+id.
-	logf, err := os.OpenFile(LogPath(volDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if volDir != "" {
+		logf, err := os.OpenFile(LogPath(volDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return 0, err
+		}
+		logf.Close()
+	}
+	// Keep the per-volume log private, but a test binary must never touch the
+	// user-session home, inspect running daemons, or re-exec itself.
+	if isTestExecutable(exe) {
+		return 0, fmt.Errorf("refusing to start a daemon from a test binary (%s)", filepath.Base(exe))
+	}
+	globalLog, err := GlobalLogPath()
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(globalLog), 0o700); err != nil {
+		return 0, err
+	}
+	logf, err := os.OpenFile(globalLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return 0, err
 	}
 	defer logf.Close()
-	// A `go test` binary must never re-exec itself as a daemon: os.Args[0] is
-	// then the TEST binary, so the spawned "daemon run" re-runs the whole
-	// suite — which spawns again. A test that reached this line once took a
-	// developer's Mac to load 47 before anyone noticed. Any test that wants a
-	// real daemon builds the real binary and runs it (cli_e2e_test.go).
-	//
-	// After the log is opened, not before: the log file's mode is itself a
-	// tested invariant (sec_daemon_test.go), and the state a caller can
-	// observe should not depend on which binary asked.
-	if strings.HasSuffix(exe, ".test") || strings.Contains(exe, "/_test/") {
-		return 0, fmt.Errorf("refusing to start a daemon from a test binary (%s)", filepath.Base(exe))
-	}
-	cmd := exec.Command(exe, "daemon", "run", folder,
-		"--scan-interval", scanInterval.String(),
-		"--remote-interval", remoteInterval.String())
-	cmd.Stdout = logf
-	cmd.Stderr = logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	if err := reapLegacyDaemonIfNeeded(volDir); err != nil {
 		return 0, err
 	}
-	if err := cmd.Process.Release(); err != nil {
-		return 0, err
+	if pid, upgrade := globalNeedsUpgrade(); upgrade {
+		path, err := GlobalLockPath()
+		if err != nil {
+			return 0, err
+		}
+		if err := terminateLockedProcess(pid, path); err != nil {
+			return 0, err
+		}
 	}
-
-	// The child announces its own pid, and only once it holds the lifetime
-	// lock (see Run). The parent must NOT write PidPath: a child that loses
-	// the lock race exits without ever being the daemon, and its pid written
-	// here would outlive it — leaving Stop signalling a corpse (ESRCH) while
-	// the daemon that won keeps syncing, and status printing a phantom pid.
-	//
-	// So wait for the lock instead of assuming the spawn worked. A caller
-	// that gets a pid back can trust that a daemon owns it. In a race the pid
-	// is the winner's rather than the child just spawned, which is the honest
-	// answer to "which pid is the daemon" — callers that need to distinguish
-	// starting from adopting check Running first (see `bdrive resume`).
-	deadline := time.Now().Add(startTimeout)
-	for {
-		if pid, ok := Running(volDir); ok && pid > 0 {
+	if volDir != "" {
+		if pid, running := Running(volDir); running && pid > 0 {
 			return pid, nil
 		}
-		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("daemon did not come up within %s; see %s",
-				startTimeout, LogPath(volDir))
+	}
+	deadline := time.Now().Add(startTimeout)
+	spawned := false
+	for time.Now().Before(deadline) {
+		if pid, running := GlobalRunning(); running && pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGHUP)
+		} else if !spawned {
+			cmd := exec.Command(exe, "daemon", "run",
+				"--scan-interval", scanInterval.String(),
+				"--remote-interval", remoteInterval.String())
+			cmd.Stdout, cmd.Stderr = logf, logf
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			if err := cmd.Start(); err != nil {
+				return 0, err
+			}
+			if err := cmd.Process.Release(); err != nil {
+				return 0, err
+			}
+			spawned = true
 		}
 		time.Sleep(20 * time.Millisecond)
+		if volDir != "" {
+			if pid, running := Running(volDir); running && pid > 0 {
+				return pid, nil
+			}
+		} else if pid, running := GlobalRunning(); running && pid > 0 {
+			return pid, nil
+		}
 	}
+	return 0, fmt.Errorf("daemon did not come up within %s; see %s", startTimeout, globalLog)
 }
 
 // startTimeout bounds how long Start waits for the child to take the lock and
@@ -311,84 +486,376 @@ const watchedPollFactor = 30
 // observed by the lock being released, not by the pid disappearing: the pid
 // could be recycled while we wait, and the lock cannot.
 func Stop(volDir string) (bool, error) {
-	// The pid to signal comes from inside the lock, never from daemon.pid: a
-	// number in a file the daemon does not own is a SIGKILL primitive against
-	// any same-user process, and a -9'd daemon leaves exactly such a number
-	// behind with no attacker involved.
-	pid, ok := lockPid(volDir)
-	if !ok {
+	pid, running := lockPid(volDir)
+	if !running {
 		os.Remove(PidPath(volDir))
 		return false, nil
 	}
-	legacy := false
 	if pid <= 0 {
-		// A held lock whose file names no pid is a daemon from before the pid
-		// moved into the lock — it wrote daemon.pid instead, and telling its
-		// user "kill it by hand" made every pre-upgrade mount unstoppable.
-		// daemon.pid alone is never a license to signal (recycled pids, and a
-		// number in a file the holder never wrote — see the sec test), so the
-		// fallback signals only a process that VERIFIABLY looks like a bdrive
-		// daemon: the pidfile's process must be alive and its command line
-		// must say `daemon run`. SIGTERM only, below — no SIGKILL escalation
-		// on a pre-invariant number.
-		data, rerr := os.ReadFile(PidPath(volDir))
-		p, perr := strconv.Atoi(strings.TrimSpace(string(data)))
-		if rerr != nil || perr != nil || p <= 0 || !strings.Contains(cmdline(p), "daemon run") {
-			return false, fmt.Errorf("a daemon holds %s but it announced no pid; kill it by hand",
-				LockPath(volDir))
-		}
-		pid, legacy = p, true
+		return stopLegacyUnannouncedDaemon(volDir)
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+	otherActive, err := otherSupervisorVolumeRunning(volDir, pid)
+	if err != nil {
 		return false, err
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if !locked(LockPath(volDir)) {
-			os.Remove(PidPath(volDir))
-			return true, nil
+	globalPID, global := GlobalRunning()
+	if (global && globalPID == pid) || otherActive || globalLockIndeterminate() {
+		if err := store.SetPaused(volDir, true); err != nil {
+			return false, err
 		}
-		time.Sleep(100 * time.Millisecond)
+		deadline := time.Now().Add(5 * time.Second)
+		nextWake := time.Time{}
+		for time.Now().Before(deadline) {
+			if !locked(LockPath(volDir)) {
+				os.Remove(PidPath(volDir))
+				return true, nil
+			}
+			if time.Now().After(nextWake) {
+				_ = syscall.Kill(pid, syscall.SIGHUP)
+				nextWake = time.Now().Add(200 * time.Millisecond)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		otherActive, err := otherSupervisorVolumeRunning(volDir, pid)
+		if err != nil {
+			return false, err
+		}
+		if otherActive || globalLockIndeterminate() {
+			return false, fmt.Errorf("daemon worker for %s did not stop within 5s", volDir)
+		}
 	}
-	if legacy {
-		return false, fmt.Errorf("daemon (pid %d) did not exit after SIGTERM; kill it by hand", pid)
+	if err := terminateLockedProcess(pid, LockPath(volDir)); err != nil {
+		return false, err
 	}
-	syscall.Kill(pid, syscall.SIGKILL)
 	os.Remove(PidPath(volDir))
 	return true, nil
 }
 
-// cmdline reports a process's command line, or "" when it cannot be known —
-// /proc on Linux, ps everywhere else. Used only to recognize a legacy daemon
-// before signalling it; "" fails closed.
-func cmdline(pid int) string {
-	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
-		return strings.ReplaceAll(string(data), "\x00", " ")
-	}
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+// globalLockIndeterminate distinguishes an unreadable global lock from an
+// unlocked one. In particular, an EACCES response is never permission to kill
+// a PID which may own multiple workers in another process.
+func globalLockIndeterminate() bool {
+	path, err := GlobalLockPath()
 	if err != nil {
-		return ""
+		return false
 	}
-	return string(out)
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return os.IsPermission(err)
+	}
+	f.Close()
+	return false
 }
 
-// Run is the daemon main loop, executed in the foreground of the (usually
-// detached) `bdrive daemon run` process.
+// A stuck worker must not make a per-project stop terminate other projects.
+// Only the last worker may use process-level escalation.
+func otherSupervisorVolumeRunning(volDir string, pid int) (bool, error) {
+	home, err := config.Home()
+	if err != nil {
+		return false, err
+	}
+	root := filepath.Join(home, "volumes")
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check other volume workers: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		other := filepath.Join(root, entry.Name())
+		if filepath.Clean(other) == filepath.Clean(volDir) {
+			continue
+		}
+		if otherPID, running := lockPid(other); running && otherPID == pid {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func terminateLockedProcess(pid int, path string) error {
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+		return err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !locked(path) {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		return err
+	}
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !locked(path) {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return fmt.Errorf("daemon (pid %d) still holds %s after SIGKILL", pid, path)
+}
+
+type mountTarget struct {
+	folder string
+	proj   config.Project
+}
+
+type volumeWorker struct {
+	expectedRemote string
+	cancel         context.CancelFunc
+	wakeCh         chan struct{}
+	done           chan struct{}
+}
+
+// loadProjectRegular opens and validates one project config without a
+// check-then-reopen race. Nonblocking/no-follow keeps FIFOs and symlinks out
+// of the supervisor's discovery path.
+func loadProjectRegular(folder string) (config.Project, bool, error) {
+	path := filepath.Join(folder, config.ProjectDir, "config.json")
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return config.Project{}, false, nil
+		}
+		return config.Project{}, false, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 1<<20 {
+		return config.Project{}, false, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	if err != nil || len(data) > 1<<20 {
+		return config.Project{}, false, err
+	}
+	var hdr struct {
+		Kind string `json:"kind"`
+	}
+	if json.Unmarshal(data, &hdr) == nil && hdr.Kind == config.WorkspaceKind {
+		return config.Project{}, false, nil
+	}
+	var p config.Project
+	if err := json.Unmarshal(data, &p); err != nil {
+		return config.Project{}, false, err
+	}
+	if p.ID != "" && !config.ValidMountID(p.ID) {
+		return config.Project{}, false, fmt.Errorf("invalid mount id")
+	}
+	for i, entry := range p.Include {
+		trimmed := strings.TrimSuffix(entry, "/")
+		if trimmed != "" && !strings.ContainsAny(trimmed, "/*?[!") &&
+			!strings.HasPrefix(entry, "/") && !strings.HasPrefix(entry, "!") {
+			p.Include[i] = "/" + entry
+		}
+	}
+	return p, true, nil
+}
+
+// activeMountsForVolume filters registry entries before inspecting any folder,
+// so an unrelated volume's filesystem cannot block this worker's sync loop.
+func activeMountsForVolume(volDir, expectedRemote string) []mountTarget {
+	mounts, err := config.LoadMounts()
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(mounts))
+	for id := range mounts {
+		v, err := config.VolumeDir(id)
+		if err == nil && v == volDir && !store.PausedMount(volDir, id) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	var targets []mountTarget
+	for _, id := range ids {
+		mi := mounts[id]
+		proj, ok, err := loadProjectRegular(mi.Path)
+		if err != nil || !ok || proj.ID != id ||
+			!config.SameRemote(proj.Remote, mi.Remote) || !config.SameRemote(proj.Remote, expectedRemote) {
+			continue
+		}
+		targets = append(targets, mountTarget{folder: mi.Path, proj: proj})
+	}
+	return targets
+}
+
+// activeVolumes validates each registry entry before exposing any folder to sync.
+// A changed folder remote cannot redirect a running worker to an unchosen hub.
+func activeVolumes() (map[string][]mountTarget, error) {
+	mounts, err := config.LoadMounts()
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(mounts))
+	for id := range mounts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	volumes := make(map[string][]mountTarget)
+	for _, id := range ids {
+		mi := mounts[id]
+		volDir, err := config.VolumeDir(id)
+		if err != nil || store.PausedMount(volDir, id) {
+			continue
+		}
+		proj, ok, err := loadProjectRegular(mi.Path)
+		if err != nil || !ok || proj.ID != id || !config.SameRemote(proj.Remote, mi.Remote) {
+			continue
+		}
+		volumes[volDir] = append(volumes[volDir], mountTarget{folder: mi.Path, proj: proj})
+	}
+	return volumes, nil
+}
+
+// Run owns the user-session lock and reconciles independently locked workers.
 func Run(folder string, scanInterval, remoteInterval time.Duration) error {
+	if folder != "" {
+		if err := ValidateLegacyRunFolder(folder); err != nil {
+			return err
+		}
+	}
+	if scanInterval <= 0 || remoteInterval <= 0 {
+		return fmt.Errorf("daemon intervals must be positive")
+	}
+	path, err := GlobalLockPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	lockf, err := holdLock(path)
+	if err != nil {
+		return err
+	}
+	defer release(lockf)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
+	reloadCh := make(chan os.Signal, 1)
+	signal.Notify(reloadCh, syscall.SIGHUP)
+	defer signal.Stop(reloadCh)
+	if err := announceGlobal(lockf); err != nil {
+		return err
+	}
+	pidPath, _ := GlobalPidPath()
+	defer os.Remove(pidPath)
+	if err := reapAllLegacyDaemons(); err != nil {
+		return err
+	}
+	// First-use identity creation must finish before workers start concurrently.
+	if _, err := config.LoadDevice(); err != nil {
+		return err
+	}
+	workers := make(map[string]*volumeWorker)
+	workerDoneCh := make(chan string, 1)
+	defer func() {
+		for _, w := range workers {
+			w.cancel()
+		}
+		for _, w := range workers {
+			<-w.done
+		}
+	}()
+	ticker := time.NewTicker(scanInterval)
+	defer ticker.Stop()
+	wake := false
+	for {
+		volumes, err := activeVolumes()
+		if err != nil {
+			return err
+		}
+		for volDir, w := range workers {
+			matches := false
+			for _, mount := range volumes[volDir] {
+				if config.SameRemote(mount.proj.Remote, w.expectedRemote) {
+					matches = true
+					break
+				}
+			}
+			select {
+			case <-w.done:
+				delete(workers, volDir)
+				continue
+			default:
+			}
+			if !matches {
+				w.cancel()
+				<-w.done
+				delete(workers, volDir)
+			} else if wake {
+				select {
+				case w.wakeCh <- struct{}{}:
+				default:
+				}
+			}
+		}
+		for volDir, mounts := range volumes {
+			if _, exists := workers[volDir]; exists {
+				continue
+			}
+			if err := reapLegacyDaemonIfNeeded(volDir); err != nil {
+				return err
+			}
+			wctx, cancel := context.WithCancel(ctx)
+			w := &volumeWorker{
+				expectedRemote: mounts[0].proj.Remote, cancel: cancel,
+				wakeCh: make(chan struct{}, 1), done: make(chan struct{}),
+			}
+			workers[volDir] = w
+			go func(volDir string, w *volumeWorker) {
+				defer func() {
+					close(w.done)
+					select {
+					case workerDoneCh <- volDir:
+					default:
+					}
+				}()
+				if err := runVolumeWorker(wctx, volDir, w.expectedRemote, scanInterval, remoteInterval, w.wakeCh); err != nil {
+					log.Printf("volume worker %s exited: %v", volDir, err)
+				}
+			}(volDir, w)
+		}
+		if len(workers) == 0 {
+			return nil
+		}
+		wake = false
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-reloadCh:
+			wake = true
+		case <-workerDoneCh:
+		case <-ticker.C:
+		}
+	}
+}
 
-	proj, ok, err := config.ResolveMount(folder)
-	if err != nil {
-		return err
+// workerCycleHook is a test seam set before starting workers and cleared only
+// after all workers finish; production leaves it nil.
+var workerCycleHook func(string)
+
+func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logger *log.Logger) (res *syncer.Result, err error, panicked bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			logger.Printf("cycle panic recovered: %v\n%s", p, debug.Stack())
+			err = fmt.Errorf("cycle panic: %v", p)
+			panicked = true
+		}
+	}()
+	if workerCycleHook != nil {
+		workerCycleHook(volDir)
 	}
-	if !ok {
-		return fmt.Errorf("%s is not a beardrive project (run `bdrive init`)", folder)
-	}
-	volDir, err := config.VolumeDir(proj.ID)
-	if err != nil {
-		return err
-	}
+	res, err = sess.Cycle(ctx)
+	return
+}
+
+func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInterval, remoteInterval time.Duration, wakeCh <-chan struct{}) error {
 	st, err := store.Open(volDir)
 	if err != nil {
 		return err
@@ -397,9 +864,6 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	if err != nil {
 		return err
 	}
-	// Hold the lifetime lock before announcing the pid: it is what makes
-	// "is a daemon running" answerable, and it also makes a double start
-	// impossible (two daemons on one mount would write one journal twice).
 	lockf, err := holdLock(LockPath(volDir))
 	if err != nil {
 		return err
@@ -408,38 +872,18 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	if err := announce(lockf); err != nil {
 		return err
 	}
-
-	// daemon.pid is the human-readable copy (status output, `kill` by hand).
-	// 0600: this directory is 0755 and the file decides what gets signalled.
 	if err := os.WriteFile(PidPath(volDir), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		return err
 	}
 	defer os.Remove(PidPath(volDir))
-
-	log.Printf("daemon started: folder=%s mount=%s volume=%s remote=%q device=%s(%s) scan=%s sync=%s",
-		folder, proj.ID, proj.Volume, proj.Remote, dev.Name, dev.ID, scanInterval, remoteInterval)
-
-	// Re-index the workspace root above this project, if there is one. Here
-	// because THIS is what every daemon start passes through — `bdrive resume`
-	// (the reboot path) calls Start directly, so a manifest refreshed only by
-	// `bdrive init` would never notice a project added on another device or a
-	// folder the user deleted.
-	//
-	// In a goroutine, and that is the whole point. The scan reads a directory
-	// the user chose plus one config per child, neither bounded: a wedged
-	// network mount or a TCC-gated sibling blocks it forever. Inline it would
-	// take the daemon with it — before announce that fails a healthy project's
-	// start, and after announce it is worse, because the flock says "running"
-	// while the sync loop never begins. Sync must never wait on an index.
-	//
-	// A no-op when no root sits above, it never creates one, and nothing
-	// resolves state from what it writes.
-	go func() {
-		if err := config.RefreshWorkspaceOf(folder); err != nil {
-			log.Printf("workspace manifest not refreshed: %v", err)
-		}
-	}()
-
+	logf, err := os.OpenFile(LogPath(volDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logf.Close()
+	logger := log.New(logf, "", log.LstdFlags)
+	logger.Printf("worker started: volume=%s remote=%q device=%s(%s) scan=%s sync=%s",
+		volDir, expectedRemote, dev.Name, dev.ID, scanInterval, remoteInterval)
 	var be remote.Backend
 	defer func() {
 		if be != nil {
@@ -448,28 +892,10 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 	}()
 	var lastRemote time.Time
 	var lastToken string
-	// Which access state we last logged, so a degraded daemon says it once
-	// instead of on every tick.
 	lastAccess := store.AccessOK
-
-	// watch carries "a peer pushed" from hubs that implement remote.Watcher,
-	// so a teammate's edit lands in about a second instead of waiting out
-	// remoteInterval. Nil whenever there is no stream — a nil channel blocks
-	// forever in select, which is exactly the polling behaviour we want back.
-	//
-	// It used to be an accelerator ONLY, with the poll running at full rate
-	// beside it. That made an idle device the hub's single largest source of
-	// traffic (docs/hub-load-prd.md), so the stream now also decides the poll
-	// cadence: see pollEvery below. The tick is still the guarantee — the
-	// stream can die silently, and nothing here trusts it further than
-	// watchedPollFactor.
 	var watch <-chan struct{}
 	var watchCancel context.CancelFunc
-	// Re-dialling is not free (a request here, a goroutine on the hub), and a
-	// hub that does not implement the route will never start implementing it
-	// mid-connection, so a failed dial backs off instead of retrying per tick.
-	var nextWatch time.Time
-	var watchOpened time.Time
+	var nextWatch, watchOpened time.Time
 	stopWatch := func() {
 		if watchCancel != nil {
 			watchCancel()
@@ -478,253 +904,27 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		watch = nil
 	}
 	defer stopWatch()
-
+	refreshed := make(map[string]bool)
 	for {
-		// A pause is per mount, not per shared volume. If the mount that
-		// started this daemon is paused, hand the volume to an unpaused sibling
-		// before reading the active folder below.
-		if store.PausedMount(volDir, proj.ID) {
-			promoted := false
-			if m, merr := config.LoadMounts(); merr == nil {
-				ids := make([]string, 0, len(m))
-				for id := range m {
-					ids = append(ids, id)
-				}
-				sort.Strings(ids)
-				for _, id := range ids {
-					mi := m[id]
-					if id == proj.ID || mi.Path == "" || store.PausedMount(volDir, id) {
-						continue
+		if ctx.Err() != nil || store.Paused(volDir) {
+			return nil
+		}
+		targets := activeMountsForVolume(volDir, expectedRemote)
+		if len(targets) == 0 {
+			logger.Printf("no active mounts remain; exiting")
+			return nil
+		}
+		proj := targets[0].proj
+		for _, target := range targets {
+			if !refreshed[target.folder] {
+				refreshed[target.folder] = true
+				go func(folder string) {
+					if err := config.RefreshWorkspaceOf(folder); err != nil {
+						logger.Printf("workspace manifest not refreshed: %v", err)
 					}
-					v, verr := config.VolumeDir(id)
-					if verr != nil || v != volDir {
-						continue
-					}
-					c, cok, cerr := config.LoadProject(mi.Path)
-					if cerr == nil && cok && c.ID == id &&
-						config.SameRemote(c.Remote, proj.Remote) {
-						folder = mi.Path
-						proj = c
-						promoted = true
-						break
-					}
-				}
-			}
-			if !promoted {
-				log.Printf("mount paused; exiting")
-				return nil
+				}(target.folder)
 			}
 		}
-
-		// Re-read the project config each tick. A vanished primary folder may
-		// have been replaced by another enrolled worktree sharing this volume;
-		// promote that sibling before deciding the project is gone.
-		cur, ok, err := config.LoadProject(folder)
-		if err == nil && ok {
-			if cur.ID != proj.ID {
-				promoted := false
-				if m, merr := config.LoadMounts(); merr == nil {
-					if mi, ok := m[cur.ID]; ok && mi.Path == folder &&
-						!store.PausedMount(volDir, cur.ID) &&
-						config.SameRemote(cur.Remote, proj.Remote) {
-						if v, verr := config.VolumeDir(cur.ID); verr == nil && v == volDir {
-							proj = cur
-							continue
-						}
-					}
-					ids := make([]string, 0, len(m))
-					for id := range m {
-						ids = append(ids, id)
-					}
-					sort.Strings(ids)
-					for _, id := range ids {
-						mi := m[id]
-						if mi.Path == "" || mi.Path == folder || store.PausedMount(volDir, id) {
-							continue
-						}
-						v, verr := config.VolumeDir(id)
-						if verr != nil || v != volDir {
-							continue
-						}
-						sc, scok, scerr := config.LoadProject(mi.Path)
-						if scerr == nil && scok && sc.ID == id &&
-							config.SameRemote(sc.Remote, proj.Remote) {
-							folder = mi.Path
-							proj = sc
-							promoted = true
-							break
-						}
-					}
-				}
-				if promoted {
-					continue
-				}
-				log.Printf("mount identity changed; exiting")
-				return nil
-			}
-			// If the registry says this mount now lives elsewhere, a new
-			// location has taken over — stand down.
-			promotedSibling := config.Project{}
-			promoted := false
-			if m, err := config.LoadMounts(); err == nil {
-				if mi, ok := m[proj.ID]; ok && mi.Path != folder {
-					c, cok, cerr := config.LoadProject(mi.Path)
-					validReRegistered := cerr == nil && cok && c.ID == proj.ID &&
-						config.SameRemote(c.Remote, proj.Remote)
-					if !validReRegistered {
-						log.Printf("mount re-registered at %s; exiting", mi.Path)
-						return nil
-					}
-					v, verr := config.VolumeDir(proj.ID)
-					if verr != nil || v != volDir || !config.IsMount(mi.Path) {
-						log.Printf("mount re-registered at %s; exiting", mi.Path)
-						return nil
-					}
-					ids := make([]string, 0, len(m))
-					for id := range m {
-						ids = append(ids, id)
-					}
-					sort.Strings(ids)
-					for _, id := range ids {
-						sibling := m[id]
-						if id == proj.ID || sibling.Path == "" || sibling.Path == folder ||
-							store.PausedMount(volDir, id) {
-							continue
-						}
-						sv, sverr := config.VolumeDir(id)
-						if sverr != nil || sv != volDir {
-							continue
-						}
-						sc, scok, scerr := config.LoadProject(sibling.Path)
-						if scerr == nil && scok && sc.ID == id &&
-							config.SameRemote(sc.Remote, proj.Remote) {
-							promotedSibling = sc
-							folder = sibling.Path
-							promoted = true
-							break
-						}
-					}
-					if !promoted {
-						log.Printf("mount re-registered at %s; exiting", mi.Path)
-						return nil
-					}
-				}
-			}
-			if cur.Remote != proj.Remote {
-				// A running daemon never follows a folder config to a new remote.
-				// .bdrive/config.json is untrusted input (anything with write
-				// access inside the mount writes it: an agent session, a
-				// dependency's install script), and following it moved the whole
-				// project — every path, device name and signed-in email in the
-				// journal — to a host the user never chose, on the next 3s tick,
-				// with no credential needed for a file:// target. The daemon then
-				// PULLED from there too, which is an arbitrary write into the
-				// mount. Standing down is the same self-heal as a moved folder:
-				// the next bdrive command in this folder starts a daemon for
-				// whatever it then says, which is a user action.
-				log.Printf("remote changed in .bdrive/config.json (%q -> %q); exiting — run bdrive in this folder to resume",
-					proj.Remote, cur.Remote)
-				promoted = false
-				if m, merr := config.LoadMounts(); merr == nil {
-					ids := make([]string, 0, len(m))
-					for id := range m {
-						ids = append(ids, id)
-					}
-					sort.Strings(ids)
-					for _, id := range ids {
-						mi := m[id]
-						if mi.Path == "" || mi.Path == folder || store.PausedMount(volDir, id) {
-							continue
-						}
-						v, verr := config.VolumeDir(id)
-						if verr != nil || v != volDir {
-							continue
-						}
-						sc, scok, scerr := config.LoadProject(mi.Path)
-						if scerr == nil && scok && sc.ID == id &&
-							config.SameRemote(sc.Remote, proj.Remote) {
-							folder = mi.Path
-							proj = sc
-							promoted = true
-							break
-						}
-					}
-				}
-				if promoted {
-					continue
-				}
-				return nil
-			}
-			if promoted {
-				proj = promotedSibling
-			} else {
-				proj = cur
-			}
-		} else {
-			promoted := false
-			if m, merr := config.LoadMounts(); merr == nil {
-				ids := make([]string, 0, len(m))
-				for id := range m {
-					ids = append(ids, id)
-				}
-				sort.Strings(ids)
-				for _, id := range ids {
-					mi := m[id]
-					if mi.Path == "" || mi.Path == folder || store.PausedMount(volDir, id) {
-						continue
-					}
-					v, verr := config.VolumeDir(id)
-					if verr != nil || v != volDir {
-						continue
-					}
-					c, cok, cerr := config.LoadProject(mi.Path)
-					if cerr == nil && cok && c.ID == id && config.SameRemote(c.Remote, proj.Remote) {
-						folder = mi.Path
-						proj = c
-						promoted = true
-						break
-					}
-				}
-			}
-			if !promoted {
-				log.Printf("project config gone (folder moved or deleted); exiting")
-				return nil
-			}
-		}
-
-		// All live enrolled worktrees sharing this volume get a cycle in a
-		// deterministic order. Each mount has its own folder and state cache,
-		// while the store, journal and backend remain shared.
-		targets := []struct {
-			folder string
-			proj   config.Project
-		}{{folder: folder, proj: proj}}
-		if m, merr := config.LoadMounts(); merr == nil {
-			ids := make([]string, 0, len(m))
-			for id := range m {
-				ids = append(ids, id)
-			}
-			sort.Strings(ids)
-			for _, id := range ids {
-				mi := m[id]
-				if id == proj.ID || mi.Path == "" || mi.Path == folder ||
-					store.PausedMount(volDir, id) {
-					continue
-				}
-				v, verr := config.VolumeDir(id)
-				if verr != nil || v != volDir {
-					continue
-				}
-				c, cok, cerr := config.LoadProject(mi.Path)
-				if cerr == nil && cok && c.ID == id && config.SameRemote(c.Remote, proj.Remote) {
-					targets = append(targets, struct {
-						folder string
-						proj   config.Project
-					}{folder: mi.Path, proj: c})
-				}
-			}
-		}
-
 		// Re-read settings each tick too, so a login/logout/account switch
 		// after the daemon started is reflected in op authorship — otherwise
 		// a long-lived daemon stamps every change with a stale identity. The
@@ -760,7 +960,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		if doRemote && be == nil {
 			b, err := remote.Open(ctx, proj.Remote)
 			if err != nil {
-				log.Printf("remote unavailable: %v", err)
+				logger.Printf("remote unavailable: %v", err)
 				doRemote = false
 				lastRemote = time.Now()
 			} else {
@@ -826,6 +1026,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		// backend on a remote tick, or when an earlier sibling committed local
 		// ops that must be published before this target catches up.
 		maxLocalTarget := -1
+		cyclePanicked := false
 		for i, target := range targets {
 			if i > 0 && ctx.Err() != nil {
 				break
@@ -841,7 +1042,11 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			if doRemote || res.LocalOps > 0 {
 				sess.Backend = be
 			}
-			r, rerr := sess.Cycle(ctx)
+			r, rerr, panicked := cycleSafely(ctx, sess, volDir, logger)
+			if panicked {
+				cyclePanicked = true
+				break
+			}
 			if rerr != nil && cycleErr == nil {
 				cycleErr = rerr
 			}
@@ -855,7 +1060,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 		// Replay the shared journal into those earlier folders immediately,
 		// without another remote request, so concurrent worktrees converge in
 		// the same daemon tick.
-		if maxLocalTarget > 0 && ctx.Err() == nil {
+		if !cyclePanicked && maxLocalTarget > 0 && ctx.Err() == nil {
 			for i := range maxLocalTarget {
 				target := targets[i]
 				sess := &syncer.Session{
@@ -866,41 +1071,55 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 					Device:         dev,
 					Account:        settings,
 				}
-				r, rerr := sess.Cycle(ctx)
+				r, rerr, panicked := cycleSafely(ctx, sess, volDir, logger)
+				if panicked {
+					cyclePanicked = true
+					break
+				}
 				if rerr != nil && cycleErr == nil {
 					cycleErr = rerr
 				}
 				mergeResult(r)
 			}
 		}
+		if cyclePanicked {
+			// Even a busy watch or repeated SIGHUP must not turn a panic into
+			// a hot retry loop. Other volumes keep running during this backoff.
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(scanInterval):
+			}
+			continue
+		}
 
 		switch {
 		case ctx.Err() != nil:
-			log.Printf("daemon stopping")
+			logger.Printf("daemon stopping")
 			return nil
 		case cycleErr != nil:
-			log.Printf("cycle error: %v", cycleErr)
+			logger.Printf("cycle error: %v", cycleErr)
 		case res.NoAccess:
 			// The connection is fine, the answer isn't: keep the backend and
 			// keep ticking cheaply so a re-grant self-heals. Log the
 			// transition only — a paused daemon must stay quiet.
 			if lastAccess != store.AccessNone {
-				log.Printf("access revoked for this project; sync paused (%v)", res.AccessErr)
+				logger.Printf("access revoked for this project; sync paused (%v)", res.AccessErr)
 				lastAccess = store.AccessNone
 			}
 			lastRemote = time.Now()
 		case res.ReadOnly:
 			if lastAccess != store.AccessReadOnly {
 				if reason := res.Reason(); reason != "" {
-					log.Printf("read-only on this project, pulling only; local changes stay on this device (%s)", reason)
+					logger.Printf("read-only on this project, pulling only; local changes stay on this device (%s)", reason)
 				} else {
-					log.Printf("read-only on this project, pulling only; local changes stay on this device")
+					logger.Printf("read-only on this project, pulling only; local changes stay on this device")
 				}
 				lastAccess = store.AccessReadOnly
 			}
 			lastRemote = time.Now()
 		case res.Offline:
-			log.Printf("offline, will retry: %v", res.OfflineErr)
+			logger.Printf("offline, will retry: %v", res.OfflineErr)
 			if be != nil {
 				be.Close()
 				be = nil
@@ -914,11 +1133,11 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			// seconds: three cheap scan ticks run between remote passes, each
 			// cleared the flag, and the next remote pass set it again.
 			if doRemote && lastAccess != store.AccessOK {
-				log.Printf("access restored; syncing normally")
+				logger.Printf("access restored; syncing normally")
 				lastAccess = store.AccessOK
 			}
 			if res.Activity() {
-				log.Printf("local+%d pulled+%d merged=%d conflicts=%d files~%d pushed=%v",
+				logger.Printf("local+%d pulled+%d merged=%d conflicts=%d files~%d pushed=%v",
 					res.LocalOps, res.PulledOps, res.Merged, res.Conflicts, res.Materialized, res.Pushed)
 			}
 			if doRemote {
@@ -934,7 +1153,7 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 
 		select {
 		case <-ctx.Done():
-			log.Printf("daemon stopping")
+			logger.Printf("daemon stopping")
 			return nil
 		case _, open := <-watch:
 			if !open {
@@ -952,6 +1171,8 @@ func Run(folder string, scanInterval, remoteInterval time.Duration) error {
 			}
 			// A peer pushed. Clearing the gate makes the cycle below a remote
 			// one instead of a cheap local scan.
+			lastRemote = time.Time{}
+		case <-wakeCh:
 			lastRemote = time.Time{}
 		case <-time.After(scanInterval):
 		}

@@ -2,13 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -501,6 +506,160 @@ func TestWorktree_StopOneWorktreeDoesNotPauseSibling(t *testing.T) {
 	if _, err := seccliRun(t, syncCmd(), []string{wt2}); err != nil {
 		t.Fatalf("sync wt2 after stopping wt1: %v", err)
 	}
+}
+
+type stopPauseExpectation struct {
+	Volume       string
+	MountID      string
+	VolumePaused bool
+}
+
+// A separate process receives the real SIGHUP sent by Stop/WakeSupervisor.
+// Checking in the signal handler catches publishing the pause after signaling,
+// which a post-command assertion cannot distinguish.
+func TestWorktree_StopPauseSignalHelper(t *testing.T) {
+	raw := os.Getenv("BDRIVE_TEST_STOP_PAUSE")
+	if raw == "" {
+		return
+	}
+	var expected []stopPauseExpectation
+	if err := json.Unmarshal([]byte(raw), &expected); err != nil {
+		t.Fatal(err)
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	home, err := config.Home()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{filepath.Join(home, "daemon.lock")}
+	seen := make(map[string]bool)
+	for _, want := range expected {
+		if !seen[want.Volume] {
+			paths = append(paths, filepath.Join(want.Volume, "daemon.lock"))
+			seen[want.Volume] = true
+		}
+	}
+	for _, path := range paths {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(strconv.Itoa(os.Getpid()) + "\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(os.Getenv("BDRIVE_TEST_STOP_READY"), []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-signals:
+		for _, want := range expected {
+			if _, err := os.Stat(filepath.Join(want.Volume, "paused-"+want.MountID)); err != nil {
+				t.Errorf("mount %s was not paused before SIGHUP: %v", want.MountID, err)
+			}
+			if got := store.Paused(want.Volume); got != want.VolumePaused {
+				t.Errorf("volume pause at SIGHUP = %v, want %v", got, want.VolumePaused)
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("stop never signaled the supervisor")
+	}
+}
+
+func TestWorktree_StopPausesMountBeforeSignallingDaemon(t *testing.T) {
+	for _, mode := range []string{"single", "sibling", "all"} {
+		t.Run(mode, func(t *testing.T) {
+			worktreeHome(t)
+			folder := t.TempDir()
+			rawRemote := "file://" + t.TempDir()
+			proj := initWorktree(t, folder, rawRemote)
+			vdir, err := config.VolumeDir(proj.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := []stopPauseExpectation{{Volume: vdir, MountID: proj.ID, VolumePaused: mode != "sibling"}}
+			var sibling config.Project
+			if mode == "sibling" || mode == "all" {
+				sibling = initWorktree(t, t.TempDir(), rawRemote)
+			}
+			if mode == "all" {
+				expected = append(expected, stopPauseExpectation{Volume: vdir, MountID: sibling.ID, VolumePaused: true})
+				other := initWorktree(t, t.TempDir(), "file://"+t.TempDir())
+				otherDir, err := config.VolumeDir(other.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected = append(expected, stopPauseExpectation{Volume: otherDir, MountID: other.ID, VolumePaused: true})
+			}
+			raw, err := json.Marshal(expected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ready := filepath.Join(t.TempDir(), "ready")
+			helper := exec.Command(os.Args[0], "-test.run=^TestWorktree_StopPauseSignalHelper$")
+			helper.Env = append(os.Environ(), "BDRIVE_TEST_STOP_PAUSE="+string(raw), "BDRIVE_TEST_STOP_READY="+ready)
+			var output strings.Builder
+			helper.Stdout, helper.Stderr = &output, &output
+			if err := helper.Start(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			var waitErr error
+			go func() {
+				waitErr = helper.Wait()
+				close(done)
+			}()
+			t.Cleanup(func() {
+				_ = helper.Process.Kill()
+				<-done
+			})
+			deadline := time.Now().Add(3 * time.Second)
+			for !fileExistsForStopPause(ready) {
+				select {
+				case <-done:
+					t.Fatalf("supervisor helper exited: %v\n%s", waitErr, output.String())
+				default:
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("supervisor helper never acquired its locks")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			args := []string{folder}
+			if mode == "all" {
+				args = []string{"--all"}
+			}
+			out, err := seccliRun(t, stopCmd(), args)
+			if err != nil {
+				t.Fatalf("stop %s: %v\n%s", mode, err, out)
+			}
+			select {
+			case <-done:
+				if waitErr != nil {
+					t.Fatalf("pause ordering failed: %v\n%s", waitErr, output.String())
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("supervisor did not receive the pause notification")
+			}
+			if mode == "sibling" && syncBlocked(sibling) != "" {
+				t.Fatal("stopping one mount paused its active sibling")
+			}
+			if mode == "all" && !strings.Contains(out, fmt.Sprintf("stopped syncing %d enrolled project(s)", len(expected))) {
+				t.Fatalf("stop --all did not summarize every mount:\n%s", out)
+			}
+		})
+	}
+}
+
+func fileExistsForStopPause(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func TestWorktree_LegacyInboundSpoolNotConsumedBySecondaryMount(t *testing.T) {

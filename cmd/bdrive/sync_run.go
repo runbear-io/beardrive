@@ -78,6 +78,7 @@ func startSync(ctx context.Context, folder string, proj config.Project, foregrou
 // `bdrive init` again to resume).
 func stopCmd() *cobra.Command {
 	var forget bool
+	var all bool
 	c := &cobra.Command{
 		Use:     "stop [folder]",
 		Aliases: []string{"pause"},
@@ -89,6 +90,49 @@ With --forget the mount is also removed from this device's registry (the
 folder's .bdrive settings and the local volume data are kept).`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if all {
+				if len(args) != 0 {
+					return fmt.Errorf("--all cannot be combined with a folder")
+				}
+				mounts, err := config.LoadMounts()
+				if err != nil {
+					return err
+				}
+				volumes := make(map[string]bool)
+				// Publish every pause before waking the supervisor, including
+				// every mount sharing a volume that is about to be stopped.
+				for id := range mounts {
+					vdir, err := config.VolumeDir(id)
+					if err != nil {
+						return err
+					}
+					if err := store.SetPausedMount(vdir, id, true); err != nil {
+						return err
+					}
+					if err := store.SetPaused(vdir, true); err != nil {
+						return err
+					}
+					volumes[vdir] = true
+				}
+				for vdir := range volumes {
+					if _, err := daemon.Stop(vdir); err != nil {
+						return err
+					}
+				}
+				for id, mi := range mounts {
+					if err := config.RememberVolumeRemote(id, mi.Remote); err != nil {
+						return err
+					}
+					if forget {
+						if err := config.ForgetMount(id); err != nil {
+							return err
+						}
+						fmt.Printf("forgot mount %s (local volume data kept under ~/.bdrive/volumes/%s)\n", id, id)
+					}
+				}
+				fmt.Printf("stopped syncing %d enrolled project(s) on this device (run `bdrive init` to resume)\n", len(mounts))
+				return nil
+			}
 			folder, err := absFolder(args)
 			if err != nil {
 				return err
@@ -117,15 +161,6 @@ folder's .bdrive settings and the local volume data are kept).`,
 				sibling = true
 				break
 			}
-			var stopped bool
-			if sibling {
-				_, stopped = daemon.Running(vdir)
-			} else {
-				stopped, err = daemon.Stop(vdir)
-				if err != nil {
-					return err
-				}
-			}
 			// Pause only this mount. A shared sibling keeps the volume daemon
 			// alive and continues syncing through the shared store.
 			if err := store.SetPausedMount(vdir, proj.ID, true); err != nil {
@@ -133,6 +168,16 @@ folder's .bdrive settings and the local volume data are kept).`,
 			}
 			if !sibling {
 				if err := store.SetPaused(vdir, true); err != nil {
+					return err
+				}
+			}
+			var stopped bool
+			if sibling {
+				_, stopped = daemon.Running(vdir)
+				daemon.WakeSupervisor()
+			} else {
+				stopped, err = daemon.Stop(vdir)
+				if err != nil {
 					return err
 				}
 			}
@@ -154,5 +199,6 @@ folder's .bdrive settings and the local volume data are kept).`,
 		},
 	}
 	c.Flags().BoolVar(&forget, "forget", false, "also remove the mount from this device's registry")
+	c.Flags().BoolVar(&all, "all", false, "stop syncing all enrolled projects on this device")
 	return c
 }

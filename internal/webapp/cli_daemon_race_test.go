@@ -20,12 +20,15 @@ package webapp
 // real login agent can land in.
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestCLIDaemonPidFileNamesTheLockHolder(t *testing.T) {
@@ -57,14 +60,64 @@ func TestCLIDaemonPidFileNamesTheLockHolder(t *testing.T) {
 		t.Errorf("daemon.pid names pid %d, which is not running (%v) — stop and status both trust this file", pid, err)
 	}
 
-	// The consequence, asserted directly: stop must work and must leave
-	// nothing syncing behind it.
+	globalPIDPath := filepath.Join(e.home, ".bdrive", "daemon.pid")
+	if globalPID := readDaemonPid(t, globalPIDPath); globalPID != pid {
+		t.Fatalf("volume daemon.pid = %d, global daemon.pid = %d", pid, globalPID)
+	}
+	second := t.TempDir()
+	t.Cleanup(func() { _, _ = e.run(second, "stop") })
+	if out, err := e.run(second, "init", "--name", "race-second-e2e", "--yes"); err != nil {
+		t.Fatalf("second init: %v\n%s", err, out)
+	}
+	secondPIDPath := cliVolumePidPath(t, e.home, second)
+	if secondPID := readDaemonPid(t, secondPIDPath); secondPID != pid {
+		t.Fatalf("projects have different daemon PIDs: %d != %d", pid, secondPID)
+	}
+	command, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(command), "daemon run --") || strings.Contains(string(command), work) || strings.Contains(string(command), second) {
+		t.Fatalf("global daemon command must not name a mount folder: %s", command)
+	}
+	if !cliDaemonLockHeld(t, filepath.Join(filepath.Dir(pidPath), "daemon.lock")) ||
+		!cliDaemonLockHeld(t, filepath.Join(filepath.Dir(secondPIDPath), "daemon.lock")) {
+		t.Fatal("both initialized projects must have a live volume worker")
+	}
+
+	// Stopping one project releases only its volume lock; the second project
+	// continues under the same single supervisor.
 	out, err := e.run(work, "stop")
 	if err != nil {
 		t.Errorf("stop failed while a daemon was running: %v\n%s", err, out)
 	}
-	if out, err := e.run(work, "status"); err == nil && strings.Contains(out, "daemon:   running") {
+	if out, err := e.run(work, "status", work); err == nil && strings.Contains(out, "daemon:   running") {
 		t.Errorf("a daemon is still running after stop:\n%s", out)
+	}
+	if cliDaemonLockHeld(t, filepath.Join(filepath.Dir(pidPath), "daemon.lock")) {
+		t.Error("first project's volume lock is still held after stop")
+	}
+	if fileExists(pidPath) {
+		t.Error("first project's daemon.pid survived stop")
+	}
+	if !cliDaemonLockHeld(t, filepath.Join(filepath.Dir(secondPIDPath), "daemon.lock")) {
+		t.Fatal("stopping the first project stopped the second project's worker")
+	}
+	if secondPID := readDaemonPid(t, secondPIDPath); secondPID != pid {
+		t.Fatalf("second project's daemon PID changed after stopping the first: %d != %d", secondPID, pid)
+	}
+	if out, err := e.run(second, "status", second); err != nil || !strings.Contains(out, "daemon:   running (pid "+strconv.Itoa(pid)+")") {
+		t.Fatalf("second project is not running under the global PID: %v\n%s", err, out)
+	}
+	if out, err := e.run(second, "stop"); err != nil {
+		t.Fatalf("second stop: %v\n%s", err, out)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for cliDaemonLockHeld(t, filepath.Join(e.home, ".bdrive", "daemon.lock")) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if cliDaemonLockHeld(t, filepath.Join(e.home, ".bdrive", "daemon.lock")) {
+		t.Fatal("supervisor remained alive after its final project stopped")
 	}
 }
 
@@ -101,4 +154,41 @@ func readDaemonPid(t *testing.T, path string) int {
 		t.Fatalf("%s does not hold a pid: %q", path, data)
 	}
 	return pid
+}
+
+func cliVolumePidPath(t *testing.T, home, folder string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(folder, ".bdrive", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proj struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &proj); err != nil || proj.ID == "" {
+		t.Fatalf("invalid project config: %v\n%s", err, data)
+	}
+	return filepath.Join(home, ".bdrive", "volumes", proj.ID, "daemon.pid")
+}
+
+func cliDaemonLockHeld(t *testing.T, path string) bool {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			t.Fatal(err)
+		}
+		return true
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	return false
 }

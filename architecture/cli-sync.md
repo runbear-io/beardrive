@@ -215,11 +215,25 @@ classDiagram
     class daemon {
         +Run(folder, scan, remote)
         +Start / Stop / Running
+        +GlobalRunning / WakeSupervisor
+        +GlobalLockPath / GlobalPidPath / GlobalLogPath
+        +EnsureRunningBestEffort / EnsureRunningAsync
+        -map~string, volumeWorker~ workers
     }
-    note for daemon "per-volume detached loop cycling all enrolled worktrees sharing volDir; re-reads .bdrive/config.json each tick, promotes a live sibling or exits without deletes if it vanishes"
+    note for daemon "One detached bdrive daemon run supervisor per machine/user session. Holds BDRIVE_HOME/daemon.lock, with daemon.pid and daemon.log beside it. Reconciles valid, unpaused mounts into one worker per volume; exits cleanly when no active volumes remain"
+    note for daemon "init, resume, sync and agent sync hooks start or wake the supervisor for unpaused projects. A binary fingerprint change replaces the old supervisor. Hook self-heal is asynchronous"
+
+    class volumeWorker {
+        -string expectedRemote
+        -context.CancelFunc cancel
+        -chan wakeCh
+        -chan done
+    }
+    note for volumeWorker "runVolumeWorker cycles all enrolled worktrees sharing volDir and holds volumes/volume-id/daemon.lock; daemon.pid and daemon.log stay per-volume. Re-reads config each tick, promotes a live sibling or exits without deletes if a folder vanishes. A changed remote ends the worker"
+    note for volumeWorker "bdrive stop pauses the selected mount. When no active sibling remains, its worker releases the volume lock; other projects keep running. The global and volume flocks form the Dual-Lock scheme"
     note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back"
 
-    note for daemon "The tick now selects on a THIRD arm: remote.Watcher's channel, when the backend is a hub that implements it. A peer's push clears lastRemote so the next cycle is a remote one, turning ~10s of latency into ~1s. The stream is torn down wherever the backend is dropped (token change, offline) since its connection carries the old credential to the old host, and a failed or ended dial backs off watchRetry (1m) rather than retrying per tick — an older hub 404s here forever and must not become a log line every few seconds. NO LONGER strictly an accelerator: a live stream now also SETS the remote cadence, which drops to remoteInterval x watchedPollFactor (5m at the default) and snaps back to remoteInterval the moment watch goes nil — a failed dial, a token change, an offline cycle or the hub&apos;s own streamMaxAge all do that, so losing the stream restores the tight cadence on the very next tick. The tick is still the guarantee: a stream can die silently and nothing trusts it further than that factor. This is the largest single item in docs/hub-load-prd.md — an idle device on one project cost 17,280 requests a day, 9.4% of the production hub&apos;s entire daily traffic, to be told nothing by a poll while an open stream told it the same nothing for free. A hub with no stream syncs exactly as it always did"
+    note for volumeWorker "remote.Watcher wakes a remote cycle when a peer pushes, reducing arrival latency from about 10s to 1s. A live stream stretches polling to remoteInterval x watchedPollFactor (5m by default); losing it restores remoteInterval on the next tick. Token changes and offline cycles drop the stream. Failed or ended dials back off for watchRetry (1m), including an older hub's 404. Periodic polling still bounds silent stream failure"
 
     Session --> merge : before a conflict copy
     Session --> Store : volume state
@@ -253,7 +267,8 @@ classDiagram
     Session ..> UnderRoot : materialize writes and deletes
     walkFolder ..> ReservedPath : never-sync set
     Session ..> ReservedPath : neverSync = unsafeRel or reserved
-    daemon --> Session : one Cycle per tick
+    daemon *-- "0..*" volumeWorker : workers keyed by volDir
+    volumeWorker --> Session : one Cycle per tick
 ```
 
 ## CLI commands, device state, and the opt-in gate
@@ -369,16 +384,29 @@ classDiagram
     }
     note for Autostart "internal/autostart — ONE login unit per machine that runs `bdrive resume`: darwin a LaunchAgents plist (RunAtLoad, no KeepAlive), linux a systemd user unit + its default.target.wants symlink (needs sd_booted), windows an HKCU Run value. Writes the registration only — never launchctl/systemctl/schtasks"
 
-    class DaemonLock {
-        volumes/id/daemon.lock
-        volumes/id/daemon.pid
+    class GlobalDaemonLock {
+        BDRIVE_HOME/daemon.lock
+        BDRIVE_HOME/daemon.pid
+        BDRIVE_HOME/daemon.log
     }
-    note for DaemonLock "internal/daemon — liveness is the flock, held for the daemon's lifetime; the kernel drops it at death/reboot, so a leftover pid can never read as running. Start writes no pid — it waits for the lock, so a returned pid always has a daemon behind it"
-    note for DaemonLock "The pid Stop SIGNALS now lives INSIDE the flock'd daemon.lock, written by announce after the lock is taken and truncated by release. daemon.pid became display-only and is never signalled: it is an ordinary file in a synced-adjacent tree, so anything that could rewrite it could aim a kill at any process on the machine. The lock is opened O_NOFOLLOW, and an unopenable lock reads as running only when this process is the one holding it"
+    note for GlobalDaemonLock "Held for the supervisor process lifetime. GlobalRunning checks the flock; WakeSupervisor sends SIGHUP to its recorded PID. No active volumes means a clean exit"
+
+    class DaemonLock {
+        volumes/volume-id/daemon.lock
+        volumes/volume-id/daemon.pid
+        volumes/volume-id/daemon.log
+    }
+    note for DaemonLock "Held for the volume worker lifetime. Running(volDir) checks the flock. Start waits for the worker lock; stopping a project reconciles workers instead of killing their shared process"
+    note for DaemonLock "Liveness comes from the flock, never daemon.pid. The PID used for signalling is stored inside the held lock and cleared on release. Lock files use O_NOFOLLOW. The kernel releases both lock levels on process death or reboot"
 
     Commands --> Autostart : autostart install/uninstall (init runs install automatically)
     Autostart ..> Commands : login runs `bdrive resume`
-    Commands --> DaemonLock : Running / Start / Stop
+    Commands --> daemon : Start / Stop / Running and self-heal
+    daemon --> GlobalDaemonLock : supervisor owns
+    volumeWorker --> DaemonLock : worker owns
+    daemon --> MountRegistry : discovers valid unpaused volumes
+    daemon --> PausedMarker : reconciles active workers
+    startSync --> daemon : starts or wakes supervisor
     Commands --> AgentHooks : hooks install/uninstall (init runs install automatically)
     AgentHooks --> Commands : runs sync and read-log
     Commands --> syncBlocked : sync and read-log gate first
@@ -397,6 +425,6 @@ classDiagram
     openSession ..> Device : identity
     openSession ..> Settings : account and token
     Commands ..> Workspace : init refuses a root, desktop onboarding designates one
-    daemon ..> Workspace : RefreshWorkspaceOf — the ONLY reader of a manifest
+    volumeWorker ..> Workspace : RefreshWorkspaceOf, the only manifest reader
     Workspace ..> Project : indexes them, never owns their identity
 ```

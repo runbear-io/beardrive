@@ -1113,3 +1113,143 @@ func TestCLIStatusReportsUnscannedWork(t *testing.T) {
 		t.Fatalf("drift did not clear after a sync:\n%s", out)
 	}
 }
+
+func TestCLIMovedProjectSyncRestartsGlobalDaemon(t *testing.T) {
+	e := newCLIEnv(t)
+	parent := t.TempDir()
+	work := filepath.Join(parent, "original")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := e.run(work, "init", "--name", "moved-daemon-e2e", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	// Cleanup resolves the current path even when the assertion fails between
+	// either rename and the command that heals its registry entry.
+	t.Cleanup(func() { _, _ = e.run(parent, "stop", "--all") })
+	pidPath := cliVolumePidPath(t, e.home, work)
+	volumeLock := filepath.Join(filepath.Dir(pidPath), "daemon.lock")
+	globalLock := filepath.Join(e.home, ".bdrive", "daemon.lock")
+	moved := filepath.Join(parent, "moved")
+	if err := os.Rename(work, moved); err != nil {
+		t.Fatal(err)
+	}
+	// Losing the only folder shuts down its worker and then the supervisor.
+	// No init is needed to recover: sync at the new location is the touch.
+	deadline := time.Now().Add(10 * time.Second)
+	for (cliDaemonLockHeld(t, volumeLock) || cliDaemonLockHeld(t, globalLock)) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if cliDaemonLockHeld(t, volumeLock) || cliDaemonLockHeld(t, globalLock) {
+		t.Fatal("daemon did not release the moved folder's worker and global locks")
+	}
+	if out, err := e.run(moved, "status"); err != nil {
+		t.Fatalf("bare status: %v\n%s", err, out)
+	}
+	if cliDaemonLockHeld(t, globalLock) {
+		t.Fatal("bare status restarted the daemon; it must remain read-only")
+	}
+	if out, err := e.run(moved, "sync"); err != nil {
+		t.Fatalf("sync after move: %v\n%s", err, out)
+	}
+	if !cliDaemonLockHeld(t, volumeLock) {
+		t.Fatal("sync did not restart the moved project's worker")
+	}
+	if got, want := readDaemonPid(t, pidPath), readDaemonPid(t, filepath.Join(e.home, ".bdrive", "daemon.pid")); got != want {
+		t.Fatalf("restarted worker pid = %d, global pid = %d", got, want)
+	}
+	projectID := projectIDByName(t, e.browser, e.hub.URL, "moved-daemon-e2e")
+	assertBackgroundPush := func(folder, name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(folder, name), []byte("background sync after move\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			if hubPaths(t, e.browser, e.hub.URL, projectID)[name] {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("%s was not uploaded by the background worker after moving", name)
+	}
+	assertBackgroundPush(moved, "after-sync-move.md")
+
+	// Explicit status is a separate self-heal gesture: it updates the moved
+	// path and wakes an already-running supervisor without unpausing anything.
+	movedAgain := filepath.Join(parent, "moved-again")
+	if err := os.Rename(moved, movedAgain); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := e.run(movedAgain, "status", movedAgain); err != nil {
+		t.Fatalf("explicit status after move: %v\n%s", err, out)
+	}
+	assertBackgroundPush(movedAgain, "after-status-move.md")
+	if out, err := e.run(movedAgain, "stop"); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out)
+	}
+	if out, err := e.run(movedAgain, "status", movedAgain); err != nil {
+		t.Fatalf("explicit status while paused: %v\n%s", err, out)
+	}
+	if cliDaemonLockHeld(t, volumeLock) {
+		t.Fatal("explicit status resumed a paused project")
+	}
+}
+
+func TestCLIResumeReplacesOutdatedGlobalSupervisor(t *testing.T) {
+	e := newCLIEnv(t)
+	work := t.TempDir()
+	if out, err := e.run(work, "init", "--name", "resume-upgrade-e2e", "--yes"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { _, _ = e.run(work, "stop", "--all") })
+	globalLock := filepath.Join(e.home, ".bdrive", "daemon.lock")
+	globalPIDPath := filepath.Join(e.home, ".bdrive", "daemon.pid")
+	volumePIDPath := cliVolumePidPath(t, e.home, work)
+	volumeLock := filepath.Join(filepath.Dir(volumePIDPath), "daemon.lock")
+	oldPID := readDaemonPid(t, globalPIDPath)
+	before, err := os.ReadFile(globalLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidLine, currentFingerprint, ok := strings.Cut(strings.TrimSpace(string(before)), "\n")
+	if !ok || currentFingerprint == "" {
+		t.Fatalf("supervisor did not announce its binary fingerprint: %q", before)
+	}
+	// Change the announcement in place: replacing the inode would release
+	// the connection between the global lock path and its live holder.
+	if err := os.WriteFile(globalLock, []byte(pidLine+"\nstale-e2e-fingerprint\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !cliDaemonLockHeld(t, globalLock) || !cliDaemonLockHeld(t, volumeLock) {
+		t.Fatal("stale fingerprint scenario must retain live global and volume locks")
+	}
+	out, err := e.run(work, "resume")
+	if err != nil {
+		t.Fatalf("resume outdated supervisor: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "resumed 1, already running 0, skipped 0, failed 0") {
+		t.Fatalf("resume skipped an outdated supervisor instead of upgrading it:\n%s", out)
+	}
+	newPID := readDaemonPid(t, globalPIDPath)
+	if newPID == oldPID {
+		t.Fatalf("resume retained outdated supervisor pid %d", oldPID)
+	}
+	if volumePID := readDaemonPid(t, volumePIDPath); volumePID != newPID {
+		t.Fatalf("volume pid = %d, upgraded global pid = %d", volumePID, newPID)
+	}
+	after, err := os.ReadFile(globalLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, replacementFingerprint, ok := strings.Cut(strings.TrimSpace(string(after)), "\n")
+	if !ok || replacementFingerprint != currentFingerprint {
+		t.Fatalf("replacement did not restore the current binary fingerprint: %q", after)
+	}
+	if !cliDaemonLockHeld(t, globalLock) || !cliDaemonLockHeld(t, volumeLock) {
+		t.Fatal("replacement supervisor did not acquire both global and volume locks")
+	}
+	if out, err := e.run(work, "resume"); err != nil || !strings.Contains(out, "resumed 0, already running 1, skipped 0, failed 0") {
+		t.Fatalf("resume should leave the current replacement running: %v\n%s", err, out)
+	}
+}

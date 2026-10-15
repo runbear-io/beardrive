@@ -444,17 +444,6 @@ func desktopPause(w http.ResponseWriter, r *http.Request) {
 			sibling = true
 			break
 		}
-		if sibling {
-			_, running := daemon.Running(m.volDir)
-			stopped = stopped || running
-		} else {
-			didStop, err := daemon.Stop(m.volDir)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			stopped = stopped || didStop
-		}
 		if err := store.SetPausedMount(m.volDir, m.id, true); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -464,6 +453,18 @@ func desktopPause(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+		}
+		if sibling {
+			_, running := daemon.Running(m.volDir)
+			stopped = stopped || running
+			daemon.WakeSupervisor()
+		} else {
+			didStop, err := daemon.Stop(m.volDir)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			stopped = stopped || didStop
 		}
 	}
 	writeDesktopJSON(w, map[string]any{"ok": true, "stopped": stopped})

@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 func TestDaemon_CyclesConcurrentWorktreesAndSurvivesDeletedPrimary(t *testing.T) {
@@ -199,4 +201,140 @@ func worktreeRemoteHasOp(root, path, kind string) bool {
 		}
 	}
 	return false
+}
+
+type supervisorFixture struct {
+	folder  string
+	remote  string
+	volDir  string
+	mountID string
+}
+
+func supervisorMount(t *testing.T) supervisorFixture {
+	t.Helper()
+	folder, remoteDir := t.TempDir(), t.TempDir()
+	proj, err := config.SaveProject(folder, config.Project{Remote: "file://" + remoteDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := config.EnrollMount(folder); err != nil {
+		t.Fatal(err)
+	}
+	volDir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(volDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return supervisorFixture{folder: folder, remote: remoteDir, volDir: volDir, mountID: proj.ID}
+}
+
+func supervisorRun(t *testing.T, mounts ...supervisorFixture) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	exited := make(chan struct{})
+	go func() {
+		done <- Run("", 20*time.Millisecond, 40*time.Millisecond)
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		for _, mount := range mounts {
+			if err := store.SetPausedMount(mount.volDir, mount.mountID, true); err != nil {
+				t.Errorf("pause %s during cleanup: %v", mount.mountID, err)
+			}
+		}
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+			t.Error("supervisor did not exit during cleanup")
+		}
+	})
+	return done
+}
+
+func TestSupervisor_ManagesMultipleProjectsAndIsolatesStop(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	projA, projB := supervisorMount(t), supervisorMount(t)
+	if projA.volDir == projB.volDir {
+		t.Fatal("distinct projects unexpectedly share a volume")
+	}
+	done := supervisorRun(t, projA, projB)
+	worktreeWaitFor(t, "both supervisor workers", done, func() bool {
+		pidA, a := Running(projA.volDir)
+		pidB, b := Running(projB.volDir)
+		pidGlobal, global := GlobalRunning()
+		return a && b && global && pidA == os.Getpid() && pidB == pidA && pidGlobal == pidA
+	})
+	writeWorktreeFile(t, projA.folder, "a.txt", "project A\n")
+	writeWorktreeFile(t, projB.folder, "b.txt", "project B\n")
+	worktreeWaitFor(t, "both projects syncing", done, func() bool {
+		return worktreeRemoteHasOp(projA.remote, "a.txt", journal.KindPut) &&
+			worktreeRemoteHasOp(projB.remote, "b.txt", journal.KindPut)
+	})
+	if stopped, err := Stop(projB.volDir); err != nil || !stopped {
+		t.Fatalf("Stop(project B) = (%v, %v)", stopped, err)
+	}
+	if _, running := Running(projB.volDir); running {
+		t.Fatal("paused project B still owns its volume lock")
+	}
+	if pid, running := Running(projA.volDir); !running || pid != os.Getpid() {
+		t.Fatalf("stopping B interrupted A: pid=%d running=%v", pid, running)
+	}
+	writeWorktreeFile(t, projA.folder, "a-after-stop.txt", "A continues\n")
+	writeWorktreeFile(t, projB.folder, "b-after-stop.txt", "B stays paused\n")
+	worktreeWaitFor(t, "A syncing after B stops", done, func() bool {
+		return worktreeRemoteHasOp(projA.remote, "a-after-stop.txt", journal.KindPut)
+	})
+	if worktreeRemoteHasOp(projB.remote, "b-after-stop.txt", journal.KindPut) {
+		t.Fatal("stopped project B kept syncing")
+	}
+	if err := store.SetPausedMount(projA.volDir, projA.mountID, true); err != nil {
+		t.Fatal(err)
+	}
+	WakeSupervisor()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("supervisor exited with error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor did not exit after its last project paused")
+	}
+	if _, running := GlobalRunning(); running {
+		t.Fatal("supervisor left its global lock held")
+	}
+}
+
+func TestSupervisor_WorkerPanicRecoveryIsolatesOtherVolumes(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	projA, projB := supervisorMount(t), supervisorMount(t)
+	var panicA atomic.Bool
+	panicA.Store(true)
+	workerCycleHook = func(volDir string) {
+		if volDir == projA.volDir && panicA.Load() {
+			panic("injected project A failure")
+		}
+	}
+	// Registered before supervisorRun's cleanup so workers exit before the
+	// shared test seam is cleared, avoiding a concurrent function-pointer write.
+	t.Cleanup(func() { workerCycleHook = nil })
+	done := supervisorRun(t, projA, projB)
+	worktreeWaitFor(t, "project A panic logged with stack", done, func() bool {
+		data, err := os.ReadFile(LogPath(projA.volDir))
+		return err == nil && strings.Contains(string(data), "cycle panic recovered: injected project A failure") &&
+			strings.Contains(string(data), "runtime/debug.Stack")
+	})
+	writeWorktreeFile(t, projB.folder, "b-during-panic.txt", "B is unaffected\n")
+	worktreeWaitFor(t, "project B syncing while A panics", done, func() bool {
+		return worktreeRemoteHasOp(projB.remote, "b-during-panic.txt", journal.KindPut)
+	})
+	if pid, running := Running(projA.volDir); !running || pid != os.Getpid() {
+		t.Fatalf("panic dropped A's worker lock: pid=%d running=%v", pid, running)
+	}
+	panicA.Store(false)
+	writeWorktreeFile(t, projA.folder, "a-after-panic.txt", "A recovered\n")
+	worktreeWaitFor(t, "project A retrying successfully after panic", done, func() bool {
+		return worktreeRemoteHasOp(projA.remote, "a-after-panic.txt", journal.KindPut)
+	})
 }
