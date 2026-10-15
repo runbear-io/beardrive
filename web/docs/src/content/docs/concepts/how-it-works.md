@@ -65,9 +65,29 @@ copy is still journaled and pushed as a superseded version of that path, so
 
 ## The daemon
 
-A single background daemon runs per project volume. It scans each enrolled worktree folder every few seconds and exchanges with the remote every ~10s, or immediately after local edits. Tune it with `--scan-interval` and `--remote-interval` on `bdrive daemon run` (init always uses the defaults).
+One background supervisor process runs per machine/user session
+(`bdrive daemon run`). It holds `~/.bdrive/daemon.lock`; its `daemon.pid`
+and `daemon.log` live alongside it. Each active project volume gets one
+worker goroutine, with its own `daemon.lock`, `daemon.pid`, and `daemon.log`
+under `~/.bdrive/volumes/<volume-id>/`. These two lock levels are the
+Dual-Lock scheme. `$BDRIVE_HOME` relocates both sets of files.
 
-It re-reads `.bdrive/config.json` each tick. If a folder vanishes because it was moved, renamed, or deleted, the daemon promotes any surviving sibling worktree that shares the volume. If no sibling remains, it exits cleanly without propagating deletes.
+Each worker scans its enrolled worktree folders every few seconds and
+exchanges with the remote every ~10s, or immediately after local edits.
+Tune the intervals with `--scan-interval` and `--remote-interval` on
+`bdrive daemon run` (`init` uses the defaults).
+
+Workers re-read `.bdrive/config.json` each tick. If a folder vanishes because
+it was moved, renamed, or deleted, its worker promotes a surviving sibling
+worktree that shares the volume. If no sibling remains, that worker exits
+without propagating deletes.
+
+`bdrive stop` pauses the selected mount. When no active worktrees remain in
+its volume, the worker releases the volume lock; other projects keep syncing.
+The supervisor exits cleanly when no active volumes remain.
+`bdrive init`, `bdrive resume`, `bdrive sync`, and agent sync hooks start or
+wake it for unpaused projects. These entry points also replace the running
+supervisor when the `bdrive` binary has been upgraded.
 
 ## The change stream
 

@@ -222,15 +222,32 @@ bdrive restore memory.md
 # Check sync state and the daemon
 bdrive status
 
-# Stop syncing — pauses everything, including agent turn hooks
-# (files stay on disk; bdrive init resumes any time)
+# Stop syncing this project, including its agent turn hooks
+# (other projects keep syncing; bdrive init resumes this one)
 bdrive stop
 ```
 
-Renaming or moving a project folder is safe: state is keyed by a stable
-project id, never the path. The daemon notices the move, steps aside, and
-the next `bdrive init` (or any bdrive command) at the new location resumes
-exactly where it left off — zero re-scan, zero spurious changes.
+Renaming or moving a project folder is safe: state is keyed by stable IDs,
+never the path. The volume worker notices a missing folder and continues with
+any surviving sibling worktree, or stops without propagating deletes.
+`bdrive init` at the new location resumes the project.
+
+### Background sync
+
+One background supervisor process runs per machine/user session:
+`bdrive daemon run`. It holds `~/.bdrive/daemon.lock` and writes
+`daemon.pid` and `daemon.log` alongside it. Each active project volume has
+one worker goroutine with its own `daemon.lock`, `daemon.pid`, and
+`daemon.log` under `~/.bdrive/volumes/<volume-id>/`. This Dual-Lock scheme
+keeps one supervisor and one worker per volume. `$BDRIVE_HOME` relocates
+both sets of files.
+
+`bdrive stop` pauses the selected mount. When its volume has no active
+worktrees left, the worker releases that volume's lock without interrupting
+other projects. The supervisor exits cleanly when no active volumes remain.
+`bdrive init`, `bdrive resume`, `bdrive sync`, and agent sync hooks start or
+wake it for unpaused projects. After a binary upgrade, these entry points
+replace the old supervisor with the current binary automatically.
 
 ### Credentials
 
@@ -253,9 +270,9 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive login [server-url]` | Sign this device in (browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY fall back to it automatically; default server beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host). Switch hubs with `bdrive login <new-url>` |
 | `bdrive logout` | Sign this device out — revoke this device's token on the hub and clear it locally (`--forget` also drops the remembered server) |
 | `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--template/--yes`) for scripts; `--template docs\|wiki\|para\|skills` starts the project from a structure (directories plus the `AGENTS.md` that explains them) instead of an empty folder; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
-| `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent; this is what the login agent runs |
+| `bdrive resume` | Start or wake the global sync supervisor for every unpaused project volume on this device after a reboot, crash, or manual kill. Idempotent; this is what the login agent runs |
 | `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot — a launchd user agent on macOS, a systemd user unit on Linux. `bdrive init` installs it; `--no-autostart` skips it |
-| `bdrive stop [folder]` | Stop syncing, including agent sync hooks (files stay; `bdrive init` resumes) |
+| `bdrive stop [folder]` | Pause this mount and its agent sync hooks; release its volume worker when no active sibling remains. Other projects keep syncing; files stay on disk and `bdrive init` resumes |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes, so no one hand-writes negation syntax. The daemon picks changes up in seconds; `rm` deletes nothing, locally or on the hub. `--explain` lists every path in the folder split into what syncs and what does not, so you can verify what leaves this machine (pure read — no daemon, no lock, no network) |
 | `bdrive grep <pattern> [folder]` | Search the text **inside** the files a project syncs — Go RE2 regexp, or a literal with `-F`; `-i` ignores case, `-l` prints matching paths only, `-n` caps the lines printed (default 200, `0` = all). Output is `path:line: text`. Only files the project actually syncs are searched, so a `.bdriveignore` rule or a narrowed `bdrive scope` excludes a file from search exactly as it excludes it from sync; binary files are skipped. Pure local read — no daemon, no lock, no network, works offline and never blocks a sync in progress. Exit status 0 on match, 1 on none, so it composes in scripts |
 | `bdrive stale [folder]` | Find docs the code has outgrown: synced markdown (`.md`/`.markdown`) that links to a file written **after** the doc itself. Staleness here is not age — a doc goes stale when what it describes moves. Write times come from the **journal**, not `os.Stat`: materialize stamps a peer's file with this device's mtime, so on a freshly synced machine every mtime is identical and only the journal still knows. `-l` prints outgrown paths only, `-n` caps the docs printed (default 50, `0` = all). A reference that does not resolve to a file this project syncs — a URL, a `../` escape, a made-up path — is silently ignored. Pure local read — no daemon, no lock, no network. **Exit status is 0 whether or not anything is stale**: this is advisory, not a gate |

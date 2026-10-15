@@ -42,6 +42,7 @@ Projects paused with ` + "`bdrive stop`" + ` stay paused — resume never overri
 				return err
 			}
 			var started, running, skipped, failed int
+			seen := make(map[string]bool)
 			for id, mi := range mounts {
 				// The folder config is the source of truth for whether this is
 				// still a project: a moved or deleted folder must not be
@@ -67,7 +68,11 @@ Projects paused with ` + "`bdrive stop`" + ` stay paused — resume never overri
 					}
 					continue
 				}
-				if pid, ok := daemon.Running(vdir); ok {
+				if seen[vdir] {
+					continue
+				}
+				seen[vdir] = true
+				if pid, ok := daemon.RunningCurrent(vdir); ok {
 					running++
 					if !quiet {
 						fmt.Printf("  running  %s (pid %d)\n", mi.Path, pid)

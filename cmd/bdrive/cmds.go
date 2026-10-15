@@ -106,6 +106,7 @@ list in .bdrive/config.json is never pruned against either.`,
 				if err != nil {
 					return err
 				}
+				daemon.EnsureRunningBestEffort(sess.Store.Dir(), 3*time.Second, 10*time.Second)
 				fmt.Printf("synced %s (project %q)\n", target, proj.Volume)
 				printCycle(res)
 				if res.ReadOnly || res.NoAccess {
@@ -132,6 +133,9 @@ list in .bdrive/config.json is never pruned against either.`,
 						link.paths = h.paths
 						link.secrets = h.secrets
 						links = append(links, link)
+					}
+					if vdir, err := config.VolumeDir(proj.ID); err == nil {
+						daemon.EnsureRunningAsync(vdir, 3*time.Second, 10*time.Second)
 					}
 				}
 				emitHookContext(cmd, links)
@@ -203,6 +207,16 @@ func statusCmd() *cobra.Command {
 				proj, err := mustProject(folder) // also self-heals the registry
 				if err != nil {
 					return err
+				}
+				if _, enrolled := mounts[proj.ID]; enrolled {
+					vdir, err := config.VolumeDir(proj.ID)
+					if err != nil {
+						return err
+					}
+					if !store.PausedMount(vdir, proj.ID) {
+						daemon.WakeSupervisor()
+						daemon.EnsureRunningBestEffort(vdir, 3*time.Second, 10*time.Second)
+					}
 				}
 				mounts = map[string]config.MountInfo{proj.ID: {Path: folder, Volume: proj.Volume, Remote: proj.Remote}}
 			}
@@ -504,15 +518,21 @@ func daemonCmd() *cobra.Command {
 	}
 	var scanInterval, remoteInterval time.Duration
 	run := &cobra.Command{
-		Use:   "run <folder>",
+		Use:   "run [folder]",
 		Short: "Run the sync daemon in the foreground (internal)",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			folder, err := absFolder(args)
-			if err != nil {
-				return err
+			if len(args) == 1 {
+				folder, err := absFolder(args)
+				if err != nil {
+					return err
+				}
+				if err := daemon.ValidateLegacyRunFolder(folder); err != nil {
+					return err
+				}
+				return daemon.Run(folder, scanInterval, remoteInterval)
 			}
-			return daemon.Run(folder, scanInterval, remoteInterval)
+			return daemon.Run("", scanInterval, remoteInterval)
 		},
 	}
 	run.Flags().DurationVar(&scanInterval, "scan-interval", 3*time.Second, "local scan interval")

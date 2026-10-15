@@ -28,18 +28,35 @@ func wsMount(t *testing.T, root, name string) string {
 	return folder
 }
 
-// wsRunDaemon starts the real loop and stops it the documented way — removing
-// .bdrive, which is the clean exit — so the test process never installs and
-// drops a SIGTERM handler around itself. Same technique as sec_daemon_test.go.
+// wsRunDaemon starts the global loop and pauses every enrolled mount in the
+// isolated home on cleanup, including projects discovered beside the primary.
 func wsRunDaemon(t *testing.T, folder string) {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() { done <- Run(folder, 25*time.Millisecond, 25*time.Millisecond) }()
 	t.Cleanup(func() {
+		mounts, err := config.LoadMounts()
+		if err != nil {
+			t.Errorf("load mounts during supervisor cleanup: %v", err)
+		}
+		for id := range mounts {
+			volDir, err := config.VolumeDir(id)
+			if err != nil {
+				t.Errorf("resolve volume during supervisor cleanup: %v", err)
+				continue
+			}
+			if err := store.SetPausedMount(volDir, id, true); err != nil {
+				t.Errorf("pause mount during supervisor cleanup: %v", err)
+			}
+		}
 		os.RemoveAll(filepath.Join(folder, ".bdrive"))
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Errorf("supervisor cleanup: %v", err)
+			}
 		case <-time.After(5 * time.Second):
+			t.Error("supervisor did not exit during cleanup")
 		}
 	})
 }

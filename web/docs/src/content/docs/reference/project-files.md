@@ -145,6 +145,9 @@ Everything else lives under `$BDRIVE_HOME` (default `~/.bdrive`):
 | `device.json` | This device's identity, used in change tracking |
 | `settings.json` | Default server, device token, signed-in account |
 | `mounts.json` | Mount registry, keyed by stable mount id, holding each mount's last-known path and shared `volume_id` when multiple worktrees connect to the same project |
+| `daemon.lock` | Global supervisor liveness lock, held by the single `bdrive daemon run` process |
+| `daemon.pid` | Global supervisor PID for display; liveness comes from the lock |
+| `daemon.log` | Global supervisor log |
 | `volumes/<volume-id>/` | Shared local volume store: blobs, journals, sync state, and per-mount files |
 
 Nothing is keyed by folder path, which is why moves and renames are free.
@@ -164,7 +167,19 @@ Nothing is keyed by folder path, which is why moves and renames are free.
                             they last changed (what `bdrive status` reports)
 ```
 
-Also here for a running project: `daemon.pid` and `daemon.log`.
+Each active volume worker also holds `daemon.lock` in this directory and
+writes `daemon.pid` and `daemon.log` here. The supervisor holds a separate
+`daemon.lock` at the top of `$BDRIVE_HOME`, with its own PID and log files.
+This Dual-Lock scheme allows one supervisor process per machine/user session
+and one worker goroutine per active project volume. PID files alone never
+prove that either is running.
+
+`bdrive stop` pauses the selected mount. Once no active sibling worktrees
+remain, the worker releases the volume lock without stopping other projects.
+The global daemon exits cleanly when no active volumes remain.
+`bdrive init`, `bdrive resume`, `bdrive sync`, and agent sync hooks start or
+wake it for unpaused projects and replace it automatically after a binary
+upgrade.
 
 The hub's storage adds two key classes the local store never holds: files
 larger than 4 MiB travel as content-defined `chunks/<sha256>` pieces plus a
