@@ -58,11 +58,12 @@ without a TTY init never prompts. It creates-or-joins a project named after the
 folder and syncs everything.
 
 Init writes `.bdrive/config.json`, starts or wakes the background sync daemon,
-and prints the project's hub link. For a new project, it seeds a starter
-`.bdriveignore` (node_modules, build dirs, caches, `.env*`). When joining an
-existing project, or initializing an additional worktree for a project already
-synced on this device, `init` reuses the shared local volume's `.bdriveignore`
-instead of writing the starter template over it. It also registers the sync
+and prints the project's hub link. If the folder has no `.bdriveignore`, it
+seeds a starter one (node_modules, build dirs, caches, `.env*`), unless this
+device already syncs the project in another folder or worktree. In that case
+`init` reuses the shared local volume's `.bdriveignore` instead of writing the
+starter template over it.
+It also registers the sync
 hooks for any agent platform it detects in that platform's **user** config, once
 per machine, so nothing lands inside the project. `--no-hooks` skips them. Not
 signed in yet? It runs the login flow first.
