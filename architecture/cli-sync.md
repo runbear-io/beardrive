@@ -164,8 +164,8 @@ classDiagram
         +Lock() flock
     }
     note for Store "secrets-mount-id.json is the credential-finding record: what `bdrive status` prints and what the agent hook appends a sentence about. Like the inbound spool it outlives the cycle that wrote it — the daemon scans the write seconds before the turn starts — but unlike it, it is STATE and is never drained: a finding stands until the file changes without it"
-    note for Store "internal/store — ~/.bdrive/volumes/mount-id: content-addressed blobs, per-device journal copies, state cache, paused marker (free funcs Paused/SetPaused and PausedMount/SetPausedMount, no flock)"
-    note for Store "inbound.jsonl is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle. Result.Inbound now carries the SAME events for the post_sync hook and is not a duplicate to delete: that consumer fires from the cycle itself, and a second drainer would silently empty the agent hook's context"
+    note for Store "internal/store: ~/.bdrive/volumes/volume-id holds shared content-addressed blobs, per-device journal copies, and sync.json; state-mount-id.json, paused-mount-id, note-mount-id.json, secrets-mount-id.json, and inbound-mount-id.jsonl are per-mount (free funcs Paused/SetPaused and PausedMount/SetPausedMount, no flock)"
+    note for Store "inbound-mount-id.jsonl (with legacy inbound.jsonl fallback) is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle. Result.Inbound now carries the SAME events for the post_sync hook and is not a duplicate to delete: that consumer fires from the cycle itself, and a second drainer would silently empty the agent hook's context"
 
     class secretLog {
         <<syncer/secrets.go>>
@@ -221,7 +221,7 @@ classDiagram
         -map~string, volumeWorker~ workers
     }
     note for daemon "One detached bdrive daemon run supervisor per machine/user session. Holds BDRIVE_HOME/daemon.lock, with daemon.pid and daemon.log beside it. Reconciles valid, unpaused mounts into one worker per volume; exits cleanly when no active volumes remain"
-    note for daemon "init, resume, sync and agent sync hooks start or wake the supervisor for unpaused projects. A binary fingerprint change replaces the old supervisor. Hook self-heal is asynchronous"
+    note for daemon "init, resume, sync, status &lt;folder&gt; and agent sync hooks start or wake the supervisor for unpaused projects. A binary fingerprint change replaces the old supervisor. Hook self-heal is asynchronous"
 
     class volumeWorker {
         -string expectedRemote
@@ -230,7 +230,7 @@ classDiagram
         -chan done
     }
     note for volumeWorker "runVolumeWorker cycles all enrolled worktrees sharing volDir and holds volumes/volume-id/daemon.lock; daemon.pid and daemon.log stay per-volume. Re-reads config each tick, promotes a live sibling or exits without deletes if a folder vanishes. A changed remote ends the worker"
-    note for volumeWorker "bdrive stop pauses the selected mount. When no active sibling remains, its worker releases the volume lock; other projects keep running. The global and volume flocks form the Dual-Lock scheme"
+    note for volumeWorker "bdrive stop pauses the selected mount; stop --all pauses every enrolled project on the device. When no active sibling remains, its worker releases the volume lock; other projects keep running. The global and volume flocks form the Dual-Lock scheme"
     note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back"
 
     note for volumeWorker "remote.Watcher wakes a remote cycle when a peer pushes, reducing arrival latency from about 10s to 1s. A live stream stretches polling to remoteInterval x watchedPollFactor (5m by default); losing it restores remoteInterval on the next tick. Token changes and offline cycles drop the stream. Failed or ended dials back off for watchRetry (1m), including an older hub's 404. Periodic polling still bounds silent stream failure"
@@ -279,7 +279,7 @@ classDiagram
 
     class Commands {
         init login logout
-        sync stop scope grep stale forget status log
+        sync stop(--all) scope grep stale forget status log
         restore url share comments export import
         web desktop daemon hooks read-log
         resume autostart mcp

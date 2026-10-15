@@ -4,6 +4,38 @@ Notable changes per release. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); BearDrive is pre-1.0, so
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 
+## v0.18.0 — 2026-10-15
+
+**Update your devices.** Everything here is in the client; the hub is
+unchanged, and older clients keep syncing with it. Running sync daemons switch
+over to the new supervisor the first time the updated `bdrive` runs on a
+machine (`bdrive init`, `resume`, `sync`, `status <folder>`, or an agent turn), with
+nothing to re-init.
+
+- **One project, several folders on the same device.** Git worktrees and extra
+  checkouts of a project can now all be mounted at once. They share one local
+  volume store and one device journal (`volume_id` in `mounts.json`), while
+  each folder keeps its own materialization cache (`state-<mount-id>.json`),
+  pause state (`paused-<mount-id>`), session note (`note-<mount-id>.json`),
+  secret warnings (`secrets-<mount-id>.json`), and agent-hook inbound list
+  (`inbound-<mount-id>.jsonl`). `bdrive init` used to refuse a second folder,
+  and deleting a worktree before running `init` in a fresh one started the
+  device's journal over and hit `409 Conflict` on every push. A folder joining
+  a project already synced on this device reuses the shared local volume's
+  `.bdriveignore` instead of overwriting it with the starter template. (#278)
+- **One background sync supervisor per user session instead of one process per
+  project.** A single `bdrive daemon run` supervisor (`~/.bdrive/daemon.lock`)
+  runs one worker goroutine per active project volume
+  (`~/.bdrive/volumes/<volume-id>/daemon.lock`) and shares HTTP/2 hub
+  connections across projects. After a binary upgrade, the next `bdrive`
+  command or agent turn replaces the running supervisor automatically.
+  `bdrive stop` pauses only the selected folder while sibling worktrees and
+  other projects keep syncing; `bdrive stop --all` pauses every project on the
+  device. (#281, #282)
+- **Pulling a large batch of changes downloads in parallel.** Missing blobs on
+  pull now download with up to 16 concurrent requests instead of one by one,
+  matching push concurrency. (#280)
+
 ## v0.17.1 — 2026-10-14
 
 A hub-only fix; clients are unchanged. Live on the managed hub already.

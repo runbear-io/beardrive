@@ -12,9 +12,9 @@ flowchart LR
     subgraph device["User device"]
         wf["working folder<br/>(real files + .bdrive/config.json)"]
         cli["cmd/bdrive<br/>CLI commands"]
-        dmn["internal/daemon<br/>background loop"]
+        dmn["internal/daemon<br/>global supervisor + volume workers"]
         eng["internal/syncer Session.Cycle<br/>internal/journal ops + replay"]
-        vs["volume store ~/.bdrive/volumes/id<br/>internal/store: blobs, journals,<br/>state, paused marker"]
+        vs["volume store ~/.bdrive/volumes/volume-id<br/>internal/store: blobs, journals,<br/>sync.json + per-mount state"]
         cfg["internal/config<br/>device.json, settings.json, mounts.json"]
         wsr["workspace root (optional)<br/>.bdrive/workspace.json — an INDEX of the<br/>project folders beside it, never identity"]
     end

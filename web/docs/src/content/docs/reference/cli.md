@@ -12,9 +12,9 @@ One binary, `bdrive` — the CLI, the sync daemon, and the web server.
 | `bdrive login [server-url]` | Sign this device in. Browser flow — the page names the account this terminal would act as and lets you switch before approving; `--device` forces the approval-link flow, and shells without a TTY (agents, CI, SSH) fall back to it automatically. Default server is beardrive.ai — the managed cloud, free personal workspace on signup; pass your hub URL to self-host. Switch hubs with `bdrive login <new-url>`. `--status` shows the current server and account |
 | `bdrive logout` | Sign this device out — revokes this device's token on the hub, then clears it locally. `--forget` also drops the remembered server |
 | `bdrive init [folder]` | Create or connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY; flags (`--name`, `--project`, `--server`, `--only`, `--template`, `--yes`) for scripts. `--template docs\|wiki\|para\|skills` starts a new project from a structure instead of an empty folder. Also registers agent sync hooks for detected platforms (`--no-hooks` skips them) and a login item so sync resumes after a reboot (`--no-autostart` skips), and prints the project's hub link. Re-run to resume |
-| `bdrive resume` | Restart the sync daemon for every project on this device that isn't paused — after a reboot, a crash, or a manual kill. Idempotent, so running it twice is harmless. This is what the login item runs |
+| `bdrive resume` | Start or wake the global sync supervisor for every unpaused project volume on this device after a reboot, crash, or manual kill. Idempotent, so running it twice is harmless. This is what the login item runs |
 | `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot: a user LaunchAgent on macOS, a systemd user unit on Linux (needs systemd). `bdrive init` installs it; `--no-autostart` skips it |
-| `bdrive stop [folder]` | Stop syncing — daemon and agent sync hooks both pause. Files stay on disk; `bdrive init` resumes |
+| `bdrive stop [--all] [folder]` | Pause this mount and its agent sync hooks; release its volume worker when no active sibling worktree remains. Other projects keep syncing; `--all` pauses every enrolled project on this device. Files stay on disk and `bdrive init` resumes |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes. Run from the mount root; the daemon picks changes up in seconds. `rm` stops syncing a folder but deletes nothing, locally or on the hub |
 | `bdrive scope --explain` | List every path in the folder, split into what syncs and what does not, with counts — the verifiable answer to "what leaves this machine". Pure read: no daemon, no lock, no network |
 | `bdrive grep <pattern> [folder]` | Search the text **inside** the files a project syncs. `pattern` is a Go RE2 regexp, or a literal string with `-F`. `-i` ignores case, `-l` prints matching paths only, `-n` caps the lines printed (default 200, `0` = all). Pure read: no daemon, no lock, no network |
@@ -88,8 +88,9 @@ friends), once per machine, so they cover every session in every folder; nothing
 is written inside the project. See
 [Hooks in detail](/manual/hooks/).
 
-The daemon scans every 3s and talks to the hub every 10s; those intervals are
-tunable on `bdrive daemon run`, not on init.
+`bdrive daemon run` runs the single user-session sync supervisor across all active
+project volumes. Each volume worker scans every 3s and talks to the hub every
+10s; those intervals are tunable on `bdrive daemon run`, not on init.
 
 ### `bdrive sync --note`
 

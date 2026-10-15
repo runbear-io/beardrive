@@ -245,8 +245,9 @@ both sets of files.
 `bdrive stop` pauses the selected mount. When its volume has no active
 worktrees left, the worker releases that volume's lock without interrupting
 other projects. The supervisor exits cleanly when no active volumes remain.
-`bdrive init`, `bdrive resume`, `bdrive sync`, and agent sync hooks start or
-wake it for unpaused projects. After a binary upgrade, these entry points
+`bdrive stop --all` pauses every enrolled project on this device.
+`bdrive init`, `bdrive resume`, `bdrive sync`, `bdrive status <folder>`, and
+agent sync hooks start or wake it for unpaused projects. After a binary upgrade, these entry points
 replace the old supervisor with the current binary automatically.
 
 ### Credentials
@@ -272,7 +273,7 @@ hub's own storage, never something a syncing client points at directly:
 | `bdrive init [folder]` | Create/connect a project and start syncing — the mount is always exactly the folder named. Interactive on a TTY, flags (`--name/--project/--server/--only/--template/--yes`) for scripts; `--template docs\|wiki\|para\|skills` starts the project from a structure (directories plus the `AGENTS.md` that explains them) instead of an empty folder; registers agent sync hooks and the login autostart in each platform's user config (`--no-hooks` skips the hooks), prints the project link; re-run to resume |
 | `bdrive resume` | Start or wake the global sync supervisor for every unpaused project volume on this device after a reboot, crash, or manual kill. Idempotent; this is what the login agent runs |
 | `bdrive autostart [install\|uninstall]` | Show, add, or remove the login registration that runs `bdrive resume` after a reboot — a launchd user agent on macOS, a systemd user unit on Linux. `bdrive init` installs it; `--no-autostart` skips it |
-| `bdrive stop [folder]` | Pause this mount and its agent sync hooks; release its volume worker when no active sibling remains. Other projects keep syncing; files stay on disk and `bdrive init` resumes |
+| `bdrive stop [--all] [folder]` | Pause this mount and its agent sync hooks; release its volume worker when no active sibling remains. Other projects keep syncing; files stay on disk and `bdrive init` resumes. `--all` pauses every enrolled project on this device |
 | `bdrive scope [add\|rm <dirs...>]` | Show or change which subfolders sync — edits the managed block of `.bdriveignore` rules that `init --only` writes, so no one hand-writes negation syntax. The daemon picks changes up in seconds; `rm` deletes nothing, locally or on the hub. `--explain` lists every path in the folder split into what syncs and what does not, so you can verify what leaves this machine (pure read — no daemon, no lock, no network) |
 | `bdrive grep <pattern> [folder]` | Search the text **inside** the files a project syncs — Go RE2 regexp, or a literal with `-F`; `-i` ignores case, `-l` prints matching paths only, `-n` caps the lines printed (default 200, `0` = all). Output is `path:line: text`. Only files the project actually syncs are searched, so a `.bdriveignore` rule or a narrowed `bdrive scope` excludes a file from search exactly as it excludes it from sync; binary files are skipped. Pure local read — no daemon, no lock, no network, works offline and never blocks a sync in progress. Exit status 0 on match, 1 on none, so it composes in scripts |
 | `bdrive stale [folder]` | Find docs the code has outgrown: synced markdown (`.md`/`.markdown`) that links to a file written **after** the doc itself. Staleness here is not age — a doc goes stale when what it describes moves. Write times come from the **journal**, not `os.Stat`: materialize stamps a peer's file with this device's mtime, so on a freshly synced machine every mtime is identical and only the journal still knows. `-l` prints outgrown paths only, `-n` caps the docs printed (default 50, `0` = all). A reference that does not resolve to a file this project syncs — a URL, a `../` escape, a made-up path — is silently ignored. Pure local read — no daemon, no lock, no network. **Exit status is 0 whether or not anything is stale**: this is advisory, not a gate |
@@ -304,9 +305,9 @@ the project:
   legacy `include` list — still honored, never written now). Written by
   `bdrive init`, safe to hand-edit (a running daemon picks changes up
   automatically). Never synced, and it holds no credentials (the session
-  token stays in `~/.bdrive`). Because everything is keyed by the mount id,
-  the folder can be renamed or moved freely; copy it to another machine and
-  `bdrive init` resumes the same project.
+  token stays in `~/.bdrive`). Folder identity is keyed by the stable mount
+  id, so the folder can be renamed or moved freely; copy it to another
+  machine and `bdrive init` resumes the same project.
 - **`.bdriveignore`** — gitignore-style opt-out list at the mount root. Syncs
   like a normal file, so every device shares the same rules. Supports `#`
   comments, `*`, `**`, `?`, trailing `/` for directories, leading `/` (or any
@@ -318,6 +319,15 @@ the project:
   "remote": "https://drive.example.com/p/7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4",
   "post_sync": "qmd update && qmd embed" }
 ```
+
+Multiple worktrees or checkouts on the same device can mount the same project.
+Their `mounts.json` entries share a `volume_id`, pointing at
+`~/.bdrive/volumes/<volume-id>/` for blobs, journals, and sync state. Each mount
+keeps its own `state-<mount-id>.json`, `paused-<mount-id>`,
+`note-<mount-id>.json`, `secrets-<mount-id>.json`, and
+`inbound-<mount-id>.jsonl`. A new worktree or folder joining a project already
+synced on this device reuses the shared local volume's `.bdriveignore` instead
+of replacing it with the starter template.
 
 - **`.bdrive/workspace.json`** — only in a folder that *holds* projects rather
   than being one (the Mac app writes it at the folder you connect; the CLI
@@ -857,7 +867,7 @@ Each enrolled worktree has a mount entry in `mounts.json`. Multiple worktrees fo
   by `(lamport, time, device)` — every device converges to the same view.
   Concurrent edits keep the last writer at the path; the loser is preserved
   as a conflict-copy file by the device that detects the overlap.
-- One background daemon runs per project volume. It scans each enrolled worktree folder every few seconds (cheap size+mtime check) and exchanges with the remote every ~10s, or immediately after local edits. Tunable with --scan-interval and --remote-interval on the daemon (defaults 3s / 10s).
+- One background supervisor runs per user session, with one worker goroutine per active project volume. Each worker scans its enrolled worktree folders every few seconds (cheap size+mtime check) and exchanges with the remote every ~10s, or immediately after local edits. Tunable with --scan-interval and --remote-interval on the daemon (defaults 3s / 10s).
 - Against a hub, the daemon also holds a **live change stream** open, so a
   teammate's push arrives in about a second instead of waiting out the
   remote interval. It is an accelerator only: a hub that is down, too old to

@@ -84,13 +84,14 @@ unaffected; only turn-boundary sync stops.
 
 The sync daemon is an ordinary background process, so a restart ends it. `bdrive
 init` therefore also registers a login item that runs `bdrive resume`, which
-starts a daemon for every project this device syncs and has not paused:
+starts or wakes the global sync supervisor for every project this device syncs and
+has not paused:
 
 ```sh
 bdrive autostart              # is it registered?
 bdrive autostart install      # register it (init already did)
 bdrive autostart uninstall    # stop starting sync at login
-bdrive resume                 # start the daemons right now
+bdrive resume                 # start or wake the sync daemon right now
 ```
 
 One registration covers every project — add or remove projects freely, nothing

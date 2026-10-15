@@ -37,7 +37,7 @@ approve — nothing to retype. `bdrive login --device` forces that flow.
 
 ## 2. Start syncing a project
 
-Once per project.
+Once per project folder (including additional git worktrees of the same project).
 
 ```console
 $ cd ~/workspace && bdrive init
@@ -45,6 +45,7 @@ initialized /Users/snow/workspace
   server:  https://your-hub
   project: workspace (7f3a2c91-4d5e-4b8a-9c17-2ad0f6b3e9c4)
   claude   hooks registered  →  /Users/snow/.claude/settings.json
+  login:   autostart registered  →  ~/Library/LaunchAgents/ai.beardrive.daemon.plist
   daemon:  running (pid 55434, scan 3s, remote sync 10s)
 ```
 
@@ -56,10 +57,14 @@ Every question has a flag — `--name`, `--project`, `--only`, `--yes` — and
 without a TTY init never prompts. It creates-or-joins a project named after the
 folder and syncs everything.
 
-Init writes `.bdrive/config.json`, seeds a starter `.bdriveignore`
-(node_modules, build dirs, caches, `.env*`), starts the daemon, and prints the
-project's hub link. It also registers the sync
-hooks for any agent platform it detects — in that platform's **user** config, once
+Init writes `.bdrive/config.json`, starts or wakes the background sync daemon,
+and prints the project's hub link. If the folder has no `.bdriveignore`, it
+seeds a starter one (node_modules, build dirs, caches, `.env*`), unless this
+device already syncs the project in another folder or worktree. In that case
+`init` reuses the shared local volume's `.bdriveignore` instead of writing the
+starter template over it.
+It also registers the sync
+hooks for any agent platform it detects in that platform's **user** config, once
 per machine, so nothing lands inside the project. `--no-hooks` skips them. Not
 signed in yet? It runs the login flow first.
 
@@ -83,7 +88,8 @@ echo "remember this" > memory.md
 
 bdrive log       # what changed, who changed it, from which device
 bdrive status    # projects, daemon state, pending changes
-bdrive stop      # stop syncing; files stay on disk, init resumes any time
+bdrive stop      # pause this mount; files stay on disk, init resumes any time
+bdrive stop --all # pause all projects on this device
 ```
 
 ## 4. Add a second machine
@@ -97,10 +103,11 @@ The files appear and stay in sync.
 
 ## Moving a folder is safe
 
-State is keyed by a stable project id, never the path. The daemon notices a move
-or rename, steps aside, and the next `bdrive init` — or any bdrive command — at
-the new location resumes exactly where it left off. Zero re-scan, zero spurious
-changes.
+State is keyed by stable mount and volume IDs, never the path. If a folder moves
+or is deleted, its volume worker continues with any surviving sibling worktree
+or steps aside without propagating deletes. Run `bdrive init`, `bdrive sync`, or
+`bdrive status <folder>` at the new location to resume and restart sync
+automatically.
 
 ## Next
 
