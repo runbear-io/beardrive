@@ -78,6 +78,7 @@ test("top bar: Share is the only primary button, ⋯ holds Download/Print/Copy",
     await expect(menu.getByRole("button", { name: item, exact: true })).toBeVisible();
   }
 
+  await expect(bar.locator("#history-btn")).toHaveAttribute("aria-label", "History");
   await page.click("#history-btn");
   await expect(page).toHaveURL(new RegExp(`/${id}/activity/`));
 });

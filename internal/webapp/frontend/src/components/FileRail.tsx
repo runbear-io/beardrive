@@ -218,11 +218,11 @@ function ReadsCard({ heat, insightsHref }: { heat: HeatEntry; insightsHref?: str
           </span>
         ))}
       </div>
-      {(heat.readers || heat.last) && (
+      {(heat.readers || heat.last_read) && (
         <p className="fv-readnote">
           {heat.readers ? `${heat.readers} distinct reader${heat.readers === 1 ? "" : "s"}` : ""}
-          {heat.readers && heat.last ? " · " : ""}
-          {heat.last ? "last read " + new Date(heat.last).toLocaleDateString() : ""}
+          {heat.readers && heat.last_read ? " · " : ""}
+          {heat.last_read ? "last read " + new Date(heat.last_read).toLocaleDateString() : ""}
         </p>
       )}
     </section>

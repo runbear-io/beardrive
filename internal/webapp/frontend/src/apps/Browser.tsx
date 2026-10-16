@@ -1097,7 +1097,7 @@ export default function Browser(props: {
             </Button>
           )}
           {canHistory && (isFile || (!path && !route.view)) && (
-            <Button id="history-btn" variant="toolbar" className="ghost" onClick={historyNow}>
+            <Button id="history-btn" variant="toolbar" className="ghost" title="History" aria-label="History" onClick={historyNow}>
               <Icon name="hist" /> <span className="lbl">History</span>
             </Button>
           )}

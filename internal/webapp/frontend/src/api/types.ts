@@ -212,7 +212,7 @@ export interface HeatEntry {
   agent?: number;
   share?: number;
   readers?: number;
-  last?: string;
+  last_read?: string;
 }
 export type HeatMap = Record<string, HeatEntry>;
 
