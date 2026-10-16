@@ -59,9 +59,11 @@ export function visitBaseline(pid: string): number {
 }
 
 // Records "seen up to now" for the NEXT session without moving this one's
-// baseline.
+// baseline. Leaving ends the session, so the cached baseline is dropped and a
+// return to this project in the same tab starts from the stored marker.
 export function noteLeaving(pid: string) {
   write(VISIT_KEY(pid), String(Date.now()));
+  baselines.delete(pid);
 }
 
 // The reader looked at everything (opened Activity): both the stored marker

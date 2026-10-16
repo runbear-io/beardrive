@@ -28,6 +28,9 @@ import { isMac } from "../util";
 export interface TreeActions {
   open: (path: string) => void;
   newFile?: (folder: string) => void;
+  /** Whether a new file may be created in this folder — folder rules can
+      make a subtree read-only for someone who may write the project. */
+  canCreateIn?: (folder: string) => boolean;
   pinned?: (path: string) => boolean;
   togglePin?: (path: string) => void;
   copyPath: (path: string) => void;
@@ -52,7 +55,7 @@ function RowMenu({ path, dir, actions, children }: {
           <Icon name={dir ? "folderopen" : "doc"} /> {dir ? "Open folder" : "Open"}
           <DropdownMenuShortcut>↵</DropdownMenuShortcut>
         </DropdownMenuItem>
-        {actions.newFile && (
+        {actions.newFile && (actions.canCreateIn?.(folder) ?? true) && (
           <DropdownMenuItem onSelect={() => actions.newFile!(folder)}>
             <Icon name="fileplus" /> New file
           </DropdownMenuItem>
@@ -281,7 +284,7 @@ export function FileTree(props: {
                     </span>
                   )}
                   <span className="thover">
-                    {n.dir && actions.newFile && (
+                    {n.dir && actions.newFile && (actions.canCreateIn?.(n.path) ?? true) && (
                       <button
                         className="tact"
                         aria-label={"New file in " + n.name}

@@ -771,7 +771,14 @@ export default function Browser(props: {
   const { query: filterQuery } = useSidebarSearch();
   useEffect(() => clearFilter, []);
 
-  const canWrite = hub && !!project && atLeast(project.perm, "write");
+  // New files go through upload/content, so they need uploads enabled on the
+  // hub as well as write access to the folder they land in.
+  const canWrite = hub && !!project && config.upload.enabled && atLeast(project.perm, "write");
+  const canCreateIn = useCallback(
+    (folder: string) =>
+      !!project && atLeast(folderPerm(folder ? folder + "/" : "") ?? project.perm, "write"),
+    [project, folderRules],
+  );
   const newFile = useCallback(
     async (folder: string) => {
       const name = (await modalPrompt("New file", "File name", "untitled.md", "Create"))?.trim().replace(/^\/+/, "");
@@ -799,6 +806,7 @@ export default function Browser(props: {
         openPath(p);
       },
       newFile: canWrite ? newFile : undefined,
+      canCreateIn,
       pinned: pid ? (p) => pinsOf(pid).includes(p) : undefined,
       togglePin: pid ? (p) => togglePin(pid, p) : undefined,
       copyPath: async (p) => {
@@ -825,7 +833,7 @@ export default function Browser(props: {
       remove: canRestore ? onRemove : undefined,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [canWrite, newFile, pid, hub, project, shares, openPath, openHistory, canRestore, onRemove, props.onClosePanel],
+    [canWrite, newFile, canCreateIn, pid, hub, project, shares, openPath, openHistory, canRestore, onRemove, props.onClosePanel],
   );
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
