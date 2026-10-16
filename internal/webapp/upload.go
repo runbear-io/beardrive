@@ -656,6 +656,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	if !ok {
 		head = blob
 	}
+	s.adoptRoomWrite(projectID(r), p, head, tmp)
 	writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head})
 }
 
