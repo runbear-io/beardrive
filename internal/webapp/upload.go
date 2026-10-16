@@ -325,6 +325,20 @@ func underRoot(root, dir string) error {
 
 var blobRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// isBlobSHA is blobRe without the regexp engine, for the replay, which asks
+// once per op of every journal in the project.
+func isBlobSHA(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // cleanUploadPath validates a client-supplied destination path and returns
 // its normalized form.
 func cleanUploadPath(p string) (string, error) {

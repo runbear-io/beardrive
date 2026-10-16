@@ -19,6 +19,7 @@ package webapp
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -36,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -284,6 +286,56 @@ type snapshot struct {
 	// journals to derive it from — every resolver then answers "not found",
 	// so the DirSource exclusion falls out instead of needing a rule.
 	moves moveIndex
+
+	// tree holds the encoded /tree answer for callers who may see every file,
+	// keyed by the slim flag. A snapshot never changes once built, so neither
+	// does its tree, and building, hashing and compressing several MB of JSON
+	// was nearly all of what the endpoint cost a large project per request.
+	treeMu sync.Mutex
+	tree   map[bool]*encodedJSON
+}
+
+// encodedJSON is a response body encoded once: plain, gzipped, and its ETag.
+type encodedJSON struct {
+	body, gz []byte
+	etag     string
+}
+
+func encodeJSON(v any) (*encodedJSON, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	zw.Write(body)
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(body)
+	return &encodedJSON{body: body, gz: gz.Bytes(), etag: `"` + hex.EncodeToString(sum[:16]) + `"`}, nil
+}
+
+// fullTree is the tree of every file in the snapshot, encoded once.
+func (s *snapshot) fullTree(slim bool) (*encodedJSON, error) {
+	s.treeMu.Lock()
+	defer s.treeMu.Unlock()
+	if enc := s.tree[slim]; enc != nil {
+		return enc, nil
+	}
+	tree := buildTree(s.files)
+	if slim {
+		stripPaths(tree)
+	}
+	enc, err := encodeJSON(tree)
+	if err != nil {
+		return nil, err
+	}
+	if s.tree == nil {
+		s.tree = map[bool]*encodedJSON{}
+	}
+	s.tree[slim] = enc
+	return enc, nil
 }
 
 // MoveSource is a Source that can also report where its files came from.
@@ -315,8 +367,18 @@ func (v *volume) snapshot(ctx context.Context) (*snapshot, error) {
 		}
 		return nil, err
 	}
+	// The same fold as last time (see FilesWithMoves) keeps the same snapshot,
+	// and with it everything already encoded from it.
+	if v.snap != nil && sameMap(v.snap.files, files) {
+		v.at = time.Now()
+		return v.snap, nil
+	}
 	v.snap, v.at = &snapshot{files: files, moves: moves}, time.Now()
 	return v.snap, nil
+}
+
+func sameMap(a, b map[string]FileInfo) bool {
+	return reflect.ValueOf(a).UnsafePointer() == reflect.ValueOf(b).UnsafePointer()
 }
 
 // invalidate forces the next snapshot to refetch, so an upload shows up in
@@ -404,6 +466,11 @@ type RemoteSource struct {
 	fmu    sync.Mutex                 // guards fcache and fbytes
 	fcache map[string]filteredJournal // scopeTag+key → journal as one account may read it
 	fbytes int64
+
+	foldMu    sync.Mutex // guards the last fold, reused while the journals are unchanged
+	foldFP    string
+	foldFiles map[string]FileInfo
+	foldMoves moveIndex
 }
 
 // cachedJournal is one journal's parsed ops plus the (size, modified) that
@@ -688,6 +755,15 @@ type sourcedOp struct {
 // No singleflight: two requests that miss the same journal at the same moment
 // both fetch it, which is what every request did before this existed.
 func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) {
+	keep, err := r.listJournals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.sourcedOpsOf(ctx, keep)
+}
+
+// listJournals is the one storage round trip every read of the project pays.
+func (r *RemoteSource) listJournals(ctx context.Context) ([]remote.Object, error) {
 	objs, err := r.Backend.List(ctx, "journal/")
 	if err != nil {
 		return nil, fmt.Errorf("list journals: %w", err)
@@ -698,7 +774,37 @@ func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) 
 			keep = append(keep, o)
 		}
 	}
+	return keep, nil
+}
 
+// sourcedOpsOf returns the ops of the listed journals, each with the device
+// whose journal it was read from.
+func (r *RemoteSource) sourcedOpsOf(ctx context.Context, keep []remote.Object) ([]sourcedOp, error) {
+	parsed, err := r.parsedJournals(ctx, keep)
+	if err != nil {
+		return nil, err
+	}
+	// A fresh outer slice on every call: handleHistory and Files both sort what
+	// they are handed, and the cached ops must never be the thing they reorder.
+	// journal.Op is all value fields, so appending one copies it.
+	n := 0
+	for _, ops := range parsed {
+		n += len(ops)
+	}
+	all := make([]sourcedOp, 0, n)
+	for i, o := range keep {
+		from := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
+		for _, op := range parsed[i] {
+			all = append(all, sourcedOp{Op: op, From: from})
+		}
+	}
+	return all, nil
+}
+
+// parsedJournals returns each listed journal's ops, fetching only the ones
+// whose cached parse is not current. The slices are the cache's own: read
+// them, never write or reorder them.
+func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object) ([][]journal.Op, error) {
 	parsed := make([][]journal.Op, len(keep))
 	var misses []int
 	r.jmu.Lock()
@@ -752,18 +858,7 @@ func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) 
 		}
 		r.cacheJournals(keep, misses, parsed, sizes)
 	}
-
-	// A fresh outer slice on every call: handleHistory and Files both sort what
-	// they are handed, and the cached ops must never be the thing they reorder.
-	// journal.Op is all value fields, so appending one copies it.
-	var all []sourcedOp
-	for i, o := range keep {
-		from := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
-		for _, op := range parsed[i] {
-			all = append(all, sourcedOp{Op: op, From: from})
-		}
-	}
-	return all, nil
+	return parsed, nil
 }
 
 // cacheJournals records what the fetch pass parsed, and enforces the byte
@@ -795,15 +890,107 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 }
 
 // FilesWithMoves is the replay, plus the rename index derived from the same
-// sorted ops — one pass, so the index rides in the cached snapshot.
+// ops — one pass, so the index rides in the cached snapshot.
+//
+// When the journal listing is exactly what the last fold saw, the last fold is
+// the answer: journals only grow, so an unchanged (key, size, modified) set
+// is an unchanged input, and replay is deterministic. That turns the periodic
+// refresh of an idle project into one List. The maps are shared with every
+// snapshot built from them, which is safe because nothing writes to a
+// snapshot after it is built.
 func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo, moveIndex, error) {
-	all, err := r.loadOps(ctx)
+	keep, err := r.listJournals(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	journal.Sort(all)
+	fp := journalFingerprint(keep)
+	r.foldMu.Lock()
+	if r.foldFP == fp && r.foldFiles != nil {
+		files, moves := r.foldFiles, r.foldMoves
+		r.foldMu.Unlock()
+		return files, moves, nil
+	}
+	r.foldMu.Unlock()
+
+	parsed, err := r.parsedJournals(ctx, keep)
+	if err != nil {
+		return nil, nil, err
+	}
+	all := byPathOrder(parsed...)
+	files, moves := foldFiles(all), buildMoveIndex(all)
+
+	r.foldMu.Lock()
+	r.foldFP, r.foldFiles, r.foldMoves = fp, files, moves
+	r.foldMu.Unlock()
+	return files, moves, nil
+}
+
+// journalFingerprint names a journal listing: two equal fingerprints are the
+// same bytes in every journal, because journals only grow.
+func journalFingerprint(objs []remote.Object) string {
+	var b strings.Builder
+	for _, o := range objs {
+		fmt.Fprintf(&b, "%s\x00%d\x00%d\n", o.Key, o.Size, o.Modified.UnixNano())
+	}
+	return b.String()
+}
+
+// byPathOrder returns every op of the given journals in one slice, grouped by
+// path, each path's ops in journal.Less order.
+//
+// Everything the fold derives depends only on the order of one path's own
+// ops: the last writer of a path, and the move pairing, which tracks what
+// each path held and only counts candidates across paths. So this gives the
+// fold exactly what a global journal.Sort would, for many small sorts instead
+// of one over every op in the project. Stable within a path, like
+// journal.Sort, so ops that tie under Less keep their journal order.
+//
+// The journals are read, never reordered: they may be the parse cache's own.
+func byPathOrder(journals ...[]journal.Op) []journal.Op {
+	type ref struct{ j, i int32 }
+	at := func(x ref) *journal.Op { return &journals[x.j][x.i] }
+	n := 0
+	for _, ops := range journals {
+		n += len(ops)
+	}
+	groups := make(map[string][]ref, n/4)
+	paths := make([]string, 0, n/4)
+	for j, ops := range journals {
+		for i := range ops {
+			p := ops[i].Path
+			g, ok := groups[p]
+			if !ok {
+				paths = append(paths, p)
+			}
+			groups[p] = append(g, ref{int32(j), int32(i)})
+		}
+	}
+	out := make([]journal.Op, 0, n)
+	for _, p := range paths {
+		g := groups[p]
+		if len(g) > 1 {
+			slices.SortStableFunc(g, func(a, b ref) int {
+				switch {
+				case journal.Less(*at(a), *at(b)):
+					return -1
+				case journal.Less(*at(b), *at(a)):
+					return 1
+				}
+				return 0
+			})
+		}
+		for _, x := range g {
+			out = append(out, *at(x))
+		}
+	}
+	return out
+}
+
+// foldFiles replays ops (in journal.Less order within each path) into the
+// listing: last writer wins per path.
+func foldFiles(ops []journal.Op) map[string]FileInfo {
 	files := make(map[string]FileInfo)
-	for _, op := range all {
+	for _, op := range ops {
 		switch op.Kind {
 		case journal.KindPut:
 			// A symlink op carries a target and no blob: record it as a link
@@ -823,7 +1010,7 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 			// prefix, or out of the storage root entirely. Same rule as every
 			// ?sha= route. An op that fails it is ignored (the path keeps its
 			// previous version) rather than treated as a delete.
-			if !blobRe.MatchString(op.Blob) {
+			if !isBlobSHA(op.Blob) {
 				continue
 			}
 			files[op.Path] = FileInfo{
@@ -835,7 +1022,7 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 			delete(files, op.Path)
 		}
 	}
-	return files, buildMoveIndex(all), nil
+	return files
 }
 
 func (r *RemoteSource) Open(ctx context.Context, _ string, fi FileInfo) (io.ReadCloser, error) {
@@ -1477,7 +1664,18 @@ func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	tree := buildTree(visibleFiles(snap.files, s.visibility(r)))
+	vis := s.visibility(r)
+	slim := r.URL.Query().Get("slim") == "1"
+	if !vis.hides() {
+		enc, err := snap.fullTree(slim)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeEncodedJSON(w, r, enc)
+		return
+	}
+	tree := buildTree(visibleFiles(snap.files, vis))
 	/* ?slim=1 drops the one field a client can derive for itself.
 
 	   Every node's `path` is its ancestors' names plus its own, and the
@@ -1490,7 +1688,7 @@ func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
 	   still running a cached bundle refetches this tree, and a field it reads
 	   vanishing underneath it would break every link on the page until
 	   someone reloaded. A client that can rebuild paths says so. */
-	if r.URL.Query().Get("slim") == "1" {
+	if slim {
 		stripPaths(tree)
 	}
 	writeJSONCached(w, r, tree)
@@ -2019,6 +2217,26 @@ func writeJSONCached(w http.ResponseWriter, r *http.Request, v any) {
 	}
 	h.Set("Content-Type", "application/json")
 	w.Write(body)
+}
+
+// writeEncodedJSON is writeJSONCached for a body encoded ahead of time. The
+// gzip middleware passes a body that already carries Content-Encoding through
+// untouched, so the compressed bytes are served as they are.
+func writeEncodedJSON(w http.ResponseWriter, r *http.Request, enc *encodedJSON) {
+	h := w.Header()
+	h.Set("ETag", enc.etag)
+	h.Set("Cache-Control", "no-cache")
+	if etagMatches(r.Header.Get("If-None-Match"), enc.etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	h.Set("Content-Type", "application/json")
+	if acceptsGzip(r.Header.Get("Accept-Encoding")) {
+		h.Set("Content-Encoding", "gzip")
+		w.Write(enc.gz)
+		return
+	}
+	w.Write(enc.body)
 }
 
 // etagMatches handles the header as sent: a comma-separated list, entries
