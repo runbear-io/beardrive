@@ -79,7 +79,7 @@ export function CommentSurface(props: {
   /* ---- the in-page surface (markdown, text) ---- */
 
   const ranges = useRef(new Map<string, Range>());
-  const [pins, setPins] = useState<{ id: string; n: number; x: number; y: number }[]>([]);
+  const [pins, setPins] = useState<{ id: string; n: number; c: number; x: number; y: number }[]>([]);
   const [tick, setTick] = useState(0);
 
   // The rendered document changes under us (a refetch, a diagram landing,
@@ -137,7 +137,7 @@ export function CommentSurface(props: {
       const y = Math.round(box.top - base.top + box.height / 2);
       const k = perLine.get(y) ?? 0;
       perLine.set(y, k + 1);
-      next.push({ id: t.id, n: t.n, x: -30 - k * 24, y });
+      next.push({ id: t.id, n: t.n, c: t.messages.length, x: -46 - k * 44, y });
     }
     setPins(next);
   }, [shown, focus, tick, framed, page]);
@@ -325,14 +325,15 @@ export function CommentSurface(props: {
             data-bd-ignore=""
             className={"cm-pin" + (p.id === focus ? " active" : "")}
             style={{ left: p.x, top: p.y }}
-            title={`Comment ${p.n}`}
+            title={`Comment ${p.n} · ${p.c} message${p.c === 1 ? "" : "s"}`}
             aria-label={`Open comment ${p.n}`}
             onClick={() => {
               onFocus(p.id);
               onOpenPanel();
             }}
           >
-            {p.n}
+            <Icon name="comment" />
+            {p.c}
           </button>
         ))}
       {draft && pos && !draft.composing && (
@@ -427,10 +428,10 @@ export function CommentPanel(props: {
         <b>Comments</b>
         <div className="cm-tabs" role="tablist">
           <button role="tab" aria-selected={tab === "open"} onClick={() => setTab("open")}>
-            Open {open.length > 0 && <span>{open.length}</span>}
+            Open{open.length > 0 && <span> · {open.length}</span>}
           </button>
           <button role="tab" aria-selected={tab === "resolved"} onClick={() => setTab("resolved")}>
-            Resolved {done.length > 0 && <span>{done.length}</span>}
+            Resolved{done.length > 0 && <span> · {done.length}</span>}
           </button>
         </div>
         <button className="cm-x" onClick={onClose} aria-label="Close comments" title="Close">
@@ -460,6 +461,11 @@ export function CommentPanel(props: {
             t={t}
             active={t.id === focus}
             onFocus={() => onFocus(t.id === focus ? null : t.id)}
+            onJump={() => {
+              // Re-focusing an already-focused thread must still scroll.
+              onFocus(null);
+              requestAnimationFrame(() => onFocus(t.id));
+            }}
             actions={actions}
             canDelete={admin || (!!me && t.author === me.toLowerCase())}
           />
@@ -491,10 +497,12 @@ function ThreadCard(props: {
   t: Numbered;
   active: boolean;
   onFocus: () => void;
+  onJump: () => void;
   actions: ReturnType<typeof useCommentActions>;
   canDelete: boolean;
 }) {
-  const { t, active, onFocus, actions, canDelete } = props;
+  const { t, active, onFocus, onJump, actions, canDelete } = props;
+  const anchored = !!(t.anchor.quote || t.anchor.element) && !t.missing;
   const [reply, setReply] = useState("");
   const [busy, setBusy] = useState(false);
   const card = useRef<HTMLDivElement>(null);
@@ -530,12 +538,27 @@ function ThreadCard(props: {
       )}
       {t.messages.map((m) => (
         <div key={m.id} className="cm-msg">
-          <div className="cm-who">
-            <b>{m.name || m.author || "someone"}</b> <time dateTime={m.time} title={new Date(m.time).toLocaleString()}>{ago(m.time)}</time>
+          <span className="cm-av" aria-hidden="true">
+            {initials(m.name || m.author || "?")}
+          </span>
+          <div className="cm-msg-main">
+            <div className="cm-who">
+              <b>{m.name || m.author || "someone"}</b> <time dateTime={m.time} title={new Date(m.time).toLocaleString()}>{ago(m.time)}</time>
+            </div>
+            <div className="cm-body">{m.body}</div>
           </div>
-          <div className="cm-body">{m.body}</div>
         </div>
       ))}
+      {/* `bdrive comments` lists every open thread, so an open thread is
+          exactly what the next agent sweep picks up. */}
+      {!t.resolved && !t.missing && (
+        <div className="cm-queued">
+          <Icon name="sparkle" />
+          <span>
+            Queued for next agent sweep · <code>bdrive comments</code>
+          </span>
+        </div>
+      )}
       {t.resolved && t.resolved_at && (
         <div className="cm-resolved">
           <Icon name="check" /> Resolved by {t.resolved_name || t.resolved_by || "someone"} {ago(t.resolved_at)}
@@ -567,15 +590,21 @@ function ThreadCard(props: {
             <Icon name="trash" />
           </button>
         )}
+        <Button variant="toolbar" className="ghost cm-act" disabled={busy} onClick={() => void send(t.resolved ? "reopen" : "resolve")}>
+          {!t.resolved && <Icon name="check" />}
+          {t.resolved ? "Reopen" : reply.trim() ? "Reply & resolve" : "Resolve"}
+        </Button>
+        {anchored && (
+          <Button variant="toolbar" className="ghost cm-act cm-jump" onClick={onJump}>
+            <Icon name="jump" /> Jump to text
+          </Button>
+        )}
         <span className="cm-spacer" />
         {reply.trim() && (
           <Button variant="subtle" disabled={busy} onClick={() => void send("reply")}>
             Reply
           </Button>
         )}
-        <Button variant="toolbar" disabled={busy} onClick={() => void send(t.resolved ? "reopen" : "resolve")}>
-          {t.resolved ? "Reopen" : reply.trim() ? "Reply & resolve" : "Resolve"}
-        </Button>
       </div>
     </div>
   );
@@ -600,6 +629,12 @@ function AnchorView({ a }: { a: CommentAnchor }) {
       {a.element && <div className="cm-quote cm-el">{a.element}</div>}
     </div>
   );
+}
+
+function initials(name: string): string {
+  const words = name.trim().split(/[\s@._-]+/).filter(Boolean);
+  if (!words.length) return "?";
+  return (words[0][0] + (words[1]?.[0] ?? "")).toUpperCase();
 }
 
 // Numbers follow creation order, so a pin and its card agree and a number

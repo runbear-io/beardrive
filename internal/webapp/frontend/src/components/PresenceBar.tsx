@@ -33,6 +33,7 @@ export function PresenceBar({ people, path }: { people: Person[]; path?: string 
     return ax - bx;
   });
   const shown = sorted.slice(0, 5);
+  const here = path ? people.filter((p) => p.path === path).length : 0;
   const rest = sorted.length - shown.length;
   return (
     <div id="presence" className="flex items-center gap-1" aria-label="People viewing this project">
@@ -54,6 +55,11 @@ export function PresenceBar({ people, path }: { people: Person[]; path?: string 
         </span>
       ))}
       {rest > 0 && <span className="text-xs text-muted-foreground">+{rest}</span>}
+      {here > 0 && (
+        <span className="presence-count" title={`${here} ${here === 1 ? "person is" : "people are"} on this file`}>
+          {here} viewing
+        </span>
+      )}
     </div>
   );
 }

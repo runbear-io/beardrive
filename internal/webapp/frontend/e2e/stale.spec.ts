@@ -13,7 +13,7 @@ test("a hot-and-stale file says so on its own page, in words and elapsed time", 
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/${FLAGGED[0]}`);
-  const meta = page.locator("#meta");
+  const meta = page.locator(".fv-meta");
   // The warning, not the raw-date arithmetic the reader used to have to do.
   await expect(meta.locator(".meta-stale")).toContainText("stale");
   await expect(meta.locator(".meta-stale")).toContainText(/last changed \d+ (day|month|year)s? ago/);
@@ -26,19 +26,18 @@ test("a fresh file gets no warning, and neither does a historical version", asyn
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/${NOT_FLAGGED}`);
-  await page.waitForSelector("#meta");
-  await expect(page.locator("#meta .meta-stale")).toHaveCount(0);
+  await page.waitForSelector(".fv-meta");
+  await expect(page.locator(".fv-meta .meta-stale")).toHaveCount(0);
 
   // Read counts belong to the path, not to one version, so neither does the
   // verdict derived from them.
   const hist = await (await page.request.get(`/api/p/${pid}/history?path=${FLAGGED[0]}`)).json();
   const sha = hist.entries[0].blob; // the history API calls it "blob"
   await page.goto(`/${pid}/${FLAGGED[0]}?v=${sha}`);
-  // Wait on the CONTENT, not on #meta: with nothing to say the meta line is
-  // empty, and `#meta:empty { display: none }` means a visibility wait here
-  // would hang on exactly the passing case.
+  // Wait on the CONTENT: a historical version's meta row has no read count,
+  // so it is not what says the page has loaded.
   await expect(page.getByRole("heading", { name: "Retired spec" })).toBeVisible();
-  await expect(page.locator("#meta .meta-stale")).toHaveCount(0);
+  await expect(page.locator(".fv-meta .meta-stale")).toHaveCount(0);
 });
 
 test("the folder listing marks every flagged file and nothing else", async ({ page }) => {
