@@ -334,7 +334,7 @@ export function CommentSurface(props: {
             }}
           >
             <Icon name="comment" />
-            {p.c}
+            {p.n}
           </button>
         ))}
       {draft && pos && !draft.composing && (

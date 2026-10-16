@@ -251,6 +251,9 @@ test("desktop pins on one line stay inside the scroller's gutter", async ({ page
   await page.goto(`/${id}/${file}`);
   const pins = page.locator(".cm-pin");
   await expect(pins).toHaveCount(3);
+  // Each pin names its thread, the number its panel card carries — not its
+  // message count, which would label all three "1".
+  expect(new Set(await pins.allTextContents()).size).toBe(3);
   const box = (await page.locator("#content").boundingBox())!;
   const seen: { x: number; y: number; width: number; height: number }[] = [];
   for (let i = 0; i < 3; i++) {
