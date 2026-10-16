@@ -24,7 +24,7 @@ import { useTheme, type Theme } from "../lib/theme";
    maintains. Every project member sees this — /heat is gated on membership
    and returns counts only, never actor identities (reads.go). */
 
-interface DeviceHeat {
+export interface DeviceHeat {
   id?: string;
   name?: string;
   folders?: Record<string, number>;

@@ -24,6 +24,8 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { atLeast } from "../api/types";
+import { linkProps } from "../nav";
+import { urlForView } from "../router";
 import type { Org, PermLevel, Project, ProjectPerms } from "../api/types";
 
 // Settings for the open project (sidebar menu): General edits the name,
@@ -224,6 +226,18 @@ export function ProjectSettings({
       <PublicLinks project={project} />
 
       <People project={project} org={org} />
+
+      <Card id="ps-devices">
+        <CardHeader>
+          <CardTitle>Devices</CardTitle>
+          <CardDescription>Sync this project to another computer, or set up an agent on one.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button asChild variant="outline">
+            <a {...linkProps(urlForView("install", project.id))}>Connect a device</a>
+          </Button>
+        </CardContent>
+      </Card>
 
 
       <Card>

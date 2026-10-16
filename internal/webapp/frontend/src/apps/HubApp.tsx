@@ -4,11 +4,11 @@ import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../a
 import { useFetchProjects, useOrgs, usePending, usePermissions, useProjects, useHubRefresh } from "../hooks/useHub";
 import { decodePath, parseRoute, projectByName, titleForRoute, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
-import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
+import { AppShell, Icon, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { McpConnections } from "../components/McpConnections";
-import { ProjectNav } from "../components/ProjectNav";
+import { ProjectNav, ProjectRailNav, type ProjectMenu } from "../components/ProjectNav";
 import { useQueryClient } from "@tanstack/react-query";
 import { AccountBar, SignedOutBar } from "../components/AccountBar";
 import { BillingView } from "../components/BillingView";
@@ -465,6 +465,33 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     return <Redirect to={urlForPath(route.path, current.id, route.version, route.full, route.editing)} />;
   }
 
+  // Scoped views (/insights/<path>, /activity/<path>) belong to the
+  // file/folder — the tree carries the selection, no menu item lights up.
+  const projectMenu: ProjectMenu = {
+    active: panel
+      ? null
+      : !route.view && !route.path
+        ? "home"
+        : route.view === "dashboard" && !route.viewTarget
+          ? "insights"
+          : route.view === "history" && !route.viewTarget
+            ? "activity"
+            : route.view === "settings"
+              ? "settings"
+              : null,
+    // Each page is a URL; explicitly close overlay panels because same-path
+    // navigation doesn't change pathname.
+    onNav: (key) => {
+      setPanel(null);
+      navigate(
+        key === "home"
+          ? "/" + current.id
+          : urlForView(key === "activity" ? "history" : key === "insights" ? "dashboard" : "settings", current.id),
+      );
+      closeSidebarOnMobile();
+    },
+  };
+
   return (
     <>
       <Browser
@@ -482,47 +509,29 @@ export default function HubApp({ config }: { config: ServerConfig }) {
             projects={projects}
             currentId={current.id}
             onNew={newProject}
-            menu={{
-              // Scoped views (/dashboard/<path>, /history/<path>) belong to
-              // the file/folder — the tree carries the selection, no menu
-              // item lights up.
-              active: panel
-                ? null
-                : route.view === "dashboard" && !route.viewTarget
-                  ? "dashboard"
-                  : route.view === "install"
-                    ? "install"
-                    : route.view === "history" && !route.viewTarget
-                      ? "history"
-                      : route.view === "settings"
-                        ? "settings"
-                        : null,
-              // Each page is a URL; explicitly close overlay panels because
-              // same-path navigation doesn't change pathname.
-              onDashboard: () => {
-                setPanel(null);
-                navigate(urlForView("dashboard", current.id));
-                closeSidebarOnMobile();
-              },
-              onInstall: () => {
+            readsEnabled={!!config.reads?.enabled}
+            menu={projectMenu}
+          />
+        ),
+        railNav: <ProjectRailNav pid={current.id} menu={projectMenu} />,
+        orgBar: (
+          <>
+            <button
+              id="nav-install"
+              className={"connect-device" + (!panel && route.view === "install" ? " active" : "")}
+              onClick={() => {
                 setPanel(null);
                 navigate(urlForView("install", current.id));
                 closeSidebarOnMobile();
-              },
-              onHistory: () => {
-                setPanel(null);
-                navigate(urlForView("history", current.id));
-                closeSidebarOnMobile();
-              },
-              onSettings: () => {
-                setPanel(null);
-                navigate(urlForView("settings", current.id));
-                closeSidebarOnMobile();
-              },
-            }}
-          />
+              }}
+            >
+              <Icon name="laptop" />
+              <span className="label">Connect a device</span>
+              <Icon name="plus" />
+            </button>
+            {accountBar}
+          </>
         ),
-        orgBar: accountBar,
       }}
       panel={activePanel || orgPage || billingPage || connectionsPage || routePage}
       onClosePanel={() => setPanel(null)}

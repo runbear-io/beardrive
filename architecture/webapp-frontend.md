@@ -118,6 +118,7 @@ classDiagram
         +useHub
         +useComments useCommentActions (["comments", apiBase, path])
         +useBrowse
+        +useSidebar useActivityCount useSyncLine useOpenCommentCounts
         +useProjectEvents (one SSE per BROWSER → invalidate)
         +usePresence (announces on arrive/navigate/leave)
         +useTextAt (any URL) → useBlobText (sha-keyed, immutable)
@@ -131,14 +132,15 @@ classDiagram
     note for hooks "TanStack Query wrappers over the viewer APIs. useTextAt fetches any URL and sniffs it — the Content-Length cheap-out lives here (HTTP), the byte decision in lib/sniff.ts (pure). A live path must not be cached immutable; a sha can be. fileURLFor is the one definition of a file page's byte URL, so Copy and FileView cannot drift; fetchBlobText is exported for Copy, which must NOT read the shared text cache — TextView stores a string there and SniffView a BlobText"
 
     class components {
-        FileView FolderListing FileTree
+        FileView FolderListing FileTree (TreeFilter, TreeActions row menu)
+        ProjectNav (SidebarSearch ProjectRailNav) Pinned PinnedRail
         HistoryView HistoryRow HistoryFilters DiffView VersionBanner ConflictBanner
         PresenceBar Editor VisualEdit
         Comments (CommentSurface CommentPanel)
         Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
-        Palette shell AccountBar WidthHandles ...
+        Palette shell (RailBase RailButton) AccountBar WidthHandles ...
     }
     note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; the initial selection is options[0].value — the same array element the RECOMMENDED badge indexes, so the badged row and the checked row are one row by construction (on a template-less hub that row is 'I already have a folder', which still creates an empty project). modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
     note for components "HistoryFilters drives the SERVER (?q=/?user=/?since=/?until= on the history API), never the loaded page — filtering what is on screen would lie about everything below the fold and break next_cursor. Its state is Route.filters, so a narrowed feed is linkable, survives reload, and Back undoes it; the author list accumulates across fetches, because filtering by one author leaves only their rows loaded"
@@ -165,6 +167,9 @@ classDiagram
         +heat.ts placeLabels LABEL_MAX (scatter danger-dot labels)
         +heat.ts HOT_READS STALE_DAYS isDanger daysSince agoLabel staleNote
         +conflict.ts parseConflict conflictName Conflict
+        +treeview.ts treeStats buildRows filterTree SYSTEM_FILE_PATTERNS CHILD_CAP
+        +visits.ts visitBaseline markAllSeen noteLeaving usePins togglePin (localStorage, per project)
+        +sidebarSearch.ts useSidebarSearch setFilterQuery registerFilterResults
         +collab.ts CollabDoc peerCount isRemote (y-websocket to the hub-held document)
         +sharedfile.ts openSharedFile SharedFile SAVE_IDLE_MS
         +sharedfile.ts merge MergeResult (an outside write, offered to an open document)
@@ -184,6 +189,7 @@ classDiagram
     note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it. HEAT_DISCLOSURE sits beside that arithmetic for the same reason: a member's own views count toward the number, and four surfaces printing their own copy of that promise is four promises that can drift (BEA-61). The constant is NOT re-exported through useBrowse — surfaces import it straight from lib/heat, and a unit test asserts src/ holds exactly one copy of the sentence. The hot-and-stale VERDICT joined the totals for the same reason (BEA-119): HOT_READS/STALE_DAYS/isDanger were private to Insights.tsx, so the Dashboard was the only screen that could say a doc was hot and unmaintained — the file page and the folder listing showed the ingredients and no verdict. isDanger takes (reads, days) rather than a heat entry because only the Dashboard has a reader lens: it passes its lens-filtered count, the other two pass heatTotal. staleNote returns a STRING (empty when not flagged) so the badge stays pure and survives whichever component owns the meta line"
     note for lib "scroll.ts is the per-route scroll goal, lifted out of Browser.tsx so it can be tested at all — the frontend suite is node --test over pure TS with no jsdom. A route change arms a goal (0 on a fresh navigation, the memoized offset on POP) and views re-apply it up to MAX_APPLY times as content grows after first paint; noteScroll RETIRES it the moment the reader scrolls, which is the choke point that stops any onRendered caller — a metadata refresh, a poll, anything added later — from moving a reader mid-read (BEA-155). Two clauses in that guard are load-bearing and each has its own test: scrollTo fires a scroll event of its own, so movement is measured against the goal and never against zero, and a page shorter than the last one makes the browser CLAMP the carried-over offset to the bottom, which is either the old page arriving or a goal that does not fit yet"
     note for lib "secrets.ts is the six credential rules in words, mirroring internal/secrets' Label map. It lived in Browser.tsx under a comment saying one caller did not justify a file; BEA-147 gave it a second one, and the two callers are the two surfaces that report the SAME finding — the share dialog that refuses to mint, and FileView's badge that only warns. One map is what makes 'wording consistent with the share dialog' mechanical rather than a copy-editing promise"
+    note for lib "treeview.ts decides which rows the sidebar tree shows, as pure functions: conflict copies fold into a badge on an original that still exists, names matching SYSTEM_FILE_PATTERNS group under a collapsed System files row per folder, nested folders show their CHILD_CAP most recently changed children then Show N more (the selected path is always kept), and folders count files changed after the visit baseline. visits.ts holds that baseline and the pins in localStorage per project — client-side by design: it is one reader's view of a shared project. The baseline is fixed for a page session and moves when Activity opens; the stored marker also moves on pagehide/project switch"
     note for lib "conflict.ts recognises a conflict copy from its NAME alone — syncer.conflictName is a pure function of the path, so the device and the moment come out of the string with no server route, no journal field and no request. The regex is an ANCHORED suffix and a strictly narrower match of the Go convention (sanitize's character class, clip's 32), and every mismatch — truncated suffix, impossible date — is null rather than a throw, so a stray filename can never break a listing. Two callers: FolderListing marks the row, ConflictBanner explains the file (BEA-128)"
     note for lib "fuzzy.ts is the palette matcher, lifted out of Palette.tsx so it can be tested at all. scoreLabel is the whole query: it splits on whitespace and every token must match the label (AND, order irrelevant, scores summed) — a space used to be just another character to the subsequence walk, and a path never contains one, so any two-word query matched NOTHING (BEA-194). Its typo pass is one rule, not an edit-distance routine: retry a token of 4+ characters with each single character dropped, which covers a transposition, a substitution and an insertion because subsequence matching already tolerates the other direction. Three properties are load-bearing and each has a test: a blank query returns score 0 with no hits BEFORE it splits (the stable sort over that is what keeps the project's own destinations on top — BEA-52, BEA-105), an errored token costs a flat penalty no bonus can climb over (so exact beats approximate by construction, not by tuning), and hits come back sorted and de-duplicated — Highlight slices forward from the last index and would silently duplicate letters otherwise. Palette runs it strict over every candidate and retries only the misses, only when the strict pass came back short of the 40-row cap, so a query that already matches never pays for the typo pass"
     note for lib "prompt.ts is the agent paste-prompt — the single most important string in onboarding, and it was assembled by hand in ConnectGuide, EmptyState and Setup's Done frame, three wordings drifting independently. They differ only in what is being set up, so they are one function with one varying clause. Pure and origin-injected so the node suite can test it: each previous wording is pinned by a test, and one more pins that every variant still ASKS which folder, which is the runbook's hard gate"
@@ -197,7 +203,8 @@ classDiagram
     VolumeApp --> Browser
     HubApp --> router
     Browser --> router
-    Browser --> lib : parseConflict
+    Browser --> lib : parseConflict treeStats visits sidebarSearch
+    components --> lib : buildRows filterTree (FileTree), sidebarSearch (ProjectNav)
     Browser --> components
     components --> lib : openSharedFile (Editor and VisualEdit share one room)
     HubApp --> components

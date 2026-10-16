@@ -31,10 +31,12 @@ export function Palette({
   open,
   onClose,
   candidates,
+  initialQuery = "",
 }: {
   open: boolean;
   onClose: () => void;
   candidates: () => PaletteItem[];
+  initialQuery?: string; // what the sidebar's filter already had typed
 }) {
   const [query, setQuery] = useState("");
 
@@ -63,8 +65,8 @@ export function Palette({
   }, [open, query, candidates]);
 
   useEffect(() => {
-    if (open) setQuery("");
-  }, [open]);
+    if (open) setQuery(initialQuery);
+  }, [open, initialQuery]);
 
   const run = (item: PaletteItem) => {
     onClose();
