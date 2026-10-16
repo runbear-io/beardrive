@@ -172,7 +172,9 @@ export function VisualEdit({
         void anchorRanges();
       },
       onSolo: () => {
-        // No relay, so no room and no peer that could double-seed it. Filling
+        // No relay, so no room and no peer that could double-seed it: the
+        // provider is stopped before this runs and cannot later hand this
+        // document the hub's copy of the same bytes. Filling
         // the document locally keeps ONE code path for splicing instead of a
         // second plain-string one that would only ever run on an older hub.
         if (!file.collab.text.length) {

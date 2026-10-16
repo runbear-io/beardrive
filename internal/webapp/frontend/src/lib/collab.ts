@@ -23,7 +23,9 @@ import { Awareness } from "y-protocols/awareness";
    `awareness`, `peerCount`, `connect`, `destroy`), so swapping the transport
    underneath them changed almost nothing above. */
 
-export type CollabStatus = "connecting" | "live" | "offline";
+// "solo": the room was given up on for the life of this editor (see stop());
+// the file is saved by this client alone and nothing will ever go live.
+export type CollabStatus = "connecting" | "live" | "offline" | "solo";
 
 export class CollabDoc {
   readonly doc = new Y.Doc();
@@ -32,6 +34,7 @@ export class CollabDoc {
 
   private ws: WebsocketProvider | null = null;
   private closed = false;
+  private reached = false;
 
   constructor(
     private readonly url: string,
@@ -108,15 +111,37 @@ export class CollabDoc {
       // "Synced" is the document having arrived, which is the moment the
       // editor may mount on it. Nothing is seeded here: the hub built it from
       // the file before this client existed.
-      if (synced && !this.closed) this.onReady();
+      if (synced && !this.closed) {
+        this.reached = true;
+        this.onReady();
+      }
     });
     /* A connection that never succeeds has to be reported, or the editor
        waits forever for a document that is not coming. y-websocket retries on
        its own — which is right, a flaky network should heal — so this asks
        only once, well past the first few attempts. */
     setTimeout(() => {
-      if (!this.closed && !provider.synced) this.onUnavailable();
+      // Once reached, a later drop is a reconnect to wait out, never solo:
+      // the editor is already bound to this document.
+      if (this.closed || this.reached) return;
+      this.stop();
+      this.onUnavailable();
     }, UNREACHABLE_MS);
+  }
+
+  /* Give up on the room for good, keeping the document.
+
+     A solo editor edits its own copy. If the provider were left retrying, a
+     handshake that finally succeeded would merge the hub's document — built
+     from the same file — with that copy, and every character the two share
+     would be in the result twice. So the transport goes before anything
+     local is written, and nothing after this can bring it back. */
+  stop() {
+    if (this.closed) return;
+    this.closed = true;
+    this.ws?.destroy();
+    this.ws = null;
+    this.onStatus("solo");
   }
 
   /* Did this change come from the hub, or from the person at this keyboard?
