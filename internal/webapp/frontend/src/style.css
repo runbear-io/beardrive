@@ -2003,3 +2003,9 @@ body.full-view .cm-panel { top: 0; }
   .cm-pin { left: -19px !important; padding: 0 5px; }
   .cm-pin .ico { display: none; }
 }
+/* Between the phone breakpoint and a wide desktop the sidebar leaves the top
+   bar too little room for every label: the secondary actions drop to icons
+   (their titles still name them) before Edit and Share give anything up. */
+@media (max-width: 1200px) {
+  #topbar #comments-btn .lbl, #topbar #history-btn .lbl, .presence-count, .sync-pill { display: none; }
+}

@@ -150,3 +150,20 @@ test("comments panel: Open/Resolved tabs, quoted anchor, sweep note, jump to tex
   await expect(panel.locator(".cm-card .cm-queued")).toHaveCount(0);
   await expect(panel.locator(".cm-card")).toContainText("Resolved by");
 });
+
+test("top bar fits between the phone breakpoint and a wide desktop", async ({ page }) => {
+  await login(page);
+  const id = await project(page);
+  const file = await ownFile(page, id, DOC);
+  for (const width of [901, 1000, 1100, 1200]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto(`/${id}/${file}`);
+    await expect(page.locator("#content h1")).toHaveText("Handbook");
+    const bar = await page.locator("#topbar").boundingBox();
+    for (const sel of ["#comments-btn", "#history-btn", "#edit-btn", "#share-btn", "#more-btn"]) {
+      const b = await page.locator(sel).boundingBox();
+      expect(b, `${sel} at ${width}px`).not.toBeNull();
+      expect(b!.x + b!.width, `${sel} right edge at ${width}px`).toBeLessThanOrEqual(bar!.x + bar!.width + 0.5);
+    }
+  }
+});
