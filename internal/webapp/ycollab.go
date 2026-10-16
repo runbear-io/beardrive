@@ -71,9 +71,9 @@ func (s *Server) ydocs() *ygows.Server {
 			s.watchRoom(room, doc)
 			return nil
 		}
-		srv.OnLastPeer = func(ctx context.Context, room string) { s.snapshotRoom(ctx, room) }
+		srv.OnLastPeer = func(ctx context.Context, room string) { s.finalSnapshot(ctx, room) }
 		srv.OnUnloadDocument = func(ctx context.Context, room string) {
-			s.snapshotRoom(ctx, room)
+			s.finalSnapshot(ctx, room)
 			s.rooms().drop(room)
 		}
 		/* Authorization runs per CONNECTION, after proj() has already decided
@@ -347,7 +347,13 @@ func (s *Server) roomBytes(room string) ([]byte, string, bool) {
 // and the change frame are then the same code every other write goes through;
 // a second path into the file would be a second set of rules to keep in
 // agreement.
-func (s *Server) snapshotRoom(ctx context.Context, room string) {
+func (s *Server) snapshotRoom(ctx context.Context, room string) { s.snapshot(ctx, room, false) }
+
+// finalSnapshot is the write made as the room empties: nobody is left to see
+// the document, so a version the file refuses is parked beside it instead.
+func (s *Server) finalSnapshot(ctx context.Context, room string) { s.snapshot(ctx, room, true) }
+
+func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	project, path, ok := strings.Cut(room, "/")
 	if !ok {
 		return
@@ -405,7 +411,61 @@ func (s *Server) snapshotRoom(ctx context.Context, room string) {
 			s.rooms().rebase(room, head)
 		}
 		log.Printf("bdrive: %s was written outside its co-editing room; the room's version is beside it as %s", path, copy)
+	case http.StatusUnprocessableEntity:
+		/* sharpShrink: the room would empty or gut the file, and no editor in
+		   a live room writes for itself, so nobody can confirm it. The file
+		   keeps its bytes. While editors remain the document is still theirs;
+		   once the room empties, the room's text is parked as a conflict copy
+		   so a deliberate clear is never silently dropped. */
+		if !final || s.rooms().isParked(room, text) {
+			log.Printf("bdrive: not snapshotting %s: the room's text would empty or sharply shrink it", path)
+			return
+		}
+		// Marked before the write: parkCopy owns this text from here,
+		// retrying past the room's lifetime, so the second final snapshot
+		// must not start another.
+		s.rooms().park(room, text)
+		copy := conflictPath(path, who, time.Now())
+		s.parkCopy(who, project, path, copy, text)
+		return
 	}
+}
+
+// Backoff for a refused room's conflict copy, doubling up to a ceiling. Vars
+// so a test need not wait out real backoff.
+var (
+	parkBackoff    = 30 * time.Second
+	parkBackoffMax = 10 * time.Minute
+)
+
+// parkCopy writes a room's refused text beside its file. A failing store is
+// retried in the background for as long as this process lives, with no retry
+// budget: once the room is evicted this text exists nowhere else, so giving
+// up would be the loss the copy exists to prevent. Held in memory only, so a
+// hub restart before the store recovers still loses it.
+func (s *Server) parkCopy(who User, project, path, copy, text string) {
+	try := func() bool {
+		cw := s.putAs(context.Background(), who, project, copy, text, "")
+		if cw.code == http.StatusOK {
+			log.Printf("bdrive: %s: the room's text would empty or sharply shrink it; parked beside it as %s", path, copy)
+			return true
+		}
+		log.Printf("bdrive: %s: could not park the room's refused text (%d bytes) as %s (%d); retrying", path, len(text), copy, cw.code)
+		return false
+	}
+	if try() {
+		return
+	}
+	go func() {
+		wait := parkBackoff
+		for {
+			time.Sleep(wait)
+			if try() {
+				return
+			}
+			wait = min(wait*2, parkBackoffMax)
+		}
+	}()
 }
 
 // putAs writes one path through the ordinary upload door as a human, with
@@ -474,6 +534,9 @@ type roomRegistry struct {
 	// not be pushed past by more typing.
 	pending map[string]*roomFlush
 	unsubs  map[string]func()
+	// parked is the text a room last set aside as a conflict copy, so the
+	// two final snapshots (last peer, unload) park it once.
+	parked map[string]string
 }
 
 type roomFlush struct {
@@ -486,6 +549,7 @@ func (s *Server) rooms() *roomRegistry {
 		s.roomReg = &roomRegistry{
 			docs: map[string]*crdt.Doc{}, users: map[string]User{},
 			bases: map[string]string{}, pending: map[string]*roomFlush{}, unsubs: map[string]func(){},
+			parked: map[string]string{},
 		}
 	})
 	return s.roomReg
@@ -501,6 +565,20 @@ func (r *roomRegistry) rebase(room, sha string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.bases[room] = sha
+}
+
+func (r *roomRegistry) isParked(room, text string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prev, ok := r.parked[room]
+	return ok && prev == text
+}
+
+// park records text as set aside for room, once its copy is written.
+func (r *roomRegistry) park(room, text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.parked[room] = text
 }
 
 func (r *roomRegistry) base(room string) string {
@@ -600,6 +678,7 @@ func (r *roomRegistry) drop(room string) {
 	}
 	delete(r.docs, room)
 	delete(r.users, room)
+	delete(r.parked, room)
 	// bases outlives the room on purpose: it is how the NEXT room for this
 	// file finds the history to rebuild from when somebody wrote the file
 	// from outside in between (seedDoc). One sha per file ever edited.

@@ -240,12 +240,16 @@ export async function putText(
   url: string,
   text: string,
   base?: string,
+  // The user confirmed a save the hub refused for emptying or sharply
+  // shrinking the file (422, upload.go sharpShrink).
+  confirmShrink = false,
 ): Promise<{ sha?: string }> {
   const r = await fetch(url, {
     method: "PUT",
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       ...(base ? { "If-Match": base } : {}),
+      ...(confirmShrink ? { "X-Bdrive-Confirm-Shrink": "1" } : {}),
     },
     body: text,
   });

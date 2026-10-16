@@ -29,6 +29,14 @@ export type SaveState = "clean" | "dirty" | "saving" | "error";
    "same" — nothing new: our own write coming back, or text we already hold.
    "merged" — spliced into the live buffer.
    "blocked" — refused, because applying it would have destroyed something. */
+function isShrinkRefusal(e: HttpError): boolean {
+  try {
+    return (JSON.parse(e.body) as { shrink?: boolean }).shrink === true;
+  } catch {
+    return false;
+  }
+}
+
 export type MergeResult = "same" | "merged" | "blocked";
 
 // Idle time before the document is written to the file.
@@ -68,6 +76,9 @@ export function openSharedFile(opts: {
   /** A concurrent edit could not be merged, so this client's version was
       preserved beside the file instead of being dropped. */
   onConflictCopy?: (path: string) => void;
+  /** The hub refused a save that would empty or sharply shrink the file. The
+      file keeps its bytes; `confirm` writes this text anyway. */
+  onShrinkRefused?: (confirm: () => Promise<void>) => void;
   me?: { name: string; colour: string };
   /** The document arrived: it is live and holds the truth. */
   onReady: (collab: CollabDoc) => void;
@@ -139,6 +150,26 @@ export function openSharedFile(opts: {
       setState("clean");
       opts.onSaved?.(text);
     } catch (e) {
+      if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
+        setState("error");
+        // The user may keep typing while the warning is open, so the
+        // confirmation writes the document as it stands when clicked.
+        opts.onShrinkRefused?.(async () => {
+          const now = current();
+          setState("saving");
+          opts.onWriting?.();
+          try {
+            const out = await putText(contentURL(opts.path), now, base, true);
+            saved = now;
+            if (out.sha) base = out.sha;
+            setState("clean");
+            opts.onSaved?.(now);
+          } catch {
+            setState("error");
+          }
+        });
+        return;
+      }
       if (e instanceof HttpError && e.status === 409) {
         inFlight.delete(text); // preserve() writes under a different path
         /* A 409 in a shared room is usually a LOST RACE, not a disagreement.

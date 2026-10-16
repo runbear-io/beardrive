@@ -19,6 +19,7 @@ import {
 } from "@codemirror/language";
 import { yCollab } from "y-codemirror.next";
 import { type CollabStatus } from "../lib/collab";
+import { warnShrink } from "../toast";
 import {
   openSharedFile,
   SAVE_IDLE_MS,
@@ -209,6 +210,7 @@ export function Editor({
       who: meRef.current?.name,
       me: meRef.current,
       onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
+      onShrinkRefused: (confirm) => warnShrink(path, confirm),
       onReady: () => mount(),
       // No relay: an older hub, or a desktop build that does not proxy the
       // route. Editing is single-writer then — exactly what it was before
