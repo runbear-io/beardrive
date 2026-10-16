@@ -1318,7 +1318,7 @@ a.ai-main:hover { color: var(--accent-ink); }
 }
 
 .fv-rail { font-size: 12.5px; }
-.fv-sec h4 {
+.fv-sec .fv-sec-h {
   display: flex; align-items: baseline; margin: 0 0 10px; color: var(--text-faint);
   font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
 }
@@ -2004,7 +2004,7 @@ body.full-view .cm-panel { top: 0; }
 /* The gutter is too narrow to fan pins out sideways, so threads on one line
    stack downwards instead. */
 @media (max-width: 900px) {
-  .cm-pin { left: -19px !important; padding: 0 5px; transform: translateY(calc(var(--k, 0) * 22px)); }
+  .cm-pin { left: -19px !important; padding: 0 5px; transform: translateY(-50%) translateY(calc(var(--k, 0) * 22px)); }
   .cm-pin .ico { display: none; }
 }
 /* Between the phone breakpoint and a wide desktop the sidebar leaves the top
