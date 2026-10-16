@@ -858,6 +858,8 @@ export default function Browser(props: {
   if (panel) {
     view = panel.body;
   } else if (route.view === "dashboard") {
+    // Data-dense: the treemap and hot path sit side by side.
+    pageWidth = "wide";
     view = (
       <Insights
         flatFiles={flatFiles}

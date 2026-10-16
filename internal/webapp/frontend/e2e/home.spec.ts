@@ -127,7 +127,7 @@ test("hot path row opens the file", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/insights`);
-  await page.click(".in-hp-row:first-child");
+  await page.locator(".in-hp-row").first().click();
   await page.waitForURL(/\/(index|guide)\.md$/);
   await expect(page.locator("#content h1")).toBeVisible();
 });
@@ -320,7 +320,7 @@ test("project menu pages each own a URL: Home, Activity, Insights, Settings, Con
   const pid = await wikiId(page);
   await page.click("#nav-insights");
   await page.waitForURL(`/${pid}/insights`);
-  await expect(page.locator(".insights .in-title")).toContainText("Knowledge insights");
+  await expect(page.locator(".insights .in-title")).toContainText("What the team and its agents actually read");
   await expect(page.locator("#nav-insights")).toHaveClass(/active/);
   await page.click("#nav-install");
   await page.waitForURL(`/${pid}/install`);

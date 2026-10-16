@@ -73,6 +73,8 @@ test("the Dashboard still flags exactly that set — no threshold drift", async 
 
   const dots = page.locator(".in-pt.danger");
   await expect(dots).toHaveCount(FLAGGED.length);
+  // The treemap opens at folder level; the flagged files are all in archive/.
+  await page.locator('.in-tm-cell[data-dir="archive"]').click();
   const paths = await page.locator(".in-tm-label", { hasText: "⚠" }).evaluateAll((els) =>
     els.map((e) => e.getAttribute("data-path")),
   );

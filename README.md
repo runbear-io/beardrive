@@ -733,13 +733,15 @@ Hubs also track **read heat**: viewer opens and downloads count as human
 reads, share-link hits as share reads, and agent tool reads (reported by
 the sync hooks via `bdrive read-log`) as agent reads — sync replication
 never counts. Folder listings show heat dots and 30-day read counts to
-every member, and every member gets the project **Dashboard**
-(sidebar or ⋯ menu), four sections with an all/human/agent lens: a **treemap** of
-every file (cell size = reads, color = staleness, ⚠ on hot+stale — click
-through to any file), the **reads × freshness** scatter whose hot-but-stale
-quadrant is the knowledge people rely on that nobody maintains, the
-**hot path** (top files by reads, agent/human split — effectively the
-team's agent context window), and an **agent coverage matrix** (which
+every member, and every member gets the project **Insights** page
+(sidebar or ⋯ menu), with an All/People/Agents/Share links lens over every
+section: a KPI row, a **fix these first** worklist (hot-but-stale and
+emptied-but-still-read files, ranked by reads × days since change, with
+adjustable thresholds), a **treemap** of folders two deep that drills into
+files (four freshness bins, ⚠ on hot+stale, ⛔ on emptied), the **hot path**
+as two charts (what agents load, what people open), the **reads × days
+since change** scatter whose hot-but-stale quadrant is the knowledge people
+rely on that nobody maintains, and an **agent coverage matrix** (which
 agent devices read which folders). The API
 (`GET /api/p/<id>/heat?prefix=&days=`) exposes only aggregate counts,
 distinct-reader counts, and last-read times — never who read what;

@@ -37,21 +37,33 @@ Folder listings show heat dots and 30-day read counts to every member. It's the
 fastest way to tell which parts of a knowledge folder are load-bearing and which
 are decoration.
 
-## The project Dashboard
+## The project Insights page
 
-Every project member gets a **Dashboard** with an all/human/agent
-lens — four views:
+Every project member gets an **Insights** page. A lens (All / People / Agents /
+Share links) applies to every section, top to bottom:
 
-- **Treemap** — every file, cell size by reads, color by staleness, with ⚠ on
-  hot-and-stale. Click through to any file.
-- **Reads × freshness scatter** — the hot-but-stale quadrant is the important
-  one: knowledge the team relies on that nobody maintains. That quadrant is a
-  worklist.
-- **Hot path** — top files by reads with the agent/human split. Effectively your
-  team's agent context window, measured rather than assumed.
-- **Agent coverage matrix** — which agent devices read which folders. Useful for
-  spotting an agent that never discovered the folder at all, which usually means
-  a missing [root pointer](/guides/shared-agent-memory/).
+- **KPI row** — reads split by people, agents and share links; the share of
+  files read at least once; how many files are hot but stale; how many files
+  are empty but still being read.
+- **Fix these first** — a worklist ranked by reads × days since the last
+  change, with a one-line reason and a Restore (emptied files) or Review
+  action. The thresholds ("Stale after 30 days · hot ≥ 3 reads") are a control
+  on the page, and they drive the charts below too.
+- **Where reads go** — a treemap of folders two levels deep (click one to see
+  its files), coloured in four freshness bins fitted to the project's own age
+  range, with ⚠ on hot-and-stale and ⛔ on emptied files.
+- **Hot path** — "What agents load" and "What people open" as two separate
+  charts. Effectively your team's agent context window, measured rather than
+  assumed.
+- **Reads × days since change** — every read file as a grey dot; only the
+  hot-and-stale and emptied ones are coloured and named, and the danger
+  quadrant prints its count.
+- **Agent coverage matrix** — which agent devices read which folders, with a
+  few generated takeaways. Useful for spotting an agent that never discovered
+  a folder at all, which usually means a missing
+  [root pointer](/guides/shared-agent-memory/).
+
+Every chart has a **View as table** toggle.
 
 ## One session, read and written
 

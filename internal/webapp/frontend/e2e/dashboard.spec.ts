@@ -25,7 +25,7 @@ test("every dot sits inside the frame, and the hot+stale ones say which file the
   const pid = await wikiId(page);
   await page.goto(`/${pid}/insights`);
 
-  const svg = page.locator("svg.in-chart:not(.in-treemap):not(.in-matrix)");
+  const svg = page.locator("svg.in-scatter");
   const [, , W, H] = (await svg.getAttribute("viewBox"))!.split(" ").map(Number);
   const M = { l: 44, r: 16, t: 20, b: 34 }; // Scatter's margins
 
@@ -50,7 +50,7 @@ test("every dot sits inside the frame, and the hot+stale ones say which file the
   expect(names.length).toBeLessThanOrEqual(6);
   expect(names).toContain("retired-spec.md"); // basename, not the full path
   for (const n of names) {
-    await expect(page.locator(".in-hp-row", { hasText: n })).not.toHaveCount(0);
+    await expect(page.locator(".in-fix-row", { hasText: n })).not.toHaveCount(0);
   }
   // Inside the frame, and no two labels on the same baseline.
   const boxes = await labels.evaluateAll((els) =>
@@ -77,9 +77,9 @@ test("every dot sits inside the frame, and the hot+stale ones say which file the
   await expect(svg.locator(".in-pt").first().locator("title")).toHaveCount(1);
   await expect(svg.locator(".in-pt.danger").first()).toBeVisible();
 
-  // The caption moved out of the plot, where it overprinted "hot + stale".
-  await expect(svg).not.toContainText("dot size");
-  await expect(page.locator(".in-cap")).toHaveText("dot size = agent share of reads");
+  // The caption lives in the section head, never over the plot.
+  await expect(svg).not.toContainText("Hover a dot");
+  await expect(page.locator(".in-cap")).toHaveText("Hover a dot for path, reads by type, last editor");
 });
 
 /* A heat row outlives its file. Before this, the file panels joined heat onto
@@ -91,7 +91,7 @@ test("reads for a deleted file are ranked and labelled, not dropped", async ({ p
   await page.goto(`/${pid}/insights`);
 
   const row = page.locator(".in-hp-row", { hasText: "scratch.md" });
-  await expect(row).toHaveCount(1); // seeded with reads, deleted by the seed
+  await expect(row).toHaveCount(1); // seeded with human reads only, deleted by the seed
   await expect(row.locator(".in-hp-gone")).toHaveText("· no longer in the project");
   await expect(page.locator(".insights")).not.toContainText("No reads in the window yet");
   await expect(page.locator(".in-orphan-note")).toHaveText([
@@ -111,10 +111,10 @@ test("the orphan footnote follows the lens", async ({ page }) => {
   const pid = await wikiId(page);
   await page.goto(`/${pid}/insights`);
   await expect(page.locator(".in-orphan-note").first()).toBeVisible();
-  await page.getByRole("button", { name: "Agent reads" }).click();
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
   await expect(page.locator(".in-orphan-note")).toHaveCount(0);
   await expect(page.locator(".in-hp-row", { hasText: "scratch.md" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Human reads" }).click();
+  await page.getByRole("button", { name: "People", exact: true }).click();
   await expect(page.locator(".in-hp-row", { hasText: "scratch.md" })).toHaveCount(1);
 });
 
@@ -128,12 +128,12 @@ test("the shared lens isolates share-link reads and paints them share-colored", 
   await page.goto(`/${pid}/insights`);
   await expect(page.locator(".in-lens-btn")).toHaveText([
     "All reads",
-    "Human reads",
-    "Agent reads",
-    "Shared reads",
+    "People",
+    "Agents",
+    "Share links",
   ]);
 
-  await page.getByRole("button", { name: "Shared reads" }).click();
+  await page.getByRole("button", { name: "Share links" }).click();
   // notes/deep/topic.md carries the seed's only share reads. Other specs mint
   // and open their own links against this shared hub, so assert the filter's
   // invariant — share reads only — not a row count that moves with test order.
@@ -142,12 +142,14 @@ test("the shared lens isolates share-link reads and paints them share-colored", 
   await expect(topic.locator(".in-hp-count")).toHaveText("3");
 
   // The bar is the whole point: under a share lens the reads must not be
-  // painted as somebody else's traffic.
+  // painted as somebody else's traffic. The hot path is one chart per reader
+  // kind, so only the share chart exists.
   await expect(topic.locator(".in-hp-share")).not.toHaveCSS("width", "0px");
   for (const cls of [".in-hp-agent", ".in-hp-human"]) {
-    await expect(topic.locator(cls)).toHaveCSS("width", "0px");
+    await expect(topic.locator(cls)).toHaveCount(0);
   }
-  await expect(page.locator(".in-sw.share")).toBeVisible();
+  await expect(page.locator('[data-sec="hot-share"] .in-h2')).toHaveText("What share links serve");
+  await expect(page.locator('[data-sec="hot-agent"], [data-sec="hot-human"]')).toHaveCount(0);
 
   // Files read only by people or agents drop out entirely — the lens filters,
   // it does not merely re-sort. Neither path is shared by any spec.
@@ -157,8 +159,8 @@ test("the shared lens isolates share-link reads and paints them share-colored", 
 
   // "All reads" still means human + agent + share.
   await page.getByRole("button", { name: "All reads" }).click();
-  await expect(page.locator(".in-hp-row", { hasText: "archive/retired-spec.md" })).toHaveCount(1);
-  await expect(topic).toHaveCount(1);
+  await expect(page.locator(".in-hp-row", { hasText: "archive/retired-spec.md" })).not.toHaveCount(0);
+  await expect(topic).not.toHaveCount(0);
 });
 
 // The empty scope must stay empty: falling back to every file would be worse
@@ -172,7 +174,7 @@ test("a project with no share reads says so under the shared lens", async ({ pag
       { data: "# A\n", headers: { "content-type": "text/markdown" } },
     );
     await page.goto(`/${made.project.id}/insights`);
-    await page.getByRole("button", { name: "Shared reads" }).click();
+    await page.getByRole("button", { name: "Share links" }).click();
     await expect(page.locator(".dl-empty")).toContainText("No reads in the window yet.");
     await expect(page.locator(".in-hp-row", { hasText: "a.md" })).toHaveCount(0);
   } finally {
@@ -207,7 +209,7 @@ test("a project with no files says so instead of drawing empty charts", async ({
    an all-new project goes grey; and the flat test is per-scope, not per-project. */
 
 const fills = (page: import("@playwright/test").Page) =>
-  page.locator(".in-tm-cell").evaluateAll((els) => els.map((e) => e.getAttribute("fill")!));
+  page.locator(".in-tm-cell").evaluateAll((els) => els.map((e) => getComputedStyle(e).fill));
 
 test("a range worth colouring keeps its colours", async ({ page }) => {
   await login(page);
@@ -229,10 +231,14 @@ test("a project too young to rank goes grey instead of all-clear green", async (
     }
     await page.goto(`/${pid}/insights`);
     await expect(page.locator(".in-treemap")).toBeVisible();
+    // Both root files fold into one "(root)" folder cell at the default level;
+    // drilling in draws the two files, still off the ramp.
+    expect(await fills(page)).toEqual(["rgb(150, 156, 164)"]);
+    await page.locator('.in-tm-cell[data-dir=""]').click();
     const f = await fills(page);
     expect(f.length).toBe(2);
-    expect(new Set(f).size).toBe(1); // one fill, and it is not on the ramp
-    expect(f[0]).toBe("rgb(150,156,164)");
+    expect(new Set(f).size).toBe(1);
+    expect(f[0]).toBe("rgb(150, 156, 164)");
     await expect(page.locator(".in-tm-range")).toContainText("colour off");
     await expect(page.locator(".in-sw-age")).toHaveClass(/in-sw-flat/);
   } finally {
@@ -246,6 +252,7 @@ test("the flat test follows the scope, not the project", async ({ page }) => {
   // notes/ holds only 90min- and 24h-old files, inside a project spanning 210d.
   await page.goto(`/${pid}/insights/notes`);
   await expect(page.locator(".in-tm-range")).toContainText("colour off");
+  await expect(page.locator(".in-tm-cell")).not.toHaveCount(0);
   expect(new Set(await fills(page)).size).toBe(1);
   await page.goto(`/${pid}/insights`);
   await expect(page.locator(".in-tm-range")).toContainText("observed:");
