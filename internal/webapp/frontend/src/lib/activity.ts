@@ -53,9 +53,16 @@ export function historyApiQuery(f: HistoryFilters | undefined, now = new Date())
   return s ? "&" + s : "";
 }
 
-// How many days the summary chart covers for a filter set.
+// How many days the summary chart covers for a filter set with no custom
+// bounds; custom since/until name the days themselves.
 export function summaryDays(f: HistoryFilters | undefined): number {
   return (f?.range && RANGE_DAYS[f.range]) || 7;
+}
+
+// What the summary header calls its window.
+export function summaryLabel(f: HistoryFilters | undefined): string {
+  if (f?.range && RANGE_LABEL[f.range]) return RANGE_LABEL[f.range];
+  return f?.since || f?.until ? "Custom range" : "Last 7 days";
 }
 
 // "Today", "Yesterday", or the reader's own date format.
@@ -64,6 +71,15 @@ export function dayLabel(day: string, now = new Date()): string {
   if (day === localDay(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))) return "Yesterday";
   const d = parseDay(day);
   return d ? d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" }) : day;
+}
+
+/* What a change's diff compares against: the predecessor's sha when it is
+   known, "" when there is genuinely none (a first version, diffed against
+   an empty file), undefined when one exists but nobody named it — which
+   must show no count rather than claim every line was added. */
+export function diffBase(kind: string, prev: string | undefined): string | undefined {
+  if (prev) return prev;
+  return kind === "add" ? "" : undefined;
 }
 
 // An agent's change carries the session the sync hook stamped on it.

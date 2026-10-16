@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agentName, dateWindow, dayLabel, historyApiQuery, localDay, spanLabel, summaryDays } from "./activity.ts";
+import {
+  agentName,
+  dateWindow,
+  dayLabel,
+  diffBase,
+  historyApiQuery,
+  localDay,
+  spanLabel,
+  summaryDays,
+  summaryLabel,
+} from "./activity.ts";
 
 const now = new Date(2026, 9, 16, 15, 30); // local 16 Oct 2026
 
@@ -40,4 +50,19 @@ test("labels", () => {
   assert.equal(spanLabel(0), "");
   assert.equal(summaryDays({ range: "30d" }), 30);
   assert.equal(summaryDays({}), 7);
+});
+
+test("the summary names a custom range as one", () => {
+  assert.equal(summaryLabel({ range: "7d" }), "Last 7 days");
+  assert.equal(summaryLabel({ since: "2026-01-01", until: "2026-01-03" }), "Custom range");
+  assert.equal(summaryLabel({ until: "2026-01-03" }), "Custom range");
+  assert.equal(summaryLabel({}), "Last 7 days");
+});
+
+test("a diff compares against an empty file only when there was no earlier version", () => {
+  assert.equal(diffBase("edit", "abc"), "abc");
+  assert.equal(diffBase("add", undefined), "");
+  assert.equal(diffBase("add", "abc"), "abc"); // re-added after a delete
+  assert.equal(diffBase("edit", undefined), undefined);
+  assert.equal(diffBase("delete", undefined), undefined);
 });

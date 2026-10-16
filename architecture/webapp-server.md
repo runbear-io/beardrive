@@ -141,7 +141,7 @@ classDiagram
         +Date YYYY-MM-DD in the reader's zone
         +Agent, Human counts
     }
-    note for histFilter "The reader filters shared by GET history and GET history/summary. actor=agent means op.Session != &quot;&quot; — only the agent hook sets a session, while a note is anyone's to write. device= matches sourcedOp.From (the journal the op was read from), never op.Device. history/summary answers the Activity header in one pass over the ops the feed already loads: totals plus one histDay per calendar day (days=1..31) in the reader's tz (IANA ?tz=, else ?offset= minutes), so the browser never pages a week of history to draw seven bars"
+    note for histFilter "The reader filters shared by GET history and GET history/summary. actor=agent means op.Session != &quot;&quot; — only the agent hook sets a session, while a note is anyone's to write. device= matches sourcedOp.From (the journal the op was read from), never op.Device. history/summary answers the Activity header in one pass over the ops the feed already loads: totals plus one histDay per calendar day in the reader's tz (IANA ?tz=, else ?offset= minutes): the last days=1..31, or the days since=/until= touch (latest 31 kept), with the bounds applied to the counts as in the feed; each history entry also carries prev, the path's content before it, replayed over the whole journal so an off-page predecessor is still named. The browser never pages a week of history to draw seven bars"
     histFilter ..> histDay : summary buckets
 
     class Uploader {

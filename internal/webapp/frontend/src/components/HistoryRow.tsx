@@ -4,7 +4,7 @@ import { humanSize, whoChanged } from "../util";
 import { Icon } from "./shell";
 import { DiffStat, DiffView, useDiffStat } from "./DiffView";
 import { parseConflict } from "../lib/conflict";
-import { isAgent } from "../lib/activity";
+import { diffBase, isAgent } from "../lib/activity";
 
 /* One change as a row: what happened (added / edited / deleted), to which
    file, by whom, from where — with the note (session link) expandable.
@@ -131,7 +131,7 @@ export function HistoryRow({
   const when = new Date(e.time).toLocaleString();
   const dl = apiBase + "blob?sha=" + e.blob + "&name=" + encodeURIComponent(base) + "&download=1";
   const toggleDiff = () => setDiffOpen(!diffOpen);
-  const counts = useDiffStat(apiBase, diff?.prev, e.blob, !!stat && kind !== "delete" && !!e.blob);
+  const counts = useDiffStat(apiBase, diffBase(kind, diff?.prev), e.blob, !!stat && kind !== "delete" && !!e.blob);
   // A conflict copy still on disk: the copy's own page explains it and links
   // the version that kept the name, which is where resolving starts.
   const conflict = kind !== "delete" ? parseConflict(e.path) : null;

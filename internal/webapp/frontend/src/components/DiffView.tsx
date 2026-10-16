@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
+import { diffBase } from "../lib/activity";
 import { diffText } from "../lib/diff";
 import { blobURL, useBlobText } from "../hooks/useBlob";
 
@@ -84,16 +85,17 @@ export function DiffView({
 
 /* The +N −M of one change, for a row that wants the size of an edit without
    its lines. Shares DiffView's blob cache, so opening the diff afterwards
-   costs nothing. A first version counts every line as added. */
-export function useDiffStat(apiBase: string, prev: string | undefined, cur: string | undefined, enabled: boolean) {
-  const a = useBlobText(apiBase, prev, enabled && !!prev);
-  const b = useBlobText(apiBase, cur, enabled);
+   costs nothing. `base` is diffBase's answer: "" counts every line as added
+   (a first version), undefined counts nothing (a predecessor nobody named). */
+export function useDiffStat(apiBase: string, base: string | undefined, cur: string | undefined, enabled: boolean) {
+  const a = useBlobText(apiBase, base, enabled && !!base);
+  const b = useBlobText(apiBase, cur, enabled && base !== undefined);
   return useMemo(() => {
-    if (b.data?.kind !== "text") return null;
-    if (!prev) return diffText("", b.data.text);
+    if (base === undefined || b.data?.kind !== "text") return null;
+    if (!base) return diffText("", b.data.text);
     if (a.data?.kind !== "text") return null;
     return diffText(a.data.text, b.data.text);
-  }, [a.data, b.data, prev]);
+  }, [a.data, b.data, base]);
 }
 
 export function DiffStat({ add, del }: { add: number; del: number }) {
@@ -118,11 +120,13 @@ type Tab = (typeof TABS)[number][0];
 export function DiffTabs({
   apiBase,
   path,
+  kind,
   prev,
   cur,
 }: {
   apiBase: string;
   path: string;
+  kind: string;
   prev?: string;
   cur?: string; // absent for a delete: the panel then shows what was removed
 }) {
@@ -143,7 +147,11 @@ export function DiffTabs({
             <DiffView apiBase={apiBase} path={path} prev={prev} cur={cur} />
           ) : (
             <div className="dv dv-msg">
-              {cur ? "First version — nothing to compare against." : "This change deleted the file."}
+              {!cur
+                ? "This change deleted the file."
+                : diffBase(kind, prev) === ""
+                  ? "First version — nothing to compare against."
+                  : "Earlier version not loaded — nothing to compare against here."}
             </div>
           ))}
         {tab === "rendered" && shown && <Rendered apiBase={apiBase} path={path} sha={shown} />}

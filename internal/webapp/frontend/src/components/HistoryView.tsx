@@ -10,7 +10,6 @@ import { groupRuns, runFileCount, type Run } from "../lib/runs";
 import { HistoryFilters, authorsOf, filterChips } from "./HistoryFilters";
 import { hasHistoryFilters, type HistoryFilters as Filters } from "../router";
 import {
-  RANGE_LABEL,
   agentName,
   dayLabel,
   historyApiQuery,
@@ -18,6 +17,7 @@ import {
   localDay,
   spanLabel,
   summaryDays,
+  summaryLabel,
 } from "../lib/activity";
 import { DiffTabs } from "./DiffView";
 
@@ -200,6 +200,7 @@ export function HistoryView(props: {
   // flat list, never a group: it is a per-path lookup, and grouping must not
   // change what a diff compares against.
   const prevBlob = (i: number) => {
+    if (entries[i].prev) return entries[i].prev;
     for (let j = i + 1; j < entries.length; j++) {
       if (entries[j].path === entries[i].path && entries[j].kind !== "delete") return entries[j].blob;
     }
@@ -424,10 +425,11 @@ function HistoryError({ onRetry, timedOut }: { onRetry: () => void; timedOut: bo
 }
 
 /* Totals for the window the date filter names (seven days when it names
-   none): one aggregate request, never a client-side walk over pages. */
+   none, the days a custom range touches when it is one): one aggregate
+   request with the feed's own filters, never a client-side walk over pages. */
 function ActivitySummary({ apiBase, scope, filters }: { apiBase: string; scope: string; filters?: Filters }) {
   const days = summaryDays(filters);
-  const rest = historyApiQuery({ q: filters?.q, user: filters?.user, actor: filters?.actor, device: filters?.device });
+  const rest = historyApiQuery(filters);
   let tz = "";
   try {
     tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
@@ -443,16 +445,17 @@ function ActivitySummary({ apiBase, scope, filters }: { apiBase: string; scope: 
     retry: false,
   });
   if (!data) return <div className="hsum hsum-wait" />;
+  const todayKey = localDay(new Date());
   const max = Math.max(1, ...data.days.map((d) => d.agent + d.human));
   const fmt = (d: string) => {
     const [y, m, dd] = d.split("-").map(Number);
     return new Date(y, m - 1, dd);
   };
-  const first = fmt(data.days[0].date);
-  const last = fmt(data.days[data.days.length - 1].date);
   const short = (d: Date) => d.toLocaleDateString([], { month: "short", day: "numeric" });
+  const n = data.days.length;
+  const span = !n ? "" : n === 1 ? short(fmt(data.days[0].date)) : short(fmt(data.days[0].date)) + " – " + short(fmt(data.days[n - 1].date));
   const share = data.total ? Math.round((100 * data.agent) / data.total) : 0;
-  const label = (filters?.range && RANGE_LABEL[filters.range]) || "Last 7 days";
+  const label = summaryLabel(filters);
   return (
     <div className="hsum">
       <div className="hsum-head">
@@ -461,7 +464,8 @@ function ActivitySummary({ apiBase, scope, filters }: { apiBase: string; scope: 
             {data.total} change{data.total === 1 ? "" : "s"}
           </div>
           <div className="hsum-sub">
-            {days === 1 ? short(last) : short(first) + " – " + short(last)} · {share}% by agents · {data.devices} device
+            {span && span + " · "}
+            {share}% by agents · {data.devices} device
             {data.devices === 1 ? "" : "s"}
             <span className="hsum-range"> · {label}</span>
           </div>
@@ -474,7 +478,7 @@ function ActivitySummary({ apiBase, scope, filters }: { apiBase: string; scope: 
       <div className={"hsum-bars" + (data.days.length > 14 ? " dense" : "")}>
         {data.days.map((d, i) => {
           const day = fmt(d.date);
-          const today = i === data.days.length - 1;
+          const today = d.date === todayKey;
           return (
             <div
               className={"hsum-col" + (today ? " today" : "")}
@@ -487,7 +491,7 @@ function ActivitySummary({ apiBase, scope, filters }: { apiBase: string; scope: 
               </div>
               <span className="hsum-day">
                 {data.days.length === 1
-                  ? "Today"
+                  ? dayLabel(d.date)
                   : data.days.length > 14
                     ? i % 5 === 0 || today
                       ? day.getDate()
@@ -577,7 +581,7 @@ function ActivityPanel(props: {
             type="button"
             className="btn ap-copy"
             onClick={async () => {
-              const url = location.origin + props.linkFor!(e.path, deleted ? undefined : e.blob);
+              const url = location.origin + props.linkFor!(e.path, deleted ? props.prev : e.blob);
               toast((await copyText(url)) ? "Link copied" : url, false);
             }}
           >
@@ -586,7 +590,7 @@ function ActivityPanel(props: {
           </button>
         )}
       </div>
-      <DiffTabs apiBase={apiBase} path={e.path} prev={props.prev} cur={deleted ? undefined : e.blob} />
+      <DiffTabs apiBase={apiBase} path={e.path} kind={e.kind} prev={props.prev} cur={deleted ? undefined : e.blob} />
       <div className="ap-foot">J / K to move between changes · esc close</div>
     </aside>
   );

@@ -150,3 +150,39 @@ test("a history request that hangs turns into an error with Try again", async ({
   await expect(page.locator(rows).first()).toBeVisible();
   await expect(err).toHaveCount(0);
 });
+
+test("a custom range charts its own days and says so", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const [since, until] = await page.evaluate(() => {
+    const p2 = (n: number) => String(n).padStart(2, "0");
+    const day = (back: number) => {
+      const n = new Date();
+      const d = new Date(n.getFullYear(), n.getMonth(), n.getDate() - back);
+      return d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate());
+    };
+    return [day(3), day(1)];
+  });
+  await page.goto(`/${pid}/activity?since=${since}&until=${until}`);
+  await expect(page.locator(".hsum-sub")).toContainText("Custom range");
+  await expect(page.locator(".hsum-sub")).not.toContainText("Last 7 days");
+  await expect(page.locator(".hsum-col")).toHaveCount(3);
+  // The range ends yesterday, so no bar is today's.
+  await expect(page.locator(".hsum-col.today")).toHaveCount(0);
+});
+
+test("Copy link on a delete links the version it removed", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/activity`);
+  const row = page.locator(".history .hentry.delete", { hasText: "scratch.md" }).first();
+  await row.locator(".hsel-btn").click();
+  const panel = page.locator(".apanel");
+  await panel.getByRole("button", { name: "Copy link" }).click();
+  await expect(page.getByText("Link copied")).toBeVisible();
+  const link = await page.evaluate(() => navigator.clipboard.readText());
+  expect(link).toMatch(new RegExp(`/${pid}/scratch\\.md\\?v=[0-9a-f]{64}$`));
+  await page.goto(link);
+  await expect(page.getByText("Temporary.")).toBeVisible();
+});
