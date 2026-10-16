@@ -127,7 +127,7 @@ export function FileRail(props: {
     <>
       {toc.length > 0 && (
         <section className="fv-sec fv-toc" aria-label="On this page">
-          <h2 className="fv-sec-h">On this page</h2>
+          <p className="fv-sec-h">On this page</p>
           <ul>
             {toc.map((t) => (
               <li key={t.id} className={(t.level === 3 ? "sub" : "") + (t.id === active ? " on" : "")}>
@@ -135,8 +135,10 @@ export function FileRail(props: {
                   href={"#" + t.id}
                   aria-current={t.id === active ? "location" : undefined}
                   onClick={(e) => {
+                    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
                     e.preventDefault();
                     document.getElementById(t.id)?.scrollIntoView({ block: "start", behavior: "smooth" });
+                    history.replaceState(history.state, "", location.pathname + location.search + "#" + t.id);
                   }}
                 >
                   {t.text}
@@ -149,7 +151,7 @@ export function FileRail(props: {
       {heat && reads > 0 && <ReadsCard heat={heat} insightsHref={insightsHref} />}
       {frontmatter?.length ? (
         <section className="fv-sec fv-props" aria-label="Properties">
-          <h2 className="fv-sec-h">Properties</h2>
+          <p className="fv-sec-h">Properties</p>
           <dl>
             {frontmatter.map((p) => (
               <div key={p.key}>
@@ -194,14 +196,14 @@ function ReadsCard({ heat, insightsHref }: { heat: HeatEntry; insightsHref?: str
   ].filter((p) => p.n > 0);
   return (
     <section className="fv-sec fv-readcard" aria-label="Reads, last 30 days">
-      <h2 className="fv-sec-h">
+      <p className="fv-sec-h">
         Reads · 30 days
         {insightsHref && (
           <a className="fv-sec-link" href={insightsHref}>
             Insights →
           </a>
         )}
-      </h2>
+      </p>
       <div className="fv-big" title={HEAT_DISCLOSURE}>
         {total}
         <span className="sr-only"> — {HEAT_DISCLOSURE}</span>
