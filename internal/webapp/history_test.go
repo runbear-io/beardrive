@@ -867,3 +867,23 @@ func TestHistoryUntilIsInclusiveToTheNanosecond(t *testing.T) {
 		t.Error("the next midnight fell inside an inclusive until")
 	}
 }
+
+// The summary counts exactly what the feed shows: an `until` inside a day
+// leaves that day's later changes out of both.
+func TestHistorySummaryHonorsUntilWithinADay(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	day := time.Now().UTC().AddDate(0, 0, -1)
+	y, m, d := day.Date()
+	f.putFull("dev1", "mira@acme.io", "early.md", "e", time.Date(y, m, d, 9, 0, 0, 0, time.UTC))
+	f.putFull("dev1", "mira@acme.io", "late.md", "l", time.Date(y, m, d, 15, 0, 0, 0, time.UTC))
+	until := time.Date(y, m, d, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	rec := do(t, srv.Handler(), "GET", "/api/p/"+p.ID+"/history/summary?offset=0&until="+until, nil)
+	var s struct{ Total int }
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &s) != nil {
+		t.Fatalf("summary: %d %s", rec.Code, rec.Body)
+	}
+	if s.Total != 1 {
+		t.Fatalf("summary with until at noon counted %d changes, want 1 (the 15:00 one is after the bound)", s.Total)
+	}
+}
