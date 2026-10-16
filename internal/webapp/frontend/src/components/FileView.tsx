@@ -530,6 +530,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           editors={editors}
           me={props.me?.name ?? ""}
           typing={typing}
+          versions={!!props.projectId}
         />
       )}
       {visual ? (
