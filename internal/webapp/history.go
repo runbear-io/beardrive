@@ -35,11 +35,15 @@ type historyDevice struct {
 
 // HistoryEntry is one change as the history API reports it.
 type HistoryEntry struct {
-	Time     string        `json:"time"`
-	Kind     string        `json:"kind"` // add | edit | delete
-	Path     string        `json:"path"`
-	Size     int64         `json:"size,omitempty"`
-	Blob     string        `json:"blob,omitempty"` // sha256; fetch via the blob endpoint
+	Time string `json:"time"`
+	Kind string `json:"kind"` // add | edit | delete
+	Path string `json:"path"`
+	Size int64  `json:"size,omitempty"`
+	Blob string `json:"blob,omitempty"` // sha256; fetch via the blob endpoint
+	// Prev is the content this path last had before the op — across a
+	// delete too, so a delete names what it removed and a re-add what it
+	// replaced. Absent only when the path never had content before.
+	Prev     string        `json:"prev,omitempty"`
 	User     string        `json:"user,omitempty"`
 	UserName string        `json:"user_name,omitempty"`
 	Author   string        `json:"author,omitempty"` // offline/git fallback identity
@@ -187,9 +191,15 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	// replayed over ALL ops in journal order, before any path/prefix filter,
 	// so a filtered view classifies the same as the full feed.
 	kinds := make([]string, len(all))
+	prevs := make([]string, len(all))
 	exists := make(map[string]bool, len(all))
+	last := make(map[string]string, len(all))
 	for i, so := range all {
 		op := so.Op
+		prevs[i] = last[op.Path]
+		if op.Kind != journal.KindDelete {
+			last[op.Path] = op.Blob
+		}
 		switch {
 		case op.Kind == journal.KindDelete:
 			kinds[i] = "delete"
@@ -252,7 +262,7 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		}
 		matched = append(matched, timed{HistoryEntry{
 			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: kinds[i],
-			Path: op.Path, Size: op.Size, Blob: op.Blob,
+			Path: op.Path, Size: op.Size, Blob: op.Blob, Prev: prevs[i],
 			User: op.User, UserName: op.UserName, Author: op.Author,
 			Device: dev, Note: op.Note, Session: op.Session,
 		}, op})
@@ -360,10 +370,13 @@ type histDay struct {
 }
 
 // handleHistorySummary serves GET /history/summary: the counts behind the
-// Activity header for the last ?days= calendar days (1–31, default 7) in the
-// reader's zone (?tz= IANA name, else ?offset= minutes east of UTC, else
-// UTC). Scoping (?prefix=) and every histFilter except the date bounds apply,
-// so the header describes the same feed it sits above. It answers in one pass
+// Activity header, one bar per calendar day in the reader's zone (?tz= IANA
+// name, else ?offset= minutes east of UTC, else UTC). The chart covers the
+// last ?days= days (1–31, default 7) — or, when ?since=/?until= are given,
+// the days those bounds touch: until's day (today when absent) back to
+// since's day (?days= back when absent), keeping the latest 31 when the span
+// is longer. Scoping (?prefix=) and every histFilter apply, the bounds
+// included, so the header describes the same feed it sits above. It answers in one pass
 // over the journals the feed already loads, so the browser never pages
 // through a week of history to draw seven bars.
 func (s *Server) handleHistorySummary(v *volume, w http.ResponseWriter, r *http.Request) {
@@ -377,7 +390,6 @@ func (s *Server) handleHistorySummary(v *volume, w http.ResponseWriter, r *http.
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	f.since, f.until = time.Time{}, time.Time{}
 	days := 7
 	if raw := q.Get("days"); raw != "" {
 		if days, err = strconv.Atoi(raw); err != nil || days < 1 || days > 31 {
@@ -396,8 +408,17 @@ func (s *Server) handleHistorySummary(v *volume, w http.ResponseWriter, r *http.
 		loc = time.FixedZone("", off*60)
 	}
 	prefix := q.Get("prefix")
-	now := time.Now().In(loc)
-	y, m, d := now.Date()
+	last := time.Now().In(loc)
+	if !f.until.IsZero() {
+		last = f.until.Add(-time.Nanosecond).In(loc) // until is exclusive
+	}
+	y, m, d := last.Date()
+	if !f.since.IsZero() {
+		first := f.since.In(loc)
+		fy, fm, fd := first.Date()
+		span := int(time.Date(y, m, d, 12, 0, 0, 0, time.UTC).Sub(time.Date(fy, fm, fd, 12, 0, 0, 0, time.UTC)).Hours()/24) + 1
+		days = min(max(span, 0), 31)
+	}
 	start := time.Date(y, m, d-days+1, 0, 0, 0, 0, loc)
 	out := struct {
 		Total   int       `json:"total"`

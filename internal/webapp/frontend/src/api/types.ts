@@ -228,6 +228,9 @@ export interface HistoryEntry {
   path: string;
   size?: number;
   blob?: string;
+  // The content the path last had before this change (what a delete removed,
+  // what an edit replaced); absent when there was none, or from an older hub.
+  prev?: string;
   user?: string;
   user_name?: string;
   author?: string;

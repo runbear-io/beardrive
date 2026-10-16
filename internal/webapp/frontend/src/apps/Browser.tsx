@@ -105,9 +105,11 @@ export default function Browser(props: {
   const treePath = path || (route.view === "dashboard" || route.view === "history" ? route.viewTarget || "" : "");
   const isDir = !!path && dirIndex.has(path);
   // A file only counts as one when the tree actually contains it — a
-  // missing path gets the not-found view, not a broken file view.
+  // missing path gets the not-found view, not a broken file view. A pinned
+  // version (?v=) is the exception: it names exact bytes, which outlive the
+  // file, so a deleted file's past versions stay openable.
   const isFile = !!path && loaded && !isDir && flatFiles.some((f) => f.path === path);
-  const isMissing = !!path && loaded && !isDir && !isFile;
+  const isMissing = !!path && loaded && !isDir && !isFile && !version;
   const listingShowing = isDir && !route.view;
 
   /* ---- an address whose file moved ----

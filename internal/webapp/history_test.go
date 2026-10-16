@@ -1,6 +1,8 @@
 package webapp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -774,9 +776,75 @@ func TestHistorySummary(t *testing.T) {
 	if s := get("offset=540&actor=agent"); s.Total != 1 || s.Human != 0 {
 		t.Errorf("actor = %+v", s)
 	}
+	// A custom range charts the days its bounds touch, in the reader's zone,
+	// and counts only what the feed under the same bounds would show.
+	bound := func(t time.Time) string { return url.QueryEscape(t.Format(time.RFC3339)) }
+	since, until := at(7, 0), at(6, 0).Add(24*time.Hour-time.Second)
+	s = get("offset=540&since=" + bound(since) + "&until=" + bound(until))
+	if s.Total != 2 || len(s.Days) != 2 || s.Days[0].Date != since.Format("2006-01-02") ||
+		s.Days[1].Date != at(6, 0).Format("2006-01-02") || s.Days[0].Human != 1 || s.Days[1].Human != 1 {
+		t.Errorf("custom range = %+v", s)
+	}
+	if s := get("offset=540&until=" + bound(until)); s.Total != 2 || len(s.Days) != 7 || s.Days[6].Date != at(6, 0).Format("2006-01-02") {
+		t.Errorf("until only = %+v", s)
+	}
+	if s := get("offset=540&since=" + bound(at(1, 0))); s.Total != 2 || len(s.Days) != 2 {
+		t.Errorf("since only = %+v", s)
+	}
+	if s := get("offset=540&since=" + bound(at(90, 0))); len(s.Days) != 31 || s.Days[30].Date != now.Format("2006-01-02") {
+		t.Errorf("long range keeps the latest 31 days: %d days", len(s.Days))
+	}
+	if s := get("offset=540&since=" + bound(at(1, 0)) + "&until=" + bound(at(3, 0))); s.Total != 0 || len(s.Days) != 0 {
+		t.Errorf("since after until = %+v", s)
+	}
 	for _, q := range []string{"days=0", "days=32", "actor=x"} {
 		if rec := do(t, h, "GET", base+"history/summary?"+q, nil); rec.Code != http.StatusBadRequest {
 			t.Errorf("?%s = %d, want 400", q, rec.Code)
 		}
+	}
+}
+
+// Every entry names the content its path had just before it, from the whole
+// journal rather than the page, so a client can diff a change whose
+// predecessor it never loaded and tell that from a genuine first version.
+func TestHistoryEntryPrev(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	sha := func(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
+	f.put("dev1", "a.md", "v1")
+	f.put("dev1", "a.md", "v2")
+	f.del("dev1", "a.md")
+	f.put("dev1", "a.md", "v3")
+	h, base := srv.Handler(), "/api/p/"+p.ID+"/"
+
+	got := func(q string) []HistoryEntry {
+		t.Helper()
+		rec := do(t, h, "GET", base+"history?"+q, nil)
+		var out struct {
+			Entries []HistoryEntry `json:"entries"`
+		}
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+			t.Fatalf("history ?%s: %d %s", q, rec.Code, rec.Body)
+		}
+		return out.Entries
+	}
+	all := got("path=a.md")
+	want := []struct{ kind, prev string }{
+		{"add", sha("v2")},    // re-added: replaces what the delete removed
+		{"delete", sha("v2")}, // names what it removed
+		{"edit", sha("v1")},
+		{"add", ""}, // a genuine first version
+	}
+	if len(all) != len(want) {
+		t.Fatalf("entries = %+v", all)
+	}
+	for i, w := range want {
+		if all[i].Kind != w.kind || all[i].Prev != w.prev {
+			t.Errorf("entry %d = %s prev %q, want %s prev %q", i, all[i].Kind, all[i].Prev, w.kind, w.prev)
+		}
+	}
+	// A one-entry page still knows the delete's predecessor.
+	if page := got("path=a.md&n=1"); len(page) != 1 || page[0].Prev != sha("v2") {
+		t.Errorf("first page = %+v", page)
 	}
 }
