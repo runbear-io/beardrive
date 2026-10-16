@@ -62,7 +62,7 @@ test("share mints through the hub proxy and lands on the clipboard", async ({ pa
 
 test("heat reaches the dashboard through the hub proxy", async ({ page }) => {
   await page.goto(`/${HUB_ID}/insights`);
-  await expect(page.getByText("Knowledge insights")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What the team and its agents actually read" })).toBeVisible();
   await expect(page.getByText("index.md").first()).toBeVisible();
 });
 
