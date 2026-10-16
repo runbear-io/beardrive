@@ -417,12 +417,16 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		   keeps its bytes. While editors remain the document is still theirs;
 		   once the room empties, the room's text is parked as a conflict copy
 		   so a deliberate clear is never silently dropped. */
-		if !final || !s.rooms().park(room, text) {
+		if !final || s.rooms().isParked(room, text) {
 			log.Printf("bdrive: not snapshotting %s: the room's text would empty or sharply shrink it", path)
 			return
 		}
 		copy := conflictPath(path, who, time.Now())
-		s.putAs(ctx, who, project, copy, text, "")
+		if cw := s.putAs(ctx, who, project, copy, text, ""); cw.code != http.StatusOK {
+			log.Printf("bdrive: %s: could not park the room's refused text as %s (%d); the file is unchanged", path, copy, cw.code)
+			return
+		}
+		s.rooms().park(room, text)
 		log.Printf("bdrive: %s: the room's text would empty or sharply shrink it; parked beside it as %s", path, copy)
 	}
 }
@@ -526,15 +530,18 @@ func (r *roomRegistry) rebase(room, sha string) {
 	r.bases[room] = sha
 }
 
-// park records text as set aside for room, reporting false if it already was.
-func (r *roomRegistry) park(room, text string) bool {
+func (r *roomRegistry) isParked(room, text string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if prev, ok := r.parked[room]; ok && prev == text {
-		return false
-	}
+	prev, ok := r.parked[room]
+	return ok && prev == text
+}
+
+// park records text as set aside for room, once its copy is written.
+func (r *roomRegistry) park(room, text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.parked[room] = text
-	return true
 }
 
 func (r *roomRegistry) base(room string) string {
