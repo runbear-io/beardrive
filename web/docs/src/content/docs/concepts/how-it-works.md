@@ -73,10 +73,10 @@ under `~/.bdrive/volumes/<volume-id>/`. These two lock levels are the
 Dual-Lock scheme. `$BDRIVE_HOME` relocates both sets of files.
 
 Each worker watches its enrolled worktree folders on macOS and Linux and
-uses a one-minute safety scan. A watcher error falls back to the polling
-interval; other platforms use polling directly. Local edits wake a scan, and
-remote exchange still follows `--remote-interval` unless a local edit or
-remote event brings it forward.
+uses a one-minute safety scan when remote polling does not require an earlier
+cycle. A watcher error falls back to the polling interval; other platforms use
+polling directly. Local edits wake a scan, and remote exchange still follows
+`--remote-interval` unless a local edit or remote event brings it forward.
 
 Workers re-read `.bdrive/config.json` each tick. If a folder vanishes because
 it was moved, renamed, or deleted, its worker promotes a surviving sibling

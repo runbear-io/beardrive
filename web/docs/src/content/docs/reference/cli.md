@@ -90,10 +90,11 @@ is written inside the project. See
 
 `bdrive daemon run` runs the single user-session sync supervisor across all active
 project volumes. On macOS and Linux, each volume worker watches its folders and
-uses a one-minute safety scan; watcher failures fall back to the local polling
-interval. Other platforms use polling directly. Remote exchange defaults to
-every 10s, with local edits and remote events able to wake it sooner. Tune
-these intervals on `bdrive daemon run`, not on init.
+uses a one-minute safety scan when remote polling does not require an earlier
+cycle; watcher failures fall back to the local polling interval. Other platforms
+use polling directly. Remote exchange defaults to every 10s, with local edits
+and remote events able to wake it sooner. Tune these intervals on `bdrive daemon
+run`, not on init.
 
 ### `bdrive sync --note`
 

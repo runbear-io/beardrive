@@ -1397,11 +1397,51 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			if !ok {
 				stopLocalWatch()
 				localWatchRetryAt = time.Now().Add(localWatchRetry)
-			} else if wait := time.Until(lastCycle.Add(scanInterval)); wait > 0 {
-				select {
-				case <-ctx.Done():
-					return nil
-				case <-time.After(wait):
+				continue
+			}
+			if wait := time.Until(lastCycle.Add(scanInterval)); wait > 0 {
+				timer := time.NewTimer(wait)
+			localWait:
+				for {
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return nil
+					case _, open := <-watch:
+						if !open {
+							lived := time.Since(watchOpened)
+							stopWatch()
+							if lived < watchRetry {
+								nextWatch = time.Now().Add(watchRetry)
+							}
+						} else {
+							lastRemote = time.Time{}
+						}
+						timer.Stop()
+						break localWait
+					case <-wakeCh:
+						lastRemote = time.Time{}
+						timer.Stop()
+						break localWait
+					case watchErr, ok := <-localWatchErr:
+						if !ok {
+							watchErr = errors.New("local filesystem watcher channel closed")
+						}
+						logger.Printf("local filesystem watcher stopped; polling: %v", watchErr)
+						stopLocalWatch()
+						localWatchRetryAt = time.Now().Add(localWatchRetry)
+						timer.Stop()
+						break localWait
+					case _, ok := <-localWatchWake:
+						if !ok {
+							stopLocalWatch()
+							localWatchRetryAt = time.Now().Add(localWatchRetry)
+							timer.Stop()
+							break localWait
+						}
+					case <-timer.C:
+						break localWait
+					}
 				}
 			}
 			continue
