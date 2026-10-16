@@ -139,6 +139,30 @@ test("a past version is restored in one click, as a new version", async ({ page 
   expect(h.entries.length).toBe(3);
 });
 
+test("a restore reaches the open document without the change stream", async ({ page }) => {
+  test.setTimeout(60_000);
+  await login(page, ADMIN);
+  // The editor must not depend on hearing about its own restore.
+  await page.route(/\/events(\?|$)/, (route) => route.abort());
+  const file = `restore-quiet-${Date.now()}.md`;
+  await put(page, file, "first version\n");
+  await page.waitForTimeout(1_100);
+  await put(page, file, "second version\n");
+  await open(page, file);
+
+  const rows = page.locator(".er-vlist li[data-sha]");
+  await expect(rows).toHaveCount(2);
+  await rows.nth(1).locator(".er-restore").click();
+  await expect.poll(() => read(page, file), { timeout: 10_000 }).toBe("first version\n");
+  await expect.poll(async () => (await editorText(page)).trim()).toBe("first version");
+
+  await page.locator(".cm-host .cm-line").first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" and more");
+  await expect.poll(() => read(page, file), { timeout: 15_000 }).toBe("first version and more\n");
+  expect((await editorText(page)).trim()).toBe("first version and more");
+});
+
 test("switching modes keeps one room and never duplicates the text", async ({ page }) => {
   test.setTimeout(60_000);
   await login(page, ADMIN);

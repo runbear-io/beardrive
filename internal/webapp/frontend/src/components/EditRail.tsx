@@ -31,6 +31,9 @@ export function EditRail(props: {
   // History and restore are per-project hub routes; a single-volume server
   // has neither, so it gets no versions list.
   versions: boolean;
+  // A restore landed: the file now holds that version, and the open document
+  // must be brought to it.
+  onRestored?: (folded: boolean) => Promise<void>;
 }) {
   const { apiBase, path, text, meeting } = props;
   const wide = useWideRail();
@@ -80,7 +83,7 @@ export function EditRail(props: {
           </ul>
         )}
       </section>
-      {props.versions && <Versions apiBase={apiBase} path={path} size={new TextEncoder().encode(text).length} />}
+      {props.versions && <Versions apiBase={apiBase} path={path} onRestored={props.onRestored} size={new TextEncoder().encode(text).length} />}
     </>
   );
 
@@ -144,7 +147,17 @@ function Attendees(props: {
   );
 }
 
-function Versions({ apiBase, path, size }: { apiBase: string; path: string; size: number }) {
+function Versions({
+  apiBase,
+  path,
+  size,
+  onRestored,
+}: {
+  apiBase: string;
+  path: string;
+  size: number;
+  onRestored?: (folded: boolean) => Promise<void>;
+}) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState("");
   const { data } = useQuery({
@@ -162,9 +175,10 @@ function Versions({ apiBase, path, size }: { apiBase: string; path: string; size
     const when = new Date(e.time).toLocaleString();
     setBusy(e.blob!);
     try {
-      await postJSON(apiBase + "restore", { path, sha: e.blob });
+      const out = await postJSON<{ folded?: boolean }>(apiBase + "restore", { path, sha: e.blob });
       toast("Restored the version from " + when + ".");
       void qc.invalidateQueries({ queryKey: ["history", apiBase] });
+      await onRestored?.(!!out?.folded);
     } catch (err) {
       toast("Could not restore: " + (err as Error).message, true);
     } finally {

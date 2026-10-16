@@ -227,6 +227,12 @@ func replayInto(doc *crdt.Doc, state []byte, want string) bool {
 // prefix and suffix are kept, the middle replaced. Offsets are UTF-16 units,
 // which is what Yjs counts in.
 func splice(doc *crdt.Doc, txt *crdt.YText, from, to string) {
+	spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, from, to)
+}
+
+// spliceVia is splice through a caller's transaction runner — ygo's Apply
+// hands one out, and only edits made through it reach the room's peers.
+func spliceVia(transact func(func(*crdt.Transaction)), txt *crdt.YText, from, to string) {
 	a, b := []rune(from), []rune(to)
 	p := 0
 	for p < len(a) && p < len(b) && a[p] == b[p] {
@@ -242,7 +248,7 @@ func splice(doc *crdt.Doc, txt *crdt.YText, from, to string) {
 	if del == 0 && ins == "" {
 		return
 	}
-	doc.Transact(func(txn *crdt.Transaction) {
+	transact(func(txn *crdt.Transaction) {
 		if del > 0 {
 			txt.Delete(txn, at, del)
 		}
@@ -250,6 +256,37 @@ func splice(doc *crdt.Doc, txt *crdt.YText, from, to string) {
 			txt.Insert(txn, at, ins, nil)
 		}
 	})
+}
+
+// foldIntoRoom puts a write the hub itself made to a file — a restore — into
+// that file's live room, as one edit every peer receives, and moves the
+// room's base to it. Without this the room keeps the text from before the
+// write, and its next snapshot either writes that back over it or, refused
+// for a stale base, parks a conflict copy. Reports whether a room took it;
+// no room means no document to keep in step.
+func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bool {
+	room := project + "/" + path
+	if _, _, ok := s.rooms().get(room); !ok {
+		return false
+	}
+	body, cur, ok := s.roomBytes(room)
+	if !ok || cur != sha {
+		return false
+	}
+	folded := false
+	err := s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		txt := doc.GetText("body")
+		spliceVia(transact, txt, txt.ToString(), string(body))
+		folded = true
+	})
+	if err != nil || !folded {
+		return false
+	}
+	s.rooms().rebase(room, sha)
+	if doc, _, ok := s.rooms().get(room); ok {
+		s.storeRoomHistory(project, sha, doc.EncodeStateAsUpdate())
+	}
+	return true
 }
 
 // A room's history lives in the project's own storage as ydoc/<sha>: the
