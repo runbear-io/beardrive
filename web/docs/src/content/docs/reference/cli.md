@@ -131,9 +131,9 @@ never names a version the file does not hold. In `--list`, exactly one row
 carries the `*` that marks the version the file holds now; restoring puts old
 bytes back under a new entry, so several rows can legitimately share a hash.
 
-The hub's History view narrows the feed by path substring, author and date
+The hub's Activity view narrows the feed by path substring, author and date
 range (dates are UTC days, inclusive at both ends). The filters live in the
-URL — `<project>/history?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31`
+URL — `<project>/activity?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31`
 — so a narrowed feed is a link you can send, and it survives reload and Back.
 Filtering happens on the server, so paging through a filtered feed shows every
 match, not just the ones on the first page.

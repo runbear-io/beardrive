@@ -1,5 +1,6 @@
+import { useEffect, useState } from "react";
 import { navigate } from "../nav";
-import { Icon, ProjectIcon } from "./shell";
+import { Icon, ProjectIcon, RailButton } from "./shell";
 import {
   Select,
   SelectContent,
@@ -9,6 +10,16 @@ import {
 } from "@/components/ui/select";
 import type { Project } from "../api/types";
 import { closeSidebarOnMobile } from "./shell";
+import { requestSearch } from "../search";
+import { isMac } from "../util";
+import { ACTIVITY_CAP, agoText, useActivityCount, useSyncLine } from "../hooks/useSidebar";
+import {
+  activateFilterSel,
+  clearFilter,
+  moveFilterSel,
+  setFilterQuery,
+  useSidebarSearch,
+} from "../lib/sidebarSearch";
 
 // Deterministic accent for a project's letter-mark, so each project keeps a
 // stable color across reloads without any server state.
@@ -19,19 +30,28 @@ export function projColor(s: string): string {
   return PROJ_COLORS[h % PROJ_COLORS.length];
 }
 
+export type NavKey = "home" | "activity" | "insights" | "settings";
+
 export interface ProjectMenu {
-  active: "dashboard" | "install" | "history" | "settings" | null;
-  onDashboard: () => void;
-  onInstall: () => void;
-  onHistory: () => void;
-  onSettings: () => void;
+  active: NavKey | null;
+  onNav: (key: NavKey) => void;
 }
+
+const NAV: ReadonlyArray<readonly [NavKey, string, string]> = [
+  ["home", "Home", "home"],
+  ["activity", "Activity", "activity"],
+  ["insights", "Insights", "insights"],
+  ["settings", "Settings", "gear"],
+];
+
+const countText = (n: number) => (n >= ACTIVITY_CAP ? ACTIVITY_CAP - 1 + "+" : String(n));
 
 export function ProjectNav({
   projects,
   currentId,
   menu,
   onNew,
+  readsEnabled = false,
 }: {
   projects: Project[];
   currentId?: string;
@@ -40,8 +60,10 @@ export function ProjectNav({
   // (this button, the empty state's button, and the auto-open when a signed-in
   // account has no projects at all), and one owner beats three copies.
   onNew: () => void;
+  readsEnabled?: boolean; // the hub keeps read telemetry, so /heat?by=device answers
 }) {
   const current = projects.find((p) => p.id === currentId);
+  const fresh = useActivityCount(menu ? currentId : undefined);
 
   return (
     <nav id="projects" aria-label="Projects">
@@ -86,7 +108,10 @@ export function ProjectNav({
                 second one here. Render the name ourselves when we have it,
                 keeping the [data-slot="select-value"] styling hook. */}
             {current ? (
-              <span data-slot="select-value">{current.name}</span>
+              <span className="proj-text">
+                <span data-slot="select-value">{current.name}</span>
+                {menu && <SyncLine pid={current.id} readsEnabled={readsEnabled} />}
+              </span>
             ) : (
               <SelectValue placeholder="Select a project" />
             )}
@@ -107,37 +132,135 @@ export function ProjectNav({
           </SelectContent>
         </Select>
       </div>
+      {menu && <SidebarSearch />}
       {menu && (
         <ul className="nav-menu" aria-label="Project pages">
-          {(
-            [
-              ["dashboard", "Dashboard", "dashboard", menu.onDashboard],
-              ["install", "Installation", "terminal", menu.onInstall],
-              ["history", "History", "hist", menu.onHistory],
-              ["settings", "Settings", "gear", menu.onSettings],
-            ] as const
-          ).map(([key, label, icon, onClick]) => (
+          {NAV.map(([key, label, icon]) => (
             <li key={key}>
               <div
                 id={"nav-" + key}
                 className={"row" + (menu.active === key ? " active" : "")}
                 role="button"
                 tabIndex={0}
-                onClick={onClick}
+                onClick={() => menu.onNav(key)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    onClick();
+                    menu.onNav(key);
                   }
                 }}
               >
                 <Icon name={icon} />
                 <span className="label">{label}</span>
+                {key === "activity" && !!fresh && (
+                  <span className="nav-pill" title={`${countText(fresh)} changes since your last visit`}>
+                    {countText(fresh)}
+                  </span>
+                )}
               </div>
             </li>
           ))}
         </ul>
       )}
     </nav>
+  );
+}
+
+// Re-renders once a minute so "synced 2m ago" does not freeze.
+function useMinuteTick() {
+  const [, set] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => set((n) => n + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+}
+
+function SyncLine({ pid, readsEnabled }: { pid: string; readsEnabled: boolean }) {
+  useMinuteTick();
+  const { devices, synced } = useSyncLine(pid, readsEnabled);
+  const parts: string[] = [];
+  if (devices) parts.push(devices + (devices === 1 ? " device" : " devices"));
+  if (synced) parts.push("synced " + agoText(synced));
+  if (!parts.length) return null;
+  return (
+    <span id="sync-line">
+      <span className="sync-dot" aria-hidden="true" />
+      {parts.join(" · ")}
+    </span>
+  );
+}
+
+/* The always-visible search field. Typing filters the tree in place
+   (FileTree's TreeFilter); an empty field, or ⌘↵, hands over to the ⌘K
+   palette, which also searches projects and actions. */
+export function SidebarSearch() {
+  const { query } = useSidebarSearch();
+  return (
+    <div id="sb-search" className={query ? "filtering" : undefined}>
+      <Icon name="search" />
+      <input
+        id="sb-search-input"
+        type="text"
+        value={query}
+        placeholder="Search or jump to…"
+        aria-label="Filter files, or press Enter to search everything"
+        autoComplete="off"
+        spellCheck={false}
+        onChange={(e) => setFilterQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            moveFilterSel(e.key === "ArrowDown" ? 1 : -1);
+          } else if (e.key === "Enter") {
+            e.preventDefault();
+            if (!query.trim() || e.metaKey || e.ctrlKey) requestSearch(query.trim());
+            else activateFilterSel();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            if (query) clearFilter();
+            else e.currentTarget.blur();
+          }
+        }}
+      />
+      {query ? (
+        <button className="sb-kbd" aria-label="Clear filter" onClick={clearFilter}>
+          esc
+        </button>
+      ) : (
+        <button
+          className="sb-kbd"
+          aria-label="Open search"
+          title="Search everything"
+          onClick={() => {
+            requestSearch();
+            closeSidebarOnMobile();
+          }}
+        >
+          {isMac ? "⌘K" : "Ctrl K"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* The project's nav as icon-only rail buttons, badges kept. */
+export function ProjectRailNav({ pid, menu }: { pid: string; menu: ProjectMenu }) {
+  const fresh = useActivityCount(pid);
+  return (
+    <>
+      {NAV.map(([key, label, icon]) => (
+        <RailButton
+          key={key}
+          id={"rail-" + key}
+          icon={icon}
+          label={label}
+          hint={key === "activity" && fresh ? countText(fresh) + " new" : undefined}
+          badge={key === "activity" && fresh ? countText(fresh) : undefined}
+          active={menu.active === key}
+          onClick={() => menu.onNav(key)}
+        />
+      ))}
+    </>
   );
 }

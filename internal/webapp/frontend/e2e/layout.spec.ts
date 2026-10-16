@@ -73,7 +73,7 @@ test("charts never scale past the size they were drawn at", async ({ page }) => 
   await page.setViewportSize({ width: 1600, height: 900 });
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`http://localhost:8993/${pid}/dashboard`);
+  await page.goto(`http://localhost:8993/${pid}/insights`);
   await page.waitForSelector(".in-chart");
   const worst = await page.evaluate(() => {
     let max = 0;
@@ -92,7 +92,7 @@ test("the gutter belongs to the scroll container, not the column", async ({ page
   // A markdown page used to carry the max-width on #content itself, so its
   // gutter came out of the reading measure and .md ran ~80px narrower than
   // every other page. The gutter must live on #content alone.
-  for (const path of ["/index.md", "/notes", "/history"]) {
+  for (const path of ["/index.md", "/notes", "/activity"]) {
     await page.goto(`http://localhost:8993/${pid}${path}`);
     await page.waitForSelector("#content > .page");
     const r = await page.evaluate(() => {
@@ -156,7 +156,7 @@ test("provenance survives to a phone on the file view and in History", async ({ 
     // loads and (before this fix) display:none below 900px.
     await expect(page.locator("#meta")).not.toBeEmpty();
     const meta = await page.locator("#meta").textContent();
-    await page.goto(`/${pid}/history`);
+    await page.goto(`/${pid}/activity`);
     await page.waitForSelector(".hrun-head");
     return {
       meta,

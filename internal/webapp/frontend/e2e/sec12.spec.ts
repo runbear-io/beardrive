@@ -149,9 +149,9 @@ test("TestSec_Router_APathNamedLikeAnObjectPrototypeMemberIsNotAViewRoute", asyn
   const pid = await wikiId(page);
 
   // Control: a real legacy view DOES normalize, so the mechanism is live.
-  await page.goto(`/${pid}/insights`);
+  await page.goto(`/${pid}/dashboard`);
   await alive(page, "/insights");
-  await expect(page).toHaveURL(new RegExp(`/${pid}/dashboard$`));
+  await expect(page).toHaveURL(new RegExp(`/${pid}/insights$`));
 
   for (const seg of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
     await page.goto(`/${pid}/${seg}`);
@@ -199,7 +199,7 @@ test("TestSec_Router_BackForwardAndReloadLandWhereTheLinkDid", async ({ page }) 
 
   await page.goto(`/${pid}/notes`);
   await alive(page, "/notes");
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
   await expect(page.locator("#content")).toBeVisible();
   const historyURL = page.url();
 

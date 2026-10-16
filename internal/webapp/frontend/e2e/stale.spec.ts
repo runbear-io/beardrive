@@ -69,7 +69,7 @@ test("the folder listing marks every flagged file and nothing else", async ({ pa
 test("the Dashboard still flags exactly that set — no threshold drift", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/dashboard`);
+  await page.goto(`/${pid}/insights`);
   await page.waitForSelector(".in-chart");
 
   const dots = page.locator(".in-pt.danger");
