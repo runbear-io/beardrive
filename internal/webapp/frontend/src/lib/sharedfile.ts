@@ -1,4 +1,5 @@
 import { CollabDoc, type CollabStatus } from "./collab";
+import { hasCollabRoute } from "./collabroute";
 import { textEdit } from "./diff";
 import { HttpError, putText } from "../api/http";
 import { conflictName } from "./conflict";
@@ -430,7 +431,20 @@ export function openSharedFile(opts: {
   collab.text.observe(onDocChange);
   const onPeerChange = () => opts.onPeers?.(collab.peerCount());
   collab.awareness.on("change", onPeerChange);
-  collab.connect();
+  /* Solo is decided once and kept: CollabDoc.stop() has already ended the
+     transport by the time onSolo runs, so `hubHoldsIt` can never flip under
+     a solo surface and every save from here on is this client's own,
+     If-Match and all. A server with no room route goes straight there; the
+     callback is deferred because the caller's own handle to this file is
+     not assigned until this returns. */
+  let gone = false;
+  if (hasCollabRoute(opts.apiBase)) collab.connect();
+  else
+    queueMicrotask(() => {
+      if (gone) return;
+      collab.stop();
+      opts.onSolo();
+    });
 
   // Whichever surface is live holds the truth: the CRDT when the relay
   // answered, the surface's own buffer when it never did.
@@ -559,6 +573,7 @@ export function openSharedFile(opts: {
     destroy() {
       if (timer) clearTimeout(timer);
       if (shrinkTimer) clearTimeout(shrinkTimer);
+      gone = true;
       // Closing the tab mid-word must not lose the word. For a live room
       // the hub has the word — it writes on last peer, and on the debounce
       // for everyone still there — and a parting write from here would be
