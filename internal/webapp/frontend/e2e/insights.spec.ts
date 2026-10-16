@@ -132,6 +132,12 @@ test("the lens applies to every section", async ({ page }) => {
   await expect(page.locator(".in-fix-row", { hasText: "retired-spec.md" })).toHaveCount(0); // agent-only reads
   await expect(sub).not.toHaveText(allSub!);
   await expect(page.locator(".in-cov-off")).toBeVisible();
+  // The table view is held to the same lens: no agent matrix behind it.
+  const cov = page.locator('[data-sec="coverage"]');
+  await cov.locator(".in-astable").click();
+  await expect(cov.locator(".in-table-wrap .in-cov-off")).toBeVisible();
+  await expect(cov.locator(".in-table-wrap table")).toHaveCount(0);
+  await cov.locator(".in-astable").click();
 
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   await expect(reads.locator('[data-kind="human"]')).toContainText("0 people");

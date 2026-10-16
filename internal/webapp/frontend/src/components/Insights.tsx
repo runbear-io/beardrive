@@ -1223,18 +1223,21 @@ function CoverageMatrix({ devices, lens }: { devices: DeviceHeat[]; lens: Lens }
       </tbody>
     </table>
   );
+  // The matrix counts agent reads only; under another lens neither the chart
+  // nor its table may show it.
+  const offNote = (
+    <p className="in-legend in-cov-off">
+      This matrix counts agent reads only — the {LENS_LABEL[lens]} lens has nothing to show here.
+    </p>
+  );
   return (
     <Frame
       id="coverage"
       title="Which agents read which folders"
       sub="Agent reads per device × top-level folder · folders sorted by total agent reads"
-      table={table}
+      table={offLens ? () => offNote : table}
     >
-      {offLens && (
-        <p className="in-legend in-cov-off">
-          This matrix counts agent reads only — the {LENS_LABEL[lens]} lens has nothing to show here.
-        </p>
-      )}
+      {offLens && offNote}
       {!offLens && (
         <div className="in-cov">
           <div className="in-matrix-wrap">
