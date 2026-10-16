@@ -192,3 +192,15 @@ export function sameName(heading: string, person: string): boolean {
   if (!h || !p) return false;
   return h === p || p.split(/[ @.]/)[0] === h;
 }
+
+/* Whether an edit made while the room is offline may go through. Only the
+   body of your own section is editable then: nobody else's section, not the
+   preamble, and nothing at all in a note with no section of yours — any of
+   those could be under someone else's live typing that this tab cannot see
+   until it reconnects. Ranges are [from, to] in the document before the
+   edit. */
+export function offlineEditable(secs: Section[], me: string, ranges: Array<[number, number]>): boolean {
+  const mine = secs.find((s) => sameName(s.name, me));
+  if (!mine) return false;
+  return ranges.every(([from, to]) => from >= mine.headingEnd && to <= mine.to);
+}

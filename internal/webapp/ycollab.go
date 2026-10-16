@@ -268,7 +268,8 @@ func spliceVia(transact func(func(*crdt.Transaction)), txt *crdt.YText, from, to
 // room's base to it. Without this the room keeps the text from before the
 // write, and its next snapshot either writes that back over it or, refused
 // for a stale base, parks a conflict copy. Reports whether a room took it;
-// no room means no document to keep in step.
+// no room means no document to keep in step. A version too large for a room
+// to hold ends the room instead.
 func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bool {
 	room := project + "/" + path
 	if _, _, ok := s.rooms().get(room); !ok {
@@ -276,6 +277,14 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 	}
 	body, cur, ok := s.roomBytes(room)
 	if !ok || cur != sha {
+		return false
+	}
+	if len(body) >= maxSeedBytes {
+		// Too large to hold, so not folded as a prefix: the room ends with no
+		// snapshot (dropped from the registry first, so the unload finds
+		// nothing to write), and a reconnect is refused by seedDoc.
+		s.rooms().drop(room)
+		_ = s.ydocs().CloseRoom(room, true)
 		return false
 	}
 	folded := false

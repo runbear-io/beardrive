@@ -17,7 +17,7 @@ import {
 import { codeFolding, foldEffect, foldedRanges, unfoldEffect } from "@codemirror/language";
 import { ySyncAnnotation } from "y-codemirror.next";
 import type { CollabDoc } from "./collab";
-import { personHue, sameName, sections, summary, type Section } from "./meeting";
+import { offlineEditable, personHue, sameName, sections, summary, type Section } from "./meeting";
 
 /* Per-person sections in a meeting note, inside CodeMirror.
 
@@ -263,17 +263,14 @@ export function meetingSections(o: MeetingOptions): Extension {
     },
   );
 
-  // Offline, only your own section takes typing. Remote updates carry no
-  // user event, so this never refuses what arrives from the hub.
+  // Offline, only your own section takes typing (offlineEditable). Remote
+  // updates carry no user event, so this never refuses what arrives from the
+  // hub.
   const guard = EditorState.transactionFilter.of((tr) => {
     if (!tr.docChanged || !tr.annotation(Transaction.userEvent) || !o.offline()) return tr;
-    const mine = sectionsOf(tr.startState).find((s) => sameName(s.name, o.me));
-    if (!mine) return tr;
-    let ok = true;
-    tr.changes.iterChangedRanges((fa, ta) => {
-      if (fa < mine.headingEnd || ta > mine.to) ok = false;
-    });
-    if (ok) return tr;
+    const ranges: Array<[number, number]> = [];
+    tr.changes.iterChangedRanges((fa, ta) => ranges.push([fa, ta]));
+    if (offlineEditable(sectionsOf(tr.startState), o.me, ranges)) return tr;
     o.onBlocked?.();
     return [];
   });

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   actionItems,
   isMeetingNote,
+  offlineEditable,
   itemsMarkdown,
   openItems,
   previousNote,
@@ -97,4 +98,19 @@ test("wordCount and sameName", () => {
   assert.equal(sameName("Liam", "Liam Hwang"), true);
   assert.equal(sameName("liam hwang", "Liam  Hwang"), true);
   assert.equal(sameName("Snow", "Liam"), false);
+});
+
+test("offline, only your own section is editable — and nothing when you have none", () => {
+  const note = "# Daily\nintro\n\n## Snow\n- shipped\n\n## Mino\n- reviewed\n";
+  const secs = sections(note);
+  const at = (needle: string): [number, number] => {
+    const i = note.indexOf(needle);
+    return [i, i + 1];
+  };
+  assert.equal(offlineEditable(secs, "Snow", [at("shipped")]), true);
+  assert.equal(offlineEditable(secs, "Snow", [at("reviewed")]), false);
+  assert.equal(offlineEditable(secs, "Snow", [at("intro")]), false);
+  // Only another attendee's section, none of mine: nothing is editable.
+  const only = "## Mino\n- reviewed\n";
+  assert.equal(offlineEditable(sections(only), "Snow", [[only.indexOf("reviewed"), only.indexOf("reviewed") + 1]]), false);
 });

@@ -174,6 +174,42 @@ test("edits made while the socket is down are marked pending, then land", async 
   await expect.poll(() => read(page, file), { timeout: 10_000 }).toBe("BASE queued\n");
 });
 
+test("offline, a meeting note with no section of yours takes no typing", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.addInitScript(() => {
+    window.__sockets = [];
+    const Orig = window.WebSocket;
+    window.WebSocket = new Proxy(Orig, {
+      construct(target, args: ConstructorParameters<typeof WebSocket>) {
+        const s = new target(...args);
+        window.__sockets.push(s);
+        return s;
+      },
+    });
+  });
+  await login(page, ADMIN);
+  const file = `daily-meetings/offline-${Date.now()}.md`;
+  const body = "## Mino\n- reviewed the queue\n";
+  await put(page, file, body);
+  await open(page, file);
+
+  await page.routeWebSocket(/ycollab/, (ws) => ws.close());
+  await page.evaluate(() => window.__sockets.filter((s) => s.url.includes("ycollab")).forEach((s) => s.close()));
+  await expect(page.locator("#editor-state")).toHaveAttribute("data-collab", "offline", { timeout: 10_000 });
+  await expect(page.locator("#ed-offline")).toContainText("Only your own section can be edited");
+
+  await page.locator(".cm-host .cm-line", { hasText: "reviewed the queue" }).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" EDITED");
+  expect(await editorText(page)).not.toContain("EDITED");
+  await expect(page.locator("#editor-state")).toHaveAttribute("data-pending", "0");
+
+  await page.unrouteAll({ behavior: "ignoreErrors" });
+  await expect(page.locator("#editor-state")).toHaveAttribute("data-collab", "live", { timeout: 20_000 });
+  await page.waitForTimeout(2_500);
+  expect(await read(page, file)).toBe(body);
+});
+
 test("a past version is restored in one click, as a new version", async ({ page }) => {
   test.setTimeout(60_000);
   await login(page, ADMIN);

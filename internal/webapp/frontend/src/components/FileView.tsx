@@ -523,7 +523,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           {pending > 0
             ? `Your ${pending} ${pending === 1 ? "edit is" : "edits are"} kept in this tab and will merge when you're back.`
             : "Edits you make are kept in this tab and merge when you're back."}
-          {meeting && " Other people's sections are read-only until then."}
+          {meeting && " Only your own section can be edited until then."}
         </div>
       )}
       {!visual && md && (

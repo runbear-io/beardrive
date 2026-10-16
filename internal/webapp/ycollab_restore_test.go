@@ -133,3 +133,31 @@ func TestRestoreIntoAReaderOnlyRoomAddsNoWriter(t *testing.T) {
 		t.Fatalf("file = %q", got)
 	}
 }
+
+// A version too large for a room to hold is never folded in as a prefix: the
+// room is ended without a snapshot, and the file stays the whole restored
+// blob however long the old room's document keeps changing.
+func TestRestoreTooLargeForARoomEndsItInstead(t *testing.T) {
+	fastRoom(t, 50*time.Millisecond, 500*time.Millisecond)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	big := strings.Repeat("x", maxSeedBytes+10)
+	putContent(t, h, up, big, "")
+	putContent(t, h, up, "small now\n", "")
+	room := p.ID + "/notes.md"
+	doc := liveRoom(t, srv, room, true)
+
+	if out := restoreVia(t, h, p.ID, "notes.md", shaOf(big)); out.Folded {
+		t.Fatal("a version too large to hold reported folded=true")
+	}
+	if strings.Contains(doc.GetText("body").ToString(), "xxxx") {
+		t.Fatal("a prefix of the restored version was folded into the room")
+	}
+	typeInto(doc, "late\n")
+	time.Sleep(500 * time.Millisecond)
+	if got := get(t, h, url).Body.String(); got != big {
+		t.Fatalf("the file after restore is %d bytes, want the whole restored %d", len(got), len(big))
+	}
+}
