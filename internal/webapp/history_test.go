@@ -850,3 +850,20 @@ func TestHistoryEntryPrev(t *testing.T) {
 		t.Errorf("first page = %+v", page)
 	}
 }
+
+// An inclusive `until` names the last nanosecond of a day, so an op late in
+// that day's final millisecond is still inside it and the next midnight is not.
+func TestHistoryUntilIsInclusiveToTheNanosecond(t *testing.T) {
+	end, ok := parseHistTime("2026-07-02T23:59:59.999999999Z", true)
+	if !ok {
+		t.Fatal("did not parse")
+	}
+	f := histFilter{until: end}
+	at := func(ts time.Time) sourcedOp { return sourcedOp{Op: journal.Op{Path: "a.md", Time: ts}} }
+	if !f.keep(at(time.Date(2026, 7, 2, 23, 59, 59, 999_500_000, time.UTC))) {
+		t.Error("an op in the day's final millisecond fell outside an inclusive until")
+	}
+	if f.keep(at(time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC))) {
+		t.Error("the next midnight fell inside an inclusive until")
+	}
+}

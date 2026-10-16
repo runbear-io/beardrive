@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   agentName,
   dateWindow,
+  lastNanoBefore,
   dayLabel,
   diffBase,
   historyApiQuery,
@@ -25,7 +26,7 @@ test("presets count whole local days back from today", () => {
 test("custom days are local and inclusive at both ends", () => {
   const w = dateWindow({ since: "2026-07-01", until: "2026-07-02" }, now);
   assert.equal(w.since!.getTime(), new Date(2026, 6, 1).getTime());
-  assert.equal(w.until!.getTime(), new Date(2026, 6, 3).getTime() - 1);
+  assert.equal(w.until!.getTime(), new Date(2026, 6, 3).getTime());
   assert.deepEqual(dateWindow({ since: "nope" }, now), {});
 });
 
@@ -65,4 +66,8 @@ test("a diff compares against an empty file only when there was no earlier versi
   assert.equal(diffBase("add", "abc"), "abc"); // re-added after a delete
   assert.equal(diffBase("edit", undefined), undefined);
   assert.equal(diffBase("delete", undefined), undefined);
+});
+
+test("until names the last nanosecond of the day, not the last millisecond", () => {
+  assert.equal(lastNanoBefore(new Date("2026-07-03T00:00:00.000Z")), "2026-07-02T23:59:59.999999999Z");
 });
