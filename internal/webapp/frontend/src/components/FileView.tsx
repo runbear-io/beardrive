@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { FrontmatterPair, HeatMap, Node, RenderDoc } from "../api/types";
@@ -26,9 +26,13 @@ import { useTheme } from "../lib/theme";
 import { secretsBadge, type SecretFinding } from "../lib/secrets";
 import { Icon } from "./shell";
 import { toast } from "../toast";
-import { Editor, type SaveState } from "./Editor";
-import { VisualEdit } from "./VisualEdit";
+import type { SaveState } from "./Editor";
 import type { CollabStatus } from "../lib/collab";
+
+// The editors carry CodeMirror, TipTap/ProseMirror and the Yjs collaboration
+// stack, none of which a reader needs, so they load when someone edits.
+const Editor = lazy(() => import("./Editor").then((m) => ({ default: m.Editor })));
+const VisualEdit = lazy(() => import("./VisualEdit").then((m) => ({ default: m.VisualEdit })));
 
 export function FileView(props: {
   apiBase: string;
@@ -421,55 +425,57 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           unchanged — saving keeps your version and theirs stays in history.
         </div>
       )}
-      {visual ? (
-        /* HTML gets the rendered page, clicked directly. Same file, same
-           shared document, same save — a different surface onto it. Source
-           editing stays one click away for the structural work this cannot
-           express (Browser.tsx's "Edit source"). */
-        <VisualEdit
-          apiBase={apiBase}
-          fileURL={fileURL}
-          path={path}
-          initial={data.text}
-          baseSha={data.sha}
-          onConflictCopy={onConflictCopy}
-          onWriting={() => {
-            mine.current++;
-          }}
-          onStateChange={setState}
-          onCollab={setCollab}
-          onPeers={(n) => {
-            peers.current = n;
-          }}
-          me={props.me}
-          onRendered={props.onRendered}
-        />
-      ) : (
-        <Editor
-          apiBase={apiBase}
-          path={path}
-          initial={data.text}
-          baseSha={data.sha}
-          onConflictCopy={onConflictCopy}
-          /* Someone wrote the file while it was open here. Merged, it is
-             already on screen and only worth a word; refused, it is the
-             banner — and either way this is the only thing that raises or
-             clears it for this surface. */
-          onExternal={(r) => {
-            setPeerWrote(r === "blocked");
-            if (r === "merged") toast("Folded in a change from outside this editor.");
-          }}
-          onWriting={() => {
-            mine.current++;
-          }}
-          onStateChange={setState}
-          onCollab={setCollab}
-          onPeers={(n) => {
-            peers.current = n;
-          }}
-          me={props.me}
-        />
-      )}
+      <Suspense fallback={<div className="empty">Loading editor…</div>}>
+        {visual ? (
+          /* HTML gets the rendered page, clicked directly. Same file, same
+             shared document, same save — a different surface onto it. Source
+             editing stays one click away for the structural work this cannot
+             express (Browser.tsx's "Edit source"). */
+          <VisualEdit
+            apiBase={apiBase}
+            fileURL={fileURL}
+            path={path}
+            initial={data.text}
+            baseSha={data.sha}
+            onConflictCopy={onConflictCopy}
+            onWriting={() => {
+              mine.current++;
+            }}
+            onStateChange={setState}
+            onCollab={setCollab}
+            onPeers={(n) => {
+              peers.current = n;
+            }}
+            me={props.me}
+            onRendered={props.onRendered}
+          />
+        ) : (
+          <Editor
+            apiBase={apiBase}
+            path={path}
+            initial={data.text}
+            baseSha={data.sha}
+            onConflictCopy={onConflictCopy}
+            /* Someone wrote the file while it was open here. Merged, it is
+               already on screen and only worth a word; refused, it is the
+               banner — and either way this is the only thing that raises or
+               clears it for this surface. */
+            onExternal={(r) => {
+              setPeerWrote(r === "blocked");
+              if (r === "merged") toast("Folded in a change from outside this editor.");
+            }}
+            onWriting={() => {
+              mine.current++;
+            }}
+            onStateChange={setState}
+            onCollab={setCollab}
+            onPeers={(n) => {
+              peers.current = n;
+            }}
+            me={props.me}
+          />
+        )}
+      </Suspense>
     </>
   );
 }
