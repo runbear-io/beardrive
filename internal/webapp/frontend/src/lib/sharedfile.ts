@@ -154,6 +154,7 @@ export function openSharedFile(opts: {
         setState("error");
         opts.onShrinkRefused?.(async () => {
           setState("saving");
+          opts.onWriting?.();
           try {
             const out = await putText(contentURL(opts.path), text, base, true);
             saved = text;

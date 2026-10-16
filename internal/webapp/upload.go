@@ -481,15 +481,15 @@ func (s *Server) headFile(ctx context.Context, v *volume, p string) (FileInfo, b
 	return fi, ok
 }
 
-/* An editor save that empties a file, or keeps less than a fifth of it, is
-   refused unless the client confirms it.
-
-   An editor that attaches before its document has content holds an empty
-   buffer that looks clean, and its next save writes 0 bytes over the file.
-   No conflict check catches that: the base is right, only the text is
-   missing. Applied to conditional (If-Match) writes only — editors and the
-   hub's own room snapshots — so an upload that replaces a file wholesale is
-   untouched. Small files are exempt from the ratio, not from emptying. */
+// An editor save that empties a file, or keeps less than a fifth of it, is
+// refused unless the client confirms it.
+//
+// An editor that attaches before its document has content holds an empty
+// buffer that looks clean, and its next save writes 0 bytes over the file. No
+// conflict check catches that: the base is right, only the text is missing.
+// Applied to conditional (If-Match) writes only — editors and the hub's own
+// room snapshots — so an upload that replaces a file wholesale is untouched.
+// Small files are exempt from the ratio, not from emptying.
 const (
 	confirmShrinkHeader = "X-Bdrive-Confirm-Shrink"
 	shrinkRatioFloor    = 256
