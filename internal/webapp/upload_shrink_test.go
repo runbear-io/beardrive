@@ -3,10 +3,13 @@ package webapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 )
@@ -152,5 +155,77 @@ func TestFinalSnapshotParksARefusedShrink(t *testing.T) {
 	}
 	if n := conflicts(); n != 1 {
 		t.Fatalf("conflict copies after the room emptied = %d, want 1", n)
+	}
+}
+
+// failingQuota admits `skip` writes, then refuses the next n, standing in for
+// a store that goes briefly down.
+type failingQuota struct {
+	UnlimitedQuota
+	mu      sync.Mutex
+	skip, n int
+}
+
+func (q *failingQuota) CheckWrite(string, int64) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.skip > 0 {
+		q.skip--
+		return nil
+	}
+	if q.n > 0 {
+		q.n--
+		return errors.New("store unavailable")
+	}
+	return nil
+}
+
+// The room is gone by the time a failed copy could be retried, so the retry
+// cannot depend on it.
+func TestRefusedShrinkCopyIsRetriedAfterTheRoomCloses(t *testing.T) {
+	old := parkBackoff
+	parkBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { parkBackoff = old })
+
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	room := p.ID + "/notes.md"
+	full := strings.Repeat("a standup line\n", 100)
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", full, "")
+	doc := crdt.New()
+	if err := srv.seedDoc(room, doc); err != nil {
+		t.Fatal(err)
+	}
+	srv.rooms().load(room, doc)
+	srv.rooms().writer(room, User{Email: "editor@example.com", Name: "An Editor"})
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Delete(txn, 0, txt.Len()) })
+
+	// The snapshot itself gets through to its 422; every write after it fails
+	// until the copy has been refused more than once.
+	srv.Quota = &failingQuota{skip: 1, n: 3}
+	srv.finalSnapshot(context.Background(), room)
+	srv.finalSnapshot(context.Background(), room)
+	srv.rooms().drop(room)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var out struct {
+			Entries []struct{ Path string } `json:"entries"`
+		}
+		_ = json.Unmarshal(get(t, h, "/api/p/"+p.ID+"/history?n=50").Body.Bytes(), &out)
+		n := 0
+		for _, e := range out.Entries {
+			if strings.HasPrefix(e.Path, "notes.md.bdrive-conflict-") {
+				n++
+			}
+		}
+		if n == 1 {
+			return
+		}
+		if n > 1 || time.Now().After(deadline) {
+			t.Fatalf("conflict copies = %d, want exactly 1 after retries", n)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

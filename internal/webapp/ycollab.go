@@ -421,14 +421,49 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 			log.Printf("bdrive: not snapshotting %s: the room's text would empty or sharply shrink it", path)
 			return
 		}
-		copy := conflictPath(path, who, time.Now())
-		if cw := s.putAs(ctx, who, project, copy, text, ""); cw.code != http.StatusOK {
-			log.Printf("bdrive: %s: could not park the room's refused text as %s (%d); the file is unchanged", path, copy, cw.code)
-			return
-		}
+		// Marked before the write: parkCopy owns this text from here,
+		// retrying past the room's lifetime, so the second final snapshot
+		// must not start another.
 		s.rooms().park(room, text)
-		log.Printf("bdrive: %s: the room's text would empty or sharply shrink it; parked beside it as %s", path, copy)
+		copy := conflictPath(path, who, time.Now())
+		s.parkCopy(who, project, path, copy, text)
+		return
 	}
+}
+
+// Retry schedule for a refused room's conflict copy. Vars so a test need not
+// wait out real backoff.
+var (
+	parkRetries = 20
+	parkBackoff = 30 * time.Second
+)
+
+// parkCopy writes a room's refused text beside its file, retrying a failing
+// store in the background well past the room's eviction: once the room is
+// gone this text exists nowhere else. Held in memory only, so a hub restart
+// mid-retry loses it.
+func (s *Server) parkCopy(who User, project, path, copy, text string) {
+	try := func() bool {
+		cw := s.putAs(context.Background(), who, project, copy, text, "")
+		if cw.code == http.StatusOK {
+			log.Printf("bdrive: %s: the room's text would empty or sharply shrink it; parked beside it as %s", path, copy)
+			return true
+		}
+		log.Printf("bdrive: %s: could not park the room's refused text as %s (%d)", path, copy, cw.code)
+		return false
+	}
+	if try() {
+		return
+	}
+	go func() {
+		for i := 1; i < parkRetries; i++ {
+			time.Sleep(parkBackoff)
+			if try() {
+				return
+			}
+		}
+		log.Printf("bdrive: %s: gave up parking the room's refused text (%d bytes) after %d tries", path, len(text), parkRetries)
+	}()
 }
 
 // putAs writes one path through the ordinary upload door as a human, with
