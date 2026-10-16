@@ -86,7 +86,7 @@ export function Home(props: {
 
   const fresh = useMemo(() => recent.data?.entries || [], [recent.data]);
   const entries = useMemo(() => mergeEntries(fresh, hist.data?.entries || []), [fresh, hist.data]);
-  const summary = useMemo(() => sinceSummary(fresh, since, fresh.length >= ACTIVITY_CAP), [fresh, since]);
+  const summary = useMemo(() => sinceSummary(fresh, fresh.length >= ACTIVITY_CAP), [fresh]);
   const devices = useMemo(() => devicesFrom(entries, me?.email), [entries, me?.email]);
   const fileSet = useMemo(() => new Set(flatFiles.map((f) => f.path)), [flatFiles]);
   const jump = useMemo(() => recents.filter((r) => fileSet.has(r.path)).slice(0, 4), [recents, fileSet]);

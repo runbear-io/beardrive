@@ -16,16 +16,20 @@ test("greeting uses the first name and the hour", () => {
   assert.equal(greeting("", new Date(2026, 0, 1, 14)), "Good afternoon");
 });
 
-test("since summary stops at the baseline and counts agents", () => {
+test("since summary counts the server-filtered page, including same-second changes", () => {
   const list = [
     e("2026-10-16T10:00:00Z", "a.md", "d1", { session: "s", note: "claude-code session s" }),
     e("2026-10-16T09:00:00Z", "a.md", "d2"),
-    e("2026-10-16T08:00:00Z", "b.md", "d2"),
-    e("2026-10-15T08:00:00Z", "c.md", "d2"),
+    e("2026-10-16T09:00:00Z", "b.md", "d2"),
   ];
-  const s = sinceSummary(list, Date.parse("2026-10-16T07:00:00Z"), true);
-  assert.deepEqual(s, { changes: 3, files: 2, agent: 1, capped: false });
-  assert.equal(sinceSummary(list.slice(0, 2), 0, true).capped, true);
+  assert.deepEqual(sinceSummary(list, false), { changes: 3, files: 2, agent: 1, capped: false });
+  assert.equal(sinceSummary(list, true).capped, true);
+});
+
+test("merge keeps two same-second edits of one path from one device", () => {
+  const a = e("2026-10-16T09:00:00Z", "a.md", "d1", { seq: 7 });
+  const b = e("2026-10-16T09:00:00Z", "a.md", "d1", { seq: 8 });
+  assert.equal(mergeEntries([a, b], [a]).length, 2);
 });
 
 test("devices: newest first, agent from the newest stamped change, you marked", () => {

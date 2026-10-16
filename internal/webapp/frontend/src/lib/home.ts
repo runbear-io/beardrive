@@ -17,24 +17,28 @@ export function greeting(name: string | undefined, now = new Date()): string {
 
 export type SinceSummary = { changes: number; files: number; agent: number; capped: boolean };
 
-// What changed after `since`, from a newest-first page of history. `capped`
-// says the page ended before reaching the baseline, so the counts are floors.
-export function sinceSummary(entries: HistoryEntry[], since: number, pageFull: boolean): SinceSummary {
+// What changed since the last visit, from a page the server already filtered
+// with ?since= — re-checking here would compare whole-second times against a
+// millisecond baseline and drop changes made in that second. `capped` says
+// the page was full, so the counts are floors.
+export function sinceSummary(entries: HistoryEntry[], pageFull: boolean): SinceSummary {
   const files = new Set<string>();
   let changes = 0;
   let agent = 0;
   for (const e of entries) {
-    if (Date.parse(e.time) <= since) break;
     changes++;
     files.add(e.path);
     if (isAgent(e)) agent++;
   }
-  return { changes, files: files.size, agent, capped: pageFull && changes === entries.length };
+  return { changes, files: files.size, agent, capped: pageFull };
 }
 
 // Two newest-first pages as one, each change once.
 export function mergeEntries(a: HistoryEntry[], b: HistoryEntry[]): HistoryEntry[] {
-  const key = (e: HistoryEntry) => e.time + "\0" + e.path + "\0" + e.kind + "\0" + (e.device?.id ?? "");
+  // device + seq is one op; the fallback (an older hub with no seq) can merge
+  // two same-second edits of one path from one device.
+  const key = (e: HistoryEntry) =>
+    e.seq ? (e.device?.id ?? "") + "\0" + e.seq : e.time + "\0" + e.path + "\0" + e.kind + "\0" + (e.device?.id ?? "");
   const seen = new Set<string>();
   const out: HistoryEntry[] = [];
   for (const e of [...a, ...b]) {
