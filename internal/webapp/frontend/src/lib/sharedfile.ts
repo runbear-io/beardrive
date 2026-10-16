@@ -152,15 +152,18 @@ export function openSharedFile(opts: {
     } catch (e) {
       if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
         setState("error");
+        // The user may keep typing while the warning is open, so the
+        // confirmation writes the document as it stands when clicked.
         opts.onShrinkRefused?.(async () => {
+          const now = current();
           setState("saving");
           opts.onWriting?.();
           try {
-            const out = await putText(contentURL(opts.path), text, base, true);
-            saved = text;
+            const out = await putText(contentURL(opts.path), now, base, true);
+            saved = now;
             if (out.sha) base = out.sha;
             setState("clean");
-            opts.onSaved?.(text);
+            opts.onSaved?.(now);
           } catch {
             setState("error");
           }
