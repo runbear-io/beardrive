@@ -1045,7 +1045,14 @@ export default function Browser(props: {
   const crumb = panel ? (
     panel.crumb
   ) : path ? (
-    <Breadcrumbs path={path} onOpenFolder={openPath} />
+    <>
+      <Breadcrumbs path={path} onOpenFolder={openPath} />
+      {hub && isFile && !version && !editing && (
+        <span className="sync-pill" title="This file is on the hub and syncing to every device">
+          Synced
+        </span>
+      )}
+    </>
   ) : route.view === "dashboard" ? (
     "Insights — " + (route.viewTarget || project?.name || "")
   ) : route.view === "history" ? (
@@ -1075,6 +1082,25 @@ export default function Browser(props: {
       actions={
         <>
           <PresenceBar people={people} path={path} />
+          {commentsOn && (
+            <Button
+              id="comments-btn"
+              variant="toolbar"
+              className="ghost"
+              title={openThreads ? `${openThreads} open comment${openThreads === 1 ? "" : "s"}` : "Comments"}
+              aria-label="Comments"
+              aria-pressed={commentsOpen}
+              onClick={() => setCommentsOpen((o) => !o)}
+            >
+              <Icon name="comment" /> <span className="lbl">Comments</span>
+              {openThreads > 0 && <span className="cm-count">{openThreads}</span>}
+            </Button>
+          )}
+          {canHistory && (isFile || (!path && !route.view)) && (
+            <Button id="history-btn" variant="toolbar" className="ghost" onClick={historyNow}>
+              <Icon name="hist" /> <span className="lbl">History</span>
+            </Button>
+          )}
           {canEdit && (
             <Button
               id="edit-btn"
@@ -1084,7 +1110,7 @@ export default function Browser(props: {
                 navigate(urlForPath(path, project?.id, version, route.full, !editing))
               }
             >
-              {editing ? "Done" : "Edit"}
+              {!editing && <Icon name="pencil" />} <span className="lbl-keep">{editing ? "Done" : "Edit"}</span>
             </Button>
           )}
           {/* The escape hatch, offered only while actually editing an HTML
@@ -1105,23 +1131,10 @@ export default function Browser(props: {
               {editSource ? "Edit page" : "Edit source"}
             </Button>
           )}
-          {commentsOn && (
-            <Button
-              id="comments-btn"
-              variant="toolbar"
-              className={openThreads ? undefined : "icon-only"}
-              title={openThreads ? `${openThreads} open comment${openThreads === 1 ? "" : "s"}` : "Comments"}
-              aria-label="Comments"
-              aria-pressed={commentsOpen}
-              onClick={() => setCommentsOpen((o) => !o)}
-            >
-              <Icon name="comment" />
-              {openThreads > 0 && <span className="cm-count">{openThreads}</span>}
-            </Button>
-          )}
+          {/* The one primary action on the page. */}
           {canShare && (
-            <Button id="share-btn" variant="toolbar" className="icon-only" title="Share" aria-label="Share" onClick={shareNow}>
-              <Icon name="share" />
+            <Button id="share-btn" variant="primary" title="Share" aria-label="Share" onClick={shareNow}>
+              <Icon name="link" /> <span className="lbl">Share</span>
             </Button>
           )}
           {canFull && (
@@ -1135,11 +1148,6 @@ export default function Browser(props: {
               onClick={enterFull}
             >
               <Icon name="expand" />
-            </Button>
-          )}
-          {canHistory && !path && !route.view && (
-            <Button id="history-btn" variant="toolbar" onClick={historyNow}>
-              <Icon name="hist" /> <span className="lbl">History</span>
             </Button>
           )}
           {canDownload && (

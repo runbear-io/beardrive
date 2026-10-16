@@ -69,6 +69,11 @@ import {
   Plug,
   Wrench,
   X,
+  Pencil,
+  Eye,
+  Tag,
+  CornerUpLeft,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 
@@ -253,6 +258,12 @@ const ICONS: Record<string, LucideIcon> = {
   upload: Upload,
   users: Users,
   x: X,
+  pencil: Pencil,
+  eye: Eye,
+  tag: Tag,
+  jump: CornerUpLeft,
+  sparkle: Sparkles,
+  calendar: Calendar,
 };
 
 export function Icon({ name }: { name: string }) {

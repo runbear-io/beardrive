@@ -6,7 +6,9 @@ import { login, wikiId } from "./helpers";
    fullscreen, and a reload is the reset. Seeded files only — an upload here
    would journal ops other specs count. */
 
-test.use({ viewport: { width: 1600, height: 900 } });
+// Wide enough that the file rail beside the prose leaves room for a 968px
+// column: the handles never drag the prose under the rail.
+test.use({ viewport: { width: 1700, height: 900 } });
 
 const colWidth = async (page: Page) => (await page.locator("#content > .page").boundingBox())!.width;
 
