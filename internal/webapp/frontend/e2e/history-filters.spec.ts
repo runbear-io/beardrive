@@ -163,14 +163,13 @@ test("a filter change shows a loading row, never a premature 'no matches'", asyn
   await page.fill(".hfilters input[type=search]", "runbook");
   await page.waitForURL(`/${pid}/activity?q=runbook`);
 
-  const empty = page.locator(".history .empty");
-  await expect(empty).toHaveText("Loading…");
+  await expect(page.locator(".history .hskel")).toBeVisible();
   await expect(page.locator(".history .empty", { hasText: "No changes match these filters." })).toHaveCount(0);
   // and the bar is still there, still holding what was typed
   await expect(page.locator(".hfilters input[type=search]")).toHaveValue("runbook");
 
   // …then the rows land and the loading row goes away.
   await expect(page.locator(rows).first()).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator(".history .empty")).toHaveCount(0);
+  await expect(page.locator(".history .hskel")).toHaveCount(0);
   await page.unroute(stall);
 });

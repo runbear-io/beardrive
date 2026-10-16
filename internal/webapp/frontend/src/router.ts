@@ -83,10 +83,13 @@ export type ViewName = "dashboard" | "history" | "install" | "settings";
 export interface HistoryFilters {
   q?: string; // substring of the path
   user?: string; // exact account
-  since?: string; // YYYY-MM-DD (UTC), inclusive
-  until?: string; // YYYY-MM-DD (UTC), inclusive
+  actor?: string; // agent | human
+  device?: string; // device id
+  range?: string; // a date preset: today | 7d | 30d
+  since?: string; // YYYY-MM-DD in the reader's zone, inclusive
+  until?: string; // YYYY-MM-DD in the reader's zone, inclusive
 }
-export const HISTORY_FILTER_KEYS = ["q", "user", "since", "until"] as const;
+export const HISTORY_FILTER_KEYS = ["q", "user", "actor", "device", "range", "since", "until"] as const;
 
 export function hasHistoryFilters(f?: HistoryFilters): boolean {
   return !!f && HISTORY_FILTER_KEYS.some((k) => !!f[k]);
