@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -64,6 +65,7 @@ func (s *Server) ydocs() *ygows.Server {
 		srv.OnLoadDocument = func(_ context.Context, room string, doc *crdt.Doc) error {
 			s.rooms().load(room, doc)
 			if err := s.seedDoc(room, doc); err != nil {
+				s.rooms().drop(room)
 				return err
 			}
 			// AFTER the seed, so the bytes the document was built from are
@@ -160,6 +162,9 @@ func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
 	body, sha, ok := s.roomBytes(room)
 	if !ok || len(body) == 0 {
 		return nil // a file that does not exist yet starts empty
+	}
+	if len(body) >= maxSeedBytes {
+		return fmt.Errorf("%s is too large to co-edit", room) // a truncated seed would be written back over the rest
 	}
 	project, _, _ := strings.Cut(room, "/")
 	prev := s.rooms().base(room) // what the last room for this file wrote, if any
@@ -287,6 +292,33 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 		s.storeRoomHistory(project, sha, doc.EncodeStateAsUpdate())
 	}
 	return true
+}
+
+// adoptRoomWrite moves a live room's base to a write that spells exactly the
+// room's document — an editor in the room confirming a shrink the hub would
+// not make on its own. The room already holds that text, so its next
+// snapshot must build on this version rather than be refused for a stale
+// base and parked as a conflict copy. A write that differs from the
+// document is an outsider's and leaves the room alone.
+func (s *Server) adoptRoomWrite(project, path, sha string, body io.ReadSeeker) {
+	room := project + "/" + path
+	doc, _, ok := s.rooms().get(room)
+	if !ok || sha == "" {
+		return
+	}
+	if _, err := body.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+	written, err := io.ReadAll(io.LimitReader(body, maxSeedBytes+1))
+	if err != nil {
+		return
+	}
+	state := doc.EncodeStateAsUpdate()
+	if text, ok := replayed(state); !ok || text != string(written) {
+		return
+	}
+	s.rooms().rebase(room, sha)
+	s.storeRoomHistory(project, sha, state)
 }
 
 // A room's history lives in the project's own storage as ydoc/<sha>: the

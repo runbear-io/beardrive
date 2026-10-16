@@ -84,6 +84,59 @@ test("emptying a live room asks first, and Keep puts the saved text back", async
   await expect.poll(() => read(page, file), { timeout: 10_000 }).toBe("short");
 });
 
+test("Keep in a live room leaves the editor saved, and later typing still saves", async ({ page }) => {
+  test.setTimeout(60_000);
+  await login(page, ADMIN);
+  const file = `keep-state-${Date.now()}.md`;
+  const body = "## Snow\n" + "- shipped the thing\n".repeat(40);
+  expect((await put(page, file, body)).ok()).toBeTruthy();
+  await open(page, file);
+  const state = page.locator("#editor-state");
+
+  await page.locator(".cm-host .cm-content").click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.press("Delete");
+  await expect(page.locator("#shrink-dialog")).toBeVisible({ timeout: 10_000 });
+  await page.locator("#shrink-keep").click();
+  await expect(page.locator("#shrink-dialog")).toBeHidden();
+  await expect.poll(() => editorText(page)).toContain("shipped the thing");
+  await expect(state).toHaveAttribute("data-state", "clean");
+  await page.waitForTimeout(3_000);
+  await expect(state).toHaveAttribute("data-state", "clean");
+  expect(await read(page, file)).toBe(body);
+
+  await page.locator(".cm-host .cm-line").first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" today");
+  await expect(state).toHaveAttribute("data-state", "dirty");
+  await expect.poll(() => read(page, file), { timeout: 10_000 }).toBe(body.replace("## Snow", "## Snow today"));
+  await expect(state).toHaveAttribute("data-state", "clean", { timeout: 10_000 });
+});
+
+test("Save anyway in a live room, then typing, writes both — no conflict copy", async ({ page }) => {
+  test.setTimeout(60_000);
+  await login(page, ADMIN);
+  const file = `confirm-then-type-${Date.now()}.md`;
+  const body = "## Snow\n" + "- shipped the thing\n".repeat(40);
+  expect((await put(page, file, body)).ok()).toBeTruthy();
+  await open(page, file);
+
+  await page.locator(".cm-host .cm-content").click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("short");
+  await expect(page.locator("#shrink-dialog")).toBeVisible({ timeout: 10_000 });
+  await page.locator("#shrink-confirm").click();
+  await expect(page.locator("#shrink-dialog")).toBeHidden();
+  await expect.poll(() => read(page, file), { timeout: 10_000 }).toBe("short");
+
+  await page.locator(".cm-host .cm-line").first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" and more");
+  await expect.poll(() => read(page, file), { timeout: 15_000 }).toBe("short and more");
+  const tree = await (await page.request.get(`/api/p/${projectId}/tree?slim=1`)).text();
+  expect(tree).not.toContain(file + ".bdrive-conflict-");
+});
+
 test("edits made while the socket is down are marked pending, then land", async ({ page }) => {
   test.setTimeout(60_000);
   await page.addInitScript(() => {
