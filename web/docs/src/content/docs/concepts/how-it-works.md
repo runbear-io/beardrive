@@ -72,10 +72,11 @@ worker goroutine, with its own `daemon.lock`, `daemon.pid`, and `daemon.log`
 under `~/.bdrive/volumes/<volume-id>/`. These two lock levels are the
 Dual-Lock scheme. `$BDRIVE_HOME` relocates both sets of files.
 
-Each worker scans its enrolled worktree folders every few seconds and
-exchanges with the remote every ~10s, or immediately after local edits.
-Tune the intervals with `--scan-interval` and `--remote-interval` on
-`bdrive daemon run` (`init` uses the defaults).
+Each worker watches its enrolled worktree folders on macOS and Linux and
+uses a one-minute safety scan. A watcher error falls back to the polling
+interval; other platforms use polling directly. Local edits wake a scan, and
+remote exchange still follows `--remote-interval` unless a local edit or
+remote event brings it forward.
 
 Workers re-read `.bdrive/config.json` each tick. If a folder vanishes because
 it was moved, renamed, or deleted, its worker promotes a surviving sibling
