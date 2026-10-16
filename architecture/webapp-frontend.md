@@ -103,8 +103,11 @@ classDiagram
         +getJSON / postJSON / api
         +getResponse (raw bytes)
         +PRODUCT_EVENTS method+path → event
+        +prefetchForURL(queryClient, url)
+        +bootRequests(route, isMarkdown)
         types.ts server contracts
     }
+    note for api "api/prefetch.ts — main.tsx calls prefetchForURL before React mounts: the requests a URL alone determines (projects, orgs, tree, heat, and render + comments for a markdown read) start under the SAME query keys the hooks use, so a mounting hook joins the request in flight. Config is deliberately excluded (its queryFn owns the signed-out redirect), and a prefetch never navigates — a failure is cached as an error the hook refetches through getJSON. bootRequests.ts is the import-free URL→requests mapping, so the node test runner can pin it"
     note for api "api/http.ts — all URLs root-absolute so deep paths never break relative resolution. Every mutating call goes through api()/postJSON(), so one table there is the whole product-event surface: a new write is measured or it isn't, instead of depending on someone remembering a capture() call"
 
     class analytics {
@@ -199,7 +202,7 @@ classDiagram
     Browser --> router
     Browser --> lib : parseConflict
     Browser --> components
-    components --> lib : openSharedFile (Editor and VisualEdit share one room)
+    components --> lib : openSharedFile (Editor and VisualEdit share one room; both React.lazy chunks)
     HubApp --> components
     components --> nav : linkProps navigate
     components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid parseConflict secretsBadge scoreLabel
@@ -212,6 +215,7 @@ classDiagram
     components --> lib : rangeFor describe hitTest (Comments)
     components ..> inlineComment : postMessage via the ?comment=1 iframe
     hooks --> api
+    App --> api : main.tsx prefetchForURL (same query keys as hooks)
     Browser --> hooks : useTree useHeat useShares useProjectEvents useComments, fetchBlobText + fileURLFor (Copy)
     HubApp --> hooks
     HubApp --> Setup : desktop mode only, /setup/* frames
