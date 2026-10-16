@@ -672,3 +672,111 @@ func TestStoreObservesDevices(t *testing.T) {
 		t.Fatalf("observed = %+v %v", d, ok)
 	}
 }
+
+// setSession stamps the last op in dev's journal with an agent session, as
+// the agent sync hook does.
+func (f *fakeRemote) setSession(dev, session string) {
+	f.t.Helper()
+	p := filepath.Join(f.dir, "journal", dev+".jsonl")
+	ops, err := journal.ReadFile(p)
+	if err != nil || len(ops) == 0 {
+		f.t.Fatal(err)
+	}
+	ops[len(ops)-1].Session = session
+	data, err := journal.Marshal(ops)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	writeFileT(f.t, p, data)
+}
+
+// ?actor= splits on the hook-set session, never the note; ?device= on the
+// journal the op came from.
+func TestHistoryActorAndDeviceFilters(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	day := func(d int) time.Time { return time.Date(2026, 7, d, 12, 0, 0, 0, time.UTC) }
+	f.putFull("dev1", "mira@acme.io", "a.md", "a", day(1))
+	f.setSession("dev1", "s1")
+	f.putFull("dev1", "mira@acme.io", "b.md", "b", day(2))
+	f.putFull("dev2", "ken@acme.io", "c.md", "c", day(3))
+	h, base := srv.Handler(), "/api/p/"+p.ID+"/"
+	for _, c := range []struct {
+		q    string
+		want []string
+	}{
+		{"actor=agent", []string{"a.md"}},
+		{"actor=human", []string{"c.md", "b.md"}},
+		{"device=dev1", []string{"b.md", "a.md"}},
+		{"device=dev2&actor=agent", []string{}},
+		{"device=nope", []string{}},
+	} {
+		if got, _ := histPaths(t, h, base+"history?"+c.q); !slices.Equal(got, c.want) {
+			t.Errorf("?%s = %v, want %v", c.q, got, c.want)
+		}
+	}
+	if rec := do(t, h, "GET", base+"history?actor=robot", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("?actor=robot = %d, want 400", rec.Code)
+	}
+}
+
+// The summary counts the last N calendar days in the reader's zone, split
+// agent/human, and honours the same filters as the feed.
+func TestHistorySummary(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	loc := time.FixedZone("", 9*3600)
+	now := time.Now().In(loc)
+	y, m, d := now.Date()
+	at := func(daysAgo, hour int) time.Time {
+		return time.Date(y, m, d-daysAgo, hour, 0, 0, 0, loc)
+	}
+	// 00:30 local today is still yesterday in UTC: the zone decides the bar.
+	f.putFull("dev1", "mira@acme.io", "a.md", "a", time.Date(y, m, d, 0, 30, 0, 0, loc))
+	f.setSession("dev1", "s1")
+	f.putFull("dev1", "mira@acme.io", "b.md", "b", at(1, 10))
+	f.putFull("dev2", "ken@acme.io", "docs/c.md", "c", at(6, 10))
+	f.putFull("dev2", "ken@acme.io", "docs/old.md", "o", at(7, 10)) // outside 7 days
+	h, base := srv.Handler(), "/api/p/"+p.ID+"/"
+
+	type sum struct {
+		Total, Agent, Human, Devices int
+		Days                         []histDay
+	}
+	get := func(q string) sum {
+		t.Helper()
+		rec := do(t, h, "GET", base+"history/summary?"+q, nil)
+		if rec.Code != 200 {
+			t.Fatalf("summary ?%s: %d %s", q, rec.Code, rec.Body)
+		}
+		var s sum
+		if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	s := get("offset=540")
+	if s.Total != 3 || s.Agent != 1 || s.Human != 2 || s.Devices != 2 || len(s.Days) != 7 {
+		t.Fatalf("summary = %+v", s)
+	}
+	if last := s.Days[6]; last.Date != now.Format("2006-01-02") || last.Agent != 1 || last.Human != 0 {
+		t.Errorf("today = %+v", last)
+	}
+	if s.Days[0].Human != 1 {
+		t.Errorf("six days ago = %+v", s.Days[0])
+	}
+	if s := get("offset=540&days=8"); s.Total != 4 || len(s.Days) != 8 {
+		t.Errorf("days=8 = %+v", s)
+	}
+	if s := get("offset=540&prefix=docs/"); s.Total != 1 {
+		t.Errorf("prefix = %+v", s)
+	}
+	if s := get("offset=540&actor=agent"); s.Total != 1 || s.Human != 0 {
+		t.Errorf("actor = %+v", s)
+	}
+	for _, q := range []string{"days=0", "days=32", "actor=x"} {
+		if rec := do(t, h, "GET", base+"history/summary?"+q, nil); rec.Code != http.StatusBadRequest {
+			t.Errorf("?%s = %d, want 400", q, rec.Code)
+		}
+	}
+}

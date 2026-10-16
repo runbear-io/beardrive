@@ -885,6 +885,7 @@ export default function Browser(props: {
         remove={canRestore ? { onRemove, busy: removing } : undefined}
         undoRun={canRestore ? { onUndoRun, busy: undoingRun } : undefined}
         filters={route.filters}
+        linkFor={(p, v) => urlForPath(p, project?.id, v)}
         /* push, not replace: a filter is a navigation, and Back undoes it */
         onFilters={(f) => navigate(urlForView("history", project?.id, route.viewTarget || "", f))}
       />

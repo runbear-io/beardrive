@@ -74,7 +74,7 @@ classDiagram
         +Route.editing /edit/&lt;path&gt;, the file page with the editor open
         +Route.trailingSlash notes/ resolves, then replaces to notes
         +Route.queryTarget history ?path= / ?prefix= resolves, then replaces to /history/target
-        +Route.filters q user since until, history feed
+        +Route.filters q user actor device range since until, history feed
         +historyFilterQuery(filters) / hasHistoryFilters
         +urlForPath(path, projectId, version, full, editing)
         +withoutFull(url) the same URL minus full — the scroll memo key
@@ -134,7 +134,7 @@ classDiagram
     class components {
         FileView FileRail (DocHeader) FolderListing FileTree (TreeFilter, TreeActions row menu)
         ProjectNav (SidebarSearch ProjectRailNav) Pinned PinnedRail
-        HistoryView HistoryRow HistoryFilters DiffView VersionBanner ConflictBanner
+        HistoryView (ActivitySummary ActivityPanel) HistoryRow HistoryFilters DiffView (DiffTabs DiffStat) VersionBanner ConflictBanner
         PresenceBar Editor VisualEdit
         Comments (CommentSurface CommentPanel)
         Insights ShareDialog NewProjectDialog
@@ -144,7 +144,8 @@ classDiagram
     }
     note for components "FileRail.tsx is the markdown file page's DocHeader (frontmatter type / OKF chips, size, who-edited · device · date · reads/30d — provenance lives here, not in the top bar's #meta, which now carries only the editor's save state) and its right rail: On this page (h2/h3 read from the rendered HTML's goldmark ids, current section by #content scroll), Reads · 30 days (the path's /heat entry only: total, agent/human/share split, distinct readers — the API has no per-day series and no per-path reader identities, so there are no daily bars or top readers), and Properties (full frontmatter). ≥1400px it is an absolute aside beside .page.read; below, a closed <details> above the document; data-bd-ignore keeps all of it out of comment anchoring. The comments panel replaces it while open"
     note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; the initial selection is options[0].value — the same array element the RECOMMENDED badge indexes, so the badged row and the checked row are one row by construction (on a template-less hub that row is 'I already have a folder', which still creates an empty project). modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
-    note for components "HistoryFilters drives the SERVER (?q=/?user=/?since=/?until= on the history API), never the loaded page — filtering what is on screen would lie about everything below the fold and break next_cursor. Its state is Route.filters, so a narrowed feed is linkable, survives reload, and Back undoes it; the author list accumulates across fetches, because filtering by one author leaves only their rows loaded"
+    note for components "Activity (HistoryView): day headers are SIBLINGS of the rows, never wrappers, so every row stays a direct child of .history; the summary is one GET history/summary, never a client walk over pages; a request still pending after 10 s becomes an error with Try again (resetQueries abandons the hung request). Selecting a row (Details, or J/K) opens ActivityPanel, a drawer with DiffTabs (Changes / Rendered / Full file), Open file, Restore previous and Copy link; Esc closes it. Row clicks still navigate to the version, and the inline show-changes diff stays"
+    note for components "HistoryFilters drives the SERVER (?q=/?user=/?actor=/?device=/?since=/?until= on the history API; lib/activity.ts turns a preset or a local custom day into RFC3339 instants at the reader's midnight), never the loaded page — filtering what is on screen would lie about everything below the fold and break next_cursor. Its state is Route.filters, so a narrowed feed is linkable, survives reload, and Back undoes it; the author list accumulates across fetches, because filtering by one author leaves only their rows loaded"
     note for components "FileView's transformHTML resolves the server's `wiki:` marker against flatFiles into a real urlForPath() href (unresolvable ones lose the href and get .wiki-missing), so copy-link/middle-click/new-tab work and only a plain click reaches the delegated handler — resolution used to happen at click time, which left a dead `wiki:guide` string in the DOM (BEA-136). It also drops `data:image/svg` from any rendered img and any `data:` href from any rendered link — goldmark admits them, and an inline SVG is a document rather than a picture (the same property the server's sandboxInline walls off). Insights builds its per-device folder bag with Object.create(null), since folder names come off a peer's journal and one named __proto__ silently emptied the matrix. style.css sets unicode-bidi isolate-override on the peer-authored strings a reader is expected to CHECK (listing rows, breadcrumb, history path/note/device) — journal.SafeText refuses the bidi CONTROLS, but a single strong-RTL LETTER is legal and still reorders a row"
     note for components "HistoryView's RunGroup header carries the run-wide undo (POST undo-run, gated by the same write permission as the per-row restore/remove). It asks the SERVER for the file list first (preview: true) rather than deriving it from the loaded feed — that window is paged and filterable, so a client-computed list is wrong exactly when the run is old. modal.tsx's Confirm.message widened from string to ReactNode for it (the prompt's one-field API is untouched), so the dialog can show every path, its action, and the &quot;changed after this run&quot; warning inline"
     note for components "FileView's MarkdownView renders SecretBadge above the content when the render response carries findings — VersionBanner's shape (a strip, role=status, no actions), the red family rather than the accent because accent+glow already means 'you are looking at an old version' and the two strips stack on the ?sha= view. It phrases from lib/secrets so the badge and the share dialog name the rule and the line identically"
@@ -161,6 +162,7 @@ classDiagram
         +diff.ts splitLines lcsDiff diffText
         +diff.ts textEdit (the one splice that folds an outside write in)
         +runs.ts groupRuns runFileCount
+        +activity.ts dateWindow historyApiQuery dayLabel isAgent agentName
         +heat.ts heatFor heatTotal heatText heatLevel hotPathSplit
         +heat.ts HEAT_DISCLOSURE (what the count includes, said once)
         +heat.ts ageRange isFlatRange ageSpanLabel (treemap scale)
