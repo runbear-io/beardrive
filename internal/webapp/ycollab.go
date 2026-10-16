@@ -431,17 +431,18 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	}
 }
 
-// Retry schedule for a refused room's conflict copy. Vars so a test need not
-// wait out real backoff.
+// Backoff for a refused room's conflict copy, doubling up to a ceiling. Vars
+// so a test need not wait out real backoff.
 var (
-	parkRetries = 20
-	parkBackoff = 30 * time.Second
+	parkBackoff    = 30 * time.Second
+	parkBackoffMax = 10 * time.Minute
 )
 
-// parkCopy writes a room's refused text beside its file, retrying a failing
-// store in the background well past the room's eviction: once the room is
-// gone this text exists nowhere else. Held in memory only, so a hub restart
-// mid-retry loses it.
+// parkCopy writes a room's refused text beside its file. A failing store is
+// retried in the background for as long as this process lives, with no retry
+// budget: once the room is evicted this text exists nowhere else, so giving
+// up would be the loss the copy exists to prevent. Held in memory only, so a
+// hub restart before the store recovers still loses it.
 func (s *Server) parkCopy(who User, project, path, copy, text string) {
 	try := func() bool {
 		cw := s.putAs(context.Background(), who, project, copy, text, "")
@@ -449,20 +450,21 @@ func (s *Server) parkCopy(who User, project, path, copy, text string) {
 			log.Printf("bdrive: %s: the room's text would empty or sharply shrink it; parked beside it as %s", path, copy)
 			return true
 		}
-		log.Printf("bdrive: %s: could not park the room's refused text as %s (%d)", path, copy, cw.code)
+		log.Printf("bdrive: %s: could not park the room's refused text (%d bytes) as %s (%d); retrying", path, len(text), copy, cw.code)
 		return false
 	}
 	if try() {
 		return
 	}
 	go func() {
-		for i := 1; i < parkRetries; i++ {
-			time.Sleep(parkBackoff)
+		wait := parkBackoff
+		for {
+			time.Sleep(wait)
 			if try() {
 				return
 			}
+			wait = min(wait*2, parkBackoffMax)
 		}
-		log.Printf("bdrive: %s: gave up parking the room's refused text (%d bytes) after %d tries", path, len(text), parkRetries)
 	}()
 }
 
