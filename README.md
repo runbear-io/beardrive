@@ -867,12 +867,12 @@ Each enrolled worktree has a mount entry in `mounts.json`. Multiple worktrees fo
   by `(lamport, time, device)` — every device converges to the same view.
   Concurrent edits keep the last writer at the path; the loser is preserved
   as a conflict-copy file by the device that detects the overlap.
-- One background supervisor runs per user session, with one worker goroutine per active project volume. Each worker scans its enrolled worktree folders every few seconds (cheap size+mtime check) and exchanges with the remote every ~10s, or immediately after local edits. Tunable with --scan-interval and --remote-interval on the daemon (defaults 3s / 10s).
+- One background supervisor runs per user session, with one worker goroutine per active project volume. On macOS and Linux, each worker watches its enrolled worktree folders and uses a one-minute safety scan when remote polling does not require an earlier cycle; a watcher error falls back to `--scan-interval`. Other platforms use the polling path. Workers exchange with the remote every ~10s, or immediately after local edits. Tune the local and remote intervals with `--scan-interval` and `--remote-interval` on the daemon (defaults 3s / 10s).
 - Against a hub, the daemon also holds a **live change stream** open, so a
   teammate's push arrives in about a second instead of waiting out the
   remote interval. It is an accelerator only: a hub that is down, too old to
-  serve the stream, or behind a proxy that buffers it simply falls back to
-  the intervals above, and object-store remotes never had it to begin with.
+  serve the stream, or behind a proxy that buffers it simply falls back to the
+  intervals above, and object-store remotes never had it to begin with.
 
 ### What beardrive does not sync
 

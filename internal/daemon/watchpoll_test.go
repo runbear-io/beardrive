@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,6 +32,51 @@ import (
    stream is healthy, and it comes straight back when the stream dies. The
    second half is the one that matters for safety — the stream is an
    optimisation, and every guarantee still has to survive losing it. */
+
+func TestLocalFolderWatcherRejectsMissingRoot(t *testing.T) {
+	_, err := startLocalFolderWatcher(context.Background(), []string{filepath.Join(t.TempDir(), "missing")})
+	if err == nil {
+		t.Fatal("watcher setup succeeded for a missing root")
+	}
+}
+
+func TestLocalFolderWatcherWakesAndAddsDirectories(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer lw.close()
+	if err := os.WriteFile(filepath.Join(root, "first.txt"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report a file change")
+	}
+	sub := filepath.Join(root, "nested")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report a new directory")
+	}
+	if err := os.WriteFile(filepath.Join(sub, "second.txt"), []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not add the new directory")
+	}
+	lw.close()
+	lw.close()
+}
 
 func TestWatchSuppressesThePoll(t *testing.T) {
 	hub := newFakeHub(t)
