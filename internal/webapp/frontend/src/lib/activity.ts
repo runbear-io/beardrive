@@ -28,7 +28,8 @@ function parseDay(s: string): Date | null {
 }
 
 /* The instants a filter set covers. A preset counts whole local days back
-   from today; custom since/until are local days, inclusive at both ends.
+   from today; custom since/until are local days, inclusive at both ends, so
+   `until` is the NEXT local midnight, exclusive.
    The server takes RFC3339 instants, so the reader's midnight — not UTC's —
    is where a day starts. */
 export function dateWindow(f: HistoryFilters | undefined, now = new Date()): { since?: Date; until?: Date } {
@@ -38,8 +39,15 @@ export function dateWindow(f: HistoryFilters | undefined, now = new Date()): { s
   const s = f?.since ? parseDay(f.since) : null;
   const u = f?.until ? parseDay(f.until) : null;
   if (s) out.since = s;
-  if (u) out.until = new Date(u.getFullYear(), u.getMonth(), u.getDate() + 1, 0, 0, 0, -1);
+  if (u) out.until = new Date(u.getFullYear(), u.getMonth(), u.getDate() + 1);
   return out;
+}
+
+// The server reads `until` as inclusive to the nanosecond, while a Date only
+// carries milliseconds: name the last nanosecond before the exclusive bound,
+// so an op late in the final millisecond of the day still counts.
+export function lastNanoBefore(d: Date): string {
+  return new Date(d.getTime() - 1).toISOString().replace(/\.(\d{3})Z$/, ".$1999999Z");
 }
 
 // The history API's query for a filter set ("&k=v…", or "").
@@ -48,7 +56,7 @@ export function historyApiQuery(f: HistoryFilters | undefined, now = new Date())
   for (const k of ["q", "user", "actor", "device"] as const) if (f?.[k]) p.set(k, f[k]!);
   const w = dateWindow(f, now);
   if (w.since) p.set("since", w.since.toISOString());
-  if (w.until) p.set("until", w.until.toISOString());
+  if (w.until) p.set("until", lastNanoBefore(w.until));
   const s = p.toString();
   return s ? "&" + s : "";
 }

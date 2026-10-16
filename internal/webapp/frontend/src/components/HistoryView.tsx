@@ -584,7 +584,7 @@ function ActivityPanel(props: {
             {busy ? "Restoring…" : deleted ? "Restore file" : "Restore previous"}
           </button>
         )}
-        {props.linkFor && (
+        {props.linkFor && (deleted ? !!props.prev : !!e.blob) && (
           <button
             type="button"
             className="btn ap-copy"
