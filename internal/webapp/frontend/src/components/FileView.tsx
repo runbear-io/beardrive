@@ -22,7 +22,11 @@ import { useTheme } from "../lib/theme";
 import { secretsBadge, type SecretFinding } from "../lib/secrets";
 import { Icon } from "./shell";
 import { toast } from "../toast";
-import { Editor, type SaveState } from "./Editor";
+import { Editor, type EditMode, type EditorInfo, type SaveState } from "./Editor";
+import { EditRail } from "./EditRail";
+import { Avatar } from "./PresenceBar";
+import { remoteCursors } from "../lib/cm-meeting";
+import { agoShort, byteLength, isMeetingNote, sectionAt, sections, wordCount } from "../lib/meeting";
 import { VisualEdit } from "./VisualEdit";
 import type { CollabStatus } from "../lib/collab";
 
@@ -315,6 +319,50 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   const { data, error } = useTextAt(fileURL, ["text", fileURL], true, false);
   const [state, setState] = useState<SaveState>("clean");
   const [collab, setCollab] = useState<CollabStatus>("connecting");
+  const md = MD_EXT.test(path);
+  const meeting = isMeetingNote(path);
+  // Write and Markdown are one CodeMirror reconfigured; Preview hides it
+  // without unmounting, so the room, the cursor and the undo history all
+  // survive a switch. The /edit/ URL stays the invitation either way.
+  const [mode, setMode] = useState<EditMode | "preview">(md ? "write" : "markdown");
+  const [info, setInfo] = useState<EditorInfo | null>(null);
+  const [pending, setPending] = useState(0);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [, setTick] = useState(0);
+  // Who is in the room, and which sections a remote caret is in.
+  const [editors, setEditors] = useState<string[]>([]);
+  const [typing, setTyping] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 5_000);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => {
+    if (state === "clean") setSavedAt(Date.now());
+  }, [state]);
+  const roomDoc = info?.collab ?? null;
+  const textRef = useRef("");
+  textRef.current = info?.text ?? "";
+  useEffect(() => {
+    if (!roomDoc) return;
+    const read = () => {
+      const names: string[] = [];
+      roomDoc.awareness.getStates().forEach((st) => {
+        const n = (st as { user?: { name?: string } }).user?.name;
+        if (n) names.push(n);
+      });
+      setEditors([...new Set(names)]);
+      const secs = sections(textRef.current);
+      const on = new Set<string>();
+      for (const c of remoteCursors(roomDoc)) {
+        const sec = sectionAt(secs, c.pos);
+        if (sec) on.add(sec.name);
+      }
+      setTyping(on);
+    };
+    read();
+    roomDoc.awareness.on("change", read);
+    return () => roomDoc.awareness.off("change", read);
+  }, [roomDoc]);
   // A peer's write that arrived while this buffer was open. Advisory only —
   // and only interesting when it did NOT come through the shared document:
   // a co-editor's keystrokes are already in the buffer.
@@ -366,22 +414,48 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     return () => window.removeEventListener("bdrive:changed", onPeer);
   }, [path, visual]);
 
+  const offline = collab === "offline";
+  const label =
+    offline && pending > 0
+      ? `Offline · ${pending} ${pending === 1 ? "edit" : "edits"} pending`
+      : offline
+        ? "Offline · reconnecting"
+        : state === "saving"
+          ? "Saving…"
+          : state === "dirty"
+            ? collab === "live"
+              ? "Live · unsaved"
+              : "Unsaved"
+            : state === "error"
+              ? "Not saved — still trying"
+              : (collab === "live" ? "Live · " : "") + "saved" + (savedAt ? " " + agoShort(savedAt) : "");
   useEffect(() => {
     onMeta(
-      <span id="editor-state" data-state={state} data-collab={collab}>
-        {state === "saving"
-          ? "saving…"
-          : state === "dirty"
-            ? "unsaved"
-            : state === "error"
-              ? "save failed — still trying"
-              : "saved"}
-      </span>,
+      <>
+        <span
+          id="editor-state"
+          className="ed-state"
+          data-state={state}
+          data-collab={collab}
+          data-pending={pending}
+        >
+          <i aria-hidden="true" />
+          {label}
+        </span>
+        {editors.length > 0 && (
+          <span className="ed-editors" aria-label="People editing this file">
+            {editors.slice(0, 5).map((n) => (
+              <Avatar key={n} name={n} title={n + " is editing"} />
+            ))}
+            {editors.length > 5 && <span className="ed-more">+{editors.length - 5}</span>}
+          </span>
+        )}
+      </>,
     );
     // collab belongs in the deps: without it the status line keeps whatever
     // connection state it was first rendered with, so a room that came up
     // fine still reads "connecting" forever.
-  }, [state, collab, onMeta]);
+  }, [state, collab, label, pending, editors, onMeta]);
   // Leaving edit mode keeps FileView mounted on the same path, so the editor
   // clears its own status rather than leaving it on a read-only page.
   useEffect(() => () => onMeta(""), [onMeta]);
@@ -420,6 +494,44 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           unchanged — saving keeps your version and theirs stays in history.
         </div>
       )}
+      {offline && (
+        <div id="ed-offline" className="banner ed-offline" role="status">
+          <b>Reconnecting…</b>{" "}
+          {pending > 0
+            ? `Your ${pending} ${pending === 1 ? "edit is" : "edits are"} kept in this tab and will merge when you're back.`
+            : "Edits you make are kept in this tab and merge when you're back."}
+          {meeting && " Other people's sections are read-only until then."}
+        </div>
+      )}
+      {!visual && md && (
+        <div className="ed-modes" role="tablist" aria-label="Editor mode">
+          {(["write", "markdown", "preview"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              role="tab"
+              id={"mode-" + m}
+              aria-selected={mode === m}
+              className={mode === m ? "on" : ""}
+              onClick={() => setMode(m)}
+            >
+              <Icon name={m === "write" ? "pencil" : m === "markdown" ? "code" : "eye"} />
+              {m === "write" ? "Write" : m === "markdown" ? "Markdown" : "Preview"}
+            </button>
+          ))}
+        </div>
+      )}
+      {md && !visual && (
+        <EditRail
+          apiBase={apiBase}
+          path={path}
+          text={info?.text ?? data.text}
+          meeting={meeting}
+          editors={editors}
+          me={props.me?.name ?? ""}
+          typing={typing}
+        />
+      )}
       {visual ? (
         /* HTML gets the rendered page, clicked directly. Same file, same
            shared document, same save — a different surface onto it. Source
@@ -444,8 +556,14 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           onRendered={props.onRendered}
         />
       ) : (
+        <div className="ed-surface" hidden={mode === "preview"}>
         <Editor
           apiBase={apiBase}
+          mode={mode === "preview" ? "write" : mode}
+          meeting={meeting}
+          files={props.flatFiles.map((f) => f.path)}
+          onInfo={setInfo}
+          onPending={setPending}
           path={path}
           initial={data.text}
           baseSha={data.sha}
@@ -468,6 +586,24 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           }}
           me={props.me}
         />
+        </div>
+      )}
+      {mode === "preview" && !visual && <EditPreview {...props} />}
+      {!visual && (
+        <div className="ed-statusbar" id="ed-statusbar">
+          <span>
+            {md ? "Markdown" : "Text"} · {humanSize(byteLength(info?.text ?? data.text))} ·{" "}
+            {wordCount(info?.text ?? data.text).toLocaleString()} words
+          </span>
+          <span className="ed-guard" title="A save that would empty the file or cut most of it asks first">
+            <Icon name="shield" /> Empty-save protection on
+          </span>
+          {info && (
+            <span className="ed-pos">
+              Ln {info.line}, Col {info.col}
+            </span>
+          )}
+        </div>
       )}
     </>
   );
@@ -486,6 +622,27 @@ export function renderQuery(apiBase: string, path: string, version?: string) {
     // delay is a blank pane the reader has no explanation for.
     retry: version ? false : undefined,
   };
+}
+
+/* The note as it reads, from the hub's renderer. It shows the file as last
+   written — the room snapshots within a second of a pause — while the editor
+   stays mounted, hidden, so going back to Write is the same session. */
+function EditPreview(props: Parameters<typeof FileView>[0]) {
+  const { apiBase, path, flatFiles, projectId, onOpenFile } = props;
+  const { data: doc } = useQuery(renderQuery(apiBase, path));
+  const html = useMemo(
+    () => (doc ? transformHTML(doc.html, path, apiBase, flatFiles, projectId) : ""),
+    [doc, path, apiBase, flatFiles, projectId],
+  );
+  if (!doc) return <div className="empty">Loading preview…</div>;
+  return (
+    <div
+      id="ed-preview"
+      className="fv-prose"
+      dangerouslySetInnerHTML={{ __html: html }}
+      onClick={(e) => handleLinkClick(e, path, onOpenFile)}
+    />
+  );
 }
 
 function MarkdownView(props: Parameters<typeof FileView>[0]) {

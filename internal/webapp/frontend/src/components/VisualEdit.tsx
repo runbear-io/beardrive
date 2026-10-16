@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState } from "../lib/sharedfile";
 import { type CollabStatus } from "../lib/collab";
-import { warnShrink } from "../toast";
+import { askShrink } from "./ShrinkDialog";
 
 /* Click-to-edit for a synced HTML file: the app's half.
 
@@ -164,7 +164,7 @@ export function VisualEdit({
       who: meRef.current?.name,
       me: meRef.current,
       onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
-      onShrinkRefused: (confirm) => warnShrink(path, confirm),
+      onShrinkRefused: (ask) => askShrink(path, ask),
       // Nothing to mount either way: the surface is the iframe, which is
       // already on screen. The room is joined for the CRDT alone.
       onReady: () => {
