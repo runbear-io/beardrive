@@ -1,21 +1,21 @@
 import { test, expect } from "@playwright/test";
 import { login, wikiId, MEMBER, READER, expectToast } from "./helpers";
 
-// Phase 3: project home (connect guide + embedded dashboard), the dedicated
-// dashboard route, and the history views. Ports the original parity checks
-// from the pre-migration smoke suite.
+// The project home, the install guide, the dedicated dashboard route, and
+// the history views. Home's own sections are covered in home-view.spec.ts.
 
-test("landing is the project home (guide), not a dashboard redirect", async ({ page }) => {
+test("landing is the project home, not a dashboard redirect", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.waitForURL("/" + pid);
-  await expect(page.locator(".guide")).toBeVisible();
+  await expect(page.locator(".home-greet")).toBeVisible();
   await expect(page.locator("#crumb")).toHaveText("wiki");
 });
 
 test("guide: one paste for every agent, one line of prose, details collapsed", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
+  await page.goto(`/${pid}/install`);
   await page.waitForSelector(".guide");
   // No agent tabs anymore — the prompt is identical for every agent.
   await expect(page.locator(".gd-tab")).toHaveCount(0);
@@ -42,6 +42,7 @@ test("guide: one paste for every agent, one line of prose, details collapsed", a
 test("guide: manual fallback has the full command list and the docs link", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
+  await page.goto(`/${pid}/install`);
   await page.waitForSelector(".guide");
   const manual = await page.$$eval(".gd-manual .gd-code code", (els) =>
     els.map((e) => e.textContent).join("\n"),
@@ -60,28 +61,6 @@ test("guide: manual fallback has the full command list and the docs link", async
   await expect(desc).not.toContainText("One command");
   await expect(desc).not.toContainText("signs this device in");
   await expect(desc).toContainText("registers the sync hooks and starts syncing");
-});
-
-test("home embeds the dashboard below the guide, for members too", async ({ page, browser }) => {
-  await login(page);
-  await page.waitForSelector(".guide");
-  await expect(page.locator(".home-insights .insights")).toBeVisible();
-  // Guide renders above the embedded dashboard
-  const order = await page.evaluate(() => {
-    const g = document.querySelector(".guide");
-    const i = document.querySelector(".home-insights");
-    return g && i ? (g.compareDocumentPosition(i) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 : false;
-  });
-  expect(order).toBe(true);
-  await expect(page.locator(".in-treemap")).toBeVisible();
-  await expect(page.locator(".in-hotpath .in-hp-row").first()).toBeVisible();
-
-  const ctx = await browser.newContext();
-  const p2 = await ctx.newPage();
-  await login(p2, MEMBER);
-  await p2.waitForSelector(".guide");
-  await expect(p2.locator(".home-insights .insights")).toBeVisible();
-  await ctx.close();
 });
 
 test("dedicated dashboard route still works and survives reload", async ({ page }) => {
@@ -138,7 +117,7 @@ test("vault name returns to the project home", async ({ page }) => {
   await page.goto(`/${pid}/index.md`);
   await page.click("#vault-name");
   await page.waitForURL("/" + pid);
-  await expect(page.locator(".guide")).toBeVisible();
+  await expect(page.locator(".home-greet")).toBeVisible();
 });
 
 test("back/forward walks home → file → dashboard", async ({ page }) => {
@@ -151,7 +130,7 @@ test("back/forward walks home → file → dashboard", async ({ page }) => {
   await page.goBack();
   await expect(page.locator("#content h1")).toHaveText("Wiki");
   await page.goBack();
-  await expect(page.locator(".guide")).toBeVisible();
+  await expect(page.locator(".home-greet")).toBeVisible();
   await page.goForward();
   await expect(page.locator("#content h1")).toHaveText("Wiki");
 });
