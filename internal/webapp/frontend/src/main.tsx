@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
+import { prefetchForURL } from "./api/prefetch";
 import ErrorBoundary from "./ErrorBoundary";
 import { initTheme } from "./lib/theme";
 import "./tw.css";
@@ -17,6 +18,7 @@ const queryClient = new QueryClient({
   },
 });
 
+prefetchForURL(queryClient, location.pathname + location.search);
 initTheme();
 
 createRoot(document.getElementById("root")!).render(

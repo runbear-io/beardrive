@@ -1,4 +1,3 @@
-import * as Y from "yjs";
 import {
   EditorState,
   StateField,
@@ -130,19 +129,7 @@ class StatusWidget extends WidgetType {
 
 // remoteCursors is where each OTHER editor's caret sits, by name.
 export function remoteCursors(collab: CollabDoc | null): Array<{ name: string; pos: number }> {
-  if (!collab) return [];
-  const out: Array<{ name: string; pos: number }> = [];
-  collab.awareness.getStates().forEach((st, id) => {
-    if (id === collab.doc.clientID) return;
-    const c = (st as { cursor?: { head?: unknown }; user?: { name?: string } }).cursor;
-    if (!c?.head) return;
-    const abs = Y.createAbsolutePositionFromRelativePosition(
-      Y.createRelativePositionFromJSON(c.head),
-      collab.doc,
-    );
-    if (abs) out.push({ name: (st as { user?: { name?: string } }).user?.name ?? "Someone", pos: abs.index });
-  });
-  return out;
+  return collab ? collab.remoteCursors() : [];
 }
 
 function isFolded(state: EditorState, s: Section): boolean {

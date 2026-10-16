@@ -103,8 +103,11 @@ classDiagram
         +getJSON / postJSON / api
         +getResponse (raw bytes)
         +PRODUCT_EVENTS method+path → event
+        +prefetchForURL(queryClient, url)
+        +bootRequests(route, isMarkdown)
         types.ts server contracts
     }
+    note for api "api/prefetch.ts — main.tsx calls prefetchForURL before React mounts: the requests a URL alone determines (projects, orgs, tree, heat, and render + comments for a markdown read) start under the SAME query keys the hooks use, so a mounting hook joins the request in flight. Config is deliberately excluded (its queryFn owns the signed-out redirect), and a prefetch never navigates — a failure is cached as an error the hook refetches through getJSON. bootRequests.ts is the import-free URL→requests mapping, so the node test runner can pin it"
     note for api "api/http.ts — all URLs root-absolute so deep paths never break relative resolution. Every mutating call goes through api()/postJSON(), so one table there is the whole product-event surface: a new write is measured or it isn't, instead of depending on someone remembering a capture() call"
 
     class analytics {
@@ -219,7 +222,7 @@ classDiagram
     Browser --> lib : parseConflict treeStats visits sidebarSearch
     components --> lib : buildRows filterTree (FileTree), sidebarSearch (ProjectNav)
     Browser --> components
-    components --> lib : openSharedFile (Editor and VisualEdit share one room)
+    components --> lib : openSharedFile (Editor and VisualEdit share one room; both React.lazy chunks)
     note for components "EditView (FileView.tsx) is the editing page: a Write / Markdown / Preview segmented control over ONE Editor — Write and Markdown reconfigure the same CodeMirror through a Compartment, Preview hides it without unmounting, so the room, the cursor and the undo stack survive a switch and the /edit/ URL stays the invitation. The top bar's #editor-state reads Live · saved Ns ago / Offline · N edits pending, beside avatars of everyone in the room (awareness). EditRail is the markdown edit rail: attendee progress (meeting notes), action items from - [ ] … @owner lines (Copy as markdown), and recent versions with a one-click Restore that POSTs /restore — a new op, never a rewrite. ShrinkDialogHost is the blocking empty-save dialog: sharedfile raises it on the hub's 422 when this client saves, and — because a hub-held room's refusal never reaches a client — on seeing the document itself sharpShrink against the last known file text; Keep (the default) splices the file's current bytes back into the document, Save anyway PUTs the document as it stands with X-Bdrive-Confirm-Shrink. The ask belongs to its editor: destroying the SharedFile withdraws it (withdrawShrink closes the dialog without running either answer, and no parting save is written), and both answers are no-ops on a destroyed file. After a Restore, EditView reconciles the open document itself through the Editor's SharedFile handle (onRestored) instead of relying on the change stream: merge with held when the hub reports it folded the restore into the live room, as an ordinary outside write otherwise. Meeting notes (any daily-meetings/ folder) get cm-meeting's per-person sections: fold state is CodeMirror folding (view-only), status derives from awareness cursors and changes seen in this tab, and while the socket is down only your own section takes edits (meeting.ts offlineEditable) — the preamble, other sections, and the whole note when it has no section of yours are filtered before they reach the CRDT"
     HubApp --> components
     components --> nav : linkProps navigate
@@ -233,6 +236,7 @@ classDiagram
     components --> lib : rangeFor describe hitTest (Comments)
     components ..> inlineComment : postMessage via the ?comment=1 iframe
     hooks --> api
+    App --> api : main.tsx prefetchForURL (same query keys as hooks)
     Browser --> hooks : useTree useHeat useShares useProjectEvents useComments, fetchBlobText + fileURLFor (Copy)
     HubApp --> hooks
     HubApp --> Setup : desktop mode only, /setup/* frames

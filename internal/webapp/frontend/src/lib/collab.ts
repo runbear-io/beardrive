@@ -36,6 +36,21 @@ export class CollabDoc {
   private closed = false;
   private reached = false;
 
+  // Where each OTHER participant's caret sits, by name, as an index into the
+  // text. A method rather than a helper beside the editor, so a caller that
+  // only reads it does not have to import Yjs itself.
+  remoteCursors(): Array<{ name: string; pos: number }> {
+    const out: Array<{ name: string; pos: number }> = [];
+    this.awareness.getStates().forEach((st, id) => {
+      if (id === this.doc.clientID) return;
+      const c = (st as { cursor?: { head?: unknown }; user?: { name?: string } }).cursor;
+      if (!c?.head) return;
+      const abs = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(c.head), this.doc);
+      if (abs) out.push({ name: (st as { user?: { name?: string } }).user?.name ?? "Someone", pos: abs.index });
+    });
+    return out;
+  }
+
   constructor(
     private readonly url: string,
     private readonly onStatus: (s: CollabStatus) => void,

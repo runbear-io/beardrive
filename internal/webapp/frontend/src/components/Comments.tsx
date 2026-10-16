@@ -169,7 +169,10 @@ export function CommentSurface(props: {
     el?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [focus, framed]);
 
-  useEffect(() => {
+  // Layout, not passive: the document can be on screen in the same commit
+  // that mounts this surface, and a selection made before a passive effect
+  // ran would find no listener.
+  useLayoutEffect(() => {
     if (framed || !page) return;
     const onSelect = (e: Event) => {
       if (ignored(e.target as Node)) return;
