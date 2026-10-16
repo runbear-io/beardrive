@@ -1050,6 +1050,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		}
 	}()
 	var lastRemote time.Time
+	var lastCycle time.Time
 	var lastToken string
 	lastAccess := store.AccessOK
 	var watch <-chan struct{}
@@ -1160,6 +1161,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			pollEvery = remotePollEvery
 		}
 		waitFor := pollEvery
+		remoteFailed := false
 		doRemote := proj.Remote != "" && time.Since(lastRemote) >= remotePollEvery
 		if doRemote && be == nil {
 			b, err := remote.Open(ctx, proj.Remote)
@@ -1167,6 +1169,8 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				logger.Printf("remote unavailable: %v", err)
 				doRemote = false
 				lastRemote = time.Now()
+				remoteFailed = true
+				waitFor = min(waitFor, scanInterval)
 			} else {
 				be = b
 			}
@@ -1296,6 +1300,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 			continue
 		}
+		lastCycle = time.Now()
 
 		switch {
 		case ctx.Err() != nil:
@@ -1347,7 +1352,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			if doRemote {
 				lastRemote = time.Now()
 			}
-			if res.LocalOps > 0 && !doRemote {
+			if res.LocalOps > 0 && !doRemote && !remoteFailed && proj.Remote != "" {
 				lastRemote = time.Time{} // push local edits on the next cycle
 				continue
 			}
@@ -1392,6 +1397,12 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			if !ok {
 				stopLocalWatch()
 				localWatchRetryAt = time.Now().Add(localWatchRetry)
+			} else if wait := time.Until(lastCycle.Add(scanInterval)); wait > 0 {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(wait):
+				}
 			}
 			continue
 		case <-time.After(waitFor):
