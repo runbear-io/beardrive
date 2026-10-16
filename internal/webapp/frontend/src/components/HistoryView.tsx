@@ -51,6 +51,7 @@ export function HistoryView(props: {
   // Every file the project still has, so a run card can mark a path it read
   // that has since been deleted — the same label the Dashboard uses.
   flatFiles: Node[];
+  projectId?: string;
   onOpen: (path: string, version?: string) => void;
   onMeta: (meta: string) => void;
   onRendered?: () => void;
@@ -199,8 +200,11 @@ export function HistoryView(props: {
   // below it on the same path that still has content. This keeps scanning the
   // flat list, never a group: it is a per-path lookup, and grouping must not
   // change what a diff compares against.
+  // A delete takes only what the hub names: a delete of a path that was
+  // already gone removed nothing, and the older content below it is not
+  // what it removed.
   const prevBlob = (i: number) => {
-    if (entries[i].prev) return entries[i].prev;
+    if (entries[i].prev || entries[i].kind === "delete") return entries[i].prev || undefined;
     for (let j = i + 1; j < entries.length; j++) {
       if (entries[j].path === entries[i].path && entries[j].kind !== "delete") return entries[j].blob;
     }
@@ -370,6 +374,8 @@ export function HistoryView(props: {
           recreates={recreates(sel)}
           restore={restore}
           linkFor={props.linkFor}
+          flatFiles={props.flatFiles}
+          projectId={props.projectId}
           onOpen={props.onOpen}
           onClose={() => setSel(null)}
           onPrev={at > 0 ? () => setSel(order[at - 1]) : undefined}
@@ -524,6 +530,8 @@ function ActivityPanel(props: {
   recreates: boolean;
   restore?: RestoreAction;
   linkFor?: (path: string, version?: string) => string;
+  flatFiles: Node[];
+  projectId?: string;
   onOpen: (path: string, version?: string) => void;
   onClose: () => void;
   onPrev?: () => void;
@@ -590,7 +598,16 @@ function ActivityPanel(props: {
           </button>
         )}
       </div>
-      <DiffTabs apiBase={apiBase} path={e.path} kind={e.kind} prev={props.prev} cur={deleted ? undefined : e.blob} />
+      <DiffTabs
+        apiBase={apiBase}
+        path={e.path}
+        kind={e.kind}
+        prev={props.prev}
+        cur={deleted ? undefined : e.blob}
+        flatFiles={props.flatFiles}
+        projectId={props.projectId}
+        onOpenFile={(p) => props.onOpen(p)}
+      />
       <div className="ap-foot">J / K to move between changes · esc close</div>
     </aside>
   );

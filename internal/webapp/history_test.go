@@ -814,6 +814,7 @@ func TestHistoryEntryPrev(t *testing.T) {
 	f.put("dev1", "a.md", "v1")
 	f.put("dev1", "a.md", "v2")
 	f.del("dev1", "a.md")
+	f.del("dev2", "a.md") // a second device deleting the same, already-gone file
 	f.put("dev1", "a.md", "v3")
 	h, base := srv.Handler(), "/api/p/"+p.ID+"/"
 
@@ -831,6 +832,7 @@ func TestHistoryEntryPrev(t *testing.T) {
 	all := got("path=a.md")
 	want := []struct{ kind, prev string }{
 		{"add", sha("v2")},    // re-added: replaces what the delete removed
+		{"delete", ""},        // the path was already gone: removed nothing
 		{"delete", sha("v2")}, // names what it removed
 		{"edit", sha("v1")},
 		{"add", ""}, // a genuine first version
