@@ -137,6 +137,10 @@ export function useProjectEvents(
         qc.invalidateQueries({ queryKey: ["permissions"] });
         qc.invalidateQueries({ queryKey: ["render", apiBase] });
         qc.invalidateQueries({ queryKey: ["text"] });
+        // History pages list paths and actors: after a scope change they may
+        // name content this reader can no longer see.
+        qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         return;
       }
       // An open editor must know a peer wrote its file, but must NOT be

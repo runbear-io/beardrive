@@ -111,3 +111,29 @@ test("an empty project's home is the connect guide", async ({ page }) => {
     await page.request.delete("/api/projects/" + pid);
   }
 });
+
+test("peer-written names on Home are isolated from bidi reordering", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  await expect(page.locator(".home-feed .fe-path").first()).toBeVisible();
+  for (const sel of [".fe-who", ".fe-path", ".fe-dev", ".dev-name"]) {
+    const el = page.locator(sel).first();
+    if (!(await el.count())) continue;
+    expect(await el.evaluate((n) => getComputedStyle(n).unicodeBidi), sel).toBe("isolate-override");
+  }
+});
+
+test("a scope change refetches Home's history", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  await expect(page.locator(".home-feed").first()).toBeVisible();
+  const refetch = page.waitForRequest((r) => r.url().includes(`/api/p/${pid}/history?`) && !r.url().includes("since="), {
+    timeout: 15_000,
+  });
+  const put = await page.request.put(`/api/p/${pid}/folders`, { data: { prefix: "zz-scope-probe", default: "read" } });
+  expect(put.ok(), await put.text()).toBeTruthy();
+  await refetch;
+  await page.request.delete(`/api/p/${pid}/folders?prefix=zz-scope-probe%2F`).catch(() => {});
+});
