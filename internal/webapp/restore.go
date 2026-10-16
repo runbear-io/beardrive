@@ -115,10 +115,15 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	s.quota().RecordUsage(org, 0)
 	v.invalidate()
+	// Before the change frame goes out, so an editor in the room has the
+	// restored text by the time it hears the file changed.
+	folded := s.foldIntoRoom(r.Context(), projectID(r), p, req.SHA)
 	// A restore writes a put op like any other edit, so it belongs in the same
 	// count. The frontend's `file_restored` says which BUTTON was pressed; this
 	// says a file changed.
 	s.captureChange(r, "browser", 1, 0)
 	s.publishChange(r, "browser", []string{p}, 1, 0)
-	writeJSON(w, map[string]any{"ok": true, "blob": req.SHA, "size": found.Size})
+	// "folded" tells the editor that asked that the room already holds the
+	// restored text, so it must not splice it in a second time.
+	writeJSON(w, map[string]any{"ok": true, "blob": req.SHA, "size": found.Size, "folded": folded})
 }

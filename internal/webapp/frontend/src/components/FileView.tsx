@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
-import { fileURLFor, useTextAt } from "../hooks/useBlob";
+import { fetchBlobText, fileURLFor, useTextAt } from "../hooks/useBlob";
+import type { SharedFile } from "../lib/sharedfile";
 import {
   CSV_EXT,
   HTML_EXT,
@@ -375,6 +376,28 @@ function EditView(props: Parameters<typeof FileView>[0]) {
      from one paragraph to the next saves each of them. The second event then
      had nothing to claim it and raised the banner on the user's own edit. */
   const mine = useRef(0);
+  const qc = useQueryClient();
+  const fileHandle = useRef<SharedFile | null>(null);
+  /* A restore from the rail, reconciled here rather than left to the change
+     stream: a missed frame would leave the open document on the text from
+     before it, and the next save would write that back over the restore. A
+     live room already holds the restored text — the hub folded it in — so
+     only the version is recorded; anything else takes it as an outside
+     write. */
+  const onRestored = async (folded: boolean) => {
+    try {
+      const head = await fetchBlobText(fileURL);
+      const f = fileHandle.current;
+      if (head.kind === "text" && f) {
+        const r = f.merge(head.text, head.sha, { held: folded });
+        setPeerWrote(r === "blocked");
+      }
+    } catch {
+      // The change stream and the next refetch still carry it.
+    }
+    void qc.invalidateQueries({ queryKey: ["text", fileURL] });
+    void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });
+  };
   // Co-editors in this document right now. A write while somebody else is in
   // the room is their snapshot of the document I already have — warning about
   // it would fire on every co-editing save. Alone, the same event means
@@ -531,6 +554,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           me={props.me?.name ?? ""}
           typing={typing}
           versions={!!props.projectId}
+          onRestored={onRestored}
         />
       )}
       {visual ? (
@@ -565,6 +589,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           files={props.flatFiles.map((f) => f.path)}
           onInfo={setInfo}
           onPending={setPending}
+          handle={fileHandle}
           path={path}
           initial={data.text}
           baseSha={data.sha}

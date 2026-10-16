@@ -9,9 +9,15 @@ import { Icon } from "./shell";
    it is answered. Keeping the saved version is the default: Escape, the
    overlay and the focused button all keep it, and only "Save anyway" writes
    the shrunken document. One question at a time — sharedfile.ts never asks a
-   second while the first is open. */
+   second while the first is open.
 
-type Ask = ShrinkAsk & { path: string };
+   The answers belong to the editor that asked, and that editor can go away
+   while the question is on screen — another file opened, edit mode left. It
+   withdraws its own ask as it is destroyed (withdrawShrink), which closes the
+   dialog without running either answer; a different editor's ask replaces
+   this one wholesale and never runs its callbacks. */
+
+type Ask = ShrinkAsk & { path: string; from: ShrinkAsk };
 
 let current: Ask | null = null;
 let listeners: Array<() => void> = [];
@@ -21,7 +27,12 @@ const emit = (next: Ask | null) => {
 };
 
 export function askShrink(path: string, ask: ShrinkAsk) {
-  emit({ ...ask, path });
+  emit({ ...ask, path, from: ask });
+}
+
+// Close the dialog if it is still showing this ask; a later ask is untouched.
+export function withdrawShrink(ask: ShrinkAsk) {
+  if (current?.from === ask) emit(null);
 }
 
 export function ShrinkDialogHost() {
@@ -34,16 +45,19 @@ export function ShrinkDialogHost() {
     },
     () => current,
   );
-  const [busy, setBusy] = useState(false);
+  // Keyed to the ask, so an answer still running for one never disables the
+  // buttons of the next.
+  const [busyFor, setBusyFor] = useState<Ask | null>(null);
   if (!a) return null;
+  const busy = busyFor === a;
   const name = a.path.split("/").pop() || a.path;
   const run = async (f: () => Promise<void>) => {
-    setBusy(true);
+    setBusyFor(a);
     try {
       await f();
     } finally {
-      setBusy(false);
-      emit(null);
+      setBusyFor((b) => (b === a ? null : b));
+      if (current === a) emit(null);
     }
   };
   const keep = () => void run(a.keep);

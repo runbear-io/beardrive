@@ -26,7 +26,7 @@ import { slashMenu } from "../lib/cm-slash";
 import { openItems, previousNote, sections } from "../lib/meeting";
 import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
 import { toast } from "../toast";
-import { askShrink } from "./ShrinkDialog";
+import { askShrink, withdrawShrink } from "./ShrinkDialog";
 import {
   openSharedFile,
   SAVE_IDLE_MS,
@@ -88,6 +88,7 @@ export function Editor({
   files,
   onInfo,
   onPending,
+  handle,
 }: {
   apiBase: string;
   path: string;
@@ -118,6 +119,9 @@ export function Editor({
   files?: string[];
   onInfo?: (i: EditorInfo) => void;
   onPending?: (n: number) => void;
+  // The open file, for a caller that writes it from outside the editor and
+  // must fold that write in itself (EditView's restore).
+  handle?: { current: SharedFile | null };
 }) {
   const host = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -300,6 +304,7 @@ export function Editor({
       me: meRef.current,
       onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
       onShrinkRefused: (ask) => askShrink(path, ask),
+      onShrinkWithdrawn: withdrawShrink,
       onReady: () => mount(),
       // No relay: an older hub, or a desktop build that does not proxy the
       // route. Editing is single-writer then — exactly what it was before
@@ -320,10 +325,12 @@ export function Editor({
       soloApply: (e) => view?.dispatch({ changes: e }),
     });
     shared.current = file;
+    if (handle) handle.current = file;
 
     return () => {
       if (timer.current) clearTimeout(timer.current);
       shared.current = null;
+      if (handle?.current === file) handle.current = null;
       editor.current = null;
       file.destroy();
       view?.destroy();

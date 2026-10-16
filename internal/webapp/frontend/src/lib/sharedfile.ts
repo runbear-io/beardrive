@@ -62,8 +62,11 @@ export type SharedFile = {
   saveNow(): Promise<void>;
   /** Fold an outside write — an agent, a CLI, another device — into the open
       document. "blocked" means the caller should SAY so instead, because this
-      refused to resolve it. */
-  merge(next: string, nextSha?: string): MergeResult;
+      refused to resolve it. `held` says the hub has already put this text
+      into the shared document (a restore into a live room): it is recorded
+      as the file's content and never spliced here, which would apply it
+      twice. */
+  merge(next: string, nextSha?: string, how?: { held?: boolean }): MergeResult;
   /** Tell this file the head sha moved without its content being news to us —
       a co-editor saved the document we already share. Without it every other
       member of a room keeps saving against a base the hub has moved past, and
@@ -93,6 +96,9 @@ export function openSharedFile(opts: {
       reaches a client — this client saw the document shrink that far. The
       file keeps its bytes until the user picks one of the two answers. */
   onShrinkRefused?: (ask: ShrinkAsk) => void;
+  /** The file was destroyed with that question still open: close it. Neither
+      answer runs after destroy — both are no-ops on a closed file. */
+  onShrinkWithdrawn?: (ask: ShrinkAsk) => void;
   /** Local edits made while the room is not live: they are queued in this
       tab's document and merge when the socket comes back. 0 once it has. */
   onPending?: (n: number) => void;
@@ -206,15 +212,15 @@ export function openSharedFile(opts: {
 
   /* One question at a time: while the user is deciding, a second refusal or
      a second sighting of the same shrink must not stack another dialog. */
-  let asking = false;
+  let asking: ShrinkAsk | null = null;
   const askShrink = (text: string) => {
-    if (asking || !opts.onShrinkRefused) return;
-    asking = true;
+    if (asking || gone || !opts.onShrinkRefused) return;
     setState("error");
-    opts.onShrinkRefused({
+    asking = {
       was: byteLength(saved),
       now: byteLength(text),
       confirm: async () => {
+        if (gone) return;
         // The user may keep typing while the dialog is open, so the
         // confirmation writes the document as it stands when clicked.
         const now = current();
@@ -229,13 +235,14 @@ export function openSharedFile(opts: {
         } catch {
           setState("error");
         } finally {
-          asking = false;
+          asking = null;
         }
       },
       keep: async () => {
+        if (gone) return;
         try {
           const head = await fetchBlobText(fileURLFor(opts.apiBase, opts.path));
-          if (head.kind !== "text") return;
+          if (gone || head.kind !== "text") return;
           const cur = current();
           const e = textEdit(cur, head.text);
           saved = head.text;
@@ -252,10 +259,11 @@ export function openSharedFile(opts: {
         } catch {
           setState("error");
         } finally {
-          asking = false;
+          asking = null;
         }
       },
-    });
+    };
+    opts.onShrinkRefused(asking);
   };
 
   /* In a hub-held room nobody here saves, so the hub's 422 never comes back
@@ -373,6 +381,7 @@ export function openSharedFile(opts: {
      Never live means solo — an older hub, a proxy that will not upgrade —
      and then this client saves exactly as it always did. */
   let hubHoldsIt = false;
+  let gone = false;
   // Whether the socket is up right now, and how many local edits were made
   // while it was not.
   let live = false;
@@ -437,7 +446,6 @@ export function openSharedFile(opts: {
      If-Match and all. A server with no room route goes straight there; the
      callback is deferred because the caller's own handle to this file is
      not assigned until this returns. */
-  let gone = false;
   if (hasCollabRoute(opts.apiBase)) collab.connect();
   else
     queueMicrotask(() => {
@@ -481,7 +489,12 @@ export function openSharedFile(opts: {
     if (sha) base = sha;
   };
 
-  const merge = (next: string, nextSha?: string): MergeResult => {
+  const merge = (next: string, nextSha?: string, how?: { held?: boolean }): MergeResult => {
+    if (how?.held) {
+      saved = next;
+      rebase(nextSha);
+      return "same";
+    }
     // The file is at the content we last knew about: our own write coming
     // back through the change stream, or nothing new at all. `inFlight`
     // covers the common case that `saved` cannot — the frame announcing our
@@ -578,8 +591,11 @@ export function openSharedFile(opts: {
       // the hub has the word — it writes on last peer, and on the debounce
       // for everyone still there — and a parting write from here would be
       // one more racer against it.
+      // An unanswered shrink question means the user has not agreed to write
+      // this text, so it is not written on the way out either.
       const text = current();
-      if (!hubHoldsIt && text && text !== saved) void save(text);
+      if (asking) opts.onShrinkWithdrawn?.(asking);
+      else if (!hubHoldsIt && text && text !== saved) void save(text);
       collab.awareness.off("change", onPeerChange);
       collab.text.unobserve(onDocChange);
       collab.destroy();
