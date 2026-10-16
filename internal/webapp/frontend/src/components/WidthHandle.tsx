@@ -22,7 +22,9 @@ function roomFor(page: HTMLElement): number {
   const box = page.parentElement!;
   const cs = getComputedStyle(box);
   const inner = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-  const rail = page.querySelector(":scope > aside.fv-rail") && window.matchMedia(FM_RAIL).matches ? RAIL : 0;
+  const el = page.querySelector<HTMLElement>(":scope > aside.fv-rail");
+  // The comments panel hides the rail and takes its place.
+  const rail = el && window.matchMedia(FM_RAIL).matches && getComputedStyle(el).display !== "none" ? RAIL : 0;
   return inner - rail;
 }
 

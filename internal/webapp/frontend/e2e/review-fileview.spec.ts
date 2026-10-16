@@ -192,3 +192,30 @@ test("print drops the file rail; phone pins on one line do not overlap", async (
   const overlap = a!.y < b!.y + b!.height && b!.y < a!.y + a!.height && a!.x < b!.x + b!.width && b!.x < a!.x + a!.width;
   expect(overlap).toBe(false);
 });
+
+test("the page title is the first heading, ahead of the rail's section labels", async ({ page }) => {
+  await login(page);
+  const id = await project(page);
+  const file = await ownFile(page, id, DOC);
+  await page.goto(`/${id}/${file}`);
+  await expect(page.locator("aside.fv-rail")).toBeVisible();
+  const first = page.locator("#content :is(h1,h2,h3,h4,h5,h6)").first();
+  await expect(first).toHaveText("Handbook");
+  await expect(page.locator("aside.fv-rail h4")).toHaveCount(0);
+});
+
+test("with comments open the hidden rail no longer limits the reading width", async ({ page }) => {
+  await login(page);
+  const id = await project(page);
+  const file = await ownFile(page, id, DOC);
+  await page.setViewportSize({ width: 1700, height: 900 });
+  await page.goto(`/${id}/${file}`);
+  await page.click("#comments-btn");
+  await expect(page.locator("aside.fv-rail")).toBeHidden();
+  const handle = page.locator(".rw-handle").last();
+  await handle.focus();
+  const before = (await page.locator(".fv-prose").boundingBox())!.width;
+  for (let i = 0; i < 40; i++) await page.keyboard.press("ArrowRight");
+  const after = (await page.locator(".fv-prose").boundingBox())!.width;
+  expect(after).toBeGreaterThan(before);
+});

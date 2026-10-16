@@ -15,7 +15,7 @@ import {
   resolveWiki,
 } from "../util";
 import { urlForPath, urlForView } from "../router";
-import { DocHeader, FileRail } from "./FileRail";
+import { DocHeader, FileRail, useWideRail } from "./FileRail";
 import { CSV_ROWS, parseDelimited, type Csv } from "../lib/csv";
 import { DARK, LIGHT, hasMermaid, renderMermaid } from "../lib/mermaid";
 import { useTheme } from "../lib/theme";
@@ -471,6 +471,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
 }
 
 function MarkdownView(props: Parameters<typeof FileView>[0]) {
+  const wideRail = useWideRail();
   const {
     apiBase,
     path,
@@ -551,23 +552,28 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   const heat = version ? null : (heatMap && heatMap[doc.path]) || null;
   // The rail is a SIBLING of the prose, not a wrapper around it: CSS hangs it
   // in the right margin of .page.read (style.css, .fv-rail) without a third
-  // column in AppShell. Server-rendered, server-sanitized markdown — same
+  // column in AppShell. Wide, it follows the document so assistive heading
+  // navigation meets the page title first; narrow, its disclosure sits above. Server-rendered, server-sanitized markdown — same
   // trust model as the classic app assigning innerHTML.
+  const rail = (
+    <FileRail
+      html={html}
+      frontmatter={doc.frontmatter}
+      heat={heat}
+      insightsHref={projectId ? urlForView("dashboard", projectId, path) : undefined}
+    />
+  );
   return (
     <>
       <SecretBadge findings={doc.findings} />
-      <FileRail
-        html={html}
-        frontmatter={doc.frontmatter}
-        heat={heat}
-        insightsHref={projectId ? urlForView("dashboard", projectId, path) : undefined}
-      />
+      {!wideRail && rail}
       <DocHeader doc={doc} heat={heat} />
       <div
         className="fv-prose"
         dangerouslySetInnerHTML={{ __html: diagrams ?? html }}
         onClick={(e) => handleLinkClick(e, path, onOpenFile)}
       />
+      {wideRail && rail}
     </>
   );
 }
