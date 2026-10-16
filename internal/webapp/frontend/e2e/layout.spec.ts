@@ -51,13 +51,14 @@ test("every view shares one column system", async ({ page }) => {
   await visit("/notes", "app"); // folder listing is a structured view too
 });
 
-test("the install route and the project home render the guide identically", async ({ page }) => {
-  // They are two sidebar items apart and show the same component; /install
-  // used to wrap it in the .onboard card — 320px narrower, 90px lower.
+test("the install route and an empty project's home render the guide identically", async ({ page }) => {
+  // An empty project's home IS the install guide; /install used to wrap it in
+  // the .onboard card — 320px narrower, 90px lower.
   await login(page);
-  const pid = await wikiId(page);
+  const made = await (await page.request.post("/api/projects", { data: { name: "layout-empty" } })).json();
+  const pid = made.project.id;
   const box = async (path: string) => {
-    await page.goto(`http://localhost:8993/${pid}${path}`);
+    await page.goto(`/${pid}${path}`);
     await page.waitForSelector(".guide");
     return page.evaluate(() => {
       const r = (document.querySelector(".guide") as HTMLElement).getBoundingClientRect();
@@ -65,6 +66,7 @@ test("the install route and the project home render the guide identically", asyn
     });
   };
   expect(await box("/install")).toEqual(await box(""));
+  await page.request.delete("/api/projects/" + pid);
 });
 
 test("charts never scale past the size they were drawn at", async ({ page }) => {
