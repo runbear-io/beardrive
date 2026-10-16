@@ -202,7 +202,7 @@ test("the page title is the first heading, ahead of the rail's section labels", 
   await expect(page.locator("aside.fv-rail")).toBeVisible();
   const first = page.locator("#content :is(h1,h2,h3,h4,h5,h6)").first();
   await expect(first).toHaveText("Handbook");
-  await expect(page.locator("aside.fv-rail h4")).toHaveCount(0);
+  await expect(page.locator(".fv-rail :is(h1,h2,h3,h4,h5,h6)")).toHaveCount(0);
 });
 
 test("with comments open the hidden rail no longer limits the reading width", async ({ page }) => {
@@ -219,4 +219,20 @@ test("with comments open the hidden rail no longer limits the reading width", as
   for (let i = 0; i < 40; i++) await page.keyboard.press("ArrowRight");
   const after = (await page.locator(".fv-prose").boundingBox())!.width;
   expect(after).toBeGreaterThan(before);
+});
+
+test("leaving edit mode clears the editor's status; TOC links set the hash", async ({ page }) => {
+  await login(page);
+  const id = await project(page);
+  const file = await ownFile(page, id, DOC);
+  await page.goto(`/${id}/edit/${file}`);
+  await expect(page.locator("#editor-state")).toBeVisible();
+  await page.goto(`/${id}/${file}`);
+  await page.click("#edit-btn");
+  await expect(page.locator("#editor-state")).toBeVisible();
+  await page.click("#edit-btn");
+  await expect(page.locator("#editor-state")).toHaveCount(0);
+
+  await page.locator(".fv-toc a", { hasText: "Second section" }).click();
+  await expect(page).toHaveURL(/#second-section$/);
 });

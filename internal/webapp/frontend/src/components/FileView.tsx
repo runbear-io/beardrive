@@ -382,6 +382,9 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     // connection state it was first rendered with, so a room that came up
     // fine still reads "connecting" forever.
   }, [state, collab, onMeta]);
+  // Leaving edit mode keeps FileView mounted on the same path, so the editor
+  // clears its own status rather than leaving it on a read-only page.
+  useEffect(() => () => onMeta(""), [onMeta]);
 
   /* A read that failed is only fatal before there is anything to lose.
 
