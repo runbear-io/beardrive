@@ -231,9 +231,16 @@ classDiagram
     }
     note for volumeWorker "runVolumeWorker cycles all enrolled worktrees sharing volDir and holds volumes/volume-id/daemon.lock; daemon.pid and daemon.log stay per-volume. Re-reads config each tick, promotes a live sibling or exits without deletes if a folder vanishes. A changed remote ends the worker"
     note for volumeWorker "bdrive stop pauses the selected mount; stop --all pauses every enrolled project on the device. When no active sibling remains, its worker releases the volume lock; other projects keep running. The global and volume flocks form the Dual-Lock scheme"
+    class localFolderWatcher {
+        -chan wake
+        -chan err
+        +close()
+    }
+    note for localFolderWatcher "runVolumeWorker watches every active mount directory recursively, wakes local cycles on filesystem changes, adds newly created directories, and falls back to scanInterval after setup or runtime errors. A healthy watcher uses a one-minute safety scan; local events do not force remote polling, while local ops and backfill schedule their own immediate remote leg"
     note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back"
 
     note for volumeWorker "remote.Watcher wakes a remote cycle when a peer pushes, reducing arrival latency from about 10s to 1s. A live stream stretches polling to remoteInterval x watchedPollFactor (5m by default); losing it restores remoteInterval on the next tick. Token changes and offline cycles drop the stream. Failed or ended dials back off for watchRetry (1m), including an older hub's 404. Periodic polling still bounds silent stream failure"
+    volumeWorker --> localFolderWatcher : local filesystem wake and safety fallback
 
     Session --> merge : before a conflict copy
     Session --> Store : volume state

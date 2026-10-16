@@ -316,6 +316,11 @@ func TestDeltaE2E_MixedFleetConflictAndDelete(t *testing.T) {
 		t.Fatalf("seed did not converge: %v", err)
 	}
 
+	// Pause the current daemon before either edit. Its watcher would otherwise
+	// publish this side before the old client observes the concurrent change.
+	if out, err := cur.run(dirCur, "stop", dirCur); err != nil {
+		t.Fatalf("stop current daemon: %v\n%s", err, out)
+	}
 	// Concurrent edits before either syncs: old edits the head, new the tail.
 	editOld := append([]byte{}, base...)
 	editOld[0] ^= 0xff
@@ -328,7 +333,11 @@ func TestDeltaE2E_MixedFleetConflictAndDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	syncNow(t, old, dirOld)
-	syncNow(t, cur, dirCur)
+	// init clears the pause and runs one cycle before starting the watcher, so
+	// this is the cycle that observes the unpushed local edit and old's edit.
+	if out, err := cur.run(dirCur, "init", "--name", "delta-e2e-mixed", "--yes"); err != nil {
+		t.Fatalf("resume current client: %v\n%s", err, out)
+	}
 	syncNow(t, old, dirOld)
 	syncNow(t, cur, dirCur)
 	syncNow(t, old, dirOld) // one more pass so the loser's conflict copy propagates

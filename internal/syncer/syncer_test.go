@@ -129,6 +129,25 @@ func TestOfflineCycle(t *testing.T) {
 	}
 }
 
+func TestQuietCycleDoesNotRewriteCache(t *testing.T) {
+	a := newDevice(t, "deva", nil)
+	write(t, a.Folder, "quiet.txt", "unchanged")
+	cycle(t, a)
+	cachePath := filepath.Join(a.Store.Dir(), "state-"+a.mountID()+".json")
+	before, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	after, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("quiet cycle rewrote the cache")
+	}
+}
+
 func TestTwoDeviceSync(t *testing.T) {
 	be := sharedRemote(t)
 	a := newDevice(t, "deva", be)

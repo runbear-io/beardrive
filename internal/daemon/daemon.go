@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -20,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
@@ -892,6 +894,108 @@ var workerInitHook func(string)
 // after all workers finish; production leaves it nil.
 var workerCycleHook func(string)
 
+// A healthy local watcher replaces the tight safety scan with this slow poll.
+// The watcher is only an accelerator: losing it immediately restores the
+// existing scanInterval polling path.
+const (
+	localWatchSafetyInterval = time.Minute
+	localWatchRetry          = time.Minute
+)
+
+type localFolderWatcher struct {
+	wake  <-chan struct{}
+	err   <-chan error
+	close func()
+}
+
+func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderWatcher, error) {
+	fw, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+	var closeOnce sync.Once
+	closeWatcher := func() {
+		closeOnce.Do(func() { _ = fw.Close() })
+	}
+	seen := make(map[string]bool)
+	addDir := func(root string) error {
+		return filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			path = filepath.Clean(path)
+			if seen[path] {
+				return nil
+			}
+			if err := fw.Add(path); err != nil {
+				return err
+			}
+			seen[path] = true
+			return nil
+		})
+	}
+	for _, root := range roots {
+		if err := addDir(root); err != nil {
+			closeWatcher()
+			return nil, err
+		}
+	}
+	wake := make(chan struct{}, 1)
+	errCh := make(chan error, 1)
+	notify := func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	report := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+	go func() {
+		defer closeWatcher()
+		defer close(wake)
+		defer close(errCh)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-fw.Events:
+				if !ok {
+					report(errors.New("local filesystem watcher closed"))
+					return
+				}
+				if ev.Op&fsnotify.Create != 0 {
+					if info, statErr := os.Stat(ev.Name); statErr == nil && info.IsDir() {
+						if addErr := addDir(ev.Name); addErr != nil {
+							report(addErr)
+							return
+						}
+					}
+				}
+				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename|fsnotify.Chmod) != 0 {
+					notify()
+				}
+			case err, ok := <-fw.Errors:
+				if !ok {
+					report(errors.New("local filesystem watcher error channel closed"))
+				} else if err != nil {
+					report(err)
+				} else {
+					report(errors.New("local filesystem watcher error"))
+				}
+				return
+			}
+		}
+	}()
+	return &localFolderWatcher{wake: wake, err: errCh, close: closeWatcher}, nil
+}
+
 func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logger *log.Logger) (res *syncer.Result, err error, panicked bool) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -951,6 +1055,20 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	var watch <-chan struct{}
 	var watchCancel context.CancelFunc
 	var nextWatch, watchOpened time.Time
+	var localWatch *localFolderWatcher
+	var localWatchWake <-chan struct{}
+	var localWatchErr <-chan error
+	var localWatchRoots string
+	var localWatchRetryAt time.Time
+	localWatchHealthy := false
+	stopLocalWatch := func() {
+		if localWatch != nil {
+			localWatch.close()
+			localWatch = nil
+		}
+		localWatchWake, localWatchErr = nil, nil
+		localWatchHealthy = false
+	}
 	stopWatch := func() {
 		if watchCancel != nil {
 			watchCancel()
@@ -959,6 +1077,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		watch = nil
 	}
 	defer stopWatch()
+	defer stopLocalWatch()
 	refreshed := make(map[string]bool)
 	for {
 		if ctx.Err() != nil || store.Paused(volDir) {
@@ -968,6 +1087,26 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		if len(targets) == 0 {
 			logger.Printf("no active mounts remain; exiting")
 			return nil
+		}
+		roots := make([]string, 0, len(targets))
+		for _, target := range targets {
+			roots = append(roots, target.folder)
+		}
+		sort.Strings(roots)
+		rootKey := strings.Join(roots, "\x00")
+		if rootKey != localWatchRoots {
+			stopLocalWatch()
+			localWatchRoots, localWatchRetryAt = rootKey, time.Time{}
+		}
+		if localWatch == nil && time.Now().After(localWatchRetryAt) {
+			lw, watchErr := startLocalFolderWatcher(ctx, roots)
+			if watchErr != nil {
+				localWatchRetryAt = time.Now().Add(localWatchRetry)
+				logger.Printf("local filesystem watcher unavailable; polling: %v", watchErr)
+			} else {
+				localWatch, localWatchWake, localWatchErr = lw, lw.wake, lw.err
+				localWatchHealthy = true
+			}
 		}
 		proj := targets[0].proj
 		for _, target := range targets {
@@ -996,22 +1135,32 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			lastRemote = time.Time{}
 		}
 
-		// How long this daemon is willing to go without talking to the hub.
+		// Keep local safety scans independent from remote polling. A healthy
+		// filesystem watcher makes the local scan a slow backstop; failures
+		// fall back to the existing scanInterval cadence.
 		//
-		// With the change stream open, a peer's write arrives by push and
-		// clears the gate below, so the timer is only catching a stream that
-		// died without telling us. Without one, the timer IS the sync: it has
-		// to stay at remoteInterval or nothing would notice a peer at all.
+		// The remote timer still gates hub work. With the change stream open,
+		// a peer's write arrives by push and clears that gate below, so the
+		// timer only catches a stream that died without telling us. Without a
+		// stream, it stays at remoteInterval or peers would go unnoticed.
 		//
 		// Note this reads `watch`, which a failed dial, a token change, an
 		// offline cycle and the hub's own streamMaxAge all set back to nil —
-		// so losing the stream restores the tight cadence on the very next
-		// tick rather than at the end of a long one.
-		pollEvery := remoteInterval
-		if watch != nil {
-			pollEvery = remoteInterval * watchedPollFactor
+		// so losing the stream restores the tight remote cadence immediately.
+		pollEvery := scanInterval
+		if localWatchHealthy {
+			pollEvery = localWatchSafetyInterval
 		}
-		doRemote := proj.Remote != "" && time.Since(lastRemote) >= pollEvery
+		// Remote polling remains independent of the local watcher.
+		remotePollEvery := remoteInterval
+		if watch != nil {
+			remotePollEvery = remoteInterval * watchedPollFactor
+		}
+		if remotePollEvery < pollEvery {
+			pollEvery = remotePollEvery
+		}
+		waitFor := pollEvery
+		doRemote := proj.Remote != "" && time.Since(lastRemote) >= remotePollEvery
 		if doRemote && be == nil {
 			b, err := remote.Open(ctx, proj.Remote)
 			if err != nil {
@@ -1199,10 +1348,12 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				lastRemote = time.Now()
 			}
 			if res.LocalOps > 0 && !doRemote {
-				lastRemote = time.Time{} // push local edits on the next tick
+				lastRemote = time.Time{} // push local edits on the next cycle
+				continue
 			}
 			if res.Backfilling {
 				lastRemote = time.Time{} // fetch the next batch on the next tick
+				waitFor = min(waitFor, scanInterval)
 			}
 		}
 
@@ -1229,7 +1380,21 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			lastRemote = time.Time{}
 		case <-wakeCh:
 			lastRemote = time.Time{}
-		case <-time.After(scanInterval):
+		case watchErr, ok := <-localWatchErr:
+			if !ok {
+				watchErr = errors.New("local filesystem watcher channel closed")
+			}
+			logger.Printf("local filesystem watcher stopped; polling: %v", watchErr)
+			stopLocalWatch()
+			localWatchRetryAt = time.Now().Add(localWatchRetry)
+			continue
+		case _, ok := <-localWatchWake:
+			if !ok {
+				stopLocalWatch()
+				localWatchRetryAt = time.Now().Add(localWatchRetry)
+			}
+			continue
+		case <-time.After(waitFor):
 		}
 	}
 }

@@ -128,7 +128,8 @@ type Session struct {
 
 	// fetched holds the blobs this cycle has already asked the remote for, so
 	// the backfill never downloads one twice in a cycle. Reset with inbound.
-	fetched map[string]bool
+	fetched    map[string]bool
+	cacheDirty bool
 }
 
 // logInbound records one materialized peer path both ways: on this cycle's
@@ -422,6 +423,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 
 	s.inbound = nil
 	s.fetched = map[string]bool{}
+	s.cacheDirty = false
 	res := &Result{}
 	cache, err := s.Store.LoadCache(s.mountID())
 	if err != nil {
@@ -679,7 +681,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 			if cerr := commitLocal(); cerr != nil {
 				return nil, cerr
 			}
-			return res, s.finish(cache, st, sec)
+			return res, s.finish(cache, st, sec, s.cacheDirty)
 		case errors.Is(err, errBlobContent):
 			// Reported — it is the only signal a device ever gets that its hub
 			// is serving bytes that are not what they are addressed as — but
@@ -990,7 +992,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// so a device the hub was refusing alternated between the two log lines
 	// forever and `bdrive status` reported healthy sync moments after the push
 	// it had just refused.
-	if err := s.finish(cache, st, sec); err != nil {
+	if err := s.finish(cache, st, sec, s.cacheDirty); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -999,9 +1001,11 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 // finish persists the two pieces of state a cycle mutates. Saving the cache
 // matters even on a cut-short cycle: the scan already journaled local edits,
 // and dropping the cache would make the next scan journal them all again.
-func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, sec *secretLog) error {
-	if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
-		return err
+func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, sec *secretLog, cacheDirty bool) error {
+	if cacheDirty {
+		if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
+			return err
+		}
 	}
 	// Written only when the cycle changed it, so a quiet daemon tick every 3s
 	// still writes nothing — and an error is logged, never returned: this is
@@ -1085,6 +1089,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			}
 			if ok && c.Link == target {
 				c.Size, c.MTimeNS = size, mt // touched, same target
+				s.cacheDirty = true
 				cache[rel] = c
 				return nil
 			}
@@ -1092,6 +1097,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			op.Link = target
 			op.Mtime = info.ModTime().UTC()
 			ops = append(ops, op)
+			s.cacheDirty = true
 			cache[rel] = store.CachedFile{Link: target, Size: size, MTimeNS: mt}
 			return nil
 		}
@@ -1107,6 +1113,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		if ok && c.Blob == sum {
 			// content unchanged, just touched
 			c.Size, c.MTimeNS, c.Mode = n, mt, mode
+			s.cacheDirty = true
 			cache[rel] = c
 			return nil
 		}
@@ -1114,6 +1121,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		op.Blob, op.Size, op.Mode = sum, n, mode
 		op.Mtime = info.ModTime().UTC()
 		ops = append(ops, op)
+		s.cacheDirty = true
 		cache[rel] = store.CachedFile{Blob: sum, Size: n, Mode: mode, MTimeNS: mt}
 		return nil
 	})
@@ -1141,14 +1149,17 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 		if unsafeRel(rel) || neverSync(rel) {
 			delete(cache, rel)
+			s.cacheDirty = true
 			continue
 		}
 		if filter.Skip(rel) {
 			delete(cache, rel) // newly filtered, not deleted: stop tracking silently
+			s.cacheDirty = true
 			continue
 		}
 		ops = append(ops, nextOp(journal.KindDelete, rel))
 		delete(cache, rel)
+		s.cacheDirty = true
 	}
 	return ops, nil
 }
@@ -1939,6 +1950,7 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 		// 4; this loop got none of them, and it ends in os.Remove.
 		if unsafeRel(rel) || neverSync(rel) {
 			delete(cache, rel)
+			s.cacheDirty = true
 			continue
 		}
 		if filter.Skip(rel) {
@@ -1948,11 +1960,13 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 			// (or any delete op for a now-filtered path) unlinks every peer's
 			// local copy, which is the data loss the feature exists to avoid.
 			delete(cache, rel)
+			s.cacheDirty = true
 			continue
 		}
 		abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
 		if !store.UnderRoot(s.Folder, abs) {
 			delete(cache, rel)
+			s.cacheDirty = true
 			continue
 		}
 		if fi, err := os.Stat(abs); err == nil {
@@ -1971,6 +1985,7 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 			s.logInbound(rel, true)
 		}
 		delete(cache, rel)
+		s.cacheDirty = true
 		changed++
 	}
 	return changed, nil
@@ -2034,6 +2049,7 @@ func (s *Session) materializeFile(rel string, want journal.FileState, cache map[
 	if err != nil {
 		return false, err
 	}
+	s.cacheDirty = true
 	cache[rel] = store.CachedFile{Blob: want.Blob, Size: fi.Size(), Mode: want.Mode, MTimeNS: fi.ModTime().UnixNano()}
 	// Spool it for the next agent turn ("changed since your last turn"). Only
 	// peer content reaches here — a local edit is journaled by the scan and
@@ -2152,6 +2168,7 @@ func (s *Session) materializeSymlink(rel string, want journal.FileState, cache m
 			// (an untracked, differing link) leave it for the next scan.
 			cur, rerr := os.Readlink(abs)
 			if rerr == nil && cur == want.Link {
+				s.cacheDirty = true
 				cache[rel] = store.CachedFile{Link: want.Link, Size: fi.Size(), MTimeNS: fi.ModTime().UnixNano()}
 				return false, nil
 			}
@@ -2170,6 +2187,7 @@ func (s *Session) materializeSymlink(rel string, want journal.FileState, cache m
 	if err != nil {
 		return false, err
 	}
+	s.cacheDirty = true
 	cache[rel] = store.CachedFile{Link: want.Link, Size: fi.Size(), MTimeNS: fi.ModTime().UnixNano()}
 	s.logInbound(rel, false)
 	return true, nil
