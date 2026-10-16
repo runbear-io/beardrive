@@ -126,8 +126,9 @@ export function CommentSurface(props: {
       else reg.delete(HL_ACTIVE);
     }
     // Pins sit in the left gutter beside the line their text starts on, so
-    // they never cover what was quoted; threads starting on one line stack
-    // outwards.
+    // they never cover what was quoted. The gutter is the scroller's padding
+    // and anything past it is clipped, so threads starting on one line stack
+    // downwards (style.css, --k) rather than fanning out sideways.
     const base = page.getBoundingClientRect();
     const next: typeof pins = [];
     const perLine = new Map<number, number>();
@@ -137,7 +138,7 @@ export function CommentSurface(props: {
       const y = Math.round(box.top - base.top + box.height / 2);
       const k = perLine.get(y) ?? 0;
       perLine.set(y, k + 1);
-      next.push({ id: t.id, n: t.n, c: t.messages.length, k, x: -46 - k * 44, y });
+      next.push({ id: t.id, n: t.n, c: t.messages.length, k, x: -38, y });
     }
     setPins(next);
   }, [shown, focus, tick, framed, page]);

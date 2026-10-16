@@ -1673,7 +1673,7 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
 ::highlight(bd-comment) { background-color: rgba(245,166,35,.24); }
 ::highlight(bd-comment-active) { background-color: rgba(245,166,35,.55); }
 .cm-pin {
-  position: absolute; z-index: 6; transform: translateY(-50%);
+  position: absolute; z-index: 6; transform: translateY(-50%) translateY(calc(var(--k, 0) * 22px));
   min-width: 20px; height: 20px; padding: 0 5px; border: none; border-radius: 10px 10px 10px 2px;
   background: var(--accent); color: #241704; font: 600 11px/20px var(--ui); cursor: pointer;
   box-shadow: 0 2px 6px rgba(0,0,0,.35);
@@ -1991,7 +1991,7 @@ body.full-view .cm-panel { top: 0; }
 .cm-row .btn.cm-act:hover { background: var(--hover); }
 .cm-row .btn.cm-act .ico { width: 13px; height: 13px; }
 .cm-card .cm-row { justify-content: flex-start; gap: 2px; }
-.cm-pin { display: inline-flex; align-items: center; gap: 3px; padding: 0 7px; border-radius: 10px; }
+.cm-pin { display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; border-radius: 10px; }
 .cm-pin .ico { width: 11px; height: 11px; }
 @media (max-width: 900px) { #edit-btn .ico { display: none; } }
 /* The comments panel takes the rail's place rather than squeezing the prose
@@ -2001,10 +2001,8 @@ body.full-view .cm-panel { top: 0; }
   body:has(.cm-panel) aside.fv-rail { display: none; }
 }
 /* A phone's gutter has room for the count alone. */
-/* The gutter is too narrow to fan pins out sideways, so threads on one line
-   stack downwards instead. */
 @media (max-width: 900px) {
-  .cm-pin { left: -19px !important; padding: 0 5px; transform: translateY(-50%) translateY(calc(var(--k, 0) * 22px)); }
+  .cm-pin { left: -19px !important; padding: 0 5px; }
   .cm-pin .ico { display: none; }
 }
 /* Between the phone breakpoint and a wide desktop the sidebar leaves the top

@@ -238,3 +238,30 @@ test("leaving edit mode clears the editor's status; TOC links set the hash", asy
   await page.locator(".fv-toc a", { hasText: "Second section" }).click();
   await expect(page).toHaveURL(/#second-section$/);
 });
+
+test("desktop pins on one line stay inside the scroller's gutter", async ({ page }) => {
+  await login(page);
+  const id = await project(page);
+  const file = await ownFile(page, id, DOC);
+  for (const body of ["one", "two", "three"]) {
+    const r = await page.request.post(`/api/p/${id}/comments`, { data: { path: file, anchor: { quote: "Intro text." }, body } });
+    expect(r.ok(), await r.text()).toBeTruthy();
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/${id}/${file}`);
+  const pins = page.locator(".cm-pin");
+  await expect(pins).toHaveCount(3);
+  const box = (await page.locator("#content").boundingBox())!;
+  const seen: { x: number; y: number; width: number; height: number }[] = [];
+  for (let i = 0; i < 3; i++) {
+    const b = (await pins.nth(i).boundingBox())!;
+    expect(b.x, `pin ${i} left edge`).toBeGreaterThanOrEqual(box.x);
+    for (const o of seen) {
+      const overlap = b.y < o.y + o.height && o.y < b.y + b.height && b.x < o.x + o.width && o.x < b.x + b.width;
+      expect(overlap, `pin ${i} overlaps another`).toBe(false);
+    }
+    seen.push(b);
+    await pins.nth(i).click();
+    await expect(page.locator(".cm-panel")).toBeVisible();
+  }
+});
