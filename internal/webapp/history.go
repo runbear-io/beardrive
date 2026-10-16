@@ -42,7 +42,9 @@ type HistoryEntry struct {
 	Blob string `json:"blob,omitempty"` // sha256; fetch via the blob endpoint
 	// Prev is the content this path last had before the op — across a
 	// delete too, so a delete names what it removed and a re-add what it
-	// replaced. Absent only when the path never had content before.
+	// replaced. Absent when the path never had content before, and on a
+	// delete of a path that was already gone (e.g. two devices deleting it
+	// concurrently): that delete removed nothing.
 	Prev     string        `json:"prev,omitempty"`
 	User     string        `json:"user,omitempty"`
 	UserName string        `json:"user_name,omitempty"`
@@ -196,7 +198,11 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	last := make(map[string]string, len(all))
 	for i, so := range all {
 		op := so.Op
-		prevs[i] = last[op.Path]
+		// A delete of a path that is already gone removed nothing, so it
+		// names nothing — even though the path once had content.
+		if op.Kind != journal.KindDelete || exists[op.Path] {
+			prevs[i] = last[op.Path]
+		}
 		if op.Kind != journal.KindDelete {
 			last[op.Path] = op.Blob
 		}

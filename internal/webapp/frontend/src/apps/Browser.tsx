@@ -880,6 +880,7 @@ export default function Browser(props: {
         target={route.viewTarget || ""}
         isFolder={isFolderFn}
         flatFiles={flatFiles}
+        projectId={project?.id}
         onOpen={openPath}
         onMeta={setMeta}
         onRendered={onRendered}

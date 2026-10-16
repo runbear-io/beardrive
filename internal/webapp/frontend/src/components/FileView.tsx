@@ -608,7 +608,7 @@ function SecretBadge({ findings }: { findings?: SecretFinding[] }) {
 /* Delegated click handling for rendered-markdown links: wikilinks (already
    carrying a real in-app href, see transformHTML) and relative links route
    in-app on a plain click, everything else keeps its native behavior. */
-function handleLinkClick(
+export function handleLinkClick(
   e: React.MouseEvent,
   p: string,
   openFile: (path: string) => void,
@@ -638,7 +638,7 @@ function handleLinkClick(
 /* String-level rewrite of the server's HTML: relative image sources point
    at the file API, external links open in a new tab, and wikilinks get the
    real in-app URL of their target. */
-function transformHTML(
+export function transformHTML(
   html: string,
   p: string,
   apiBase: string,

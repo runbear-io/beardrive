@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId } from "./helpers";
+import { ADMIN, login, wikiId } from "./helpers";
 
 // The Activity view: filters that speak the reader's calendar, a summary,
 // day groups, session cards, the diff side panel and the three non-feed
@@ -185,4 +185,45 @@ test("Copy link on a delete links the version it removed", async ({ page, contex
   expect(link).toMatch(new RegExp(`/${pid}/scratch\\.md\\?v=[0-9a-f]{64}$`));
   await page.goto(link);
   await expect(page.getByText("Temporary.")).toBeVisible();
+});
+
+test("a past version's Rendered tab routes its links and wikilinks in-app", async ({ page, browser }) => {
+  await login(page);
+  const made = await page.request.post("/api/projects", { data: { name: "zz-activity-render" } });
+  expect(made.ok()).toBeTruthy();
+  const id = (await made.json()).project.id;
+  try {
+    const put = async (path: string, body: string) => {
+      const r = await page.request.put(`/api/p/${id}/upload/content?path=${encodeURIComponent(path)}`, { data: body });
+      expect(r.ok()).toBeTruthy();
+    };
+    await put("notes/readme.md", "# Readme\n");
+    await put("other.md", "# Other\n");
+    await put("notes/page.md", "# Page\n\nSee [the readme](readme.md) and [[other]].\n");
+    await put("notes/page.md", "# Page\n\nNo links any more.\n");
+
+    await page.goto(`/${id}/activity`);
+    const first = page.locator(".history .hentry.add", { hasText: "notes/page.md" });
+    await first.locator(".hsel-btn").click();
+    const panel = page.locator(".apanel");
+    await panel.getByRole("tab", { name: "Rendered" }).click();
+    const md = panel.locator(".dtabs-md");
+    // The wikilink resolved before the mount: a real in-app href.
+    await expect(md.getByRole("link", { name: "other" })).toHaveAttribute("href", `/${id}/other.md`);
+    // A relative link resolves against the file's folder, not the project root.
+    await md.getByRole("link", { name: "the readme" }).click();
+    await page.waitForURL(`/${id}/notes/readme.md`);
+
+    await page.goBack();
+    await page.waitForURL(`/${id}/activity`);
+    await page.locator(".history .hentry.add", { hasText: "notes/page.md" }).locator(".hsel-btn").click();
+    await panel.getByRole("tab", { name: "Rendered" }).click();
+    await panel.locator(".dtabs-md").getByRole("link", { name: "other" }).click();
+    await page.waitForURL(`/${id}/other.md`);
+  } finally {
+    const p = await browser.newPage();
+    await login(p, ADMIN);
+    await p.request.delete(`/api/projects/${id}`).catch(() => {});
+    await p.close();
+  }
 });

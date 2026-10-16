@@ -4,6 +4,8 @@ import { getJSON } from "../api/http";
 import { diffBase } from "../lib/activity";
 import { diffText } from "../lib/diff";
 import { blobURL, useBlobText } from "../hooks/useBlob";
+import type { Node } from "../api/types";
+import { handleLinkClick, transformHTML } from "./FileView";
 
 /* What actually changed between one version of a file and the one before
    it: a line diff, computed in the browser from the two blobs the history
@@ -123,12 +125,18 @@ export function DiffTabs({
   kind,
   prev,
   cur,
+  flatFiles,
+  projectId,
+  onOpenFile,
 }: {
   apiBase: string;
   path: string;
   kind: string;
   prev?: string;
   cur?: string; // absent for a delete: the panel then shows what was removed
+  flatFiles: Node[];
+  projectId?: string;
+  onOpenFile: (path: string) => void;
 }) {
   const [tab, setTab] = useState<Tab>("changes");
   const shown = cur || prev;
@@ -154,14 +162,34 @@ export function DiffTabs({
                   : "Earlier version not loaded — nothing to compare against here."}
             </div>
           ))}
-        {tab === "rendered" && shown && <Rendered apiBase={apiBase} path={path} sha={shown} />}
+        {tab === "rendered" && shown && (
+          <Rendered apiBase={apiBase} path={path} sha={shown} flatFiles={flatFiles} projectId={projectId} onOpenFile={onOpenFile} />
+        )}
         {tab === "full" && shown && <FullFile apiBase={apiBase} sha={shown} />}
       </div>
     </div>
   );
 }
 
-function Rendered({ apiBase, path, sha }: { apiBase: string; path: string; sha: string }) {
+/* The same string transform and delegated link handling as the file page's
+   ?v= view, so links and [[wikilinks]] in a past version resolve against the
+   file's path and open in-app. Like that view, relative images point at the
+   files as they are now — a version pins only this file's own bytes. */
+function Rendered({
+  apiBase,
+  path,
+  sha,
+  flatFiles,
+  projectId,
+  onOpenFile,
+}: {
+  apiBase: string;
+  path: string;
+  sha: string;
+  flatFiles: Node[];
+  projectId?: string;
+  onOpenFile: (path: string) => void;
+}) {
   const md = /\.(md|markdown)$/i.test(path);
   const img = /\.(png|jpe?g|gif|webp|svg)$/i.test(path);
   const { data, error } = useQuery({
@@ -170,11 +198,21 @@ function Rendered({ apiBase, path, sha }: { apiBase: string; path: string; sha: 
     enabled: md,
     retry: false,
   });
+  const html = useMemo(
+    () => (data ? transformHTML(data.html, path, apiBase, flatFiles, projectId) : ""),
+    [data, path, apiBase, flatFiles, projectId],
+  );
   if (img) return <img className="dtabs-img" alt={basename(path)} src={blobURL(apiBase, sha, basename(path))} />;
   if (!md) return <div className="dv dv-msg">No rendered view for this file type — see Full file.</div>;
   if (error) return <div className="dv dv-msg">Could not render this version.</div>;
   if (!data) return <div className="dv dv-msg">Rendering…</div>;
-  return <div className="md dtabs-md" dangerouslySetInnerHTML={{ __html: data.html }} />;
+  return (
+    <div
+      className="md dtabs-md"
+      dangerouslySetInnerHTML={{ __html: html }}
+      onClick={(e) => handleLinkClick(e, path, onOpenFile)}
+    />
+  );
 }
 
 function FullFile({ apiBase, sha }: { apiBase: string; sha: string }) {
