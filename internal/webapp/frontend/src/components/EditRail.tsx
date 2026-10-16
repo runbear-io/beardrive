@@ -28,6 +28,9 @@ export function EditRail(props: {
   me: string;
   // The section a remote cursor is typing in, by heading name.
   typing: Set<string>;
+  // History and restore are per-project hub routes; a single-volume server
+  // has neither, so it gets no versions list.
+  versions: boolean;
 }) {
   const { apiBase, path, text, meeting } = props;
   const wide = useWideRail();
@@ -77,7 +80,7 @@ export function EditRail(props: {
           </ul>
         )}
       </section>
-      <Versions apiBase={apiBase} path={path} size={new TextEncoder().encode(text).length} />
+      {props.versions && <Versions apiBase={apiBase} path={path} size={new TextEncoder().encode(text).length} />}
     </>
   );
 
