@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState } from "@codemirror/state";
 import {
   EditorView,
   keymap,
@@ -17,9 +17,16 @@ import {
   syntaxHighlighting,
   defaultHighlightStyle,
 } from "@codemirror/language";
+import { completionKeymap } from "@codemirror/autocomplete";
+import { foldKeymap } from "@codemirror/language";
 import { yCollab } from "y-codemirror.next";
-import { type CollabStatus } from "../lib/collab";
-import { warnShrink } from "../toast";
+import { type CollabDoc, type CollabStatus } from "../lib/collab";
+import { meetingSections } from "../lib/cm-meeting";
+import { slashMenu } from "../lib/cm-slash";
+import { openItems, previousNote, sections } from "../lib/meeting";
+import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
+import { toast } from "../toast";
+import { askShrink } from "./ShrinkDialog";
 import {
   openSharedFile,
   SAVE_IDLE_MS,
@@ -51,6 +58,18 @@ import {
 
 export type { SaveState };
 
+// How the source is shown. Both are the same CodeMirror on the same room;
+// switching reconfigures the view and never remounts it.
+export type EditMode = "write" | "markdown";
+
+// What the chrome around the editor reads from it on every change.
+export type EditorInfo = {
+  text: string;
+  line: number;
+  col: number;
+  collab: CollabDoc | null;
+};
+
 export function Editor({
   apiBase,
   path,
@@ -64,6 +83,11 @@ export function Editor({
   onConflictCopy,
   baseSha,
   me,
+  mode = "markdown",
+  meeting = false,
+  files,
+  onInfo,
+  onPending,
 }: {
   apiBase: string;
   path: string;
@@ -86,6 +110,14 @@ export function Editor({
   // Reports whether other editors are in the document, so the caller can
   // tell a co-editor's snapshot from an outside write.
   onPeers?: (n: number) => void;
+  mode?: EditMode;
+  // A meeting note (lib/meeting.ts isMeetingNote): per-person sections and
+  // the meeting commands in the / menu.
+  meeting?: boolean;
+  // Project file paths, for [[ links and finding the previous meeting.
+  files?: string[];
+  onInfo?: (i: EditorInfo) => void;
+  onPending?: (n: number) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -101,8 +133,16 @@ export function Editor({
   //  - `initial` changes whenever the seed query refetches, and a peer's write
   //    invalidates exactly that query — so it would reset the buffer under the
   //    typist's cursor, which is the one thing this component must never do.
-  const cb = useRef({ onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal, onConflictCopy });
-  cb.current = { onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal, onConflictCopy };
+  const cb = useRef({ onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal, onConflictCopy, onInfo, onPending });
+  cb.current = { onSaved, onWriting, onStateChange, onCollab, onPeers, onExternal, onConflictCopy, onInfo, onPending };
+  const filesRef = useRef(files ?? []);
+  filesRef.current = files ?? [];
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const meetingRef = useRef(meeting);
+  meetingRef.current = meeting;
+  const live = useRef<CollabStatus>("connecting");
+  const modeSlot = useRef(new Compartment());
   const seed = useRef(initial);
   // The bytes this editor opened with, so a later `initial` can be told apart
   // from the one that mounted us.
@@ -143,15 +183,60 @@ export function Editor({
 
     // The extensions both mounts share. Only the collaborative binding and
     // the change listener differ between them.
+    const who = meRef.current?.name ?? "";
+    const report = (v: EditorView) => {
+      const head = v.state.selection.main.head;
+      const line = v.state.doc.lineAt(head);
+      cb.current.onInfo?.({
+        text: v.state.doc.toString(),
+        line: line.number,
+        col: head - line.from + 1,
+        collab: view === v && viaRoom ? file.collab : null,
+      });
+    };
+    const meetingExt = () =>
+      meetingRef.current
+        ? meetingSections({
+            me: who,
+            collab: file.collab,
+            offline: () => viaRoom && live.current !== "live",
+            onBlocked: () => toast("Offline: other people's sections are read-only until you reconnect."),
+          })
+        : [];
     const baseExtensions = [
-      lineNumbers(),
+      modeSlot.current.of(modeExtensions(modeRef.current)),
       highlightActiveLine(),
       history(),
       markdown(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+      slashMenu({
+        me: who,
+        files: () => filesRef.current,
+        people: () => {
+          const names = sections(view?.state.doc.toString() ?? "").map((x) => x.name);
+          file.collab.awareness.getStates().forEach((st) => {
+            const n = (st as { user?: { name?: string } }).user?.name;
+            if (n) names.push(n);
+          });
+          return names;
+        },
+        carryOver: meetingRef.current
+          ? async () => {
+              const prev = previousNote(path, filesRef.current);
+              if (!prev) return null;
+              const got = await fetchBlobText(fileURLFor(apiBase, prev));
+              return { from: prev, items: got.kind === "text" ? openItems(got.text) : [] };
+            }
+          : undefined,
+        onNotice: (m) => toast(m),
+      }),
+      keymap.of([...completionKeymap, ...foldKeymap, ...defaultKeymap, ...historyKeymap, indentWithTab]),
       EditorView.lineWrapping,
+      EditorView.updateListener.of((u) => {
+        if (u.docChanged || u.selectionSet || u.focusChanged) report(u.view);
+      }),
     ];
+    let viaRoom = false;
 
     // Without the CRDT there is no shared document to observe, so the save
     // timer hangs off CodeMirror's own updates instead.
@@ -170,11 +255,12 @@ export function Editor({
         parent: host.current,
         state: EditorState.create({
           doc: seed.current,
-          extensions: [...baseExtensions, soloListener],
+          extensions: [...baseExtensions, meetingExt(), soloListener],
         }),
       });
       editor.current = view;
       view.focus();
+      report(view);
     };
 
     // Mounted only once the relay has answered, so CodeMirror binds to a
@@ -192,11 +278,14 @@ export function Editor({
             // remote update becomes a CodeMirror transaction, and remote
             // cursors are drawn from awareness.
             yCollab(file.collab.text, file.collab.awareness),
+            meetingExt(),
           ],
         }),
       });
+      viaRoom = true;
       editor.current = view;
       view.focus();
+      report(view);
     };
 
     // The room, the CRDT and the idle save — everything about having this file
@@ -210,14 +299,18 @@ export function Editor({
       who: meRef.current?.name,
       me: meRef.current,
       onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
-      onShrinkRefused: (confirm) => warnShrink(path, confirm),
+      onShrinkRefused: (ask) => askShrink(path, ask),
       onReady: () => mount(),
       // No relay: an older hub, or a desktop build that does not proxy the
       // route. Editing is single-writer then — exactly what it was before
       // co-editing existed — rather than a pane that never appears.
       onSolo: () => mountSolo(),
       onState: (s) => cb.current.onStateChange?.(s),
-      onCollab: (s) => cb.current.onCollab?.(s),
+      onCollab: (s) => {
+        live.current = s;
+        cb.current.onCollab?.(s);
+      },
+      onPending: (n) => cb.current.onPending?.(n),
       onPeers: (n) => cb.current.onPeers?.(n),
       onSaved: (t) => cb.current.onSaved?.(t),
       onWriting: () => cb.current.onWriting?.(),
@@ -239,5 +332,15 @@ export function Editor({
     // editor (correct); a re-render must not.
   }, [apiBase, path]);
 
-  return <div ref={host} id="editor" className="cm-host" />;
+  useEffect(() => {
+    editor.current?.dispatch({ effects: modeSlot.current.reconfigure(modeExtensions(mode)) });
+  }, [mode]);
+
+  return <div ref={host} id="editor" className={"cm-host cm-mode-" + mode} data-mode={mode} />;
+}
+
+// Write is the note as prose — no gutter, the reading measure; Markdown is the
+// source with line numbers.
+function modeExtensions(m: EditMode) {
+  return m === "markdown" ? [lineNumbers()] : [EditorView.contentAttributes.of({ "data-write": "" })];
 }

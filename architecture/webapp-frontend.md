@@ -135,7 +135,8 @@ classDiagram
         FileView FileRail (DocHeader) FolderListing FileTree (TreeFilter, TreeActions row menu)
         ProjectNav (SidebarSearch ProjectRailNav) Pinned PinnedRail
         HistoryView (ActivitySummary ActivityPanel) HistoryRow HistoryFilters DiffView (DiffTabs DiffStat) VersionBanner ConflictBanner
-        PresenceBar Editor VisualEdit
+        PresenceBar (Avatar) Editor (EditMode EditorInfo) VisualEdit
+        EditRail (Attendees Versions) ShrinkDialogHost askShrink
         Comments (CommentSurface CommentPanel)
         Home Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
@@ -181,6 +182,10 @@ classDiagram
         +sharedfile.ts merge MergeResult (an outside write, offered to an open document)
         +sharedfile.ts rebase (the head sha moved because a co-editor saved)
         +sharedfile.ts preserve (a save that lost, parked beside the file)
+        +sharedfile.ts ShrinkAsk onShrinkRefused onPending (the empty-save guard, client side)
+        +meeting.ts isMeetingNote sections actionItems openItems previousNote sharpShrink personHue
+        +cm-meeting.ts meetingSections (per-person folds, status, offline section guard)
+        +cm-slash.ts slashMenu (/ commands, @mention, [[ file)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +scroll.ts Goal armGoal applyGoal noteScroll MAX_APPLY
         +csv.ts parseDelimited Csv CSV_ROWS
@@ -213,6 +218,7 @@ classDiagram
     components --> lib : buildRows filterTree (FileTree), sidebarSearch (ProjectNav)
     Browser --> components
     components --> lib : openSharedFile (Editor and VisualEdit share one room)
+    note for components "EditView (FileView.tsx) is the editing page: a Write / Markdown / Preview segmented control over ONE Editor — Write and Markdown reconfigure the same CodeMirror through a Compartment, Preview hides it without unmounting, so the room, the cursor and the undo stack survive a switch and the /edit/ URL stays the invitation. The top bar's #editor-state reads Live · saved Ns ago / Offline · N edits pending, beside avatars of everyone in the room (awareness). EditRail is the markdown edit rail: attendee progress (meeting notes), action items from - [ ] … @owner lines (Copy as markdown), and recent versions with a one-click Restore that POSTs /restore — a new op, never a rewrite. ShrinkDialogHost is the blocking empty-save dialog: sharedfile raises it on the hub's 422 when this client saves, and — because a hub-held room's refusal never reaches a client — on seeing the document itself sharpShrink against the last known file text; Keep (the default) splices the file's current bytes back into the document, Save anyway PUTs the document as it stands with X-Bdrive-Confirm-Shrink. Meeting notes (any daily-meetings/ folder) get cm-meeting's per-person sections: fold state is CodeMirror folding (view-only), status derives from awareness cursors and changes seen in this tab, and while the socket is down edits outside your own section are filtered before they reach the CRDT"
     HubApp --> components
     components --> nav : linkProps navigate
     components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid parseConflict secretsBadge scoreLabel

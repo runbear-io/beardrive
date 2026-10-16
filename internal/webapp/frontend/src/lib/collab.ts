@@ -55,7 +55,8 @@ export class CollabDoc {
       this.awareness.setLocalStateField("user", {
         name: this.me.name,
         color: this.me.colour,
-        colorLight: this.me.colour + "33",
+        // The selection tint: the caret colour at a fifth of its strength.
+        colorLight: this.me.colour.replace(/\)$/, " / 0.2)"),
       });
     }
   }
@@ -95,11 +96,15 @@ export class CollabDoc {
     });
     this.ws = provider;
 
+    // Live means the handshake finished, not merely that a socket opened: a
+    // connection that opens and is dropped before syncing never reaches the
+    // hub's document, and must not read as live in between.
     provider.on("status", (e: { status: string }) => {
       if (this.closed) return;
-      this.onStatus(e.status === "connected" ? "live" : "offline");
+      this.onStatus(e.status === "connected" ? (provider.synced ? "live" : "connecting") : "offline");
     });
     provider.on("sync", (synced: boolean) => {
+      if (synced && !this.closed) this.onStatus("live");
       // "Synced" is the document having arrived, which is the moment the
       // editor may mount on it. Nothing is seeded here: the hub built it from
       // the file before this client existed.

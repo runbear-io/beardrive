@@ -51,10 +51,16 @@ test("an editor that opened before its content never empties the file", async ({
   await page.locator(".cm-host .cm-content").click();
   await page.keyboard.type("x");
 
-  await expect(page.getByText(/Not saved: this would empty or cut most of/)).toBeVisible({
-    timeout: 10_000,
-  });
-  await page.unroute(() => true);
+  // The guard blocks the editor until it is answered; keeping the saved
+  // version is the default and puts the file's bytes back in the buffer.
+  await expect(page.locator("#shrink-dialog")).toBeVisible({ timeout: 10_000 });
+  await page.unrouteAll({ behavior: "ignoreErrors" });
   const after = await page.request.get(`/api/p/${id}/file?path=${encodeURIComponent(file)}`);
   expect(await after.text()).toBe(body);
+  await page.locator("#shrink-keep").click();
+  await expect(page.locator("#shrink-dialog")).toBeHidden();
+  await expect(page.locator(".cm-host .cm-content")).toContainText("shipped the thing");
+  await page.waitForTimeout(1_500);
+  const kept = await page.request.get(`/api/p/${id}/file?path=${encodeURIComponent(file)}`);
+  expect(await kept.text()).toBe(body);
 });

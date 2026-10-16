@@ -3,6 +3,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell, Topbar, VaultHeader } from "./components/shell";
 import { Toaster } from "./toast";
 import { ModalHost } from "./modal";
+import { ShrinkDialogHost } from "./components/ShrinkDialog";
 import HubApp from "./apps/HubApp";
 import VolumeApp from "./apps/VolumeApp";
 
@@ -22,6 +23,7 @@ export default function App() {
       )}
       <Toaster />
       <ModalHost />
+      <ShrinkDialogHost />
     </TooltipProvider>
   );
 }
