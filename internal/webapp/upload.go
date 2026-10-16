@@ -468,12 +468,41 @@ func (s *Server) lockPath(project, p string) func() {
 // stale one can only cost a spurious 409 the client recovers from — never a
 // missed conflict that costs somebody their text.
 func (s *Server) headBlob(ctx context.Context, v *volume, p string) (string, bool) {
+	fi, ok := s.headFile(ctx, v, p)
+	return fi.Blob, ok
+}
+
+func (s *Server) headFile(ctx context.Context, v *volume, p string) (FileInfo, bool) {
 	snap, err := v.snapshot(ctx)
 	if err != nil {
-		return "", false
+		return FileInfo{}, false
 	}
 	fi, ok := snap.files[p]
-	return fi.Blob, ok
+	return fi, ok
+}
+
+/* An editor save that empties a file, or keeps less than a fifth of it, is
+   refused unless the client confirms it.
+
+   An editor that attaches before its document has content holds an empty
+   buffer that looks clean, and its next save writes 0 bytes over the file.
+   No conflict check catches that: the base is right, only the text is
+   missing. Applied to conditional (If-Match) writes only — editors and the
+   hub's own room snapshots — so an upload that replaces a file wholesale is
+   untouched. Small files are exempt from the ratio, not from emptying. */
+const (
+	confirmShrinkHeader = "X-Bdrive-Confirm-Shrink"
+	shrinkRatioFloor    = 256
+)
+
+func sharpShrink(was, now int64) bool {
+	if was <= 0 || now >= was {
+		return false
+	}
+	if now == 0 {
+		return true
+	}
+	return was >= shrinkRatioFloor && now*5 < was
 }
 
 // handleUploadContent receives content through the server (server mode).
@@ -583,6 +612,17 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 				"error": "this file changed since you last read it",
 				"sha":   head,
 				"path":  p,
+			})
+			return
+		}
+		if fi, ok := s.headFile(r.Context(), v, p); ok && sharpShrink(fi.Size, size) &&
+			r.Header.Get(confirmShrinkHeader) == "" {
+			writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{
+				"error":  "this save would empty or sharply shrink the file",
+				"shrink": true,
+				"sha":    fi.Blob,
+				"size":   fi.Size,
+				"path":   p,
 			})
 			return
 		}

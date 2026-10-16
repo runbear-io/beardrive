@@ -405,6 +405,10 @@ func (s *Server) snapshotRoom(ctx context.Context, room string) {
 			s.rooms().rebase(room, head)
 		}
 		log.Printf("bdrive: %s was written outside its co-editing room; the room's version is beside it as %s", path, copy)
+	case http.StatusUnprocessableEntity:
+		// sharpShrink: the room would empty the file. The file keeps its
+		// bytes; the document is still live for whoever is editing it.
+		log.Printf("bdrive: not snapshotting %s: the room's text would empty or sharply shrink it", path)
 	}
 }
 
