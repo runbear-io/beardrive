@@ -167,3 +167,28 @@ test("top bar fits between the phone breakpoint and a wide desktop", async ({ pa
     }
   }
 });
+
+test("print drops the file rail; phone pins on one line do not overlap", async ({ page }) => {
+  await login(page);
+  const id = await project(page);
+  const file = await ownFile(page, id, DOC);
+  await page.goto(`/${id}/${file}`);
+  await expect(page.locator("aside.fv-rail")).toBeVisible();
+  await page.emulateMedia({ media: "print" });
+  await expect(page.locator("aside.fv-rail")).toBeHidden();
+  await page.emulateMedia({ media: "screen" });
+
+  // Two open threads on the same quote.
+  const anchor = { quote: "Intro text." };
+  for (const body of ["first", "second"]) {
+    const r = await page.request.post(`/api/p/${id}/comments`, { data: { path: file, anchor, body } });
+    expect(r.ok(), await r.text()).toBeTruthy();
+  }
+  await page.setViewportSize({ width: 600, height: 900 });
+  await page.goto(`/${id}/${file}`);
+  const pins = page.locator(".cm-pin");
+  await expect(pins).toHaveCount(2);
+  const [a, b] = [await pins.nth(0).boundingBox(), await pins.nth(1).boundingBox()];
+  const overlap = a!.y < b!.y + b!.height && b!.y < a!.y + a!.height && a!.x < b!.x + b!.width && b!.x < a!.x + a!.width;
+  expect(overlap).toBe(false);
+});

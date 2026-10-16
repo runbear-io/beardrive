@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import type { CommentAnchor, CommentThread } from "../api/types";
 import { useCommentActions } from "../hooks/useComments";
@@ -79,7 +79,7 @@ export function CommentSurface(props: {
   /* ---- the in-page surface (markdown, text) ---- */
 
   const ranges = useRef(new Map<string, Range>());
-  const [pins, setPins] = useState<{ id: string; n: number; c: number; x: number; y: number }[]>([]);
+  const [pins, setPins] = useState<{ id: string; n: number; c: number; k: number; x: number; y: number }[]>([]);
   const [tick, setTick] = useState(0);
 
   // The rendered document changes under us (a refetch, a diagram landing,
@@ -137,7 +137,7 @@ export function CommentSurface(props: {
       const y = Math.round(box.top - base.top + box.height / 2);
       const k = perLine.get(y) ?? 0;
       perLine.set(y, k + 1);
-      next.push({ id: t.id, n: t.n, c: t.messages.length, x: -46 - k * 44, y });
+      next.push({ id: t.id, n: t.n, c: t.messages.length, k, x: -46 - k * 44, y });
     }
     setPins(next);
   }, [shown, focus, tick, framed, page]);
@@ -324,7 +324,7 @@ export function CommentSurface(props: {
             key={p.id}
             data-bd-ignore=""
             className={"cm-pin" + (p.id === focus ? " active" : "")}
-            style={{ left: p.x, top: p.y }}
+            style={{ left: p.x, top: p.y, "--k": p.k } as CSSProperties}
             title={`Comment ${p.n} · ${p.c} message${p.c === 1 ? "" : "s"}`}
             aria-label={`Open comment ${p.n}`}
             onClick={() => {
