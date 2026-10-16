@@ -804,7 +804,8 @@ a.ai-main:hover { color: var(--accent-ink); }
    ponytail: an all-RTL name now reads left-to-right for an RTL reader, which
    is the cost of one CSS line. Upgrade path if that matters: override only
    when the string mixes strong directions, decided per name in JS. */
-.dl-name, #crumb, .hpath, .hnote, .hrun-note, .hdev, .ai-main {
+.dl-name, #crumb, .hpath, .hnote, .hrun-note, .hdev, .ai-main,
+.hc-name, .hc-dir, .fe-who, .fe-path, .fe-dev, .dev-name, .ha-title, .ha-sub, .hb-label > span:first-child {
   unicode-bidi: isolate-override;
   direction: ltr;
 }

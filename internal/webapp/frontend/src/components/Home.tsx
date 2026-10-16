@@ -221,7 +221,7 @@ export function Home(props: {
                       </span>
                       <div className="fe-body">
                         <div>
-                          <b>{who}</b> <span className="fe-what">{what}</span>
+                          <b className="fe-who">{who}</b> <span className="fe-what">{what}</span>
                         </div>
                         {run ? (
                           <span className="fe-path">{dirOf(e.path) || nameOf(e.path)}</span>
