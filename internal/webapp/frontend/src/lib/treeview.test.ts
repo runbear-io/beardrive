@@ -55,6 +55,13 @@ test("nested folders cap at the most recent children, keeping the selection", ()
   assert.equal(buildRows(root, { expanded: exp, showAll: new Set(["p"]), stats }).length, 10);
 });
 
+test("a nested folder of exactly cap + 1 children is capped too", () => {
+  const kids = Array.from({ length: 6 }, (_, i) => f(`p/f${i}.md`, `2026-01-0${i + 1}T00:00:00Z`));
+  const root = d("", [d("p", kids)]);
+  const rows = names(buildRows(root, { expanded: new Set(["p"]), showAll: new Set(), stats: treeStats(root, 0) }));
+  assert.deepEqual(rows, ["p", "p/f5.md", "p/f4.md", "p/f3.md", "p/f2.md", "p/f1.md", "[more 1]"]);
+});
+
 test("folders count files changed after the baseline", () => {
   const root = d("", [d("a", [f("a/x", "2026-02-01T00:00:00Z"), f("a/y", "2025-01-01T00:00:00Z")])]);
   const stats = treeStats(root, Date.parse("2026-01-01T00:00:00Z"));

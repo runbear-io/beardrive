@@ -118,7 +118,7 @@ export function buildRows(
     const plain = kids.filter((c) => !isSystemName(c.name));
     const system = kids.filter((c) => isSystemName(c.name));
 
-    if (depth > 0 && plain.length > cap + 1 && !showAll.has(parent.path)) {
+    if (depth > 0 && plain.length > cap && !showAll.has(parent.path)) {
       const byRecent = [...plain].sort(
         (a, b) => (stats.latest.get(b.path) || 0) - (stats.latest.get(a.path) || 0),
       );

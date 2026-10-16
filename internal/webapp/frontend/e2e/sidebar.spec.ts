@@ -138,3 +138,33 @@ test("pins persist per project across reloads and show in the rail", async ({ pa
   await page.reload();
   await expect(page.locator("#pinned")).toHaveCount(0);
 });
+
+test("New file is offered only where the hub would accept the write", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  // A rule making archive/ read-only for this account; everything else stays
+  // writable.
+  await page.route(`**/api/p/${pid}/folders`, (route) =>
+    route.fulfill({
+      json: {
+        folders: [{ prefix: "archive/", default: "read", grants: [], me: "read" }],
+        scope: "",
+      },
+    }),
+  );
+  await page.goto(`/${pid}`);
+  const newIn = (dir: string) => page.locator(`#tree .row[data-path="${dir}"] .tact[title="New file"]`);
+  await expect(page.locator('#tree .row[data-path="notes"]')).toBeVisible();
+  await expect(newIn("notes")).toHaveCount(1);
+  await expect(newIn("archive")).toHaveCount(0);
+
+  // A hub with uploads off accepts no new file anywhere.
+  await page.route("**/api/config", async (route) => {
+    const res = await route.fetch();
+    const cfg = await res.json();
+    await route.fulfill({ response: res, json: { ...cfg, upload: { ...cfg.upload, enabled: false } } });
+  });
+  await page.reload();
+  await expect(page.locator('#tree .row[data-path="notes"]')).toBeVisible();
+  await expect(page.locator('#tree .tact[title="New file"]')).toHaveCount(0);
+});
