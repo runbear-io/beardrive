@@ -1,4 +1,5 @@
 import type { Person } from "../hooks/usePresence";
+import { personHue } from "../lib/meeting";
 
 /* Who else is here, as initials.
 
@@ -16,11 +17,18 @@ function initials(name: string): string {
 
 // A stable colour per person, so the same teammate is the same colour across
 // reloads and across everyone's screen. Hash, not an index: an index would
-// re-colour everybody whenever one person left.
-function hue(name: string): number {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
-  return h;
+// re-colour everybody whenever one person left. The editor's carets and
+// section avatars use the same hash (lib/meeting.ts personHue).
+const hue = personHue;
+
+// One person's initials in their colour. `.pavatar` in style.css draws the
+// same circle for widgets CodeMirror builds outside React.
+export function Avatar({ name, title }: { name: string; title?: string }) {
+  return (
+    <span className="pavatar" title={title ?? name} style={{ ["--ph" as string]: hue(name) }}>
+      {initials(name)}
+    </span>
+  );
 }
 
 export function PresenceBar({ people, path }: { people: Person[]; path?: string }) {

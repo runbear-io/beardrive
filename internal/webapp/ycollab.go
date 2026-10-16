@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -64,6 +65,7 @@ func (s *Server) ydocs() *ygows.Server {
 		srv.OnLoadDocument = func(_ context.Context, room string, doc *crdt.Doc) error {
 			s.rooms().load(room, doc)
 			if err := s.seedDoc(room, doc); err != nil {
+				s.rooms().drop(room)
 				return err
 			}
 			// AFTER the seed, so the bytes the document was built from are
@@ -161,6 +163,9 @@ func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
 	if !ok || len(body) == 0 {
 		return nil // a file that does not exist yet starts empty
 	}
+	if len(body) >= maxSeedBytes {
+		return fmt.Errorf("%s is too large to co-edit", room) // a truncated seed would be written back over the rest
+	}
 	project, _, _ := strings.Cut(room, "/")
 	prev := s.rooms().base(room) // what the last room for this file wrote, if any
 	s.rooms().rebase(room, sha)
@@ -227,6 +232,12 @@ func replayInto(doc *crdt.Doc, state []byte, want string) bool {
 // prefix and suffix are kept, the middle replaced. Offsets are UTF-16 units,
 // which is what Yjs counts in.
 func splice(doc *crdt.Doc, txt *crdt.YText, from, to string) {
+	spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, from, to)
+}
+
+// spliceVia is splice through a caller's transaction runner — ygo's Apply
+// hands one out, and only edits made through it reach the room's peers.
+func spliceVia(transact func(func(*crdt.Transaction)), txt *crdt.YText, from, to string) {
 	a, b := []rune(from), []rune(to)
 	p := 0
 	for p < len(a) && p < len(b) && a[p] == b[p] {
@@ -242,7 +253,7 @@ func splice(doc *crdt.Doc, txt *crdt.YText, from, to string) {
 	if del == 0 && ins == "" {
 		return
 	}
-	doc.Transact(func(txn *crdt.Transaction) {
+	transact(func(txn *crdt.Transaction) {
 		if del > 0 {
 			txt.Delete(txn, at, del)
 		}
@@ -250,6 +261,64 @@ func splice(doc *crdt.Doc, txt *crdt.YText, from, to string) {
 			txt.Insert(txn, at, ins, nil)
 		}
 	})
+}
+
+// foldIntoRoom puts a write the hub itself made to a file — a restore — into
+// that file's live room, as one edit every peer receives, and moves the
+// room's base to it. Without this the room keeps the text from before the
+// write, and its next snapshot either writes that back over it or, refused
+// for a stale base, parks a conflict copy. Reports whether a room took it;
+// no room means no document to keep in step.
+func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bool {
+	room := project + "/" + path
+	if _, _, ok := s.rooms().get(room); !ok {
+		return false
+	}
+	body, cur, ok := s.roomBytes(room)
+	if !ok || cur != sha {
+		return false
+	}
+	folded := false
+	err := s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		txt := doc.GetText("body")
+		spliceVia(transact, txt, txt.ToString(), string(body))
+		folded = true
+	})
+	if err != nil || !folded {
+		return false
+	}
+	s.rooms().rebase(room, sha)
+	if doc, _, ok := s.rooms().get(room); ok {
+		s.storeRoomHistory(project, sha, doc.EncodeStateAsUpdate())
+	}
+	return true
+}
+
+// adoptRoomWrite moves a live room's base to a write that spells exactly the
+// room's document — an editor in the room confirming a shrink the hub would
+// not make on its own. The room already holds that text, so its next
+// snapshot must build on this version rather than be refused for a stale
+// base and parked as a conflict copy. A write that differs from the
+// document is an outsider's and leaves the room alone.
+func (s *Server) adoptRoomWrite(project, path, sha string, body io.ReadSeeker) {
+	room := project + "/" + path
+	doc, _, ok := s.rooms().get(room)
+	if !ok || sha == "" {
+		return
+	}
+	if _, err := body.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+	written, err := io.ReadAll(io.LimitReader(body, maxSeedBytes+1))
+	if err != nil {
+		return
+	}
+	state := doc.EncodeStateAsUpdate()
+	if text, ok := replayed(state); !ok || text != string(written) {
+		return
+	}
+	s.rooms().rebase(room, sha)
+	s.storeRoomHistory(project, sha, state)
 }
 
 // A room's history lives in the project's own storage as ydoc/<sha>: the

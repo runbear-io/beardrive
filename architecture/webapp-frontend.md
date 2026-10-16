@@ -135,7 +135,8 @@ classDiagram
         FileView FileRail (DocHeader) FolderListing FileTree (TreeFilter, TreeActions row menu)
         ProjectNav (SidebarSearch ProjectRailNav) Pinned PinnedRail
         HistoryView (ActivitySummary ActivityPanel) HistoryRow HistoryFilters DiffView (DiffTabs DiffStat) VersionBanner ConflictBanner
-        PresenceBar Editor VisualEdit
+        PresenceBar (Avatar) Editor (EditMode EditorInfo) VisualEdit
+        EditRail (Attendees Versions) ShrinkDialogHost askShrink
         Comments (CommentSurface CommentPanel)
         Home Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
@@ -155,6 +156,7 @@ classDiagram
     note for components "FileView's HtmlView re-mounts its iframe on the change stream. An iframe loads once, so leaving the editor rendered the file as it was when Done was pressed — BEFORE the save landed — and then sat there with the edit saved on the hub and invisible on screen; the same reload makes a teammate's edit appear in a page you are already looking at. EditView's banner is raised by the MERGE VERDICT for the source editor and by the change stream only for the visual one: the verdict knows whether the write could be folded in and the event cannot, so raising a banner on the event would flash the wrong answer ahead of it. For that visual path `mine` is a COUNT, not a flag: the change stream announces a write as soon as the hub journals it, often before the PUT's own response, so openSharedFile reports a write BEFORE it goes out, and two saves in flight (routine — clicking between paragraphs saves each) left the second event with nothing to claim it and raised the peer banner on the user's own edit"
     note for lib "A save carries the version its buffer was read at (If-Match), and a 409 is not an error to retry — it means somebody else's write is already the file. By then merge() has necessarily declined, because a save only happens when this buffer has changes of its own, so there is nothing left to reconcile: the losing version is written BESIDE the file as <name>.bdrive-conflict-<who>-<utc>, the same name the sync path has used since the beginning and the same one ConflictBanner already explains. conflictName is therefore a second implementation of a pure function that lives in Go (syncer.go) — round-tripped through parseConflict in the unit tests, because two formats for one filename would be two explanations for one reader."
     note for lib "sharedfile.merge is how an agent's write reaches a document somebody is typing in. The editor still never re-seeds itself from the server — that resets the buffer under a cursor — so the write arrives as textEdit's single splice instead: everything it does not change is untouched, and so is the caret sitting in it. It REFUSES in the two cases where a splice destroys something, and the refusal is FileView's banner: unsaved local edits (never overwrite half a sentence), and a co-editor in the room (both clients would compute the same splice, and two identical splices into one CRDT is the change applied twice). `saved` moves to the incoming text BEFORE the splice, or the document change it causes schedules a save that writes back what was just read. A relay-less surface has no Y.Text to splice, so it passes soloApply — without one merge reports blocked rather than claiming a change it could not make"
+    note for lib "Solo is one-way. A room that was never reached by UNREACHABLE_MS (or a single-volume server, which has no room route) makes CollabDoc.stop() end the provider BEFORE onSolo runs, and status reads solo from then on. A provider left retrying would merge the hub's document into a solo surface's seeded copy (the whole file twice), or flip hubHoldsIt under a solo CodeMirror that is not bound to the room, so its saves became no-ops. A room that was reached once is never given up on: a later drop is a reconnect"
     note for lib "sharedfile.ts is everything about having a file open that is not about a keyboard — join the room, hold the CRDT, save on idle, save once more on the way out. Both surfaces sit on it: Editor binds CodeMirror to the Y.Text, VisualEdit splices ranges into the same one, so somebody typing markup and somebody clicking a headline are in one room and neither has to know the other exists"
     note for components "components/ui — shadcn/ui primitives (Radix, copied in), themed from BearDrive tokens in tw.css; rendered markdown is transformed as a string before mounting, link clicks delegated on the container — never patch the dangerouslySetInnerHTML subtree"
 
@@ -176,11 +178,16 @@ classDiagram
         +recents.ts noteOpened useRecents pushRecent (localStorage, per project)
         +home.ts greeting sinceSummary devicesFrom conflictsIn staleHot readsByFolder
         +sidebarSearch.ts useSidebarSearch setFilterQuery registerFilterResults
-        +collab.ts CollabDoc peerCount isRemote (y-websocket to the hub-held document)
+        +collab.ts CollabDoc peerCount isRemote stop (y-websocket to the hub-held document; stop = solo for good)
+        +collabroute.ts hasCollabRoute (only a project api base has a room; a single volume opens solo at once)
         +sharedfile.ts openSharedFile SharedFile SAVE_IDLE_MS
-        +sharedfile.ts merge MergeResult (an outside write, offered to an open document)
+        +sharedfile.ts merge MergeResult (an outside write, offered to an open document; held = already in the room)
         +sharedfile.ts rebase (the head sha moved because a co-editor saved)
         +sharedfile.ts preserve (a save that lost, parked beside the file)
+        +sharedfile.ts ShrinkAsk onShrinkRefused onShrinkWithdrawn onPending (the empty-save guard, client side; destroy withdraws its open ask)
+        +meeting.ts isMeetingNote sections actionItems openItems previousNote sharpShrink personHue
+        +cm-meeting.ts meetingSections (per-person folds, status, offline section guard)
+        +cm-slash.ts slashMenu (/ commands, @mention, [[ file)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +scroll.ts Goal armGoal applyGoal noteScroll MAX_APPLY
         +csv.ts parseDelimited Csv CSV_ROWS
@@ -213,6 +220,7 @@ classDiagram
     components --> lib : buildRows filterTree (FileTree), sidebarSearch (ProjectNav)
     Browser --> components
     components --> lib : openSharedFile (Editor and VisualEdit share one room)
+    note for components "EditView (FileView.tsx) is the editing page: a Write / Markdown / Preview segmented control over ONE Editor — Write and Markdown reconfigure the same CodeMirror through a Compartment, Preview hides it without unmounting, so the room, the cursor and the undo stack survive a switch and the /edit/ URL stays the invitation. The top bar's #editor-state reads Live · saved Ns ago / Offline · N edits pending, beside avatars of everyone in the room (awareness). EditRail is the markdown edit rail: attendee progress (meeting notes), action items from - [ ] … @owner lines (Copy as markdown), and recent versions with a one-click Restore that POSTs /restore — a new op, never a rewrite. ShrinkDialogHost is the blocking empty-save dialog: sharedfile raises it on the hub's 422 when this client saves, and — because a hub-held room's refusal never reaches a client — on seeing the document itself sharpShrink against the last known file text; Keep (the default) splices the file's current bytes back into the document, Save anyway PUTs the document as it stands with X-Bdrive-Confirm-Shrink. The ask belongs to its editor: destroying the SharedFile withdraws it (withdrawShrink closes the dialog without running either answer, and no parting save is written), and both answers are no-ops on a destroyed file. After a Restore, EditView reconciles the open document itself through the Editor's SharedFile handle (onRestored) instead of relying on the change stream: merge with held when the hub reports it folded the restore into the live room, as an ordinary outside write otherwise. Meeting notes (any daily-meetings/ folder) get cm-meeting's per-person sections: fold state is CodeMirror folding (view-only), status derives from awareness cursors and changes seen in this tab, and while the socket is down edits outside your own section are filtered before they reach the CRDT"
     HubApp --> components
     components --> nav : linkProps navigate
     components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid parseConflict secretsBadge scoreLabel
