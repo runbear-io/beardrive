@@ -502,7 +502,9 @@ function ThreadCard(props: {
   canDelete: boolean;
 }) {
   const { t, active, onFocus, onJump, actions, canDelete } = props;
-  const anchored = !!(t.anchor.quote || t.anchor.element) && !t.missing;
+  // Only open threads are anchored in the page (CommentSurface marks those),
+  // so a resolved one has no text to jump to.
+  const anchored = !!(t.anchor.quote || t.anchor.element) && !t.missing && !t.resolved;
   const [reply, setReply] = useState("");
   const [busy, setBusy] = useState(false);
   const card = useRef<HTMLDivElement>(null);

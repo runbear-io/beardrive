@@ -150,6 +150,8 @@ test("comments panel: Open/Resolved tabs, quoted anchor, sweep note, jump to tex
   await expect(panel.locator(".cm-card .cm-q")).toHaveText("Tail text here");
   await expect(panel.locator(".cm-card .cm-queued")).toHaveCount(0);
   await expect(panel.locator(".cm-card")).toContainText("Resolved by");
+  // A resolved thread is not marked in the page, so it offers no jump.
+  await expect(panel.locator(".cm-card .cm-jump")).toHaveCount(0);
 });
 
 test("top bar fits between the phone breakpoint and a wide desktop", async ({ page }) => {
