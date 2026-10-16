@@ -1002,7 +1002,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 // matters even on a cut-short cycle: the scan already journaled local edits,
 // and dropping the cache would make the next scan journal them all again.
 func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, sec *secretLog, cacheDirty bool) error {
-	if cacheDirty {
+	if cacheDirty || !s.Store.HasCache(s.mountID()) {
 		if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
 			return err
 		}

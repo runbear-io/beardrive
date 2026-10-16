@@ -148,6 +148,43 @@ func TestQuietCycleDoesNotRewriteCache(t *testing.T) {
 	}
 }
 
+func TestEmptyFilteredMountInitializesCache(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "volume"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := config.Device{ID: "dev1", Name: "dev1", Author: "dev1@test"}
+	m1 := &Session{Folder: t.TempDir(), MountID: "mount1", Store: st, Device: dev}
+	write(t, m1.Folder, "shared.txt", "from the project")
+	cycle(t, m1)
+
+	m2 := &Session{Folder: t.TempDir(), MountID: "mount2", Store: st, Device: dev}
+	_, err = config.SaveProject(m2.Folder, config.Project{ID: m2.MountID, Include: []string{"never"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, m2)
+	if !st.HasCache(m2.MountID) {
+		t.Fatal("empty first cycle did not initialize the mount cache")
+	}
+	cache, err := st.LoadCache(m2.MountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cache) != 0 {
+		t.Fatalf("filtered first cycle cache = %v, want empty", cache)
+	}
+
+	if _, err := config.SaveProject(m2.Folder, config.Project{ID: m2.MountID}); err != nil {
+		t.Fatal(err)
+	}
+	write(t, m2.Folder, "shared.txt", "local edit")
+	res := cycle(t, m2)
+	if res.LocalOps != 1 || res.Adopted != 0 {
+		t.Fatalf("later local file was treated as a join adoption: %+v", res)
+	}
+}
+
 func TestTwoDeviceSync(t *testing.T) {
 	be := sharedRemote(t)
 	a := newDevice(t, "deva", be)
