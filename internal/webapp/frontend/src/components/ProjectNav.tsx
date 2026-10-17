@@ -190,9 +190,11 @@ function SyncLine({ pid, readsEnabled }: { pid: string; readsEnabled: boolean })
   );
 }
 
-/* The always-visible search field. Typing filters the tree in place
-   (FileTree's TreeFilter); an empty field, or ⌘↵, hands over to the ⌘K
-   palette, which also searches projects and actions. */
+/* The always-visible search field. A click on the empty field opens the ⌘K
+   palette, which searches files, projects and actions. Typing into it from
+   the keyboard (Tab, then type) filters the tree in place (FileTree's
+   TreeFilter); once a filter is showing, clicks edit it like any input, and
+   ⌘↵ hands the query to the palette. */
 export function SidebarSearch() {
   const { query } = useSidebarSearch();
   return (
@@ -206,6 +208,12 @@ export function SidebarSearch() {
         aria-label="Filter files, or press Enter to search everything"
         autoComplete="off"
         spellCheck={false}
+        onMouseDown={(e) => {
+          if (query) return;
+          e.preventDefault();
+          requestSearch();
+          closeSidebarOnMobile();
+        }}
         onChange={(e) => setFilterQuery(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "ArrowDown" || e.key === "ArrowUp") {
