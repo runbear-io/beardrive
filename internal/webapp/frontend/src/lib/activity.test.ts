@@ -9,6 +9,7 @@ import {
   historyApiQuery,
   localDay,
   spanLabel,
+  isAllTime,
   summaryDays,
   summaryLabel,
 } from "./activity.ts";
@@ -50,14 +51,17 @@ test("labels", () => {
   assert.equal(spanLabel(65 * 60_000), "1 h 5 min");
   assert.equal(spanLabel(0), "");
   assert.equal(summaryDays({ range: "30d" }), 30);
-  assert.equal(summaryDays({}), 7);
+  assert.equal(summaryDays({}), 30);
 });
 
 test("the summary names a custom range as one", () => {
   assert.equal(summaryLabel({ range: "7d" }), "Last 7 days");
   assert.equal(summaryLabel({ since: "2026-01-01", until: "2026-01-03" }), "Custom range");
   assert.equal(summaryLabel({ until: "2026-01-03" }), "Custom range");
-  assert.equal(summaryLabel({}), "Last 7 days");
+  assert.equal(summaryLabel({}), "All time");
+  assert.equal(isAllTime({}), true);
+  assert.equal(isAllTime({ range: "7d" }), false);
+  assert.equal(isAllTime({ since: "2026-01-01" }), false);
 });
 
 test("a diff compares against an empty file only when there was no earlier version", () => {

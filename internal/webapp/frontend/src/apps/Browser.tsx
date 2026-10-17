@@ -863,6 +863,7 @@ export default function Browser(props: {
     pageWidth = "wide";
     view = (
       <Insights
+        apiBase={hub ? apiBase : undefined}
         flatFiles={flatFiles}
         heatMap={heatMap}
         devices={devices}
@@ -1013,6 +1014,7 @@ export default function Browser(props: {
               device guide, and a second button six inches under the first
               reads as two different steps. */}
           <Insights
+            apiBase={hub ? apiBase : undefined}
             flatFiles={flatFiles}
             heatMap={heatMap}
             devices={devices}

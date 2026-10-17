@@ -57,10 +57,13 @@ test("an emptied file that is still read is a Restore row", async ({ page }) => 
   const pid = made.project.id;
   try {
     await page.request.put(`/api/p/${pid}/upload/content?path=notes/full.md`, { data: "# Full\n" });
+    // Emptied: had content, now 0 B. Always-empty: 0 B from the start.
+    await page.request.put(`/api/p/${pid}/upload/content?path=notes/daily.md`, { data: "standup notes\n" });
     await page.request.put(`/api/p/${pid}/upload/content?path=notes/daily.md`, { data: "" });
+    await page.request.put(`/api/p/${pid}/upload/content?path=notes/robots.txt`, { data: "" });
     await page.request.post(`/api/p/${pid}/reads`, {
       headers: { "X-Bdrive-Device": "insights-e2e-agent" },
-      data: { reads: [{ path: "notes/daily.md" }] },
+      data: { reads: [{ path: "notes/daily.md" }, { path: "notes/robots.txt" }] },
     });
     await page.goto(`/${pid}/insights`);
     const row = page.locator('.in-fix-row[data-kind="empty"]', { hasText: "daily.md" });
@@ -69,6 +72,9 @@ test("an emptied file that is still read is a Restore row", async ({ page }) => 
     await expect(row.locator(".in-fx-when")).toContainText("→ 0 B");
     await expect(page.locator('.in-kpi[data-kpi="empty"] .in-status')).toHaveText("⛔ Restore");
     await expect(page.locator(".in-tm-cell.flag-empty")).toHaveCount(1);
+    // A file that was never anything but empty is not "now empty".
+    await expect(page.locator('.in-fix-row[data-kind="empty"]', { hasText: "robots.txt" })).toHaveCount(0);
+    await expect(page.locator('.in-kpi[data-kpi="empty"] .in-kpi-v, .in-kpi[data-kpi="empty"]').first()).toContainText("1");
     await row.getByRole("button", { name: "Restore" }).click();
     await expect(page).toHaveURL(new RegExp(`/${pid}/activity/notes/daily\\.md$`));
   } finally {

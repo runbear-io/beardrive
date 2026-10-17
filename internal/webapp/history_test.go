@@ -770,6 +770,11 @@ func TestHistorySummary(t *testing.T) {
 	if s := get("offset=540&days=8"); s.Total != 4 || len(s.Days) != 8 {
 		t.Errorf("days=8 = %+v", s)
 	}
+	// All time totals everything the feed shows, while the bars keep their
+	// window: the op from 7 days ago counts, but draws no bar.
+	if s := get("offset=540&all=1"); s.Total != 4 || s.Human != 3 || len(s.Days) != 7 {
+		t.Errorf("all=1 = %+v", s)
+	}
 	if s := get("offset=540&prefix=docs/"); s.Total != 1 {
 		t.Errorf("prefix = %+v", s)
 	}

@@ -218,10 +218,9 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		}
 	}
 	type timed struct {
-		entry HistoryEntry
-		op    journal.Op
+		i  int // index into all
+		op journal.Op
 	}
-	visible := s.deviceVisibleIn(projectID(r))
 	// A file that moved keeps its past — under its old path. ?path= resolves
 	// through the move chain so the feed for docs/a.md includes the versions
 	// written while it was a.md. Each hop is time-bounded (see segment), so
@@ -253,25 +252,7 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		case !f.keep(sop):
 			continue
 		}
-		// Attribution comes from the journal the op was READ from, never from
-		// its own Device field: that field is arbitrary JSON any member with
-		// write access can put in their own journal, so trusting it printed
-		// another org's machine name into this feed and answered "does this
-		// device id exist on the hub?" for anyone who asked. The registry join
-		// is scoped the same way heat's is.
-		dev := historyDevice{ID: sop.From}
-		if op.Device == sop.From {
-			dev.Name = op.DeviceName // the journal's owner describing itself
-		}
-		if info, ok := s.Devices.LookupIn(sop.From, visible); ok && info.ID != "" {
-			dev = historyDevice{ID: info.ID, Name: info.Name, OS: info.OS}
-		}
-		matched = append(matched, timed{HistoryEntry{
-			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: kinds[i],
-			Path: op.Path, Size: op.Size, Blob: op.Blob, Prev: prevs[i],
-			User: op.User, UserName: op.UserName, Author: op.Author,
-			Device: dev, Note: op.Note, Session: op.Session,
-		}, op})
+		matched = append(matched, timed{i, op})
 	}
 	// Truncation happens AFTER the sort: cutting during the walk above would
 	// pick the n highest-Lamport entries and merely display them in time order.
@@ -295,9 +276,43 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		next = encodeCursor(matched[n-1].op)
 		matched = matched[:n]
 	}
+	// Only the page is attributed. The registry join re-checks its store and
+	// the org directory on every lookup, so resolving every matched op made a
+	// long feed cost seconds per hundred rows on a database-backed hub; each
+	// journal is resolved once per request instead.
+	visible := s.deviceVisibleIn(projectID(r))
+	type resolved struct {
+		dev        historyDevice
+		registered bool
+	}
+	devs := map[string]resolved{}
 	entries := make([]HistoryEntry, len(matched))
-	for i, m := range matched {
-		entries[i] = m.entry
+	for k, m := range matched {
+		sop, op := all[m.i], m.op
+		res, ok := devs[sop.From]
+		if !ok {
+			// Attribution comes from the journal the op was READ from, never
+			// from its own Device field: that field is arbitrary JSON any
+			// member with write access can put in their own journal, so
+			// trusting it printed another org's machine name into this feed
+			// and answered "does this device id exist on the hub?" for anyone
+			// who asked. The registry join is scoped the same way heat's is.
+			res = resolved{dev: historyDevice{ID: sop.From}}
+			if info, ok := s.Devices.LookupIn(sop.From, visible); ok && info.ID != "" {
+				res = resolved{historyDevice{ID: info.ID, Name: info.Name, OS: info.OS}, true}
+			}
+			devs[sop.From] = res
+		}
+		dev := res.dev
+		if !res.registered && op.Device == sop.From {
+			dev.Name = op.DeviceName // the journal's owner describing itself
+		}
+		entries[k] = HistoryEntry{
+			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: kinds[m.i],
+			Path: op.Path, Size: op.Size, Blob: op.Blob, Prev: prevs[m.i],
+			User: op.User, UserName: op.UserName, Author: op.Author,
+			Device: dev, Note: op.Note, Session: op.Session,
+		}
 	}
 	out := map[string]any{"entries": entries}
 	if next != "" {
@@ -446,26 +461,36 @@ func (s *Server) handleHistorySummary(v *volume, w http.ResponseWriter, r *http.
 	}
 	vis := s.visibility(r)
 	devices := map[string]bool{}
+	// ?all=1 totals every op the filters keep, while the bars still cover
+	// the chart window: "All time" in the feed must not be summarised as the
+	// last week.
+	allTime := q.Get("all") == "1"
 	for _, sop := range all {
 		op := sop.Op
-		if !vis.canRead(op.Path) || !f.keep(sop) || op.Time.Before(start) {
+		if !vis.canRead(op.Path) || !f.keep(sop) || (!allTime && op.Time.Before(start)) {
 			continue
 		}
 		if prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/") {
 			continue
 		}
 		i, ok := index[op.Time.In(loc).Format("2006-01-02")]
-		if !ok {
+		if !ok && (!allTime || !op.Time.Before(start)) {
 			continue // in the future by this reader's clock
 		}
 		out.Total++
 		devices[sop.From] = true
-		if op.Session != "" {
+		agent := op.Session != ""
+		if agent {
 			out.Agent++
-			out.Days[i].Agent++
 		} else {
 			out.Human++
-			out.Days[i].Human++
+		}
+		if ok {
+			if agent {
+				out.Days[i].Agent++
+			} else {
+				out.Days[i].Human++
+			}
 		}
 	}
 	out.Devices = len(devices)

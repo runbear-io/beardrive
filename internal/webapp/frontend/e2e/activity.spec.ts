@@ -60,8 +60,11 @@ test("the summary splits changes into agents and people", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/activity`);
-  await expect(page.locator(".hsum-total")).toContainText(/\d+ changes?/);
-  await expect(page.locator(".hsum-col")).toHaveCount(7);
+  await expect(page.locator(".hsum-total")).toContainText(/[\d,]+ changes?/);
+  // No date filter is All time: the total is the whole history and the bars
+  // cover the last 30 days — never "Last 7 days".
+  await expect(page.locator(".hsum-col")).toHaveCount(30);
+  await expect(page.locator(".hsum-sub")).toContainText("All time");
   await expect(page.locator(".hsum-sub")).toContainText("% by agents");
   await expect(page.locator(".hday").first()).toBeVisible();
 });
