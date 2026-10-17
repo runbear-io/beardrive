@@ -53,3 +53,29 @@ func TestHistoryAttributesThePageNotEveryOp(t *testing.T) {
 		t.Fatalf("a 10-row page of a 400-op feed checked the device store %d times, want ≤ 2", n)
 	}
 }
+
+// Emptied is "0 B now and had content before", over the WHOLE journal: a
+// file emptied long ago and saved empty many times since is still emptied,
+// and a file that was always empty never is.
+func TestHistoryEmptied(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	f.put("dev1", "notes/daily.md", "standup")
+	for i := 0; i < 120; i++ { // more than a history page of empty saves
+		f.put("dev1", "notes/daily.md", "")
+	}
+	f.put("dev1", "robots.txt", "")
+	f.put("dev1", "full.md", "content")
+	f.put("dev1", "gone.md", "x")
+	f.put("dev1", "gone.md", "")
+	f.del("dev1", "gone.md")
+
+	rec := do(t, srv.Handler(), "GET", "/api/p/"+p.ID+"/history/emptied", nil)
+	var out struct{ Paths []string }
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+		t.Fatalf("emptied: %d %s", rec.Code, rec.Body)
+	}
+	if len(out.Paths) != 1 || out.Paths[0] != "notes/daily.md" {
+		t.Fatalf("emptied = %v, want [notes/daily.md]", out.Paths)
+	}
+}

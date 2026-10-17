@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Archive, BellOff, Users } from "lucide-react";
 import { getJSON } from "../api/http";
-import type { HeatMap, HistoryEntry, Node } from "../api/types";
+import type { HeatMap, Node } from "../api/types";
 import { heatTotal } from "../hooks/useBrowse";
 import {
   HEAT_DISCLOSURE,
@@ -118,34 +118,18 @@ function StatusMark({ p }: { p: { danger: boolean; empty: boolean } }) {
   return null;
 }
 
-/* "Read, but now empty" means EMPTIED: the file is 0 B now and had content
-   before. The tree only knows the size today, so a file that was always 0 B
-   (a placeholder, an empty robots.txt) looks the same; each 0-byte file that
-   is still read is checked against its own history, and only one with an
-   earlier non-empty version is flagged. Bounded: the check runs for the
-   EMPTIED_CHECK most-read candidates, and an unchecked file is not flagged. */
-const EMPTIED_CHECK = 40;
-
-function useEmptied(apiBase: string | undefined, files: Node[], heat: HeatMap | null): Set<string> {
-  const candidates = apiBase
-    ? files
-        .filter((f) => !f.size && heat && heatTotal(heat[f.path] || {}) > 0)
-        .sort((a, b) => heatTotal(heat![b.path] || {}) - heatTotal(heat![a.path] || {}))
-        .slice(0, EMPTIED_CHECK)
-    : [];
-  const results = useQueries({
-    queries: candidates.map((f) => ({
-      queryKey: ["emptied", apiBase, f.path, f.time],
-      queryFn: () =>
-        getJSON<{ entries: HistoryEntry[] }>(apiBase + "history?path=" + encodeURIComponent(f.path) + "&n=100"),
-      staleTime: 5 * 60_000,
-    })),
+/* "Read, but now empty" means EMPTIED: 0 B now and had content before. The
+   tree only knows today's size, so a file that was always 0 B (a placeholder,
+   an empty robots.txt) looks the same; the hub answers which files are
+   emptied in one pass over the whole history (GET history/emptied). */
+function useEmptied(apiBase: string | undefined): Set<string> {
+  const { data } = useQuery({
+    queryKey: ["emptied", apiBase],
+    queryFn: () => getJSON<{ paths: string[] }>(apiBase + "history/emptied"),
+    enabled: !!apiBase,
+    staleTime: 60_000,
   });
-  const out = new Set<string>();
-  results.forEach((r, i) => {
-    if (r.data?.entries?.some((e) => e.kind !== "delete" && (e.size || 0) > 0)) out.add(candidates[i].path);
-  });
-  return out;
+  return new Set(data?.paths ?? []);
 }
 
 export function Insights(props: {
@@ -161,7 +145,7 @@ export function Insights(props: {
   onOpenHistory: (path: string) => void;
   isFolder: (path: string) => boolean;
 }) {
-  const emptied = useEmptied(props.apiBase, props.flatFiles, props.heatMap);
+  const emptied = useEmptied(props.apiBase);
   const [lens, setLens] = useState<Lens>("all");
   const [th, setTh] = useState<Thresholds>(loadThresholds);
   useEffect(() => {

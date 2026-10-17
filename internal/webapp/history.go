@@ -565,3 +565,50 @@ func sanitizeFilename(name string) string {
 		return r
 	}, name)
 }
+
+// handleHistoryEmptied lists the files that are EMPTIED: their current
+// version is 0 bytes and an earlier version had content. The tree only knows
+// today's size, which cannot tell an emptied note from a file that was always
+// empty, and asking for each file's history would scan the journal once per
+// file. One pass over the replayed ops answers it for the whole project.
+func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.Request) {
+	rs := storeSource(v, w)
+	if rs == nil {
+		return
+	}
+	all, err := rs.loadSourcedOps(r.Context())
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
+		return
+	}
+	sort.SliceStable(all, func(i, j int) bool { return journal.Less(all[i].Op, all[j].Op) })
+	type state struct {
+		size int64
+		live bool
+		had  bool // some version ever had content
+	}
+	files := map[string]*state{}
+	for _, sop := range all {
+		op := sop.Op
+		st := files[op.Path]
+		if st == nil {
+			st = &state{}
+			files[op.Path] = st
+		}
+		if op.Kind == journal.KindDelete {
+			st.live = false
+			continue
+		}
+		st.had = st.had || op.Size > 0
+		st.size, st.live = op.Size, true
+	}
+	vis := s.visibility(r)
+	paths := []string{}
+	for p, st := range files {
+		if st.live && st.size == 0 && st.had && vis.canRead(p) {
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+	writeJSON(w, map[string]any{"paths": paths})
+}
