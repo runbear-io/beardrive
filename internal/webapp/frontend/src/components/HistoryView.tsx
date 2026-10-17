@@ -169,8 +169,10 @@ export function HistoryView(props: {
       const next = ev.key === "j" ? Math.min(order.length - 1, at + 1) : Math.max(0, at === -1 ? 0 : at - 1);
       setSel(order[next]);
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture phase: the row's own buttons stop key propagation so their
+    // Enter/Space stay theirs, which would otherwise swallow J/K/Esc too.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [order, sel]);
   useEffect(() => {
     if (sel === null) return;
@@ -252,7 +254,7 @@ export function HistoryView(props: {
   const selEntry = sel !== null ? entries[sel] : undefined;
   const at = sel === null ? -1 : order.indexOf(sel);
   return (
-    <div className={"activity" + (selEntry ? " has-panel" : "")}>
+    <div className={"activity" + (selEntry ? " has-panel" : "") + (entries.length ? " two-zone" : "")}>
       <div className="history">
         {bar}
         {summary}
@@ -365,7 +367,7 @@ export function HistoryView(props: {
           </button>
         )}
       </div>
-      {selEntry && sel !== null && (
+      {selEntry && sel !== null ? (
         <ActivityPanel
           key={sel}
           entry={selEntry}
@@ -382,8 +384,25 @@ export function HistoryView(props: {
           onPrev={at > 0 ? () => setSel(order[at - 1]) : undefined}
           onNext={at < order.length - 1 ? () => setSel(order[at + 1]) : undefined}
         />
+      ) : (
+        entries.length > 0 && <PanelGuide />
       )}
     </div>
+  );
+}
+
+// The panel's resting state, shown only where the panel is part of the
+// layout (wide screens); narrow screens open the change as a drawer instead.
+function PanelGuide() {
+  return (
+    <aside className="apanel-empty" aria-label="Change details">
+      <Icon name="hist" />
+      <b>Select a change</b>
+      <span>Its diff, rendered view and full file appear here.</span>
+      <span className="ap-keys">
+        <kbd>J</kbd> <kbd>K</kbd> move · <kbd>Esc</kbd> close
+      </span>
+    </aside>
   );
 }
 

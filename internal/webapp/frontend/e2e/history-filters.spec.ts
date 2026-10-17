@@ -37,14 +37,18 @@ test("the path filter narrows the feed and lands in the URL", async ({ page }) =
   await expect(page.locator(rows)).toHaveCount(before);
 });
 
+// Devices and people share one picker: both answer "whose changes", and a
+// person is reached under its People group while ?user= stays the URL form.
 test("the author filter offers the accounts in the feed and narrows to one", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/activity`);
-  const sel = page.locator(".hfilters select.hf-user");
-  await expect(sel.locator("option")).toContainText(["Anyone", "alice@x.io", "bob@x.io"]);
+  const sel = page.locator(".hfilters select.hf-device");
+  const people = sel.locator('optgroup[label="People"] option');
+  await expect(people).toContainText(["alice@x.io", "bob@x.io"]);
+  await expect(sel.locator('optgroup[label="Devices"] option').first()).toBeAttached();
 
-  await sel.selectOption("bob@x.io");
+  await sel.selectOption("u:bob@x.io");
   await page.waitForURL(`/${pid}/activity?user=bob%40x.io`);
   // the seed gives bob exactly one change, and nothing else in the suite
   // ever writes as him
@@ -52,7 +56,8 @@ test("the author filter offers the accounts in the feed and narrows to one", asy
   await expect(page.locator(`${rows} .hpath`)).toHaveText("notes/deep/topic.md");
   // and the other author is still selectable — filtering by one must not
   // strand the reader with a list rebuilt from their rows alone
-  await expect(sel.locator("option")).toContainText(["Anyone", "alice@x.io", "bob@x.io"]);
+  await expect(people).toContainText(["alice@x.io", "bob@x.io"]);
+  await expect(sel).toHaveValue("u:bob@x.io");
 });
 
 test("the date range filters server-side, and filters compose", async ({ page }) => {
@@ -67,7 +72,7 @@ test("the date range filters server-side, and filters compose", async ({ page })
   // Compose: an author who did write, plus a window that excludes everyone.
   await page.goto(`/${pid}/activity?user=alice%40x.io&until=2020-01-02`);
   await expect(page.locator(rows)).toHaveCount(0);
-  await expect(page.locator(".hfilters select.hf-user")).toHaveValue("alice@x.io");
+  await expect(page.locator(".hfilters select.hf-device")).toHaveValue("u:alice@x.io");
   await expect(page.locator(".hf-date").nth(1)).toHaveValue("2020-01-02");
 });
 
@@ -124,7 +129,7 @@ test("?path= lands on that file's feed, normalizes the URL, and keeps filters", 
   for (const p of await page.locator(`${rows} .hpath`).allTextContents()) {
     expect(p).toContain("guide.md");
   }
-  await expect(page.locator(".hfilters select.hf-user")).toHaveValue("alice@x.io");
+  await expect(page.locator(".hfilters select.hf-device")).toHaveValue("u:alice@x.io");
 
   await page.goBack();
   await expect(page).toHaveURL(`/${pid}/activity`);
