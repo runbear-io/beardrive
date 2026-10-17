@@ -158,7 +158,7 @@ export function FileTree(props: {
   const menuScrollTop = useRef(0);
   // A touch long-press opens the context menu, and lifting that finger still
   // fires a click on the same row. The row a touch opened a menu on swallows
-  // exactly that one click; any new press clears it.
+  // exactly that one click; a new press, or the menu closing, clears it.
   const pointerType = useRef("");
   const pressOpenedMenu = useRef<string | null>(null);
   const noteMenuOpen = () => {
@@ -287,6 +287,9 @@ export function FileTree(props: {
               modal={false}
               onOpenChange={(o) => {
                 if (o) noteMenuOpen();
+                // Closed without the release click arriving (Escape, a tap
+                // elsewhere): nothing is left for the row to swallow.
+                else if (pressOpenedMenu.current === n.path) pressOpenedMenu.current = null;
                 setContextFor((p) => (o ? n.path : p === n.path ? null : p));
               }}
             >

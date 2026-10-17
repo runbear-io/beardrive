@@ -1615,6 +1615,18 @@ test("the click that ends a long-press does not open the row under its menu", as
   await expect(page).toHaveURL(new RegExp(`/${pid}/?$`));
   await page.keyboard.press("Escape");
   await expect(page.getByRole("menu")).toHaveCount(0);
+
+  // Escape before the release click: the same row then opens from the keyboard.
+  await row.dispatchEvent("pointerdown", { ...at, pointerType: "touch", isPrimary: true });
+  await row.dispatchEvent("contextmenu", { ...at, button: 2 });
+  await expect(page.getByRole("menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await row.focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(new RegExp(`/${pid}/guide\\.md$`));
+  await page.goto(`/${pid}`);
+
   // A real click right after — on another row — opens it.
   await page.locator('#tree .row[data-path="deploy.md"]').click();
   await expect(page).toHaveURL(new RegExp(`/${pid}/deploy\\.md$`));
