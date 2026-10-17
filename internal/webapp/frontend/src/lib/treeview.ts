@@ -126,10 +126,13 @@ export function buildRows(
     const system = kids.filter((c) => isSystemName(c.name));
 
     if (depth > 0 && plain.length > cap && !showAll.has(parent.path)) {
+      // WHICH children show is always the most recently changed (HANDOFF
+      // §3-A); the order they show in is the reader's chosen order.
       const byRecent = [...plain].sort(byLatest);
+      const pick = new Set([...byRecent.slice(0, cap), ...byRecent.slice(cap).filter((c) => onKeepPath(c.path))]);
       const shown = byRecent.slice(0, cap);
       const held = byRecent.slice(cap).filter((c) => onKeepPath(c.path));
-      emit([...shown, ...held], depth);
+      emit(plain.filter((c) => pick.has(c)), depth);
       out.push({ kind: "more", parent: parent.path, depth, hidden: plain.length - shown.length - held.length });
     } else {
       emit(plain, depth);

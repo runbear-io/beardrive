@@ -47,10 +47,15 @@ test("nested folders cap at the most recent children, keeping the selection", ()
   const stats = treeStats(root, 0);
   const exp = new Set(["p"]);
   assert.deepEqual(names(buildRows(root, { expanded: exp, showAll: new Set(), stats })), [
-    "p", "p/f8.md", "p/f7.md", "p/f6.md", "p/f5.md", "p/f4.md", "[more 4]",
+    "p", "p/f4.md", "p/f5.md", "p/f6.md", "p/f7.md", "p/f8.md", "[more 4]",
   ]);
-  assert.deepEqual(names(buildRows(root, { expanded: exp, showAll: new Set(), stats, keep: "p/f0.md" })).slice(-2), [
-    "p/f0.md", "[more 3]",
+  // The selection is kept beyond the cap, in its place in the order.
+  assert.deepEqual(names(buildRows(root, { expanded: exp, showAll: new Set(), stats, keep: "p/f0.md" })), [
+    "p", "p/f0.md", "p/f4.md", "p/f5.md", "p/f6.md", "p/f7.md", "p/f8.md", "[more 3]",
+  ]);
+  // Recent order shows the same five, newest first.
+  assert.deepEqual(names(buildRows(root, { expanded: exp, showAll: new Set(), stats, order: "recent" })), [
+    "p", "p/f8.md", "p/f7.md", "p/f6.md", "p/f5.md", "p/f4.md", "[more 4]",
   ]);
   assert.equal(buildRows(root, { expanded: exp, showAll: new Set(["p"]), stats }).length, 10);
 });
@@ -59,7 +64,7 @@ test("a nested folder of exactly cap + 1 children is capped too", () => {
   const kids = Array.from({ length: 6 }, (_, i) => f(`p/f${i}.md`, `2026-01-0${i + 1}T00:00:00Z`));
   const root = d("", [d("p", kids)]);
   const rows = names(buildRows(root, { expanded: new Set(["p"]), showAll: new Set(), stats: treeStats(root, 0) }));
-  assert.deepEqual(rows, ["p", "p/f5.md", "p/f4.md", "p/f3.md", "p/f2.md", "p/f1.md", "[more 1]"]);
+  assert.deepEqual(rows, ["p", "p/f1.md", "p/f2.md", "p/f3.md", "p/f4.md", "p/f5.md", "[more 1]"]);
 });
 
 test("folders count files changed after the baseline", () => {
@@ -90,4 +95,13 @@ test("recent order lists each level newest change first", () => {
   assert.deepEqual(names(buildRows(root, { ...opts, order: "recent" })), ["a", "a/new.md", "a/old.md", "b.md"]);
   stats.latest.set("b.md", Date.parse("2026-04-01T00:00:00Z"));
   assert.deepEqual(names(buildRows(root, { ...opts, order: "recent" })), ["b.md", "a", "a/new.md", "a/old.md"]);
+});
+
+test("a capped folder in name order shows its recent children, in name order", () => {
+  // The tree arrives in name order; times make d, b, c, f, g the most recent.
+  const at: Record<string, number> = { a: 2, b: 4, c: 5, d: 3, e: 1, f: 6, g: 7 };
+  const kids = ["a", "b", "c", "d", "e", "f", "g"].map((n) => f(`p/${n}.md`, `2026-01-0${at[n]}T00:00:00Z`));
+  const root = d("", [d("p", kids)]);
+  const rows = names(buildRows(root, { expanded: new Set(["p"]), showAll: new Set(), stats: treeStats(root, 0), order: "name" }));
+  assert.deepEqual(rows, ["p", "p/b.md", "p/c.md", "p/d.md", "p/f.md", "p/g.md", "[more 2]"]);
 });
