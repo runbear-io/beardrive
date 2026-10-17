@@ -572,8 +572,8 @@ func sanitizeFilename(name string) string {
 // tell an emptied note from a file that was always empty, and asking for each
 // file's history would scan the journal once per file. The candidates are the
 // tree's own 0-byte files (RemoteSource.FilesWithMoves, so the replay rules
-// are the tree's), and each is checked along its move chain the way the
-// per-file history feed follows it.
+// are the tree's), each checked along its move chain the way the per-file
+// history feed follows it — in a single pass over the journal.
 func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.Request) {
 	rs := storeSource(v, w)
 	if rs == nil {
@@ -591,6 +591,9 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 			candidates = append(candidates, p)
 		}
 	}
+	// One pass over the journal: each candidate's chain is indexed by the
+	// paths it covers, so an op is checked only against the candidates whose
+	// history runs through its path — not every candidate against every op.
 	paths := []string{}
 	if len(candidates) > 0 {
 		all, err := rs.loadSourcedOps(r.Context())
@@ -598,16 +601,31 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 			storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 			return
 		}
+		type hit struct {
+			file string
+			seg  segment
+		}
+		into := inboundIndex(moves)
+		byPath := map[string][]hit{}
 		for _, p := range candidates {
-			chain := chainSegments(moves, p)
-			for _, sop := range all {
-				op := sop.Op
-				if op.Kind != journal.KindDelete && op.Link == "" && op.Size > 0 &&
-					blobRe.MatchString(op.Blob) && inSegments(chain, op.Path, op.Time) {
-					paths = append(paths, p)
-					break
+			for _, seg := range chainFrom(into, p) {
+				byPath[seg.Path] = append(byPath[seg.Path], hit{p, seg})
+			}
+		}
+		had := map[string]bool{}
+		for _, sop := range all {
+			op := sop.Op
+			if op.Kind == journal.KindDelete || op.Link != "" || op.Size <= 0 || !blobRe.MatchString(op.Blob) {
+				continue
+			}
+			for _, h := range byPath[op.Path] {
+				if !had[h.file] && inSegments([]segment{h.seg}, op.Path, op.Time) {
+					had[h.file] = true
 				}
 			}
+		}
+		for p := range had {
+			paths = append(paths, p)
 		}
 	}
 	sort.Strings(paths)
