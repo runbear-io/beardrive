@@ -615,7 +615,10 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 		had := map[string]bool{}
 		for _, sop := range all {
 			op := sop.Op
-			if op.Kind == journal.KindDelete || op.Link != "" || op.Size <= 0 || !blobRe.MatchString(op.Blob) {
+			// A version under a path this reader cannot see does not count:
+			// "it had content" would disclose that the hidden path did.
+			if op.Kind == journal.KindDelete || op.Link != "" || op.Size <= 0 ||
+				!blobRe.MatchString(op.Blob) || !vis.canRead(op.Path) {
 				continue
 			}
 			for _, h := range byPath[op.Path] {

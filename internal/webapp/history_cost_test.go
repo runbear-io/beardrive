@@ -93,3 +93,36 @@ func TestHistoryEmptied(t *testing.T) {
 		t.Fatalf("emptied = %v, want [new-name.md notes/daily.md]", out.Paths)
 	}
 }
+
+// A version under a folder the reader cannot see is no evidence of content:
+// otherwise a file moved out of a hidden folder and emptied would be listed,
+// disclosing that the hidden path held something.
+func TestHistoryEmptiedIgnoresHiddenHistory(t *testing.T) {
+	h, _, cookies, p, root := permHubAt(t)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	t0 := time.Now().Add(-time.Hour)
+	// The content only ever lived under secret/: it was emptied there, then
+	// the empty file moved out.
+	f.putAt("dev1", "secret/x.md", "hidden content", t0)
+	f.putAt("dev1", "secret/x.md", "", t0.Add(time.Minute))
+	f.move("dev1", "secret/x.md", "public/x.md", "", t0.Add(2*time.Minute))
+	rule := map[string]any{"prefix": "secret", "default": PermNone}
+	if rec := doAs(t, h, "PUT", "/api/p/"+p.ID+"/folders", rule, cookies["alice"]); rec.Code != 200 {
+		t.Fatalf("set rule: %d %s", rec.Code, rec.Body)
+	}
+	get := func(who string) []string {
+		t.Helper()
+		rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/history/emptied", nil, cookies[who])
+		var out struct{ Paths []string }
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+			t.Fatalf("emptied as %s: %d %s", who, rec.Code, rec.Body)
+		}
+		return out.Paths
+	}
+	if got := get("bob"); len(got) != 0 {
+		t.Fatalf("bob, who cannot see secret/, is told %v was emptied", got)
+	}
+	if got := get("alice"); len(got) != 1 || got[0] != "public/x.md" {
+		t.Fatalf("alice (admin) sees %v, want [public/x.md]", got)
+	}
+}
