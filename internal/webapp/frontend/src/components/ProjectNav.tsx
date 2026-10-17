@@ -209,7 +209,9 @@ export function SidebarSearch() {
         autoComplete="off"
         spellCheck={false}
         onMouseDown={(e) => {
-          if (query) return;
+          // Primary button only: right and middle clicks keep the browser's
+          // context menu, autoscroll and paste.
+          if (query || e.button !== 0) return;
           e.preventDefault();
           requestSearch();
           closeSidebarOnMobile();
