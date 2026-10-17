@@ -1598,7 +1598,8 @@ test("right-click opens the row menu at the pointer, stays on screen near the bo
 });
 
 // A touch long-press fires contextmenu, then the finger's release fires a
-// click on the same row. The release must not open the row under the menu.
+// click on the same row. That one click must not open the row under the menu
+// — and a later, real click (on any row) must still work.
 test("the click that ends a long-press does not open the row under its menu", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
@@ -1606,9 +1607,15 @@ test("the click that ends a long-press does not open the row under its menu", as
   const row = page.locator('#tree .row[data-path="guide.md"]');
   await expect(row).toBeVisible();
   const box = (await row.boundingBox())!;
-  await row.dispatchEvent("contextmenu", { clientX: box.x + 40, clientY: box.y + box.height / 2, button: 2 });
+  const at = { clientX: box.x + 40, clientY: box.y + box.height / 2 };
+  await row.dispatchEvent("pointerdown", { ...at, pointerType: "touch", isPrimary: true });
+  await row.dispatchEvent("contextmenu", { ...at, button: 2 });
   await expect(page.getByRole("menu")).toBeVisible();
-  await row.dispatchEvent("click");
+  await row.dispatchEvent("click", at);
   await expect(page).toHaveURL(new RegExp(`/${pid}/?$`));
-  await expect(page.getByRole("menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  // A real click right after — on another row — opens it.
+  await page.locator('#tree .row[data-path="deploy.md"]').click();
+  await expect(page).toHaveURL(new RegExp(`/${pid}/deploy\\.md$`));
 });

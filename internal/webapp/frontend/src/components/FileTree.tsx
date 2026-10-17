@@ -156,15 +156,14 @@ export function FileTree(props: {
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [contextFor, setContextFor] = useState<string | null>(null);
   const menuScrollTop = useRef(0);
-  // A touch long-press opens the context menu, and lifting the finger still
-  // fires the row's click: a click this soon after a menu opened is that
-  // release, not a request to open the row under the menu.
-  const menuOpenedAt = useRef(0);
+  // A touch long-press opens the context menu, and lifting that finger still
+  // fires a click on the same row. The row a touch opened a menu on swallows
+  // exactly that one click; any new press clears it.
+  const pointerType = useRef("");
+  const pressOpenedMenu = useRef<string | null>(null);
   const noteMenuOpen = () => {
     menuScrollTop.current = scrollRef.current?.scrollTop ?? 0;
-    menuOpenedAt.current = Date.now();
   };
-  const fromMenuRelease = () => Date.now() - menuOpenedAt.current < 700;
 
   const rows = useMemo(
     () => buildRows(root, { expanded, showAll, stats, keep: currentPath, order }),
@@ -270,7 +269,10 @@ export function FileTree(props: {
           const { node: n, depth, conflicts, fresh } = r;
           const open = n.dir ? expanded.has(n.path) : false;
           const click = () => {
-            if (fromMenuRelease()) return;
+            if (pressOpenedMenu.current === n.path) {
+              pressOpenedMenu.current = null;
+              return;
+            }
             if (n.dir && currentPath === n.path && listingShowing) {
               // Folding beats re-opening when this folder's listing is up.
               onToggle(n.path);
@@ -304,6 +306,13 @@ export function FileTree(props: {
                   title={n.name}
                   aria-expanded={n.dir ? open : undefined}
                   style={place(vi.start, depth)}
+                  onPointerDown={(e) => {
+                    pointerType.current = e.pointerType;
+                    pressOpenedMenu.current = null;
+                  }}
+                  onContextMenu={() => {
+                    if (pointerType.current === "touch") pressOpenedMenu.current = n.path;
+                  }}
                   onClick={click}
                   onKeyDown={(e) => {
                     if (e.target !== e.currentTarget) return;
