@@ -78,6 +78,51 @@ func TestLocalFolderWatcherWakesAndAddsDirectories(t *testing.T) {
 	lw.close()
 }
 
+func TestLocalFolderWatcherReaddsRecreatedDirectoryTree(t *testing.T) {
+	root := t.TempDir()
+	recreated := filepath.Join(root, "nested")
+	deep := filepath.Join(recreated, "deep")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer lw.close()
+
+	waitWake := func(label string) {
+		t.Helper()
+		select {
+		case <-lw.wake:
+		case <-time.After(time.Second):
+			t.Fatalf("watcher did not report %s", label)
+		}
+	}
+
+	if err := os.RemoveAll(recreated); err != nil {
+		t.Fatal(err)
+	}
+	waitWake("directory removal")
+
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	waitWake("recreated directory tree")
+	select {
+	case <-lw.wake:
+	default:
+	}
+
+	if err := os.WriteFile(filepath.Join(deep, "file.txt"), []byte("contents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitWake("write in recreated descendant")
+}
+
 func TestWatchSuppressesThePoll(t *testing.T) {
 	hub := newFakeHub(t)
 	m := watchMount(t, hub)

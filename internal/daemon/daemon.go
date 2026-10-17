@@ -937,6 +937,16 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			return nil
 		})
 	}
+	forgetDir := func(path string) {
+		path = filepath.Clean(path)
+		for watched := range seen {
+			rel, err := filepath.Rel(path, watched)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				delete(seen, watched)
+			}
+		}
+	}
+
 	for _, root := range roots {
 		if err := addDir(root); err != nil {
 			closeWatcher()
@@ -969,6 +979,9 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				if !ok {
 					report(errors.New("local filesystem watcher closed"))
 					return
+				}
+				if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+					forgetDir(ev.Name)
 				}
 				if ev.Op&fsnotify.Create != 0 {
 					if info, statErr := os.Stat(ev.Name); statErr == nil && info.IsDir() {

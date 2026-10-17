@@ -3,7 +3,7 @@ module github.com/runbear-io/beardrive
 go 1.25.8
 
 require (
-	github.com/fsnotify/fsnotify v1.9.0
+	github.com/fsnotify/fsnotify v1.10.1
 	cloud.google.com/go/storage v1.62.3
 	github.com/AlecAivazis/survey/v2 v2.3.7
 	github.com/aws/aws-sdk-go-v2 v1.42.0
