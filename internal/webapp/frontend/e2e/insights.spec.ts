@@ -250,3 +250,15 @@ for (const width of [1440, 1200]) {
     expect(boxes[2].right).toBeLessThanOrEqual(kpi.x + kpi.width);
   });
 }
+
+test("on a phone the Reads legend wraps inside its card", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/insights`);
+  const kpi = (await page.locator('.in-kpi[data-kpi="reads"]').boundingBox())!;
+  const boxes = await page
+    .locator('.in-kpi[data-kpi="reads"] .in-kpi-n > span')
+    .evaluateAll((els) => els.map((e) => e.getBoundingClientRect()));
+  for (const b of boxes) expect(b.right).toBeLessThanOrEqual(kpi.x + kpi.width + 0.5);
+});
