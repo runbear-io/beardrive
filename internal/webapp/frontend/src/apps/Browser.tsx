@@ -1013,8 +1013,9 @@ export default function Browser(props: {
           {/* No install CTA here: ConnectGuide directly above IS the set-up-a-
               device guide, and a second button six inches under the first
               reads as two different steps. */}
+          {/* No apiBase: the home's summary skips the emptied check, so a
+              teammate's write costs this page no extra request. */}
           <Insights
-            apiBase={hub ? apiBase : undefined}
             flatFiles={flatFiles}
             heatMap={heatMap}
             devices={devices}

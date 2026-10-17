@@ -92,6 +92,8 @@ export function useProjectEvents(
         coalesce = null;
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        // Mounted only on the Insights view, so other pages pay nothing.
+        qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
       }, COALESCE_MS);
     };
 

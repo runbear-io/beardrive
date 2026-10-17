@@ -585,6 +585,7 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 	type state struct {
 		size int64
 		live bool
+		link bool // the current version is a symlink: no content, not "emptied"
 		had  bool // some version ever had content
 	}
 	files := map[string]*state{}
@@ -599,13 +600,23 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 			st.live = false
 			continue
 		}
+		// The tree's replay rules (RemoteSource.FilesWithMoves): a link is a
+		// file with no content, and a put whose blob is not a bare sha256 is
+		// ignored — the path keeps whatever it was.
+		if op.Link != "" {
+			st.size, st.live, st.link = 0, true, true
+			continue
+		}
+		if !blobRe.MatchString(op.Blob) {
+			continue
+		}
 		st.had = st.had || op.Size > 0
-		st.size, st.live = op.Size, true
+		st.size, st.live, st.link = op.Size, true, false
 	}
 	vis := s.visibility(r)
 	paths := []string{}
 	for p, st := range files {
-		if st.live && st.size == 0 && st.had && vis.canRead(p) {
+		if st.live && !st.link && st.size == 0 && st.had && vis.canRead(p) {
 			paths = append(paths, p)
 		}
 	}

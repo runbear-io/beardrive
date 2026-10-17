@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+
+	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 // countingDeviceRepo counts how often the registry asks its store whether it
@@ -69,6 +71,12 @@ func TestHistoryEmptied(t *testing.T) {
 	f.put("dev1", "gone.md", "x")
 	f.put("dev1", "gone.md", "")
 	f.del("dev1", "gone.md")
+	// Not emptied: the tree ignores a put with a malformed blob, and a link
+	// has no content to have lost.
+	f.put("dev1", "bogus.md", "real content")
+	f.append("dev1", journal.Op{Kind: journal.KindPut, Path: "bogus.md", Blob: "../../other/blob", Size: 0})
+	f.put("dev1", "linked.md", "real content")
+	f.append("dev1", journal.Op{Kind: journal.KindPut, Path: "linked.md", Link: "target.md"})
 
 	rec := do(t, srv.Handler(), "GET", "/api/p/"+p.ID+"/history/emptied", nil)
 	var out struct{ Paths []string }
