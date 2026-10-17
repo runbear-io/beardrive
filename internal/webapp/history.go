@@ -579,11 +579,17 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 	if rs == nil {
 		return
 	}
-	files, moves, err := rs.FilesWithMoves(r.Context())
+	// One journal load serves both the tree replay and the history check.
+	sourced, err := rs.loadSourcedOps(r.Context())
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
+	all := make([]journal.Op, len(sourced))
+	for i, sop := range sourced {
+		all[i] = sop.Op
+	}
+	files, moves := filesWithMoves(all)
 	vis := s.visibility(r)
 	var candidates []string
 	for p, fi := range files {
@@ -596,11 +602,6 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 	// history runs through its path — not every candidate against every op.
 	paths := []string{}
 	if len(candidates) > 0 {
-		all, err := rs.loadSourcedOps(r.Context())
-		if err != nil {
-			storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
-			return
-		}
 		type hit struct {
 			file string
 			seg  segment
@@ -613,8 +614,7 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 			}
 		}
 		had := map[string]bool{}
-		for _, sop := range all {
-			op := sop.Op
+		for _, op := range all {
 			// A version under a path this reader cannot see does not count:
 			// "it had content" would disclose that the hidden path did.
 			if op.Kind == journal.KindDelete || op.Link != "" || op.Size <= 0 ||

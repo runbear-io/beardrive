@@ -801,6 +801,13 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 	if err != nil {
 		return nil, nil, err
 	}
+	files, moves := filesWithMoves(all)
+	return files, moves, nil
+}
+
+// filesWithMoves replays ops (sorted in place) into the tree and its move
+// index — the one set of replay rules every view of "the files" shares.
+func filesWithMoves(all []journal.Op) (map[string]FileInfo, moveIndex) {
 	journal.Sort(all)
 	files := make(map[string]FileInfo)
 	for _, op := range all {
@@ -835,7 +842,7 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 			delete(files, op.Path)
 		}
 	}
-	return files, buildMoveIndex(all), nil
+	return files, buildMoveIndex(all)
 }
 
 func (r *RemoteSource) Open(ctx context.Context, _ string, fi FileInfo) (io.ReadCloser, error) {
