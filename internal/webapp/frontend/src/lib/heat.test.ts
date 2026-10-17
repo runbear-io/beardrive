@@ -223,12 +223,12 @@ test("HEAT_DISCLOSURE is the only copy of the sentence", () => {
    surfaces at once. */
 
 test("isDanger needs both halves, at the exact thresholds", () => {
-  assert.equal(HOT_READS, 3);
+  assert.equal(HOT_READS, 10);
   assert.equal(STALE_DAYS, 30);
-  assert.equal(isDanger(3, 30), true); // both, exactly on the line
-  assert.equal(isDanger(3, 29), false); // hot but fresh
-  assert.equal(isDanger(2, 60), false); // stale but cold
-  assert.equal(isDanger(2, 29), false); // neither
+  assert.equal(isDanger(10, 30), true); // both, exactly on the line
+  assert.equal(isDanger(10, 29), false); // hot but fresh
+  assert.equal(isDanger(9, 60), false); // stale but cold
+  assert.equal(isDanger(9, 29), false); // neither
   assert.equal(isDanger(0, 0), false);
 });
 
