@@ -614,7 +614,18 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 			}
 		}
 		had := map[string]bool{}
+		isCandidate := make(map[string]bool, len(candidates))
+		for _, p := range candidates {
+			isCandidate[p] = true
+		}
 		for _, op := range all {
+			// A delete of the candidate's own path ends whatever came before:
+			// a file recreated empty after it is a new file, the way the tree
+			// replays it, and inherits nothing from the one that was deleted.
+			if op.Kind == journal.KindDelete && isCandidate[op.Path] {
+				had[op.Path] = false
+				continue
+			}
 			// A version under a path this reader cannot see does not count:
 			// "it had content" would disclose that the hidden path did.
 			if op.Kind == journal.KindDelete || op.Link != "" || op.Size <= 0 ||
@@ -627,8 +638,10 @@ func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.
 				}
 			}
 		}
-		for p := range had {
-			paths = append(paths, p)
+		for p, ok := range had {
+			if ok {
+				paths = append(paths, p)
+			}
 		}
 	}
 	sort.Strings(paths)

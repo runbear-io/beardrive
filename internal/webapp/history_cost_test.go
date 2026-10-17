@@ -83,6 +83,11 @@ func TestHistoryEmptied(t *testing.T) {
 	f.putAt("dev1", "old-name.md", "moved content", t0)
 	f.move("dev1", "old-name.md", "new-name.md", "moved content", t0.Add(time.Minute))
 	f.putAt("dev1", "new-name.md", "", t0.Add(2*time.Minute))
+	// Not emptied: moved, deleted, then recreated empty — a new file.
+	f.putAt("dev1", "src.md", "old content", t0)
+	f.move("dev1", "src.md", "dst.md", "old content", t0.Add(time.Minute))
+	f.delAt("dev1", "dst.md", t0.Add(2*time.Minute))
+	f.putAt("dev1", "dst.md", "", t0.Add(3*time.Minute))
 
 	rec := do(t, srv.Handler(), "GET", "/api/p/"+p.ID+"/history/emptied", nil)
 	var out struct{ Paths []string }
