@@ -58,3 +58,9 @@ export function setFilterSel(i: number) {
 export function activateFilterSel() {
   activate?.(state.sel);
 }
+
+// Puts the caret in the sidebar search field, where typing filters the tree.
+// Focus alone never opens the palette: only a click on the empty field does.
+export function focusSidebarSearch() {
+  document.getElementById("sb-search-input")?.focus();
+}

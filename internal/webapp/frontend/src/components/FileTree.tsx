@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { Node } from "../api/types";
 import { Icon, closeSidebarOnMobile } from "./shell";
@@ -10,7 +10,15 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { buildRows, filterTree, parentOf, systemKey, type FilterHit, type TreeStats } from "../lib/treeview";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import { buildRows, filterTree, parentOf, systemKey, type FilterHit, type TreeOrder, type TreeStats } from "../lib/treeview";
 import { registerFilterResults, setFilterSel, useSidebarSearch } from "../lib/sidebarSearch";
 import { requestSearch } from "../search";
 import { isMac } from "../util";
@@ -40,61 +48,78 @@ export interface TreeActions {
   remove?: (path: string) => void;
 }
 
-function RowMenu({ path, dir, actions, children }: {
+// The two row menus, ⋯ (a DropdownMenu anchored to its button) and right-click
+// (a ContextMenu at the pointer), draw this one list through their own parts.
+interface MenuKit {
+  Item: typeof DropdownMenuItem | typeof ContextMenuItem;
+  Separator: typeof DropdownMenuSeparator | typeof ContextMenuSeparator;
+  Shortcut: typeof DropdownMenuShortcut | typeof ContextMenuShortcut;
+}
+const DROPDOWN_KIT: MenuKit = { Item: DropdownMenuItem, Separator: DropdownMenuSeparator, Shortcut: DropdownMenuShortcut };
+const CONTEXT_KIT: MenuKit = { Item: ContextMenuItem, Separator: ContextMenuSeparator, Shortcut: ContextMenuShortcut };
+
+function RowMenuItems({ path, dir, actions, kit }: {
   path: string;
   dir: boolean;
   actions: TreeActions;
-  children: ReactNode;
+  kit: MenuKit;
 }) {
+  const { Item, Separator, Shortcut } = kit;
   const folder = dir ? path : parentOf(path).replace(/\/$/, "");
   return (
     <>
-      {children}
-      <DropdownMenuContent className="row-menu" align="start" onClick={(e) => e.stopPropagation()}>
-        <DropdownMenuItem onSelect={() => actions.open(path)}>
-          <Icon name={dir ? "folderopen" : "doc"} /> {dir ? "Open folder" : "Open"}
-          <DropdownMenuShortcut>↵</DropdownMenuShortcut>
-        </DropdownMenuItem>
-        {actions.newFile && (actions.canCreateIn?.(folder) ?? true) && (
-          <DropdownMenuItem onSelect={() => actions.newFile!(folder)}>
-            <Icon name="fileplus" /> New file
-          </DropdownMenuItem>
-        )}
-        {actions.togglePin && (
-          <DropdownMenuItem onSelect={() => actions.togglePin!(path)}>
-            <Icon name="star" /> {actions.pinned?.(path) ? "Unpin" : "Pin to sidebar"}
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => actions.copyPath(path)}>
-          <Icon name="copy" /> Copy path
-        </DropdownMenuItem>
-        {actions.copyShareLink && !dir && (
-          <DropdownMenuItem onSelect={() => actions.copyShareLink!(path)}>
-            <Icon name="link" /> Copy share link
-          </DropdownMenuItem>
-        )}
-        {(actions.history || actions.insights) && <DropdownMenuSeparator />}
-        {actions.history && (
-          <DropdownMenuItem onSelect={() => actions.history!(path)}>
-            <Icon name="hist" /> Show history
-          </DropdownMenuItem>
-        )}
-        {actions.insights && (
-          <DropdownMenuItem onSelect={() => actions.insights!(path)}>
-            <Icon name="insights" /> View in Insights
-          </DropdownMenuItem>
-        )}
-        {actions.remove && !dir && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" onSelect={() => actions.remove!(path)}>
-              <Icon name="trash" /> Delete…
-            </DropdownMenuItem>
-          </>
-        )}
-      </DropdownMenuContent>
+      <Item onSelect={() => actions.open(path)}>
+        <Icon name={dir ? "folderopen" : "doc"} /> {dir ? "Open folder" : "Open"}
+        <Shortcut>↵</Shortcut>
+      </Item>
+      {actions.newFile && (actions.canCreateIn?.(folder) ?? true) && (
+        <Item onSelect={() => actions.newFile!(folder)}>
+          <Icon name="fileplus" /> New file
+        </Item>
+      )}
+      {actions.togglePin && (
+        <Item onSelect={() => actions.togglePin!(path)}>
+          <Icon name="star" /> {actions.pinned?.(path) ? "Unpin" : "Pin to sidebar"}
+        </Item>
+      )}
+      <Separator />
+      <Item onSelect={() => actions.copyPath(path)}>
+        <Icon name="copy" /> Copy path
+      </Item>
+      {actions.copyShareLink && !dir && (
+        <Item onSelect={() => actions.copyShareLink!(path)}>
+          <Icon name="link" /> Copy share link
+        </Item>
+      )}
+      {(actions.history || actions.insights) && <Separator />}
+      {actions.history && (
+        <Item onSelect={() => actions.history!(path)}>
+          <Icon name="hist" /> Show history
+        </Item>
+      )}
+      {actions.insights && (
+        <Item onSelect={() => actions.insights!(path)}>
+          <Icon name="insights" /> View in Insights
+        </Item>
+      )}
+      {actions.remove && !dir && (
+        <>
+          <Separator />
+          <Item variant="destructive" onSelect={() => actions.remove!(path)}>
+            <Icon name="trash" /> Delete…
+          </Item>
+        </>
+      )}
     </>
+  );
+}
+
+// Shift+F10 and the Menu key open the context menu at the focused row, just
+// below its label, rather than wherever the browser would place it.
+function openContextMenuAt(row: HTMLElement) {
+  const r = row.getBoundingClientRect();
+  row.dispatchEvent(
+    new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: r.left + 24, clientY: r.bottom }),
   );
 }
 
@@ -121,16 +146,23 @@ export function FileTree(props: {
      label. */
   restricted: Set<string>;
   stats: TreeStats;
+  order?: TreeOrder;
   actions: TreeActions;
 }) {
-  const { root, expanded, onToggle, currentPath, listingShowing, restricted, stats, actions } = props;
+  const { root, expanded, onToggle, currentPath, listingShowing, restricted, stats, order, actions } = props;
   const scrollRef = useRef<HTMLElement>(null);
   const [showAll, setShowAll] = useState<Set<string>>(() => new Set());
+  // The row whose ⋯ menu / right-click menu is open, for the row highlight.
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [contextFor, setContextFor] = useState<string | null>(null);
+  const menuScrollTop = useRef(0);
+  const noteMenuOpen = () => {
+    menuScrollTop.current = scrollRef.current?.scrollTop ?? 0;
+  };
 
   const rows = useMemo(
-    () => buildRows(root, { expanded, showAll, stats, keep: currentPath }),
-    [root, expanded, showAll, stats, currentPath],
+    () => buildRows(root, { expanded, showAll, stats, keep: currentPath, order }),
+    [root, expanded, showAll, stats, currentPath, order],
   );
 
   const virtualizer = useVirtualizer({
@@ -167,7 +199,21 @@ export function FileTree(props: {
   });
 
   return (
-    <nav id="tree" aria-label="Files" ref={scrollRef}>
+    <nav
+      id="tree"
+      aria-label="Files"
+      ref={scrollRef}
+      onScroll={(e) => {
+        // The virtualizer recycles rows as the tree scrolls, so a menu would
+        // be left pointing at a row that is gone or now shows another path.
+        // Focus returning to a row nudges the scroll by a few pixels; only a
+        // real scroll closes the menu.
+        if (!menuFor && !contextFor) return;
+        if (Math.abs(e.currentTarget.scrollTop - menuScrollTop.current) < 28) return;
+        if (menuFor) setMenuFor(null);
+        if (contextFor) document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      }}
+    >
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((vi) => {
           const r = rows[vi.index];
@@ -227,14 +273,24 @@ export function FileTree(props: {
             if (!n.dir) closeSidebarOnMobile();
           };
           return (
-            <DropdownMenu
+            <ContextMenu
               key={vi.key}
-              open={menuFor === n.path}
-              onOpenChange={(o) => setMenuFor(o ? n.path : null)}
+              modal={false}
+              onOpenChange={(o) => {
+                if (o) noteMenuOpen();
+                setContextFor((p) => (o ? n.path : p === n.path ? null : p));
+              }}
             >
-              <RowMenu path={n.path} dir={!!n.dir} actions={actions}>
+            <DropdownMenu
+              open={menuFor === n.path}
+              onOpenChange={(o) => {
+                if (o) noteMenuOpen();
+                setMenuFor(o ? n.path : null);
+              }}
+            >
+              <ContextMenuTrigger asChild>
                 <div
-                  className={"row " + (n.dir ? "dir" : "file") + (currentPath === n.path ? " active" : "") + (n.dir && !open ? " collapsed" : "") + (menuFor === n.path ? " menu-open" : "")}
+                  className={"row " + (n.dir ? "dir" : "file") + (currentPath === n.path ? " active" : "") + (n.dir && !open ? " collapsed" : "") + (menuFor === n.path || contextFor === n.path ? " menu-open" : "")}
                   data-path={n.path}
                   tabIndex={0}
                   role="button"
@@ -242,12 +298,14 @@ export function FileTree(props: {
                   aria-expanded={n.dir ? open : undefined}
                   style={place(vi.start, depth)}
                   onClick={click}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setMenuFor(n.path);
-                  }}
                   onKeyDown={(e) => {
-                    if (e.target === e.currentTarget) activateOnKey(click)(e);
+                    if (e.target !== e.currentTarget) return;
+                    if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
+                      e.preventDefault();
+                      openContextMenuAt(e.currentTarget);
+                      return;
+                    }
+                    activateOnKey(click)(e);
                   }}
                 >
                   {guides(depth)}
@@ -311,8 +369,15 @@ export function FileTree(props: {
                     </DropdownMenuTrigger>
                   </span>
                 </div>
-              </RowMenu>
+              </ContextMenuTrigger>
+              <DropdownMenuContent className="row-menu" align="start" onClick={(e) => e.stopPropagation()}>
+                <RowMenuItems path={n.path} dir={!!n.dir} actions={actions} kit={DROPDOWN_KIT} />
+              </DropdownMenuContent>
             </DropdownMenu>
+            <ContextMenuContent className="row-menu" onClick={(e) => e.stopPropagation()}>
+              <RowMenuItems path={n.path} dir={!!n.dir} actions={actions} kit={CONTEXT_KIT} />
+            </ContextMenuContent>
+            </ContextMenu>
           );
         })}
       </div>

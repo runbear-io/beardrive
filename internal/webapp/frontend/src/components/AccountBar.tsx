@@ -48,13 +48,9 @@ function GithubMark() {
 // The org entry is a plain link to org.manage_url: this hub's own org page
 // when it owns its orgs, the identity provider's page when it does not. The
 // server decides; nothing here branches on the answer.
-/* The star ask is a link that sits there, never a banner that interrupts: it
-   is dim, one click, and identical on every render, so it reads as social
-   proof rather than as a request. Anything dismissible would need dismissal
-   state and would still have interrupted once.
-
-   One component because both footers below render it identically — signed in
-   and signed out were byte-identical copies. */
+/* The star ask is a plain link, never a banner: dim, one click, and
+   identical on every render, so it reads as social proof rather than as a
+   request. */
 function StarOnGitHub() {
   return (
     <a className="gh-star" href={REPO_URL} target="_blank" rel="noreferrer">
@@ -98,7 +94,6 @@ export function AccountBar({
   const connectionsLink = linkProps("/connections");
   return (
     <footer id="accountbar">
-      <StarOnGitHub />
       <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <button id="account-btn" className={orgActive ? "active" : undefined} aria-label="Account menu">
@@ -202,6 +197,14 @@ export function AccountBar({
               </a>
             </DropdownMenuItem>
           )}
+          <DropdownMenuItem asChild>
+            <a id="menu-github" className="gh-star-item" href={REPO_URL} target="_blank" rel="noreferrer">
+              <GithubMark />
+              <span>Star on GitHub</span>
+              <span className="ext" aria-hidden="true">↗</span>
+              <span className="sr-only"> (opens in a new tab)</span>
+            </a>
+          </DropdownMenuItem>
           {signOut ? (
             <DropdownMenuItem id="signout" onSelect={signOut}>
               <Icon name="power" />

@@ -188,7 +188,6 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     <VaultHeader
       name={brand}
       onHome={() => navigate("/")}
-      search={!!current}
       beta={brand === "BearDrive"}
     />
   );

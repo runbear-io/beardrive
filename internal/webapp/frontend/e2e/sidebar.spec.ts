@@ -182,3 +182,62 @@ test("New file is offered only where the hub would accept the write", async ({ p
   await expect(page.locator('#tree .row[data-path="notes"]')).toBeVisible();
   await expect(page.locator('#tree .tact[title="New file"]')).toHaveCount(0);
 });
+
+test("FILES header: filter focuses the search field, sort toggles name ↔ recent and persists", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  await page.evaluate(() => localStorage.removeItem("bdrive.treeOrder"));
+  await page.reload();
+
+  await page.click("#tree-filter-btn");
+  await expect(page.locator("#sb-search-input")).toBeFocused();
+  await expect(page.locator("#palette")).toHaveCount(0);
+  await page.keyboard.type("guide");
+  await expect(page.locator('#tree-filter .fhit[data-path="guide.md"]')).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#tree")).toBeVisible();
+
+  const top = () =>
+    page.locator("#tree .row[data-path]").evaluateAll((els) =>
+      els
+        .filter((e) => !e.getAttribute("data-path")!.includes("/"))
+        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)
+        .map((e) => e.getAttribute("data-path")),
+    );
+  const byName = await top();
+  const sort = page.locator("#tree-sort-btn");
+  await expect(sort).toHaveAttribute("aria-pressed", "false");
+  await sort.click();
+  await expect(sort).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(top).not.toEqual(byName);
+  const byRecent = await top();
+  await page.reload();
+  await expect(page.locator("#tree-sort-btn")).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(top).toEqual(byRecent);
+  await page.click("#tree-sort-btn");
+  await expect.poll(top).toEqual(byName);
+});
+
+test("active nav is neutral; honey marks only the selected tree file; star link lives in the account menu", async ({
+  page,
+}) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/guide.md`);
+  await page.click("#nav-activity");
+  const nav = page.locator("#nav-activity");
+  await expect(nav).toHaveClass(/active/);
+  await expect(nav).toHaveCSS("color", "rgb(238, 240, 243)"); // --text
+  await expect(nav.locator(".label")).toHaveCSS("font-weight", "600");
+  await page.goto(`/${pid}/guide.md`);
+  await expect(page.locator('#tree .row[data-path="guide.md"]')).toHaveCSS("color", "rgb(255, 207, 133)"); // --accent-bright
+
+  await expect(page.locator("#vault #search-btn")).toHaveCount(0);
+  await expect(page.locator("#vault .icon-btn2")).toHaveCount(1); // collapse only
+  await expect(page.locator("#accountbar .gh-star")).toHaveCount(0);
+  await page.click("#account-btn");
+  await expect(page.locator("#menu-github")).toHaveAttribute("href", /github\.com/);
+});

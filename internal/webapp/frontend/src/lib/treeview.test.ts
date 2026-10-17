@@ -78,3 +78,16 @@ test("filter matches base names, exact and prefix first", () => {
   assert.deepEqual(r.files.map((h) => h.path), ["s/Konny-call.md", "a/notkonny.md"]);
   assert.equal(r.files[1].at, 3);
 });
+
+test("recent order lists each level newest change first", () => {
+  const root = d("", [
+    d("a", [f("a/old.md", "2026-01-01T00:00:00Z"), f("a/new.md", "2026-03-01T00:00:00Z")]),
+    f("b.md", "2026-02-01T00:00:00Z"),
+  ]);
+  const stats = treeStats(root, 0);
+  const opts = { expanded: new Set(["a"]), showAll: new Set<string>(), stats };
+  assert.deepEqual(names(buildRows(root, opts)), ["a", "a/old.md", "a/new.md", "b.md"]);
+  assert.deepEqual(names(buildRows(root, { ...opts, order: "recent" })), ["a", "a/new.md", "a/old.md", "b.md"]);
+  stats.latest.set("b.md", Date.parse("2026-04-01T00:00:00Z"));
+  assert.deepEqual(names(buildRows(root, { ...opts, order: "recent" })), ["b.md", "a", "a/new.md", "a/old.md"]);
+});

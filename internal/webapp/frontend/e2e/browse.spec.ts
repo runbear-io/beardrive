@@ -1216,7 +1216,6 @@ test("a file with no mermaid fence fetches no mermaid chunk", async ({ page }) =
   page.on("request", (r) => /mermaid\.core|Diagram-/.test(r.url()) && fetched.push(r.url()));
   await page.goto(`/${pid}/guide.md`);
   await expect(page.locator("#content")).toContainText("Second version");
-  await page.waitForTimeout(500);
   expect(fetched).toEqual([]);
 });
 
@@ -1530,4 +1529,70 @@ test("file rail on a phone: closed disclosure above the body", async ({ browser 
   await panel.locator("summary").click();
   await expect(panel.locator(".fv-props dt")).toHaveText(["title", "owner"]);
   await ctx.close();
+});
+
+test("right-click opens the row menu at the pointer, stays on screen near the bottom, and Shift+F10 opens it", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await login(page);
+  await wikiId(page);
+  const row = page.locator('#tree .row[data-path="guide.md"]');
+  await expect(row).toBeVisible();
+  const box = (await row.boundingBox())!;
+  const menu = page.locator('[data-slot="context-menu-content"]');
+
+  const menuXAt = async (x: number) => {
+    await row.click({ button: "right", position: { x, y: box.height / 2 } });
+    await expect(menu).toBeVisible();
+    const m = (await menu.boundingBox())!;
+    // Opens beside the cursor, not under the row's ⋯ button.
+    expect(Math.abs(m.x - (box.x + x))).toBeLessThan(12);
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    return m.x;
+  };
+  const left = await menuXAt(12);
+  const centre = await menuXAt(box.width / 2);
+  expect(centre - left).toBeGreaterThan(40);
+
+  // Both menus draw the same items.
+  await row.click({ button: "right", position: { x: 12, y: box.height / 2 } });
+  await expect(menu.getByRole("menuitem").first()).toBeVisible();
+  const contextItems = await menu.getByRole("menuitem").allTextContents();
+  expect(contextItems.length).toBeGreaterThan(3);
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await row.hover();
+  await row.locator('button[aria-label="Actions for guide.md"]').click();
+  const dropdown = page.locator('[data-slot="dropdown-menu-content"]');
+  await expect(dropdown.getByRole("menuitem").first()).toBeVisible();
+  expect(await dropdown.getByRole("menuitem").allTextContents()).toEqual(contextItems);
+  await page.keyboard.press("Escape");
+
+  // Near the bottom of the window the menu moves up to stay on screen
+  // (Radix shifts it along the cursor's edge rather than mirroring it).
+  const vh = Math.round(box.y + box.height + 40);
+  await page.setViewportSize({ width: 1280, height: vh });
+  const low = (await row.boundingBox())!;
+  await row.click({ button: "right", position: { x: 12, y: low.height / 2 } });
+  await expect(menu).toBeVisible();
+  const up = (await menu.boundingBox())!;
+  expect(up.y + up.height).toBeLessThanOrEqual(vh);
+  expect(up.y).toBeLessThan(low.y);
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  // Shift+F10 on the focused row opens it there.
+  await row.focus();
+  await page.keyboard.press("Shift+F10");
+  await expect(menu).toBeVisible();
+  const kb = (await menu.boundingBox())!;
+  const rb = (await row.boundingBox())!;
+  expect(Math.abs(kb.x - (rb.x + 24))).toBeLessThan(12);
+  expect(kb.y).toBeLessThanOrEqual(rb.y + rb.height + 4);
+  expect(kb.y + kb.height).toBeGreaterThanOrEqual(rb.y);
+  await expect(row).toHaveClass(/menu-open/);
+  await page.keyboard.press("Escape");
+  await expect(row).not.toHaveClass(/menu-open/);
 });
