@@ -1596,3 +1596,19 @@ test("right-click opens the row menu at the pointer, stays on screen near the bo
   await page.keyboard.press("Escape");
   await expect(row).not.toHaveClass(/menu-open/);
 });
+
+// A touch long-press fires contextmenu, then the finger's release fires a
+// click on the same row. The release must not open the row under the menu.
+test("the click that ends a long-press does not open the row under its menu", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  const row = page.locator('#tree .row[data-path="guide.md"]');
+  await expect(row).toBeVisible();
+  const box = (await row.boundingBox())!;
+  await row.dispatchEvent("contextmenu", { clientX: box.x + 40, clientY: box.y + box.height / 2, button: 2 });
+  await expect(page.getByRole("menu")).toBeVisible();
+  await row.dispatchEvent("click");
+  await expect(page).toHaveURL(new RegExp(`/${pid}/?$`));
+  await expect(page.getByRole("menu")).toBeVisible();
+});

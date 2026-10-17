@@ -156,9 +156,15 @@ export function FileTree(props: {
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [contextFor, setContextFor] = useState<string | null>(null);
   const menuScrollTop = useRef(0);
+  // A touch long-press opens the context menu, and lifting the finger still
+  // fires the row's click: a click this soon after a menu opened is that
+  // release, not a request to open the row under the menu.
+  const menuOpenedAt = useRef(0);
   const noteMenuOpen = () => {
     menuScrollTop.current = scrollRef.current?.scrollTop ?? 0;
+    menuOpenedAt.current = Date.now();
   };
+  const fromMenuRelease = () => Date.now() - menuOpenedAt.current < 700;
 
   const rows = useMemo(
     () => buildRows(root, { expanded, showAll, stats, keep: currentPath, order }),
@@ -264,6 +270,7 @@ export function FileTree(props: {
           const { node: n, depth, conflicts, fresh } = r;
           const open = n.dir ? expanded.has(n.path) : false;
           const click = () => {
+            if (fromMenuRelease()) return;
             if (n.dir && currentPath === n.path && listingShowing) {
               // Folding beats re-opening when this folder's listing is up.
               onToggle(n.path);
