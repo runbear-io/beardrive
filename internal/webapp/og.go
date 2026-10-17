@@ -1,7 +1,10 @@
 package webapp
 
 import (
+	"fmt"
 	"html"
+	"io"
+	"net/http"
 	"net/url"
 	"path"
 	"regexp"
@@ -147,4 +150,116 @@ func truncateWords(s string, max int) string {
 		cut = cut[:i]
 	}
 	return strings.TrimRight(cut, " \t\n") + "…"
+}
+
+// unfurlerUAs are the link expanders that fetch a pasted URL to build a card.
+// Matching is by substring because each one appends version and contact text.
+var unfurlerUAs = []string{
+	"Slackbot-LinkExpanding",
+	"Slack-ImgProxy",
+	"Discordbot",
+	"Twitterbot",
+	"facebookexternalhit",
+	"LinkedInBot",
+	"TelegramBot",
+	"WhatsApp",
+}
+
+func isUnfurler(ua string) bool {
+	for _, u := range unfurlerUAs {
+		if strings.Contains(ua, u) {
+			return true
+		}
+	}
+	return false
+}
+
+// needsCard reports whether a shared file gets an Open Graph card when an
+// unfurler asks for it. Markdown already renders its own; images unfurl as
+// themselves, and swapping one for a card would also swap the og:image fetch
+// for a card, leaving nothing to show.
+func needsCard(p string) bool {
+	ext := strings.ToLower(path.Ext(p))
+	if ext == ".md" || ext == ".markdown" {
+		return false
+	}
+	return !strings.HasPrefix(contentType(p), "image/")
+}
+
+// cardHeadLimit bounds how much of a shared HTML file is read to find its
+// title and description; both belong in <head>.
+const cardHeadLimit = 64 << 10
+
+var (
+	cardTitleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	cardMetaRe  = regexp.MustCompile(`(?is)<meta\s[^>]*>`)
+	cardAttrRe  = regexp.MustCompile(`(?is)\b(name|property|content)\s*=\s*("[^"]*"|'[^']*')`)
+)
+
+// htmlHead pulls the title, description and image an HTML document declares
+// about itself, its own og:* winning over <title> and name="description".
+func htmlHead(doc string) (title, desc, image string) {
+	if m := cardTitleRe.FindStringSubmatch(doc); m != nil {
+		title = m[1]
+	}
+	for _, tag := range cardMetaRe.FindAllString(doc, -1) {
+		var key, content string
+		for _, a := range cardAttrRe.FindAllStringSubmatch(tag, -1) {
+			v := a[2][1 : len(a[2])-1]
+			if strings.EqualFold(a[1], "content") {
+				content = v
+			} else {
+				key = strings.ToLower(v)
+			}
+		}
+		switch key {
+		case "og:title":
+			title = content
+		case "og:description":
+			desc = content
+		case "description":
+			if desc == "" {
+				desc = content
+			}
+		case "og:image":
+			image = content
+		}
+	}
+	clean := func(s string) string {
+		return strings.Join(strings.Fields(html.UnescapeString(ogTagRe.ReplaceAllString(s, ""))), " ")
+	}
+	return truncateWords(clean(title), 200), truncateWords(clean(desc), 200), html.UnescapeString(image)
+}
+
+// serveShareCard answers an unfurler with an Open Graph page for a shared
+// file that is not markdown or an image. HTML is described by its own head;
+// anything else by its name, kind, size and age. Content stays inside the
+// share's public scope: the link already serves these bytes to anyone.
+func (s *Server) serveShareCard(w http.ResponseWriter, r *http.Request, v *volume, sp string, fi FileInfo) {
+	title, desc, image := path.Base(sp), "", ""
+	ext := strings.ToLower(path.Ext(sp))
+	if ext == ".html" || ext == ".htm" {
+		if rc, err := v.source.Open(r.Context(), sp, fi); err == nil {
+			head, _ := io.ReadAll(io.LimitReader(rc, cardHeadLimit))
+			rc.Close()
+			t, d, i := htmlHead(string(head))
+			if t != "" {
+				title = t
+			}
+			desc, image = d, i
+		}
+	}
+	if desc == "" {
+		kind := strings.TrimPrefix(strings.ToUpper(ext), ".")
+		if kind == "" {
+			kind = "File"
+		}
+		desc = kind + " · " + humanSize(fi.Size)
+		if !fi.Time.IsZero() {
+			desc += " · Updated " + fi.Time.UTC().Format("2 Jan 2006")
+		}
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8">%s%s</head><body></body></html>`,
+		titleTag(title), ogMeta(title, desc, image, "article", requestBaseURL(r)+r.URL.EscapedPath()))
 }

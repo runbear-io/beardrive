@@ -621,6 +621,13 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fi := snap.files[sp]
+	// An unfurler gets a card instead of the bytes for files that cannot
+	// describe themselves to it. Not a read and not egress worth billing: no
+	// person saw the file.
+	if r.URL.Query().Get("download") != "1" && isUnfurler(r.UserAgent()) && needsCard(sp) {
+		s.serveShareCard(w, r, v, sp, fi)
+		return
+	}
 	// A share hit is external consumption: one audience member reloading is
 	// debounced to a visit, distinct visitors still count.
 	s.Reads.Record(sh.Project, sp, ReadKindShare, s.shareActor(r, sh.Token))
