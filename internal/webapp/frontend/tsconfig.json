@@ -12,6 +12,7 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true, // lets lib modules import each other in a form node --test can run
     "isolatedModules": true,
     "skipLibCheck": true
   },

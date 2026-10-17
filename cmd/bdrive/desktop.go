@@ -108,6 +108,7 @@ var desktopRoutes = []struct {
 	{"GET /api/p/{project}/download", routeLocal, "local bytes"},
 	{"GET /api/p/{project}/render", routeLocal, "local bytes, rendered here"},
 	{"GET /api/p/{project}/history", routeLocal, "replayed from the local volume store's journals"},
+	{"GET /api/p/{project}/history/summary", routeLocal, "counted from the same local journals the history feed replays"},
 	{"GET /api/p/{project}/blob", routeLocal, "old versions come from local blobs"},
 	{"GET /api/p/{project}/store/list", routeLocal, "the local volume store"},
 	{"GET /api/p/{project}/store/object", routeLocal, "the local volume store"},

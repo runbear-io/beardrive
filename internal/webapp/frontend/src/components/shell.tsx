@@ -3,11 +3,13 @@ import { requestSearch } from "../search";
 import { isMac } from "../util";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
+  Activity,
   Beaker,
   BookOpen,
   Briefcase,
   Bug,
   Calendar,
+  ChartNoAxesCombined,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -19,10 +21,13 @@ import {
   CreditCard,
   Database,
   Download,
+  FilePlus,
   Ellipsis,
   FileText,
   Flag,
   Folder,
+  FolderCog,
+  FolderOpen,
   Gauge,
   Heart,
   Image,
@@ -32,6 +37,8 @@ import {
   Globe,
   GraduationCap,
   History,
+  House,
+  LaptopMinimal,
   Link,
   Lock,
   LogOut,
@@ -43,6 +50,8 @@ import {
   Music,
   Package,
   PanelLeft,
+  PanelLeftClose,
+  PanelLeftOpen,
   PenLine,
   Plus,
   Printer,
@@ -60,6 +69,11 @@ import {
   Plug,
   Wrench,
   X,
+  Pencil,
+  Eye,
+  Tag,
+  CornerUpLeft,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 
@@ -73,7 +87,9 @@ export const SIDEBAR_COLLAPSED_KEY = "bdrive.sbCollapsed";
 // is a modal off-canvas drawer (body.sb-open); at desktop widths it is a fixed
 // column that collapses for a distraction-free reading width
 // (body.sb-collapsed, remembered per browser). One control and one shortcut
-// (⌘B / Ctrl+B) drive whichever applies at the current width.
+// (⌘B or ⌘\, Ctrl on other platforms) drive whichever applies at the
+// current width. Collapsed is a narrow icon rail, never fully hidden, so the
+// nav and its badges stay one click away.
 export function toggleSidebar() {
   if (window.innerWidth <= SIDEBAR_BREAKPOINT) toggleDrawer();
   else setCollapsed(!document.body.classList.contains("sb-collapsed"));
@@ -145,8 +161,10 @@ export function syncSidebarInert() {
   const mobile = window.innerWidth <= SIDEBAR_BREAKPOINT;
   const drawerOpen = document.body.classList.contains("sb-open");
   const collapsed = document.body.classList.contains("sb-collapsed");
+  // Collapsed at desktop width is the icon rail: still on screen, still
+  // focusable, so only the closed mobile drawer is inert.
   const hidden = mobile ? !drawerOpen : collapsed;
-  if (hidden) el.setAttribute("inert", "");
+  if (mobile && !drawerOpen) el.setAttribute("inert", "");
   else el.removeAttribute("inert");
   // The mirror: while the drawer is over the page, the page is not reachable.
   const main = document.getElementById("main");
@@ -181,8 +199,10 @@ if (typeof window !== "undefined") {
     }
     // ⌘B / Ctrl+B toggles the sidebar — the VS Code convention, and the one
     // Windows users already know (Ctrl+B), since there is no ⌘ key there.
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "b") {
-      if (isEditingTarget(e.target)) return; // ⌘B is Bold in an editor
+    // ⌘\ / Ctrl+\ is the same toggle without the clash with Bold.
+    const key = e.key.toLowerCase();
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (key === "b" || key === "\\")) {
+      if (key === "b" && isEditingTarget(e.target)) return; // ⌘B is Bold in an editor
       e.preventDefault();
       toggleSidebar();
     }
@@ -207,6 +227,16 @@ const ICONS: Record<string, LucideIcon> = {
   expand: Maximize2,
   folder: Folder,
   dashboard: LayoutDashboard,
+  activity: Activity,
+  insights: ChartNoAxesCombined,
+  fileplus: FilePlus,
+  folderopen: FolderOpen,
+  home: House,
+  laptop: LaptopMinimal,
+  sidebarclose: PanelLeftClose,
+  sidebaropen: PanelLeftOpen,
+  star: Star,
+  system: FolderCog,
   gear: Settings,
   globe: Globe,
   hist: History,
@@ -228,6 +258,12 @@ const ICONS: Record<string, LucideIcon> = {
   upload: Upload,
   users: Users,
   x: X,
+  pencil: Pencil,
+  eye: Eye,
+  tag: Tag,
+  jump: CornerUpLeft,
+  sparkle: Sparkles,
+  calendar: Calendar,
 };
 
 export function Icon({ name }: { name: string }) {
@@ -354,6 +390,9 @@ function sidebarInert(el: HTMLElement | null) {
 export function AppShell(props: {
   vault: ReactNode;
   projectsNav?: ReactNode;
+  // What the sidebar becomes when collapsed at desktop width: an icon rail.
+  // Defaults to just the brand, search, and the expand control.
+  rail?: ReactNode;
   tree?: ReactNode;
   orgBar?: ReactNode;
   topbar: ReactNode;
@@ -374,6 +413,9 @@ export function AppShell(props: {
         {props.projectsNav}
         {props.tree ?? <nav id="tree" aria-label="Files" />}
         {props.orgBar}
+        <div id="rail">
+          {props.rail ?? <RailBase />}
+        </div>
       </aside>
       <main id="main">
         {props.topbar}
@@ -387,6 +429,65 @@ export function AppShell(props: {
         </article>
       </main>
     </>
+  );
+}
+
+/* The icon rail's frame: brand mark on top, expand control at the bottom,
+   whatever the caller supplies in between. */
+export function RailBase({ children }: { children?: ReactNode }) {
+  return (
+    <>
+      <span className="rail-mark">
+        <Mark size={20} />
+      </span>
+      <RailButton
+        id="rail-search"
+        icon="search"
+        label="Search"
+        hint={isMac ? "⌘K" : "Ctrl+K"}
+        onClick={() => requestSearch()}
+      />
+      {children}
+      <span className="rail-grow" />
+      <RailButton
+        id="rail-expand"
+        icon="sidebaropen"
+        label="Expand sidebar"
+        hint={isMac ? "⌘\\" : "Ctrl+\\"}
+        onClick={toggleSidebar}
+      />
+    </>
+  );
+}
+
+export function RailButton(props: {
+  id?: string;
+  icon: string;
+  label: string;
+  hint?: string;
+  badge?: ReactNode;
+  danger?: boolean;
+  active?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip delayDuration={100}>
+      <TooltipTrigger asChild>
+        <button
+          id={props.id}
+          className={"rail-btn" + (props.active ? " active" : "")}
+          aria-label={props.label}
+          onClick={props.onClick}
+        >
+          <Icon name={props.icon} />
+          {props.badge ? <span className={"rail-badge" + (props.danger ? " danger" : "")}>{props.badge}</span> : null}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="right" className="tipcard" sideOffset={8}>
+        {props.label}
+        {props.hint && <span className="tip-hint">{props.hint}</span>}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -444,6 +545,16 @@ export function VaultHeader(props: {
             </TooltipContent>
           </Tooltip>
         )}
+        <Tooltip delayDuration={150}>
+          <TooltipTrigger asChild>
+            <button id="sb-collapse" className="icon-btn2" aria-label="Collapse sidebar" onClick={toggleSidebar}>
+              <Icon name="sidebarclose" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent className="tipcard" sideOffset={6}>
+            Collapse <kbd>{isMac ? "⌘\\" : "Ctrl+\\"}</kbd>
+          </TooltipContent>
+        </Tooltip>
         {showSignout && (
           <a id="signout" href="/auth/logout" title="Sign out" aria-label="Sign out">
             <Icon name="power" />

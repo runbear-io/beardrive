@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
-import { getJSON, postJSON } from "../api/http";
+import { getJSON, postJSON, putText } from "../api/http";
 import type { Project, ServerConfig, UndoPlan } from "../api/types";
 import { useHeat, useTree } from "../hooks/useBrowse";
 import { useProjectEvents } from "../hooks/useProjectEvents";
@@ -15,10 +15,16 @@ import { urlForPath, urlForView, withoutFull, type Route } from "../router";
 import { currentNavType, navigate, useLocationPath } from "../nav";
 import { CSV_EXT, HTML_EXT, IMG_EXT, MD_EXT, PDF_EXT, copyText } from "../util";
 import { toast } from "../toast";
-import { modalConfirm } from "../modal";
+import { modalConfirm, modalPrompt } from "../modal";
 import { onSearchRequest } from "../search";
-import { AppShell, Icon, Page, Topbar, closeSidebarOnMobile, syncSidebarInert, type PageWidth } from "../components/shell";
-import { FileTree, ancestorsOf } from "../components/FileTree";
+import { AppShell, Icon, Page, RailBase, Topbar, closeSidebarOnMobile, syncSidebarInert, type PageWidth } from "../components/shell";
+import { FileTree, TreeFilter, ancestorsOf, type TreeActions } from "../components/FileTree";
+import { Pinned, PinnedRail } from "../components/Pinned";
+import { SidebarSearch } from "../components/ProjectNav";
+import { useOpenCommentCounts } from "../hooks/useSidebar";
+import { markAllSeen, noteLeaving, pinsOf, togglePin, usePins, useVisitBaseline } from "../lib/visits";
+import { clearFilter, useSidebarSearch } from "../lib/sidebarSearch";
+import { treeStats } from "../lib/treeview";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
 import { FileView } from "../components/FileView";
@@ -48,7 +54,7 @@ export default function Browser(props: {
   hub: boolean;
   project?: Project;
   projects?: Project[];
-  sidebar: { vault: ReactNode; projectsNav?: ReactNode; orgBar?: ReactNode };
+  sidebar: { vault: ReactNode; projectsNav?: ReactNode; railNav?: ReactNode; orgBar?: ReactNode };
   // Admin panels (org admin, hub settings) replace the content pane without
   // touching the URL — matching the classic app, where they were never
   // routes. Any navigation closes them (the caller owns that state).
@@ -99,9 +105,11 @@ export default function Browser(props: {
   const treePath = path || (route.view === "dashboard" || route.view === "history" ? route.viewTarget || "" : "");
   const isDir = !!path && dirIndex.has(path);
   // A file only counts as one when the tree actually contains it — a
-  // missing path gets the not-found view, not a broken file view.
+  // missing path gets the not-found view, not a broken file view. A pinned
+  // version (?v=) is the exception: it names exact bytes, which outlive the
+  // file, so a deleted file's past versions stay openable.
   const isFile = !!path && loaded && !isDir && flatFiles.some((f) => f.path === path);
-  const isMissing = !!path && loaded && !isDir && !isFile;
+  const isMissing = !!path && loaded && !isDir && !isFile && !version;
   const listingShowing = isDir && !route.view;
 
   /* ---- an address whose file moved ----
@@ -220,7 +228,15 @@ export default function Browser(props: {
   const [shareOpen, setShareOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  useEffect(() => onSearchRequest(() => setPaletteOpen(true)), []);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  useEffect(
+    () =>
+      onSearchRequest((q) => {
+        setPaletteQuery(q ?? "");
+        setPaletteOpen(true);
+      }),
+    [],
+  );
   const downloadRef = useRef<HTMLAnchorElement>(null);
   const printRef = useRef<HTMLAnchorElement>(null);
 
@@ -667,6 +683,7 @@ export default function Browser(props: {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        setPaletteQuery("");
         setPaletteOpen((v) => !v);
       }
     };
@@ -697,8 +714,9 @@ export default function Browser(props: {
       // name while the palette copy promised project search (BEA-105). One row,
       // not two — still the first, still unconditional, so BEA-52 holds.
       add("folder", project.name + " — project root", "project", go("/" + pid));
-      add("dashboard", "Dashboard", "action", go(urlForView("dashboard", pid)));
-      add("terminal", "Installation", "action", go(urlForView("install", pid)));
+      add("insights", "Insights", "action", go(urlForView("dashboard", pid)));
+      add("activity", "Activity", "action", go(urlForView("history", pid)));
+      add("laptop", "Connect a device", "action", go(urlForView("install", pid)));
       add("gear", "Settings", "action", go(urlForView("settings", pid)));
     }
     if (hub && project && path) {
@@ -726,6 +744,100 @@ export default function Browser(props: {
     return items;
   }, [hub, project, path, isFile, canShare, canCopy, canPrint, config.auth?.enabled, dirIndex, flatFiles, props.projects, props.onClosePanel, shareNow, copyNow, printNow, historyNow, openHistory, openPath]);
 
+  /* ---- sidebar: last visit, pins, filter mode, row actions ---- */
+  const pid = hub ? project?.id : undefined;
+  useEffect(() => {
+    if (!pid) return;
+    const leave = () => noteLeaving(pid);
+    window.addEventListener("pagehide", leave);
+    return () => {
+      window.removeEventListener("pagehide", leave);
+      leave();
+    };
+  }, [pid]);
+  const activityOpen = route.view === "history" && !route.viewTarget;
+  useEffect(() => {
+    if (pid && activityOpen) markAllSeen(pid);
+  }, [pid, activityOpen]);
+  const since = useVisitBaseline(pid);
+  const stats = useMemo(() => treeStats(tree, since), [tree, since]);
+  const pins = usePins(pid);
+  const commentCounts = useOpenCommentCounts(apiBase, !!pid && !!config.comments && pins.length > 0);
+  const pinBadges = useMemo(
+    () => ({ comments: commentCounts, conflicts: stats.conflicts }),
+    [commentCounts, stats.conflicts],
+  );
+  const filePaths = useMemo(() => new Set(flatFiles.map((f) => f.path)), [flatFiles]);
+  const pinExists = useCallback((p: string) => filePaths.has(p) || dirIndex.has(p), [filePaths, dirIndex]);
+  const dirPaths = useMemo(() => [...dirIndex.keys()], [dirIndex]);
+  const { query: filterQuery } = useSidebarSearch();
+  useEffect(() => clearFilter, []);
+
+  // New files go through upload/content, so they need uploads enabled on the
+  // hub as well as write access to the folder they land in.
+  const canWrite = hub && !!project && config.upload.enabled && atLeast(project.perm, "write");
+  const canCreateIn = useCallback(
+    (folder: string) =>
+      !!project && atLeast(folderPerm(folder ? folder + "/" : "") ?? project.perm, "write"),
+    [project, folderRules],
+  );
+  const newFile = useCallback(
+    async (folder: string) => {
+      const name = (await modalPrompt("New file", "File name", "untitled.md", "Create"))?.trim().replace(/^\/+/, "");
+      if (!name) return;
+      const p = (folder ? folder + "/" : "") + name;
+      if (filePaths.has(p) || dirIndex.has(p)) {
+        toast(p + " already exists", true);
+        return;
+      }
+      try {
+        await putText(apiBase + "upload/content?path=" + encodeURIComponent(p), "");
+        await qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        navigate(urlForPath(p, project?.id, undefined, false, true));
+        closeSidebarOnMobile();
+      } catch (err) {
+        toast("Could not create " + p + ": " + (err as Error).message, true);
+      }
+    },
+    [apiBase, filePaths, dirIndex, project?.id, qc],
+  );
+  const treeActions = useMemo<TreeActions>(
+    () => ({
+      open: (p) => {
+        props.onClosePanel?.();
+        openPath(p);
+      },
+      newFile: canWrite ? newFile : undefined,
+      canCreateIn,
+      pinned: pid ? (p) => pinsOf(pid).includes(p) : undefined,
+      togglePin: pid ? (p) => togglePin(pid, p) : undefined,
+      copyPath: async (p) => {
+        const ok = await copyText(p);
+        toast(ok ? "Path copied" : p, !ok);
+      },
+      copyShareLink:
+        hub && project && atLeast(project.perm, "write")
+          ? async (p) => {
+              const existing = (shares || []).find((x) => x.path === p);
+              if (existing) {
+                const ok = await copyText(existing.url);
+                toast(ok ? "Share link copied" : existing.url, !ok);
+                return;
+              }
+              // No link yet: minting one is the share dialog's job.
+              props.onClosePanel?.();
+              openPath(p);
+              setShareOpen(true);
+            }
+          : undefined,
+      history: hub && project ? (p) => openHistory(p) : undefined,
+      insights: hub && project ? (p) => navigate(urlForView("dashboard", project.id, p)) : undefined,
+      remove: canRestore ? onRemove : undefined,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [canWrite, newFile, canCreateIn, pid, hub, project, shares, openPath, openHistory, canRestore, onRemove, props.onClosePanel],
+  );
+
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
   useEffect(() => {
     if (!moreOpen) return;
@@ -746,6 +858,8 @@ export default function Browser(props: {
   if (panel) {
     view = panel.body;
   } else if (route.view === "dashboard") {
+    // Data-dense: the treemap and hot path sit side by side.
+    pageWidth = "wide";
     view = (
       <Insights
         flatFiles={flatFiles}
@@ -768,6 +882,7 @@ export default function Browser(props: {
         target={route.viewTarget || ""}
         isFolder={isFolderFn}
         flatFiles={flatFiles}
+        projectId={project?.id}
         onOpen={openPath}
         onMeta={setMeta}
         onRendered={onRendered}
@@ -775,6 +890,7 @@ export default function Browser(props: {
         remove={canRestore ? { onRemove, busy: removing } : undefined}
         undoRun={canRestore ? { onUndoRun, busy: undoingRun } : undefined}
         filters={route.filters}
+        linkFor={(p, v) => urlForPath(p, project?.id, v)}
         /* push, not replace: a filter is a navigation, and Back undoes it */
         onFilters={(f) => navigate(urlForView("history", project?.id, route.viewTarget || "", f))}
       />
@@ -935,11 +1051,18 @@ export default function Browser(props: {
   const crumb = panel ? (
     panel.crumb
   ) : path ? (
-    <Breadcrumbs path={path} onOpenFolder={openPath} />
+    <>
+      <Breadcrumbs path={path} onOpenFolder={openPath} />
+      {hub && isFile && !version && !editing && (
+        <span className="sync-pill" title="This file is on the hub and syncing to every device">
+          Synced
+        </span>
+      )}
+    </>
   ) : route.view === "dashboard" ? (
-    "Dashboard — " + (route.viewTarget || project?.name || "")
+    "Insights — " + (route.viewTarget || project?.name || "")
   ) : route.view === "history" ? (
-    "History — " + historyTitle(route.viewTarget || "", isFolderFn)
+    "Activity — " + historyTitle(route.viewTarget || "", isFolderFn)
   ) : isHome ? (
     project!.name
   ) : null;
@@ -965,6 +1088,25 @@ export default function Browser(props: {
       actions={
         <>
           <PresenceBar people={people} path={path} />
+          {commentsOn && (
+            <Button
+              id="comments-btn"
+              variant="toolbar"
+              className="ghost"
+              title={openThreads ? `${openThreads} open comment${openThreads === 1 ? "" : "s"}` : "Comments"}
+              aria-label="Comments"
+              aria-pressed={commentsOpen}
+              onClick={() => setCommentsOpen((o) => !o)}
+            >
+              <Icon name="comment" /> <span className="lbl">Comments</span>
+              {openThreads > 0 && <span className="cm-count">{openThreads}</span>}
+            </Button>
+          )}
+          {canHistory && (isFile || (!path && !route.view)) && (
+            <Button id="history-btn" variant="toolbar" className="ghost" title="History" aria-label="History" onClick={historyNow}>
+              <Icon name="hist" /> <span className="lbl">History</span>
+            </Button>
+          )}
           {canEdit && (
             <Button
               id="edit-btn"
@@ -974,7 +1116,7 @@ export default function Browser(props: {
                 navigate(urlForPath(path, project?.id, version, route.full, !editing))
               }
             >
-              {editing ? "Done" : "Edit"}
+              {!editing && <Icon name="pencil" />} <span className="lbl-keep">{editing ? "Done" : "Edit"}</span>
             </Button>
           )}
           {/* The escape hatch, offered only while actually editing an HTML
@@ -995,23 +1137,10 @@ export default function Browser(props: {
               {editSource ? "Edit page" : "Edit source"}
             </Button>
           )}
-          {commentsOn && (
-            <Button
-              id="comments-btn"
-              variant="toolbar"
-              className={openThreads ? undefined : "icon-only"}
-              title={openThreads ? `${openThreads} open comment${openThreads === 1 ? "" : "s"}` : "Comments"}
-              aria-label="Comments"
-              aria-pressed={commentsOpen}
-              onClick={() => setCommentsOpen((o) => !o)}
-            >
-              <Icon name="comment" />
-              {openThreads > 0 && <span className="cm-count">{openThreads}</span>}
-            </Button>
-          )}
+          {/* The one primary action on the page. */}
           {canShare && (
-            <Button id="share-btn" variant="toolbar" className="icon-only" title="Share" aria-label="Share" onClick={shareNow}>
-              <Icon name="share" />
+            <Button id="share-btn" variant="primary" title="Share" aria-label="Share" onClick={shareNow}>
+              <Icon name="link" /> <span className="lbl">Share</span>
             </Button>
           )}
           {canFull && (
@@ -1025,11 +1154,6 @@ export default function Browser(props: {
               onClick={enterFull}
             >
               <Icon name="expand" />
-            </Button>
-          )}
-          {canHistory && !path && !route.view && (
-            <Button id="history-btn" variant="toolbar" onClick={historyNow}>
-              <Icon name="hist" /> <span className="lbl">History</span>
             </Button>
           )}
           {canDownload && (
@@ -1092,7 +1216,7 @@ export default function Browser(props: {
                     navigate(urlForView("dashboard", project?.id, path));
                   }}
                 >
-                  Dashboard
+                  Insights
                 </button>
               )}
             </div>
@@ -1108,16 +1232,58 @@ export default function Browser(props: {
         vault={props.sidebar.vault}
         projectsNav={props.sidebar.projectsNav}
         orgBar={props.sidebar.orgBar}
+        rail={
+          <RailBase>
+            {props.sidebar.railNav}
+            <PinnedRail pins={pins} badges={pinBadges} onOpen={treeActions.open} />
+          </RailBase>
+        }
         tree={
-          <FileTree
-            root={tree}
-            expanded={expanded}
-            onToggle={onToggle}
-            currentPath={treePath}
-            listingShowing={listingShowing}
-            restricted={restrictedDirs}
-            onOpen={openPath}
-          />
+          <>
+            {!hub && <SidebarSearch />}
+            {filterQuery.trim() ? (
+              <TreeFilter query={filterQuery} dirs={dirPaths} files={flatFiles} onOpen={treeActions.open} />
+            ) : (
+              <>
+                {pid && (
+                  <Pinned
+                    pins={pins}
+                    badges={pinBadges}
+                    exists={pinExists}
+                    currentPath={treePath}
+                    onOpen={treeActions.open}
+                    onUnpin={(p) => togglePin(pid, p)}
+                  />
+                )}
+                {pid && (
+                  <div className="sb-section files-head">
+                    <span>Files</span>
+                    {canWrite && (
+                      <button
+                        className="tact"
+                        id="new-file-root"
+                        aria-label="New file"
+                        title="New file"
+                        onClick={() => newFile("")}
+                      >
+                        <Icon name="fileplus" />
+                      </button>
+                    )}
+                  </div>
+                )}
+                <FileTree
+                  root={tree}
+                  expanded={expanded}
+                  onToggle={onToggle}
+                  currentPath={treePath}
+                  listingShowing={listingShowing}
+                  restricted={restrictedDirs}
+                  stats={stats}
+                  actions={treeActions}
+                />
+              </>
+            )}
+          </>
         }
         topbar={topbar}
         exit={
@@ -1183,7 +1349,12 @@ export default function Browser(props: {
           admin={atLeast(project?.perm, "admin")}
         />
       )}
-      <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} candidates={paletteCandidates} />
+      <Palette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        candidates={paletteCandidates}
+        initialQuery={paletteQuery}
+      />
     </>
   );
 }

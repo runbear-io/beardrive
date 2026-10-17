@@ -9,7 +9,7 @@ import { login, wikiId, expectToast, READER } from "./helpers";
 test("a run card shows what the session read as well as what it changed", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
 
   const card = page.locator(".hrun").first();
   await expect(card).toBeVisible();
@@ -44,7 +44,7 @@ test("a run card shows what the session read as well as what it changed", async 
 test("a read-only row opens the file it names", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
   await page.locator(".hrun-read", { hasText: "index.md" }).click();
   await expect(page).toHaveURL(new RegExp(`/${pid}/index.md`));
 });
@@ -67,7 +67,7 @@ test("undoing a whole run puts every file it touched back", async ({ page }) => 
     data: "# Runbook\n\nEdited by a teammate after the run.\n",
   });
 
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
   const card = page.locator(".hrun", { hasText: "claude-code session 8f21e4" }).first();
   await expect(card).toBeVisible();
 
@@ -88,7 +88,7 @@ test("undoing a whole run puts every file it touched back", async ({ page }) => 
   await page.goto(`/${pid}/runbook.md`);
   await expect(page.locator("#content")).toContainText("Edited by a teammate");
 
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
   await card.locator(".hrun-undo").click();
   await page.locator(".modal .danger-btn").click();
   await expectToast(page, /Undid 2 files/);
@@ -102,7 +102,7 @@ test("undoing a whole run puts every file it touched back", async ({ page }) => 
 
   // The undo is itself a run card — same note on every op it wrote — so it
   // carries the same button and walks the whole thing back.
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
   const undoCard = page.locator(".hrun", { hasText: "undo run 8f21e4" }).first();
   await expect(undoCard).toBeVisible();
   await undoCard.locator(".hrun-undo").click();
@@ -123,7 +123,7 @@ test("undoing a whole run puts every file it touched back", async ({ page }) => 
 test("a read-only member sees no undo button on a run card", async ({ page }) => {
   await login(page, READER);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
   const card = page.locator(".hrun").first();
   await expect(card).toBeVisible();
   await expect(card.locator(".hrun-undo")).toHaveCount(0);

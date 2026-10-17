@@ -22,9 +22,9 @@ test("tab titles put the document name before the project name", () => {
     ["/p-1/projects/searchd/engagement/kickoff.md", "kickoff — team"],
     ["/p-1/docs/diagram.png", "diagram.png — team"],
     ["/p-1/edit/docs/roadmap.md", "roadmap · Editing — team"],
-    ["/p-1/dashboard", "Dashboard — team"],
-    ["/p-1/history", "History — team"],
-    ["/p-1/history/docs/roadmap.md", "roadmap · History — team"],
+    ["/p-1/insights", "Insights — team"],
+    ["/p-1/activity", "Activity — team"],
+    ["/p-1/activity/docs/roadmap.md", "roadmap · Activity — team"],
     ["/p-1/docs/roadmap.md?v=abc123", "roadmap · Version — team"],
     ["/p-1/settings", "Settings — team"],
   ];
@@ -92,7 +92,7 @@ test("the ?v= version survives the rewrite", () => {
 
 // View targets were already normalized at parse; this guards that.
 test("view routes still resolve", () => {
-  const r = parseRoute("/p-1/history/notes/", "hub");
+  const r = parseRoute("/p-1/activity/notes/", "hub");
   assert.equal(r.view, "history");
   assert.equal(r.viewTarget, "notes");
   assert.equal(r.path, "");
@@ -109,7 +109,7 @@ test("odd characters round-trip", () => {
 // History filters live in the URL, so a narrowed feed is linkable and comes
 // back on reload and Back. Round-trip: parse → build → same URL.
 test("history filters round-trip through the URL", () => {
-  const r = parseRoute("/p-1/history/notes?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31", "hub");
+  const r = parseRoute("/p-1/activity/notes?q=runbook&user=mira@acme.io&since=2026-07-01&until=2026-07-31", "hub");
   assert.equal(r.view, "history");
   assert.equal(r.viewTarget, "notes");
   assert.deepEqual(r.filters, {
@@ -120,42 +120,42 @@ test("history filters round-trip through the URL", () => {
   });
   assert.equal(
     urlForView("history", "p-1", "notes", r.filters),
-    "/p-1/history/notes?q=runbook&user=mira%40acme.io&since=2026-07-01&until=2026-07-31",
+    "/p-1/activity/notes?q=runbook&user=mira%40acme.io&since=2026-07-01&until=2026-07-31",
   );
 });
 
 // An unfiltered feed keeps the bare URL it has always had — no empty ?q=.
 test("no filters means no query string", () => {
-  assert.equal(parseRoute("/p-1/history", "hub").filters, undefined);
+  assert.equal(parseRoute("/p-1/activity", "hub").filters, undefined);
   assert.equal(historyFilterQuery(undefined), "");
   assert.equal(historyFilterQuery({ q: "" }), "");
-  assert.equal(urlForView("history", "p-1"), "/p-1/history");
+  assert.equal(urlForView("history", "p-1"), "/p-1/activity");
   // other views ignore them entirely
-  assert.equal(urlForView("dashboard", "p-1", "", { q: "x" }), "/p-1/dashboard");
+  assert.equal(urlForView("dashboard", "p-1", "", { q: "x" }), "/p-1/insights");
 });
 
 // BEA-64: the History API takes ?path=/?prefix=, so a reader who has seen it
 // types the query form at the page too. It used to be dropped, which rendered
 // the whole project as if the file had no history.
 test("?path= and ?prefix= name the history target and ask to be normalized", () => {
-  const p = parseRoute("/p-1/history?path=guide.md", "hub");
+  const p = parseRoute("/p-1/activity?path=guide.md", "hub");
   assert.equal(p.view, "history");
   assert.equal(p.viewTarget, "guide.md");
   assert.equal(p.queryTarget, true);
-  assert.equal(urlForView("history", "p-1", p.viewTarget, p.filters), "/p-1/history/guide.md");
+  assert.equal(urlForView("history", "p-1", p.viewTarget, p.filters), "/p-1/activity/guide.md");
 
   // Aliases, not modes: the view decides file-vs-subtree from the tree.
-  const x = parseRoute("/p-1/history?prefix=notes", "hub");
+  const x = parseRoute("/p-1/activity?prefix=notes", "hub");
   assert.equal(x.viewTarget, "notes");
   assert.equal(x.queryTarget, true);
 
   // Same trailing-slash tolerance a path segment gets.
-  const s = parseRoute("/p-1/history?prefix=notes/", "hub");
+  const s = parseRoute("/p-1/activity?prefix=notes/", "hub");
   assert.equal(s.viewTarget, "notes");
   assert.equal(s.queryTarget, true);
 
   // A value that is nothing but separators names no file.
-  const empty = parseRoute("/p-1/history?path=/", "hub");
+  const empty = parseRoute("/p-1/activity?path=/", "hub");
   assert.equal(empty.viewTarget, "");
   assert.ok(!empty.queryTarget);
 });
@@ -163,7 +163,7 @@ test("?path= and ?prefix= name the history target and ask to be normalized", () 
 // The path route is the canonical one, so it wins and stays put — otherwise
 // arriving at a file's feed with a stray ?path= would bounce you elsewhere.
 test("a path segment beats ?path=, and other views ignore it", () => {
-  const r = parseRoute("/p-1/history/a.md?path=b.md", "hub");
+  const r = parseRoute("/p-1/activity/a.md?path=b.md", "hub");
   assert.equal(r.viewTarget, "a.md");
   assert.equal(r.queryTarget, undefined);
 
@@ -181,23 +181,23 @@ test("a path segment beats ?path=, and other views ignore it", () => {
 // The normalization is a redirect, so anything else in the query string has
 // to survive it — losing the author filter on the hop is the same bug again.
 test("filters survive the ?path= normalization", () => {
-  const r = parseRoute("/p-1/history?path=guide.md&user=alice@x.io", "hub");
+  const r = parseRoute("/p-1/activity?path=guide.md&user=alice@x.io", "hub");
   assert.equal(r.viewTarget, "guide.md");
   assert.equal(r.queryTarget, true);
   assert.deepEqual(r.filters, { user: "alice@x.io" });
   assert.equal(
     urlForView("history", "p-1", r.viewTarget, r.filters),
-    "/p-1/history/guide.md?user=alice%40x.io",
+    "/p-1/activity/guide.md?user=alice%40x.io",
   );
 });
 
 // Encoded slashes survive both decodes, so a target that arrived
 // double-encoded re-encodes to exactly one URL rather than another redirect.
 test("an encoded separator in ?path= round-trips", () => {
-  const r = parseRoute("/p-1/history?path=a%2Fb.md", "hub");
+  const r = parseRoute("/p-1/activity?path=a%2Fb.md", "hub");
   assert.equal(r.viewTarget, "a/b.md");
   assert.equal(r.queryTarget, true);
-  assert.equal(urlForView("history", "p-1", r.viewTarget), "/p-1/history/a/b.md");
+  assert.equal(urlForView("history", "p-1", r.viewTarget), "/p-1/activity/a/b.md");
 });
 
 // BEA-140. The id never appears in the UI as something to copy, so readers
@@ -304,8 +304,8 @@ test("full survives the normalizations that rewrite a file URL", () => {
   // A legacy view and a query-form history target both resolve to view
   // routes, where fullscreen does not apply — the flag parses, and the view
   // simply ignores it.
-  assert.equal(parseRoute("/p-1/insights?full=1", "hub").view, "dashboard");
-  assert.equal(parseRoute("/p-1/history?path=guide.md&full=1", "hub").viewTarget, "guide.md");
+  assert.equal(parseRoute("/p-1/dashboard?full=1", "hub").view, "dashboard");
+  assert.equal(parseRoute("/p-1/activity?path=guide.md&full=1", "hub").viewTarget, "guide.md");
 });
 
 // The editor has a URL so it can be handed to someone: everyone editing one
@@ -343,7 +343,7 @@ test("edit shadows nothing but its own first segment", () => {
   assert.equal(r.view, undefined);
 
   // And the view routes are untouched by the prefix existing.
-  assert.equal(parseRoute("/p-1/history/notes.md", "hub").view, "history");
+  assert.equal(parseRoute("/p-1/activity/notes.md", "hub").view, "history");
 
   // A file called "edit" at the root is the cost, same as for a view name.
   assert.equal(parseRoute("/p-1/edit", "hub").path, "");
@@ -374,7 +374,7 @@ test("withoutFull strips only full, and is a no-op without it", () => {
   assert.equal(withoutFull("/p-1/guide.md?full=1&v=abc123"), "/p-1/guide.md?v=abc123");
 
   // Idempotent, and byte-for-byte untouched when there is no full to strip.
-  for (const u of ["/p-1/guide.md", "/p-1/guide.md?v=abc123", "/p-1/history?q=a%20b", "/"]) {
+  for (const u of ["/p-1/guide.md", "/p-1/guide.md?v=abc123", "/p-1/activity?q=a%20b", "/"]) {
     assert.equal(withoutFull(u), u);
     assert.equal(withoutFull(withoutFull(u)), u);
   }
@@ -383,4 +383,17 @@ test("withoutFull strips only full, and is a no-op without it", () => {
     withoutFull(urlForPath("guide.md", "p-1", "abc123", true)),
     urlForPath("guide.md", "p-1", "abc123"),
   );
+});
+
+test("insights and activity are canonical; dashboard and history redirect", () => {
+  assert.equal(urlForView("dashboard", "p-1"), "/p-1/insights");
+  assert.equal(urlForView("history", "p-1", "notes"), "/p-1/activity/notes");
+  const a = parseRoute("/p-1/activity/notes", "hub");
+  assert.equal(a.view, "history");
+  assert.equal(a.legacyView, undefined);
+  const d = parseRoute("/p-1/dashboard/notes", "hub");
+  assert.equal(d.view, "dashboard");
+  assert.equal(d.legacyView, true);
+  assert.equal(parseRoute("/p-1/history", "hub").legacyView, true);
+  assert.equal(parseRoute("/p-1/constructor", "hub").view, undefined);
 });

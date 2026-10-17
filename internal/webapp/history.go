@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,11 +35,17 @@ type historyDevice struct {
 
 // HistoryEntry is one change as the history API reports it.
 type HistoryEntry struct {
-	Time     string        `json:"time"`
-	Kind     string        `json:"kind"` // add | edit | delete
-	Path     string        `json:"path"`
-	Size     int64         `json:"size,omitempty"`
-	Blob     string        `json:"blob,omitempty"` // sha256; fetch via the blob endpoint
+	Time string `json:"time"`
+	Kind string `json:"kind"` // add | edit | delete
+	Path string `json:"path"`
+	Size int64  `json:"size,omitempty"`
+	Blob string `json:"blob,omitempty"` // sha256; fetch via the blob endpoint
+	// Prev is the content this path last had before the op — across a
+	// delete too, so a delete names what it removed and a re-add what it
+	// replaced. Absent when the path never had content before, and on a
+	// delete of a path that was already gone (e.g. two devices deleting it
+	// concurrently): that delete removed nothing.
+	Prev     string        `json:"prev,omitempty"`
 	User     string        `json:"user,omitempty"`
 	UserName string        `json:"user_name,omitempty"`
 	Author   string        `json:"author,omitempty"` // offline/git fallback identity
@@ -136,9 +143,7 @@ func parseHistTime(s string, end bool) (time.Time, bool) {
 // ?prefix=<folder/> (everything underneath, "" = the whole project),
 // newest first by wall-clock time, at most ?n= entries (default 100).
 //
-// Reader filters — ?q= (case-insensitive substring of the path), ?user=
-// (exact account), ?since=/?until= (UTC bounds, inclusive at both ends) —
-// compose with each other and with path/prefix. They are applied in the same
+// Reader filters (see histFilter) compose with each other and with path/prefix. They are applied in the same
 // walk as path/prefix, i.e. BEFORE the sort and the cursor skip, so
 // next_cursor keeps meaning "the next matching entry" and paging under a
 // filter needs no new machinery.
@@ -172,25 +177,10 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	needle := strings.ToLower(q.Get("q")) // lowered once, not per op
-	user := q.Get("user")
-	var since, until time.Time
-	// since > until is not an error: it means "nothing", which is what it returns.
-	for _, b := range []struct {
-		name string
-		end  bool
-		into *time.Time
-	}{{"since", false, &since}, {"until", true, &until}} {
-		raw := q.Get(b.name)
-		if raw == "" {
-			continue
-		}
-		t, ok := parseHistTime(raw, b.end)
-		if !ok {
-			http.Error(w, "invalid "+b.name, http.StatusBadRequest)
-			return
-		}
-		*b.into = t
+	f, err := parseHistFilter(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	all, err := rs.loadSourcedOps(r.Context())
 	if err != nil {
@@ -203,9 +193,19 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	// replayed over ALL ops in journal order, before any path/prefix filter,
 	// so a filtered view classifies the same as the full feed.
 	kinds := make([]string, len(all))
+	prevs := make([]string, len(all))
 	exists := make(map[string]bool, len(all))
+	last := make(map[string]string, len(all))
 	for i, so := range all {
 		op := so.Op
+		// A delete of a path that is already gone removed nothing, so it
+		// names nothing — even though the path once had content.
+		if op.Kind != journal.KindDelete || exists[op.Path] {
+			prevs[i] = last[op.Path]
+		}
+		if op.Kind != journal.KindDelete {
+			last[op.Path] = op.Blob
+		}
 		switch {
 		case op.Kind == journal.KindDelete:
 			kinds[i] = "delete"
@@ -250,13 +250,7 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			continue
 		case path == "" && prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/"):
 			continue
-		case needle != "" && !strings.Contains(strings.ToLower(op.Path), needle):
-			continue
-		case user != "" && op.User != user:
-			continue
-		case !since.IsZero() && op.Time.Before(since):
-			continue
-		case !until.IsZero() && !op.Time.Before(until):
+		case !f.keep(sop):
 			continue
 		}
 		// Attribution comes from the journal the op was READ from, never from
@@ -274,7 +268,7 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		}
 		matched = append(matched, timed{HistoryEntry{
 			Time: op.Time.UTC().Format("2006-01-02T15:04:05Z"), Kind: kinds[i],
-			Path: op.Path, Size: op.Size, Blob: op.Blob,
+			Path: op.Path, Size: op.Size, Blob: op.Blob, Prev: prevs[i],
 			User: op.User, UserName: op.UserName, Author: op.Author,
 			Device: dev, Note: op.Note, Session: op.Session,
 		}, op})
@@ -309,6 +303,172 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	if next != "" {
 		out["next_cursor"] = next
 	}
+	writeJSON(w, out)
+}
+
+// histFilter is the reader-side narrowing shared by the feed and its
+// summary: ?q= (case-insensitive substring of the path), ?user= (exact
+// account), ?actor=agent|human, ?device= (the journal an op was read from),
+// ?since=/?until= (bounds, inclusive at both ends; a bare date is a UTC day,
+// an RFC3339 instant carries the reader's own offset).
+//
+// An op is an agent's when it carries a Session: only the agent sync hook
+// sets one, while a note is anyone's to write, so the note never decides it.
+type histFilter struct {
+	needle, user, actor, device string
+	since, until                time.Time
+}
+
+func parseHistFilter(q url.Values) (histFilter, error) {
+	f := histFilter{
+		needle: strings.ToLower(q.Get("q")), // lowered once, not per op
+		user:   q.Get("user"),
+		actor:  q.Get("actor"),
+		device: q.Get("device"),
+	}
+	if f.actor != "" && f.actor != "agent" && f.actor != "human" {
+		return f, fmt.Errorf("invalid actor")
+	}
+	// since > until is not an error: it means "nothing", which is what it returns.
+	for _, b := range []struct {
+		name string
+		end  bool
+		into *time.Time
+	}{{"since", false, &f.since}, {"until", true, &f.until}} {
+		raw := q.Get(b.name)
+		if raw == "" {
+			continue
+		}
+		t, ok := parseHistTime(raw, b.end)
+		if !ok {
+			return f, fmt.Errorf("invalid %s", b.name)
+		}
+		*b.into = t
+	}
+	return f, nil
+}
+
+func (f histFilter) keep(sop sourcedOp) bool {
+	op := sop.Op
+	switch {
+	case f.needle != "" && !strings.Contains(strings.ToLower(op.Path), f.needle):
+		return false
+	case f.user != "" && op.User != f.user:
+		return false
+	case f.actor == "agent" && op.Session == "", f.actor == "human" && op.Session != "":
+		return false
+	case f.device != "" && sop.From != f.device:
+		return false
+	case !f.since.IsZero() && op.Time.Before(f.since):
+		return false
+	case !f.until.IsZero() && !op.Time.Before(f.until):
+		return false
+	}
+	return true
+}
+
+// histDay is one bar of the summary chart: a calendar day in the reader's
+// zone, split by who made the changes.
+type histDay struct {
+	Date  string `json:"date"` // YYYY-MM-DD in the requested zone
+	Agent int    `json:"agent"`
+	Human int    `json:"human"`
+}
+
+// handleHistorySummary serves GET /history/summary: the counts behind the
+// Activity header, one bar per calendar day in the reader's zone (?tz= IANA
+// name, else ?offset= minutes east of UTC, else UTC). The chart covers the
+// last ?days= days (1–31, default 7) — or, when ?since=/?until= are given,
+// the days those bounds touch: until's day (today when absent) back to
+// since's day (?days= back when absent), keeping the latest 31 when the span
+// is longer. Scoping (?prefix=) and every histFilter apply, the bounds
+// included, so the header describes the same feed it sits above. It answers in one pass
+// over the journals the feed already loads, so the browser never pages
+// through a week of history to draw seven bars.
+func (s *Server) handleHistorySummary(v *volume, w http.ResponseWriter, r *http.Request) {
+	rs := storeSource(v, w)
+	if rs == nil {
+		return
+	}
+	q := r.URL.Query()
+	f, err := parseHistFilter(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	days := 7
+	if raw := q.Get("days"); raw != "" {
+		if days, err = strconv.Atoi(raw); err != nil || days < 1 || days > 31 {
+			http.Error(w, "invalid days", http.StatusBadRequest)
+			return
+		}
+	}
+	loc := time.UTC
+	if name := q.Get("tz"); name != "" {
+		if l, err := time.LoadLocation(name); err == nil {
+			loc = l
+		} else if off, err := strconv.Atoi(q.Get("offset")); err == nil && off > -24*60 && off < 24*60 {
+			loc = time.FixedZone("", off*60)
+		}
+	} else if off, err := strconv.Atoi(q.Get("offset")); err == nil && off > -24*60 && off < 24*60 {
+		loc = time.FixedZone("", off*60)
+	}
+	prefix := q.Get("prefix")
+	last := time.Now().In(loc)
+	if !f.until.IsZero() {
+		last = f.until.Add(-time.Nanosecond).In(loc) // until is exclusive
+	}
+	y, m, d := last.Date()
+	if !f.since.IsZero() {
+		first := f.since.In(loc)
+		fy, fm, fd := first.Date()
+		span := int(time.Date(y, m, d, 12, 0, 0, 0, time.UTC).Sub(time.Date(fy, fm, fd, 12, 0, 0, 0, time.UTC)).Hours()/24) + 1
+		days = min(max(span, 0), 31)
+	}
+	start := time.Date(y, m, d-days+1, 0, 0, 0, 0, loc)
+	out := struct {
+		Total   int       `json:"total"`
+		Agent   int       `json:"agent"`
+		Human   int       `json:"human"`
+		Devices int       `json:"devices"`
+		Days    []histDay `json:"days"`
+	}{Days: make([]histDay, days)}
+	index := make(map[string]int, days)
+	for i := range out.Days {
+		day := time.Date(y, m, d-days+1+i, 0, 0, 0, 0, loc).Format("2006-01-02")
+		out.Days[i].Date = day
+		index[day] = i
+	}
+	all, err := rs.loadSourcedOps(r.Context())
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
+		return
+	}
+	vis := s.visibility(r)
+	devices := map[string]bool{}
+	for _, sop := range all {
+		op := sop.Op
+		if !vis.canRead(op.Path) || !f.keep(sop) || op.Time.Before(start) {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(op.Path, strings.TrimSuffix(prefix, "/")+"/") {
+			continue
+		}
+		i, ok := index[op.Time.In(loc).Format("2006-01-02")]
+		if !ok {
+			continue // in the future by this reader's clock
+		}
+		out.Total++
+		devices[sop.From] = true
+		if op.Session != "" {
+			out.Agent++
+			out.Days[i].Agent++
+		} else {
+			out.Human++
+			out.Days[i].Human++
+		}
+	}
+	out.Devices = len(devices)
 	writeJSON(w, out)
 }
 

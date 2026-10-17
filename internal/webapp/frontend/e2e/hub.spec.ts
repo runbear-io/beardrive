@@ -56,7 +56,7 @@ test("a project name in the URL resolves to its id", async ({ page }) => {
 
   // A view segment survives the hop too, and matching ignores case.
   await page.goto("/WIKI/dashboard");
-  await page.waitForURL("/" + pid + "/dashboard");
+  await page.waitForURL("/" + pid + "/insights");
   await expect(page.locator("#content")).toContainText(/.+/);
 });
 

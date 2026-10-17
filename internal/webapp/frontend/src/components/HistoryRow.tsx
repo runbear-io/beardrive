@@ -2,7 +2,9 @@ import { useState } from "react";
 import type { HistoryEntry } from "../api/types";
 import { humanSize, whoChanged } from "../util";
 import { Icon } from "./shell";
-import { DiffView } from "./DiffView";
+import { DiffStat, DiffView, useDiffStat } from "./DiffView";
+import { parseConflict } from "../lib/conflict";
+import { diffBase, isAgent } from "../lib/activity";
 
 /* One change as a row: what happened (added / edited / deleted), to which
    file, by whom, from where — with the note (session link) expandable.
@@ -63,6 +65,10 @@ export function HistoryRow({
   recreates,
   inRun,
   read,
+  selected,
+  onSelect,
+  stat,
+  idx,
 }: {
   entry: HistoryEntry;
   // Its own prop, not something nested in `diff`: the version controls below
@@ -92,6 +98,13 @@ export function HistoryRow({
   // The run that wrote this row also READ this path. Only ever set inside a
   // run card, where a session id makes the join possible at all.
   read?: boolean;
+  // The row the Activity side panel is showing, and how to make it so.
+  selected?: boolean;
+  onSelect?: () => void;
+  // Fetch both versions to show the change's +N −M on the row itself.
+  stat?: boolean;
+  // Position in the flat feed, so keyboard selection can scroll to the row.
+  idx?: number;
 }) {
   const [noteOpen, setNoteOpen] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
@@ -118,13 +131,19 @@ export function HistoryRow({
   const when = new Date(e.time).toLocaleString();
   const dl = apiBase + "blob?sha=" + e.blob + "&name=" + encodeURIComponent(base) + "&download=1";
   const toggleDiff = () => setDiffOpen(!diffOpen);
+  const counts = useDiffStat(apiBase, diffBase(kind, diff?.prev), e.blob, !!stat && kind !== "delete" && !!e.blob);
+  // A conflict copy still on disk: the copy's own page explains it and links
+  // the version that kept the name, which is where resolving starts.
+  const conflict = kind !== "delete" ? parseConflict(e.path) : null;
   const open = (ev: React.MouseEvent | React.KeyboardEvent) => {
     if ((ev.target as HTMLElement).tagName === "A") return;
     if (clickable) onOpen(e.path, e.blob);
   };
   return (
     <div
-      className={"hentry " + kind + (clickable ? " clickable" : "")}
+      className={"hentry " + kind + (clickable ? " clickable" : "") + (selected ? " sel" : "")}
+      data-agent={isAgent(e) ? "" : undefined}
+      data-hidx={idx}
       tabIndex={clickable ? 0 : undefined}
       role={clickable ? "button" : undefined}
       onClick={open}
@@ -145,12 +164,45 @@ export function HistoryRow({
           </span>
         )}
         <span className="hpath">{e.path}</span>
-        <span className="htime">{when}</span>
+        {counts && <DiffStat add={counts.add} del={counts.del} />}
+        <span className="htime" title={when}>
+          {new Date(e.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        </span>
       </div>
       <div className="hmeta">
         <span className="hwho">{who}</span>
         <span className="hdev">{dev}</span>
         <span className="hsize">{e.size ? humanSize(e.size) : ""}</span>
+        {kind === "delete" && restorable && <span className="hgone">can be restored</span>}
+        {conflict && (
+          <button
+            type="button"
+            className="pbtn hresolve-btn"
+            title={`Two devices edited ${conflict.original} at once — review and keep one`}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              onOpen(e.path);
+            }}
+            onKeyDown={(ev) => ev.stopPropagation()}
+          >
+            Resolve
+          </button>
+        )}
+        {onSelect && (
+          <button
+            type="button"
+            className="hsel-btn"
+            aria-pressed={!!selected}
+            title="Show this change in the side panel (J / K to move)"
+            onClick={(ev) => {
+              ev.stopPropagation();
+              onSelect();
+            }}
+            onKeyDown={(ev) => ev.stopPropagation()}
+          >
+            Details
+          </button>
+        )}
         {/* Restoring is not navigating, so the click stops here — same rule
             the note and diff controls follow. */}
         {restorable && (

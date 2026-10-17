@@ -33,28 +33,45 @@ export function decodePath(p: string): string {
 
 // Special views are RESTful routes under the project — the first segment
 // after the project id is reserved when it names a view:
-//   /<project-id>/dashboard[/<path>]  the read×staleness dashboard (optionally scoped)
-//   /<project-id>/history[/<path>]    change feed (project / subtree / file)
-//   /<project-id>/install             connect-a-device guide
-//   /<project-id>/settings            project settings
+//   /<project-id>/insights[/<path>]  the read×staleness dashboard (optionally scoped)
+//   /<project-id>/activity[/<path>]  change feed (project / subtree / file)
+//   /<project-id>/install            connect-a-device guide
+//   /<project-id>/settings           project settings
 // Rule: every page gets its own URL path (see CLAUDE.md) — new surfaces are
 // view routes here, not ephemeral panel state. (Root-level files literally
 // named like a view lose the URL shortcut and remain reachable via the tree.)
-export const VIEW_ROUTES = new Set(["dashboard", "history", "install", "settings"]);
+//
+// The URL segment and the internal view name differ for two views: the code
+// still calls them dashboard/history, the address bar says insights/activity.
+const VIEW_SEGMENTS: Record<ViewName, string> = {
+  dashboard: "insights",
+  history: "activity",
+  install: "install",
+  settings: "settings",
+};
+const SEGMENT_VIEWS: Record<string, ViewName> = {
+  insights: "dashboard",
+  activity: "history",
+  install: "install",
+  settings: "settings",
+};
+export const VIEW_ROUTES = new Set(Object.keys(SEGMENT_VIEWS));
 
 // Shipped URLs that were renamed. Parsed into the new view and normalized
 // away on arrival, so bookmarks resolve without a second live name.
-const LEGACY_VIEWS: Record<string, ViewName> = { insights: "dashboard" };
+const LEGACY_VIEWS: Record<string, ViewName> = { dashboard: "dashboard", history: "history" };
 
 // `head` is a file or folder name any member can create, and indexing a plain
 // object with it reaches Object.prototype: LEGACY_VIEWS["constructor"] is the
-// Object constructor — truthy — so a folder named "constructor" was parsed as a
-// renamed view, `view` became a FUNCTION, and the legacy-view redirect rewrote
-// the address bar to "/<pid>/function Object() { [native code] }". The folder
-// was then unreachable by URL for the whole org, permanently. Same shape round
-// 11 fixed in ProjectIcon; the router kept it.
+// Object constructor — truthy — so a folder named "constructor" would parse as
+// a renamed view, `view` would become a FUNCTION, and the legacy-view redirect
+// would rewrite the address bar to "/<pid>/function Object() { [native code] }",
+// leaving that folder unreachable by URL. Both lookups are own-property only.
 function legacyView(head: string): ViewName | undefined {
   return Object.hasOwn(LEGACY_VIEWS, head) ? LEGACY_VIEWS[head] : undefined;
+}
+function segmentView(head: string): ViewName | undefined {
+  return Object.hasOwn(SEGMENT_VIEWS, head) ? SEGMENT_VIEWS[head] : undefined;
 }
 
 export type ViewName = "dashboard" | "history" | "install" | "settings";
@@ -66,10 +83,13 @@ export type ViewName = "dashboard" | "history" | "install" | "settings";
 export interface HistoryFilters {
   q?: string; // substring of the path
   user?: string; // exact account
-  since?: string; // YYYY-MM-DD (UTC), inclusive
-  until?: string; // YYYY-MM-DD (UTC), inclusive
+  actor?: string; // agent | human
+  device?: string; // device id
+  range?: string; // a date preset: today | 7d | 30d
+  since?: string; // YYYY-MM-DD in the reader's zone, inclusive
+  until?: string; // YYYY-MM-DD in the reader's zone, inclusive
 }
-export const HISTORY_FILTER_KEYS = ["q", "user", "since", "until"] as const;
+export const HISTORY_FILTER_KEYS = ["q", "user", "actor", "device", "range", "since", "until"] as const;
 
 export function hasHistoryFilters(f?: HistoryFilters): boolean {
   return !!f && HISTORY_FILTER_KEYS.some((k) => !!f[k]);
@@ -102,7 +122,7 @@ export interface Route {
   path: string;
   view?: ViewName;
   viewTarget?: string;
-  // The URL used a renamed segment (e.g. /insights): the app replaces it
+  // The URL used a renamed segment (e.g. /dashboard): the app replaces it
   // with the canonical one instead of leaving two URLs for one page.
   legacyView?: boolean;
   // The URL carried a trailing separator (/notes/ — what a browser hands you
@@ -148,8 +168,8 @@ export interface Route {
 }
 
 const VIEW_TITLES: Record<ViewName, string> = {
-  dashboard: "Dashboard",
-  history: "History",
+  dashboard: "Insights",
+  history: "Activity",
   install: "Install",
   settings: "Settings",
 };
@@ -260,8 +280,9 @@ function parsePath(pathname: string, mode: "volume" | "hub"): Route {
   // file that happens to live under a folder called history.
   if (head === "edit") return takeEdit(r);
   const legacy = legacyView(head);
-  if (VIEW_ROUTES.has(head) || legacy) {
-    r.view = legacy || (head as ViewName);
+  const canonical = segmentView(head);
+  if (canonical || legacy) {
+    r.view = canonical || legacy;
     if (legacy) r.legacyView = true;
     r.viewTarget = seg === -1 ? "" : r.path.slice(seg + 1).replace(/\/+$/, "");
     r.path = "";
@@ -313,7 +334,7 @@ export function urlForView(
   target?: string,
   filters?: HistoryFilters,
 ): string {
-  let s = (projectId ? "/" + projectId : "") + "/" + view;
+  let s = (projectId ? "/" + projectId : "") + "/" + VIEW_SEGMENTS[view];
   if (target) s += "/" + encodePath(target.replace(/\/+$/, ""));
   return s + (view === "history" ? historyFilterQuery(filters) : "");
 }

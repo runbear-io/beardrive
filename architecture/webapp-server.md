@@ -131,6 +131,18 @@ classDiagram
     }
     note for moveIndex "There is no rename op — a move is put(new) + delete(old), same device, same blob, one cycle — so the index is DERIVED inside the replay Files already runs and cached with the snapshot. Pairing needs same device, |Δt| ≤ 30s, B's first-ever put, and one-to-one both ways; anything ambiguous stays a plain deletion. Nothing here writes an op: journal.Less and Replay are untouched"
     note for segment "Time-bounded on purpose: a bare set of paths would make history?path=docs/a.md show the ops of the NEW a.md that took the old address"
+    class histFilter {
+        +needle user actor device
+        +since until
+        +parseHistFilter(query) histFilter
+        +keep(sourcedOp) bool
+    }
+    class histDay {
+        +Date YYYY-MM-DD in the reader's zone
+        +Agent, Human counts
+    }
+    note for histFilter "The reader filters shared by GET history and GET history/summary. actor=agent means op.Session != &quot;&quot; — only the agent hook sets a session, while a note is anyone's to write. device= matches sourcedOp.From (the journal the op was read from), never op.Device. history/summary answers the Activity header in one pass over the ops the feed already loads: totals plus one histDay per calendar day in the reader's tz (IANA ?tz=, else ?offset= minutes): the last days=1..31, or the days since=/until= touch (latest 31 kept), with the bounds applied to the counts as in the feed; each history entry also carries prev, the path's content before it, replayed over the whole journal so an off-page predecessor is still named (a delete of an already-absent path names none: it removed nothing). The browser never pages a week of history to draw seven bars"
+    histFilter ..> histDay : summary buckets
 
     class Uploader {
         <<interface>>

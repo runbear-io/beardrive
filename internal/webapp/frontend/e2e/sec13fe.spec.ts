@@ -285,7 +285,7 @@ test("Insights: folders named __proto__ and constructor do not disturb the dashb
 
   // Whole-project dashboard: CoverageMatrix reads d.folders through a Map, so
   // this is the guarded path.
-  await page.goto(`/${pid}/dashboard`);
+  await page.goto(`/${pid}/insights`);
   await expect(page.locator(".in-treemap")).toBeVisible(); // CONTROL
   await expect(page.locator(".in-chart .in-quad").first()).toBeVisible();
   await expect(page.locator("body")).not.toContainText("This page didn’t load");
@@ -310,7 +310,7 @@ test("Insights: folders named __proto__ and constructor do not disturb the dashb
   const drew = new Map<string, boolean>();
   for (const p of seeded) {
     const dir = p.split("/")[0];
-    await page.goto(`/${pid}/dashboard/${encodeURIComponent(dir)}`);
+    await page.goto(`/${pid}/insights/${encodeURIComponent(dir)}`);
     // CONTROL: the scoped dashboard rendered at all.
     await expect(page.locator(".insights")).toBeVisible();
     await expect(page.locator("body")).not.toContainText("This page didn’t load");
@@ -387,8 +387,8 @@ test("ErrorBoundary: no surface driven this round reaches the app's floor", asyn
   for (const url of [
     `/${pid}`,
     `/${pid}/sec13`,
-    `/${pid}/dashboard`,
-    `/${pid}/history`,
+    `/${pid}/insights`,
+    `/${pid}/activity`,
     `/${pid}/settings`,
   ]) {
     await page.goto(url);

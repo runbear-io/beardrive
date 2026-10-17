@@ -284,7 +284,7 @@ test("folders and view routes ignore ?full=1", async ({ page }) => {
 
   // A folder listing has no content the chrome is in the way of, and a view
   // route is not a file page at all.
-  for (const path of ["notes", "history", "dashboard"]) {
+  for (const path of ["notes", "activity", "insights"]) {
     await page.goto(`/${pid}/${path}?full=1`);
     await page.waitForSelector("#content > .page");
     await expect(page.locator("#topbar"), path).toBeVisible();

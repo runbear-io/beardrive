@@ -31,7 +31,7 @@ test("renders local markdown; links navigate in-app; reload keeps the deep link"
 });
 
 test("history comes from the local journals; any version is addressable", async ({ page, request }) => {
-  await page.goto(`/${HUB_ID}/history`);
+  await page.goto(`/${HUB_ID}/activity`);
   await expect(page.getByText("e2e@example.com").first()).toBeVisible();
   const hist = await (await request.get(`/api/p/${HUB_ID}/history?path=index.md`)).json();
   expect(hist.entries.length).toBe(2);
@@ -41,7 +41,7 @@ test("history comes from the local journals; any version is addressable", async 
 });
 
 test("restore is offered on desktop (hub-backed)", async ({ page }) => {
-  await page.goto(`/${HUB_ID}/history`);
+  await page.goto(`/${HUB_ID}/activity`);
   await expect(page.locator(".hrestore-btn").first()).toBeVisible();
 });
 
@@ -61,8 +61,8 @@ test("share mints through the hub proxy and lands on the clipboard", async ({ pa
 });
 
 test("heat reaches the dashboard through the hub proxy", async ({ page }) => {
-  await page.goto(`/${HUB_ID}/dashboard`);
-  await expect(page.getByText("Knowledge insights")).toBeVisible();
+  await page.goto(`/${HUB_ID}/insights`);
+  await expect(page.getByRole("heading", { name: "What the team and its agents actually read" })).toBeVisible();
   await expect(page.getByText("index.md").first()).toBeVisible();
 });
 

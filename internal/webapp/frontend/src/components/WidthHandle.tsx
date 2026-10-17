@@ -11,18 +11,20 @@ import { FM_RAIL } from "../util";
    file page is not re-rendered on every pointer move. Double-click puts the
    default measure back. */
 
-const RAIL = 268; // frontmatter rail + gap beside the prose — style.css
+const RAIL = 300; // file rail + gap beside the prose — style.css (aside.fv-rail)
 const STEP = 32; // arrow-key nudge
 
 type Side = "left" | "right";
 
 // How wide the prose column may get: the scroller's content box, minus the
-// frontmatter rail when it is laid out beside the prose.
+// file rail when it is laid out beside the prose.
 function roomFor(page: HTMLElement): number {
   const box = page.parentElement!;
   const cs = getComputedStyle(box);
   const inner = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-  const rail = page.querySelector(":scope > .fmpanel") && window.matchMedia(FM_RAIL).matches ? RAIL : 0;
+  const el = page.querySelector<HTMLElement>(":scope > aside.fv-rail");
+  // The comments panel hides the rail and takes its place.
+  const rail = el && window.matchMedia(FM_RAIL).matches && getComputedStyle(el).display !== "none" ? RAIL : 0;
   return inner - rail;
 }
 

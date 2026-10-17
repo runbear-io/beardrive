@@ -45,7 +45,7 @@ test("every view shares one column system", async ({ page }) => {
   await visit("", "app"); // project home
   await visit("/install", "app"); // the same guide, so the same column
   await visit("/settings", "app");
-  await visit("/dashboard", "app"); // charts cap their own measure; the column is normal
+  await visit("/dashboard", "wide"); // data-dense: treemap and hot path side by side
   await visit("/history", "app"); // structured view, not a file render
   await visit("/index.md", "read"); // rendered markdown — the only read surface
   await visit("/notes", "app"); // folder listing is a structured view too
@@ -73,7 +73,7 @@ test("charts never scale past the size they were drawn at", async ({ page }) => 
   await page.setViewportSize({ width: 1600, height: 900 });
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`http://localhost:8993/${pid}/dashboard`);
+  await page.goto(`http://localhost:8993/${pid}/insights`);
   await page.waitForSelector(".in-chart");
   const worst = await page.evaluate(() => {
     let max = 0;
@@ -92,7 +92,7 @@ test("the gutter belongs to the scroll container, not the column", async ({ page
   // A markdown page used to carry the max-width on #content itself, so its
   // gutter came out of the reading measure and .md ran ~80px narrower than
   // every other page. The gutter must live on #content alone.
-  for (const path of ["/index.md", "/notes", "/history"]) {
+  for (const path of ["/index.md", "/notes", "/activity"]) {
     await page.goto(`http://localhost:8993/${pid}${path}`);
     await page.waitForSelector("#content > .page");
     const r = await page.evaluate(() => {
@@ -152,11 +152,9 @@ test("provenance survives to a phone on the file view and in History", async ({ 
 
   const read = async () => {
     await page.goto(`/${pid}/index.md`);
-    // Not waitForSelector: #meta is always in the DOM, empty until the file
-    // loads and (before this fix) display:none below 900px.
-    await expect(page.locator("#meta")).not.toBeEmpty();
-    const meta = await page.locator("#meta").textContent();
-    await page.goto(`/${pid}/history`);
+    await expect(page.locator(".fv-meta")).not.toBeEmpty();
+    const meta = await page.locator(".fv-meta").textContent();
+    await page.goto(`/${pid}/activity`);
     await page.waitForSelector(".hrun-head");
     return {
       meta,
@@ -172,19 +170,19 @@ test("provenance survives to a phone on the file view and in History", async ({ 
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/${pid}/index.md`);
-  await expect(page.locator("#meta")).not.toBeEmpty();
-  await expect(page.locator("#meta"), "390px: provenance line visible").toBeVisible();
+  await expect(page.locator(".fv-meta")).not.toBeEmpty();
+  await expect(page.locator(".fv-meta"), "390px: provenance line visible").toBeVisible();
 
   const m = await page.evaluate(() => {
     const bar = document.querySelector("#topbar") as HTMLElement;
-    const meta = document.querySelector("#meta") as HTMLElement;
+    const meta = document.querySelector(".fv-meta") as HTMLElement;
     const btns = [...bar.querySelectorAll<HTMLElement>(".btn, .icon-btn")].filter(
       (b) => b.getBoundingClientRect().width > 0,
     );
     const last = btns[btns.length - 1].getBoundingClientRect();
     const content = document.querySelector("#content") as HTMLElement;
     return {
-      // Actions stay flush right on row 1, above the wrapped meta row.
+      // Actions stay flush right in the top bar, above the document's meta row.
       gapFromRight: Math.round(bar.getBoundingClientRect().right - last.right),
       actionsAboveMeta: last.bottom <= meta.getBoundingClientRect().top + 1,
       tap: Math.min(...btns.map((b) => b.getBoundingClientRect().height)),

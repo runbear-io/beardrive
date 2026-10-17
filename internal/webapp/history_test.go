@@ -1,6 +1,8 @@
 package webapp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -670,5 +672,218 @@ func TestStoreObservesDevices(t *testing.T) {
 	d, ok := srv.Devices.Get("dev-9")
 	if !ok || d.Name != "build-box" || d.OS != "linux/amd64" || d.IP != "192.0.2.55" {
 		t.Fatalf("observed = %+v %v", d, ok)
+	}
+}
+
+// setSession stamps the last op in dev's journal with an agent session, as
+// the agent sync hook does.
+func (f *fakeRemote) setSession(dev, session string) {
+	f.t.Helper()
+	p := filepath.Join(f.dir, "journal", dev+".jsonl")
+	ops, err := journal.ReadFile(p)
+	if err != nil || len(ops) == 0 {
+		f.t.Fatal(err)
+	}
+	ops[len(ops)-1].Session = session
+	data, err := journal.Marshal(ops)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	writeFileT(f.t, p, data)
+}
+
+// ?actor= splits on the hook-set session, never the note; ?device= on the
+// journal the op came from.
+func TestHistoryActorAndDeviceFilters(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	day := func(d int) time.Time { return time.Date(2026, 7, d, 12, 0, 0, 0, time.UTC) }
+	f.putFull("dev1", "mira@acme.io", "a.md", "a", day(1))
+	f.setSession("dev1", "s1")
+	f.putFull("dev1", "mira@acme.io", "b.md", "b", day(2))
+	f.putFull("dev2", "ken@acme.io", "c.md", "c", day(3))
+	h, base := srv.Handler(), "/api/p/"+p.ID+"/"
+	for _, c := range []struct {
+		q    string
+		want []string
+	}{
+		{"actor=agent", []string{"a.md"}},
+		{"actor=human", []string{"c.md", "b.md"}},
+		{"device=dev1", []string{"b.md", "a.md"}},
+		{"device=dev2&actor=agent", []string{}},
+		{"device=nope", []string{}},
+	} {
+		if got, _ := histPaths(t, h, base+"history?"+c.q); !slices.Equal(got, c.want) {
+			t.Errorf("?%s = %v, want %v", c.q, got, c.want)
+		}
+	}
+	if rec := do(t, h, "GET", base+"history?actor=robot", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("?actor=robot = %d, want 400", rec.Code)
+	}
+}
+
+// The summary counts the last N calendar days in the reader's zone, split
+// agent/human, and honours the same filters as the feed.
+func TestHistorySummary(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	loc := time.FixedZone("", 9*3600)
+	now := time.Now().In(loc)
+	y, m, d := now.Date()
+	at := func(daysAgo, hour int) time.Time {
+		return time.Date(y, m, d-daysAgo, hour, 0, 0, 0, loc)
+	}
+	// 00:30 local today is still yesterday in UTC: the zone decides the bar.
+	f.putFull("dev1", "mira@acme.io", "a.md", "a", time.Date(y, m, d, 0, 30, 0, 0, loc))
+	f.setSession("dev1", "s1")
+	f.putFull("dev1", "mira@acme.io", "b.md", "b", at(1, 10))
+	f.putFull("dev2", "ken@acme.io", "docs/c.md", "c", at(6, 10))
+	f.putFull("dev2", "ken@acme.io", "docs/old.md", "o", at(7, 10)) // outside 7 days
+	h, base := srv.Handler(), "/api/p/"+p.ID+"/"
+
+	type sum struct {
+		Total, Agent, Human, Devices int
+		Days                         []histDay
+	}
+	get := func(q string) sum {
+		t.Helper()
+		rec := do(t, h, "GET", base+"history/summary?"+q, nil)
+		if rec.Code != 200 {
+			t.Fatalf("summary ?%s: %d %s", q, rec.Code, rec.Body)
+		}
+		var s sum
+		if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	s := get("offset=540")
+	if s.Total != 3 || s.Agent != 1 || s.Human != 2 || s.Devices != 2 || len(s.Days) != 7 {
+		t.Fatalf("summary = %+v", s)
+	}
+	if last := s.Days[6]; last.Date != now.Format("2006-01-02") || last.Agent != 1 || last.Human != 0 {
+		t.Errorf("today = %+v", last)
+	}
+	if s.Days[0].Human != 1 {
+		t.Errorf("six days ago = %+v", s.Days[0])
+	}
+	if s := get("offset=540&days=8"); s.Total != 4 || len(s.Days) != 8 {
+		t.Errorf("days=8 = %+v", s)
+	}
+	if s := get("offset=540&prefix=docs/"); s.Total != 1 {
+		t.Errorf("prefix = %+v", s)
+	}
+	if s := get("offset=540&actor=agent"); s.Total != 1 || s.Human != 0 {
+		t.Errorf("actor = %+v", s)
+	}
+	// A custom range charts the days its bounds touch, in the reader's zone,
+	// and counts only what the feed under the same bounds would show.
+	bound := func(t time.Time) string { return url.QueryEscape(t.Format(time.RFC3339)) }
+	since, until := at(7, 0), at(6, 0).Add(24*time.Hour-time.Second)
+	s = get("offset=540&since=" + bound(since) + "&until=" + bound(until))
+	if s.Total != 2 || len(s.Days) != 2 || s.Days[0].Date != since.Format("2006-01-02") ||
+		s.Days[1].Date != at(6, 0).Format("2006-01-02") || s.Days[0].Human != 1 || s.Days[1].Human != 1 {
+		t.Errorf("custom range = %+v", s)
+	}
+	if s := get("offset=540&until=" + bound(until)); s.Total != 2 || len(s.Days) != 7 || s.Days[6].Date != at(6, 0).Format("2006-01-02") {
+		t.Errorf("until only = %+v", s)
+	}
+	if s := get("offset=540&since=" + bound(at(1, 0))); s.Total != 2 || len(s.Days) != 2 {
+		t.Errorf("since only = %+v", s)
+	}
+	if s := get("offset=540&since=" + bound(at(90, 0))); len(s.Days) != 31 || s.Days[30].Date != now.Format("2006-01-02") {
+		t.Errorf("long range keeps the latest 31 days: %d days", len(s.Days))
+	}
+	if s := get("offset=540&since=" + bound(at(1, 0)) + "&until=" + bound(at(3, 0))); s.Total != 0 || len(s.Days) != 0 {
+		t.Errorf("since after until = %+v", s)
+	}
+	for _, q := range []string{"days=0", "days=32", "actor=x"} {
+		if rec := do(t, h, "GET", base+"history/summary?"+q, nil); rec.Code != http.StatusBadRequest {
+			t.Errorf("?%s = %d, want 400", q, rec.Code)
+		}
+	}
+}
+
+// Every entry names the content its path had just before it, from the whole
+// journal rather than the page, so a client can diff a change whose
+// predecessor it never loaded and tell that from a genuine first version.
+func TestHistoryEntryPrev(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	sha := func(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
+	f.put("dev1", "a.md", "v1")
+	f.put("dev1", "a.md", "v2")
+	f.del("dev1", "a.md")
+	f.del("dev2", "a.md") // a second device deleting the same, already-gone file
+	f.put("dev1", "a.md", "v3")
+	h, base := srv.Handler(), "/api/p/"+p.ID+"/"
+
+	got := func(q string) []HistoryEntry {
+		t.Helper()
+		rec := do(t, h, "GET", base+"history?"+q, nil)
+		var out struct {
+			Entries []HistoryEntry `json:"entries"`
+		}
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+			t.Fatalf("history ?%s: %d %s", q, rec.Code, rec.Body)
+		}
+		return out.Entries
+	}
+	all := got("path=a.md")
+	want := []struct{ kind, prev string }{
+		{"add", sha("v2")},    // re-added: replaces what the delete removed
+		{"delete", ""},        // the path was already gone: removed nothing
+		{"delete", sha("v2")}, // names what it removed
+		{"edit", sha("v1")},
+		{"add", ""}, // a genuine first version
+	}
+	if len(all) != len(want) {
+		t.Fatalf("entries = %+v", all)
+	}
+	for i, w := range want {
+		if all[i].Kind != w.kind || all[i].Prev != w.prev {
+			t.Errorf("entry %d = %s prev %q, want %s prev %q", i, all[i].Kind, all[i].Prev, w.kind, w.prev)
+		}
+	}
+	// A one-entry page still knows the delete's predecessor.
+	if page := got("path=a.md&n=1"); len(page) != 1 || page[0].Prev != sha("v2") {
+		t.Errorf("first page = %+v", page)
+	}
+}
+
+// An inclusive `until` names the last nanosecond of a day, so an op late in
+// that day's final millisecond is still inside it and the next midnight is not.
+func TestHistoryUntilIsInclusiveToTheNanosecond(t *testing.T) {
+	end, ok := parseHistTime("2026-07-02T23:59:59.999999999Z", true)
+	if !ok {
+		t.Fatal("did not parse")
+	}
+	f := histFilter{until: end}
+	at := func(ts time.Time) sourcedOp { return sourcedOp{Op: journal.Op{Path: "a.md", Time: ts}} }
+	if !f.keep(at(time.Date(2026, 7, 2, 23, 59, 59, 999_500_000, time.UTC))) {
+		t.Error("an op in the day's final millisecond fell outside an inclusive until")
+	}
+	if f.keep(at(time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC))) {
+		t.Error("the next midnight fell inside an inclusive until")
+	}
+}
+
+// The summary counts exactly what the feed shows: an `until` inside a day
+// leaves that day's later changes out of both.
+func TestHistorySummaryHonorsUntilWithinADay(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	day := time.Now().UTC().AddDate(0, 0, -1)
+	y, m, d := day.Date()
+	f.putFull("dev1", "mira@acme.io", "early.md", "e", time.Date(y, m, d, 9, 0, 0, 0, time.UTC))
+	f.putFull("dev1", "mira@acme.io", "late.md", "l", time.Date(y, m, d, 15, 0, 0, 0, time.UTC))
+	until := time.Date(y, m, d, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	rec := do(t, srv.Handler(), "GET", "/api/p/"+p.ID+"/history/summary?offset=0&until="+until, nil)
+	var s struct{ Total int }
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &s) != nil {
+		t.Fatalf("summary: %d %s", rec.Code, rec.Body)
+	}
+	if s.Total != 1 {
+		t.Fatalf("summary with until at noon counted %d changes, want 1 (the 15:00 one is after the bound)", s.Total)
 	}
 }

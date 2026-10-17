@@ -20,17 +20,17 @@ test("tab title follows SPA navigation and browser history", async ({ page }) =>
   await page.waitForURL(`/${pid}/index.md`);
   await expect(page).toHaveTitle("index.md — wiki");
 
-  await page.click("#nav-history");
-  await page.waitForURL(`/${pid}/history`);
-  await expect(page).toHaveTitle("History — wiki");
+  await page.click("#nav-activity");
+  await page.waitForURL(`/${pid}/activity`);
+  await expect(page).toHaveTitle("Activity — wiki");
 
   await page.goBack();
   await expect(page).toHaveURL(`/${pid}/index.md`);
   await expect(page).toHaveTitle("index.md — wiki");
 
   await page.goForward();
-  await expect(page).toHaveURL(`/${pid}/history`);
-  await expect(page).toHaveTitle("History — wiki");
+  await expect(page).toHaveURL(`/${pid}/activity`);
+  await expect(page).toHaveTitle("Activity — wiki");
 });
 
 test("markdown file: rendered content, crumb, meta, download + share buttons", async ({ page }) => {
@@ -40,10 +40,13 @@ test("markdown file: rendered content, crumb, meta, download + share buttons", a
   await page.waitForURL(`/${pid}/index.md`);
   await expect(page.locator("#content h1")).toHaveText("Wiki");
   await expect(page.locator("#crumb")).toContainText("index.md");
-  // The full whoChanged() string, not just the address: the seed's Author
-  // equals its User, so "alice@x.io" alone passed even when the viewer was
-  // rendering the git/OS identity instead of the signed-in account.
-  await expect(page.locator("#meta")).toContainText("Alice <alice@x.io>");
+  // Provenance lives in the document header now, not the top bar. The full
+  // whoChanged() string rides as hover text: the seed's Author equals its
+  // User, so "alice@x.io" alone passed even when the viewer was rendering the
+  // git/OS identity instead of the signed-in account.
+  await expect(page.locator(".fv-meta .fv-who")).toContainText("Alice edited");
+  await expect(page.locator(".fv-meta .fv-who")).toHaveAttribute("title", "Alice <alice@x.io>");
+  await expect(page.locator("#meta")).toBeEmpty();
   // Download lives in the ⋯ menu now; the hidden anchor powers it.
   await expect(page.locator("#download")).toHaveCount(1);
   await expect(page.locator("#more-btn")).toBeVisible();
@@ -119,7 +122,7 @@ test("folder URL with a trailing slash renders the listing and drops the slash",
 test("history row: kind is a badge, not a disclosure control", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history/guide.md`);
+  await page.goto(`/${pid}/activity/guide.md`);
   const row = page.locator(".history .hentry").first();
   await expect(row).toBeVisible();
   // kind is conveyed as text, not by an icon shape
@@ -133,7 +136,7 @@ test("history row: kind is a badge, not a disclosure control", async ({ page }) 
   // ...and it still expands in place, without navigating
   await row.locator(".hnote").click({ position: { x: 6, y: 6 } }); // off the note's link
   await expect(row.locator(".hnote")).toHaveClass(/open/);
-  await expect(page).toHaveURL(`/${pid}/history/guide.md`);
+  await expect(page).toHaveURL(`/${pid}/activity/guide.md`);
   // clicking the badge does exactly what clicking the row does: it opens
   // the version the row describes (BEA-7), not a dead zone
   await row.locator(".hkind").click();
@@ -230,16 +233,16 @@ test("palette on a dead route still offers the way back", async ({ page }) => {
   await expect(page.locator(".notfound")).toBeVisible();
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.locator("#palette")).toBeVisible();
-  for (const label of ["project root", "Dashboard", "Installation", "Settings"]) {
+  for (const label of ["project root", "Insights", "Activity", "Connect a device", "Settings"]) {
     await expect(page.locator("#palette [cmdk-list]")).toContainText(label);
   }
   // exactly one whole-project history entry, no duplicate
   expect(
     await page.locator("#palette [cmdk-item]", { hasText: "History: whole project" }).count(),
   ).toBe(1);
-  await page.fill("#palette input", "Dashboard");
+  await page.fill("#palette input", "Insights");
   await page.keyboard.press("Enter");
-  await page.waitForURL(`/${pid}/dashboard`);
+  await page.waitForURL(`/${pid}/insights`);
   await page.reload(); // the entries are real URLs, not panel state
   await expect(page.locator(".in-treemap")).toBeVisible();
 });
@@ -620,7 +623,7 @@ test("public links: banner and settings table fit a 390px viewport", async ({ pa
 test("history row opens THAT version, banner says so, View current returns", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history/guide.md`);
+  await page.goto(`/${pid}/activity/guide.md`);
   // Oldest row = the first version; click it rather than the latest.
   const added = page.locator(".hentry.add");
   await expect(added).toBeVisible();
@@ -647,7 +650,7 @@ test("history row opens THAT version, banner says so, View current returns", asy
 test("a version URL survives a hard reload, and Back returns to history", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history/guide.md`);
+  await page.goto(`/${pid}/activity/guide.md`);
   await page.locator(".hentry.add").click();
   const url = page.url();
   await page.reload();
@@ -671,12 +674,12 @@ test("an unknown version says so instead of showing current content", async ({ p
 test("delete rows have no version to open, so they stay unclickable", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history/scratch.md`);
+  await page.goto(`/${pid}/activity/scratch.md`);
   const del = page.locator(".hentry.delete");
   await expect(del).toBeVisible();
   await expect(del).not.toHaveClass(/clickable/);
   await del.click();
-  await expect(page).toHaveURL(`/${pid}/history/scratch.md`);
+  await expect(page).toHaveURL(`/${pid}/activity/scratch.md`);
 });
 
 // BEA-6: one agent run is one card, and any version can be put back.
@@ -684,7 +687,7 @@ test("delete rows have no version to open, so they stay unclickable", async ({ p
 test("history groups one agent run into a single card", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
   const run = page.locator(".hrun");
   await expect(run).toHaveCount(1);
   await expect(run.locator(".hrun-note")).toHaveText("claude-code session 8f21e4");
@@ -702,7 +705,7 @@ test("history groups one agent run into a single card", async ({ page }) => {
   // The card collapses without navigating.
   await run.locator(".hrun-toggle").click();
   await expect(run.locator(".hentry")).toHaveCount(0);
-  await expect(page).toHaveURL(`/${pid}/history`);
+  await expect(page).toHaveURL(`/${pid}/activity`);
 });
 
 // BEA-35: the one thing history couldn't reverse was a file a run CREATED.
@@ -712,7 +715,7 @@ test("history groups one agent run into a single card", async ({ page }) => {
 test("a file the run created can be undone, and comes back", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
   const created = page.locator('.hrun .hentry.add:has-text("runbook.md")');
   await expect(created).toBeVisible();
   // An add has no old bytes to put back — its undo is a removal.
@@ -766,7 +769,7 @@ test("restoring an old version brings its content back", async ({ page }) => {
   await page.request.put(url, { data: "# Restore me\n\nThe good version.\n" });
   await page.request.put(url, { data: "# Restore me\n\nClobbered by an agent.\n" });
 
-  await page.goto(`/${pid}/history/${path}`);
+  await page.goto(`/${pid}/activity/${path}`);
   const older = page.locator(".hentry.add"); // the first version
   await expect(older).toBeVisible();
 
@@ -785,7 +788,7 @@ test("restoring an old version brings its content back", async ({ page }) => {
   await expect(page.locator(".history .hentry")).toHaveCount(2);
   await expect(page.locator(".hrestore-btn").first()).toHaveText(/restore$/);
   // Asking is still not navigating: the row stayed put through the dialog.
-  await expect(page).toHaveURL(`/${pid}/history/${path}`);
+  await expect(page).toHaveURL(`/${pid}/activity/${path}`);
 
   await older.locator(".hrestore-btn").click();
   await modal.getByRole("button", { name: "Restore" }).click();
@@ -805,7 +808,7 @@ test("the current version offers no restore", async ({ page }) => {
   const pid = await wikiId(page);
   // Read-only against the seeded file, so the rest of the suite still finds
   // guide.md saying "Second version".
-  await page.goto(`/${pid}/history/guide.md`);
+  await page.goto(`/${pid}/activity/guide.md`);
   const rows = page.locator(".history .hentry");
   await expect(rows.first()).toBeVisible();
   await expect(rows.first().locator(".hrestore-btn")).toHaveCount(0);
@@ -825,7 +828,7 @@ test("the current version offers no restore", async ({ page }) => {
   const url = `/api/p/${pid}/upload/content?path=${path}`;
   await page.request.put(url, { data: "# Current\n\nThe good version.\n" });
   await page.request.put(url, { data: "# Current\n\nClobbered.\n" });
-  await page.goto(`/${pid}/history/${path}`);
+  await page.goto(`/${pid}/activity/${path}`);
   const own = page.locator(".history .hentry");
   await expect(own.first().locator(".hrestore-btn")).toHaveCount(0);
   await own.last().locator(".hrestore-btn").click(); // the oldest row: the first version
@@ -842,7 +845,7 @@ test("the current version offers no restore", async ({ page }) => {
 test("a read-only member gets no restore or remove buttons", async ({ page }) => {
   await login(page, READER);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history`);
+  await page.goto(`/${pid}/activity`);
   await expect(page.locator(".history .hentry").first()).toBeVisible();
   await expect(page.locator(".hrestore-btn")).toHaveCount(0);
   await expect(page.locator(".hremove-btn")).toHaveCount(0);
@@ -856,7 +859,7 @@ test("a read-only member gets no restore or remove buttons", async ({ page }) =>
 test("history rows carry visible Open/Download controls for that version", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history/guide.md`);
+  await page.goto(`/${pid}/activity/guide.md`);
   const added = page.locator(".hentry.add"); // the first version of guide.md
   await expect(added).toBeVisible();
 
@@ -884,7 +887,7 @@ test("history rows carry visible Open/Download controls for that version", async
 test("version controls are keyboard-reachable and don't double-fire the row", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history/guide.md`);
+  await page.goto(`/${pid}/activity/guide.md`);
   const open = page.locator(".hentry.add").getByRole("button", { name: /Open guide\.md as of/ });
   await open.focus();
   await expect(open).toBeFocused();
@@ -893,13 +896,13 @@ test("version controls are keyboard-reachable and don't double-fire the row", as
   await expect(page.locator("#content")).toContainText("First version");
   // One entry in history, not two: the row's own handler never also ran.
   await page.goBack();
-  await expect(page).toHaveURL(`/${pid}/history/guide.md`);
+  await expect(page).toHaveURL(`/${pid}/activity/guide.md`);
 });
 
 test("a delete row offers no version to open or download", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history/scratch.md`);
+  await page.goto(`/${pid}/activity/scratch.md`);
   const del = page.locator(".hentry.delete");
   await expect(del).toBeVisible();
   await expect(del.locator(".hver-btn")).toHaveCount(0);
@@ -999,7 +1002,7 @@ test("an old version of an extensionless file previews the same way", async ({ p
   const url = `/api/p/${pid}/upload/content?path=sniff/LICENSE`;
   await page.request.put(url, { data: "MIT License — the first draft.\n" });
   await page.request.put(url, { data: "Apache 2.0 — the second draft.\n" });
-  await page.goto(`/${pid}/history/sniff/LICENSE`);
+  await page.goto(`/${pid}/activity/sniff/LICENSE`);
   const older = page.locator(".hentry.add");
   await expect(older).toBeVisible();
   await older.getByRole("button", { name: /^Open .* as of/ }).click();
@@ -1134,7 +1137,7 @@ test("a past version of a csv is a table too", async ({ page }) => {
   const url = `/api/p/${pid}/upload/content?path=csv/versioned.csv`;
   await page.request.put(url, { data: "a,b\n1,2\n" });
   await page.request.put(url, { data: "a,b\n3,4\n" });
-  await page.goto(`/${pid}/history/csv/versioned.csv`);
+  await page.goto(`/${pid}/activity/csv/versioned.csv`);
   const older = page.locator(".hentry.add");
   await expect(older).toBeVisible();
   await older.getByRole("button", { name: /^Open .* as of/ }).click();
@@ -1247,14 +1250,13 @@ test("a shared diagram renders on the public page, without one there is no scrip
 
 /* BEA-61: a read count that doesn't say your own views are in it reads as
    other people's interest. Every surface printing one discloses it — the file
-   header can't do it visibly (#meta is nowrap + ellipsis), so it does it by
-   hover text and a screen-reader span. */
+   header's meta row does it by hover text and a screen-reader span. */
 test("read counts disclose that your own views count", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
 
   await page.goto(`/${pid}/index.md`);
-  const heat = page.locator("#meta span[title]");
+  const heat = page.locator(".fv-meta .fv-reads");
   await expect(heat).toContainText("/ 30d");
   await expect(heat).toHaveAttribute("title", /Includes your own views\./);
   await expect(heat.locator(".sr-only")).toContainText("10 minutes count once");
@@ -1333,7 +1335,7 @@ test("Copy on a pinned version yields THAT version's bytes", async ({ page, cont
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await login(page);
   const pid = await wikiId(page);
-  await page.goto(`/${pid}/history/guide.md`);
+  await page.goto(`/${pid}/activity/guide.md`);
   // The oldest row is the first version; the current file holds the second.
   await page.locator(".hentry.add").click();
   await page.waitForURL(new RegExp(`/${pid}/guide\\.md\\?v=[0-9a-f]{64}$`));
@@ -1473,48 +1475,34 @@ test("frontmatter is a side panel, not a slab on top of the document", async ({ 
   );
 
   await page.goto(`/${pid}/meta/props.md`);
-  const panel = page.locator("#content .fmpanel");
+  const panel = page.locator("#content aside.fv-rail .fv-props");
   await expect(panel).toBeVisible();
   // The document leads: the h1 is the first thing in the prose column, and
   // no frontmatter table survives inside the rendered markdown.
   await expect(page.locator("#content h1")).toHaveText("Q3 findings");
   await expect(page.locator("#content table.frontmatter")).toHaveCount(0);
-  expect(
-    await page.evaluate(() => {
-      const h1 = document.querySelector("#content h1") as HTMLElement;
-      return h1.getBoundingClientRect().top;
-    }),
-  ).toBeLessThan(
-    await panel.evaluate((el) => el.getBoundingClientRect().bottom),
-  );
   // Same keys, author order, nested value still compact YAML in <code>.
   await expect(panel.locator("dt")).toHaveText(["title", "status", "tags", "meta"]);
   await expect(panel.locator("dd").nth(2)).toHaveText("churn, revenue");
   await expect(panel.locator("dd code")).toHaveText("reviewed: true");
   // A rail, not a squeezed column: the prose keeps its 768px measure and the
-  // panel sits to its right.
+  // rail sits to its right.
   const geom = await page.evaluate(() => {
-    const prose = document.querySelector("#content .markdown > div:not(.fmpanel)") as HTMLElement;
-    const p = document.querySelector(".fmpanel") as HTMLElement;
+    const prose = document.querySelector("#content .fv-prose") as HTMLElement;
+    const p = document.querySelector("aside.fv-rail") as HTMLElement;
     return { prose: prose.getBoundingClientRect(), panel: p.getBoundingClientRect() };
   });
   expect(Math.round(geom.prose.width), "prose measure unchanged").toBe(768);
-  expect(geom.panel.left, "panel is to the right of the prose").toBeGreaterThanOrEqual(
+  expect(geom.panel.left, "rail is to the right of the prose").toBeGreaterThanOrEqual(
     geom.prose.right,
   );
-
-  // Collapsing is remembered — across a different file, and across a reload.
-  await panel.locator("summary").click();
-  await expect(panel).not.toHaveAttribute("open", /.*/);
-  await page.goto(`/${pid}/index.md`);
-  await expect(page.locator("#content .fmpanel")).toHaveCount(0); // no frontmatter, no panel
-  await page.goto(`/${pid}/meta/props.md`);
-  await expect(page.locator("#content .fmpanel")).not.toHaveAttribute("open", /.*/);
-  await page.reload();
-  await expect(page.locator("#content .fmpanel")).not.toHaveAttribute("open", /.*/);
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth),
+    "1440px: horizontal page scroll",
+  ).toBe(false);
 });
 
-test("frontmatter panel on a phone: closed disclosure above the body", async ({ browser }) => {
+test("file rail on a phone: closed disclosure above the body", async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const page = await ctx.newPage();
   await login(page);
@@ -1523,20 +1511,23 @@ test("frontmatter panel on a phone: closed disclosure above the body", async ({ 
     data: "---\ntitle: Q3\nowner: snow\n---\n\n# Q3\n\nBody.\n",
   });
   await page.goto(`/${pid}/meta/phone.md`);
-  const panel = page.locator("#content .fmpanel");
+  const panel = page.locator("#content details.fv-rail");
   await expect(panel).toBeVisible();
-  // No stored choice yet: a phone has no room for a rail, so it opens closed
-  // and sits above the body rather than beside it.
+  await expect(page.locator("#content aside.fv-rail")).toHaveCount(0);
+  // A phone has no room for a rail, so it opens closed and sits above the
+  // body rather than beside it.
   await expect(panel).not.toHaveAttribute("open", /.*/);
   const m = await page.evaluate(() => {
-    const p = document.querySelector(".fmpanel") as HTMLElement;
+    const p = document.querySelector("details.fv-rail") as HTMLElement;
     const h1 = document.querySelector("#content h1") as HTMLElement;
     return {
       above: p.getBoundingClientRect().bottom <= h1.getBoundingClientRect().top,
       overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
     };
   });
-  expect(m.above, "390px: panel sits above the body").toBe(true);
+  expect(m.above, "390px: rail sits above the body").toBe(true);
   expect(m.overflow, "390px: horizontal page scroll").toBe(false);
+  await panel.locator("summary").click();
+  await expect(panel.locator(".fv-props dt")).toHaveText(["title", "owner"]);
   await ctx.close();
 });
