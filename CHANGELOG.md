@@ -5,7 +5,7 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
-- **Idle daemons watch local folders instead of rescanning every three seconds.** macOS and Linux workers use recursive filesystem notifications with a one-minute safety cadence when remote polling does not require an earlier cycle, and fall back to the existing polling cadence when the watcher is unavailable. Quiet cycles no longer rewrite unchanged state caches.
+- **Local watcher recovery releases resources.** Recreated directories are re-registered, and macOS watcher shutdown no longer retains file descriptors.
 
 
 ## v0.18.0 — 2026-10-15
