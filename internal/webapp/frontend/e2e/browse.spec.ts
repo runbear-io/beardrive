@@ -129,7 +129,7 @@ test("history row: kind is a badge, not a disclosure control", async ({ page }) 
   await expect(row.locator(".hkind")).toHaveText("edited");
   await expect(row.locator(".hkind .ico")).toHaveCount(0);
   // a row announces kind, path and author without the icon
-  await expect(page.getByRole("button", { name: /edited\s+guide\.md.*alice@x\.io/s })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: /edited\s+guide\.md.*Alice/s })).toHaveCount(1);
   // only genuine expanders claim to expand: the note and the diff disclosure
   await expect(page.locator(".history .hnote[aria-expanded]")).toHaveCount(1);
   await expect(page.locator(".history [aria-expanded]:not(.hnote):not(.hdiff-btn)")).toHaveCount(0);

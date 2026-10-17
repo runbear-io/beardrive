@@ -4,7 +4,7 @@ import { getJSON } from "../api/http";
 import type { HistoryEntry, Node } from "../api/types";
 import { HistoryRow, NoteText, type RemoveAction, type RestoreAction } from "./HistoryRow";
 import { Icon } from "./shell";
-import { copyText, whoChanged } from "../util";
+import { copyText, displayName, whoChanged } from "../util";
 import { toast } from "../toast";
 import { groupRuns, runFileCount, type Run } from "../lib/runs";
 import { HistoryFilters, authorsOf, filterChips } from "./HistoryFilters";
@@ -560,7 +560,7 @@ function ActivityPanel(props: {
   const { entry: e, apiBase, restore } = props;
   const deleted = e.kind === "delete";
   const base = e.path.split("/").pop() || e.path;
-  const who = isAgent(e) ? agentName(e.note) : whoChanged(e);
+  const who = isAgent(e) ? agentName(e.note) : displayName(e);
   const dev = e.device.name || e.device.id;
   const when = new Date(e.time);
   const busy = !!restore?.busy && !!props.restorePrev && restore.busy === e.path + props.restorePrev;
