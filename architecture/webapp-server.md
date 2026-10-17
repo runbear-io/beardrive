@@ -63,10 +63,24 @@ classDiagram
     class volume {
         -source Source
         -refresh time.Duration
-        -snap *snapshot (files + moves)
+        -snap *snapshot (files + moves + encoded tree)
         +snapshot(ctx)
         +invalidate()
     }
+    class snapshot {
+        -files map path→FileInfo
+        -moves moveIndex
+        -tree map slim→encodedJSON
+        +fullTree(slim) encodedJSON
+    }
+    class encodedJSON {
+        +body []byte
+        +gz []byte
+        +etag string
+    }
+    volume --> snapshot : holds
+    snapshot --> encodedJSON : caches the full tree
+    note for snapshot "Immutable once built, so the /tree answer for a caller who may see every file is encoded once per snapshot — JSON, gzip and ETag — and served as stored (the gzip middleware passes a body that already carries Content-Encoding). A refresh whose fold is unchanged keeps the SAME snapshot, so the encoded tree survives it. Callers with hidden paths still get a per-request filtered tree"
 
     class Source {
         <<interface>>
@@ -90,7 +104,11 @@ classDiagram
         -jcache map key→cachedJournal
         -jbytes int64 raw bytes cached
         -loadSourcedOps(ctx) []sourcedOp
+        -listJournals(ctx) []remote.Object
+        -parsedJournals(ctx, keep) [][]journal.Op
         -cacheJournals(keep, misses, parsed, sizes)
+        -foldFP/foldFiles/foldMoves last fold
+        +FilesWithMoves(ctx) files, moves
         -appendOp(ctx, op)
         -appendOps(ctx, ops) ONE read-modify-write
     }
@@ -105,6 +123,7 @@ classDiagram
         +ops []journal.Op
     }
     note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp rewrites its key with strictly more bytes — so the (Size, Modified) List already reports proves a parse is still current. That is why the cache needs no expiry and no new Backend method: loadSourcedOps still Lists on every request, and fetches only the keys whose size or mtime moved (concurrently, limit 8). History used to re-download and re-parse EVERY journal per page, which is what made it 8-10s and made paging cost more rather than less. Bounded by a per-project raw-byte cap with all-or-nothing eviction"
+    note for RemoteSource "FilesWithMoves reuses the last fold when the journal listing (key, size, modified) is unchanged — journals only grow and replay is deterministic, so an idle project's refresh is one List. Otherwise byPathOrder groups ops by path and sorts each group by journal.Less instead of sorting the whole project: the last writer per path and the move pairing depend only on one path's own order, so the answer is the global sort's"
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
     note for RemoteSource "reassemble is delta sync's whole backward-compatibility story: when blobs/sha is absent (or fails verify), the manifest under manifests/sha names content-defined chunks that concatenate to the blob — spool, hash-verify against the sha requested, BACKFILL blobs/sha (best-effort; a failed write never fails the read), serve. Old clients ask for whole blobs and never learn anything changed; a hostile whole blob that fails verify is HEALED by the backfill when an honest manifest exists. Bounded by maxReassembleBytes (256 MiB) on the manifest's DECLARED sum, with each chunk's copy capped at its declared size — a member-written manifest is the one non-content-addressed object in the key space, so an amplified or oversized one is refused before it can spool"
