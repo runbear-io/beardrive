@@ -1631,3 +1631,19 @@ test("the click that ends a long-press does not open the row under its menu", as
   await page.locator('#tree .row[data-path="deploy.md"]').click();
   await expect(page).toHaveURL(new RegExp(`/${pid}/deploy\\.md$`));
 });
+
+// Radix opens a touch long-press from its own timer: no contextmenu event,
+// only a held pointer. The release click still must not open the row.
+test("a timer-opened long-press menu also swallows its release click", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  const row = page.locator('#tree .row[data-path="guide.md"]');
+  const box = (await row.boundingBox())!;
+  const at = { clientX: box.x + 40, clientY: box.y + box.height / 2, pointerType: "touch", isPrimary: true, pointerId: 7 };
+  await row.dispatchEvent("pointerdown", at);
+  await expect(page.getByRole("menu")).toBeVisible({ timeout: 3_000 });
+  await row.dispatchEvent("pointerup", at);
+  await row.dispatchEvent("click", at);
+  await expect(page).toHaveURL(new RegExp(`/${pid}/?$`));
+});

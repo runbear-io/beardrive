@@ -286,7 +286,12 @@ export function FileTree(props: {
               key={vi.key}
               modal={false}
               onOpenChange={(o) => {
-                if (o) noteMenuOpen();
+                if (o) {
+                  noteMenuOpen();
+                  // Radix opens a touch/pen long-press from its own timer,
+                  // which may never emit a native contextmenu event.
+                  if (pointerType.current && pointerType.current !== "mouse") pressOpenedMenu.current = n.path;
+                }
                 // Closed without the release click arriving (Escape, a tap
                 // elsewhere): nothing is left for the row to swallow.
                 else if (pressOpenedMenu.current === n.path) pressOpenedMenu.current = null;
