@@ -18,10 +18,10 @@ const apiOf = (pid: string) => "/api/p/" + pid + "/";
 
 // Changes since this reader's last visit, capped at what one page returns.
 export const ACTIVITY_CAP = 100;
-export function useActivityCount(pid: string | undefined): number | null {
+export function useSinceHistory(pid: string | undefined) {
   const since = useVisitBaseline(pid);
   const apiBase = pid ? apiOf(pid) : "";
-  const q = useQuery({
+  return useQuery({
     queryKey: ["history", apiBase, "since", since],
     queryFn: () =>
       getJSON<{ entries: HistoryEntry[] }>(
@@ -31,6 +31,9 @@ export function useActivityCount(pid: string | undefined): number | null {
     retry: false,
     staleTime: 15_000,
   });
+}
+export function useActivityCount(pid: string | undefined): number | null {
+  const q = useSinceHistory(pid);
   return q.data ? (q.data.entries || []).length : null;
 }
 

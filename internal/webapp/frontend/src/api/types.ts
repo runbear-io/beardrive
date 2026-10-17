@@ -240,6 +240,8 @@ export interface HistoryEntry {
   // the note not settable by hand). It groups a run card and is the key the
   // card's reads are fetched with.
   session?: string;
+  // With device.id, names one op uniquely; time is only to the second.
+  seq?: number;
 }
 
 // POST .../shares (handleShareCreate, shares.go)
