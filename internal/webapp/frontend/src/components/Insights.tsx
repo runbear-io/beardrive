@@ -122,11 +122,18 @@ function StatusMark({ p }: { p: { danger: boolean; empty: boolean } }) {
    tree only knows today's size, so a file that was always 0 B (a placeholder,
    an empty robots.txt) looks the same; the hub answers which files are
    emptied in one pass over the whole history (GET history/emptied). */
-function useEmptied(apiBase: string | undefined): Set<string> {
+function useEmptied(apiBase: string | undefined, files: Node[]): Set<string> {
+  // Keyed on the tree's own 0-byte files: whatever refreshes the tree — a
+  // change frame, a restore or remove here, the tree's fallback poll — also
+  // refreshes this whenever a file becomes, or stops being, empty.
+  const zero = files
+    .filter((f) => !f.size)
+    .map((f) => f.path + "@" + (f.time || ""))
+    .join("\n");
   const { data } = useQuery({
-    queryKey: ["emptied", apiBase],
+    queryKey: ["emptied", apiBase, zero],
     queryFn: () => getJSON<{ paths: string[] }>(apiBase + "history/emptied"),
-    enabled: !!apiBase,
+    enabled: !!apiBase && zero !== "",
     staleTime: 60_000,
   });
   return new Set(data?.paths ?? []);
@@ -145,7 +152,7 @@ export function Insights(props: {
   onOpenHistory: (path: string) => void;
   isFolder: (path: string) => boolean;
 }) {
-  const emptied = useEmptied(props.apiBase);
+  const emptied = useEmptied(props.apiBase, props.flatFiles);
   const [lens, setLens] = useState<Lens>("all");
   const [th, setTh] = useState<Thresholds>(loadThresholds);
   useEffect(() => {

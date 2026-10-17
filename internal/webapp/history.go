@@ -567,57 +567,47 @@ func sanitizeFilename(name string) string {
 }
 
 // handleHistoryEmptied lists the files that are EMPTIED: their current
-// version is 0 bytes and an earlier version had content. The tree only knows
-// today's size, which cannot tell an emptied note from a file that was always
-// empty, and asking for each file's history would scan the journal once per
-// file. One pass over the replayed ops answers it for the whole project.
+// version is 0 bytes and an earlier version — under this path or any path it
+// moved from — had content. The tree only knows today's size, which cannot
+// tell an emptied note from a file that was always empty, and asking for each
+// file's history would scan the journal once per file. The candidates are the
+// tree's own 0-byte files (RemoteSource.FilesWithMoves, so the replay rules
+// are the tree's), and each is checked along its move chain the way the
+// per-file history feed follows it.
 func (s *Server) handleHistoryEmptied(v *volume, w http.ResponseWriter, r *http.Request) {
 	rs := storeSource(v, w)
 	if rs == nil {
 		return
 	}
-	all, err := rs.loadSourcedOps(r.Context())
+	files, moves, err := rs.FilesWithMoves(r.Context())
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
-	sort.SliceStable(all, func(i, j int) bool { return journal.Less(all[i].Op, all[j].Op) })
-	type state struct {
-		size int64
-		live bool
-		link bool // the current version is a symlink: no content, not "emptied"
-		had  bool // some version ever had content
-	}
-	files := map[string]*state{}
-	for _, sop := range all {
-		op := sop.Op
-		st := files[op.Path]
-		if st == nil {
-			st = &state{}
-			files[op.Path] = st
-		}
-		if op.Kind == journal.KindDelete {
-			st.live = false
-			continue
-		}
-		// The tree's replay rules (RemoteSource.FilesWithMoves): a link is a
-		// file with no content, and a put whose blob is not a bare sha256 is
-		// ignored — the path keeps whatever it was.
-		if op.Link != "" {
-			st.size, st.live, st.link = 0, true, true
-			continue
-		}
-		if !blobRe.MatchString(op.Blob) {
-			continue
-		}
-		st.had = st.had || op.Size > 0
-		st.size, st.live, st.link = op.Size, true, false
-	}
 	vis := s.visibility(r)
+	var candidates []string
+	for p, fi := range files {
+		if fi.Size == 0 && fi.Link == "" && vis.canRead(p) {
+			candidates = append(candidates, p)
+		}
+	}
 	paths := []string{}
-	for p, st := range files {
-		if st.live && !st.link && st.size == 0 && st.had && vis.canRead(p) {
-			paths = append(paths, p)
+	if len(candidates) > 0 {
+		all, err := rs.loadSourcedOps(r.Context())
+		if err != nil {
+			storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
+			return
+		}
+		for _, p := range candidates {
+			chain := chainSegments(moves, p)
+			for _, sop := range all {
+				op := sop.Op
+				if op.Kind != journal.KindDelete && op.Link == "" && op.Size > 0 &&
+					blobRe.MatchString(op.Blob) && inSegments(chain, op.Path, op.Time) {
+					paths = append(paths, p)
+					break
+				}
+			}
 		}
 	}
 	sort.Strings(paths)

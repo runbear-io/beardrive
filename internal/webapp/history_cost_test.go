@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 )
@@ -77,13 +78,18 @@ func TestHistoryEmptied(t *testing.T) {
 	f.append("dev1", journal.Op{Kind: journal.KindPut, Path: "bogus.md", Blob: "../../other/blob", Size: 0})
 	f.put("dev1", "linked.md", "real content")
 	f.append("dev1", journal.Op{Kind: journal.KindPut, Path: "linked.md", Link: "target.md"})
+	// Emptied after a move: the content was under its old name.
+	t0 := time.Now().Add(-time.Hour)
+	f.putAt("dev1", "old-name.md", "moved content", t0)
+	f.move("dev1", "old-name.md", "new-name.md", "moved content", t0.Add(time.Minute))
+	f.putAt("dev1", "new-name.md", "", t0.Add(2*time.Minute))
 
 	rec := do(t, srv.Handler(), "GET", "/api/p/"+p.ID+"/history/emptied", nil)
 	var out struct{ Paths []string }
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
 		t.Fatalf("emptied: %d %s", rec.Code, rec.Body)
 	}
-	if len(out.Paths) != 1 || out.Paths[0] != "notes/daily.md" {
-		t.Fatalf("emptied = %v, want [notes/daily.md]", out.Paths)
+	if len(out.Paths) != 2 || out.Paths[0] != "new-name.md" || out.Paths[1] != "notes/daily.md" {
+		t.Fatalf("emptied = %v, want [new-name.md notes/daily.md]", out.Paths)
 	}
 }
