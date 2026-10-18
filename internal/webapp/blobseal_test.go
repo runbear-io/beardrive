@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/remote"
@@ -302,18 +304,13 @@ func TestLargeVerifiedBlobIsServedFromTheVerifiedBytes(t *testing.T) {
 	}
 }
 
-// A blob too large to keep is served from a second read checked as it goes.
-// If those bytes turn out not to be the reviewed ones, the client must not get
-// a complete 200: the connection is cut, so the body cannot be taken as whole.
-func TestUnverifiedStreamIsNeverACompleteResponse(t *testing.T) {
-	stored := strings.Repeat("x", 64<<10)
-	sum := sha256.Sum256([]byte(stored))
-	serve := func(body string) (int, string, error) {
+// A read that fails once the response has started must not end as a complete
+// 200: the connection is cut, so a short body cannot be taken as the file.
+func TestAStreamThatFailsIsNeverACompleteResponse(t *testing.T) {
+	serve := func(src io.Reader) (int, string, error) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/octet-stream")
-			copyOrAbort(w, &hashCheckedReader{
-				rc: io.NopCloser(strings.NewReader(body)), h: sha256.New(), sha: hex.EncodeToString(sum[:]),
-			})
+			copyOrAbort(w, src)
 		}))
 		defer ts.Close()
 		res, err := http.Get(ts.URL)
@@ -324,12 +321,34 @@ func TestUnverifiedStreamIsNeverACompleteResponse(t *testing.T) {
 		b, err := io.ReadAll(res.Body)
 		return res.StatusCode, string(b), err
 	}
-
-	if code, got, err := serve(stored); err != nil || code != 200 || got != stored {
-		t.Fatalf("honest bytes: %d, %d bytes, %v", code, len(got), err)
+	body := strings.Repeat("x", 64<<10)
+	if code, got, err := serve(strings.NewReader(body)); err != nil || code != 200 || got != body {
+		t.Fatalf("a whole read: %d, %d bytes, %v", code, len(got), err)
 	}
-	swapped := strings.Repeat("y", len(stored))
-	if _, _, err := serve(swapped); err == nil {
-		t.Fatal("bytes that do not hash to the blob's address arrived as a complete response")
+	broken := io.MultiReader(strings.NewReader(body), iotest.ErrReader(errors.New("storage went away")))
+	if _, _, err := serve(broken); err == nil {
+		t.Fatal("a read that failed mid-stream arrived as a complete response")
+	}
+}
+
+// A young blob too large to keep while it is checked is refused, not served
+// from a second read a replayed PUT could have changed — and is served once it
+// has sealed.
+func TestYoungBlobTooLargeToKeepIsRefusedUntilSealed(t *testing.T) {
+	_, be, dir := sealSource(t, time.Hour)
+	big := strings.Repeat("z", maxSpooledBody+1)
+	sha := sealPut(t, be, big)
+	src := &RemoteSource{Backend: be, PresignTTL: time.Hour}
+
+	sealAge(t, dir, time.Minute)
+	if _, err := sealTryRead(src, sha); !errors.Is(err, errUnverifiable) {
+		t.Fatalf("a young blob too large to keep was served (err %v)", err)
+	}
+	// Aged on disk rather than by the clock, so a hub that has not seen the
+	// blob yet: one that has keeps the first age it saw (maybeSeal).
+	sealAge(t, dir, 3*time.Hour)
+	later := &RemoteSource{Backend: be, PresignTTL: time.Hour}
+	if got, err := sealTryRead(later, sha); err != nil || len(got) != len(big) {
+		t.Fatalf("a sealed blob was not served: %d bytes, %v", len(got), err)
 	}
 }

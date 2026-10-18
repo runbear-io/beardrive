@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	ygows "github.com/reearth/ygo/provider/websocket"
-	"hash"
 	"io"
 	"io/fs"
 	"log"
@@ -531,14 +530,10 @@ func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser,
 			return body, nil
 		}
 		if rc, err := r.Backend.Get(ctx, "blobs/"+sha); err == nil {
-			if _, sealed := r.sealed.Load(sha); sealed {
-				return rc, nil
-			}
-			if _, canSign := r.Backend.(remote.PutSigner); canSign {
-				return &hashCheckedReader{rc: rc, h: sha256.New(), sha: sha}, nil
-			}
 			return rc, nil
 		}
+	} else if errors.Is(err, errUnverifiable) {
+		return nil, err
 	}
 	// No whole blob (or one that fails verification): the content may exist
 	// only as chunks + a manifest (delta sync, docs/delta-sync-prd.md).
@@ -681,8 +676,10 @@ func (r *RemoteSource) reassemble(ctx context.Context, sha string) (io.ReadClose
 // It returns the bytes it hashed, so the caller serves exactly what was
 // checked instead of reading the object again (a replayed PUT could land
 // between two reads): from memory up to maxVerifiedBody, from an unlinked temp
-// file up to maxSpooledBody. Past that the caller gets nil and reads again,
-// through hashCheckedReader. nil with no error also means no check was needed.
+// file up to maxSpooledBody. A blob larger than that cannot be served as
+// checked while it is still unsealed, so it is refused (errUnverifiable) until
+// it seals, at most sealAfter after it was written. nil with no error means no
+// check was needed.
 func (r *RemoteSource) verify(ctx context.Context, sha string) (io.ReadCloser, error) {
 	if _, canSign := r.Backend.(remote.PutSigner); !canSign {
 		return nil, nil
@@ -710,8 +707,17 @@ func (r *RemoteSource) verify(ctx context.Context, sha string) (io.ReadCloser, e
 		return nil, fmt.Errorf("stored content does not hash to its key")
 	}
 	r.maybeSeal(ctx, sha)
+	if keep.over {
+		if _, sealed := r.sealed.Load(sha); !sealed {
+			return nil, errUnverifiable
+		}
+	}
 	return keep.reader()
 }
+
+// errUnverifiable: the blob is too large to keep while it is checked, and
+// still young enough that a replayed presigned PUT could change it.
+var errUnverifiable = errors.New("this file was just uploaded and is too large to serve until it can be verified; try again later")
 
 // maxVerifiedBody is the largest blob verify keeps in memory; maxSpooledBody
 // the largest it keeps at all, in a temp file — the same bound reassembly
@@ -784,32 +790,10 @@ func (s *verifiedSpool) reader() (io.ReadCloser, error) {
 	}
 }
 
-// hashCheckedReader serves a blob too large to keep from a second read, and
-// fails the read at its end if those bytes do not hash to sha: what was
-// streamed cannot be recalled, but the response does not complete as if it
-// were the reviewed content.
-type hashCheckedReader struct {
-	rc  io.ReadCloser
-	h   hash.Hash
-	sha string
-}
-
-func (c *hashCheckedReader) Read(p []byte) (int, error) {
-	n, err := c.rc.Read(p)
-	c.h.Write(p[:n])
-	if err == io.EOF && hex.EncodeToString(c.h.Sum(nil)) != c.sha {
-		return n, fmt.Errorf("stored content changed while it was being served")
-	}
-	return n, err
-}
-
-func (c *hashCheckedReader) Close() error { return c.rc.Close() }
-
 // copyOrAbort streams stored bytes into a response. A read that fails once the
-// response has started — storage going away mid-stream, or hashCheckedReader
-// finding the bytes were not the reviewed ones — aborts the connection rather
-// than ending the response normally, so no client can take a short or
-// unverified body for a complete one. Handler goroutines only: net/http
+// response has started — storage going away mid-stream — aborts the
+// connection rather than ending the response normally, so no client can take
+// a short body for a complete one. Handler goroutines only: net/http
 // recovers http.ErrAbortHandler there and nowhere else.
 func copyOrAbort(dst io.Writer, src io.Reader) {
 	if _, err := io.Copy(dst, src); err != nil {
