@@ -16,6 +16,7 @@ import {
   isAgent,
   localDay,
   spanLabel,
+  isAllTime,
   summaryDays,
   summaryLabel,
 } from "../lib/activity";
@@ -443,7 +444,7 @@ function ActivitySummary({ apiBase, scope, filters }: { apiBase: string; scope: 
     /* offset alone */
   }
   const qs =
-    scope + rest + "&days=" + days + "&offset=" + -new Date().getTimezoneOffset() + (tz ? "&tz=" + encodeURIComponent(tz) : "");
+    scope + rest + (isAllTime(filters) ? "&all=1" : "") + "&days=" + days + "&offset=" + -new Date().getTimezoneOffset() + (tz ? "&tz=" + encodeURIComponent(tz) : "");
   const { data } = useQuery({
     queryKey: ["history-summary", apiBase, qs],
     queryFn: () => getJSON<HistorySummary>(apiBase + "history/summary?" + qs),
@@ -467,11 +468,11 @@ function ActivitySummary({ apiBase, scope, filters }: { apiBase: string; scope: 
       <div className="hsum-head">
         <div>
           <div className="hsum-total">
-            {data.total} change{data.total === 1 ? "" : "s"}
+            {data.total.toLocaleString()} change{data.total === 1 ? "" : "s"}
           </div>
           <div className="hsum-sub">
             {span && span + " · "}
-            {share}% by agents · {data.devices} device
+            {share}% by agents · {data.devices.toLocaleString()} device
             {data.devices === 1 ? "" : "s"}
             <span className="hsum-range"> · {label}</span>
           </div>
@@ -489,7 +490,7 @@ function ActivitySummary({ apiBase, scope, filters }: { apiBase: string; scope: 
             <div
               className={"hsum-col" + (today ? " today" : "")}
               key={d.date}
-              title={`${short(day)}: ${d.agent} by agents, ${d.human} by people`}
+              title={`${short(day)}: ${d.agent.toLocaleString()} by agents, ${d.human.toLocaleString()} by people`}
             >
               <div className="hsum-stack">
                 <span className="agent" style={{ height: (100 * d.agent) / max + "%" }} />

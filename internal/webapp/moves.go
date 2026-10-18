@@ -258,10 +258,18 @@ type segment struct {
 // ending at the hop that carried the file out of it. Used by history and
 // restore, so a moved file keeps reaching its own past versions.
 func chainSegments(idx moveIndex, p string) []segment {
-	type inbound struct {
-		from string
-		hop  time.Time
-	}
+	return chainFrom(inboundIndex(idx), p)
+}
+
+// inbound is one hop into a path: where the file came from, and when.
+type inbound struct {
+	from string
+	hop  time.Time
+}
+
+// inboundIndex inverts a move index into "who moved INTO this path". Built
+// once, it lets many chains be walked without re-scanning the index.
+func inboundIndex(idx moveIndex) map[string][]inbound {
 	into := map[string][]inbound{}
 	for src, evs := range idx {
 		for _, e := range evs {
@@ -270,6 +278,10 @@ func chainSegments(idx moveIndex, p string) []segment {
 			}
 		}
 	}
+	return into
+}
+
+func chainFrom(into map[string][]inbound, p string) []segment {
 	var segs []segment
 	seen := map[string]bool{p: true}
 	cur, upper := p, time.Time{}

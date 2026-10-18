@@ -92,6 +92,8 @@ export function useProjectEvents(
         coalesce = null;
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        // Mounted only on the Insights view, so other pages pay nothing.
+        qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
       }, COALESCE_MS);
     };
 
@@ -129,6 +131,7 @@ export function useProjectEvents(
       }
       if (ev.type === "scope") {
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
         // These two are keyed on the project id, not apiBase (useHub.ts), and
         // they are small and usually unmounted — invalidateQueries only marks
         // an inactive query stale — so the bare prefix is the cheap, correct

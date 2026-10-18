@@ -61,16 +61,22 @@ export function historyApiQuery(f: HistoryFilters | undefined, now = new Date())
   return s ? "&" + s : "";
 }
 
-// How many days the summary chart covers for a filter set with no custom
-// bounds; custom since/until name the days themselves.
+// No preset and no bounds: the feed is the whole history.
+export function isAllTime(f: HistoryFilters | undefined): boolean {
+  return !(f?.range && RANGE_DAYS[f.range]) && !f?.since && !f?.until;
+}
+
+// How many days the summary chart draws for a filter set with no custom
+// bounds (custom since/until name the days themselves). All time totals the
+// whole history and charts its last 30 days.
 export function summaryDays(f: HistoryFilters | undefined): number {
-  return (f?.range && RANGE_DAYS[f.range]) || 7;
+  return (f?.range && RANGE_DAYS[f.range]) || 30;
 }
 
 // What the summary header calls its window.
 export function summaryLabel(f: HistoryFilters | undefined): string {
   if (f?.range && RANGE_LABEL[f.range]) return RANGE_LABEL[f.range];
-  return f?.since || f?.until ? "Custom range" : "Last 7 days";
+  return f?.since || f?.until ? "Custom range" : "All time";
 }
 
 // "Today", "Yesterday", or the reader's own date format.

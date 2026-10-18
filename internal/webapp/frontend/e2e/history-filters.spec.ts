@@ -173,3 +173,25 @@ test("a filter change shows a loading row, never a premature 'no matches'", asyn
   await expect(page.locator(".history .hskel")).toHaveCount(0);
   await page.unroute(stall);
 });
+
+// All time is the feed with no lower bound: the request carries no since=,
+// the feed renders (not the error card), and Last 7 days still does too.
+test("All time and Last 7 days both show the feed", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const feedReqs: string[] = [];
+  page.on("request", (r) => {
+    const u = r.url();
+    if (/\/history\?/.test(u) && !u.includes("/history/summary")) feedReqs.push(u);
+  });
+  await page.goto(`/${pid}/activity`);
+  await expect(page.locator(rows).first()).toBeVisible();
+  await expect(page.locator(".herror")).toHaveCount(0);
+  const feed = feedReqs.find((u) => u.includes("prefix="))!;
+  expect(new URL(feed).searchParams.has("since")).toBe(false);
+
+  await page.selectOption(".hf-range", "7d");
+  await page.waitForURL(`/${pid}/activity?range=7d`);
+  await expect(page.locator(rows).first()).toBeVisible();
+  await expect(page.locator(".herror")).toHaveCount(0);
+});

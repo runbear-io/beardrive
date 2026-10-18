@@ -118,7 +118,29 @@ function StatusMark({ p }: { p: { danger: boolean; empty: boolean } }) {
   return null;
 }
 
+/* "Read, but now empty" means EMPTIED: 0 B now and had content before. The
+   tree only knows today's size, so a file that was always 0 B (a placeholder,
+   an empty robots.txt) looks the same; the hub answers which files are
+   emptied in one pass over the whole history (GET history/emptied). */
+function useEmptied(apiBase: string | undefined, files: Node[]): Set<string> {
+  // Keyed on the tree's own 0-byte files: whatever refreshes the tree — a
+  // change frame, a restore or remove here, the tree's fallback poll — also
+  // refreshes this whenever a file becomes, or stops being, empty.
+  const zero = files
+    .filter((f) => !f.size)
+    .map((f) => f.path + "@" + (f.time || ""))
+    .join("\n");
+  const { data } = useQuery({
+    queryKey: ["emptied", apiBase, zero],
+    queryFn: () => getJSON<{ paths: string[] }>(apiBase + "history/emptied"),
+    enabled: !!apiBase && zero !== "",
+    staleTime: 60_000,
+  });
+  return new Set(data?.paths ?? []);
+}
+
 export function Insights(props: {
+  apiBase?: string; // checks emptied files against their history; omitted, none is flagged
   flatFiles: Node[];
   heatMap: HeatMap | null;
   devices: DeviceHeat[] | null;
@@ -130,6 +152,7 @@ export function Insights(props: {
   onOpenHistory: (path: string) => void;
   isFolder: (path: string) => boolean;
 }) {
+  const emptied = useEmptied(props.apiBase, props.flatFiles);
   const [lens, setLens] = useState<Lens>("all");
   const [th, setTh] = useState<Thresholds>(loadThresholds);
   useEffect(() => {
@@ -189,8 +212,7 @@ export function Insights(props: {
     const e = (heatMap && heatMap[f.path]) || {};
     const days = f.time ? Math.max(0, (now - new Date(f.time).getTime()) / 86400000) : 0;
     const reads = lensReads(e);
-    // size is omitempty on the wire: an absent size on a file means 0 bytes.
-    const empty = !f.size && reads > 0;
+    const empty = emptied.has(f.path) && reads > 0;
     return {
       path: f.path,
       reads,
