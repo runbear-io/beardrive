@@ -286,7 +286,7 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 	if !s.writablePath(w, r, p) {
 		return
 	}
-	snap, err := v.snapshot(r.Context())
+	snap, err := v.snapshotHaving(r.Context(), p)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

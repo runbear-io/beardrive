@@ -1097,12 +1097,18 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		s.quota().RecordUsage(org, billed)
 	}
 	if strings.HasPrefix(key, "journal/") {
-		v.invalidate() // new ops should show in the viewer immediately
 		puts, deletes := countOps(ops, storedMax)
 		s.captureChange(r, "sync", puts, deletes)
-		// The same intent as the invalidate above, carried one hop further:
-		// a client watching the stream refetches now instead of on its poll.
-		s.publishChange(r, "sync", newOpPaths(ops, storedMax), puts, deletes)
+		// The viewer is rebuilt in the background rather than on the next
+		// read, so nobody browsing the project waits on a fold of every op in
+		// it for each device push. The stream is told once the rebuild has
+		// landed: a client that refetches on the event finds the new ops.
+		if ev, ok := changeEventFor(r, "sync", newOpPaths(ops, storedMax), puts, deletes); ok {
+			project := projectID(r)
+			v.refreshThen(func() { s.events().publish(project, ev) })
+		} else {
+			v.refreshThen(func() {})
+		}
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }

@@ -61,7 +61,7 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 	// API agrees with what the caller was looking at. A stale-snapshot 404 is
 	// a harmless retry; a second, hand-rolled replay could disagree and
 	// delete the wrong thing.
-	snap, err := v.snapshot(r.Context())
+	snap, err := v.snapshotHaving(r.Context(), p)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

@@ -277,6 +277,18 @@ type volume struct {
 	mu   sync.Mutex
 	snap *snapshot
 	at   time.Time
+	// gen numbers every rebuild as it starts, and snapGen is the one that
+	// produced snap: a rebuild that finishes after a newer one has landed is
+	// dropped rather than put back over it. staleThrough is the last gen
+	// that started before the latest invalidate: its listing may predate that
+	// write, so it is installed without counting as fresh.
+	gen, snapGen, staleThrough uint64
+
+	// Background rebuilds requested by refreshThen. bgDone holds the callbacks
+	// waiting for a rebuild that starts after they were queued.
+	bgMu      sync.Mutex
+	bgRunning bool
+	bgDone    []func()
 }
 
 type snapshot struct {
@@ -351,30 +363,133 @@ func (v *volume) snapshot(ctx context.Context) (*snapshot, error) {
 	if v.snap != nil && time.Since(v.at) < v.refresh {
 		return v.snap, nil
 	}
-	var (
-		files map[string]FileInfo
-		moves moveIndex
-		err   error
-	)
-	if ms, ok := v.source.(MoveSource); ok {
-		files, moves, err = ms.FilesWithMoves(ctx)
-	} else {
-		files, err = v.source.Files(ctx)
-	}
+	v.gen++
+	gen := v.gen
+	files, moves, err := v.load(ctx)
 	if err != nil {
 		if v.snap != nil {
 			return v.snap, nil // serve stale rather than fail
 		}
 		return nil, err
 	}
+	v.install(files, moves, gen)
+	return v.snap, nil
+}
+
+func (v *volume) load(ctx context.Context) (map[string]FileInfo, moveIndex, error) {
+	if ms, ok := v.source.(MoveSource); ok {
+		return ms.FilesWithMoves(ctx)
+	}
+	files, err := v.source.Files(ctx)
+	return files, nil, err
+}
+
+// install makes a rebuild the current snapshot unless a newer one already is.
+// Callers hold mu.
+func (v *volume) install(files map[string]FileInfo, moves moveIndex, gen uint64) {
+	if gen < v.snapGen {
+		return
+	}
+	v.snapGen = gen
+	at := time.Now()
+	if gen <= v.staleThrough {
+		at = time.Time{}
+	}
 	// The same fold as last time (see FilesWithMoves) keeps the same snapshot,
 	// and with it everything already encoded from it.
 	if v.snap != nil && sameMap(v.snap.files, files) {
-		v.at = time.Now()
-		return v.snap, nil
+		v.at = at
+		return
 	}
-	v.snap, v.at = &snapshot{files: files, moves: moves}, time.Now()
-	return v.snap, nil
+	v.snap, v.at = &snapshot{files: files, moves: moves}, at
+}
+
+// backgroundRebuildTimeout bounds one rebuild that no request is waiting on.
+const backgroundRebuildTimeout = 2 * time.Minute
+
+// refreshThen brings the snapshot up to date in the background and calls done
+// once a snapshot that includes every write accepted before the call is in
+// place. Readers keep getting the previous snapshot meanwhile instead of
+// waiting for the rebuild — which on a large project is a fold of every op in
+// it — and done is how watchers are told there is something new, so they are
+// told only once fetching will find it. Writes arriving during a rebuild are
+// gathered into the next one.
+func (v *volume) refreshThen(done func()) {
+	if v.refresh <= 0 {
+		// Every read rebuilds anyway; there is nothing to do in the background.
+		done()
+		return
+	}
+	v.bgMu.Lock()
+	v.bgDone = append(v.bgDone, done)
+	if v.bgRunning {
+		v.bgMu.Unlock()
+		return
+	}
+	v.bgRunning = true
+	v.bgMu.Unlock()
+	go v.rebuildLoop()
+}
+
+func (v *volume) rebuildLoop() {
+	for {
+		v.bgMu.Lock()
+		batch := v.bgDone
+		v.bgDone = nil
+		if len(batch) == 0 {
+			v.bgRunning = false
+			v.bgMu.Unlock()
+			return
+		}
+		v.bgMu.Unlock()
+
+		v.mu.Lock()
+		v.gen++
+		gen := v.gen
+		v.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), backgroundRebuildTimeout)
+		files, moves, err := v.load(ctx)
+		cancel()
+		v.mu.Lock()
+		if err == nil {
+			v.install(files, moves, gen)
+		} else {
+			v.at = time.Time{} // the next read retries in the foreground
+		}
+		v.mu.Unlock()
+		for _, f := range batch {
+			f()
+		}
+	}
+}
+
+// current is snapshot for a caller that must see every write already accepted
+// — seeding a co-editing room, resolving a path a client has just pushed —
+// rather than whatever a background rebuild has caught up to.
+func (v *volume) current(ctx context.Context) (*snapshot, error) {
+	v.bgMu.Lock()
+	behind := v.bgRunning
+	v.bgMu.Unlock()
+	if behind {
+		v.invalidate()
+	}
+	return v.snapshot(ctx)
+}
+
+// snapshotHaving is snapshot for a caller about to look up p: a path missing
+// from it is looked for again in current, since a client may have just pushed
+// it and be addressing it before the background rebuild has caught up.
+func (v *volume) snapshotHaving(ctx context.Context, p string) (*snapshot, error) {
+	snap, err := v.snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := snap.files[p]; !ok {
+		if cur, err := v.current(ctx); err == nil {
+			return cur, nil
+		}
+	}
+	return snap, nil
 }
 
 func sameMap(a, b map[string]FileInfo) bool {
@@ -386,6 +501,7 @@ func sameMap(a, b map[string]FileInfo) bool {
 func (v *volume) invalidate() {
 	v.mu.Lock()
 	v.at = time.Time{}
+	v.staleThrough = v.gen
 	v.mu.Unlock()
 }
 
@@ -1931,6 +2047,14 @@ func (s *Server) lookup(v *volume, r *http.Request) (string, FileInfo, int, erro
 		return "", FileInfo{}, http.StatusBadGateway, fmt.Errorf("content temporarily unavailable")
 	}
 	fi, ok := snap.files[p]
+	if !ok {
+		// A path a client has just pushed may not be in the snapshot yet while
+		// a background rebuild catches up (refreshThen).
+		if cur, err := v.current(r.Context()); err == nil && cur != snap {
+			snap = cur
+			fi, ok = snap.files[p]
+		}
+	}
 	if !ok {
 		// The address is empty — but the file may have moved out of it. A
 		// LIVE path always wins, which falls out of the ordering: the

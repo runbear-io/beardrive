@@ -64,9 +64,14 @@ classDiagram
         -source Source
         -refresh time.Duration
         -snap *snapshot (files + moves + encoded tree)
+        -gen, snapGen, staleThrough
         +snapshot(ctx)
+        +current(ctx) never behind a background rebuild
+        +snapshotHaving(ctx, p) current() when p is missing
+        +refreshThen(done) rebuild in background, then done
         +invalidate()
     }
+    note for volume "A device's journal PUT is folded in by refreshThen in the background, and its change event is published only once that rebuild has landed: readers keep the previous snapshot instead of waiting on a fold of every op, and a watcher that refetches on the event finds the new ops. Writes during a rebuild are gathered into the next one; gen/snapGen keep a slow rebuild from putting an older listing back over a newer one, and staleThrough keeps a rebuild that started before an invalidate from satisfying it. Hub-side writes (uploads, restore, remove) invalidate. current() is for callers that must see everything accepted: the If-Match head check and co-editing room seeds. snapshotHaving(p) falls back to current() when p is missing, for doors that address a path a client may have just pushed (lookup, share, comment, remove)"
     class snapshot {
         -files map path→FileInfo
         -moves moveIndex
@@ -592,7 +597,7 @@ classDiagram
         -repo ReadRepo
         -sessions SessionReadRepo
         -retention, sessionRetention
-        -byKey, dirty, seen, pendingSess
+        -byProject project→bucket map, dirty, seen, pendingSess
         +Record(...)
         +RecordSession(project, session, device, path)
         +Heat(project, prefix, days)

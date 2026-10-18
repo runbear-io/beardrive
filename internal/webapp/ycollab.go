@@ -391,7 +391,9 @@ func (s *Server) roomBytes(room string) ([]byte, string, bool) {
 		return nil, "", false
 	}
 	ctx := context.Background()
-	snap, err := v.snapshot(ctx)
+	// A room is built from what the file IS, not from a snapshot a background
+	// rebuild has not caught up on yet.
+	snap, err := v.current(ctx)
 	if err != nil {
 		return nil, "", false
 	}
