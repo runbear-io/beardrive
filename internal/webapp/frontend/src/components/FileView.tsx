@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
@@ -23,13 +23,16 @@ import { useTheme } from "../lib/theme";
 import { secretsBadge, type SecretFinding } from "../lib/secrets";
 import { Icon } from "./shell";
 import { toast } from "../toast";
-import { Editor, type EditMode, type EditorInfo, type SaveState } from "./Editor";
+import type { EditMode, EditorInfo, SaveState } from "./Editor";
 import { EditRail } from "./EditRail";
 import { Avatar } from "./PresenceBar";
-import { remoteCursors } from "../lib/cm-meeting";
 import { agoShort, byteLength, isMeetingNote, sectionAt, sections, wordCount } from "../lib/meeting";
-import { VisualEdit } from "./VisualEdit";
 import type { CollabStatus } from "../lib/collab";
+
+// The editors carry CodeMirror, TipTap/ProseMirror and the Yjs collaboration
+// stack, none of which a reader needs, so they load when someone edits.
+const Editor = lazy(() => import("./Editor").then((m) => ({ default: m.Editor })));
+const VisualEdit = lazy(() => import("./VisualEdit").then((m) => ({ default: m.VisualEdit })));
 
 export function FileView(props: {
   apiBase: string;
@@ -354,7 +357,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
       setEditors([...new Set(names)]);
       const secs = sections(textRef.current);
       const on = new Set<string>();
-      for (const c of remoteCursors(roomDoc)) {
+      for (const c of roomDoc.remoteCursors()) {
         const sec = sectionAt(secs, c.pos);
         if (sec) on.add(sec.name);
       }
@@ -557,6 +560,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           onRestored={onRestored}
         />
       )}
+      <Suspense fallback={<div className="empty">Loading editor…</div>}>
       {visual ? (
         /* HTML gets the rendered page, clicked directly. Same file, same
            shared document, same save — a different surface onto it. Source
@@ -614,6 +618,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
         />
         </div>
       )}
+      </Suspense>
       {mode === "preview" && !visual && <EditPreview {...props} />}
       {!visual && (
         <div className="ed-statusbar" id="ed-statusbar">

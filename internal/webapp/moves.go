@@ -68,9 +68,11 @@ func (e pathEvent) hop() time.Time {
 // REPLACED its own.
 type moveIndex map[string][]pathEvent
 
-// buildMoveIndex pairs deletes with creates. ops must already be sorted by
-// journal.Less — every caller has them that way (the replay, the history
-// feed) so the index costs no extra I/O and no extra pass over storage.
+// buildMoveIndex pairs deletes with creates. Each path's ops must be in
+// journal.Less order; the order ACROSS paths does not matter, since the walk
+// below tracks state per path and the pairing only counts candidates. The
+// replay hands it ops grouped by path (byPathOrder), the history feed a global
+// sort — both qualify, and the index costs no extra pass over storage.
 //
 // A delete of A pairs with the first-ever put of B when all hold: same
 // Op.Device (one device's scan produces both halves), |Δt| ≤ moveWindow,
@@ -94,7 +96,7 @@ func buildMoveIndex(ops []journal.Op) moveIndex {
 			// storage key suffix, so anything else is a path the writer
 			// chose). The index has to agree, or it would pair against a
 			// version the viewer never shows.
-			if !blobRe.MatchString(op.Blob) {
+			if !isBlobSHA(op.Blob) {
 				continue
 			}
 			if !ever[op.Path] {
