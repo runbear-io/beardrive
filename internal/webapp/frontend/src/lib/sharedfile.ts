@@ -401,7 +401,16 @@ export function openSharedFile(opts: {
   const onReady = () => opts.onReady(collab);
   const onSolo = () => opts.onSolo();
   const url = roomURL(opts.apiBase, opts.path);
-  const warm = hasCollabRoute(opts.apiBase) ? takeWarmRoom(url) : null;
+  let warm = hasCollabRoute(opts.apiBase) ? takeWarmRoom(url) : null;
+  /* A room opened ahead is taken only if it cannot be older than the read
+     this file is built on. Not synced yet: it will sync after that read, the
+     same as a connection opened now. Synced already, onto text other than the
+     read's: the file moved in between, so it is dropped and a connection is
+     opened afresh. */
+  if (warm && warm.synced && warm.text.toString() !== opts.seed) {
+    warm.destroy();
+    warm = null;
+  }
   const collab = warm ?? new CollabDoc(url, onStatus, onReady, onSolo, opts.me);
   if (warm) warm.rebind(onStatus, onReady, onSolo);
 

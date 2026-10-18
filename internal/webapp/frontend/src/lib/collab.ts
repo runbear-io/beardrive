@@ -82,6 +82,11 @@ export class CollabDoc {
     }
   }
 
+  /** Whether the hub's document has arrived. */
+  get synced(): boolean {
+    return this.reached;
+  }
+
   private emit(s: CollabStatus) {
     this.status = s;
     this.onStatus(s);
