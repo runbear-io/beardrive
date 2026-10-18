@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	ygows "github.com/reearth/ygo/provider/websocket"
+	"hash"
 	"io"
 	"io/fs"
 	"log"
@@ -527,9 +528,15 @@ func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser,
 		// one storage read instead of two, and nothing can change between
 		// the check and the read.
 		if body != nil {
-			return io.NopCloser(bytes.NewReader(body)), nil
+			return body, nil
 		}
 		if rc, err := r.Backend.Get(ctx, "blobs/"+sha); err == nil {
+			if _, sealed := r.sealed.Load(sha); sealed {
+				return rc, nil
+			}
+			if _, canSign := r.Backend.(remote.PutSigner); canSign {
+				return &hashCheckedReader{rc: rc, h: sha256.New(), sha: sha}, nil
+			}
 			return rc, nil
 		}
 	}
@@ -671,10 +678,12 @@ func (r *RemoteSource) reassemble(ctx context.Context, sha string) (io.ReadClose
 // pays the full hash. Persisting it needs somewhere to record "the hub has
 // seen these bytes", which is a metadata-store change for a cost paid once.
 //
-// It returns the bytes it hashed when they fit in maxVerifiedBody, so the
-// caller can serve them instead of reading the object a second time; nil
-// means "verified (or no check needed), read it yourself".
-func (r *RemoteSource) verify(ctx context.Context, sha string) ([]byte, error) {
+// It returns the bytes it hashed, so the caller serves exactly what was
+// checked instead of reading the object again (a replayed PUT could land
+// between two reads): from memory up to maxVerifiedBody, from an unlinked temp
+// file up to maxSpooledBody. Past that the caller gets nil and reads again,
+// through hashCheckedReader. nil with no error also means no check was needed.
+func (r *RemoteSource) verify(ctx context.Context, sha string) (io.ReadCloser, error) {
 	if _, canSign := r.Backend.(remote.PutSigner); !canSign {
 		return nil, nil
 	}
@@ -686,47 +695,115 @@ func (r *RemoteSource) verify(ctx context.Context, sha string) ([]byte, error) {
 		return nil, err
 	}
 	h := sha256.New()
-	keep := &cappedBuffer{max: maxVerifiedBody}
+	keep := &verifiedSpool{}
 	_, err = io.Copy(io.MultiWriter(h, keep), rc)
 	rc.Close()
+	if err == nil {
+		err = keep.err
+	}
 	if err != nil {
+		keep.discard()
 		return nil, err
 	}
 	if hex.EncodeToString(h.Sum(nil)) != sha {
+		keep.discard()
 		return nil, fmt.Errorf("stored content does not hash to its key")
 	}
 	r.maybeSeal(ctx, sha)
-	return keep.bytes(), nil
+	return keep.reader()
 }
 
-// maxVerifiedBody is the largest blob verify keeps to serve from memory.
-const maxVerifiedBody = 8 << 20
+// maxVerifiedBody is the largest blob verify keeps in memory; maxSpooledBody
+// the largest it keeps at all, in a temp file — the same bound reassembly
+// spools to, since the temp dir is RAM on a tmpfs deployment.
+const (
+	maxVerifiedBody = 8 << 20
+	maxSpooledBody  = maxReassembleBytes
+)
 
-// cappedBuffer keeps what is written until it passes max, then nothing.
-type cappedBuffer struct {
-	buf  bytes.Buffer
-	max  int
+// verifiedSpool keeps what is written: in memory, then in an unlinked temp file once
+// past maxVerifiedBody, then nothing once past maxSpooledBody.
+type verifiedSpool struct {
+	mem  bytes.Buffer
+	file *os.File
+	n    int64
 	over bool
+	err  error
 }
 
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if !c.over {
-		if c.buf.Len()+len(p) > c.max {
-			c.over = true
-			c.buf = bytes.Buffer{}
-		} else {
-			c.buf.Write(p)
+func (s *verifiedSpool) Write(p []byte) (int, error) {
+	if s.over || s.err != nil {
+		return len(p), nil
+	}
+	s.n += int64(len(p))
+	switch {
+	case s.n > maxSpooledBody:
+		s.discard()
+		s.over = true
+	case s.file != nil:
+		_, s.err = s.file.Write(p)
+	case s.n > maxVerifiedBody:
+		f, err := os.CreateTemp("", ".bdrive-verified-*")
+		if err != nil {
+			s.err = err
+			break
 		}
+		os.Remove(f.Name()) // served from the fd; nothing to clean up on any path
+		s.file = f
+		if _, s.err = f.Write(s.mem.Bytes()); s.err == nil {
+			_, s.err = f.Write(p)
+		}
+		s.mem = bytes.Buffer{}
+	default:
+		s.mem.Write(p)
 	}
 	return len(p), nil
 }
 
-func (c *cappedBuffer) bytes() []byte {
-	if c.over {
-		return nil
+func (s *verifiedSpool) discard() {
+	if s.file != nil {
+		s.file.Close()
+		s.file = nil
 	}
-	return c.buf.Bytes()
+	s.mem = bytes.Buffer{}
 }
+
+// reader returns what was kept, or nil when it was too large to keep.
+func (s *verifiedSpool) reader() (io.ReadCloser, error) {
+	switch {
+	case s.over:
+		return nil, nil
+	case s.file != nil:
+		if _, err := s.file.Seek(0, io.SeekStart); err != nil {
+			s.discard()
+			return nil, err
+		}
+		return s.file, nil
+	default:
+		return io.NopCloser(bytes.NewReader(s.mem.Bytes())), nil
+	}
+}
+
+// hashCheckedReader serves a blob too large to keep from a second read, and
+// fails the read at its end if those bytes do not hash to sha: what was
+// streamed cannot be recalled, but the response does not complete as if it
+// were the reviewed content.
+type hashCheckedReader struct {
+	rc  io.ReadCloser
+	h   hash.Hash
+	sha string
+}
+
+func (c *hashCheckedReader) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	c.h.Write(p[:n])
+	if err == io.EOF && hex.EncodeToString(c.h.Sum(nil)) != c.sha {
+		return n, fmt.Errorf("stored content changed while it was being served")
+	}
+	return n, err
+}
+
+func (c *hashCheckedReader) Close() error { return c.rc.Close() }
 
 // maybeSeal stops re-hashing a blob once no presigned URL for it can still be
 // live.

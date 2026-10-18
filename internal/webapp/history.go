@@ -425,11 +425,13 @@ func (s *Server) handleHistorySummary(v *volume, w http.ResponseWriter, r *http.
 		out.Days[i].Date = day
 		index[day] = i
 	}
-	all, err := rs.loadSourcedOps(r.Context())
+	// The feed's shared index: read-only, and in no particular need of order.
+	idx, err := rs.historyIndex(r.Context())
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
+	all := idx.all
 	vis := s.visibility(r)
 	devices := map[string]bool{}
 	// ?all=1 totals every op the filters keep, while the bars still cover

@@ -265,3 +265,37 @@ func TestBlobThatFailsVerificationIsNeverSealed(t *testing.T) {
 		}
 	}
 }
+
+// swapAfterFirstGet serves the stored blob to the first read and different
+// bytes to every later one: a replayed presigned PUT landing between the read
+// that verifies a blob and a read that would serve it.
+type swapAfterFirstGet struct {
+	*sealBackend
+	later []byte
+	n     int
+}
+
+func (b *swapAfterFirstGet) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	b.n++
+	if b.n > 1 {
+		return io.NopCloser(strings.NewReader(string(b.later))), nil
+	}
+	return b.sealBackend.Get(ctx, key)
+}
+
+// A blob too large to keep in memory is still served from the bytes that were
+// verified — never from a second read that a replay could have changed.
+func TestLargeVerifiedBlobIsServedFromTheVerifiedBytes(t *testing.T) {
+	_, be, _ := sealSource(t, time.Hour)
+	big := strings.Repeat("reviewed ", (maxVerifiedBody/9)+4096) // past the in-memory cap
+	sha := sealPut(t, be, big)
+	src := &RemoteSource{Backend: &swapAfterFirstGet{sealBackend: be, later: []byte("hostile")}, PresignTTL: time.Hour}
+
+	got, err := sealTryRead(src, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != big {
+		t.Fatalf("served %d bytes that are not the verified blob (%d bytes)", len(got), len(big))
+	}
+}
