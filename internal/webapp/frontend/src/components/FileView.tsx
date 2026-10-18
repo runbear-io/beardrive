@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Button } from "@/components/ui/button";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
@@ -42,15 +43,46 @@ let editorModule: EditorModule | null = null;
 let visualModule: VisualEditModule | null = null;
 let editorLoad: Promise<EditorModule> | null = null;
 let visualLoad: Promise<VisualEditModule> | null = null;
-const loadEditor = () => (editorLoad ??= import("./Editor").then((m) => (editorModule = m)));
-const loadVisualEdit = () => (visualLoad ??= import("./VisualEdit").then((m) => (visualModule = m)));
+// A failed import is forgotten rather than cached, so the next attempt tries
+// the network again (a deploy can replace the chunk under an open tab).
+const loadEditor = () =>
+  (editorLoad ??= import("./Editor")
+    .then((m) => (editorModule = m))
+    .catch((e) => {
+      editorLoad = null;
+      throw e;
+    }));
+const loadVisualEdit = () =>
+  (visualLoad ??= import("./VisualEdit")
+    .then((m) => (visualModule = m))
+    .catch((e) => {
+      visualLoad = null;
+      throw e;
+    }));
 
-function useModule<T>(have: T | null, load: () => Promise<T>): T | null {
+function useModule<T>(have: T | null, load: () => Promise<T>): { mod: T | null; failed: boolean; retry: () => void } {
   const [m, setM] = useState(have);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    if (!m) void load().then(setM);
-  }, [m, load]);
-  return m;
+    if (m) return;
+    let live = true;
+    load().then(
+      (got) => live && setM(got),
+      () => live && setFailed(true),
+    );
+    return () => {
+      live = false;
+    };
+  }, [m, load, attempt]);
+  return {
+    mod: m,
+    failed,
+    retry: () => {
+      setFailed(false);
+      setAttempt((a) => a + 1);
+    },
+  };
 }
 
 // What the editing page has to load before it can show anything: the editor
@@ -362,8 +394,9 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // editing starts, and nothing is built until that read answers: a cached copy
   // — an earlier read, a hover prefetch — may be older than a peer's write.
   // A copy fetched just now is only shown, read-only, while the read is out.
-  const [openedAt] = useState(() => Date.now());
-  const [revalidated, setRevalidated] = useState(false);
+  // Per file: the same page can move to another path without remounting.
+  const openedAt = useMemo(() => Date.now(), [fileURL]);
+  const [revalidatedFor, setRevalidatedFor] = useState<string | null>(null);
   const { refetch } = text;
   useEffect(() => {
     let live = true;
@@ -372,16 +405,19 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     void refetch({ cancelRefetch: true }).then((r) => {
       // A failed read leaves any cached copy in place; that copy must not
       // seed the session either.
-      if (live && r.status === "success" && !r.isRefetchError) setRevalidated(true);
+      if (live && r.status === "success" && !r.isRefetchError) setRevalidatedFor(fileURL);
     });
     return () => {
       live = false;
     };
-  }, [refetch]);
-  const data = revalidated ? text.data : undefined;
+  }, [refetch, fileURL]);
+  const data = revalidatedFor === fileURL ? text.data : undefined;
   const glimpse = text.data && text.dataUpdatedAt >= openedAt - EDIT_PREVIEW_MAX_AGE_MS ? text.data : undefined;
-  const Editor = useModule(editorModule, loadEditor)?.Editor;
-  const VisualEdit = useModule(visualModule, loadVisualEdit)?.VisualEdit;
+  const editorMod = useModule(editorModule, loadEditor);
+  const visualMod = useModule(visualModule, loadVisualEdit);
+  const Editor = editorMod.mod?.Editor;
+  const VisualEdit = visualMod.mod?.VisualEdit;
+  const loadFailed = visual ? visualMod : editorMod;
   const [state, setState] = useState<SaveState>("clean");
   const [collab, setCollab] = useState<CollabStatus>("connecting");
   const md = MD_EXT.test(path);
@@ -629,7 +665,14 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           onRestored={onRestored}
         />
       )}
-      {visual ? (
+      {loadFailed.failed ? (
+        <div className="empty">
+          Could not load the editor.{" "}
+          <Button variant="toolbar" onClick={loadFailed.retry}>
+            Try again
+          </Button>
+        </div>
+      ) : visual ? (
         !VisualEdit ? (
           <div className="empty">Loading editor…</div>
         ) : (
