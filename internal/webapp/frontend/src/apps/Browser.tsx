@@ -877,7 +877,9 @@ export default function Browser(props: {
       />
     );
   } else if (route.view === "history") {
-    // structured view — default app column, like the folder listing it shares rows with
+    // the wide column: the feed and its change panel side by side (style.css .activity)
+    pageWidth = "wide";
+    pageClass = "activity-page";
     view = (
       <HistoryView
         apiBase={apiBase}

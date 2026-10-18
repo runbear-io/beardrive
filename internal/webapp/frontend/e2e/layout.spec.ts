@@ -46,7 +46,7 @@ test("every view shares one column system", async ({ page }) => {
   await visit("/install", "app"); // the same guide, so the same column
   await visit("/settings", "app");
   await visit("/dashboard", "wide"); // data-dense: treemap and hot path side by side
-  await visit("/history", "app"); // structured view, not a file render
+  await visit("/history", "wide"); // the feed and its change panel side by side
   await visit("/index.md", "read"); // rendered markdown — the only read surface
   await visit("/notes", "app"); // folder listing is a structured view too
 });

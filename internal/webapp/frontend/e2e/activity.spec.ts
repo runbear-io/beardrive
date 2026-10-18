@@ -230,3 +230,47 @@ test("a past version's Rendered tab routes its links and wikilinks in-app", asyn
     await p.close();
   }
 });
+
+test.describe("two-zone layout at 1440", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("the filter bar keeps path, segment, device and date on one line", async ({ page }) => {
+    await login(page);
+    const pid = await wikiId(page);
+    await page.goto(`/${pid}/activity`);
+    await expect(page.locator(rows).first()).toBeVisible();
+    await expect(page.locator("#sidebar")).toBeVisible();
+    const boxes = await Promise.all(
+      [".hf-search", ".hf-seg", ".hf-device", ".hf-range"].map((s) => page.locator(".hfilters " + s).boundingBox()),
+    );
+    const tops = boxes.map((b) => Math.round(b!.y + b!.height / 2));
+    for (const t of tops) expect(Math.abs(t - tops[0])).toBeLessThanOrEqual(2);
+  });
+
+  test("the panel shows a guide until a row is selected, then the change", async ({ page }) => {
+    await login(page);
+    const pid = await wikiId(page);
+    await page.goto(`/${pid}/activity`);
+    await expect(page.locator(rows).first()).toBeVisible();
+    const guide = page.locator(".apanel-empty");
+    await expect(guide).toBeVisible();
+    await expect(guide).toContainText("Select a change");
+    await expect(page.locator(".apanel")).toHaveCount(0);
+    const feed = await page.locator(".history").boundingBox();
+    expect(feed!.width).toBeGreaterThan(560);
+
+    const row = page.locator(".history > .hentry", { hasText: "guide.md" }).first();
+    await row.locator(".hsel-btn").click();
+    const panel = page.locator(".apanel");
+    await expect(panel).toBeVisible();
+    await expect(guide).toHaveCount(0);
+    await expect(panel.locator(".ap-path")).toContainText("guide.md");
+    const pb = await panel.boundingBox();
+    expect(Math.round(pb!.width)).toBe(440);
+    // docked beside the feed, not over it
+    expect(pb!.x).toBeGreaterThanOrEqual(feed!.x + feed!.width);
+    await page.locator("body").press("Escape");
+    await expect(panel).toHaveCount(0);
+    await expect(guide).toBeVisible();
+  });
+});

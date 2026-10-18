@@ -1156,6 +1156,31 @@ a.ai-main:hover { color: var(--accent-ink); }
 .dtabs-img { max-width: 100%; }
 .ap-foot { padding: 9px 16px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-faint); }
 @media (max-width: 700px) { .apanel { top: 0; } }
+/* Two zones from 1200px: the feed, and a 440px change panel docked to the
+   right edge of the content area for its whole height (bleeding through
+   #content's right gutter and top padding). Below that the panel is the
+   drawer above and its resting guide is not shown. */
+.apanel-empty { display: none; }
+.activity > .history { max-width: var(--page-app); margin-inline: auto; }
+@media (min-width: 1200px) {
+  .activity.two-zone { display: grid; grid-template-columns: minmax(0, 1fr) 440px; column-gap: 32px; align-items: start; margin-right: -40px; }
+  .activity.two-zone > .history { min-width: 0; max-width: none; margin: 0; }
+  .activity.two-zone > .apanel, .activity.two-zone > .apanel-empty {
+    position: sticky; z-index: 1; top: -44px; margin-top: -44px; right: auto; bottom: auto;
+    width: auto; height: calc(100vh - 52px); box-shadow: none;
+  }
+  .apanel-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 32px; border-left: 1px solid var(--border); background: var(--bg-side); text-align: center; color: var(--text-dim); font-size: 13px; }
+  .apanel-empty > .ico { width: 22px; height: 22px; color: var(--text-faint); }
+  .apanel-empty b { color: var(--text-bright); font-size: 14px; font-weight: 600; }
+  .apanel-empty .ap-keys { margin-top: 6px; font-size: 11.5px; color: var(--text-faint); }
+  .apanel-empty kbd { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; font: inherit; font-size: 11px; }
+  /* Path, segment, device and date share one line beside the panel. */
+  .activity.two-zone .hf-search { flex: 1 1 140px; min-width: 120px; }
+  .activity.two-zone .hf-seg button { padding: 0 8px; }
+  .activity.two-zone .hf-device { max-width: 150px; }
+}
+/* Narrow columns: the path box takes its own line and the pickers wrap under it. */
+@media (max-width: 760px) { .hf-search { flex-basis: 100%; } }
 .hentry { padding: 11px 12px; border-bottom: 1px solid var(--border); --hindent: 72px; }
 .hentry:hover { background: var(--row-hover-faint); }
 .hline { display: flex; gap: 10px; align-items: center; }

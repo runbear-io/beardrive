@@ -77,6 +77,9 @@ export function HistoryFilters(props: {
     filters?.device && !devices.some((d) => d.id === filters.device)
       ? [{ id: filters.device, name: filters.device }, ...devices]
       : devices;
+  // One control narrows by machine or by account: both answer "whose
+  // changes". A URL carrying both shows the device; the chips name each.
+  const who = filters?.device ? "d:" + filters.device : filters?.user ? "u:" + filters.user : "";
   const active = hasHistoryFilters(filters);
   const zone = localZone();
   return (
@@ -110,31 +113,37 @@ export function HistoryFilters(props: {
         <Icon name="laptop" />
         <select
           className="hf-device"
-          value={filters?.device ?? ""}
-          aria-label="Filter by device"
-          onChange={(e) => set({ device: e.target.value })}
+          value={who}
+          aria-label="Filter by device or person"
+          onChange={(e) => {
+            const v = e.target.value;
+            set({
+              device: v.startsWith("d:") ? v.slice(2) : undefined,
+              user: v.startsWith("u:") ? v.slice(2) : undefined,
+            });
+          }}
         >
           <option value="">All devices</option>
-          {devOptions.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name}
-            </option>
-          ))}
+          {devOptions.length > 0 && (
+            <optgroup label="Devices">
+              {devOptions.map((d) => (
+                <option key={d.id} value={"d:" + d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {options.length > 0 && (
+            <optgroup label="People">
+              {options.map((a) => (
+                <option key={a} value={"u:" + a}>
+                  {a}
+                </option>
+              ))}
+            </optgroup>
+          )}
         </select>
       </span>
-      <select
-        className="hf-user"
-        value={filters?.user ?? ""}
-        aria-label="Filter by author"
-        onChange={(e) => set({ user: e.target.value })}
-      >
-        <option value="">Anyone</option>
-        {options.map((a) => (
-          <option key={a} value={a}>
-            {a}
-          </option>
-        ))}
-      </select>
       <span className="hf-pick">
         <Icon name="clock" />
         <select
