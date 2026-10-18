@@ -188,7 +188,7 @@ refresh re-reads the grants and clients when the store says they moved.
 	consent that is mid-flight.
 */
 func (m *MCPAuth) refresh() {
-	token, stale := m.ver.stale(m.repo)
+	token, stale := m.ver.stale(m.repo, &m.mu)
 	if !stale {
 		return
 	}

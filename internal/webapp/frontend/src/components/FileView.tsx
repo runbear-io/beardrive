@@ -1,5 +1,6 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Button } from "@/components/ui/button";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
 import { fetchBlobText, fileURLFor, useTextAt } from "../hooks/useBlob";
@@ -29,10 +30,77 @@ import { Avatar } from "./PresenceBar";
 import { agoShort, byteLength, isMeetingNote, sectionAt, sections, wordCount } from "../lib/meeting";
 import type { CollabStatus } from "../lib/collab";
 
-// The editors carry CodeMirror, TipTap/ProseMirror and the Yjs collaboration
-// stack, none of which a reader needs, so they load when someone edits.
-const Editor = lazy(() => import("./Editor").then((m) => ({ default: m.Editor })));
-const VisualEdit = lazy(() => import("./VisualEdit").then((m) => ({ default: m.VisualEdit })));
+/* The editors carry CodeMirror, TipTap/ProseMirror and the Yjs collaboration
+   stack, none of which a reader needs, so they load when someone edits.
+
+   Loaded by hand rather than with React.lazy: lazy suspends on its first
+   render even when the module is already here, and React then holds the
+   Suspense fallback for at least 300 ms. A module fetched ahead of time (see
+   preloadEditor) is rendered on the first pass instead. */
+type EditorModule = typeof import("./Editor");
+type VisualEditModule = typeof import("./VisualEdit");
+let editorModule: EditorModule | null = null;
+let visualModule: VisualEditModule | null = null;
+let editorLoad: Promise<EditorModule> | null = null;
+let visualLoad: Promise<VisualEditModule> | null = null;
+// A failed import is forgotten rather than cached, so the next attempt tries
+// the network again (a deploy can replace the chunk under an open tab).
+const loadEditor = () =>
+  (editorLoad ??= import("./Editor")
+    .then((m) => (editorModule = m))
+    .catch((e) => {
+      editorLoad = null;
+      throw e;
+    }));
+const loadVisualEdit = () =>
+  (visualLoad ??= import("./VisualEdit")
+    .then((m) => (visualModule = m))
+    .catch((e) => {
+      visualLoad = null;
+      throw e;
+    }));
+
+function useModule<T>(have: T | null, load: () => Promise<T>): { mod: T | null; failed: boolean; retry: () => void } {
+  const [m, setM] = useState(have);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (m) return;
+    let live = true;
+    load().then(
+      (got) => live && setM(got),
+      () => live && setFailed(true),
+    );
+    return () => {
+      live = false;
+    };
+  }, [m, load, attempt]);
+  return {
+    mod: m,
+    failed,
+    retry: () => {
+      setFailed(false);
+      setAttempt((a) => a + 1);
+    },
+  };
+}
+
+// What the editing page has to load before it can show anything: the editor
+// code, and the file's text under the key EditView reads. Started ahead of the
+// click so pressing Edit has nothing left to wait for.
+export function preloadEditor() {
+  void loadEditor();
+  void loadVisualEdit();
+}
+
+// How old a cached copy of the file's text may be to show while editing waits
+// for its own read. Display only: a session is never seeded from it.
+const EDIT_PREVIEW_MAX_AGE_MS = 2_000;
+
+export function prefetchEditText(qc: QueryClient, apiBase: string, path: string) {
+  const url = fileURLFor(apiBase, path);
+  void qc.prefetchQuery({ queryKey: ["text", url], queryFn: () => fetchBlobText(url) });
+}
 
 export function FileView(props: {
   apiBase: string;
@@ -320,7 +388,36 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // says right now. Shares the ["text", url] family the rest of the app uses,
   // so a restore or a peer write invalidates it like any other read.
   const fileURL = fileURLFor(apiBase, path);
-  const { data, error } = useTextAt(fileURL, ["text", fileURL], true, false);
+  const text = useTextAt(fileURL, ["text", fileURL], true, false);
+  const { error } = text;
+  // The buffer is seeded from these bytes, so they are always read again when
+  // editing starts, and nothing is built until that read answers: a cached copy
+  // — an earlier read, a hover prefetch — may be older than a peer's write.
+  // A copy fetched just now is only shown, read-only, while the read is out.
+  // Per file: the same page can move to another path without remounting.
+  const openedAt = useMemo(() => Date.now(), [fileURL]);
+  const [revalidatedFor, setRevalidatedFor] = useState<string | null>(null);
+  const { refetch } = text;
+  useEffect(() => {
+    let live = true;
+    // A new request, not one already in flight: a prefetch started before
+    // editing did is not a read of the file as it is now.
+    void refetch({ cancelRefetch: true }).then((r) => {
+      // A failed read leaves any cached copy in place; that copy must not
+      // seed the session either.
+      if (live && r.status === "success" && !r.isRefetchError) setRevalidatedFor(fileURL);
+    });
+    return () => {
+      live = false;
+    };
+  }, [refetch, fileURL]);
+  const data = revalidatedFor === fileURL ? text.data : undefined;
+  const glimpse = text.data && text.dataUpdatedAt >= openedAt - EDIT_PREVIEW_MAX_AGE_MS ? text.data : undefined;
+  const editorMod = useModule(editorModule, loadEditor);
+  const visualMod = useModule(visualModule, loadVisualEdit);
+  const Editor = editorMod.mod?.Editor;
+  const VisualEdit = visualMod.mod?.VisualEdit;
+  const loadFailed = visual ? visualMod : editorMod;
   const [state, setState] = useState<SaveState>("clean");
   const [collab, setCollab] = useState<CollabStatus>("connecting");
   const md = MD_EXT.test(path);
@@ -497,7 +594,15 @@ function EditView(props: Parameters<typeof FileView>[0]) {
      banner (BEA network-efficiency stage 5). */
   if (error && !data)
     return <div className="empty">Could not open {path} for editing.</div>;
-  if (!data) return <div className="empty">Loading…</div>;
+  if (!data) {
+    return glimpse?.kind === "text" ? (
+      <pre className={"cm-preview cm-mode-" + (mode === "preview" ? "write" : mode)} aria-busy="true">
+        {glimpse.text}
+      </pre>
+    ) : (
+      <div className="empty">Loading…</div>
+    );
+  }
   if (data.kind !== "text") {
     return (
       <div className="empty">
@@ -560,8 +665,17 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           onRestored={onRestored}
         />
       )}
-      <Suspense fallback={<div className="empty">Loading editor…</div>}>
-      {visual ? (
+      {loadFailed.failed ? (
+        <div className="empty">
+          Could not load the editor.{" "}
+          <Button variant="toolbar" onClick={loadFailed.retry}>
+            Try again
+          </Button>
+        </div>
+      ) : visual ? (
+        !VisualEdit ? (
+          <div className="empty">Loading editor…</div>
+        ) : (
         /* HTML gets the rendered page, clicked directly. Same file, same
            shared document, same save — a different surface onto it. Source
            editing stays one click away for the structural work this cannot
@@ -584,6 +698,9 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           me={props.me}
           onRendered={props.onRendered}
         />
+        )
+      ) : !Editor ? (
+        <div className="empty">Loading editor…</div>
       ) : (
         <div className="ed-surface" hidden={mode === "preview"}>
         <Editor
@@ -618,7 +735,6 @@ function EditView(props: Parameters<typeof FileView>[0]) {
         />
         </div>
       )}
-      </Suspense>
       {mode === "preview" && !visual && <EditPreview {...props} />}
       {!visual && (
         <div className="ed-statusbar" id="ed-statusbar">

@@ -3,6 +3,7 @@ package webapp
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -175,16 +176,25 @@ type Versioned interface {
 type versionGate struct {
 	token string
 	valid bool
+	reads coalescedRead
 }
 
 // stale reports whether repo may have changed since the last successful load,
 // and returns the token to record once that load succeeds.
-func (g *versionGate) stale(repo any) (token string, stale bool) {
+//
+// mu is the registry's own lock, which the caller holds. It is released while
+// the token is read, so a slow store no longer queues every authorization read
+// on the hub behind one query; it is held again before anything the registry
+// owns is touched. The read is coalesced (see coalescedRead) and still starts
+// after this call does, so a change committed before the call is always seen.
+func (g *versionGate) stale(repo any, mu *sync.Mutex) (token string, stale bool) {
 	v, ok := repo.(Versioned)
 	if !ok {
 		return "", true
 	}
-	cur, err := v.Version()
+	mu.Unlock()
+	cur, err := g.reads.do(v.Version)
+	mu.Lock()
 	if err != nil || cur == "" {
 		return "", true // can't tell → re-read, and record nothing
 	}
@@ -192,6 +202,59 @@ func (g *versionGate) stale(repo any) (token string, stale bool) {
 		return cur, false
 	}
 	return cur, true
+}
+
+// coalescedRead shares one version read among the callers waiting for it.
+//
+// A caller never takes the answer of a read that was already in flight when
+// it arrived — that read may have started before a change the caller has to
+// see. It joins the NEXT read instead, which starts once the current one ends.
+// However many requests ask at once, at most two reads per registry are
+// outstanding, and every caller's answer is from a read that began after it
+// asked.
+type coalescedRead struct {
+	mu   sync.Mutex
+	busy bool
+	next *readCall
+}
+
+type readCall struct {
+	done  chan struct{}
+	token string
+	err   error
+}
+
+func (c *coalescedRead) do(read func() (string, error)) (string, error) {
+	c.mu.Lock()
+	if !c.busy {
+		c.busy = true
+		c.mu.Unlock()
+		call := &readCall{done: make(chan struct{})}
+		c.run(call, read)
+		return call.token, call.err
+	}
+	if c.next == nil {
+		c.next = &readCall{done: make(chan struct{})}
+	}
+	call := c.next
+	c.mu.Unlock()
+	<-call.done
+	return call.token, call.err
+}
+
+// run performs one read, then starts the read the callers who arrived during
+// it are waiting for.
+func (c *coalescedRead) run(call *readCall, read func() (string, error)) {
+	call.token, call.err = read()
+	close(call.done)
+	c.mu.Lock()
+	next := c.next
+	c.next = nil
+	c.busy = next != nil
+	c.mu.Unlock()
+	if next != nil {
+		go c.run(next, read)
+	}
 }
 
 // fresh records the token of a load that succeeded.

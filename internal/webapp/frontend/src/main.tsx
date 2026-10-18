@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { prefetchForURL } from "./api/prefetch";
+import { startConfig } from "./hooks/useConfig";
 import ErrorBoundary from "./ErrorBoundary";
 import { initTheme } from "./lib/theme";
 import "./tw.css";
@@ -18,6 +19,7 @@ const queryClient = new QueryClient({
   },
 });
 
+startConfig();
 prefetchForURL(queryClient, location.pathname + location.search);
 initTheme();
 

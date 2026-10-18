@@ -139,7 +139,7 @@ func OpenDeviceRegistry(path string) (*DeviceRegistry, error) {
 // per-request hot path, it only merges the caller's own row, and every gate
 // above it (OwnerOf, MayActAs) refreshes before deciding.
 func (r *DeviceRegistry) refresh() {
-	token, stale := r.ver.stale(r.repo)
+	token, stale := r.ver.stale(r.repo, &r.mu)
 	if !stale {
 		return
 	}

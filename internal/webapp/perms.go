@@ -116,7 +116,12 @@ func (s *Server) resolveProjectPerm(r *http.Request, p Project) string {
 // a public share link, which has to ask whether the account that MINTED it can
 // still read what it publishes (shareStillReadable).
 func (s *Server) projectPermFor(p Project, email string) string {
-	role := s.Dir.Role(p.Org, email)
+	return projectPermWithRole(p, email, s.Dir.Role(p.Org, email))
+}
+
+// projectPermWithRole is projectPermFor once the account's role in the
+// project's org is known.
+func projectPermWithRole(p Project, email, role string) string {
 	if role == RoleOwner {
 		return PermAdmin
 	}
@@ -302,4 +307,30 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request, id, level strin
 		return Project{}, false
 	}
 	return p, true
+}
+
+// membershipLister is a Directory that can answer every org an account is in
+// from one read. Optional: without it orgRoles asks Role once per org.
+type membershipLister interface {
+	Memberships(email string) map[string]string
+}
+
+// orgRoles answers "what is this account's role in org X" for many orgs
+// within one request, reading the directory once rather than once per
+// project. Every answer comes from the same read, so a request sees one
+// consistent membership — it is per request, never kept across requests.
+func (s *Server) orgRoles(email string) func(org string) string {
+	if ml, ok := s.Dir.(membershipLister); ok {
+		roles := ml.Memberships(email)
+		return func(org string) string { return roles[org] }
+	}
+	memo := map[string]string{}
+	return func(org string) string {
+		r, ok := memo[org]
+		if !ok {
+			r = s.Dir.Role(org, email)
+			memo[org] = r
+		}
+		return r
+	}
 }

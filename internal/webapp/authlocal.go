@@ -217,7 +217,7 @@ func (a *BuiltinAuth) SetPolicy(requireVerification, requireApproval bool) error
 // Gated on the store's change token (Versioned) like ProjectDB.refresh: still
 // a re-read on every authenticated request, but only when something moved.
 func (a *BuiltinAuth) refresh() {
-	token, stale := a.ver.stale(a.store)
+	token, stale := a.ver.stale(a.store, &a.mu)
 	if !stale {
 		return
 	}

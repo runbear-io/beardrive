@@ -68,7 +68,7 @@ type ShareDB struct {
 // ponytail: one full Load per share resolution; see OrgDB.refresh for the
 // upgrade path if it ever shows up in a profile.
 func (db *ShareDB) refresh() {
-	token, stale := db.ver.stale(db.repo)
+	token, stale := db.ver.stale(db.repo, &db.mu)
 	if !stale {
 		return
 	}
@@ -653,7 +653,7 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Type", contentType(sp))
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeFilename(path.Base(sp))))
-		io.Copy(cw, rc)
+		copyOrAbort(cw, rc)
 		return
 	}
 
@@ -680,11 +680,11 @@ func (s *Server) handleShared(w http.ResponseWriter, r *http.Request) {
 			mermaidTag(body), updatedStamp(fi.Time), body)
 	case ".html", ".htm":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.Copy(cw, rc)
+		copyOrAbort(cw, rc)
 	default:
 		w.Header().Set("Content-Type", contentType(sp))
 		setContentLength(w, rc) // measured, never the journal's Size field
-		io.Copy(cw, rc)
+		copyOrAbort(cw, rc)
 	}
 }
 

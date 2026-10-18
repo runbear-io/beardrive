@@ -185,41 +185,13 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	all, err := rs.loadSourcedOps(r.Context())
+	idx, err := rs.historyIndex(r.Context())
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
-	sort.SliceStable(all, func(i, j int) bool { return journal.Less(all[i].Op, all[j].Op) })
-	// A put is an "add" when the path didn't exist just before it (first
-	// version, or first after a delete), an "edit" otherwise. Existence is
-	// replayed over ALL ops in journal order, before any path/prefix filter,
-	// so a filtered view classifies the same as the full feed.
-	kinds := make([]string, len(all))
-	prevs := make([]string, len(all))
-	exists := make(map[string]bool, len(all))
-	last := make(map[string]string, len(all))
-	for i, so := range all {
-		op := so.Op
-		// A delete of a path that is already gone removed nothing, so it
-		// names nothing — even though the path once had content.
-		if op.Kind != journal.KindDelete || exists[op.Path] {
-			prevs[i] = last[op.Path]
-		}
-		if op.Kind != journal.KindDelete {
-			last[op.Path] = op.Blob
-		}
-		switch {
-		case op.Kind == journal.KindDelete:
-			kinds[i] = "delete"
-			exists[op.Path] = false
-		case exists[op.Path]:
-			kinds[i] = "edit"
-		default:
-			kinds[i] = "add"
-			exists[op.Path] = true
-		}
-	}
+	// Shared by every request until a journal grows: read, never write.
+	all, kinds, prevs := idx.all, idx.kinds, idx.prevs
 	type timed struct {
 		i  int // index into all
 		op journal.Op
@@ -231,11 +203,7 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	// is already sorted by journal.Less, so this costs no extra I/O.
 	var chain []segment
 	if path != "" {
-		ops := make([]journal.Op, len(all))
-		for i, sop := range all {
-			ops[i] = sop.Op
-		}
-		chain = chainSegments(buildMoveIndex(ops), path)
+		chain = chainSegments(idx.moveIndex(), path)
 	}
 	// Resolved once, not per op: history walks every op in the project.
 	vis := s.visibility(r)
@@ -457,11 +425,13 @@ func (s *Server) handleHistorySummary(v *volume, w http.ResponseWriter, r *http.
 		out.Days[i].Date = day
 		index[day] = i
 	}
-	all, err := rs.loadSourcedOps(r.Context())
+	// The feed's shared index: read-only, and in no particular need of order.
+	idx, err := rs.historyIndex(r.Context())
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "history is temporarily unavailable", err)
 		return
 	}
+	all := idx.all
 	vis := s.visibility(r)
 	devices := map[string]bool{}
 	// ?all=1 totals every op the filters keep, while the bars still cover
@@ -553,7 +523,7 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
-	io.Copy(w, rc)
+	copyOrAbort(w, rc)
 	if pv {
 		io.WriteString(w, printSuffix)
 	}

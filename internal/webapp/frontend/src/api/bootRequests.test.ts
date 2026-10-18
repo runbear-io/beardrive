@@ -13,8 +13,8 @@ test("a shared markdown link starts the tree, the document and its comments", ()
     "/api/projects",
     "/api/orgs",
     `/api/p/${ID}/tree?slim=1`,
-    `/api/p/${ID}/heat?days=30`,
     `/api/p/${ID}/render?path=notes%2Fa%20b.md`,
+    `/api/p/${ID}/heat?days=30`,
     `/api/p/${ID}/comments?status=all&path=notes%2Fa%20b.md`,
   ]);
 });
@@ -22,7 +22,7 @@ test("a shared markdown link starts the tree, the document and its comments", ()
 test("the keys are the ones the hooks read", () => {
   const keys = bootRequests(parseRoute(`/${ID}/a.md`, "hub"), (p) => MD_EXT.test(p)).map((r) => r.queryKey);
   const base = `/api/p/${ID}/`;
-  assert.deepEqual(keys, [["projects"], ["orgs"], ["tree", base], ["heat", base], ["render", base, "a.md", ""], ["comments", base, "a.md"]]);
+  assert.deepEqual(keys, [["projects"], ["orgs"], ["tree", base], ["render", base, "a.md", ""], ["heat", base], ["comments", base, "a.md"]]);
 });
 
 test("anything but a plain markdown read starts only the shell and the tree", () => {

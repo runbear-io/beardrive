@@ -98,7 +98,10 @@ classDiagram
         +Remove(ctx, path, who, note)
         +OpenBlob(ctx, sha)
         -reassemble(ctx, sha) chunked fallback
-        -verify(ctx, sha) re-hash until sealed
+        -verify(ctx, sha) re-hash until sealed; returns the hashed bytes ≤8 MiB
+        -maybeSeal(ctx, sha) first-seen Modified + sealAfter
+        -blobMod sync.Map sha→first Modified seen
+        -historyIndex(ctx) histIndex
         -blobStat(ctx, blob) remote.Object
         -sealed sync.Map sha→proved immutable
         -jcache map key→cachedJournal
@@ -124,6 +127,14 @@ classDiagram
     }
     note for cachedJournal "Journals only GROW — a device appends only to its own, and appendOp rewrites its key with strictly more bytes — so the (Size, Modified) List already reports proves a parse is still current. That is why the cache needs no expiry and no new Backend method: loadSourcedOps still Lists on every request, and fetches only the keys whose size or mtime moved (concurrently, limit 8). History used to re-download and re-parse EVERY journal per page, which is what made it 8-10s and made paging cost more rather than less. Bounded by a per-project raw-byte cap with all-or-nothing eviction"
     note for RemoteSource "FilesWithMoves reuses the last fold when the journal listing (key, size, modified) is unchanged — journals only grow and replay is deterministic, so an idle project's refresh is one List. Otherwise byPathOrder groups ops by path and sorts each group by journal.Less instead of sorting the whole project: the last writer per path and the move pairing depend only on one path's own order, so the answer is the global sort's"
+    class histIndex {
+        +all []sourcedOp in journal.Less order
+        +kinds add/edit/delete
+        +prevs replaced blob
+        +moveIndex() built on first use
+    }
+    RemoteSource ..> histIndex : historyIndex, per journal fingerprint
+    note for histIndex "histindex.go — everything the history feed derives that does not depend on who asks, built once per journal state and shared read-only by every request until a journal grows. A hub-wide LRU (maxHistIndexOps) bounds the ops held across projects; an evicted project rebuilds on its next request. Requests keep only the per-reader work: the folder filter, the path/prefix match, the page"
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
     note for RemoteSource "reassemble is delta sync's whole backward-compatibility story: when blobs/sha is absent (or fails verify), the manifest under manifests/sha names content-defined chunks that concatenate to the blob — spool, hash-verify against the sha requested, BACKFILL blobs/sha (best-effort; a failed write never fails the read), serve. Old clients ask for whole blobs and never learn anything changed; a hostile whole blob that fails verify is HEALED by the backfill when an honest manifest exists. Bounded by maxReassembleBytes (256 MiB) on the manifest's DECLARED sum, with each chunk's copy capped at its declared size — a member-written manifest is the one non-content-addressed object in the key space, so an amplified or oversized one is refused before it can spool"
@@ -347,6 +358,7 @@ classDiagram
         -byID, invites
         -seniority func() []string
         +EvictMember(org, email)
+        +Memberships(email) org→role, one read
         +SetSeniority(f)
         -heir(o) promotes an owner
         -refresh re-reads the store before every decision
@@ -935,9 +947,16 @@ classDiagram
     class versionGate {
         <<per registry>>
         -token, valid
-        +stale(repo) token, bool
+        -reads coalescedRead
+        +stale(repo, mu) token, bool
         +fresh(token)
     }
+    class coalescedRead {
+        -busy, next *readCall
+        +do(read) token, error
+    }
+    versionGate *-- coalescedRead
+    note for coalescedRead "The version read runs with the registry's lock RELEASED and is shared: a caller never takes the answer of a read already in flight when it arrived (it may predate a change the caller must see) — it joins the NEXT read, which starts when the current one ends. However many requests ask at once, at most two reads per registry are outstanding, and every answer comes from a read that began after its caller asked. Under load this is what stopped every authorization read on the hub from queueing behind one query"
 
     class rowScopedProjectRepo {
         <<optional interface>>

@@ -218,7 +218,7 @@ func (db *OrgDB) putMember(prev, next Org, email, role string) error {
 // Gated on the store's change token (Versioned) like ProjectDB.refresh: still
 // a re-read on every authorization read, but only when something moved.
 func (db *OrgDB) refresh() {
-	token, stale := db.ver.stale(db.repo)
+	token, stale := db.ver.stale(db.repo, &db.mu)
 	if !stale {
 		return
 	}
@@ -305,6 +305,22 @@ func (db *OrgDB) OrgsFor(email string) []Org {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Memberships is every org the account belongs to, with its role, from ONE
+// registry read — for a caller about to ask Role for many orgs in a row.
+func (db *OrgDB) Memberships(email string) map[string]string {
+	e := normEmail(email)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	out := map[string]string{}
+	for id, o := range db.byID {
+		if r := o.Members[e]; r != "" {
+			out[id] = r
+		}
+	}
 	return out
 }
 

@@ -5,7 +5,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The registries re-read their whole store on every authorization read — a
@@ -195,5 +200,66 @@ func BenchmarkRegistryRead(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// Callers that arrive while a version read is in flight must not take its
+// answer — it may predate a change they have to see — and must not each run
+// their own read either: they share the next one.
+func TestCoalescedReadSharesOnlyLaterReads(t *testing.T) {
+	var c coalescedRead
+	var reads atomic.Int64
+	release := make(chan struct{})
+	read := func() (string, error) {
+		n := reads.Add(1)
+		if n == 1 {
+			<-release
+		}
+		return strconv.FormatInt(n, 10), nil
+	}
+
+	first := make(chan string)
+	go func() {
+		tok, _ := c.do(read)
+		first <- tok
+	}()
+	for reads.Load() == 0 {
+		runtime.Gosched()
+	}
+
+	const late = 50
+	var wg sync.WaitGroup
+	got := make([]string, late)
+	for i := 0; i < late; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got[i], _ = c.do(read)
+		}(i)
+	}
+	// Every late caller is queued behind the blocked read before it ends.
+	for {
+		c.mu.Lock()
+		queued := c.next != nil
+		c.mu.Unlock()
+		if queued {
+			break
+		}
+		runtime.Gosched()
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if tok := <-first; tok != "1" {
+		t.Fatalf("first caller got %q, want its own read", tok)
+	}
+	for i, tok := range got {
+		if tok != "2" {
+			t.Fatalf("late caller %d got %q: it took a read that began before it asked", i, tok)
+		}
+	}
+	if n := reads.Load(); n != 2 {
+		t.Fatalf("%d reads for %d callers, want 2", n, late+1)
 	}
 }

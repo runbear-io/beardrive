@@ -1876,6 +1876,17 @@ body.full-view .pdfview { height: calc(100vh - 72px); }
    the editor and the rendered view are visibly the same document, not two
    apps. Only the pieces CM needs told explicitly are set. */
 .cm-host { height: 100%; }
+/* Editor.tsx's stand-in while the co-editing room answers: the same text in
+   the same type as the editor it is about to become. */
+.cm-preview {
+  margin: 0;
+  padding: 12px 2px 0 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.cm-preview.cm-mode-write { font-family: var(--ui); font-size: 15px; line-height: 1.75; }
 .cm-host .cm-editor { height: 100%; background: transparent; color: var(--text); }
 .cm-host .cm-editor.cm-focused { outline: none; }
 .cm-host .cm-scroller {
