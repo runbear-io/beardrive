@@ -2,10 +2,10 @@ import { test, expect, type Page } from "@playwright/test";
 import { login, wikiId } from "./helpers";
 
 // The seeded wiki: archive/retired-spec.md has 14 agent reads and is 210 days
-// old — hot and stale under the default thresholds (≥ 3 reads, 30 days).
+// old — hot and stale under the default thresholds (≥ 10 reads, 30 days).
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.removeItem("bd.insights.thresholds"));
+  await page.addInitScript(() => localStorage.removeItem("bd.insights.thresholds.v2"));
 });
 
 test("the KPI row splits reads by reader and flags with icon + label", async ({ page }) => {
@@ -193,4 +193,72 @@ test("both themes carry the validated chart palette", async ({ page }) => {
   // No chart colour is a literal outside the tokens.
   const share = await page.locator(".in-sw.share").first().evaluate((e) => getComputedStyle(e).backgroundColor);
   expect(share).toBe("rgb(213, 81, 129)");
+});
+
+test("a fresh browser starts at hot ≥ 10, and an old default save does not pin it", async ({ page }) => {
+  // Re-seeded on every navigation: beforeEach clears the v2 key each time.
+  await page.addInitScript(() =>
+    localStorage.setItem("bd.insights.thresholds", JSON.stringify({ hot: 3, stale: 30 })),
+  );
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/insights`);
+  await expect(page.getByLabel("Hot at reads")).toHaveValue("10");
+  await expect(page.getByLabel("Stale after days")).toHaveValue("30");
+  expect(await page.evaluate(() => localStorage.getItem("bd.insights.thresholds"))).toBeNull();
+});
+
+test("a customised pre-v2 threshold save carries over", async ({ page }) => {
+  // Re-seeded on every navigation: beforeEach clears the v2 key each time.
+  await page.addInitScript(() =>
+    localStorage.setItem("bd.insights.thresholds", JSON.stringify({ hot: 5, stale: 60 })),
+  );
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/insights`);
+  await expect(page.getByLabel("Hot at reads")).toHaveValue("5");
+  await expect(page.getByLabel("Stale after days")).toHaveValue("60");
+});
+
+test("the treemap outlines at most 8 hot + stale cells, even when everything qualifies", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/insights`);
+  await page.getByLabel("Stale after days").fill("1");
+  await page.getByLabel("Hot at reads").fill("1");
+  const cells = page.locator("svg.in-treemap .in-tm-cell");
+  await expect(cells.first()).toBeVisible();
+  await expect(page.locator("svg.in-treemap .in-tm-cell.flag-stale").first()).toBeVisible();
+  expect(await page.locator("svg.in-treemap .in-tm-cell.flag-stale").count()).toBeLessThanOrEqual(8);
+  // At file level too.
+  await page.locator("svg.in-treemap [data-dir]").first().click();
+  await expect(page.locator("svg.in-treemap")).toHaveAttribute("data-level", "file");
+  expect(await page.locator("svg.in-treemap .in-tm-cell.flag-stale").count()).toBeLessThanOrEqual(8);
+});
+
+for (const width of [1440, 1200]) {
+  test(`the Reads KPI legend stays on one line at ${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await login(page);
+    const pid = await wikiId(page);
+    await page.goto(`/${pid}/insights`);
+    const items = page.locator('.in-kpi[data-kpi="reads"] .in-kpi-n > span');
+    await expect(items).toHaveCount(3);
+    const boxes = await items.evaluateAll((els) => els.map((e) => e.getBoundingClientRect()));
+    for (const b of boxes) expect(Math.abs(b.top - boxes[0].top)).toBeLessThan(2);
+    const kpi = (await page.locator('.in-kpi[data-kpi="reads"]').boundingBox())!;
+    expect(boxes[2].right).toBeLessThanOrEqual(kpi.x + kpi.width);
+  });
+}
+
+test("on a phone the Reads legend wraps inside its card", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}/insights`);
+  const kpi = (await page.locator('.in-kpi[data-kpi="reads"]').boundingBox())!;
+  const boxes = await page
+    .locator('.in-kpi[data-kpi="reads"] .in-kpi-n > span')
+    .evaluateAll((els) => els.map((e) => e.getBoundingClientRect()));
+  for (const b of boxes) expect(b.right).toBeLessThanOrEqual(kpi.x + kpi.width + 0.5);
 });

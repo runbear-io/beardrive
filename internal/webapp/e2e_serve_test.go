@@ -358,7 +358,7 @@ func seedE2E(t *testing.T, state, prefix, projectID string) {
 		// The danger quadrant: hot enough to matter, stale enough to worry.
 		{"archive/retired-spec.md", ReadKindAgent, "seed", 14},
 		{"archive/old-runbook.md", ReadKindHuman, "bob@x.io", 11},
-		{"archive/legacy-notes.md", ReadKindAgent, "seed", 8},
+		{"archive/legacy-notes.md", ReadKindAgent, "seed", 12},
 		// Read history for the file the seed deletes above: heat rows outlive
 		// their file, and the Dashboard must say so rather than drop them.
 		{"scratch.md", ReadKindHuman, "alice@x.io", 4},

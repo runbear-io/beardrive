@@ -76,11 +76,23 @@ interface Thresholds {
   hot: number;
   stale: number;
 }
-const TH_KEY = "bd.insights.thresholds";
+/* Versioned so a saved value from an earlier default does not pin a user to
+   it: a v1 save equal to that default is dropped, any other v1 save is a
+   deliberate choice and carries over. */
+const TH_KEY = "bd.insights.thresholds.v2";
+const TH_KEY_V1 = "bd.insights.thresholds";
+const V1_DEFAULT = { hot: 3, stale: 30 };
+function parseThresholds(raw: string | null): Thresholds | null {
+  const t = JSON.parse(raw || "null");
+  return t && t.hot >= 1 && t.stale >= 1 ? { hot: +t.hot, stale: +t.stale } : null;
+}
 function loadThresholds(): Thresholds {
   try {
-    const t = JSON.parse(localStorage.getItem(TH_KEY) || "null");
-    if (t && t.hot >= 1 && t.stale >= 1) return { hot: +t.hot, stale: +t.stale };
+    const t = parseThresholds(localStorage.getItem(TH_KEY));
+    if (t) return t;
+    const v1 = parseThresholds(localStorage.getItem(TH_KEY_V1));
+    localStorage.removeItem(TH_KEY_V1);
+    if (v1 && (v1.hot !== V1_DEFAULT.hot || v1.stale !== V1_DEFAULT.stale)) return v1;
   } catch {
     /* storage unavailable or corrupt: defaults */
   }
@@ -721,6 +733,8 @@ function cellTip(c: Cell): string {
 const TM_W = 600,
   TM_H = 420;
 
+const TM_OUTLINES = 8;
+
 function Treemap({
   pts,
   scope,
@@ -747,6 +761,15 @@ function Treemap({
   const cells =
     drill === null ? folderCells(pts, scopeDir) : fileCells(inDrill, drill || scopeDir);
   const placed = squarify(cells, 0, 0, TM_W, TM_H);
+  // Only the worst few hot+stale cells get the outline; when every cell is
+  // outlined none of them stands out.
+  const outlined = new Set(
+    cells
+      .filter((c) => c.danger && !c.empty)
+      .sort((a, b) => b.reads * b.days - a.reads * a.days)
+      .slice(0, TM_OUTLINES)
+      .map((c) => c.key),
+  );
 
   const crumbs = (
     <nav className="in-tm-crumbs" aria-label="Treemap level">
@@ -822,8 +845,8 @@ function Treemap({
           const cls =
             "in-tm-cell " +
             (flat ? "in-tm-flat" : "in-tm-b" + bin) +
-            (c.empty ? " flag-empty" : c.danger ? " flag-stale" : "");
-          const glyph = c.empty ? "⛔ " : c.danger ? "⚠ " : "";
+            (c.empty ? " flag-empty" : outlined.has(c.key) ? " flag-stale" : "");
+          const glyph = c.empty ? "⛔ " : outlined.has(c.key) ? "⚠ " : "";
           const fit = Math.floor((w - 10) / 6.2);
           const name = glyph + c.label;
           const label = name.length > fit ? name.slice(0, Math.max(1, fit - 1)) + "…" : name;
@@ -898,7 +921,7 @@ function FreshnessLegend({
         <span className="in-flag in-flag-empty" aria-hidden>⛔</span> emptied
       </span>
       <span className="in-tm-key">
-        <span className="in-flag in-flag-stale" aria-hidden>⚠</span> hot + stale
+        <span className="in-flag in-flag-stale" aria-hidden>⚠</span> hot + stale (top {TM_OUTLINES})
       </span>
       <span className="in-tm-range">
         {flat

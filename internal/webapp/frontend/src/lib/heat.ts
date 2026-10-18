@@ -181,7 +181,7 @@ export function placeLabels(
    default "all" lens shows. Passing an entry here would quietly hand the
    Dashboard a different number than it plots. */
 
-export const HOT_READS = 3; // ≥ this many reads/30d = hot
+export const HOT_READS = 10; // ≥ this many reads/30d = hot
 export const STALE_DAYS = 30; // ≥ this many days since last write = stale
 
 export const isDanger = (reads: number, days: number) => reads >= HOT_READS && days >= STALE_DAYS;
