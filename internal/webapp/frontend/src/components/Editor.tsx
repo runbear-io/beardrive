@@ -370,7 +370,3 @@ export function Editor({
 function modeExtensions(m: EditMode) {
   return m === "markdown" ? [lineNumbers()] : [EditorView.contentAttributes.of({ "data-write": "" })];
 }
-
-// Re-exported so the edit page can open the room while the editor's own read
-// is in flight, without importing the collaboration stack itself.
-export { prewarmRoom, releaseWarmRoom } from "../lib/collab";

@@ -1,4 +1,4 @@
-import { CollabDoc, roomURL, takeWarmRoom, type CollabStatus } from "./collab";
+import { CollabDoc, type CollabStatus } from "./collab";
 import { hasCollabRoute } from "./collabroute";
 import { textEdit } from "./diff";
 import { HttpError, putText } from "../api/http";
@@ -387,32 +387,23 @@ export function openSharedFile(opts: {
   let live = false;
   let pending = 0;
 
-  const onStatus = (s: CollabStatus) => {
-    if (s === "live") {
-      hubHoldsIt = true;
-      if (pending) {
-        pending = 0;
-        opts.onPending?.(0);
+  const collab = new CollabDoc(
+    opts.apiBase + "ycollab?path=" + encodeURIComponent(opts.path),
+    (s) => {
+      if (s === "live") {
+        hubHoldsIt = true;
+        if (pending) {
+          pending = 0;
+          opts.onPending?.(0);
+        }
       }
-    }
-    live = s === "live";
-    opts.onCollab?.(s);
-  };
-  const onReady = () => opts.onReady(collab);
-  const onSolo = () => opts.onSolo();
-  const url = roomURL(opts.apiBase, opts.path);
-  let warm = hasCollabRoute(opts.apiBase) ? takeWarmRoom(url) : null;
-  /* A room opened ahead is taken only if it cannot be older than the read
-     this file is built on. Not synced yet: it will sync after that read, the
-     same as a connection opened now. Synced already, onto text other than the
-     read's: the file moved in between, so it is dropped and a connection is
-     opened afresh. */
-  if (warm && warm.synced && warm.text.toString() !== opts.seed) {
-    warm.destroy();
-    warm = null;
-  }
-  const collab = warm ?? new CollabDoc(url, onStatus, onReady, onSolo, opts.me);
-  if (warm) warm.rebind(onStatus, onReady, onSolo);
+      live = s === "live";
+      opts.onCollab?.(s);
+    },
+    () => opts.onReady(collab),
+    () => opts.onSolo(),
+    opts.me,
+  );
 
   /* MY changes restart the idle timer. A peer's do not.
 
@@ -455,9 +446,7 @@ export function openSharedFile(opts: {
      If-Match and all. A server with no room route goes straight there; the
      callback is deferred because the caller's own handle to this file is
      not assigned until this returns. */
-  if (warm) {
-    // Already connecting (or connected): rebind above replays where it stands.
-  } else if (hasCollabRoute(opts.apiBase)) collab.connect();
+  if (hasCollabRoute(opts.apiBase)) collab.connect();
   else
     queueMicrotask(() => {
       if (gone) return;

@@ -379,22 +379,6 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     };
   }, [refetch]);
   const data = revalidated ? text.data : undefined;
-  // The room is opened now, alongside that read, rather than once the editor
-  // is built on its answer: the editor takes the connection already up. The
-  // source editor only — the visual editor binds the room to a page that
-  // loads in its own frame, and takes its connection when that page is ready.
-  useEffect(() => {
-    if (visual) return;
-    let left = false;
-    void loadEditor().then((m) => {
-      if (!left) m.prewarmRoom(apiBase, path, props.me);
-    });
-    return () => {
-      left = true;
-      void loadEditor().then((m) => m.releaseWarmRoom(apiBase, path));
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiBase, path, visual]);
   const glimpse = text.data && text.dataUpdatedAt >= openedAt - EDIT_PREVIEW_MAX_AGE_MS ? text.data : undefined;
   const Editor = useModule(editorModule, loadEditor)?.Editor;
   const VisualEdit = useModule(visualModule, loadVisualEdit)?.VisualEdit;

@@ -66,3 +66,48 @@ test("a write just after the hover prefetch is what the editor opens on", async 
     await page.request.post(`/api/p/${id}/remove`, { data: { path: name } }).catch(() => {});
   }
 });
+
+// The room is opened while editing reads the file, and the hub seeds a room
+// when it creates it — so a write landing between the two leaves a room
+// holding the older text. That room must not be the one the editor opens on.
+test("a room seeded before the edit's own read is not the one the editor opens on", async ({ page }) => {
+  await login(page);
+  const id = await wikiId(page);
+  const name = `prefetch-${Date.now()}-room.md`;
+  const put = (body: string) =>
+    page.request.put(`/api/p/${id}/upload/content?path=${encodeURIComponent(name)}`, {
+      data: body,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  expect((await put("# Doc\n\nfirst version\n")).ok()).toBeTruthy();
+  try {
+    await page.goto(`/${id}/${name}`);
+    await expect(page.locator("#content h1")).toHaveText("Doc");
+    // Hold the edit page's read until the room is open, then change the file.
+    let held = false;
+    await page.route(`**/file?path=${encodeURIComponent(name)}*`, async (route) => {
+      if (!held) {
+        held = true;
+        await page.waitForTimeout(700);
+        expect((await put("# Doc\n\nsecond version\n")).ok()).toBeTruthy();
+      }
+      await route.continue();
+    });
+    await page.evaluate(() => {
+      const w = window as unknown as { sawOld: boolean };
+      w.sawOld = false;
+      new MutationObserver(() => {
+        for (const el of document.querySelectorAll(".cm-host .cm-content")) {
+          if ((el.textContent || "").includes("first version")) w.sawOld = true;
+        }
+      }).observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
+    await page.click("#edit-btn");
+    await expect(page.locator(".cm-host .cm-content")).toContainText("second version");
+    await page.waitForTimeout(500);
+    expect(await page.evaluate(() => (window as unknown as { sawOld: boolean }).sawOld)).toBe(false);
+  } finally {
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+    await page.request.post(`/api/p/${id}/remove`, { data: { path: name } }).catch(() => {});
+  }
+});
