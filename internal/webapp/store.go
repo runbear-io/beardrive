@@ -481,10 +481,10 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	if gzipOK {
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(cw)
-		io.Copy(gz, src)
+		copyOrAbort(gz, src)
 		gz.Close()
 	} else {
-		io.Copy(cw, src)
+		copyOrAbort(cw, src)
 	}
 	s.quota().RecordEgress(s.orgOf(r.PathValue("project")), cw.n)
 }

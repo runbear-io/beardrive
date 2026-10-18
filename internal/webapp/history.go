@@ -523,7 +523,7 @@ func (s *Server) handleBlob(v *volume, w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
-	io.Copy(w, rc)
+	copyOrAbort(w, rc)
 	if pv {
 		io.WriteString(w, printSuffix)
 	}

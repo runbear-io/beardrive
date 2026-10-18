@@ -805,6 +805,18 @@ func (c *hashCheckedReader) Read(p []byte) (int, error) {
 
 func (c *hashCheckedReader) Close() error { return c.rc.Close() }
 
+// copyOrAbort streams stored bytes into a response. A read that fails once the
+// response has started — storage going away mid-stream, or hashCheckedReader
+// finding the bytes were not the reviewed ones — aborts the connection rather
+// than ending the response normally, so no client can take a short or
+// unverified body for a complete one. Handler goroutines only: net/http
+// recovers http.ErrAbortHandler there and nowhere else.
+func copyOrAbort(dst io.Writer, src io.Reader) {
+	if _, err := io.Copy(dst, src); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+}
+
 // maybeSeal stops re-hashing a blob once no presigned URL for it can still be
 // live.
 //
@@ -2028,7 +2040,7 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	if !pv && !comment {
 		setContentLength(w, body)
 	}
-	io.Copy(w, body)
+	copyOrAbort(w, body)
 	if pv {
 		io.WriteString(w, printSuffix)
 	} else if comment {

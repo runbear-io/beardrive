@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -297,5 +299,37 @@ func TestLargeVerifiedBlobIsServedFromTheVerifiedBytes(t *testing.T) {
 	}
 	if got != big {
 		t.Fatalf("served %d bytes that are not the verified blob (%d bytes)", len(got), len(big))
+	}
+}
+
+// A blob too large to keep is served from a second read checked as it goes.
+// If those bytes turn out not to be the reviewed ones, the client must not get
+// a complete 200: the connection is cut, so the body cannot be taken as whole.
+func TestUnverifiedStreamIsNeverACompleteResponse(t *testing.T) {
+	stored := strings.Repeat("x", 64<<10)
+	sum := sha256.Sum256([]byte(stored))
+	serve := func(body string) (int, string, error) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			copyOrAbort(w, &hashCheckedReader{
+				rc: io.NopCloser(strings.NewReader(body)), h: sha256.New(), sha: hex.EncodeToString(sum[:]),
+			})
+		}))
+		defer ts.Close()
+		res, err := http.Get(ts.URL)
+		if err != nil {
+			return 0, "", err
+		}
+		defer res.Body.Close()
+		b, err := io.ReadAll(res.Body)
+		return res.StatusCode, string(b), err
+	}
+
+	if code, got, err := serve(stored); err != nil || code != 200 || got != stored {
+		t.Fatalf("honest bytes: %d, %d bytes, %v", code, len(got), err)
+	}
+	swapped := strings.Repeat("y", len(stored))
+	if _, _, err := serve(swapped); err == nil {
+		t.Fatal("bytes that do not hash to the blob's address arrived as a complete response")
 	}
 }
