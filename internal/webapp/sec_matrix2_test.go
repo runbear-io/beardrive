@@ -793,16 +793,18 @@ func TestSec_Matrix_NoHeatQueryNamesADepartedMemberAfterARestart(t *testing.T) {
 	}
 	// Age one bucket past retention so the all-time fold is exercised for real.
 	ledger.mu.Lock()
-	for k, st := range ledger.byKey {
-		if k.Kind != ReadKindHuman {
-			continue
+	for _, rows := range ledger.byProject {
+		for k, st := range rows {
+			if k.Kind != ReadKindHuman {
+				continue
+			}
+			fold := k
+			fold.Day = ""
+			st.Day = ""
+			rows[fold] = st
+			ledger.dirty[fold] = true
+			delete(rows, k)
 		}
-		fold := k
-		fold.Day = ""
-		st.Day = ""
-		ledger.byKey[fold] = st
-		ledger.dirty[fold] = true
-		delete(ledger.byKey, k)
 	}
 	ledger.mu.Unlock()
 	if err := ledger.Close(); err != nil {
