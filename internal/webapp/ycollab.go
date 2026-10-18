@@ -600,9 +600,12 @@ func conflictPath(path string, who User, at time.Time) string {
 // ever names the room again, so without this a snapshot would have nothing to
 // write.
 type roomRegistry struct {
-	mu    sync.Mutex
-	docs  map[string]*crdt.Doc
-	users map[string]User
+	mu sync.Mutex
+	// flushing counts snapshots running on a timer's goroutine, so a caller
+	// tearing rooms down can wait for the ones already in flight (settle).
+	flushing int
+	docs     map[string]*crdt.Doc
+	users    map[string]User
 	// bases is the blob each room last wrote or was seeded from: the If-Match
 	// of its next snapshot. It is what turns "the hub is the only writer" from
 	// a convention into a guarantee that an outside writer is never silently
@@ -725,9 +728,29 @@ func (r *roomRegistry) touched(room string, flush func()) {
 	p.timer = time.AfterFunc(wait, func() {
 		r.mu.Lock()
 		delete(r.pending, room)
+		r.flushing++
 		r.mu.Unlock()
+		defer func() {
+			r.mu.Lock()
+			r.flushing--
+			r.mu.Unlock()
+		}()
 		flush()
 	})
+}
+
+// settle waits until no armed or running snapshot is left. Drop the rooms
+// first: an armed timer for a live room would otherwise keep re-arming.
+func (r *roomRegistry) settle() {
+	for {
+		r.mu.Lock()
+		busy := r.flushing > 0 || len(r.pending) > 0
+		r.mu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func (r *roomRegistry) writer(room string, u User) {

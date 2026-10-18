@@ -41,7 +41,12 @@ func openRoom(t *testing.T, srv *Server, room string) *crdt.Doc {
 	}
 	srv.rooms().writer(room, User{Email: "editor@example.com", Name: "An Editor"})
 	srv.watchRoom(room, doc)
-	t.Cleanup(func() { srv.rooms().drop(room) })
+	// Dropped, then settled: a snapshot already running on its timer would
+	// otherwise write ydoc/ while the test's temp dir is being removed.
+	t.Cleanup(func() {
+		srv.rooms().drop(room)
+		srv.rooms().settle()
+	})
 	return doc
 }
 
