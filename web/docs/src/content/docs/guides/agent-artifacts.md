@@ -98,6 +98,30 @@ serves the file's latest content forever, so don't put secrets in a synced
 folder. Note also that a LAN-bound hub means LAN-only links.
 :::
 
+## Editing markdown notes together
+
+A markdown file's editor has three modes on the same `/edit/` link: **Write**
+(the note as prose), **Markdown** (the source, with line numbers) and
+**Preview** (the rendered page). Switching never leaves the shared session.
+The rail beside it collects every `- [ ] … @owner` line as an action item
+(**Copy as markdown** to paste into a tracker) and lists recent versions, each
+with a one-click **Restore** — which saves the old version as a new one, so
+nothing in history is lost. Type `/` for an action item, an `@mention`, a
+`[[link]]` to another file, or — in a meeting note — the open items carried
+over from the previous meeting.
+
+Notes under a `daily-meetings/` folder get one section per `## Name`: your
+own stays open, everyone else's collapses to a one-line summary (collapsing
+only changes your view, never the file), and each shows whether that person
+is typing, when it was last updated, or that they have not started.
+
+Two guards keep a note from being lost. A save that would empty the file or
+cut most of it stops and asks: **Keep saved version** is the default, and only
+**Save anyway** writes it. And if the connection drops, your edits are kept in
+the tab and shown as *pending* until it comes back; in a meeting note, other
+people's sections are read-only meanwhile so a stale copy cannot overwrite
+their live edits.
+
 ## Fixing the wording without regenerating the report
 
 An agent writes a good report with one wrong number, or a sentence that reads

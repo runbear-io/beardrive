@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState } from "../lib/sharedfile";
 import { type CollabStatus } from "../lib/collab";
-import { warnShrink } from "../toast";
+import { askShrink, withdrawShrink } from "./ShrinkDialog";
 
 /* Click-to-edit for a synced HTML file: the app's half.
 
@@ -164,7 +164,8 @@ export function VisualEdit({
       who: meRef.current?.name,
       me: meRef.current,
       onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
-      onShrinkRefused: (confirm) => warnShrink(path, confirm),
+      onShrinkRefused: (ask) => askShrink(path, ask),
+      onShrinkWithdrawn: withdrawShrink,
       // Nothing to mount either way: the surface is the iframe, which is
       // already on screen. The room is joined for the CRDT alone.
       onReady: () => {
@@ -172,7 +173,9 @@ export function VisualEdit({
         void anchorRanges();
       },
       onSolo: () => {
-        // No relay, so no room and no peer that could double-seed it. Filling
+        // No relay, so no room and no peer that could double-seed it: the
+        // provider is stopped before this runs and cannot later hand this
+        // document the hub's copy of the same bytes. Filling
         // the document locally keeps ONE code path for splicing instead of a
         // second plain-string one that would only ever run on an older hub.
         if (!file.collab.text.length) {
