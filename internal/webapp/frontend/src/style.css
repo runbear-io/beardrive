@@ -516,7 +516,12 @@ button, input, a.btn { font-family: inherit; }
 #crumb { font-size: 12.5px; color: var(--text); font-weight: 500; letter-spacing: -.01em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #crumb .crumb-seg { color: var(--text-dim); cursor: pointer; }
 #crumb .crumb-seg:hover { color: var(--accent-bright); }
-#crumb .crumb-sep { color: var(--text-ghost); margin: 0 5px; }
+#crumb .crumb-sep { color: var(--text-ghost); margin: 0 6px; }
+#crumb .crumbs { display: inline-flex; align-items: baseline; min-width: 0; max-width: 100%; vertical-align: bottom; }
+#crumb .crumb { display: inline-flex; align-items: baseline; min-width: 0; flex: none; }
+#crumb .crumb-mid { display: inline-block; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+#crumb .crumb:last-child { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+#crumb .crumb-last { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #meta { flex: 1; min-width: 0; font-size: 12px; color: var(--text-faint); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The Dashboard's hot+stale verdict, carried onto the file's own page. Same
    red as the danger quadrant (.in-pt.danger) on purpose — one verdict, one
@@ -1141,7 +1146,17 @@ a.ai-main:hover { color: var(--accent-ink); }
 .hskel-time { flex: none; width: 40px; height: 9px; }
 .hskel-note { margin-top: 10px; font-size: 12.5px; color: var(--text-faint); }
 @keyframes hskel { 50% { opacity: .45; } }
-@media (prefers-reduced-motion: reduce) { .hskel-dot, .hskel-lines span, .hskel-time { animation: none; } }
+.fskel { display: flex; gap: 40px; padding-top: 8px; }
+.fskel-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.fskel-title, .fskel-meta span, .fskel-line, .fskel-rail span { display: block; background: var(--hover); border-radius: 4px; animation: hskel 1.4s ease-in-out infinite; }
+.fskel-title { width: 55%; height: 26px; margin-bottom: 4px; }
+.fskel-meta { display: flex; gap: 12px; margin-bottom: 14px; }
+.fskel-meta span { height: 10px; }
+.fskel-line { height: 11px; }
+.fskel-rail { flex: none; width: 200px; display: flex; flex-direction: column; gap: 10px; padding-left: 16px; border-left: 1px solid var(--border); }
+.fskel-rail span { height: 9px; }
+@media (max-width: 1399px) { .fskel-rail { display: none; } }
+@media (prefers-reduced-motion: reduce) { .hskel-dot, .hskel-lines span, .hskel-time, .fskel-title, .fskel-meta span, .fskel-line, .fskel-rail span { animation: none; } }
 .apanel { position: fixed; z-index: 40; top: 52px; right: 0; bottom: 0; width: min(460px, 100vw); display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--bg-side); box-shadow: -10px 0 32px var(--shadow-pop); overflow: hidden; }
 .ap-head { display: flex; align-items: center; gap: 6px; padding: 14px 14px 4px 16px; }
 .ap-head > .ico { width: 16px; height: 16px; color: var(--text-dim); }

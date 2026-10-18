@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { FrontmatterPair, HeatEntry, RenderDoc } from "../api/types";
 import { HEAT_DISCLOSURE, agoLabel, daysSince, heatTotal, staleNote } from "../lib/heat";
-import { FM_RAIL, humanSize, whoChanged } from "../util";
+import { FM_RAIL, absTime, displayName, humanSize, whoChanged } from "../util";
 import { Icon } from "./shell";
 
 /* The file page's document header and right rail (markdown files).
@@ -54,7 +54,7 @@ export function DocHeader({ doc, heat }: { doc: RenderDoc; heat: HeatEntry | nul
   const who = doc.user_name || doc.user || doc.author ? whoChanged(doc) : "";
   // The display name alone reads as a person; the full identity rides along
   // as hover text for whoever needs the address.
-  const short = doc.user_name || doc.user || doc.author || "";
+  const short = who ? displayName(doc) : "";
   return (
     <header className="fv-head" data-bd-ignore="">
       <div className="fv-chips">
@@ -93,8 +93,8 @@ export function DocHeader({ doc, heat }: { doc: RenderDoc; heat: HeatEntry | nul
           </span>
         )}
         {doc.time && (
-          <span>
-            <Icon name="calendar" /> {new Date(doc.time).toLocaleString()}
+          <span className="fv-when">
+            <Icon name="calendar" /> {absTime(doc.time)}
           </span>
         )}
         {reads > 0 && (

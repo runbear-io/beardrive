@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { HistoryEntry } from "../api/types";
-import { humanSize, whoChanged } from "../util";
+import { absTime, displayName, humanSize, whoChanged } from "../util";
 import { Icon } from "./shell";
 import { DiffStat, DiffView, useDiffStat } from "./DiffView";
 import { parseConflict } from "../lib/conflict";
@@ -128,7 +128,7 @@ export function HistoryRow({
   // content, never on `diff`, or the subtree and folder feeds lose them.
   const versioned = clickable && !!e.blob;
   const base = e.path.split("/").pop() || e.path;
-  const when = new Date(e.time).toLocaleString();
+  const when = absTime(e.time);
   const dl = apiBase + "blob?sha=" + e.blob + "&name=" + encodeURIComponent(base) + "&download=1";
   const toggleDiff = () => setDiffOpen(!diffOpen);
   const counts = useDiffStat(apiBase, diffBase(kind, diff?.prev), e.blob, !!stat && kind !== "delete" && !!e.blob);
@@ -170,7 +170,7 @@ export function HistoryRow({
         </span>
       </div>
       <div className="hmeta">
-        <span className="hwho">{who}</span>
+        <span className="hwho" title={who}>{displayName(e)}</span>
         <span className="hdev">{dev}</span>
         <span className="hsize">{e.size ? humanSize(e.size) : ""}</span>
         {kind === "delete" && restorable && <span className="hgone">can be restored</span>}

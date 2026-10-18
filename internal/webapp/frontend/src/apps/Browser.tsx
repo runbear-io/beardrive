@@ -27,7 +27,7 @@ import { clearFilter, focusSidebarSearch, useSidebarSearch } from "../lib/sideba
 import { treeStats } from "../lib/treeview";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
-import { FileView } from "../components/FileView";
+import { FileSkeleton, FileView, renderQuery } from "../components/FileView";
 import { ShareDialog } from "../components/ShareDialog";
 import { ShareBanner } from "../components/ShareBanner";
 import { CommentPanel, CommentSurface } from "../components/Comments";
@@ -116,6 +116,10 @@ export default function Browser(props: {
   useEffect(() => {
     if (hub && project && isFile && !version) noteOpened(project.id, path);
   }, [hub, project, isFile, path, version]);
+  // A markdown address does not need the tree to start fetching its content.
+  useEffect(() => {
+    if ((!hub || project) && !loaded && path && !route.view && MD_EXT.test(path)) qc.prefetchQuery(renderQuery(apiBase, path, version));
+  }, [hub, project, loaded, path, route.view, version, apiBase, qc]);
 
   /* ---- an address whose file moved ----
      Files get renamed and dragged into folders, and the old URL is already
@@ -906,7 +910,7 @@ export default function Browser(props: {
     );
   } else if (path) {
     if (!loaded) {
-      view = <div className="empty">Loading…</div>;
+      view = MD_EXT.test(path) ? <FileSkeleton /> : <div className="empty">Loading…</div>;
     } else if (isMissing) {
       // The tree polls every few seconds, so a file that's mid-upload (or
       // mid-sync from a teammate's device) appears here on its own.

@@ -103,3 +103,21 @@ export const FM_RAIL = "(min-width: 1400px)"; // must match style.css
 export function whoChanged(e: { user?: string; user_name?: string; author?: string }): string {
   return e.user_name ? `${e.user_name} <${e.user}>` : e.user || e.author || "unknown";
 }
+
+/* The name a person reads as a person: the account's display name, else the
+   local part of its email, else the device's git/OS identity. The full
+   identity (whoChanged) belongs in hover text. */
+export function displayName(e: { user?: string; user_name?: string; author?: string }): string {
+  if (e.user_name) return e.user_name;
+  if (e.user) return e.user.split("@")[0] || e.user;
+  return e.author || "unknown";
+}
+
+/* "Sep 30, 2026 · 8:53 AM" in the viewer's locale and timezone. */
+export function absTime(t: string | number | Date, locale?: string): string {
+  const d = new Date(t);
+  if (isNaN(d.getTime())) return "";
+  const date = new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(d);
+  const time = new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" }).format(d);
+  return date + " · " + time;
+}

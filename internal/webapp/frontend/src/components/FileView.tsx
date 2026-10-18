@@ -473,6 +473,21 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   );
 }
 
+/* The markdown page's content query. The file page prefetches it while the
+   tree is still loading, so the two requests run side by side. */
+export function renderQuery(apiBase: string, path: string, version?: string) {
+  return {
+    queryKey: ["render", apiBase, path, version || ""],
+    queryFn: () =>
+      getJSON<RenderDoc>(
+        apiBase + "render?path=" + encodeURIComponent(path) + (version ? "&sha=" + version : ""),
+      ),
+    // A blob that isn't there will not appear on a retry, and the retry's
+    // delay is a blank pane the reader has no explanation for.
+    retry: version ? false : undefined,
+  };
+}
+
 function MarkdownView(props: Parameters<typeof FileView>[0]) {
   const wideRail = useWideRail();
   const {
@@ -485,19 +500,7 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
     onOpenFile,
     onRendered,
   } = props;
-  const { data: doc, error } = useQuery({
-    queryKey: ["render", apiBase, path, version || ""],
-    queryFn: () =>
-      getJSON<RenderDoc>(
-        apiBase +
-          "render?path=" +
-          encodeURIComponent(path) +
-          (version ? "&sha=" + version : ""),
-      ),
-    // A blob that isn't there will not appear on a retry, and the retry's
-    // delay is a blank pane the reader has no explanation for.
-    retry: version ? false : undefined,
-  });
+  const { data: doc, error } = useQuery(renderQuery(apiBase, path, version));
 
   // Rewrite the HTML BEFORE rendering (relative image sources, external
   // link targets) rather than patching the live DOM afterwards: React owns
@@ -548,7 +551,7 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
   }, [html, diagrams, onRendered]);
 
   if (error) return <LoadError version={version} err={error as Error} />;
-  if (!doc) return null;
+  if (!doc) return <FileSkeleton />;
   // Read counts belong to the path, not to one version — showing them beside
   // content the banner just called historical reads as if they counted views
   // of these bytes.
@@ -578,6 +581,32 @@ function MarkdownView(props: Parameters<typeof FileView>[0]) {
       />
       {wideRail && rail}
     </>
+  );
+}
+
+/* Holds the file page's shape while its content loads: title, meta row, six
+   lines of prose, and the rail beside them. */
+export function FileSkeleton() {
+  return (
+    <div className="fskel" aria-busy="true" aria-label="Loading file" data-bd-ignore="">
+      <div className="fskel-main">
+        <span className="fskel-title" />
+        <span className="fskel-meta">
+          <span style={{ width: 120 }} />
+          <span style={{ width: 90 }} />
+          <span style={{ width: 150 }} />
+        </span>
+        {[96, 88, 92, 70, 84, 52].map((w, i) => (
+          <span className="fskel-line" key={i} style={{ width: w + "%" }} />
+        ))}
+      </div>
+      <div className="fskel-rail" aria-hidden="true">
+        <span style={{ width: "40%" }} />
+        <span style={{ width: "80%" }} />
+        <span style={{ width: "65%" }} />
+        <span style={{ width: "72%" }} />
+      </div>
+    </div>
   );
 }
 

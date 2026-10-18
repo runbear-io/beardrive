@@ -3,7 +3,7 @@
 // cheap to pin: the bare run IS the "storage missing" case.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lastProject, rememberProject, resolveWiki } from "./util.ts";
+import { absTime, displayName, lastProject, rememberProject, resolveWiki } from "./util.ts";
 
 // Swap globalThis.localStorage for the length of one call, always putting the
 // original back — later tests in the same process must not inherit a stub.
@@ -86,4 +86,17 @@ test("storage that throws is swallowed on both sides", () => {
     assert.equal(lastProject(), "");
     assert.doesNotThrow(() => rememberProject("p1"));
   });
+});
+
+test("displayName prefers the display name, then the email's local part", () => {
+  assert.equal(displayName({ user: "snow@x.io", user_name: "Snow Lee" }), "Snow Lee");
+  assert.equal(displayName({ user: "snow@x.io" }), "snow");
+  assert.equal(displayName({ author: "laptop" }), "laptop");
+  assert.equal(displayName({}), "unknown");
+});
+
+test("absTime renders date · time in the given locale", () => {
+  const d = new Date(2026, 8, 30, 8, 53);
+  assert.equal(absTime(d, "en-US").replace(/ /g, " "), "Sep 30, 2026 · 8:53 AM");
+  assert.equal(absTime("not a date"), "");
 });
