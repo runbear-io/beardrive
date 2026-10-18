@@ -61,6 +61,9 @@ export function preloadEditor() {
   void loadVisualEdit();
 }
 
+// How old the file's text may be when an edit session is seeded from it.
+const EDIT_SEED_MAX_AGE_MS = 2_000;
+
 export function prefetchEditText(qc: QueryClient, apiBase: string, path: string) {
   const url = fileURLFor(apiBase, path);
   void qc.prefetchQuery({ queryKey: ["text", url], queryFn: () => fetchBlobText(url) });
@@ -352,7 +355,17 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // says right now. Shares the ["text", url] family the rest of the app uses,
   // so a restore or a peer write invalidates it like any other read.
   const fileURL = fileURLFor(apiBase, path);
-  const { data, error } = useTextAt(fileURL, ["text", fileURL], true, false);
+  const text = useTextAt(fileURL, ["text", fileURL], true, false);
+  const { error } = text;
+  // The buffer is seeded from these bytes, so they have to be current: a copy
+  // cached by an earlier read, or prefetched on hover a while ago, is fetched
+  // again before anything is built on it. A hover just before the click is
+  // recent enough to use as it is.
+  const [openedAt] = useState(() => Date.now());
+  const data = text.data && text.dataUpdatedAt >= openedAt - EDIT_SEED_MAX_AGE_MS ? text.data : undefined;
+  useEffect(() => {
+    if (text.data && !data && !text.isFetching) void text.refetch();
+  }, [text, data]);
   const Editor = useModule(editorModule, loadEditor)?.Editor;
   const VisualEdit = useModule(visualModule, loadVisualEdit)?.VisualEdit;
   const [state, setState] = useState<SaveState>("clean");
