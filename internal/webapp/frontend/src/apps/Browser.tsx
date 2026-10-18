@@ -33,7 +33,8 @@ import { ShareBanner } from "../components/ShareBanner";
 import { CommentPanel, CommentSurface } from "../components/Comments";
 import { useComments } from "../hooks/useComments";
 import { Palette, type PaletteItem } from "../components/Palette";
-import { ConnectGuide } from "../components/ConnectGuide";
+import { Home } from "../components/Home";
+import { noteOpened } from "../lib/recents";
 import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
 import { WidthHandles } from "../components/WidthHandle";
@@ -91,11 +92,11 @@ export default function Browser(props: {
   // Dashboard data: the per-device breakdown, plus a fresh heat fetch when
   // a dashboard surface opens (the ambient heat cache may be a minute old).
   const isHome = hub && !!project && !route.path && !route.view;
-  const insightsOpen = route.view === "dashboard" || isHome;
+  const insightsOpen = route.view === "dashboard";
   const devices = useInsightsDevices(apiBase, insightsOpen);
   useEffect(() => {
-    if (insightsOpen) qc.invalidateQueries({ queryKey: ["heat", apiBase] });
-  }, [insightsOpen, apiBase, qc]);
+    if (insightsOpen || isHome) qc.invalidateQueries({ queryKey: ["heat", apiBase] });
+  }, [insightsOpen, isHome, apiBase, qc]);
 
   const path = route.path;
   // ?v= belongs to the file page; a view route or folder ignores it.
@@ -111,6 +112,10 @@ export default function Browser(props: {
   const isFile = !!path && loaded && !isDir && flatFiles.some((f) => f.path === path);
   const isMissing = !!path && loaded && !isDir && !isFile && !version;
   const listingShowing = isDir && !route.view;
+  // Home's "Jump back in": the current version of a file, opened in a project.
+  useEffect(() => {
+    if (hub && project && isFile && !version) noteOpened(project.id, path);
+  }, [hub, project, isFile, path, version]);
 
   /* ---- an address whose file moved ----
      Files get renamed and dragged into folders, and the old URL is already
@@ -1006,29 +1011,24 @@ export default function Browser(props: {
       );
     }
   } else if (isHome) {
-    // The project's index page: the connect-an-agent guide, with the
-    // dashboard below it.
+    // Two columns once there is something to summarise; the first-run guide
+    // keeps the column /install renders it in.
+    if (flatFiles.length > 0) pageWidth = "wide";
     view = (
-      <>
-        <ConnectGuide project={project!} existing={route.connect === "existing"} />
-        <div className="home-insights">
-          {/* No install CTA here: ConnectGuide directly above IS the set-up-a-
-              device guide, and a second button six inches under the first
-              reads as two different steps. */}
-          {/* No apiBase: the home's summary skips the emptied check, so a
-              teammate's write costs this page no extra request. */}
-          <Insights
-            flatFiles={flatFiles}
-            heatMap={heatMap}
-            devices={devices}
-            loading={!loaded}
-            onOpenFile={openPath}
-            onOpenFolder={openPath}
-            onOpenHistory={openHistory}
-            isFolder={isFolderFn}
-          />
-        </div>
-      </>
+      <Home
+        project={project!}
+        tree={tree}
+        flatFiles={flatFiles}
+        loaded={loaded}
+        heatMap={heatMap}
+        folders={folderRules}
+        me={config.me}
+        comments={!!config.comments}
+        existing={route.connect === "existing"}
+        onOpen={openPath}
+        onFullHistory={openHistory}
+        onRendered={onRendered}
+      />
     );
   } else {
     view = <div className="empty">Select a file to read it.</div>;

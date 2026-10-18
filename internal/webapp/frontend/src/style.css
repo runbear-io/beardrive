@@ -804,7 +804,8 @@ a.ai-main:hover { color: var(--accent-ink); }
    ponytail: an all-RTL name now reads left-to-right for an RTL reader, which
    is the cost of one CSS line. Upgrade path if that matters: override only
    when the string mixes strong directions, decided per name in JS. */
-.dl-name, #crumb, .hpath, .hnote, .hrun-note, .hdev, .ai-main {
+.dl-name, #crumb, .hpath, .hnote, .hrun-note, .hdev, .ai-main,
+.hc-name, .hc-dir, .fe-who, .fe-path, .fe-dev, .dev-name, .ha-title, .ha-sub, .hb-label > span:first-child {
   unicode-bidi: isolate-override;
   direction: ltr;
 }
@@ -2287,4 +2288,83 @@ body.full-view .cm-panel { top: 0; }
    (their titles still name them) before Edit and Share give anything up. */
 @media (max-width: 1200px) {
   #topbar #comments-btn .lbl, #topbar #history-btn .lbl, .presence-count, .sync-pill { display: none; }
+}
+
+/* ---- project Home ---- */
+.home { padding-bottom: 40px; }
+.home-head { margin: 4px 0 26px; }
+.home-greet { font-size: 26px; font-weight: 660; letter-spacing: -.02em; margin: 0 0 6px; color: var(--text-bright); }
+.home-since { margin: 0; color: var(--text-dim); font-size: 14px; line-height: 1.5; min-height: 1.5em; }
+.home-sec { margin-bottom: 28px; }
+.home-eyebrow { margin: 0 0 10px; font-size: 11.5px; font-weight: 640; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); }
+.home-h { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; font-size: 15.5px; font-weight: 620; color: var(--text-bright); }
+.home-h .ico { width: 15px; height: 15px; color: var(--accent); }
+.home-count { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--hover); border: 1px solid var(--accent-dim); color: var(--accent-ink); font-size: 11.5px; font-weight: 640; }
+.home-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.home-more { font-size: 12.5px; color: var(--accent-bright); text-decoration: none; white-space: nowrap; }
+.home-more:hover { text-decoration: underline; }
+.home-none { margin: 0; color: var(--text-faint); font-size: 13px; }
+.home-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.home-card { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--surface); color: var(--text); text-decoration: none; min-width: 0; }
+.home-card:hover { border-color: var(--border-2); background: var(--hover); }
+.hc-name { display: flex; align-items: center; gap: 7px; font-weight: 600; color: var(--text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hc-name .ico { width: 14px; height: 14px; flex: none; color: var(--text-faint); }
+.hc-dir { font-family: var(--mono); font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hc-when { font-size: 12px; color: var(--text-dim); }
+.home-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 36px; align-items: start; }
+.home-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--surface); }
+.home-attn-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.home-attn-row + .home-attn-row { border-top: 1px solid var(--border); }
+.ha-icon { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex: none; border-radius: 8px; background: var(--hover); color: var(--text-dim); }
+.ha-icon .ico { width: 15px; height: 15px; }
+.home-attn-row.conflict .ha-icon { color: var(--danger-bright); }
+.home-attn-row.comments .ha-icon, .home-attn-row.stale .ha-icon { color: var(--accent-bright); }
+.ha-text { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.ha-title { color: var(--text); font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ha-title b { font-weight: 600; color: var(--text-bright); }
+.ha-sub { color: var(--text-faint); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-activity .hf-seg { margin-bottom: 8px; }
+.home-feed { list-style: none; margin: 0; padding: 0; }
+.home-fe { display: flex; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--border); }
+.fe-avatar { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex: none; border-radius: 999px; background: var(--hover); }
+.fe-avatar .ico { width: 14px; height: 14px; }
+.fe-avatar.agent { color: var(--viz-agent); }
+.fe-avatar.human { color: var(--viz-human); }
+.fe-body { display: grid; gap: 2px; min-width: 0; flex: 1; font-size: 13.5px; color: var(--text); }
+.fe-body b { font-weight: 600; color: var(--text-bright); }
+.fe-what { color: var(--text-dim); }
+.fe-path { font-family: var(--mono); font-size: 12px; color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.fe-path:hover { color: var(--accent-bright); }
+.fe-path.del { text-decoration: line-through; color: var(--text-faint); }
+.fe-dev { font-size: 12px; color: var(--text-faint); }
+.fe-when { flex: none; font-size: 12px; color: var(--text-faint); }
+.home-devlist { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.home-devlist li { display: flex; align-items: center; gap: 10px; }
+.dev-dot { width: 7px; height: 7px; flex: none; border-radius: 999px; background: var(--text-ghost); }
+.dev-dot.on { background: var(--add); }
+.dev-text { display: grid; min-width: 0; flex: 1; }
+.dev-name { font-size: 13.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-sub { font-size: 12px; color: var(--text-faint); }
+.dev-agent { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.home-connect { padding: 14px 16px; border: 1px solid var(--accent-dim); border-radius: var(--r-card); background: var(--surface); }
+.home-connect .home-h { font-size: 14px; margin-bottom: 6px; }
+.home-connect .gd-code > code { white-space: pre-wrap; max-height: 5.2em; overflow: hidden; }
+.home-bars { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 10px; }
+.hb-label { display: flex; justify-content: space-between; font-size: 13px; color: var(--text); text-decoration: none; }
+.hb-label:hover { color: var(--accent-bright); }
+.hb-n { font-variant-numeric: tabular-nums; color: var(--text-dim); }
+.hb-track { display: block; height: 4px; margin-top: 4px; border-radius: 2px; background: var(--hover); }
+.hb-fill { display: block; height: 100%; min-width: 4px; border-radius: 2px; }
+.fresh-fresh .hb-fill { background: var(--add); }
+.fresh-aging .hb-fill { background: var(--accent); }
+.fresh-stale .hb-fill { background: var(--danger-bright); }
+.home-legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-dim); }
+.home-legend span::before { content: ""; display: inline-block; width: 10px; height: 4px; margin-right: 6px; border-radius: 2px; vertical-align: 2px; }
+.home-legend .fresh-fresh::before { background: var(--add); }
+.home-legend .fresh-aging::before { background: var(--accent); }
+.home-legend .fresh-stale::before { background: var(--danger-bright); }
+.home-files { margin-top: 8px; padding-top: 22px; border-top: 1px solid var(--border); }
+@media (max-width: 1100px) {
+  .home-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-grid { grid-template-columns: minmax(0, 1fr); }
 }

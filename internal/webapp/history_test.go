@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -890,5 +891,30 @@ func TestHistorySummaryHonorsUntilWithinADay(t *testing.T) {
 	}
 	if s.Total != 1 {
 		t.Fatalf("summary with until at noon counted %d changes, want 1 (the 15:00 one is after the bound)", s.Total)
+	}
+}
+
+// Time is only to the second, so device + seq is what names one op: every
+// entry from one device carries a distinct seq.
+func TestHistoryEntryCarriesSeq(t *testing.T) {
+	srv, p, root := newHub(t, false, nil)
+	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	f.put("dev1", "a.md", "v1")
+	f.put("dev1", "a.md", "v2")
+	f.put("dev1", "a.md", "v3")
+	rec := do(t, srv.Handler(), "GET", "/api/p/"+p.ID+"/history?path=a.md", nil)
+	var out struct {
+		Entries []HistoryEntry `json:"entries"`
+	}
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+		t.Fatalf("history: %d %s", rec.Code, rec.Body)
+	}
+	seen := map[string]bool{}
+	for _, e := range out.Entries {
+		k := e.Device.ID + "/" + strconv.FormatInt(e.Seq, 10)
+		if e.Seq == 0 || seen[k] {
+			t.Fatalf("entries do not carry distinct seqs: %+v", out.Entries)
+		}
+		seen[k] = true
 	}
 }
