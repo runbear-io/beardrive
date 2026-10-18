@@ -268,3 +268,21 @@ test("desktop pins on one line stay inside the scroller's gutter", async ({ page
     await expect(page.locator(".cm-panel")).toBeVisible();
   }
 });
+
+test("a table wider than the prose column scrolls inside it, never under the rail", async ({ page }) => {
+  await login(page);
+  const id = await project(page);
+  const cols = Array.from({ length: 8 }, (_, i) => `Column ${i} with a long heading`);
+  const row = cols.map(() => "a-very-long-unbreakable-cell-value-0123456789").join(" | ");
+  const md = "---\ntype: project\n---\n\n# Wide\n\n| " + cols.join(" | ") + " |\n|" + cols.map(() => "---").join("|") + "|\n| " + row + " |\n";
+  const file = await ownFile(page, id, md);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/${id}/${file}`);
+  const rail = page.locator("aside.fv-rail");
+  await expect(rail).toBeVisible();
+  const table = page.locator(".fv-prose table");
+  await expect(table).toBeVisible();
+  const t = (await table.boundingBox())!;
+  const r = (await rail.boundingBox())!;
+  expect(t.x + t.width).toBeLessThanOrEqual(r.x);
+});

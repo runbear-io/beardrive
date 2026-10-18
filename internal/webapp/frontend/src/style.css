@@ -1664,6 +1664,10 @@ a.ai-main:hover { color: var(--accent-ink); }
     margin-right: auto;
   }
   aside.fv-rail { position: absolute; top: 0; bottom: 0; left: calc(100% + 40px); width: 260px; }
+  /* The rail hangs just past the prose column, so nothing in the column may
+     paint past its edge: a table wider than the column scrolls inside it. */
+  .page.read:has(> aside.fv-rail) .fv-prose table,
+  .page.read:has(> aside.fv-rail) .fv-prose pre { display: block; overflow-x: auto; max-width: 100%; }
   aside.fv-rail .fv-rail-in { position: sticky; top: 0; max-height: calc(100vh - 140px); overflow-y: auto; padding-left: 20px; border-left: 1px solid var(--border); }
 }
 .markdown .admin input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
