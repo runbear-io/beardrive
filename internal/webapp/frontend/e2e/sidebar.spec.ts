@@ -32,6 +32,20 @@ test("nav routes are canonical and the old view URLs redirect to them", async ({
   await page.waitForURL(`/${pid}/insights/notes`);
 });
 
+test("clicking the empty search field opens the palette", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  await page.click("#sb-search-input");
+  await expect(page.locator("#palette")).toBeVisible();
+  await expect(page.locator("#palette input")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#palette")).toHaveCount(0);
+  // A right click is the browser's, not the palette's.
+  await page.click("#sb-search-input", { button: "right" });
+  await expect(page.locator("#palette")).toHaveCount(0);
+});
+
 test("typing in the search field filters the tree; esc restores it", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
