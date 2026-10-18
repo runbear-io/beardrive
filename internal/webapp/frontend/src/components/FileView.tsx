@@ -61,8 +61,9 @@ export function preloadEditor() {
   void loadVisualEdit();
 }
 
-// How old the file's text may be when an edit session is seeded from it.
-const EDIT_SEED_MAX_AGE_MS = 2_000;
+// How old a cached copy of the file's text may be to show while editing waits
+// for its own read. Display only: a session is never seeded from it.
+const EDIT_PREVIEW_MAX_AGE_MS = 2_000;
 
 export function prefetchEditText(qc: QueryClient, apiBase: string, path: string) {
   const url = fileURLFor(apiBase, path);
@@ -357,15 +358,44 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   const fileURL = fileURLFor(apiBase, path);
   const text = useTextAt(fileURL, ["text", fileURL], true, false);
   const { error } = text;
-  // The buffer is seeded from these bytes, so they have to be current: a copy
-  // cached by an earlier read, or prefetched on hover a while ago, is fetched
-  // again before anything is built on it. A hover just before the click is
-  // recent enough to use as it is.
+  // The buffer is seeded from these bytes, so they are always read again when
+  // editing starts, and nothing is built until that read answers: a cached copy
+  // — an earlier read, a hover prefetch — may be older than a peer's write.
+  // A copy fetched just now is only shown, read-only, while the read is out.
   const [openedAt] = useState(() => Date.now());
-  const data = text.data && text.dataUpdatedAt >= openedAt - EDIT_SEED_MAX_AGE_MS ? text.data : undefined;
+  const [revalidated, setRevalidated] = useState(false);
+  const { refetch } = text;
   useEffect(() => {
-    if (text.data && !data && !text.isFetching) void text.refetch();
-  }, [text, data]);
+    let live = true;
+    // A new request, not one already in flight: a prefetch started before
+    // editing did is not a read of the file as it is now.
+    void refetch({ cancelRefetch: true }).then((r) => {
+      // A failed read leaves any cached copy in place; that copy must not
+      // seed the session either.
+      if (live && r.status === "success" && !r.isRefetchError) setRevalidated(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [refetch]);
+  const data = revalidated ? text.data : undefined;
+  // The room is opened now, alongside that read, rather than once the editor
+  // is built on its answer: the editor takes the connection already up. The
+  // source editor only — the visual editor binds the room to a page that
+  // loads in its own frame, and takes its connection when that page is ready.
+  useEffect(() => {
+    if (visual) return;
+    let left = false;
+    void loadEditor().then((m) => {
+      if (!left) m.prewarmRoom(apiBase, path, props.me);
+    });
+    return () => {
+      left = true;
+      void loadEditor().then((m) => m.releaseWarmRoom(apiBase, path));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase, path, visual]);
+  const glimpse = text.data && text.dataUpdatedAt >= openedAt - EDIT_PREVIEW_MAX_AGE_MS ? text.data : undefined;
   const Editor = useModule(editorModule, loadEditor)?.Editor;
   const VisualEdit = useModule(visualModule, loadVisualEdit)?.VisualEdit;
   const [state, setState] = useState<SaveState>("clean");
@@ -544,7 +574,15 @@ function EditView(props: Parameters<typeof FileView>[0]) {
      banner (BEA network-efficiency stage 5). */
   if (error && !data)
     return <div className="empty">Could not open {path} for editing.</div>;
-  if (!data) return <div className="empty">Loading…</div>;
+  if (!data) {
+    return glimpse?.kind === "text" ? (
+      <pre className={"cm-preview cm-mode-" + (mode === "preview" ? "write" : mode)} aria-busy="true">
+        {glimpse.text}
+      </pre>
+    ) : (
+      <div className="empty">Loading…</div>
+    );
+  }
   if (data.kind !== "text") {
     return (
       <div className="empty">

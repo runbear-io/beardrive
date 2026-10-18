@@ -1,6 +1,7 @@
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { Awareness } from "y-protocols/awareness";
+import { hasCollabRoute } from "./collabroute";
 
 /* A Yjs document, held by the hub.
 
@@ -35,6 +36,8 @@ export class CollabDoc {
   private ws: WebsocketProvider | null = null;
   private closed = false;
   private reached = false;
+  private status: CollabStatus = "connecting";
+  private gaveUp = false;
 
   // Where each OTHER participant's caret sits, by name, as an index into the
   // text. A method rather than a helper beside the editor, so a caller that
@@ -53,15 +56,15 @@ export class CollabDoc {
 
   constructor(
     private readonly url: string,
-    private readonly onStatus: (s: CollabStatus) => void,
-    private readonly onReady: () => void,
+    private onStatus: (s: CollabStatus) => void,
+    private onReady: () => void,
     // Called when the document cannot be reached at all — an older hub with
     // no such route, or a proxy that will not upgrade a websocket. The editor
     // still opens and still saves; what it loses is LIVE collaboration, not
     // the ability to write. That is deliberately not a second CRDT path: a
     // client editing its own copy of a shared document is how two browsers
     // came to overwrite each other.
-    private readonly onUnavailable: () => void,
+    private onUnavailable: () => void,
     private readonly me?: { name: string; colour: string },
   ) {
     this.text = this.doc.getText("body");
@@ -79,8 +82,30 @@ export class CollabDoc {
     }
   }
 
+  private emit(s: CollabStatus) {
+    this.status = s;
+    this.onStatus(s);
+  }
+
+  /* Hands a connection opened ahead of time (prewarmRoom) to the editor that
+     takes it, and tells that editor where it already stands. Replayed on a
+     microtask so the caller has finished assigning the document first. */
+  rebind(onStatus: (s: CollabStatus) => void, onReady: () => void, onUnavailable: () => void) {
+    this.onStatus = onStatus;
+    this.onReady = onReady;
+    this.onUnavailable = onUnavailable;
+    queueMicrotask(() => {
+      if (this.gaveUp) {
+        onUnavailable();
+        return;
+      }
+      onStatus(this.status);
+      if (this.reached) onReady();
+    });
+  }
+
   connect() {
-    this.onStatus("connecting");
+    this.emit("connecting");
     const u = new URL(this.url, location.href);
     const path = u.searchParams.get("path") ?? "";
     const base =
@@ -119,10 +144,10 @@ export class CollabDoc {
     // hub's document, and must not read as live in between.
     provider.on("status", (e: { status: string }) => {
       if (this.closed) return;
-      this.onStatus(e.status === "connected" ? (provider.synced ? "live" : "connecting") : "offline");
+      this.emit(e.status === "connected" ? (provider.synced ? "live" : "connecting") : "offline");
     });
     provider.on("sync", (synced: boolean) => {
-      if (synced && !this.closed) this.onStatus("live");
+      if (synced && !this.closed) this.emit("live");
       // "Synced" is the document having arrived, which is the moment the
       // editor may mount on it. Nothing is seeded here: the hub built it from
       // the file before this client existed.
@@ -140,6 +165,7 @@ export class CollabDoc {
       // the editor is already bound to this document.
       if (this.closed || this.reached) return;
       this.stop();
+      this.gaveUp = true;
       this.onUnavailable();
     }, UNREACHABLE_MS);
   }
@@ -156,7 +182,7 @@ export class CollabDoc {
     this.closed = true;
     this.ws?.destroy();
     this.ws = null;
-    this.onStatus("solo");
+    this.emit("solo");
   }
 
   /* Did this change come from the hub, or from the person at this keyboard?
@@ -196,3 +222,41 @@ export class CollabDoc {
 // is unreachable. Long enough to cover a reconnect on a bad network, short
 // enough that a hub without the route does not leave an editor waiting.
 const UNREACHABLE_MS = 8_000;
+
+/* Opening a room is a socket handshake and a sync round trip. Editing starts
+   it as soon as the edit page opens — in parallel with the read the editor
+   must wait for before it is built — and the editor then takes the connection
+   that is already up (takeWarmRoom). Only an edit page does this, never a
+   hover: being in the room is what puts a person on everyone else's avatars. */
+const WARM_ROOM_MS = 15_000;
+const warmRooms = new Map<string, { doc: CollabDoc; timer: ReturnType<typeof setTimeout> }>();
+
+export function roomURL(apiBase: string, path: string): string {
+  return apiBase + "ycollab?path=" + encodeURIComponent(path);
+}
+
+export function prewarmRoom(apiBase: string, path: string, me?: { name: string; colour: string }) {
+  const url = roomURL(apiBase, path);
+  if (!hasCollabRoute(apiBase) || warmRooms.has(url)) return;
+  const doc = new CollabDoc(url, () => {}, () => {}, () => {}, me);
+  doc.connect();
+  const timer = setTimeout(() => {
+    warmRooms.delete(url);
+    doc.destroy();
+  }, WARM_ROOM_MS);
+  warmRooms.set(url, { doc, timer });
+}
+
+export function takeWarmRoom(url: string): CollabDoc | null {
+  const w = warmRooms.get(url);
+  if (!w) return null;
+  clearTimeout(w.timer);
+  warmRooms.delete(url);
+  return w.doc;
+}
+
+// releaseWarmRoom closes a room opened ahead that no editor took — the person
+// left the edit page first — so they do not linger on everyone's avatars.
+export function releaseWarmRoom(apiBase: string, path: string) {
+  takeWarmRoom(roomURL(apiBase, path))?.destroy();
+}

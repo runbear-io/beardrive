@@ -204,6 +204,13 @@ test("Cmd+B wraps the selected word in <strong>", async ({ page }) => {
   await expect
     .poll(() => frame.locator("li").first().evaluate(() => String(getSelection())))
     .not.toBe("");
+  // The DOM selection is there; ProseMirror takes it into its own state on
+  // the selectionchange that follows, a task later. Two frames inside the
+  // page cover that, so the shortcut does not arrive first.
+  await frame
+    .locator("li")
+    .first()
+    .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
   await page.keyboard.press(
     process.platform === "darwin" ? "Meta+b" : "Control+b",
   );
