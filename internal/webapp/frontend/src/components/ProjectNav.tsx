@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { navigate } from "../nav";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Icon, ProjectIcon, RailButton } from "./shell";
 import {
   Select,
@@ -238,17 +239,24 @@ export function SidebarSearch() {
           esc
         </button>
       ) : (
-        <button
-          className="sb-kbd"
-          aria-label="Open search"
-          title="Search everything"
-          onClick={() => {
-            requestSearch();
-            closeSidebarOnMobile();
-          }}
-        >
-          {isMac ? "⌘K" : "Ctrl K"}
-        </button>
+        <Tooltip delayDuration={150}>
+          <TooltipTrigger asChild>
+            <button
+              id="search-btn"
+              className="sb-kbd"
+              aria-label="Search"
+              onClick={() => {
+                requestSearch();
+                closeSidebarOnMobile();
+              }}
+            >
+              {isMac ? "⌘K" : "Ctrl K"}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent className="tipcard" sideOffset={6}>
+            Search everything <kbd>{isMac ? "⌘K" : "Ctrl+K"}</kbd>
+          </TooltipContent>
+        </Tooltip>
       )}
     </div>
   );

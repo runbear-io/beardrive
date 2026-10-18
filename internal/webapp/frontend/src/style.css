@@ -281,8 +281,10 @@ button, input, a.btn { font-family: inherit; }
 .proj-menu [data-slot="select-item"] { display: flex; align-items: center; gap: 8px; }
 #projects .row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 #projects .row:hover { background: var(--hover); color: var(--text); }
-#projects .row.active { background: var(--glow); color: var(--accent-bright); }
-#projects .row.active::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; border-radius: 2px; background: var(--accent); }
+/* Honey marks only the selected file in the tree; the current page is
+   neutral. */
+#projects .row.active { background: var(--hover); color: var(--text); }
+#projects .row.active .label { font-weight: 600; }
 
 /* file tree */
 #tree { flex: 1; overflow-y: auto; padding: 8px 8px 24px; }
@@ -400,7 +402,7 @@ button, input, a.btn { font-family: inherit; }
 /* ---- project menu ---- */
 .nav-menu { list-style: none; margin: 6px 0 0; padding: 0; }
 .nav-menu .row .ico { width: 15px; height: 15px; flex: none; color: var(--text-ghost); }
-.nav-menu .row.active .ico { color: var(--accent-bright); }
+.nav-menu .row.active .ico { color: var(--text); }
 
 /* ---- project switcher ---- */
 .proj-row { display: flex; align-items: center; gap: 4px; padding: 0 10px 4px 12px; }
@@ -425,6 +427,7 @@ button, input, a.btn { font-family: inherit; }
 
 /* ---- account bar ---- */
 #accountbar { position: relative; border-top: 1px solid var(--border); padding: 7px 10px; }
+/* Signed-out footer only; signed in, the star link lives in the account menu. */
 .gh-star {
   display: flex; align-items: center; gap: 8px;
   padding: 4px 8px; margin-bottom: 2px; border-radius: 7px;
@@ -433,6 +436,7 @@ button, input, a.btn { font-family: inherit; }
 .gh-star:hover { background: var(--hover); color: var(--text); }
 .gh-star .gh-mark { width: 12px; height: 12px; flex: none; }
 .gh-star .ext { margin-left: auto; font-size: 9px; }
+#account-menu .gh-star-item .ext { margin-left: auto; font-size: 10px; }
 #account-btn {
   width: 100%; display: flex; align-items: center; gap: 9px; text-align: left;
   padding: 6px 8px; border: none; border-radius: 7px;
@@ -2094,7 +2098,7 @@ body.full-view .cm-panel { top: 0; }
   color: var(--text-dim); cursor: pointer; position: relative; white-space: nowrap; overflow: hidden;
 }
 #pinned .row:hover { background: var(--hover); color: var(--text); }
-#pinned .row.active { background: var(--glow); color: var(--accent-bright); }
+#pinned .row.active { background: var(--hover); color: var(--text); }
 #pinned .row.gone { opacity: .55; cursor: default; }
 #pinned .row > .ico { width: 14px; height: 14px; flex: none; color: var(--accent-ink); }
 #pinned .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
@@ -2105,7 +2109,8 @@ body.full-view .cm-panel { top: 0; }
 .pin-badge.danger { color: var(--danger-ink); background: color-mix(in srgb, var(--del) 16%, transparent); }
 #pinned .pin-x { display: none; }
 #pinned .row:hover .pin-x, #pinned .row:focus-within .pin-x { display: inline-flex; }
-.files-head { padding-top: 10px; }
+.files-head { padding-top: 10px; gap: 4px; }
+.files-head > span { flex: 1; }
 
 /* Row meta and hover actions in the tree. The actions are absolutely placed
    so a hidden pair costs the label no width, and stay in layout (opacity, not
@@ -2130,6 +2135,9 @@ body.full-view .cm-panel { top: 0; }
 .tact .ico { width: 12px; height: 12px; }
 .files-head .tact { background: transparent; }
 .files-head .tact:hover { background: var(--hover); }
+.files-head .tact { color: var(--text-faint); }
+.files-head .tact.on { color: var(--text); background: var(--hover); }
+#account-menu .gh-star-item .gh-mark { width: 15px; height: 15px; flex: none; }
 .row-menu { min-width: 220px; }
 .row-menu .ico { width: 13px; height: 13px; }
 
@@ -2175,7 +2183,7 @@ body.full-view .cm-panel { top: 0; }
   border: 0; border-radius: 8px; background: transparent; color: var(--text-dim); cursor: pointer;
 }
 .rail-btn:hover { background: var(--hover); color: var(--text); }
-.rail-btn.active { background: var(--hover); color: var(--accent-bright); }
+.rail-btn.active { background: var(--hover); color: var(--text); }
 .rail-btn .ico { width: 17px; height: 17px; }
 .rail-badge {
   position: absolute; top: 2px; right: 0; min-width: 16px; height: 15px; padding: 0 4px; border-radius: 999px;

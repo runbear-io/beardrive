@@ -85,6 +85,8 @@ function isFoldedCopy(path: string, stats: TreeStats): boolean {
   return !!c && stats.conflicts.has(c.original);
 }
 
+export type TreeOrder = "name" | "recent";
+
 export function buildRows(
   root: Node | undefined,
   opts: {
@@ -93,11 +95,15 @@ export function buildRows(
     stats: TreeStats;
     keep?: string; // the selected path: always reachable, never capped away
     cap?: number;
+    // "recent" lists each level newest change first; "name" keeps the
+    // tree's own order (folders first, then by name).
+    order?: TreeOrder;
   },
 ): TreeRow[] {
   const { expanded, showAll, stats, keep = "" } = opts;
   const cap = opts.cap ?? CHILD_CAP;
   const out: TreeRow[] = [];
+  const byLatest = (a: Node, b: Node) => (stats.latest.get(b.path) || 0) - (stats.latest.get(a.path) || 0);
   const onKeepPath = (p: string) => keep === p || keep.startsWith(p + "/");
 
   const emit = (nodes: Node[], depth: number) => {
@@ -116,15 +122,17 @@ export function buildRows(
   const level = (parent: Node, depth: number) => {
     const kids = (parent.children || []).filter((c) => !isFoldedCopy(c.path, stats));
     const plain = kids.filter((c) => !isSystemName(c.name));
+    if (opts.order === "recent") plain.sort(byLatest);
     const system = kids.filter((c) => isSystemName(c.name));
 
     if (depth > 0 && plain.length > cap && !showAll.has(parent.path)) {
-      const byRecent = [...plain].sort(
-        (a, b) => (stats.latest.get(b.path) || 0) - (stats.latest.get(a.path) || 0),
-      );
+      // WHICH children show is always the most recently changed (HANDOFF
+      // §3-A); the order they show in is the reader's chosen order.
+      const byRecent = [...plain].sort(byLatest);
+      const pick = new Set([...byRecent.slice(0, cap), ...byRecent.slice(cap).filter((c) => onKeepPath(c.path))]);
       const shown = byRecent.slice(0, cap);
       const held = byRecent.slice(cap).filter((c) => onKeepPath(c.path));
-      emit([...shown, ...held], depth);
+      emit(plain.filter((c) => pick.has(c)), depth);
       out.push({ kind: "more", parent: parent.path, depth, hidden: plain.length - shown.length - held.length });
     } else {
       emit(plain, depth);

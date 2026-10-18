@@ -22,8 +22,8 @@ import { FileTree, TreeFilter, ancestorsOf, type TreeActions } from "../componen
 import { Pinned, PinnedRail } from "../components/Pinned";
 import { SidebarSearch } from "../components/ProjectNav";
 import { useOpenCommentCounts } from "../hooks/useSidebar";
-import { markAllSeen, noteLeaving, pinsOf, togglePin, usePins, useVisitBaseline } from "../lib/visits";
-import { clearFilter, useSidebarSearch } from "../lib/sidebarSearch";
+import { markAllSeen, noteLeaving, pinsOf, setTreeOrder, togglePin, usePins, useTreeOrder, useVisitBaseline } from "../lib/visits";
+import { clearFilter, focusSidebarSearch, useSidebarSearch } from "../lib/sidebarSearch";
 import { treeStats } from "../lib/treeview";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
@@ -771,6 +771,7 @@ export default function Browser(props: {
   const pinExists = useCallback((p: string) => filePaths.has(p) || dirIndex.has(p), [filePaths, dirIndex]);
   const dirPaths = useMemo(() => [...dirIndex.keys()], [dirIndex]);
   const { query: filterQuery } = useSidebarSearch();
+  const treeOrder = useTreeOrder();
   useEffect(() => clearFilter, []);
 
   // New files go through upload/content, so they need uploads enabled on the
@@ -1258,6 +1259,25 @@ export default function Browser(props: {
                 {pid && (
                   <div className="sb-section files-head">
                     <span>Files</span>
+                    <button
+                      className="tact"
+                      id="tree-filter-btn"
+                      aria-label="Filter files"
+                      title="Filter files"
+                      onClick={focusSidebarSearch}
+                    >
+                      <Icon name="filter" />
+                    </button>
+                    <button
+                      className={"tact" + (treeOrder === "recent" ? " on" : "")}
+                      id="tree-sort-btn"
+                      aria-label={treeOrder === "recent" ? "Sort by name" : "Sort by most recently changed"}
+                      aria-pressed={treeOrder === "recent"}
+                      title={treeOrder === "recent" ? "Sorted by most recently changed" : "Sorted by name"}
+                      onClick={() => setTreeOrder(treeOrder === "recent" ? "name" : "recent")}
+                    >
+                      <Icon name="sort" />
+                    </button>
                     {canWrite && (
                       <button
                         className="tact"
@@ -1279,6 +1299,7 @@ export default function Browser(props: {
                   listingShowing={listingShowing}
                   restricted={restrictedDirs}
                   stats={stats}
+                  order={treeOrder}
                   actions={treeActions}
                 />
               </>

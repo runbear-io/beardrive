@@ -108,3 +108,17 @@ export function togglePin(pid: string, path: string) {
 export function usePins(pid: string | undefined): string[] {
   return useSyncExternalStore(subscribe, () => (pid ? pinsOf(pid) : NO_PINS));
 }
+
+/* ---- tree order ----
+   How the sidebar tree sorts each folder, one choice per browser. */
+
+const ORDER_KEY = "bdrive.treeOrder";
+
+export function useTreeOrder(): "name" | "recent" {
+  return useSyncExternalStore(subscribe, () => (read(ORDER_KEY) === "recent" ? "recent" : "name"));
+}
+
+export function setTreeOrder(order: "name" | "recent") {
+  write(ORDER_KEY, order);
+  emit();
+}

@@ -4,6 +4,8 @@ import { isMac } from "../util";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Activity,
+  ArrowDownWideNarrow,
+  ListFilter,
   Beaker,
   BookOpen,
   Briefcase,
@@ -230,6 +232,8 @@ const ICONS: Record<string, LucideIcon> = {
   activity: Activity,
   insights: ChartNoAxesCombined,
   fileplus: FilePlus,
+  filter: ListFilter,
+  sort: ArrowDownWideNarrow,
   folderopen: FolderOpen,
   home: House,
   laptop: LaptopMinimal,
@@ -495,14 +499,13 @@ export function VaultHeader(props: {
   name: string;
   onHome?: () => void; // hub: the project name doubles as a home link
   showSignout?: boolean; // volume mode: sign-out stays in the header (no account bar)
-  search?: boolean; // icon-only ⌘K search trigger beside the brand
   /* BearDrive is pre-1.0 and says so next to its own wordmark. Callers pass
      this only when the lockup IS the BearDrive brand — a hub that set its own
      `brand` is labelling somebody else's product, and "Acme Docs Beta" is a
      claim we have no business making for them. */
   beta?: boolean;
 }) {
-  const { name, onHome, showSignout, search, beta } = props;
+  const { name, onHome, showSignout, beta } = props;
   return (
     <header id="vault">
       <span id="vault-badge">
@@ -525,26 +528,6 @@ export function VaultHeader(props: {
       </span>
       {beta && <span id="vault-beta">Beta</span>}
       <div className="vault-actions">
-        {search && (
-          <Tooltip delayDuration={150}>
-            <TooltipTrigger asChild>
-              <button
-                id="search-btn"
-                className="icon-btn2"
-                aria-label="Search"
-                onClick={() => {
-                  requestSearch();
-                  closeSidebarOnMobile();
-                }}
-              >
-                <Icon name="search" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent className="tipcard" sideOffset={6}>
-              Search <kbd>⌘K</kbd>
-            </TooltipContent>
-          </Tooltip>
-        )}
         <Tooltip delayDuration={150}>
           <TooltipTrigger asChild>
             <button id="sb-collapse" className="icon-btn2" aria-label="Collapse sidebar" onClick={toggleSidebar}>

@@ -77,13 +77,16 @@ test("account menu: admin gets hub admin entry; member does not", async ({ page,
   await ctx.close();
 });
 
-test("the star ask is a plain link in the sidebar, not a prompt", async ({ page }) => {
+test("the star ask is a plain link in the account menu, not a prompt", async ({ page }) => {
   await login(page);
-  const star = page.locator("#accountbar .gh-star");
+  await expect(page.locator("#accountbar .gh-star")).toHaveCount(0);
+  await page.click("#account-btn");
+  const star = page.locator("#menu-github");
   await expect(star).toBeVisible();
   await expect(star).toHaveAttribute("href", "https://github.com/runbear-io/beardrive");
   await expect(star).toHaveAttribute("target", "_blank");
   // Nothing may interrupt: no dialog, no toast, no dismissible banner.
+  await page.keyboard.press("Escape");
   await expect(page.locator('[role="dialog"], [role="alertdialog"]')).toHaveCount(0);
 });
 
