@@ -56,13 +56,13 @@ test("hot-but-stale and folder reads", () => {
     { name: "x.md", path: "docs/x.md", time: "2026-08-01T00:00:00Z" },
     { name: "y.md", path: "docs/y.md", time: "2026-10-15T00:00:00Z" },
   ];
-  const heat = { "docs/x.md": { human: 5 }, "docs/y.md": { agent: 9 } };
+  const heat = { "docs/x.md": { human: 12 }, "docs/y.md": { agent: 9 } };
   assert.deepEqual(
     staleHot(files, heat, now).map((a) => a.path),
     ["docs/x.md"],
   );
   const root: Node = { name: "", path: "", dir: true, children: [{ name: "docs", path: "docs", dir: true, children: files }] };
-  assert.deepEqual(readsByFolder(root, heat, now), [{ name: "docs", reads: 14, fresh: "fresh" }]);
+  assert.deepEqual(readsByFolder(root, heat, now), [{ name: "docs", reads: 21, fresh: "fresh" }]);
   assert.equal(freshness(null), "stale");
   assert.equal(freshness(20), "aging");
 });
