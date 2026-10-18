@@ -68,7 +68,7 @@ type ShareDB struct {
 // ponytail: one full Load per share resolution; see OrgDB.refresh for the
 // upgrade path if it ever shows up in a profile.
 func (db *ShareDB) refresh() {
-	token, stale := db.ver.stale(db.repo)
+	token, stale := db.ver.stale(db.repo, &db.mu)
 	if !stale {
 		return
 	}

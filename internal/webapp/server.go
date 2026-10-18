@@ -458,6 +458,8 @@ type RemoteSource struct {
 	// sealed holds the blobs this process has verified AND proved immutable.
 	// See verify.
 	sealed sync.Map // sha (string) → struct{}
+	// blobMod is the first Modified seen for a blob not yet sealed. See maybeSeal.
+	blobMod sync.Map // sha (string) → time.Time
 
 	jmu    sync.Mutex               // guards jcache and jbytes
 	jcache map[string]cachedJournal // "journal/<dev>.jsonl" → parsed ops
@@ -520,7 +522,13 @@ func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser,
 	if !blobRe.MatchString(sha) {
 		return nil, fmt.Errorf("invalid content reference")
 	}
-	if err := r.verify(ctx, sha); err == nil {
+	if body, err := r.verify(ctx, sha); err == nil {
+		// The bytes verify hashed, when it kept them, are what is served:
+		// one storage read instead of two, and nothing can change between
+		// the check and the read.
+		if body != nil {
+			return io.NopCloser(bytes.NewReader(body)), nil
+		}
 		if rc, err := r.Backend.Get(ctx, "blobs/"+sha); err == nil {
 			return rc, nil
 		}
@@ -662,36 +670,91 @@ func (r *RemoteSource) reassemble(ctx context.Context, sha string) (io.ReadClose
 // ponytail: per-process, so the first read of each blob after a restart still
 // pays the full hash. Persisting it needs somewhere to record "the hub has
 // seen these bytes", which is a metadata-store change for a cost paid once.
-func (r *RemoteSource) verify(ctx context.Context, sha string) error {
+//
+// It returns the bytes it hashed when they fit in maxVerifiedBody, so the
+// caller can serve them instead of reading the object a second time; nil
+// means "verified (or no check needed), read it yourself".
+func (r *RemoteSource) verify(ctx context.Context, sha string) ([]byte, error) {
 	if _, canSign := r.Backend.(remote.PutSigner); !canSign {
-		return nil
+		return nil, nil
 	}
 	if _, ok := r.sealed.Load(sha); ok {
-		return nil
+		return nil, nil
 	}
 	rc, err := r.Backend.Get(ctx, "blobs/"+sha)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	h := sha256.New()
-	_, err = io.Copy(h, rc)
+	keep := &cappedBuffer{max: maxVerifiedBody}
+	_, err = io.Copy(io.MultiWriter(h, keep), rc)
 	rc.Close()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if hex.EncodeToString(h.Sum(nil)) != sha {
-		return fmt.Errorf("stored content does not hash to its key")
+		return nil, fmt.Errorf("stored content does not hash to its key")
 	}
-	// sealAfter, not presignTTL: o.Modified is the STORAGE service's clock and
-	// time.Since is the hub's. A hub whose clock runs ahead of storage would
-	// otherwise overstate the object's age and seal it while a minted URL is
-	// still live — after which a replay is served from cache for the life of
-	// the process.
-	if o, ok, err := r.blobStat(ctx, sha); err == nil && ok &&
-		!o.Modified.IsZero() && time.Since(o.Modified) > r.sealAfter() {
+	r.maybeSeal(ctx, sha)
+	return keep.bytes(), nil
+}
+
+// maxVerifiedBody is the largest blob verify keeps to serve from memory.
+const maxVerifiedBody = 8 << 20
+
+// cappedBuffer keeps what is written until it passes max, then nothing.
+type cappedBuffer struct {
+	buf  bytes.Buffer
+	max  int
+	over bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if !c.over {
+		if c.buf.Len()+len(p) > c.max {
+			c.over = true
+			c.buf = bytes.Buffer{}
+		} else {
+			c.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) bytes() []byte {
+	if c.over {
+		return nil
+	}
+	return c.buf.Bytes()
+}
+
+// maybeSeal stops re-hashing a blob once no presigned URL for it can still be
+// live.
+//
+// The age comes from the first Modified this process saw for the blob, kept so
+// that a blob is stat'ed once rather than on every read. That anchor is safe:
+// both presign doors refuse a key that already exists, so every URL for the
+// blob was minted before its first PUT and is dead by that PUT plus the TTL —
+// and any Modified the store reports is at or after that first PUT, an
+// overwrite only moving it later.
+//
+// sealAfter, not presignTTL: Modified is the STORAGE service's clock and
+// time.Since is the hub's. A hub whose clock runs ahead of storage would
+// otherwise overstate the object's age and seal it while a minted URL is
+// still live — after which a replay is served from cache for the life of the
+// process.
+func (r *RemoteSource) maybeSeal(ctx context.Context, sha string) {
+	var mod time.Time
+	if v, ok := r.blobMod.Load(sha); ok {
+		mod = v.(time.Time)
+	} else if o, ok, err := r.blobStat(ctx, sha); err == nil && ok && !o.Modified.IsZero() {
+		mod = o.Modified
+		r.blobMod.Store(sha, mod)
+	}
+	if !mod.IsZero() && time.Since(mod) > r.sealAfter() {
 		r.sealed.Store(sha, struct{}{})
+		r.blobMod.Delete(sha)
 	}
-	return nil
 }
 
 // sealAfter is how old a stored blob must be before its verification may be
@@ -1476,8 +1539,20 @@ func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 	// Each row carries the caller's own level, so the frontend can hide write
 	// affordances without a second fetch per project on every render.
 	visible := []projectView{}
+	// Every project on the hub is checked, so the caller's memberships are
+	// read once for the whole list rather than once per project.
+	var roleOf func(string) string
+	email := normEmail(s.requestUser(r).Email)
+	if !s.Desktop && s.Dir != nil && s.Auth != nil {
+		roleOf = s.orgRoles(email)
+	}
 	for _, p := range s.Projects.List() {
-		perm := s.projectPermOf(r, p)
+		var perm string
+		if roleOf != nil && p.Org != "" {
+			perm = capByGrant(r, p.ID, projectPermWithRole(p, email, roleOf(p.Org)))
+		} else {
+			perm = s.projectPermOf(r, p)
+		}
 		if !atLeast(perm, PermRead) {
 			continue
 		}

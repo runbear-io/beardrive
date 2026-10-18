@@ -108,28 +108,48 @@ func sealRead(t testing.TB, src *RemoteSource, sha string) string {
 	return string(b)
 }
 
+// sealTamper replaces the stored bytes of a blob behind the hub's back — what a
+// replayed presigned PUT does — and keeps the object as old as it was.
+func sealTamper(t testing.TB, dir, sha, content string, age time.Duration) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "blobs", sha), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sealAge(t, dir, age)
+}
+
+func sealTryRead(src *RemoteSource, sha string) (string, error) {
+	rc, err := src.OpenBlob(context.Background(), sha)
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(rc)
+	return string(b), err
+}
+
 // Past the presign TTL nobody but the hub can write the object any more, so
-// the verification is cached and a read costs exactly one storage read — the
-// point of the whole change.
+// the verification is cached: the next read is one storage read and is not
+// hashed again (shown by bytes swapped in underneath it being served as they
+// are — the swap stands in for the hub's own write, the only one left).
 func TestBlobVerificationStopsOnceTheObjectCannotChange(t *testing.T) {
 	src, be, dir := sealSource(t, time.Minute)
 	sha := sealPut(t, be, "reviewed content")
-	sealAge(t, dir, time.Hour+10*time.Minute) // past the TTL and the skew margin
+	age := time.Hour + 10*time.Minute // past the TTL and the skew margin
+	sealAge(t, dir, age)
 
 	if got := sealRead(t, src, sha); got != "reviewed content" {
 		t.Fatalf("first read returned %q", got)
 	}
 	first := be.count()
-	if first < 2 {
-		t.Fatalf("the first read did %d storage reads, want at least 2 (verify + stream)", first)
-	}
 
-	if got := sealRead(t, src, sha); got != "reviewed content" {
-		t.Fatalf("second read returned %q", got)
+	sealTamper(t, dir, sha, "written after sealing", age)
+	if got, err := sealTryRead(src, sha); err != nil || got != "written after sealing" {
+		t.Errorf("a sealed blob was hashed again (got %q, %v): "+
+			"the verification is not being cached once the object is provably immutable", got, err)
 	}
 	if n := be.count() - first; n != 1 {
-		t.Errorf("a read of a sealed blob cost %d storage reads, want 1 (the stream): "+
-			"the verification is not being cached once the object is provably immutable", n)
+		t.Errorf("a read of a sealed blob cost %d storage reads, want 1 (the stream)", n)
 	}
 }
 
@@ -157,13 +177,29 @@ func TestBlobVerificationRepeatsWhileAPresignedURLCouldBeLive(t *testing.T) {
 			sealAge(t, dir, c.age)
 
 			sealRead(t, src, sha)
-			first := be.count()
-			sealRead(t, src, sha)
-			if n := be.count() - first; n < 2 {
-				t.Errorf("a read of a blob that a live presigned URL could still overwrite cost %d storage reads, "+
-					"want at least 2 (re-verify + stream): the verification was cached too early", n)
+			sealTamper(t, dir, sha, "a replayed presigned PUT", c.age)
+			if got, err := sealTryRead(src, sha); err == nil && got == "a replayed presigned PUT" {
+				t.Errorf("a blob a live presigned URL could still overwrite was served without "+
+					"re-hashing (%q): the verification was cached too early", got)
 			}
 		})
+	}
+}
+
+// Verifying reads the whole object anyway, so a blob that fits is served from
+// those bytes: one storage read, and nothing can change between the check and
+// the bytes the reader gets.
+func TestVerifiedBlobIsServedFromTheBytesThatWereHashed(t *testing.T) {
+	src, be, dir := sealSource(t, time.Hour)
+	sha := sealPut(t, be, "fresh content")
+	sealAge(t, dir, time.Minute)
+
+	before := be.count()
+	if got := sealRead(t, src, sha); got != "fresh content" {
+		t.Fatalf("read returned %q", got)
+	}
+	if n := be.count() - before; n != 1 {
+		t.Errorf("verifying and serving a small blob cost %d storage reads, want 1", n)
 	}
 }
 

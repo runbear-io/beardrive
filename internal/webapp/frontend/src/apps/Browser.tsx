@@ -27,7 +27,7 @@ import { clearFilter, focusSidebarSearch, useSidebarSearch } from "../lib/sideba
 import { treeStats } from "../lib/treeview";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
-import { FileSkeleton, FileView, renderQuery } from "../components/FileView";
+import { FileSkeleton, FileView, prefetchEditText, preloadEditor, renderQuery } from "../components/FileView";
 import { ShareDialog } from "../components/ShareDialog";
 import { ShareBanner } from "../components/ShareBanner";
 import { CommentPanel, CommentSurface } from "../components/Comments";
@@ -289,6 +289,13 @@ export default function Browser(props: {
   // as before: openPath builds a plain file URL, and canEdit is false for a
   // ?v= version, so the editor never opens on bytes it would overwrite.
   const editing = !!route.editing && canEdit;
+  // Someone who can edit what they are reading may well press Edit, and the
+  // editor is a separate download: fetch it once the page has settled.
+  useEffect(() => {
+    if (!canEdit || !isFile || editing) return;
+    const idle = window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 1500));
+    idle(() => preloadEditor());
+  }, [canEdit, isFile, editing]);
   // HTML edits as its rendered page by default; this is the way down to its
   // markup. Only meaningful for HTML — every other type has one surface.
   const [editSource, setEditSource] = useState(false);
@@ -1121,6 +1128,16 @@ export default function Browser(props: {
             <Button
               id="edit-btn"
               variant="toolbar"
+              onPointerEnter={() => {
+                if (editing) return;
+                preloadEditor();
+                prefetchEditText(qc, apiBase, path);
+              }}
+              onFocus={() => {
+                if (editing) return;
+                preloadEditor();
+                prefetchEditText(qc, apiBase, path);
+              }}
               title={editing ? "Stop editing" : "Edit this file"}
               onClick={() =>
                 navigate(urlForPath(path, project?.id, version, route.full, !editing))

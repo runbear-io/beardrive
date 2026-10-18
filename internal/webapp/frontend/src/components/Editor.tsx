@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Compartment, EditorState } from "@codemirror/state";
 import {
   EditorView,
@@ -181,9 +181,13 @@ export function Editor({
   const shaRef = useRef(baseSha);
   shaRef.current = baseSha;
 
+  // False until a document is mounted: the preview below stands in for it.
+  const [ready, setReady] = useState(false);
+
   useEffect(() => {
     if (!host.current) return;
     let view: EditorView | null = null;
+    setReady(false);
 
     // The extensions both mounts share. Only the collaborative binding and
     // the change listener differ between them.
@@ -263,6 +267,7 @@ export function Editor({
         }),
       });
       editor.current = view;
+      setReady(true);
       view.focus();
       report(view);
     };
@@ -288,6 +293,7 @@ export function Editor({
       });
       viaRoom = true;
       editor.current = view;
+      setReady(true);
       view.focus();
       report(view);
     };
@@ -343,7 +349,20 @@ export function Editor({
     editor.current?.dispatch({ effects: modeSlot.current.reconfigure(modeExtensions(mode)) });
   }, [mode]);
 
-  return <div ref={host} id="editor" className={"cm-host cm-mode-" + mode} data-mode={mode} />;
+  return (
+    <>
+      {/* The file's text while the room answers, so the page has its content
+          at once instead of after a handshake. Plain text rather than a
+          second CodeMirror: nothing here takes input, and anything looking for
+          the editor finds only the real one. */}
+      {!ready && (
+        <pre className={"cm-preview cm-mode-" + mode} aria-busy="true">
+          {initial}
+        </pre>
+      )}
+      <div ref={host} id="editor" className={"cm-host cm-mode-" + mode} data-mode={mode} />
+    </>
+  );
 }
 
 // Write is the note as prose — no gutter, the reading measure; Markdown is the

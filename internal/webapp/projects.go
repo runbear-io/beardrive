@@ -225,7 +225,7 @@ func (db *ProjectDB) putPerm(prev, next Project, email, level string) error {
 // It is NOT a TTL — a token that moved is always followed by the full re-read,
 // so the staleness window this removes stays removed.
 func (db *ProjectDB) refresh() {
-	token, stale := db.ver.stale(db.repo)
+	token, stale := db.ver.stale(db.repo, &db.mu)
 	if !stale {
 		return
 	}

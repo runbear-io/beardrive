@@ -1,5 +1,5 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
 import { fetchBlobText, fileURLFor, useTextAt } from "../hooks/useBlob";
@@ -29,10 +29,42 @@ import { Avatar } from "./PresenceBar";
 import { agoShort, byteLength, isMeetingNote, sectionAt, sections, wordCount } from "../lib/meeting";
 import type { CollabStatus } from "../lib/collab";
 
-// The editors carry CodeMirror, TipTap/ProseMirror and the Yjs collaboration
-// stack, none of which a reader needs, so they load when someone edits.
-const Editor = lazy(() => import("./Editor").then((m) => ({ default: m.Editor })));
-const VisualEdit = lazy(() => import("./VisualEdit").then((m) => ({ default: m.VisualEdit })));
+/* The editors carry CodeMirror, TipTap/ProseMirror and the Yjs collaboration
+   stack, none of which a reader needs, so they load when someone edits.
+
+   Loaded by hand rather than with React.lazy: lazy suspends on its first
+   render even when the module is already here, and React then holds the
+   Suspense fallback for at least 300 ms. A module fetched ahead of time (see
+   preloadEditor) is rendered on the first pass instead. */
+type EditorModule = typeof import("./Editor");
+type VisualEditModule = typeof import("./VisualEdit");
+let editorModule: EditorModule | null = null;
+let visualModule: VisualEditModule | null = null;
+let editorLoad: Promise<EditorModule> | null = null;
+let visualLoad: Promise<VisualEditModule> | null = null;
+const loadEditor = () => (editorLoad ??= import("./Editor").then((m) => (editorModule = m)));
+const loadVisualEdit = () => (visualLoad ??= import("./VisualEdit").then((m) => (visualModule = m)));
+
+function useModule<T>(have: T | null, load: () => Promise<T>): T | null {
+  const [m, setM] = useState(have);
+  useEffect(() => {
+    if (!m) void load().then(setM);
+  }, [m, load]);
+  return m;
+}
+
+// What the editing page has to load before it can show anything: the editor
+// code, and the file's text under the key EditView reads. Started ahead of the
+// click so pressing Edit has nothing left to wait for.
+export function preloadEditor() {
+  void loadEditor();
+  void loadVisualEdit();
+}
+
+export function prefetchEditText(qc: QueryClient, apiBase: string, path: string) {
+  const url = fileURLFor(apiBase, path);
+  void qc.prefetchQuery({ queryKey: ["text", url], queryFn: () => fetchBlobText(url) });
+}
 
 export function FileView(props: {
   apiBase: string;
@@ -321,6 +353,8 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // so a restore or a peer write invalidates it like any other read.
   const fileURL = fileURLFor(apiBase, path);
   const { data, error } = useTextAt(fileURL, ["text", fileURL], true, false);
+  const Editor = useModule(editorModule, loadEditor)?.Editor;
+  const VisualEdit = useModule(visualModule, loadVisualEdit)?.VisualEdit;
   const [state, setState] = useState<SaveState>("clean");
   const [collab, setCollab] = useState<CollabStatus>("connecting");
   const md = MD_EXT.test(path);
@@ -560,8 +594,10 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           onRestored={onRestored}
         />
       )}
-      <Suspense fallback={<div className="empty">Loading editor…</div>}>
       {visual ? (
+        !VisualEdit ? (
+          <div className="empty">Loading editor…</div>
+        ) : (
         /* HTML gets the rendered page, clicked directly. Same file, same
            shared document, same save — a different surface onto it. Source
            editing stays one click away for the structural work this cannot
@@ -584,6 +620,9 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           me={props.me}
           onRendered={props.onRendered}
         />
+        )
+      ) : !Editor ? (
+        <div className="empty">Loading editor…</div>
       ) : (
         <div className="ed-surface" hidden={mode === "preview"}>
         <Editor
@@ -618,7 +657,6 @@ function EditView(props: Parameters<typeof FileView>[0]) {
         />
         </div>
       )}
-      </Suspense>
       {mode === "preview" && !visual && <EditPreview {...props} />}
       {!visual && (
         <div className="ed-statusbar" id="ed-statusbar">

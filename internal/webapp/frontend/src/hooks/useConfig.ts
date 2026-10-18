@@ -3,6 +3,16 @@ import { getJSON } from "../api/http";
 import { initAnalytics } from "../analytics";
 import type { ServerConfig } from "../api/types";
 
+// The request started by startConfig, consumed by the first query run.
+let early: Promise<ServerConfig> | null = null;
+
+// startConfig sends /api/config before anything else on the page asks for
+// anything, so it is first in line for a connection: the app renders nothing
+// until it answers. The query below still decides what the answer means.
+export function startConfig() {
+  early ??= getJSON<ServerConfig>("/api/config");
+}
+
 // The first request the app makes; everything else keys off its answer.
 // If auth is on and there is no session, redirect to the login page here
 // rather than letting every authed call 401 (noisy console, and the
@@ -11,7 +21,9 @@ export function useConfig() {
   return useQuery({
     queryKey: ["config"],
     queryFn: async () => {
-      const cfg = await getJSON<ServerConfig>("/api/config");
+      const pending = early;
+      early = null;
+      const cfg = await (pending ?? getJSON<ServerConfig>("/api/config"));
       if (cfg.auth.enabled && !cfg.me) {
         /* Same loop guard as toLogin, and for the same reason: /auth/login
            will happily send a signed-in user straight back here, so if the
