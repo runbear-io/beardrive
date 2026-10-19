@@ -143,7 +143,7 @@ are reading this" signal.
 
 ## Disconnect
 
-**Account menu → Connected agents** lists everything you have connected —
+**Project menu (top of the sidebar) → Connected agents** lists everything you have connected —
 which client, which projects, when it was last used — with a Disconnect button
 on each.
 
