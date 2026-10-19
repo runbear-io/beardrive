@@ -562,7 +562,7 @@ button, input, a.btn { font-family: inherit; }
 /* The scroll container owns scrolling and the page gutter — never a width.
    Width and centering belong to .page (one per view), so every route shares
    the same column edges and the gutter never eats into the reading measure. */
-#content { flex: 1; overflow-y: auto; padding: 44px 40px 110px; scroll-behavior: smooth; scrollbar-gutter: stable; }
+#content { --content-pad-b: 110px; flex: 1; overflow-y: auto; padding: 44px 40px var(--content-pad-b); scroll-behavior: smooth; scrollbar-gutter: stable; }
 /* #content is the only scroller in the app, so with the platform's overlay
    scrollbars nothing at rest says a route has more below (that's how Public
    links went missing on settings). Giving ::-webkit-scrollbar an explicit
@@ -1409,7 +1409,7 @@ a.ai-main:hover { color: var(--accent-ink); }
   :root[data-theme="light"] #sidebar { box-shadow: 0 0 40px rgba(0,0,0,.18); }
   :root[data-theme="light"] body.sb-open #sb-backdrop { background: rgba(15,17,21,.35); }
   .icon-btn, #search-btn { display: inline-flex; width: 44px; height: 44px; }
-  #content { padding: 24px 18px 70px; }
+  #content { --content-pad-b: 70px; padding: 24px 18px var(--content-pad-b); }
   #topbar { padding: 0 8px; gap: 4px; }
   .btn .lbl { display: none; }
   #topbar .btn { min-width: 44px; min-height: 44px; padding: 0; justify-content: center; gap: 0; }
@@ -2430,7 +2430,10 @@ a.fe-path:hover { color: var(--accent-bright); }
 .ed-offline b { color: var(--accent-ink); }
 
 .ed-statusbar {
-  position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: center;
+  /* Sticky insets are measured inside the scroller's padding, so bottom: 0
+     would float the bar #content's bottom padding above the window's edge
+     with prose showing beneath it. */
+  position: sticky; bottom: calc(-1 * var(--content-pad-b, 0px)); z-index: 2; display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: center;
   margin-top: 12px; padding: 7px 2px; border-top: 1px solid var(--border); background: var(--bg);
   color: var(--text-faint); font-size: 12px;
 }

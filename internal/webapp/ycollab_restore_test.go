@@ -27,7 +27,10 @@ func liveRoom(t *testing.T, srv *Server, room string, writer bool) *crdt.Doc {
 	if writer {
 		srv.rooms().writer(room, User{Email: "editor@example.com", Name: "An Editor"})
 	}
-	t.Cleanup(func() { srv.rooms().drop(room) })
+	t.Cleanup(func() {
+		srv.rooms().drop(room)
+		srv.rooms().settle()
+	})
 	return doc
 }
 

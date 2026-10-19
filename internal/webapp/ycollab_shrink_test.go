@@ -66,7 +66,10 @@ func TestRoomRefusesAFileTooLargeToHold(t *testing.T) {
 	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=big.md", big, "")
 	room := p.ID + "/big.md"
 	srv.rooms().writer(room, User{Email: "editor@example.com", Name: "An Editor"})
-	t.Cleanup(func() { srv.rooms().drop(room) })
+	t.Cleanup(func() {
+		srv.rooms().drop(room)
+		srv.rooms().settle()
+	})
 	_ = srv.ydocs().Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		txt := doc.GetText("body")
 		transact(func(txn *crdt.Transaction) { txt.Insert(txn, txt.Len(), "!", nil) })

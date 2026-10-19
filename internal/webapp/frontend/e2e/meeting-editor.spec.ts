@@ -354,3 +354,17 @@ test("collapsing a teammate's section never edits the text", async ({ page }) =>
   expect(await read(page, file)).toBe(body);
   await expect(page.locator("#editor-state")).toHaveAttribute("data-state", "clean");
 });
+
+// The status bar sits on the window's bottom edge while the note scrolls
+// beneath it — not floating a padding's height above it with text below.
+test("the editor status bar pins to the bottom of the window", async ({ page }) => {
+  await login(page, ADMIN);
+  const file = `long-${Date.now()}.md`;
+  expect((await put(page, file, "## Snow\n" + "- a line of the meeting\n".repeat(120))).ok()).toBeTruthy();
+  await open(page, file);
+  const bar = page.locator("#ed-statusbar");
+  await expect(bar).toBeVisible();
+  const content = (await page.locator("#content").boundingBox())!;
+  const b = (await bar.boundingBox())!;
+  expect(Math.abs(b.y + b.height - (content.y + content.height))).toBeLessThanOrEqual(2);
+});
