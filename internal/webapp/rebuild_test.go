@@ -236,8 +236,12 @@ func (f *failingSource) Files(ctx context.Context) (map[string]FileInfo, error) 
 }
 
 // A background rebuild that fails leaves the push to the next read instead of
-// the previous snapshot standing until it expires.
-func TestAFailedBackgroundRebuildLeavesTheNextReadToRebuild(t *testing.T) {
+// the previous snapshot standing until it expires, and does not tell watchers:
+// they are told by the retry that lands it.
+func TestAFailedBackgroundRebuildRetriesBeforeTellingWatchers(t *testing.T) {
+	defer func(d time.Duration) { rebuildRetryMin = d }(rebuildRetryMin)
+	rebuildRetryMin = time.Millisecond
+
 	src := &failingSource{}
 	src.set("a.md")
 	v := &volume{source: src, refresh: time.Hour}
@@ -245,14 +249,21 @@ func TestAFailedBackgroundRebuildLeavesTheNextReadToRebuild(t *testing.T) {
 
 	src.set("a.md", "pushed.md")
 	src.hold() // makes the background load fail
-	done := make(chan struct{})
-	v.refreshThen(func() { close(done) })
-	<-done
+	told := make(chan bool, 1)
+	v.refreshThen(func() { told <- has(t, v, "pushed.md") })
+	select {
+	case <-told:
+		t.Fatal("watchers were told after a rebuild that failed")
+	case <-time.After(30 * time.Millisecond):
+	}
 	src.mu.Lock()
 	src.gate = nil
 	src.mu.Unlock()
 	if !has(t, v, "pushed.md") {
 		t.Fatal("the push stayed invisible after its background rebuild failed")
+	}
+	if saw := <-told; !saw {
+		t.Fatal("watchers were told, but fetching did not find the push")
 	}
 }
 

@@ -407,6 +407,12 @@ func (v *volume) install(files map[string]FileInfo, moves moveIndex, gen uint64)
 // backgroundRebuildTimeout bounds one rebuild that no request is waiting on.
 const backgroundRebuildTimeout = 2 * time.Minute
 
+// A failed background rebuild is retried after rebuildRetryMin, doubling up to
+// rebuildRetryMax while storage keeps failing.
+var rebuildRetryMin = time.Second
+
+const rebuildRetryMax = 30 * time.Second
+
 // refreshThen brings the snapshot up to date in the background and calls done
 // once a snapshot that includes every write accepted before the call is in
 // place. Readers keep getting the previous snapshot meanwhile instead of
@@ -432,9 +438,12 @@ func (v *volume) refreshThen(done func()) {
 }
 
 func (v *volume) rebuildLoop() {
+	var batch []func()
+	first := rebuildRetryMin
+	retry := first
 	for {
 		v.bgMu.Lock()
-		batch := v.bgDone
+		batch = append(batch, v.bgDone...)
 		v.bgDone = nil
 		if len(batch) == 0 {
 			v.bgRunning = false
@@ -450,16 +459,24 @@ func (v *volume) rebuildLoop() {
 		ctx, cancel := context.WithTimeout(context.Background(), backgroundRebuildTimeout)
 		files, moves, err := v.load(ctx)
 		cancel()
-		v.mu.Lock()
-		if err == nil {
-			v.install(files, moves, gen)
-		} else {
-			v.at = time.Time{} // the next read retries in the foreground
+		if err != nil {
+			// The batch is kept for a retry: telling watchers now would send
+			// them to refetch a snapshot without the change. Meanwhile the
+			// next read tries in the foreground.
+			v.mu.Lock()
+			v.at = time.Time{}
+			v.mu.Unlock()
+			time.Sleep(retry)
+			retry = min(retry*2, rebuildRetryMax)
+			continue
 		}
+		v.mu.Lock()
+		v.install(files, moves, gen)
 		v.mu.Unlock()
 		for _, f := range batch {
 			f()
 		}
+		batch, retry = nil, first
 	}
 }
 

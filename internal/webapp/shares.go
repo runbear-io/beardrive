@@ -286,7 +286,9 @@ func (s *Server) handleShareCreate(v *volume, w http.ResponseWriter, r *http.Req
 	if !s.writablePath(w, r, p) {
 		return
 	}
-	snap, err := v.snapshotHaving(r.Context(), p)
+	// current, not the cached snapshot: the credential scan below must read
+	// the version the link will serve, including one a device has just pushed.
+	snap, err := v.current(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
