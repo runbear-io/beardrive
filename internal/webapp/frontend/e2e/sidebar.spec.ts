@@ -230,3 +230,37 @@ test("active nav is neutral; honey marks only the selected tree file's icon", as
   await expect(page.locator("#vault-name")).toHaveText("BearDrive");
   await expect(page.locator("#vault button")).toHaveCount(0);
 });
+
+test("dragging the sidebar edge resizes it, persists, and double-click resets", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  const sidebar = page.locator("#sidebar");
+  const width = async () => Math.round((await sidebar.boundingBox())!.width);
+  expect(await width()).toBe(256);
+
+  const handle = (await page.locator("#sb-resize").boundingBox())!;
+  const y = handle.y + handle.height / 2;
+  await page.mouse.move(handle.x + 3, y);
+  await page.mouse.down();
+  await page.mouse.move(340, y, { steps: 5 });
+  await page.mouse.up();
+  expect(await width()).toBe(340);
+
+  await page.mouse.move(337, y);
+  await page.mouse.down();
+  await page.mouse.move(900, y, { steps: 5 });
+  await page.mouse.up();
+  expect(await width()).toBe(480);
+
+  await page.reload();
+  await page.waitForSelector("#sidebar");
+  expect(await width()).toBe(480);
+
+  await page.locator("#sb-resize").focus();
+  await page.keyboard.press("ArrowLeft");
+  expect(await width()).toBe(472);
+
+  await page.locator("#sb-resize").dblclick();
+  expect(await width()).toBe(256);
+});

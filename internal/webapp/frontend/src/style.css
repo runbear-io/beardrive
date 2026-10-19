@@ -213,7 +213,8 @@ button, input, a.btn { font-family: inherit; }
    the current page/file is a stronger neutral tint plus weight, and the one
    honey accent left is the open file's icon. */
 #sidebar {
-  width: 256px; min-width: 210px;
+  width: var(--sb-w, 256px); min-width: 210px; max-width: 480px;
+  position: relative;
   background: var(--bg-side);
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column; overflow: hidden;
@@ -494,6 +495,16 @@ button, input, a.btn { font-family: inherit; }
   body.sb-collapsed #sidebar > :not(#rail) { display: none; }
   body.sb-collapsed #rail { display: flex; }
 }
+/* Drag the sidebar's right edge to resize; double-click restores 256px. */
+#sb-resize {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 6px; z-index: 50;
+  cursor: col-resize; touch-action: none;
+}
+#sb-resize:hover, #sb-resize:focus-visible, body.sb-resizing #sb-resize {
+  background: color-mix(in srgb, var(--text) 18%, transparent); outline: none;
+}
+body.sb-resizing { cursor: col-resize; user-select: none; }
+@media (max-width: 900px) { #sb-resize { display: none; } }
 /* Desktop-app back/forward (Topbar nav slot) — like .icon-btn but always
    visible: the app window has no browser chrome to fall back on. */
 #nav-btns { display: inline-flex; gap: 2px; flex: none; }
