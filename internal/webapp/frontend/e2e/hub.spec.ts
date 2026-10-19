@@ -11,10 +11,8 @@ test("landing selects the first project and rewrites the URL", async ({ page }) 
   await page.waitForURL("/" + pid);
   await expect(page.locator("#project-select")).toContainText("wiki");
   await expect(page).toHaveTitle("wiki");
-  // The brand (and its Beta label) closes the project menu.
-  await openProjectMenu(page);
-  await expect(page.locator("#menu-brand")).toContainText("BearDrive");
-  await expect(page.locator("#menu-brand .beta")).toHaveText("Beta");
+  await expect(page.locator("#vault-name")).toHaveText("BearDrive");
+  await expect(page.locator("#vault-beta")).toHaveText("Beta");
 });
 
 test("deep link to a project resolves after reload", async ({ page }) => {

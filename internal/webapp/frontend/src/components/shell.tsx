@@ -489,7 +489,7 @@ export function RailButton(props: {
 
 export function VaultHeader(props: {
   name: string;
-  onHome?: () => void; // hub: the project name doubles as a home link
+  onHome?: () => void; // hub: the brand name doubles as a home link
   showSignout?: boolean; // volume mode: sign-out stays in the header (no account bar)
   /* BearDrive is pre-1.0 and says so next to its own wordmark. Callers pass
      this only when the lockup IS the BearDrive brand — a hub that set its own

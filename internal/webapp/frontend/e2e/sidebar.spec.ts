@@ -225,6 +225,8 @@ test("active nav is neutral; honey marks only the selected tree file's icon", as
   await expect(row).toHaveCSS("color", "rgb(238, 240, 243)"); // --text
   await expect(row.locator(".ticon")).toHaveCSS("color", "rgb(245, 166, 35)"); // --accent-ink
 
-  // The project menu is the sidebar's header; there is no brand bar above it.
-  await expect(page.locator("#sidebar #vault")).toHaveCount(0);
+  // The brand header carries no controls of its own: collapsing is the
+  // topbar's toggle (or ⌘B), and the account lives in the project menu.
+  await expect(page.locator("#vault-name")).toHaveText("BearDrive");
+  await expect(page.locator("#vault button")).toHaveCount(0);
 });
