@@ -453,8 +453,8 @@ Projects are walled by **organization**: every project belongs to one org
 (file-backed `orgs.json`), and only that org's members — accounts with the
 `owner` or `member` role — can see, browse, or sync it. Your first
 `bdrive init` creates an org for you automatically; an owner invites
-teammates from the web UI (the org name in the sidebar footer — Invite
-mints an expiring join link, `/join/<token>`, that any signed-in account
+teammates from the web UI (the project menu at the top of the sidebar →
+Organization settings — New invite mints an expiring join link, `/join/<token>`, that any signed-in account
 can open to become a member). A hub upgraded from an earlier version
 sweeps its existing projects into a `default` org that all existing
 accounts join, so nothing breaks. Public share links stay outside the
@@ -792,8 +792,8 @@ project and every connection loses it with you, nothing to revoke), writes land
 in History under your name, and restricted folders stay invisible. Both `write`
 and `edit` accept the `sha` you read, so they refuse rather than silently
 overwriting a teammate's change; `read` takes `raw: true` when an agent is
-copying a file and needs the exact bytes. The account menu's **Connected agents**
-page lists what is connected and disconnects any of it; `bdrive mcp
+copying a file and needs the exact bytes. The **Connected agents** page (in the
+project menu at the top of the sidebar) lists what is connected and disconnects any of it; `bdrive mcp
 list`/`revoke` do the same from a terminal. Either way it takes effect
 immediately, killing the access and refresh token at once. See
 [Hub configuration](https://docs.beardrive.ai/reference/hub-config/).

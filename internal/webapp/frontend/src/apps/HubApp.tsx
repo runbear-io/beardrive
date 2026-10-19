@@ -4,13 +4,20 @@ import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../a
 import { useFetchProjects, useOrgs, usePending, usePermissions, useProjects, useHubRefresh } from "../hooks/useHub";
 import { decodePath, parseRoute, projectByName, titleForRoute, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
-import { AppShell, Icon, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
+import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { McpConnections } from "../components/McpConnections";
-import { ProjectNav, ProjectRailNav, type ProjectMenu } from "../components/ProjectNav";
+import {
+  ProjectNav,
+  ProjectRailMenu,
+  ProjectRailNav,
+  SyncFooter,
+  type AccountMenu,
+  type ProjectMenu,
+} from "../components/ProjectNav";
 import { useQueryClient } from "@tanstack/react-query";
-import { AccountBar, SignedOutBar } from "../components/AccountBar";
+import { SignedOutBar } from "../components/AccountBar";
 import { BillingView } from "../components/BillingView";
 import { ProjectSettings } from "../components/ProjectSettings";
 import { ConnectGuide } from "../components/ConnectGuide";
@@ -174,23 +181,18 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   const brand = config.brand || "BearDrive";
   const org = (current && orgs?.find((o) => o.id === current.org)) || null;
 
-  // Top of the sidebar is the brand; project and account actions live in
-  // their own sections below (PropelAuth-style layout).
-  // The Beta pill labels the BEARDRIVE wordmark, so it keys on what the
-  // lockup actually says rather than on whether `brand` was configured. A hub
-  // that set its own brand is labelling somebody else's product, and "Acme
-  // Docs Beta" is a claim we have no business making for them — but the
-  // managed hub and every default self-host DO reach here with "BearDrive",
-  // and a `!config.brand` test would have missed the ones that set it
-  // explicitly (CLOUD_BRAND defaults to "BearDrive", so BuiltinAuth hubs send
-  // the string rather than an empty field).
-  const vault = (
-    <VaultHeader
-      name={brand}
-      onHome={() => navigate("/")}
-      beta={brand === "BearDrive"}
-    />
-  );
+  // Before there is a project list to show (loading, desktop onboarding) the
+  // sidebar's top is the brand; once there is one, it is the project menu.
+  // The Beta label belongs to the BEARDRIVE name, so it keys on what the name
+  // actually says rather than on whether `brand` was configured. A hub that
+  // set its own brand is labelling somebody else's product, and "Acme Docs
+  // Beta" is a claim we have no business making for them — but the managed
+  // hub and every default self-host DO reach here with "BearDrive", and a
+  // `!config.brand` test would have missed the ones that set it explicitly
+  // (CLOUD_BRAND defaults to "BearDrive", so BuiltinAuth hubs send the string
+  // rather than an empty field).
+  const beta = brand === "BearDrive";
+  const vault = <VaultHeader name={brand} onHome={() => navigate("/")} beta={beta} />;
 
   // Desktop app: session changes go through the sidecar (which runs the same
   // flows as `bdrive login`/`logout`), then the config query is refetched so
@@ -204,16 +206,18 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       .finally(() => qc.invalidateQueries({ queryKey: ["config"] }));
   };
 
-  const accountBar = config.me ? (
-    <AccountBar
-      me={config.me}
-      org={org}
-      orgActive={!!route.org}
-      billing={config.billing}
-      mcp={config.mcp}
-      signOut={config.desktop ? () => desktopAuth("/api/desktop/logout") : undefined}
-      admin={
-        isAdmin
+  // The session half of the project menu (org, hub admin, billing, theme,
+  // sign-out). Signed out on desktop, the sidebar's footer is the sign-in
+  // action instead.
+  const account: AccountMenu | undefined = config.me
+    ? {
+        me: config.me,
+        org,
+        orgActive: !!route.org,
+        billing: config.billing,
+        mcp: config.mcp,
+        signOut: config.desktop ? () => desktopAuth("/api/desktop/logout") : undefined,
+        admin: isAdmin
           ? {
               pending: pending?.length || 0,
               onClick: () => {
@@ -221,12 +225,15 @@ export default function HubApp({ config }: { config: ServerConfig }) {
                 closeSidebarOnMobile();
               },
             }
-          : undefined
+          : undefined,
+        brand,
+        beta,
       }
-    />
-  ) : config.desktop ? (
-    <SignedOutBar onSignIn={() => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")} />
-  ) : undefined;
+    : undefined;
+  const signedOutBar =
+    !config.me && config.desktop ? (
+      <SignedOutBar onSignIn={() => desktopAuth("/api/desktop/login", "Finish signing in in your browser…")} />
+    ) : undefined;
 
   if (setupStep) {
     return (
@@ -262,9 +269,8 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   if (!current) {
     return (
       <AppShell
-        vault={vault}
-        projectsNav={<ProjectNav projects={projects} onNew={newProject} />}
-        orgBar={accountBar}
+        projectsNav={<ProjectNav projects={projects} account={account} onNew={newProject} />}
+        orgBar={signedOutBar}
         topbar={<Topbar />}
       >
         <Page>
@@ -345,9 +351,8 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     // a member of it.
     return (
       <AppShell
-        vault={vault}
-        projectsNav={<ProjectNav projects={projects} onNew={newProject} />}
-        orgBar={accountBar}
+        projectsNav={<ProjectNav projects={projects} account={account} onNew={newProject} />}
+        orgBar={signedOutBar}
         topbar={<Topbar />}
       >
         <Page>
@@ -502,33 +507,38 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       project={project ?? current}
       projects={projects}
       sidebar={{
-        vault,
         projectsNav: (
           <ProjectNav
             projects={projects}
             currentId={current.id}
+            account={account}
             onNew={newProject}
-            readsEnabled={!!config.reads?.enabled}
             menu={projectMenu}
+          />
+        ),
+        railTop: (
+          <ProjectRailMenu
+            projects={projects}
+            current={current}
+            menu={projectMenu}
+            account={account}
+            onNew={newProject}
           />
         ),
         railNav: <ProjectRailNav pid={current.id} menu={projectMenu} />,
         orgBar: (
           <>
-            <button
-              id="nav-install"
-              className={"connect-device" + (!panel && route.view === "install" ? " active" : "")}
-              onClick={() => {
+            <SyncFooter
+              pid={current.id}
+              readsEnabled={!!config.reads?.enabled}
+              active={!panel && route.view === "install"}
+              onOpen={() => {
                 setPanel(null);
                 navigate(urlForView("install", current.id));
                 closeSidebarOnMobile();
               }}
-            >
-              <Icon name="laptop" />
-              <span className="label">Connect a device</span>
-              <Icon name="plus" />
-            </button>
-            {accountBar}
+            />
+            {signedOutBar}
           </>
         ),
       }}

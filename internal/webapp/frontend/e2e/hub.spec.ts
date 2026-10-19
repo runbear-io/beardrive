@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, wikiId, MEMBER, PASSWORD, expectToast } from "./helpers";
+import { login, wikiId, MEMBER, PASSWORD, expectToast, openProjectMenu } from "./helpers";
 
 // Phase 1: shell, session flags, project list/selection, routing, empty
 // state, invite accept. Mutating specs (project creation) run last —
@@ -11,7 +11,10 @@ test("landing selects the first project and rewrites the URL", async ({ page }) 
   await page.waitForURL("/" + pid);
   await expect(page.locator("#project-select")).toContainText("wiki");
   await expect(page).toHaveTitle("wiki");
-  await expect(page.locator("#vault-name")).toHaveText("BearDrive");
+  // The brand (and its Beta label) closes the project menu.
+  await openProjectMenu(page);
+  await expect(page.locator("#menu-brand")).toContainText("BearDrive");
+  await expect(page.locator("#menu-brand .beta")).toHaveText("Beta");
 });
 
 test("deep link to a project resolves after reload", async ({ page }) => {
@@ -60,9 +63,9 @@ test("a project name in the URL resolves to its id", async ({ page }) => {
   await expect(page.locator("#content")).toContainText(/.+/);
 });
 
-test("account menu: admin gets hub admin entry; member does not", async ({ page, browser }) => {
+test("project menu: admin gets hub admin entry; member does not", async ({ page, browser }) => {
   await login(page); // admin, owner of "default"
-  await page.click("#account-btn");
+  await openProjectMenu(page);
   await expect(page.locator("#menu-org-settings")).toContainText("default");
   await expect(page.locator("#menu-hub-admin")).toBeVisible();
   await expect(page.locator("#signout")).toBeVisible();
@@ -71,23 +74,10 @@ test("account menu: admin gets hub admin entry; member does not", async ({ page,
   const ctx = await browser.newContext();
   const p2 = await ctx.newPage();
   await login(p2, MEMBER);
-  await p2.click("#account-btn");
+  await openProjectMenu(p2);
   await expect(p2.locator("#menu-org-settings")).toContainText("default");
   await expect(p2.locator("#menu-hub-admin")).toHaveCount(0);
   await ctx.close();
-});
-
-test("the star ask is a plain link in the account menu, not a prompt", async ({ page }) => {
-  await login(page);
-  await expect(page.locator("#accountbar .gh-star")).toHaveCount(0);
-  await page.click("#account-btn");
-  const star = page.locator("#menu-github");
-  await expect(star).toBeVisible();
-  await expect(star).toHaveAttribute("href", "https://github.com/runbear-io/beardrive");
-  await expect(star).toHaveAttribute("target", "_blank");
-  // Nothing may interrupt: no dialog, no toast, no dismissible banner.
-  await page.keyboard.press("Escape");
-  await expect(page.locator('[role="dialog"], [role="alertdialog"]')).toHaveCount(0);
 });
 
 test("join link accepts an invite after sign-in", async ({ page, browser }) => {
@@ -152,7 +142,8 @@ test("the create dialog does not open itself when projects exist", async ({ page
 
 test("new project via the sidebar + modal seeds the recommended option", async ({ page }) => {
   await login(page);
-  await page.click("#projects .nav-add");
+  await openProjectMenu(page);
+  await page.click("#menu-new-project");
   await page.fill(".modal-input", "scratch");
   // The badged row IS the checked row — asserted as an invariant, not by
   // name, so reordering the options can't quietly split them apart again.
@@ -172,9 +163,10 @@ test("new project via the sidebar + modal seeds the recommended option", async (
     await expect(page.locator("#sidebar").getByText(name, { exact: true }).first()).toBeVisible();
   }
   // Open the switcher: both projects listed; picking one navigates.
-  await page.click("#project-select");
-  await expect(page.getByRole("option", { name: "wiki" })).toBeVisible();
-  await page.getByRole("option", { name: "wiki" }).click();
+  await openProjectMenu(page);
+  const wiki = page.getByRole("menuitem", { name: "wiki", exact: true });
+  await expect(wiki).toBeVisible();
+  await wiki.click();
   await page.waitForURL(/\/[0-9a-f-]{36}$/);
   await expect(page.locator("#project-select")).toContainText("wiki");
   await expectToast(page, "Created");
@@ -184,7 +176,8 @@ test("new project via the sidebar + modal seeds the recommended option", async (
 // shows the structure before any device has ever connected.
 test("new project from a template", async ({ page }) => {
   await login(page);
-  await page.click("#projects .nav-add");
+  await openProjectMenu(page);
+  await page.click("#menu-new-project");
   await page.fill(".modal-input", "from-template");
   await page.click('.start-point:has-text("Docs + decision records")');
   await expect(page.locator(".start-point.on")).toContainText("Docs + decision records");
@@ -206,7 +199,8 @@ test("new project from a template", async ({ page }) => {
 // survives a reload.
 test("new project from an existing folder", async ({ page }) => {
   await login(page);
-  await page.click("#projects .nav-add");
+  await openProjectMenu(page);
+  await page.click("#menu-new-project");
   await page.fill(".modal-input", "brought-my-own");
   await page.click('.start-point:has-text("I already have a folder")');
   await page.click(".modal .pbtn");
@@ -223,22 +217,23 @@ test("new project from an existing folder", async ({ page }) => {
   await expect(page.locator(".gd-note")).toBeVisible();
 });
 
-test("account menu closes on Escape and outside click", async ({ page }) => {
+test("project menu closes on Escape and outside click", async ({ page }) => {
   await login(page);
-  await page.click("#account-btn");
-  await expect(page.locator("#account-menu")).toBeVisible();
+  await page.click("#project-select");
+  await expect(page.locator("#project-menu")).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.locator("#account-menu")).toHaveCount(0);
-  await page.click("#account-btn");
-  await expect(page.locator("#account-menu")).toBeVisible();
+  await expect(page.locator("#project-menu")).toHaveCount(0);
+  await page.click("#project-select");
+  await expect(page.locator("#project-menu")).toBeVisible();
   await page.click("#content", { position: { x: 10, y: 10 } });
-  await expect(page.locator("#account-menu")).toHaveCount(0);
+  await expect(page.locator("#project-menu")).toHaveCount(0);
 });
 
 test("new-project modal cancels on Escape", async ({ page }) => {
   await login(page);
   await wikiId(page);
-  await page.click("#projects .nav-add");
+  await openProjectMenu(page);
+  await page.click("#menu-new-project");
   await expect(page.locator(".modal-input")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator(".modal-input")).toHaveCount(0);

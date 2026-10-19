@@ -3,7 +3,7 @@ import type { Project } from "../api/types";
 import { agentPrompt } from "../lib/prompt";
 import { copyText } from "../util";
 import { ProjectIcon } from "./shell";
-import { projColor } from "./ProjectNav";
+import { markStyle } from "./ProjectNav";
 
 /* ---- project home guide ----
    One paste sets up any coding agent: the prompt points at the canonical
@@ -35,7 +35,7 @@ export function ConnectGuide({ project, existing }: { project: Project; existing
         <span
           className="proj-mark"
           aria-hidden="true"
-          style={{ background: projColor(project.name) }}
+          style={markStyle(project.name)}
         >
           <ProjectIcon name={project.icon} />
         </span>

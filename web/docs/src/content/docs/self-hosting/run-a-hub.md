@@ -103,7 +103,8 @@ container platform works the same way.
 2. On any machine, `bdrive login https://your-hub`, then in the folder you want
    synced: `bdrive init --name wiki --yes` — or, inside a repository,
    `bdrive init docs --yes` to make that subfolder the project.
-3. Invite a teammate: sidebar footer → **Manage** → **New invite**. The join
+3. Invite a teammate: the project menu at the top of the sidebar →
+   **Organization settings** → **New invite**. The join
    link both creates their account and adds them to your org.
 4. Connect agents: the project's home page shows one-paste setup for Claude
    Code, Hermes, and Codex, with the hub URL and project id already filled in.
@@ -120,8 +121,9 @@ the server is the only machine configured with the bucket.
 Projects are walled by **organization**. Every project belongs to one org, and
 only that org's members — accounts with the `owner` or `member` role — can see,
 browse, or sync it. Your first `bdrive init` creates an org automatically; an
-owner invites teammates from the web UI (the org name in the sidebar footer →
-Invite mints an expiring `/join/<token>` link). Public share links stay outside
+owner invites teammates from the web UI (the project menu at the top of the
+sidebar → Organization settings → New invite mints an expiring `/join/<token>`
+link). Public share links stay outside
 the wall on purpose.
 
 A hub upgraded from a pre-org version sweeps its existing projects into a

@@ -136,7 +136,7 @@ classDiagram
 
     class components {
         FileView FileRail (DocHeader) FolderListing FileTree (TreeFilter, TreeActions row menu)
-        ProjectNav (SidebarSearch ProjectRailNav) Pinned PinnedRail
+        ProjectNav (SidebarMenu SidebarSearch SyncFooter ProjectRailNav ProjectRailMenu) Pinned PinnedRail
         HistoryView (ActivitySummary ActivityPanel) HistoryRow HistoryFilters DiffView (DiffTabs DiffStat) VersionBanner ConflictBanner
         PresenceBar (Avatar) Editor (EditMode EditorInfo) VisualEdit
         EditRail (Attendees Versions) ShrinkDialogHost askShrink
@@ -144,7 +144,7 @@ classDiagram
         Home Insights ShareDialog NewProjectDialog
         ShareBanner SharesTable AdminTable
         OrgAdmin HubSettings ProjectSettings
-        Palette shell (RailBase RailButton) AccountBar WidthHandles ...
+        Palette shell (RailBase RailButton) SignedOutBar WidthHandles ...
     }
     note for components "FileRail.tsx is the markdown file page's DocHeader (frontmatter type / OKF chips, size, who-edited · device · date · reads/30d — provenance lives here, not in the top bar's #meta, which now carries only the editor's save state) and its right rail: On this page (h2/h3 read from the rendered HTML's goldmark ids, current section by #content scroll), Reads · 30 days (the path's /heat entry only: total, agent/human/share split, distinct readers — the API has no per-day series and no per-path reader identities, so there are no daily bars or top readers), and Properties (full frontmatter). ≥1400px it is an absolute aside beside .page.read; below, a closed <details> above the document; data-bd-ignore keeps all of it out of comment anchoring. The comments panel replaces it while open"
     note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; the initial selection is options[0].value — the same array element the RECOMMENDED badge indexes, so the badged row and the checked row are one row by construction (on a template-less hub that row is 'I already have a folder', which still creates an empty project). modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
@@ -210,7 +210,7 @@ classDiagram
     note for lib "fuzzy.ts is the palette matcher, lifted out of Palette.tsx so it can be tested at all. scoreLabel is the whole query: it splits on whitespace and every token must match the label (AND, order irrelevant, scores summed) — a space used to be just another character to the subsequence walk, and a path never contains one, so any two-word query matched NOTHING (BEA-194). Its typo pass is one rule, not an edit-distance routine: retry a token of 4+ characters with each single character dropped, which covers a transposition, a substitution and an insertion because subsequence matching already tolerates the other direction. Three properties are load-bearing and each has a test: a blank query returns score 0 with no hits BEFORE it splits (the stable sort over that is what keeps the project's own destinations on top — BEA-52, BEA-105), an errored token costs a flat penalty no bonus can climb over (so exact beats approximate by construction, not by tuning), and hits come back sorted and de-duplicated — Highlight slices forward from the last index and would silently duplicate letters otherwise. Palette runs it strict over every candidate and retries only the misses, only when the strict pass came back short of the 40-row cap, so a query that already matches never pays for the typo pass"
     note for lib "prompt.ts is the agent paste-prompt — the single most important string in onboarding, and it was assembled by hand in ConnectGuide, EmptyState and Setup's Done frame, three wordings drifting independently. They differ only in what is being set up, so they are one function with one varying clause. Pure and origin-injected so the node suite can test it: each previous wording is pinned by a test, and one more pins that every variant still ASKS which folder, which is the runbook's hard gate"
     note for lib "csv.ts parses .csv/.tsv for FileView's table view — ~50 lines against RFC 4180, so no papaparse. It NEVER throws: null means 'not a table' (unterminated quote, no delimiter) and the caller falls back to the plain-text preview, which is why the fallback is a type-level guarantee rather than a try/catch someone can forget"
-    note for lib "theme.ts owns the one appearance preference: System (default), Light or Dark, kept per browser in localStorage and resolved onto html[data-theme]. index.html's inline bootstrap applies it before first paint, so a light reader never sees a dark flash. The dark tokens stay the unprefixed :root default and light overrides them under :root[data-theme=light], which leaves tw.css's @theme literals — the ones web/docs and the cloud landing read — untouched. JS-side palettes (mermaid, toasts) read useTheme rather than the OS; the Insights charts paint only from CSS tokens (--viz-agent/human/share, --viz-fresh-1…4, --viz-cov-1…4), so they follow html[data-theme] with no JS, so the choice in AccountBar reaches every surface"
+    note for lib "theme.ts owns the one appearance preference: System (default), Light or Dark, kept per browser in localStorage and resolved onto html[data-theme]. index.html's inline bootstrap applies it before first paint, so a light reader never sees a dark flash. The dark tokens stay the unprefixed :root default and light overrides them under :root[data-theme=light], which leaves tw.css's @theme literals — the ones web/docs and the cloud landing read — untouched. JS-side palettes (mermaid, toasts) read useTheme rather than the OS; the Insights charts paint only from CSS tokens (--viz-agent/human/share, --viz-fresh-1…4, --viz-cov-1…4), so they follow html[data-theme] with no JS, so the choice in the project menu (ProjectNav's SidebarMenu) reaches every surface"
 
     ErrorBoundary --> App : wraps the whole tree
     App --> HubApp
@@ -228,7 +228,7 @@ classDiagram
     HubApp --> components
     components --> nav : linkProps navigate
     components --> lib : diffText groupRuns hotPathSplit placeLabels staleNote isDanger parseDelimited renderMermaid parseConflict secretsBadge scoreLabel
-    components --> lib : useTheme (AccountBar's radio group, FileView mermaid, toasts)
+    components --> lib : useTheme (SidebarMenu's theme row, FileView mermaid, toasts)
     Browser --> lib : secretsMessage (the share dialog's half of lib/secrets)
     Browser --> lib : armGoal applyGoal noteScroll
     hooks --> lib : re-exports heat.ts, sniffBytes
