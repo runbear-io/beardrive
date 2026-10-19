@@ -264,3 +264,19 @@ test("dragging the sidebar edge resizes it, persists, and double-click resets", 
   await page.locator("#sb-resize").dblclick();
   expect(await width()).toBe(256);
 });
+
+test("a wide desktop width never covers the mobile drawer's scrim", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.evaluate(() => localStorage.setItem("bdrive.sidebarWidth", "480"));
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`/${pid}`);
+  await page.click("#menu-btn");
+  await expect(page.locator("body")).toHaveClass(/sb-open/);
+  expect(Math.round((await page.locator("#sidebar").boundingBox())!.width)).toBe(256);
+  await page.mouse.click(370, 400);
+  await expect(page.locator("body")).not.toHaveClass(/sb-open/);
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  expect(Math.round((await page.locator("#sidebar").boundingBox())!.width)).toBe(480);
+});
