@@ -64,7 +64,7 @@ classDiagram
         -source Source
         -refresh time.Duration
         -snap *snapshot (files + moves + encoded tree)
-        -gen, snapGen, staleThrough
+        -gen, snapGen, staleThrough, covers, accepted
         +snapshot(ctx)
         +current(ctx) never behind a background rebuild
         +snapshotHaving(ctx, p) current() when p is missing
@@ -72,7 +72,7 @@ classDiagram
         +refreshThen(done) rebuild in background, then done
         +invalidate()
     }
-    note for volume "A device's journal PUT is folded in by refreshThen in the background, and its change event is published only once that rebuild has landed: readers keep the previous snapshot instead of waiting on a fold of every op, and a watcher that refetches on the event finds the new ops. Writes during a rebuild are gathered into the next one; gen/snapGen keep a slow rebuild from putting an older listing back over a newer one, and staleThrough keeps a rebuild that started before an invalidate from satisfying it. Hub-side writes (uploads, restore, remove) invalidate. A failed background rebuild keeps its callbacks and retries with backoff, so watchers are told only by a rebuild that landed. The journal PUT marks the volume pending (beginRefresh) right after the store write, before it builds the change event. current() is for callers that must see everything accepted: the If-Match head check, the share credential scan and co-editing room seeds. snapshotHaving(p) falls back to current() when p is missing, for doors that address a path a client may have just pushed (lookup, comment, remove)"
+    note for volume "A device's journal PUT is folded in by refreshThen in the background, and its change event is published only once that rebuild has landed: readers keep the previous snapshot instead of waiting on a fold of every op, and a watcher that refetches on the event finds the new ops. Writes during a rebuild are gathered into the next one; gen/snapGen keep a slow rebuild from putting an older listing back over a newer one, and staleThrough keeps a rebuild that started before an invalidate from satisfying it. Hub-side writes (uploads, restore, remove) invalidate. A failed background rebuild keeps its callbacks and retries with backoff, so watchers are told only by a rebuild that landed. The journal PUT marks the volume pending (beginRefresh) right after the store write, before it builds the change event. current() is for callers that must see everything accepted: the If-Match head check, the share credential scan and co-editing room seeds. It compares the pushes counted so far (accepted) with those the cached snapshot includes (covers) and rebuilds only when behind, so the requests that ask during one background rebuild share one catch-up. snapshotHaving(p) falls back to current() when p is missing, for doors that address a path a client may have just pushed (lookup, comment, remove)"
     class snapshot {
         -files map path→FileInfo
         -moves moveIndex

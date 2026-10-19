@@ -343,3 +343,42 @@ func TestCurrentFoldsAPushMarkedBeforeItsEventIsBuilt(t *testing.T) {
 	finish(func() { t.Error("finish ran twice") })
 	<-done
 }
+
+// Catching up in the foreground happens once per push, not once per request:
+// lookups of paths that do not exist, while one background rebuild runs, must
+// not each refold the project.
+func TestMissingPathLookupsDuringARebuildFoldOnce(t *testing.T) {
+	src := &gatedSource{}
+	src.set("a.md")
+	v := &volume{source: src, refresh: time.Hour}
+	has(t, v, "a.md")
+
+	src.set("a.md", "pushed.md")
+	gate := src.hold()
+	done := make(chan struct{})
+	v.refreshThen(func() { close(done) })
+	src.mu.Lock()
+	src.gate = nil
+	src.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := v.snapshotHaving(context.Background(), "missing.md"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	src.mu.Lock()
+	loads := src.loads
+	src.mu.Unlock()
+	// seed + the background rebuild + one foreground catch-up
+	if loads > 3 {
+		t.Fatalf("%d loads: lookups during one rebuild each refolded the project", loads)
+	}
+	close(gate)
+	<-done
+}

@@ -283,15 +283,17 @@ type volume struct {
 	// that started before the latest invalidate: its listing may predate that
 	// write, so it is installed without counting as fresh.
 	gen, snapGen, staleThrough uint64
+	// covers is how many device pushes (accepted) had been counted when the
+	// listing in snap started loading: snap includes all of them.
+	covers uint64
 
 	// Background rebuilds requested by refreshThen. bgDone holds the callbacks
 	// waiting for a rebuild that starts after they were queued.
 	bgMu      sync.Mutex
 	bgRunning bool
 	bgDone    []func()
-	// pending counts writes marked by beginRefresh that have not reached
-	// refreshThen yet.
-	pending int
+	// accepted counts device pushes, from the moment each is stored.
+	accepted uint64
 }
 
 type snapshot struct {
@@ -361,13 +363,20 @@ type MoveSource interface {
 }
 
 func (v *volume) snapshot(ctx context.Context) (*snapshot, error) {
+	return v.snapshotCovering(ctx, 0)
+}
+
+// snapshotCovering is snapshot that also rebuilds when the cached one does not
+// include the first want device pushes. Concurrent callers wait on mu, so one
+// rebuild answers all of those that asked before it started.
+func (v *volume) snapshotCovering(ctx context.Context, want uint64) (*snapshot, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.snap != nil && time.Since(v.at) < v.refresh {
+	if v.snap != nil && time.Since(v.at) < v.refresh && v.covers >= want {
 		return v.snap, nil
 	}
 	v.gen++
-	gen := v.gen
+	gen, acc := v.gen, v.acceptedNow()
 	files, moves, err := v.load(ctx)
 	if err != nil {
 		if v.snap != nil {
@@ -375,8 +384,14 @@ func (v *volume) snapshot(ctx context.Context) (*snapshot, error) {
 		}
 		return nil, err
 	}
-	v.install(files, moves, gen)
+	v.install(files, moves, gen, acc)
 	return v.snap, nil
+}
+
+func (v *volume) acceptedNow() uint64 {
+	v.bgMu.Lock()
+	defer v.bgMu.Unlock()
+	return v.accepted
 }
 
 func (v *volume) load(ctx context.Context) (map[string]FileInfo, moveIndex, error) {
@@ -389,11 +404,11 @@ func (v *volume) load(ctx context.Context) (map[string]FileInfo, moveIndex, erro
 
 // install makes a rebuild the current snapshot unless a newer one already is.
 // Callers hold mu.
-func (v *volume) install(files map[string]FileInfo, moves moveIndex, gen uint64) {
+func (v *volume) install(files map[string]FileInfo, moves moveIndex, gen, acc uint64) {
 	if gen < v.snapGen {
 		return
 	}
-	v.snapGen = gen
+	v.snapGen, v.covers = gen, acc
 	at := time.Now()
 	if gen <= v.staleThrough {
 		at = time.Time{}
@@ -430,6 +445,7 @@ func (v *volume) refreshThen(done func()) {
 		return
 	}
 	v.bgMu.Lock()
+	v.accepted++
 	v.bgDone = append(v.bgDone, done)
 	if v.bgRunning {
 		v.bgMu.Unlock()
@@ -447,16 +463,11 @@ func (v *volume) refreshThen(done func()) {
 // a no-op as well as calling it on the success path.
 func (v *volume) beginRefresh() func(done func()) {
 	v.bgMu.Lock()
-	v.pending++
+	v.accepted++
 	v.bgMu.Unlock()
 	var once sync.Once
 	return func(done func()) {
-		once.Do(func() {
-			v.refreshThen(done)
-			v.bgMu.Lock()
-			v.pending--
-			v.bgMu.Unlock()
-		})
+		once.Do(func() { v.refreshThen(done) })
 	}
 }
 
@@ -477,7 +488,7 @@ func (v *volume) rebuildLoop() {
 
 		v.mu.Lock()
 		v.gen++
-		gen := v.gen
+		gen, acc := v.gen, v.acceptedNow()
 		v.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), backgroundRebuildTimeout)
 		files, moves, err := v.load(ctx)
@@ -494,7 +505,7 @@ func (v *volume) rebuildLoop() {
 			continue
 		}
 		v.mu.Lock()
-		v.install(files, moves, gen)
+		v.install(files, moves, gen, acc)
 		v.mu.Unlock()
 		for _, f := range batch {
 			f()
@@ -505,15 +516,11 @@ func (v *volume) rebuildLoop() {
 
 // current is snapshot for a caller that must see every write already accepted
 // — seeding a co-editing room, resolving a path a client has just pushed —
-// rather than whatever a background rebuild has caught up to.
+// rather than whatever a background rebuild has caught up to. It rebuilds only
+// when the cached snapshot is missing a push, so the requests that ask while
+// one rebuild runs share it.
 func (v *volume) current(ctx context.Context) (*snapshot, error) {
-	v.bgMu.Lock()
-	behind := v.bgRunning || v.pending > 0
-	v.bgMu.Unlock()
-	if behind {
-		v.invalidate()
-	}
-	return v.snapshot(ctx)
+	return v.snapshotCovering(ctx, v.acceptedNow())
 }
 
 // snapshotHaving is snapshot for a caller about to look up p: a path missing

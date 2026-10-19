@@ -1064,9 +1064,8 @@ func TestShareSecretScanSeesAPushNotYetFolded(t *testing.T) {
 	}
 
 	f.put("dev1", "deploy.md", "# Deploy\n\nrun it\n\nAWS_ACCESS_KEY_ID="+planted+"\n")
-	v.bgMu.Lock()
-	v.bgRunning = true // the push's background rebuild is still running
-	v.bgMu.Unlock()
+	finish := v.beginRefresh() // the push is stored; its rebuild has not run
+	defer finish(func() {})
 
 	if rec := postShare(t, srv, h, p.ID, map[string]string{"path": "deploy.md"}); rec.Code != http.StatusConflict {
 		t.Fatalf("share scanned the version from before the push: %d %s, want 409", rec.Code, rec.Body)
