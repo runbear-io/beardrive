@@ -477,9 +477,10 @@ func (s *Server) lockPath(project, p string) func() {
 }
 
 // headBlob is the sha a path currently resolves to, and whether it resolves at
-// all. Read from the cached snapshot rather than the journal: every write on
-// this hub invalidates it, so the answer is as fresh as the last change, and a
-// stale one can only cost a spurious 409 the client recovers from — never a
+// all. Read from the cached snapshot rather than the journal, through current:
+// a write through the hub invalidates the snapshot and a device push is folded
+// in before current answers, so the answer is as fresh as the last change, and
+// a stale one can only cost a spurious 409 the client recovers from — never a
 // missed conflict that costs somebody their text.
 func (s *Server) headBlob(ctx context.Context, v *volume, p string) (string, bool) {
 	fi, ok := s.headFile(ctx, v, p)
@@ -487,7 +488,7 @@ func (s *Server) headBlob(ctx context.Context, v *volume, p string) (string, boo
 }
 
 func (s *Server) headFile(ctx context.Context, v *volume, p string) (FileInfo, bool) {
-	snap, err := v.snapshot(ctx)
+	snap, err := v.current(ctx)
 	if err != nil {
 		return FileInfo{}, false
 	}

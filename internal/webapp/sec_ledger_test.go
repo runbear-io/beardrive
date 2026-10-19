@@ -87,13 +87,13 @@ func secledBucket(l *ReadLedger, project, path, day, kind, actor string, count i
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := ReadStatKey{Project: project, Path: path, Day: day, Kind: kind, Actor: actor}
-	l.byKey[key] = ReadStat{
+	l.setStat(key, ReadStat{
 		Project: project, Path: path, Day: day, Kind: kind, Actor: actor,
 		Count: count,
 		// A fixed instant: a wall-clock timestamp would differ between the two
 		// worlds for reasons that have nothing to do with who read the file.
 		Last: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
-	}
+	})
 }
 
 // secledBuckets snapshots every bucket in the ledger — the server-side truth
@@ -101,9 +101,11 @@ func secledBucket(l *ReadLedger, project, path, day, kind, actor string, count i
 func secledBuckets(l *ReadLedger) []ReadStat {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := make([]ReadStat, 0, len(l.byKey))
-	for _, st := range l.byKey {
-		out = append(out, st)
+	var out []ReadStat
+	for _, rows := range l.byProject {
+		for _, st := range rows {
+			out = append(out, st)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]

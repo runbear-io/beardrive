@@ -773,7 +773,7 @@ func (s *Server) handleCommentCreate(v *volume, w http.ResponseWriter, r *http.R
 		http.Error(w, "no such file", http.StatusNotFound)
 		return
 	}
-	snap, err := v.snapshot(r.Context())
+	snap, err := v.snapshotHaving(r.Context(), p)
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
 		return

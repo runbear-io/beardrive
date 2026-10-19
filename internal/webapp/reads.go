@@ -144,20 +144,22 @@ type ReadLedger struct {
 	retention time.Duration
 
 	// Session-read detail, optional (nil = off) and deliberately outside
-	// byKey: these rows are never loaded into memory in bulk, so Heat's full
-	// map scan and the boot load are unaffected by session cardinality. If a
-	// future change ever moves them into byKey, Heat (below) is what pays.
+	// byProject: these rows are never loaded into memory in bulk, so Heat's
+	// scan and the boot load are unaffected by session cardinality. If a
+	// future change ever moves them into byProject, Heat (below) is what pays.
 	sessions         SessionReadRepo
 	sessionRetention time.Duration
 
-	// scans counts ShareOpens passes over byKey. Tests assert one per
+	// scans counts ShareOpens passes over a project's buckets. Tests assert one per
 	// project per list render — the "never one scan per share" rule is
 	// invisible in the response body, so this is the only thing that can
 	// catch the regression.
 	scans atomic.Int64
 
-	mu           sync.Mutex
-	byKey        map[ReadStatKey]ReadStat
+	mu sync.Mutex
+	// byProject holds every bucket, grouped by project so a query about one
+	// project reads only that project's rows rather than the whole hub's.
+	byProject    map[string]map[ReadStatKey]ReadStat
 	dirty        map[ReadStatKey]bool
 	pendingDel   []ReadStatKey             // retention deletions awaiting a successful flush
 	seen         map[ReadStatKey]time.Time // debounce; Day field unused ("")
@@ -178,7 +180,7 @@ func NewReadLedger(repo ReadRepo, retentionDays int) (*ReadLedger, error) {
 	l := &ReadLedger{
 		repo:      repo,
 		retention: time.Duration(retentionDays) * 24 * time.Hour,
-		byKey:     map[ReadStatKey]ReadStat{},
+		byProject: map[string]map[ReadStatKey]ReadStat{},
 		dirty:     map[ReadStatKey]bool{},
 		seen:      map[ReadStatKey]time.Time{},
 		lastFlush: time.Now(),
@@ -188,7 +190,7 @@ func NewReadLedger(repo ReadRepo, retentionDays int) (*ReadLedger, error) {
 		return nil, err
 	}
 	for _, st := range stats {
-		l.byKey[st.key()] = st
+		l.setStat(st.key(), st)
 	}
 	// Fold anything past the retention horizon right away. A failed persist
 	// is not a boot failure — the fold stays dirty and later flushes retry.
@@ -245,11 +247,11 @@ func (l *ReadLedger) Record(project, path, kind, actor string) {
 	l.seen[visit] = now
 	key := visit
 	key.Day = now.Format("2006-01-02")
-	st := l.byKey[key]
+	st := l.byProject[project][key]
 	st.Project, st.Path, st.Day, st.Kind, st.Actor = project, path, key.Day, kind, actor
 	st.Count++
 	st.Last = now
-	l.byKey[key] = st
+	l.setStat(key, st)
 	l.dirty[key] = true
 	if now.Sub(l.lastFlush) >= readFlushEvery {
 		l.flushLocked()
@@ -363,10 +365,7 @@ func (l *ReadLedger) Heat(project, prefix string, since time.Time) map[string]He
 	humans := map[string]map[string]bool{} // path → distinct human actors
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for key, st := range l.byKey {
-		if key.Project != project {
-			continue
-		}
+	for key, st := range l.byProject[project] {
 		if prefix != "" && !strings.HasPrefix(key.Path, prefix+"/") {
 			continue
 		}
@@ -421,8 +420,8 @@ func (l *ReadLedger) AgentHeat(project string, since time.Time) map[string]map[s
 	out := map[string]map[string]int64{}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for key, st := range l.byKey {
-		if key.Project != project || key.Kind != ReadKindAgent {
+	for key, st := range l.byProject[project] {
+		if key.Kind != ReadKindAgent {
 			continue
 		}
 		if key.Day == "" {
@@ -464,9 +463,9 @@ type ShareOpen struct {
 // public credential joined to a network and a browser, and it must not leave
 // the ledger. There is deliberately no distinct-openers field.
 //
-// One byKey scan per project, never one per share: callers build this map
-// once and index it, because byKey is the full map and a project with 40
-// links would otherwise pay 40 full scans per list render.
+// One scan of the project's buckets, never one per share: callers build this
+// map once and index it, because a project with 40 links would otherwise pay
+// 40 scans per list render.
 func (l *ReadLedger) ShareOpens(project string) map[string]ShareOpen {
 	if l == nil {
 		return nil // reads disabled: absent, not zero
@@ -475,8 +474,8 @@ func (l *ReadLedger) ShareOpens(project string) map[string]ShareOpen {
 	out := map[string]ShareOpen{}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for key, st := range l.byKey {
-		if key.Project != project || key.Kind != ReadKindShare {
+	for key, st := range l.byProject[project] {
+		if key.Kind != ReadKindShare {
 			continue
 		}
 		// No day filter: both the daily buckets and the folded Day == ""
@@ -528,28 +527,40 @@ func (l *ReadLedger) flushLocked() {
 	l.flushSessionsLocked()
 }
 
+// setStat stores one bucket under its project. Callers hold mu (or own l).
+func (l *ReadLedger) setStat(k ReadStatKey, st ReadStat) {
+	rows := l.byProject[k.Project]
+	if rows == nil {
+		rows = map[ReadStatKey]ReadStat{}
+		l.byProject[k.Project] = rows
+	}
+	rows[k] = st
+}
+
 // compactLocked folds daily buckets older than the retention horizon into
 // their all-time rows, queueing the daily rows for deletion. Callers hold mu.
 func (l *ReadLedger) compactLocked() {
 	horizon := time.Now().UTC().Add(-l.retention).Format("2006-01-02")
-	for key, st := range l.byKey {
-		if key.Day == "" || key.Day >= horizon {
-			continue
+	for _, rows := range l.byProject {
+		for key, st := range rows {
+			if key.Day == "" || key.Day >= horizon {
+				continue
+			}
+			fold := key
+			fold.Day = ""
+			agg := rows[fold]
+			agg.Project, agg.Path, agg.Kind, agg.Actor = st.Project, st.Path, st.Kind, st.Actor
+			agg.Day = ""
+			agg.Count += st.Count
+			if st.Last.After(agg.Last) {
+				agg.Last = st.Last
+			}
+			rows[fold] = agg
+			l.dirty[fold] = true
+			delete(rows, key)
+			delete(l.dirty, key)
+			l.pendingDel = append(l.pendingDel, key)
 		}
-		fold := key
-		fold.Day = ""
-		agg := l.byKey[fold]
-		agg.Project, agg.Path, agg.Kind, agg.Actor = st.Project, st.Path, st.Kind, st.Actor
-		agg.Day = ""
-		agg.Count += st.Count
-		if st.Last.After(agg.Last) {
-			agg.Last = st.Last
-		}
-		l.byKey[fold] = agg
-		l.dirty[fold] = true
-		delete(l.byKey, key)
-		delete(l.dirty, key)
-		l.pendingDel = append(l.pendingDel, key)
 	}
 }
 
@@ -594,7 +605,7 @@ func (l *ReadLedger) persistLocked() error {
 	}
 	batch := make([]ReadStat, 0, len(l.dirty))
 	for key := range l.dirty {
-		batch = append(batch, l.byKey[key])
+		batch = append(batch, l.byProject[key.Project][key])
 	}
 	err := l.repo.PutBatch(batch)
 	if err == nil {
@@ -615,7 +626,7 @@ func (l *ReadLedger) persistLocked() error {
 	var stuck []ReadStatKey
 	landed := 0
 	for key := range l.dirty {
-		if l.repo.PutBatch([]ReadStat{l.byKey[key]}) == nil {
+		if l.repo.PutBatch([]ReadStat{l.byProject[key.Project][key]}) == nil {
 			delete(l.dirty, key)
 			landed++
 		} else {

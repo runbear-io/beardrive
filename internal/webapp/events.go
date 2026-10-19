@@ -220,8 +220,17 @@ func (h *eventHub) fanout(project string, frame []byte) {
 // name" (it feeds PostHog), and its signature is counts-only. The two want
 // the same call sites and nothing else.
 func (s *Server) publishChange(r *http.Request, source string, paths []string, puts, deletes int) {
+	if ev, ok := changeEventFor(r, source, paths, puts, deletes); ok {
+		s.events().publish(projectID(r), ev)
+	}
+}
+
+// changeEventFor builds the frame publishChange sends, from everything it
+// needs out of the request — so a caller can publish it after the request is
+// done. False when nothing changed.
+func changeEventFor(r *http.Request, source string, paths []string, puts, deletes int) (changeEvent, bool) {
 	if puts+deletes == 0 {
-		return
+		return changeEvent{}, false
 	}
 	ev := changeEvent{
 		Type: "change", Puts: puts, Deletes: deletes,
@@ -231,7 +240,7 @@ func (s *Server) publishChange(r *http.Request, source string, paths []string, p
 		paths, ev.More = paths[:eventPathLimit], true
 	}
 	ev.Paths = paths
-	s.events().publish(projectID(r), ev)
+	return ev, true
 }
 
 // publishScope announces that a project's folder rules moved.

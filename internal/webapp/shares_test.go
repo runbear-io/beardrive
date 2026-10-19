@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1043,5 +1044,30 @@ func TestShareFolderIsNotASyncProblem(t *testing.T) {
 	authAs(t, srv, req)
 	if rec := doHTTP(h, req); rec.Code != http.StatusNotFound {
 		t.Fatalf("prefix-of-a-file path: %d, want 404", rec.Code)
+	}
+}
+
+// The credential scan reads the version the link will serve. A device push the
+// background has not folded in yet replaces the file; scanning the cached
+// snapshot's version would clear a link that then serves the push.
+func TestShareSecretScanSeesAPushNotYetFolded(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	_, v, err := srv.projectVolume(p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.refresh = time.Hour
+	f.put("dev1", "deploy.md", "# Deploy\n\nrun it\n")
+	v.invalidate()
+	if _, err := v.snapshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	f.put("dev1", "deploy.md", "# Deploy\n\nrun it\n\nAWS_ACCESS_KEY_ID="+planted+"\n")
+	finish := v.beginRefresh() // the push is stored; its rebuild has not run
+	defer finish(func() {})
+
+	if rec := postShare(t, srv, h, p.ID, map[string]string{"path": "deploy.md"}); rec.Code != http.StatusConflict {
+		t.Fatalf("share scanned the version from before the push: %d %s, want 409", rec.Code, rec.Body)
 	}
 }
