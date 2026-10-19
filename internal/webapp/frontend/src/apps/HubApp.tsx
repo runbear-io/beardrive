@@ -4,7 +4,7 @@ import type { InviteAccepted, Project, ProjectCreated, ServerConfig } from "../a
 import { useFetchProjects, useOrgs, usePending, usePermissions, useProjects, useHubRefresh } from "../hooks/useHub";
 import { decodePath, parseRoute, projectByName, titleForRoute, urlForPath, urlForView } from "../router";
 import { linkProps, navigate, Redirect, useLocationPath } from "../nav";
-import { AppShell, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
+import { AppShell, Mark, Page, Topbar, VaultHeader, closeSidebarOnMobile } from "../components/shell";
 import { OrgAdmin } from "../components/OrgAdmin";
 import { HubSettings } from "../components/HubSettings";
 import { McpConnections } from "../components/McpConnections";
@@ -181,8 +181,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   const brand = config.brand || "BearDrive";
   const org = (current && orgs?.find((o) => o.id === current.org)) || null;
 
-  // Before there is a project list to show (loading, desktop onboarding) the
-  // sidebar's top is the brand; once there is one, it is the project menu.
+  // The sidebar's top is the brand, with the project menu right under it.
   // The Beta label belongs to the BEARDRIVE name, so it keys on what the name
   // actually says rather than on whether `brand` was configured. A hub that
   // set its own brand is labelling somebody else's product, and "Acme Docs
@@ -191,8 +190,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   // `!config.brand` test would have missed the ones that set it explicitly
   // (CLOUD_BRAND defaults to "BearDrive", so BuiltinAuth hubs send the string
   // rather than an empty field).
-  const beta = brand === "BearDrive";
-  const vault = <VaultHeader name={brand} onHome={() => navigate("/")} beta={beta} />;
+  const vault = <VaultHeader name={brand} onHome={() => navigate("/")} beta={brand === "BearDrive"} />;
 
   // Desktop app: session changes go through the sidecar (which runs the same
   // flows as `bdrive login`/`logout`), then the config query is refetched so
@@ -226,8 +224,6 @@ export default function HubApp({ config }: { config: ServerConfig }) {
               },
             }
           : undefined,
-        brand,
-        beta,
       }
     : undefined;
   const signedOutBar =
@@ -269,6 +265,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
   if (!current) {
     return (
       <AppShell
+        vault={vault}
         projectsNav={<ProjectNav projects={projects} account={account} onNew={newProject} />}
         orgBar={signedOutBar}
         topbar={<Topbar />}
@@ -351,6 +348,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
     // a member of it.
     return (
       <AppShell
+        vault={vault}
         projectsNav={<ProjectNav projects={projects} account={account} onNew={newProject} />}
         orgBar={signedOutBar}
         topbar={<Topbar />}
@@ -507,6 +505,7 @@ export default function HubApp({ config }: { config: ServerConfig }) {
       project={project ?? current}
       projects={projects}
       sidebar={{
+        vault,
         projectsNav: (
           <ProjectNav
             projects={projects}
@@ -517,13 +516,18 @@ export default function HubApp({ config }: { config: ServerConfig }) {
           />
         ),
         railTop: (
-          <ProjectRailMenu
-            projects={projects}
-            current={current}
-            menu={projectMenu}
-            account={account}
-            onNew={newProject}
-          />
+          <>
+            <span className="rail-mark">
+              <Mark size={20} />
+            </span>
+            <ProjectRailMenu
+              projects={projects}
+              current={current}
+              menu={projectMenu}
+              account={account}
+              onNew={newProject}
+            />
+          </>
         ),
         railNav: <ProjectRailNav pid={current.id} menu={projectMenu} />,
         orgBar: (

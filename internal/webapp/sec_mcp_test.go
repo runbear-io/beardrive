@@ -443,7 +443,10 @@ func TestSecMCPHonorsFolderPermissions(t *testing.T) {
 	if !isErr {
 		t.Fatalf("read a hidden file: %s", out)
 	}
-	if strings.Contains(strings.ToLower(out), "permission") || strings.Contains(out, "403") {
+	// The error names the path, and the project id in it is a random UUID that
+	// can itself contain "403" (about one run in 140), so it is taken out first.
+	msg := strings.ReplaceAll(out, f.wiki.ID, "<project>")
+	if strings.Contains(strings.ToLower(msg), "permission") || strings.Contains(msg, "403") {
 		t.Fatalf("hidden path answered with a permission error, confirming it exists: %s", out)
 	}
 	if _, isErr := callTool(t, cs, "write", map[string]any{

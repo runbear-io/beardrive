@@ -111,11 +111,11 @@ test("hot path row opens the file", async ({ page }) => {
   await expect(page.locator("#content h1")).toBeVisible();
 });
 
-test("Home returns to the project home", async ({ page }) => {
+test("vault name returns to the project home", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/index.md`);
-  await page.click("#nav-home");
+  await page.click("#vault-name");
   await page.waitForURL("/" + pid);
   await expect(page.locator(".home-greet")).toBeVisible();
 });

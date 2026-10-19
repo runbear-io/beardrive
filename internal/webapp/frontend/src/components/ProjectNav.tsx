@@ -70,12 +70,6 @@ export interface AccountMenu {
   mcp?: boolean; // the hub serves /mcp, so agent connections can be managed
   // Desktop app: sign-out is a sidecar call, not the hub's /auth/logout page.
   signOut?: () => void;
-  /* BearDrive is pre-1.0 and says so. Callers pass beta only when the brand
-     IS BearDrive — a hub that set its own `brand` is labelling somebody
-     else's product, and "Acme Docs Beta" is a claim we have no business
-     making for them. */
-  brand: string;
-  beta?: boolean;
 }
 
 export function ProjectNav({
@@ -346,12 +340,6 @@ export function SidebarMenu({
               </a>
             </DropdownMenuItem>
           ))}
-        {account && (
-          <div id="menu-brand" className="sb-menu-brand">
-            {account.brand}
-            {account.beta && <span className="beta">Beta</span>}
-          </div>
-        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
