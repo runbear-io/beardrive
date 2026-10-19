@@ -280,3 +280,25 @@ test("a wide desktop width never covers the mobile drawer's scrim", async ({ pag
   await page.setViewportSize({ width: 1280, height: 800 });
   expect(Math.round((await page.locator("#sidebar").boundingBox())!.width)).toBe(480);
 });
+
+test("a saved wide sidebar never pushes the editing topbar off a narrow desktop window", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const name = `resize-${Date.now()}.html`;
+  const put = await page.request.put(`/api/p/${pid}/upload/content?path=${name}`, {
+    data: "<!doctype html><html><body><h1>Resize</h1></body></html>",
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+  expect(put.ok()).toBeTruthy();
+  try {
+    await page.evaluate(() => localStorage.setItem("bdrive.sidebarWidth", "480"));
+    await page.setViewportSize({ width: 901, height: 800 });
+    await page.goto(`/${pid}/${name}`);
+    await page.click("#edit-btn");
+    await page.frameLocator("iframe.htmlview").locator("html[data-bd-ready]").waitFor();
+    const more = (await page.locator("#more-btn").boundingBox())!;
+    expect(more.x + more.width).toBeLessThanOrEqual(901);
+  } finally {
+    await page.request.post(`/api/p/${pid}/remove`, { data: { path: name } }).catch(() => {});
+  }
+});

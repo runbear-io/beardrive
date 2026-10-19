@@ -213,7 +213,9 @@ button, input, a.btn { font-family: inherit; }
    the current page/file is a stronger neutral tint plus weight, and the one
    honey accent left is the open file's icon. */
 #sidebar {
-  width: var(--sb-w, 256px); min-width: 210px; max-width: 480px;
+  width: var(--sb-w, 256px); min-width: 210px;
+  /* The topbar's actions need ~645px; a saved width never pushes them off-screen. */
+  max-width: min(480px, calc(100vw - 645px));
   position: relative;
   background: var(--bg-side);
   border-right: 1px solid var(--border);
