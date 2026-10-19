@@ -320,3 +320,26 @@ func TestAJustPushedPathResolvesBeforeTheBackgroundLands(t *testing.T) {
 	close(gate)
 	<-done
 }
+
+// A push is pending from the moment beginRefresh is called, before its change
+// event is built and handed to refreshThen: current folds it in meanwhile.
+func TestCurrentFoldsAPushMarkedBeforeItsEventIsBuilt(t *testing.T) {
+	src := &gatedSource{}
+	src.set("a.md")
+	v := &volume{source: src, refresh: time.Hour}
+	has(t, v, "a.md")
+
+	src.set("a.md", "pushed.md")
+	finish := v.beginRefresh()
+	snap, err := v.current(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := snap.files["pushed.md"]; !ok {
+		t.Fatal("current served the snapshot from before a push already marked pending")
+	}
+	done := make(chan struct{})
+	finish(func() { close(done) })
+	finish(func() { t.Error("finish ran twice") })
+	<-done
+}

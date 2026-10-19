@@ -1090,30 +1090,29 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		storageErr(w, http.StatusBadGateway, "could not store the object", err)
 		return
 	}
-	journal := strings.HasPrefix(key, "journal/")
-	puts, deletes := countOps(ops, storedMax)
-	if journal {
-		// Marked pending first, before anything else runs: from here on
-		// current() — and so the If-Match head check — folds this push in.
+	if strings.HasPrefix(key, "journal/") {
+		// Pending from here on, before anything else runs: current() — and so
+		// the If-Match head check — folds this push in.
+		refreshThen := v.beginRefresh()
+		defer refreshThen(func() {})
 		// The viewer is rebuilt in the background rather than on the next
 		// read, so nobody browsing the project waits on a fold of every op in
 		// it for each device push. The stream is told once the rebuild has
 		// landed: a client that refetches on the event finds the new ops.
+		puts, deletes := countOps(ops, storedMax)
 		if ev, ok := changeEventFor(r, "sync", newOpPaths(ops, storedMax), puts, deletes); ok {
 			project := projectID(r)
-			v.refreshThen(func() { s.events().publish(project, ev) })
+			refreshThen(func() { s.events().publish(project, ev) })
 		} else {
-			v.refreshThen(func() {})
+			refreshThen(func() {})
 		}
+		s.captureChange(r, "sync", puts, deletes)
 	}
 	// These bytes came through the hub, so they are charged here — drop any
 	// reservation for the same key rather than charging it twice.
 	s.claimGrant(project, key)
 	if billed > 0 {
 		s.quota().RecordUsage(org, billed)
-	}
-	if journal {
-		s.captureChange(r, "sync", puts, deletes)
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }

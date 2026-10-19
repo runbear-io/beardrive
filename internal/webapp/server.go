@@ -289,6 +289,9 @@ type volume struct {
 	bgMu      sync.Mutex
 	bgRunning bool
 	bgDone    []func()
+	// pending counts writes marked by beginRefresh that have not reached
+	// refreshThen yet.
+	pending int
 }
 
 type snapshot struct {
@@ -437,6 +440,26 @@ func (v *volume) refreshThen(done func()) {
 	go v.rebuildLoop()
 }
 
+// beginRefresh marks the volume behind a write that has just been stored, for
+// a caller with more work to do before it can hand refreshThen its callback:
+// current() folds the write in from this moment. The returned function is
+// refreshThen, and only its first call counts — so a caller can defer it with
+// a no-op as well as calling it on the success path.
+func (v *volume) beginRefresh() func(done func()) {
+	v.bgMu.Lock()
+	v.pending++
+	v.bgMu.Unlock()
+	var once sync.Once
+	return func(done func()) {
+		once.Do(func() {
+			v.refreshThen(done)
+			v.bgMu.Lock()
+			v.pending--
+			v.bgMu.Unlock()
+		})
+	}
+}
+
 func (v *volume) rebuildLoop() {
 	var batch []func()
 	first := rebuildRetryMin
@@ -485,7 +508,7 @@ func (v *volume) rebuildLoop() {
 // rather than whatever a background rebuild has caught up to.
 func (v *volume) current(ctx context.Context) (*snapshot, error) {
 	v.bgMu.Lock()
-	behind := v.bgRunning
+	behind := v.bgRunning || v.pending > 0
 	v.bgMu.Unlock()
 	if behind {
 		v.invalidate()
