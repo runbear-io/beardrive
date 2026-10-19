@@ -6,9 +6,10 @@ import { login, wikiId, ADMIN, MEMBER, expectToast } from "./helpers";
 // navigation closes them. Mutating specs revert their changes: the suite
 // shares one hub per run.
 
-// The org panel opens from the account menu (sidebar footer).
+// The org page opens from the project menu (the project name at the top of
+// the sidebar).
 async function openOrgSettings(page: import("@playwright/test").Page) {
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await page.click("#menu-org-settings");
 }
 
@@ -27,17 +28,17 @@ test("org admin: members with roles, self marked, rename round-trip", async ({ p
   await page.fill("#org-rename", "renamed-org");
   await page.click("#org-rename-btn");
   await expectToast(page, "Renamed");
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await expect(page.locator("#menu-org-settings")).toContainText("renamed-org");
   await page.keyboard.press("Escape");
   await page.fill("#org-rename", "default");
   await page.click("#org-rename-btn");
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await expect(page.locator("#menu-org-settings")).toContainText("default");
   await page.keyboard.press("Escape");
 });
 
-// The org page owns a URL like every other page: the account menu is a plain
+// The org page owns a URL like every other page: the project menu is a plain
 // link to it, so a deep link and a reload both land on the same view.
 test("org admin: is a real route, not panel state", async ({ page }) => {
   await login(page);
@@ -138,7 +139,7 @@ test("member sees the org panel read-only", async ({ page }) => {
 
 test("hub settings: policy view, save round-trip, pending queue empty", async ({ page }) => {
   await login(page);
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await page.click("#menu-hub-admin");
   await expect(page.locator("#crumb")).toHaveText("Signup & access");
   await expect(page.locator(".admin h1")).toHaveText("Signup & access");
@@ -160,7 +161,7 @@ test("hub settings: policy view, save round-trip, pending queue empty", async ({
 
 test("navigating away closes an open admin panel", async ({ page }) => {
   await login(page);
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await page.click("#menu-hub-admin");
   await expect(page.locator(".admin h1")).toBeVisible();
   await page.click('#tree .row[data-path="index.md"]');

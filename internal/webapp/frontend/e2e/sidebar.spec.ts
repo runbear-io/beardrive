@@ -1,9 +1,9 @@
 import { expect, test } from "@playwright/test";
 import { login, wikiId } from "./helpers";
 
-// The sidebar: Home · Activity · Insights · Settings nav with canonical URLs,
-// tree filter mode, conflict copies folded into a badge, the collapsed icon
-// rail, and per-browser pins.
+// The sidebar: Home · Activity · Insights nav with canonical URLs (Settings
+// lives in the project menu), tree filter mode, conflict copies folded into a
+// badge, the collapsed icon rail, and per-browser pins.
 
 const COPY = "archive/old-runbook.md.bdrive-conflict-mira-laptop-20260814T060945Z";
 
@@ -21,8 +21,8 @@ test("nav routes are canonical and the old view URLs redirect to them", async ({
   await page.click("#nav-home");
   await page.waitForURL(`/${pid}`);
   await expect(page.locator("#nav-home")).toHaveClass(/active/);
-  // Installation left the nav for the footer action.
-  await expect(page.locator("#projects .nav-menu .row")).toHaveCount(4);
+  // Settings is in the project menu; installation is the footer's sync row.
+  await expect(page.locator("#projects .nav-menu .row")).toHaveCount(3);
   await page.click("#nav-install");
   await page.waitForURL(`/${pid}/install`);
 
@@ -105,7 +105,7 @@ test("⌘\\ collapses the sidebar to an icon rail and back", async ({ page }) =>
   await page.keyboard.press("ControlOrMeta+\\");
   await expect(page.locator("body")).toHaveClass(/sb-collapsed/);
   const box = await page.locator("#sidebar").boundingBox();
-  expect(box!.width).toBe(56);
+  expect(box!.width).toBe(48);
   await expect(page.locator("#rail")).toBeVisible();
   await expect(page.locator("#tree")).toBeHidden();
   await page.locator("#rail-activity").hover();
@@ -183,22 +183,12 @@ test("New file is offered only where the hub would accept the write", async ({ p
   await expect(page.locator('#tree .tact[title="New file"]')).toHaveCount(0);
 });
 
-test("FILES header: filter focuses the search field, sort toggles name ↔ recent and persists", async ({
-  page,
-}) => {
+test("Files header: sort toggles name ↔ recent and persists", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}`);
   await page.evaluate(() => localStorage.removeItem("bdrive.treeOrder"));
   await page.reload();
-
-  await page.click("#tree-filter-btn");
-  await expect(page.locator("#sb-search-input")).toBeFocused();
-  await expect(page.locator("#palette")).toHaveCount(0);
-  await page.keyboard.type("guide");
-  await expect(page.locator('#tree-filter .fhit[data-path="guide.md"]')).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(page.locator("#tree")).toBeVisible();
 
   const top = () =>
     page.locator("#tree .row[data-path]").evaluateAll((els) =>
@@ -221,9 +211,7 @@ test("FILES header: filter focuses the search field, sort toggles name ↔ recen
   await expect.poll(top).toEqual(byName);
 });
 
-test("active nav is neutral; honey marks only the selected tree file; star link lives in the account menu", async ({
-  page,
-}) => {
+test("active nav is neutral; honey marks only the selected tree file's icon", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/guide.md`);
@@ -231,13 +219,12 @@ test("active nav is neutral; honey marks only the selected tree file; star link 
   const nav = page.locator("#nav-activity");
   await expect(nav).toHaveClass(/active/);
   await expect(nav).toHaveCSS("color", "rgb(238, 240, 243)"); // --text
-  await expect(nav.locator(".label")).toHaveCSS("font-weight", "600");
+  await expect(nav.locator(".label")).toHaveCSS("font-weight", "500");
   await page.goto(`/${pid}/guide.md`);
-  await expect(page.locator('#tree .row[data-path="guide.md"]')).toHaveCSS("color", "rgb(255, 207, 133)"); // --accent-bright
+  const row = page.locator('#tree .row[data-path="guide.md"]');
+  await expect(row).toHaveCSS("color", "rgb(238, 240, 243)"); // --text
+  await expect(row.locator(".ticon")).toHaveCSS("color", "rgb(245, 166, 35)"); // --accent-ink
 
-  await expect(page.locator("#vault #search-btn")).toHaveCount(0);
-  await expect(page.locator("#vault .icon-btn2")).toHaveCount(1); // collapse only
-  await expect(page.locator("#accountbar .gh-star")).toHaveCount(0);
-  await page.click("#account-btn");
-  await expect(page.locator("#menu-github")).toHaveAttribute("href", /github\.com/);
+  // The project menu is the sidebar's header; there is no brand bar above it.
+  await expect(page.locator("#sidebar #vault")).toHaveCount(0);
 });

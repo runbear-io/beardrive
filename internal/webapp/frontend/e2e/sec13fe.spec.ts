@@ -83,12 +83,12 @@ async function sec13feShell(page: Page) {
 // The CISO has flagged this twice: nobody has seen what it renders before the
 // API answers, or on a 403. It is the hub's admin panel — signup policy,
 // allowed domains, admin roster, pending approvals — and it is URL-less panel
-// state opened from the account menu, which only appears for an admin.
+// state opened from the project menu, where its entry only appears for an admin.
 
 test("HubSettings: the admin panel renders its roster for an admin (control)", async ({ page }) => {
   await login(page, ADMIN);
   await sec13feShell(page);
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await page.click("#menu-hub-admin");
   // CONTROL — this is the panel, and it is populated. Every negative
   // assertion in the two tests below is measured against this.
@@ -116,7 +116,7 @@ test("HubSettings: a member who forges the client-side admin flag gets an empty 
 
   await login(page, MEMBER);
   await sec13feShell(page);
-  await page.click("#account-btn");
+  await page.click("#project-select");
   // CONTROL: the forged flag really did open the door in the client.
   await expect(page.locator("#menu-hub-admin")).toBeVisible();
   await page.click("#menu-hub-admin");
@@ -148,7 +148,7 @@ test("HubSettings: a 403 that arrives mid-flight leaves the app usable", async (
   // ever driven this transition.
   await login(page, ADMIN);
   await sec13feShell(page);
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await page.click("#menu-hub-admin");
   await expect(page.locator(".admin h1")).toHaveText("Signup & access"); // CONTROL
 
@@ -158,7 +158,7 @@ test("HubSettings: a 403 that arrives mid-flight leaves the app usable", async (
   // Re-open the panel so the queries refetch behind the 403.
   await page.goto("/");
   await sec13feShell(page);
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await page.click("#menu-hub-admin");
   await expect(page.locator("#crumb")).toHaveText("Signup & access");
 
@@ -462,9 +462,9 @@ test.describe("VolumeApp (single-volume mode)", () => {
     await expect(page.locator("#vault-name")).toHaveText("vol");
     await expect(page.locator("body")).not.toContainText("This page didn’t load");
 
-    // No auth surface — the mode is auth-free by design, so an account menu
-    // here would be a control that cannot work.
-    await expect(page.locator("#account-btn")).toHaveCount(0);
+    // No auth surface — the mode is auth-free by design, so a project/account
+    // menu here would be a control that cannot work.
+    await expect(page.locator("#project-select")).toHaveCount(0);
 
     // A file opens, and its URL carries no project id.
     await page.goto(base + "/index.md");

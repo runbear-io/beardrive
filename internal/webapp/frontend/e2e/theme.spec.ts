@@ -15,14 +15,14 @@ test("System is the default and follows the OS live", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "light" });
   await expect.poll(() => theme(page)).toBe("light");
   await expect(page.locator("body")).toHaveCSS("background-color", "rgb(255, 255, 255)");
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await expect(page.locator("#menu-theme-system")).toHaveAttribute("data-state", "checked");
 });
 
 test("Light overrides a dark OS, persists across reload, and System hands back", async ({ page }) => {
   await login(page);
   await page.goto("/");
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await page.click("#menu-theme-light");
   expect(await theme(page)).toBe("light");
   // The menu stays open so the choice is visible before it is committed to.
@@ -43,7 +43,7 @@ test("Light overrides a dark OS, persists across reload, and System hands back",
   expect(await page.evaluate(() => document.documentElement.dataset.firstTheme)).toBe("light");
   await expect(page.locator("body")).toHaveCSS("background-color", "rgb(255, 255, 255)");
 
-  await page.click("#account-btn");
+  await page.click("#project-select");
   await page.click("#menu-theme-system");
   expect(await theme(page)).toBe("dark");
   expect(await page.evaluate(() => localStorage.getItem("bdrive-theme"))).toBeNull();

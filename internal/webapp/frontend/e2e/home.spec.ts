@@ -111,11 +111,11 @@ test("hot path row opens the file", async ({ page }) => {
   await expect(page.locator("#content h1")).toBeVisible();
 });
 
-test("vault name returns to the project home", async ({ page }) => {
+test("Home returns to the project home", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
   await page.goto(`/${pid}/index.md`);
-  await page.click("#vault-name");
+  await page.click("#nav-home");
   await page.waitForURL("/" + pid);
   await expect(page.locator(".home-greet")).toBeVisible();
 });
@@ -308,6 +308,7 @@ test("project menu pages each own a URL: Home, Activity, Insights, Settings, Con
   await page.click("#nav-activity");
   await page.waitForURL(`/${pid}/activity`);
   await expect(page.locator("#nav-activity")).toHaveClass(/active/);
+  await page.click("#project-select"); // Settings lives in the project menu
   await page.click("#nav-settings");
   await page.waitForURL(`/${pid}/settings`);
   await expect(page.locator("#crumb")).toHaveText("Project settings");
@@ -318,7 +319,8 @@ test("project menu pages each own a URL: Home, Activity, Insights, Settings, Con
   // Deep link + reload land on the page, like any URL.
   await page.goto(`/${pid}/settings`);
   await expect(page.locator(".project-settings h2")).toHaveText("wiki");
-  await expect(page.locator("#nav-settings")).toHaveClass(/active/);
+  await page.click("#project-select");
+  await expect(page.locator("#nav-settings")).toHaveAttribute("aria-current", "page");
 });
 
 test("project settings: danger zone is owner-only", async ({ page }) => {
@@ -419,7 +421,7 @@ test("project settings: delete needs the exact name typed, then navigates away",
 
   await expectToast(page, "Deleted");
   await expect(page).not.toHaveURL(new RegExp(pid));
-  await expect(page.locator("#projects .row .label", { hasText: "condemned" })).toHaveCount(0);
+  await expect(page.locator("#project-select")).not.toContainText("condemned");
 });
 
 test("project settings: People shows the default level and the grants", async ({ page }) => {

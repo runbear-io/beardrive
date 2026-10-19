@@ -1,18 +1,22 @@
-import { useEffect, useState } from "react";
-import { navigate } from "../nav";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { ChevronsUpDown, Monitor, Moon, Sun } from "lucide-react";
+import { linkProps, navigate } from "../nav";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Icon, ProjectIcon, RailButton } from "./shell";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import type { Project } from "../api/types";
-import { closeSidebarOnMobile } from "./shell";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Icon, ProjectIcon, RailButton, closeSidebarOnMobile } from "./shell";
+import type { Org, Project } from "../api/types";
 import { requestSearch } from "../search";
 import { isMac } from "../util";
+import { useTheme, type ThemePref } from "@/lib/theme";
 import { ACTIVITY_CAP, agoText, useActivityCount, useSyncLine } from "../hooks/useSidebar";
 import {
   activateFilterSel,
@@ -31,6 +35,12 @@ export function projColor(s: string): string {
   return PROJ_COLORS[h % PROJ_COLORS.length];
 }
 
+// A .proj-mark is tinted from its color (style.css), so the glyph and the
+// square read on both themes without a per-theme palette.
+export function markStyle(name: string): CSSProperties {
+  return { "--mk": projColor(name) } as CSSProperties;
+}
+
 export type NavKey = "home" | "activity" | "insights" | "settings";
 
 export interface ProjectMenu {
@@ -38,101 +48,78 @@ export interface ProjectMenu {
   onNav: (key: NavKey) => void;
 }
 
+// Settings is a page like the others (it has a route and an active state) but
+// it lives in the project menu: it is the least visited of the four, and the
+// sidebar's rows are kept for the pages people return to.
 const NAV: ReadonlyArray<readonly [NavKey, string, string]> = [
   ["home", "Home", "home"],
   ["activity", "Activity", "activity"],
   ["insights", "Insights", "insights"],
-  ["settings", "Settings", "gear"],
 ];
 
 const countText = (n: number) => (n >= ACTIVITY_CAP ? ACTIVITY_CAP - 1 + "+" : String(n));
+
+// Everything about the signed-in session that the project menu shows below the
+// project list: the org, hub administration, billing, theme and sign-out.
+export interface AccountMenu {
+  me: { email: string; name: string };
+  org: Org | null;
+  orgActive?: boolean; // the org page is the open surface
+  admin?: { pending: number; onClick: () => void }; // hub admins only
+  billing?: { plan: string; url: string }; // managed deployments only
+  mcp?: boolean; // the hub serves /mcp, so agent connections can be managed
+  // Desktop app: sign-out is a sidecar call, not the hub's /auth/logout page.
+  signOut?: () => void;
+  /* BearDrive is pre-1.0 and says so. Callers pass beta only when the brand
+     IS BearDrive — a hub that set its own `brand` is labelling somebody
+     else's product, and "Acme Docs Beta" is a claim we have no business
+     making for them. */
+  brand: string;
+  beta?: boolean;
+}
 
 export function ProjectNav({
   projects,
   currentId,
   menu,
+  account,
   onNew,
-  readsEnabled = false,
 }: {
   projects: Project[];
   currentId?: string;
   menu?: ProjectMenu;
+  account?: AccountMenu;
   // Opening the create dialog belongs to HubApp: three things ask for it now
-  // (this button, the empty state's button, and the auto-open when a signed-in
+  // (this menu, the empty state's button, and the auto-open when a signed-in
   // account has no projects at all), and one owner beats three copies.
   onNew: () => void;
-  readsEnabled?: boolean; // the hub keeps read telemetry, so /heat?by=device answers
 }) {
   const current = projects.find((p) => p.id === currentId);
   const fresh = useActivityCount(menu ? currentId : undefined);
 
   return (
     <nav id="projects" aria-label="Projects">
-      <div className="nav-head">
-        <span>Projects</span>
-        <button
-          className="nav-add"
-          title="New project"
-          aria-label="New project"
-          onClick={onNew}
-        >
-          +
-        </button>
-      </div>
-      <div className="proj-row">
-        <Select
-          value={currentId || ""}
-          onValueChange={(v) => {
-            if (v && v !== currentId) {
-              navigate("/" + v);
-              closeSidebarOnMobile();
-            }
-          }}
-        >
-          <SelectTrigger
+      <SidebarMenu
+        projects={projects}
+        current={current}
+        menu={menu}
+        account={account}
+        onNew={onNew}
+        trigger={
+          <button
             id="project-select"
-            aria-label={`Switch project — current: ${current?.name ?? "none"}`}
-            title={current?.name}
             className="proj-trigger"
+            aria-label={`Project and account menu — current project: ${current?.name ?? "none"}`}
+            title={current?.name}
           >
-            {current && (
-              <span
-                className="proj-mark"
-                aria-hidden="true"
-                style={{ background: projColor(current.name) }}
-              >
-                <ProjectIcon name={current.icon} />
-              </span>
-            )}
-            {/* SelectValue mirrors the selected item's text into the trigger —
-                which, now that every item carries its own mark, would draw a
-                second one here. Render the name ourselves when we have it,
-                keeping the [data-slot="select-value"] styling hook. */}
-            {current ? (
-              <span className="proj-text">
-                <span data-slot="select-value">{current.name}</span>
-                {menu && <SyncLine pid={current.id} readsEnabled={readsEnabled} />}
-              </span>
-            ) : (
-              <SelectValue placeholder="Select a project" />
-            )}
-          </SelectTrigger>
-          <SelectContent className="proj-menu" position="popper" sideOffset={4}>
-            {projects.map((p) => (
-              <SelectItem key={p.id} value={p.id}>
-                <span
-                  className="proj-mark"
-                  aria-hidden="true"
-                  style={{ background: projColor(p.name) }}
-                >
-                  <ProjectIcon name={p.icon} />
-                </span>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+            <span className="proj-mark" aria-hidden="true" style={current ? markStyle(current.name) : undefined}>
+              <ProjectIcon name={current?.icon} />
+            </span>
+            <span className="proj-name">{current ? current.name : projects.length ? "Select a project" : "No projects yet"}</span>
+            <ChevronsUpDown className="ico updown" aria-hidden="true" />
+          </button>
+        }
+      />
       {menu && <SidebarSearch />}
       {menu && (
         <ul className="nav-menu" aria-label="Project pages">
@@ -143,6 +130,7 @@ export function ProjectNav({
                 className={"row" + (menu.active === key ? " active" : "")}
                 role="button"
                 tabIndex={0}
+                aria-current={menu.active === key ? "page" : undefined}
                 onClick={() => menu.onNav(key)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
@@ -154,7 +142,7 @@ export function ProjectNav({
                 <Icon name={icon} />
                 <span className="label">{label}</span>
                 {key === "activity" && !!fresh && (
-                  <span className="nav-pill" title={`${countText(fresh)} changes since your last visit`}>
+                  <span className="nav-count" title={`${countText(fresh)} changes since your last visit`}>
                     {countText(fresh)}
                   </span>
                 )}
@@ -167,6 +155,214 @@ export function ProjectNav({
   );
 }
 
+// The one menu behind the project name (and the rail's project mark): switch
+// or create a project, this project's and this org's settings, then the
+// session — ordered from the narrowest scope to the widest, so what is used
+// most sits nearest the trigger and sign-out sits at the far end.
+//
+// Radix owns open/dismiss (Escape, outside click, focus). The open state is
+// ours because several entries are links: linkProps calls preventDefault to
+// route internally, and Radix composes its own select handler with
+// checkForDefaultPrevented, so that handler never runs and the menu would stay
+// open on top of the page it just opened.
+export function SidebarMenu({
+  projects,
+  current,
+  menu,
+  account,
+  onNew,
+  trigger,
+  side = "bottom",
+}: {
+  projects: Project[];
+  current?: Project;
+  menu?: ProjectMenu;
+  account?: AccountMenu;
+  onNew: () => void;
+  trigger: ReactNode;
+  side?: "bottom" | "right";
+}) {
+  const [open, setOpen] = useState(false);
+  const close = () => setOpen(false);
+  const { pref, setPref } = useTheme();
+  const org = account?.org ?? null;
+  const orgLink = org ? linkProps(org.manage_url) : null;
+  const billingLink = account?.billing ? linkProps(account.billing.url) : null;
+  const connectionsLink = linkProps("/connections");
+  const orgExternal = !!org && !org.manage_url.startsWith("/");
+
+  return (
+    <DropdownMenu modal={false} open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+      <DropdownMenuContent
+        id="project-menu"
+        className="sb-menu"
+        side={side}
+        align="start"
+        sideOffset={side === "right" ? 8 : 4}
+      >
+        <div className="sb-menu-projects">
+          {projects.map((p) => (
+            <DropdownMenuItem
+              key={p.id}
+              data-project={p.id}
+              aria-current={p.id === current?.id ? "true" : undefined}
+              onSelect={() => {
+                if (p.id !== current?.id) navigate("/" + p.id);
+                closeSidebarOnMobile();
+              }}
+            >
+              <span className="proj-mark" aria-hidden="true" style={markStyle(p.name)}>
+                <ProjectIcon name={p.icon} />
+              </span>
+              <span className="label">{p.name}</span>
+              {p.id === current?.id && <Icon name="check" />}
+            </DropdownMenuItem>
+          ))}
+        </div>
+        <DropdownMenuItem id="menu-new-project" onSelect={onNew}>
+          <span className="proj-mark add" aria-hidden="true">
+            <Icon name="plus" />
+          </span>
+          <span className="label dim">New project</span>
+        </DropdownMenuItem>
+
+        {(menu || org || account?.billing || account?.admin) && <DropdownMenuSeparator />}
+        {menu && current && (
+          <DropdownMenuItem
+            id="nav-settings"
+            aria-current={menu.active === "settings" ? "page" : undefined}
+            onSelect={() => menu.onNav("settings")}
+          >
+            <Icon name="gear" />
+            <span className="label">Project settings</span>
+          </DropdownMenuItem>
+        )}
+        {org && (
+          <DropdownMenuItem asChild>
+            {/* org.manage_url: this hub's own org page when it owns its orgs,
+                the identity provider's page when it does not. The server
+                decides; nothing here branches on the answer. */}
+            <a
+              id="menu-org-settings"
+              aria-current={account?.orgActive ? "page" : undefined}
+              {...orgLink}
+              onClick={(e) => {
+                orgLink?.onClick?.(e);
+                close();
+              }}
+            >
+              <Icon name="building" />
+              <span className="label">Organization settings</span>
+              <span className="meta">{org.name}</span>
+              {orgExternal && (
+                <>
+                  <span className="ext" aria-hidden="true">↗</span>
+                  <span className="sr-only"> (opens in a new tab)</span>
+                </>
+              )}
+            </a>
+          </DropdownMenuItem>
+        )}
+        {account?.billing && (
+          <DropdownMenuItem asChild>
+            <a
+              id="menu-billing"
+              {...billingLink}
+              onClick={(e) => {
+                billingLink?.onClick?.(e);
+                close();
+              }}
+            >
+              <Icon name="card" />
+              <span className="label">Billing</span>
+              <span className="ps-chip plan-chip">{account.billing.plan}</span>
+            </a>
+          </DropdownMenuItem>
+        )}
+        {account?.admin && (
+          <DropdownMenuItem id="menu-hub-admin" onSelect={account.admin.onClick}>
+            <Icon name="shield" />
+            <span className="label">Signup &amp; access</span>
+            {!!account.admin.pending && <span className="meta">{account.admin.pending}</span>}
+          </DropdownMenuItem>
+        )}
+
+        <DropdownMenuSeparator />
+        {account && <DropdownMenuLabel className="sb-menu-label">{account.me.email}</DropdownMenuLabel>}
+        <div className="sb-theme">
+          <span className="label">Theme</span>
+          <DropdownMenuRadioGroup
+            className="seg"
+            aria-label="Theme"
+            value={pref}
+            onValueChange={(v) => setPref(v as ThemePref)}
+          >
+            {THEMES.map(({ value, label, Glyph }) => (
+              // preventDefault keeps the menu open: the page re-themes behind
+              // it, so the choice is visible before the user commits to it.
+              <DropdownMenuRadioItem
+                key={value}
+                id={`menu-theme-${value}`}
+                className="seg-item"
+                value={value}
+                aria-label={label}
+                title={label}
+                onSelect={(e) => e.preventDefault()}
+              >
+                <Glyph className="ico" aria-hidden="true" />
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        </div>
+        {account?.mcp && (
+          <DropdownMenuItem asChild>
+            {/* An in-app route (/connections), account-level: one grant can
+                span several projects, so it has no project to live under. */}
+            <a
+              id="menu-connections"
+              {...connectionsLink}
+              onClick={(e) => {
+                connectionsLink.onClick?.(e);
+                close();
+              }}
+            >
+              <Icon name="plug" />
+              <span className="label">Connected agents</span>
+            </a>
+          </DropdownMenuItem>
+        )}
+        {account &&
+          (account.signOut ? (
+            <DropdownMenuItem id="signout" onSelect={account.signOut}>
+              <Icon name="power" />
+              <span className="label">Log out</span>
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem asChild>
+              <a id="signout" href="/auth/logout">
+                <Icon name="power" />
+                <span className="label">Log out</span>
+              </a>
+            </DropdownMenuItem>
+          ))}
+        {account && (
+          <div id="menu-brand" className="sb-menu-brand">
+            {account.brand}
+            {account.beta && <span className="beta">Beta</span>}
+          </div>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+const THEMES: { value: ThemePref; label: string; Glyph: typeof Monitor }[] = [
+  { value: "system", label: "System", Glyph: Monitor },
+  { value: "light", label: "Light", Glyph: Sun },
+  { value: "dark", label: "Dark", Glyph: Moon },
+];
+
 // Re-renders once a minute so "synced 2m ago" does not freeze.
 function useMinuteTick() {
   const [, set] = useState(0);
@@ -176,18 +372,44 @@ function useMinuteTick() {
   }, []);
 }
 
-function SyncLine({ pid, readsEnabled }: { pid: string; readsEnabled: boolean }) {
+/* The sidebar's last row: this project's sync state, and the way to the
+   install page. With nothing to report yet it says what to do instead
+   ("Connect a device") — the state a new project is in, and the reader who
+   most needs the page. */
+export function SyncFooter({
+  pid,
+  readsEnabled,
+  active,
+  onOpen,
+}: {
+  pid: string;
+  readsEnabled: boolean;
+  active: boolean;
+  onOpen: () => void;
+}) {
   useMinuteTick();
   const { devices, synced } = useSyncLine(pid, readsEnabled);
   const parts: string[] = [];
   if (devices) parts.push(devices + (devices === 1 ? " device" : " devices"));
   if (synced) parts.push("synced " + agoText(synced));
-  if (!parts.length) return null;
+  const row = (
+    <button id="nav-install" className={"row sb-sync" + (active ? " active" : "")} onClick={onOpen}>
+      {parts.length ? <span className="sync-dot" aria-hidden="true" /> : <Icon name="laptop" />}
+      <span id="sync-line" className="label">
+        {parts.length ? parts.join(" · ") : "Connect a device"}
+      </span>
+    </button>
+  );
+  if (!parts.length) return <div className="sb-foot">{row}</div>;
   return (
-    <span id="sync-line">
-      <span className="sync-dot" aria-hidden="true" />
-      {parts.join(" · ")}
-    </span>
+    <div className="sb-foot">
+      <Tooltip delayDuration={300}>
+        <TooltipTrigger asChild>{row}</TooltipTrigger>
+        <TooltipContent className="tipcard" side="top" sideOffset={6}>
+          Connect a device
+        </TooltipContent>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -205,7 +427,7 @@ export function SidebarSearch() {
         id="sb-search-input"
         type="text"
         value={query}
-        placeholder="Search or jump to…"
+        placeholder="Search"
         aria-label="Filter files, or press Enter to search everything"
         autoComplete="off"
         spellCheck={false}
@@ -280,5 +502,29 @@ export function ProjectRailNav({ pid, menu }: { pid: string; menu: ProjectMenu }
         />
       ))}
     </>
+  );
+}
+
+/* The rail's top slot: the current project's mark, opening the same menu as
+   the expanded sidebar's project name. */
+export function ProjectRailMenu(props: {
+  projects: Project[];
+  current: Project;
+  menu: ProjectMenu;
+  account?: AccountMenu;
+  onNew: () => void;
+}) {
+  return (
+    <SidebarMenu
+      {...props}
+      side="right"
+      trigger={
+        <button id="rail-project" className="rail-btn rail-proj" aria-label={`Project and account menu — ${props.current.name}`}>
+          <span className="proj-mark" aria-hidden="true" style={markStyle(props.current.name)}>
+            <ProjectIcon name={props.current.icon} />
+          </span>
+        </button>
+      }
+    />
   );
 }

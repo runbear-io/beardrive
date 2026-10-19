@@ -5,10 +5,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import {
   Activity,
   ArrowDownWideNarrow,
-  ListFilter,
   Beaker,
   BookOpen,
   Briefcase,
+  Building2,
   Bug,
   Calendar,
   ChartNoAxesCombined,
@@ -52,8 +52,6 @@ import {
   Music,
   Package,
   PanelLeft,
-  PanelLeftClose,
-  PanelLeftOpen,
   PenLine,
   Plus,
   Printer,
@@ -216,6 +214,7 @@ if (typeof window !== "undefined") {
 // `.ico` sizing/stroke rules apply unchanged.
 const ICONS: Record<string, LucideIcon> = {
   alert: TriangleAlert,
+  building: Building2,
   card: CreditCard,
   check: Check,
   chev: ChevronRight,
@@ -232,13 +231,10 @@ const ICONS: Record<string, LucideIcon> = {
   activity: Activity,
   insights: ChartNoAxesCombined,
   fileplus: FilePlus,
-  filter: ListFilter,
   sort: ArrowDownWideNarrow,
   folderopen: FolderOpen,
   home: House,
   laptop: LaptopMinimal,
-  sidebarclose: PanelLeftClose,
-  sidebaropen: PanelLeftOpen,
   star: Star,
   system: FolderCog,
   gear: Settings,
@@ -392,10 +388,10 @@ function sidebarInert(el: HTMLElement | null) {
 }
 
 export function AppShell(props: {
-  vault: ReactNode;
+  vault?: ReactNode;
   projectsNav?: ReactNode;
   // What the sidebar becomes when collapsed at desktop width: an icon rail.
-  // Defaults to just the brand, search, and the expand control.
+  // Defaults to just the brand mark and search.
   rail?: ReactNode;
   tree?: ReactNode;
   orgBar?: ReactNode;
@@ -436,14 +432,18 @@ export function AppShell(props: {
   );
 }
 
-/* The icon rail's frame: brand mark on top, expand control at the bottom,
-   whatever the caller supplies in between. */
-export function RailBase({ children }: { children?: ReactNode }) {
+/* The icon rail's frame: a top slot (the brand mark unless the caller has
+   something better, like the project menu), search, then whatever the caller
+   supplies. Expanding again is the topbar's toggle, which sits right beside
+   the rail, or ⌘B. */
+export function RailBase({ top, children }: { top?: ReactNode; children?: ReactNode }) {
   return (
     <>
-      <span className="rail-mark">
-        <Mark size={20} />
-      </span>
+      {top ?? (
+        <span className="rail-mark">
+          <Mark size={20} />
+        </span>
+      )}
       <RailButton
         id="rail-search"
         icon="search"
@@ -452,14 +452,6 @@ export function RailBase({ children }: { children?: ReactNode }) {
         onClick={() => requestSearch()}
       />
       {children}
-      <span className="rail-grow" />
-      <RailButton
-        id="rail-expand"
-        icon="sidebaropen"
-        label="Expand sidebar"
-        hint={isMac ? "⌘\\" : "Ctrl+\\"}
-        onClick={toggleSidebar}
-      />
     </>
   );
 }
@@ -527,23 +519,13 @@ export function VaultHeader(props: {
         {name}
       </span>
       {beta && <span id="vault-beta">Beta</span>}
-      <div className="vault-actions">
-        <Tooltip delayDuration={150}>
-          <TooltipTrigger asChild>
-            <button id="sb-collapse" className="icon-btn2" aria-label="Collapse sidebar" onClick={toggleSidebar}>
-              <Icon name="sidebarclose" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent className="tipcard" sideOffset={6}>
-            Collapse <kbd>{isMac ? "⌘\\" : "Ctrl+\\"}</kbd>
-          </TooltipContent>
-        </Tooltip>
-        {showSignout && (
+      {showSignout && (
+        <div className="vault-actions">
           <a id="signout" href="/auth/logout" title="Sign out" aria-label="Sign out">
             <Icon name="power" />
           </a>
-        )}
-      </div>
+        </div>
+      )}
     </header>
   );
 }

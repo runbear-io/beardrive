@@ -10,7 +10,7 @@ import { toast } from "../toast";
 import { useHubRefresh, usePermissions, useShares } from "../hooks/useHub";
 import { PROJECT_ICONS, ProjectIcon } from "./shell";
 import { OPENS_NOTE, SharesTable } from "./SharesTable";
-import { projColor } from "./ProjectNav";
+import { markStyle } from "./ProjectNav";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -124,7 +124,7 @@ export function ProjectSettings({
                 <span
                   className="proj-mark"
                   aria-hidden="true"
-                  style={{ background: projColor(project.name) }}
+                  style={markStyle(project.name)}
                 >
                   <ProjectIcon name={icon} />
                 </span>

@@ -32,7 +32,8 @@ test("renders local markdown; links navigate in-app; reload keeps the deep link"
 
 test("history comes from the local journals; any version is addressable", async ({ page, request }) => {
   await page.goto(`/${HUB_ID}/activity`);
-  await expect(page.getByText("e2e@example.com").first()).toBeVisible();
+  // The feed renders the journals' entries, device and all.
+  await expect(page.locator(".history .hentry", { hasText: "dev-e2e" }).first()).toBeVisible();
   const hist = await (await request.get(`/api/p/${HUB_ID}/history?path=index.md`)).json();
   expect(hist.entries.length).toBe(2);
   const oldest = hist.entries[hist.entries.length - 1];
@@ -76,11 +77,12 @@ test("settings reflect the hub's real permission, not the local read-only", asyn
 
 test("new project runs the connect flow, not a hub-only create dialog", async ({ page }) => {
   // On desktop a project without a local folder cannot appear in the list at
-  // all (it is built from this machine's mounts), so the + goes where a
+  // all (it is built from this machine's mounts), so New project goes where a
   // project actually gets made: pick a folder, name the shared one, sync.
   await page.goto(`/${HUB_ID}/`);
   await page.waitForSelector("#sidebar");
-  await page.locator(".nav-add").click();
+  await page.click("#project-select");
+  await page.click("#menu-new-project");
   await expect(page).toHaveURL(/\/setup\/connect$/);
   await expect(page.getByRole("heading", { name: "Add a shared folder to your project" })).toBeVisible();
   await expect(page.getByText("Docs + decision records")).toHaveCount(0);

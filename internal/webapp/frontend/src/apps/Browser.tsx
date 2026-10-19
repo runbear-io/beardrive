@@ -23,7 +23,7 @@ import { Pinned, PinnedRail } from "../components/Pinned";
 import { SidebarSearch } from "../components/ProjectNav";
 import { useOpenCommentCounts } from "../hooks/useSidebar";
 import { markAllSeen, noteLeaving, pinsOf, setTreeOrder, togglePin, usePins, useTreeOrder, useVisitBaseline } from "../lib/visits";
-import { clearFilter, focusSidebarSearch, useSidebarSearch } from "../lib/sidebarSearch";
+import { clearFilter, useSidebarSearch } from "../lib/sidebarSearch";
 import { treeStats } from "../lib/treeview";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
@@ -55,7 +55,7 @@ export default function Browser(props: {
   hub: boolean;
   project?: Project;
   projects?: Project[];
-  sidebar: { vault: ReactNode; projectsNav?: ReactNode; railNav?: ReactNode; orgBar?: ReactNode };
+  sidebar: { vault?: ReactNode; projectsNav?: ReactNode; railTop?: ReactNode; railNav?: ReactNode; orgBar?: ReactNode };
   // Admin panels (org admin, hub settings) replace the content pane without
   // touching the URL — matching the classic app, where they were never
   // routes. Any navigation closes them (the caller owns that state).
@@ -1260,7 +1260,7 @@ export default function Browser(props: {
         projectsNav={props.sidebar.projectsNav}
         orgBar={props.sidebar.orgBar}
         rail={
-          <RailBase>
+          <RailBase top={props.sidebar.railTop}>
             {props.sidebar.railNav}
             <PinnedRail pins={pins} badges={pinBadges} onOpen={treeActions.open} />
           </RailBase>
@@ -1285,15 +1285,6 @@ export default function Browser(props: {
                 {pid && (
                   <div className="sb-section files-head">
                     <span>Files</span>
-                    <button
-                      className="tact"
-                      id="tree-filter-btn"
-                      aria-label="Filter files"
-                      title="Filter files"
-                      onClick={focusSidebarSearch}
-                    >
-                      <Icon name="filter" />
-                    </button>
                     <button
                       className={"tact" + (treeOrder === "recent" ? " on" : "")}
                       id="tree-sort-btn"

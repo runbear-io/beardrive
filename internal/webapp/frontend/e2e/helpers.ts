@@ -46,3 +46,10 @@ export async function expectToast(page: Page, text: string | RegExp) {
   const { expect } = await import("@playwright/test");
   await expect(page.locator("#toast.show, [data-sonner-toast]").filter({ hasText: text }).first()).toBeVisible();
 }
+
+// The sidebar's one menu — projects, project and org settings, the session —
+// opens from the project name at the top.
+export async function openProjectMenu(page: Page) {
+  await page.click("#project-select");
+  await page.locator("#project-menu").waitFor();
+}
