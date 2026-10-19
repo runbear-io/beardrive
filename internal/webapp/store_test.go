@@ -38,6 +38,13 @@ func newHub(t testing.TB, upload bool, wrap func(remote.Backend) remote.Backend)
 		Root: be, Projects: db, Device: webDevice,
 		Refresh: 0, Upload: UploadConfig{Enabled: upload},
 	}
+	// After every room a test opened is dropped (later cleanups run first),
+	// wait out any snapshot still running before the temp dirs go.
+	t.Cleanup(func() {
+		if srv.roomReg != nil {
+			srv.rooms().settle()
+		}
+	})
 	return srv, p, root
 }
 
