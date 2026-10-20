@@ -80,20 +80,27 @@ func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 	if x := histCache.get(r, fp); x != nil {
 		return x, nil
 	}
-	all, err := r.sourcedOpsOf(ctx, keep)
+	x, err, _ := r.flight.Do("hist\x00"+fp, func() (any, error) {
+		all, err := r.sourcedOpsOf(context.WithoutCancel(ctx), keep)
+		if err != nil {
+			return nil, err
+		}
+		x := buildHistIndex(all)
+		histCache.put(r, fp, x)
+		return x, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	x := buildHistIndex(all)
-	histCache.put(r, fp, x)
-	return x, nil
+	return x.(*histIndex), nil
 }
 
-// maxHistIndexOps bounds the ops held by history indexes across the whole hub
-// (a few hundred bytes each). Least recently used projects are dropped first;
-// a dropped project's next history request rebuilds, which is what every
-// request cost before the index existed.
-const maxHistIndexOps = 300_000
+// histOpBytes is roughly what one op costs in a history index, which converts
+// hubCaches' byte budget into the ops history indexes may hold across the hub.
+// Least recently used projects are dropped first; a dropped project's next
+// history request rebuilds. The index just built is always kept, however large:
+// rebuilding it per request costs the same memory plus the sort, every time.
+const histOpBytes = 400
 
 type histEntry struct {
 	src  *RemoteSource
@@ -130,10 +137,8 @@ func (c *histLRU) put(src *RemoteSource, fp string, x *histIndex) {
 		c.ops -= len(old.x.all)
 		delete(c.entries, src)
 	}
-	if len(x.all) > maxHistIndexOps {
-		return
-	}
-	for c.ops+len(x.all) > maxHistIndexOps {
+	limit := int(hubCaches.limitBytes() / histOpBytes)
+	for c.ops+len(x.all) > limit && len(c.entries) > 0 {
 		var victim *histEntry
 		for _, e := range c.entries {
 			if victim == nil || e.used < victim.used {
