@@ -6,6 +6,7 @@ minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#s
 ## Unreleased
 
 - **Local watcher recovery releases resources.** Recreated directories are re-registered, and macOS watcher shutdown no longer retains file descriptors.
+- **Share links no longer run out because your team synced.** The hub reported every byte a device pulled through `/store/*` to `QuotaProvider.RecordEgress`, the counter a managed hub enforces its monthly share-link transfer cap against, so ordinary syncing used up the allowance and every `/s/*` link in the org answered "This link has exceeded its transfer limit". `RecordEgress` now reports share-link transfers only; sync traffic is neither checked nor metered.
 
 
 ## v0.18.0 — 2026-10-15
