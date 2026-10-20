@@ -80,70 +80,67 @@ func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 	if x := histCache.get(r, fp); x != nil {
 		return x, nil
 	}
-	all, err := r.sourcedOpsOf(ctx, keep)
+	x, err, _ := r.flight.Do("hist\x00"+fp, func() (any, error) {
+		all, err := r.sourcedOpsOf(context.WithoutCancel(ctx), keep)
+		if err != nil {
+			return nil, err
+		}
+		x := buildHistIndex(all)
+		histCache.put(r, fp, x)
+		return x, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	x := buildHistIndex(all)
-	histCache.put(r, fp, x)
-	return x, nil
+	return x.(*histIndex), nil
 }
 
-// maxHistIndexOps bounds the ops held by history indexes across the whole hub
-// (a few hundred bytes each). Least recently used projects are dropped first;
-// a dropped project's next history request rebuilds, which is what every
-// request cost before the index existed.
-const maxHistIndexOps = 300_000
+// histOpBytes is roughly what one op costs in a history index: what an index
+// is charged against hubCaches, which drops the least recently used projects'
+// caches first. A dropped project's next history request rebuilds. The index
+// just built is never dropped to make room for itself: rebuilding it per
+// request costs the same memory plus the sort, every time.
+const histOpBytes = 400
 
 type histEntry struct {
-	src  *RemoteSource
-	fp   string
-	x    *histIndex
-	used uint64
+	fp  string
+	x   *histIndex
+	gen uint64 // hubCaches generation this entry was charged at
 }
 
+// histLRU holds each project's current history index; hubCaches decides which
+// ones stay.
 type histLRU struct {
 	mu      sync.Mutex
 	entries map[*RemoteSource]*histEntry
-	ops     int
-	tick    uint64
 }
 
 var histCache = &histLRU{entries: map[*RemoteSource]*histEntry{}}
 
 func (c *histLRU) get(src *RemoteSource, fp string) *histIndex {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	e, ok := c.entries[src]
+	c.mu.Unlock()
 	if !ok || e.fp != fp {
 		return nil
 	}
-	c.tick++
-	e.used = c.tick
+	hubCaches.touch(src, historyCache)
 	return e.x
 }
 
 func (c *histLRU) put(src *RemoteSource, fp string, x *histIndex) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if old, ok := c.entries[src]; ok {
-		c.ops -= len(old.x.all)
+	gen, evict := hubCaches.charge(src, historyCache, int64(len(x.all))*histOpBytes)
+	c.entries[src] = &histEntry{fp: fp, x: x, gen: gen}
+	c.mu.Unlock()
+	dropEvicted(evict)
+}
+
+// drop deletes src's index if it is still the generation the budget evicted.
+func (c *histLRU) drop(src *RemoteSource, gen uint64) {
+	c.mu.Lock()
+	if e := c.entries[src]; e != nil && e.gen == gen {
 		delete(c.entries, src)
 	}
-	if len(x.all) > maxHistIndexOps {
-		return
-	}
-	for c.ops+len(x.all) > maxHistIndexOps {
-		var victim *histEntry
-		for _, e := range c.entries {
-			if victim == nil || e.used < victim.used {
-				victim = e
-			}
-		}
-		c.ops -= len(victim.x.all)
-		delete(c.entries, victim.src)
-	}
-	c.tick++
-	c.entries[src] = &histEntry{src: src, fp: fp, x: x, used: c.tick}
-	c.ops += len(x.all)
+	c.mu.Unlock()
 }

@@ -117,6 +117,9 @@ classDiagram
         -parsedJournals(ctx, keep) [][]journal.Op
         -cacheJournals(keep, misses, parsed, sizes)
         -foldFP/foldFiles/foldMoves last fold
+        -flight singleflight.Group one fold / history build per journal state
+        -jgen hubCaches generation of jcache
+        -dropJournals(gen) when hubCaches evicts that generation
         +FilesWithMoves(ctx) files, moves
         -appendOp(ctx, op)
         -appendOps(ctx, ops) ONE read-modify-write
@@ -140,7 +143,16 @@ classDiagram
         +moveIndex() built on first use
     }
     RemoteSource ..> histIndex : historyIndex, per journal fingerprint
-    note for histIndex "histindex.go — everything the history feed derives that does not depend on who asks, built once per journal state and shared read-only by every request until a journal grows. A hub-wide LRU (maxHistIndexOps) bounds the ops held across projects; an evicted project rebuilds on its next request. Requests keep only the per-reader work: the folder filter, the path/prefix match, the page"
+    class cacheBudget {
+        -limit int64 GOMEMLIMIT/4, else 256 MiB
+        -entries map (source, kind)→bytes, last use
+        +charge(src, kind, bytes) gen, evicted caches of other sources
+        +touch(src, kind)
+    }
+    RemoteSource ..> cacheBudget : hubCaches.charge after each journal pass
+    histLRU ..> cacheBudget : charge per index, touch per hit
+    note for cacheBudget "cachebudget.go — one memory budget for both kinds of per-project cache: parsed journals (raw journal bytes) and history indexes (histOpBytes per op), each entry keyed by (source, kind). Over budget, the least recently used caches of OTHER projects are dropped, whichever kind; a drop names the generation it evicted, so a cache rebuilt and charged again in the meantime is left alone; the project being served is never evicted to make room for itself, since its fold needs every op in memory either way"
+    note for histIndex "histindex.go — everything the history feed derives that does not depend on who asks, built once per journal state and shared read-only by every request until a journal grows. Concurrent requests for one journal state share one build (RemoteSource.flight). Each index is charged to hubCaches (histOpBytes per op), the same budget as parsed journals, and histLRU only holds what that budget keeps; the index just built is always kept, however large, and an evicted project rebuilds on its next request. Requests keep only the per-reader work: the folder filter, the path/prefix match, the page"
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
     note for RemoteSource "reassemble is delta sync's whole backward-compatibility story: when blobs/sha is absent (or fails verify), the manifest under manifests/sha names content-defined chunks that concatenate to the blob — spool, hash-verify against the sha requested, BACKFILL blobs/sha (best-effort; a failed write never fails the read), serve. Old clients ask for whole blobs and never learn anything changed; a hostile whole blob that fails verify is HEALED by the backfill when an honest manifest exists. Bounded by maxReassembleBytes (256 MiB) on the manifest's DECLARED sum, with each chunk's copy capped at its declared size — a member-written manifest is the one non-content-addressed object in the key space, so an amplified or oversized one is refused before it can spool"
