@@ -2174,8 +2174,8 @@ func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, at
 	if attach {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(p)))
 	} else {
-		w.Header().Set("Content-Type", inlineType(ct))
-		sandboxInline(w, ct)
+		w.Header().Set("Content-Type", inlineType(ct, r))
+		sandboxInline(w, r, ct)
 		// The editable view is served INSTEAD of the stored bytes, so it gets
 		// its say before the print view and before anything is streamed.
 		// Declining is always safe: the reader falls through to the ordinary
@@ -2401,6 +2401,10 @@ func inlineMarkup(ct string) bool {
 // inlineType is the Content-Type the hub is willing to have a browser PARSE
 // when it serves stored bytes inline.
 //
+// An image subresource skips the demotion below: the demotion is for XML
+// opened AS a document, and demoting an embedded .svg to text/plain is the
+// same broken picture through a second door.
+//
 // The XML family is declared inert. The sandbox CSP below already removes its
 // capability — but it removes it by making the document render as nothing at
 // all (the stylesheet an XML document names is sandboxed too, so the XSLT
@@ -2411,8 +2415,11 @@ func inlineMarkup(ct string) bool {
 //
 // HTML, XHTML and SVG keep their real type. The app has always served them,
 // and for them the sandbox is a complete wall rather than a blank page.
-func inlineType(ct string) string {
+func inlineType(ct string, r *http.Request) string {
 	l := strings.ToLower(ct)
+	if imageSubresource(ct, r) {
+		return ct
+	}
 	if inlineMarkup(l) && !strings.Contains(l, "html") && !strings.Contains(l, "svg") {
 		return "text/plain; charset=utf-8"
 	}
@@ -2430,14 +2437,64 @@ func inlineType(ct string) string {
 // the Content-Type the hub declared; without nosniff a browser is free to
 // sniff attacker-written bytes into a document type the hub never named, which
 // is the same capability arriving through a door the CSP never opened.
-func sandboxInline(w http.ResponseWriter, ct string) {
+func sandboxInline(w http.ResponseWriter, r *http.Request, ct string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if inlineMarkup(ct) {
+	if inlineMarkup(ct) && !imageSubresource(ct, r) {
 		w.Header().Set("Content-Security-Policy", inlineSandbox)
 	}
 }
 
-// inlineSandbox is the CSP on every inline render of stored markup. Without
+// imageSubresource reports whether ct is an image a MARKDOWN document renders
+// as a picture rather than as the document itself: an <img src> in a synced
+// report, or a CSS background-image.
+//
+// Those two doors have opposite needs, and the inline treatment serves only
+// one of them. Opened as a page — the file view, a share link, a past version
+// — an SVG is a document that runs the hub's origin, so the sandbox and the
+// demotion to text are both correct. Embedded as an image it is not a
+// document at all: the browser gives it no script context, and the same two
+// headers turn it into a broken-image icon instead. That was the whole of
+// "I uploaded a screenshot and the doc that embeds it shows nothing".
+//
+// So only a request that cannot be a top-level document is exempt, and
+// Sec-Fetch-* is what proves it: `dest: image` is set by the browser itself
+// for an <img>, a srcset pick, a CSS url() and the favicon, and a page cannot
+// forge it — fetch() forces `empty`, and a forged value on an <img> is
+// ignored. There is no exempt header combination a document navigation can
+// reach, which matters most in the case with no header at all: an inline SVG
+// loads its own <image href="other.svg"> as `dest: image, site: none`, and a
+// no-Sec-Fetch client is sandboxed rather than trusted. Curl gets the CSP; the
+// browser that renders the picture does not.
+func imageSubresource(ct string, r *http.Request) bool {
+	if !safeRaster(ct) {
+		return false
+	}
+	return r.Header.Get("Sec-Fetch-Dest") == "image"
+}
+
+// safeRaster is the allowlist of Content-Types with no script context in any
+// browser: bitmap formats plus SVG, the one vector format an <img> renders as
+// a picture and never as a document. image/svg+xml is in it because that is
+// exactly the distinction being drawn — the same bytes are a document when
+// navigated to and a picture when embedded.
+//
+// This is the allowlist, not a denylist of things known to run code: a type
+// the hub has never seen stays sandboxed, so the wall fails closed.
+func safeRaster(ct string) bool {
+	ct, _, _ = strings.Cut(ct, ";")
+	switch strings.ToLower(strings.TrimSpace(ct)) {
+	case "image/svg+xml",
+		"image/png", "image/jpeg", "image/gif", "image/webp",
+		"image/avif", "image/bmp", "image/x-icon", "image/vnd.microsoft.icon":
+		return true
+	}
+	return false
+}
+
+// inlineSandbox is the CSP on every inline render of stored markup.
+//
+// allow-scripts is what keeps cdns, fonts and inline styles in a synced HTML
+// report working. Without
 // allow-downloads a sandboxed document can save nothing — not a data: link,
 // not a blob a "Download CSV" button builds, not even a link to an
 // attachment — so every export button in a synced report did nothing at all.
@@ -2449,6 +2506,9 @@ func sandboxInline(w http.ResponseWriter, ct string) {
 // The app's iframe (FileView.tsx's HtmlView) carries the same flags; a
 // browser applies the intersection, so dropping it from either side would
 // block downloads again.
+//
+// It is NOT applied to a raster or SVG subresource (imageSubresource above):
+// the sandbox is a document wall, and on an image it is only a broken picture.
 const inlineSandbox = "sandbox allow-scripts allow-downloads"
 
 // printSuffix is appended to an HTML print view so the document opens the

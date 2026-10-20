@@ -150,6 +150,31 @@ test("image file renders an <img>", async ({ page }) => {
   await expect(page.locator("#content img")).toBeVisible();
 });
 
+// The bug this pins: the hub served stored images with the sandbox it uses to
+// wall off uploaded markup, and a sandboxed <img> is a broken one — so a
+// markdown doc that embedded an uploaded screenshot showed an empty box where
+// the picture should be. The seed keeps a spare at copy/icon.svg.
+test("an uploaded SVG embedded in a document renders as a picture", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#e05252"/></svg>';
+  await page.request.put(`/api/p/${pid}/upload/content?path=shots/icon.svg`, { data: svg });
+  await page.request.put(`/api/p/${pid}/upload/content?path=shots/report.md`, {
+    data: "# Shots\n\n![icon](icon.svg)\n",
+  });
+  await page.goto(`/${pid}/shots/report.md`);
+  const img = page.locator(".fv-prose img");
+  await expect(img).toHaveAttribute("src", /shots%2Ficon\.svg/);
+  // Decoded pixels, not just the element: a broken image also renders an
+  // <img> and would pass a visibility check on its own.
+  await expect
+    .poll(() => img.evaluate((el: HTMLImageElement) => el.naturalWidth), { timeout: 5000 })
+    .toBeGreaterThan(0);
+  // And the file itself, opened as a page, is still a sandboxed document.
+  const res = await page.request.get(`/api/p/${pid}/file?path=shots/icon.svg&name=icon.svg`);
+  expect(res.headers()["content-security-policy"]).toContain("sandbox");
+});
+
 test("breadcrumb ancestor opens that folder", async ({ page }) => {
   await login(page);
   const pid = await wikiId(page);
