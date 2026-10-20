@@ -95,60 +95,47 @@ func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 	return x.(*histIndex), nil
 }
 
-// histOpBytes is roughly what one op costs in a history index, which converts
-// hubCaches' byte budget into the ops history indexes may hold across the hub.
-// Least recently used projects are dropped first; a dropped project's next
-// history request rebuilds. The index just built is always kept, however large:
-// rebuilding it per request costs the same memory plus the sort, every time.
+// histOpBytes is roughly what one op costs in a history index: what an index
+// is charged against hubCaches, which drops the least recently used projects'
+// caches first. A dropped project's next history request rebuilds. The index
+// just built is never dropped to make room for itself: rebuilding it per
+// request costs the same memory plus the sort, every time.
 const histOpBytes = 400
 
 type histEntry struct {
-	src  *RemoteSource
-	fp   string
-	x    *histIndex
-	used uint64
+	fp string
+	x  *histIndex
 }
 
+// histLRU holds each project's current history index; hubCaches decides which
+// ones stay.
 type histLRU struct {
 	mu      sync.Mutex
 	entries map[*RemoteSource]*histEntry
-	ops     int
-	tick    uint64
 }
 
 var histCache = &histLRU{entries: map[*RemoteSource]*histEntry{}}
 
 func (c *histLRU) get(src *RemoteSource, fp string) *histIndex {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	e, ok := c.entries[src]
+	c.mu.Unlock()
 	if !ok || e.fp != fp {
 		return nil
 	}
-	c.tick++
-	e.used = c.tick
+	hubCaches.touch(src, historyCache)
 	return e.x
 }
 
 func (c *histLRU) put(src *RemoteSource, fp string, x *histIndex) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if old, ok := c.entries[src]; ok {
-		c.ops -= len(old.x.all)
-		delete(c.entries, src)
-	}
-	limit := int(hubCaches.limitBytes() / histOpBytes)
-	for c.ops+len(x.all) > limit && len(c.entries) > 0 {
-		var victim *histEntry
-		for _, e := range c.entries {
-			if victim == nil || e.used < victim.used {
-				victim = e
-			}
-		}
-		c.ops -= len(victim.x.all)
-		delete(c.entries, victim.src)
-	}
-	c.tick++
-	c.entries[src] = &histEntry{src: src, fp: fp, x: x, used: c.tick}
-	c.ops += len(x.all)
+	c.entries[src] = &histEntry{fp: fp, x: x}
+	c.mu.Unlock()
+	hubCaches.charge(src, historyCache, int64(len(x.all))*histOpBytes)
+}
+
+func (c *histLRU) drop(src *RemoteSource) {
+	c.mu.Lock()
+	delete(c.entries, src)
+	c.mu.Unlock()
 }

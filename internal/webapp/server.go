@@ -1160,9 +1160,7 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 	r.jmu.Lock()
 	held := r.jbytes
 	r.jmu.Unlock()
-	for _, victim := range hubCaches.charge(r, held) {
-		victim.dropJournals()
-	}
+	hubCaches.charge(r, journalCache, held)
 	return parsed, nil
 }
 

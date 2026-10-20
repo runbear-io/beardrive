@@ -188,3 +188,29 @@ func TestAHistoryIndexLargerThanTheBudgetIsStillReused(t *testing.T) {
 		t.Fatal("a history index over the budget was rebuilt on the next request")
 	}
 }
+
+// History indexes are charged to the same budget as parsed journals: one
+// ceiling for the hub, not one per kind of cache.
+func TestHistoryIndexesShareTheJournalBudget(t *testing.T) {
+	a, _, _ := countedProject(t)
+	b, _, _ := countedProject(t)
+	ctx := context.Background()
+	a.FilesWithMoves(ctx)
+	if _, err := a.historyIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := hubCaches.held(a); got <= hubCaches.heldJournals(a) {
+		t.Fatalf("a's history index is not charged: holds %d, journals alone %d", got, hubCaches.heldJournals(a))
+	}
+	withCacheBudget(t, hubCaches.held(a)+1) // room for one project's caches
+	b.FilesWithMoves(ctx)
+	b.historyIndex(ctx)
+
+	histCache.mu.Lock()
+	_, aIndexKept := histCache.entries[a]
+	_, bIndexKept := histCache.entries[b]
+	histCache.mu.Unlock()
+	if aIndexKept || !bIndexKept {
+		t.Fatalf("a's index kept=%v, b's kept=%v: want the older project's index dropped for the newer", aIndexKept, bIndexKept)
+	}
+}
