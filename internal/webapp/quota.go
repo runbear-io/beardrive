@@ -32,12 +32,14 @@ type QuotaProvider interface {
 	// Deliberately NOT called on the sync proxy or the viewer: a device that
 	// gets refused mid-sync reads it as "access revoked" and stops touching
 	// the folder, which is a far worse outcome than an over-quota bill. Those
-	// paths report through RecordEgress and are governed by fair use.
+	// paths are governed by fair use.
 	CheckRead(org string, bytes int64) error
-	// RecordEgress runs after bytes have been served, with the number
-	// actually written. Every read path reports here — share links, the sync
-	// proxy, viewer downloads — so egress is measurable even where it is not
-	// enforced.
+	// RecordEgress is CheckRead's other half: it runs after a share-link
+	// transfer with the number of bytes actually written, and reports
+	// nothing else, so a provider can enforce CheckRead against what it has
+	// recorded. The sync proxy reported here once too, and a team's own
+	// syncing spent the public share allowance until every link in the org
+	// was refused — a provider cannot tell the two apart from (org, bytes).
 	RecordEgress(org string, bytes int64)
 }
 

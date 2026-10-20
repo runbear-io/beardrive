@@ -630,13 +630,13 @@ classDiagram
         +RecordEgress(org, bytes)
     }
     class UnlimitedQuota
-    note for QuotaProvider "The read half is deliberately ASYMMETRIC. CheckRead is called on /s/* and nowhere else: a public share link is the only unauthenticated door to stored bytes, so it is the only egress a plan can cap and the only bandwidth number worth publishing. Refusing a device mid-sync would surface as ErrForbidden, which the syncer reads as 'access is gone — pause and touch nothing', so /store/* and the viewer only RecordEgress. Sync must never break over a bill"
+    note for QuotaProvider "The read half is deliberately ASYMMETRIC. CheckRead is called on /s/* and nowhere else: a public share link is the only unauthenticated door to stored bytes, so it is the only egress a plan can cap and the only bandwidth number worth publishing. Refusing a device mid-sync would surface as ErrForbidden, which the syncer reads as 'access is gone — pause and touch nothing', so /store/* and the viewer are neither checked nor recorded. RecordEgress is CheckRead's other half and reports share-link bytes ONLY: (org, bytes) cannot say which door they left by, and when /store/* reported too, a team's own syncing spent the share allowance until every link in the org was refused. Sync must never break over a bill, and never break a share link either"
     class countingWriter {
         <<quota.go>>
         +Write(p) n
         +n int64
     }
-    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file. It wraps the SOCKET and gzip writes INTO it, never the reverse — RecordEgress is a bandwidth meter, so a compressed response must report its compressed size, and getting that backwards bills plaintext while nothing fails"
+    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file. Used only by the share route, the one door RecordEgress meters"
 
     class grant {
         +project +org +key

@@ -469,24 +469,20 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	// cookie-authenticated GET whose URL one member can hand another, answering
 	// with content the attacker wrote under a Content-Type the hub chose.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// Recorded, never checked. This is a device syncing: refusing it here
-	// surfaces as ErrForbidden, which the syncer reads as "access is gone —
-	// pause and touch nothing". Sync must not break over a bill.
-	//
-	// The counter wraps the SOCKET and gzip writes into it, never the other way
-	// round: RecordEgress is a bandwidth meter, so it has to report what left
-	// the machine. Inverted, it silently bills plaintext for every compressed
-	// response and no test fails.
-	cw := &countingWriter{w: w}
+	// Neither checked nor recorded. Refusing a device here surfaces as
+	// ErrForbidden, which the syncer reads as "access is gone — pause and
+	// touch nothing", and recording it fed a teammate's pull into the
+	// counter CheckRead enforces on public share links: a team's own syncing
+	// spent the share allowance until every link in the org refused its
+	// readers. Sync traffic is fair use, not metered.
 	if gzipOK {
 		w.Header().Set("Content-Encoding", "gzip")
-		gz := gzip.NewWriter(cw)
+		gz := gzip.NewWriter(w)
 		copyOrAbort(gz, src)
 		gz.Close()
 	} else {
-		copyOrAbort(cw, src)
+		copyOrAbort(w, src)
 	}
-	s.quota().RecordEgress(s.orgOf(r.PathValue("project")), cw.n)
 }
 
 func (s *Server) handleStoreExists(v *volume, w http.ResponseWriter, r *http.Request) {

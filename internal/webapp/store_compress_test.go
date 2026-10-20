@@ -26,25 +26,18 @@ import (
 const textCorpus = "# release notes\n\nthe corpus is markdown and source files, " +
 	"five to ten kilobytes each, which is exactly what gzip is good at.\n"
 
-// meterQuota records what the hub bills, separately per meter: usage is a
-// storage bill (uncompressed), egress is a bandwidth bill (compressed).
+// meterQuota records what the hub bills for storage: the stored object is
+// uncompressed, so that is what usage is charged for.
 type meterQuota struct {
 	UnlimitedQuota
-	mu     sync.Mutex
-	usage  int64
-	egress int64
+	mu    sync.Mutex
+	usage int64
 }
 
 func (q *meterQuota) RecordUsage(_ string, b int64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.usage += b
-}
-
-func (q *meterQuota) RecordEgress(_ string, b int64) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.egress += b
 }
 
 // doRaw sends an exact body with exact headers — reads_test.go's doHdr
@@ -99,8 +92,6 @@ func incompressible(n int) []byte {
 // arrive as the exact stored bytes.
 func TestStoreGetCompresses(t *testing.T) {
 	srv, p, root := newHub(t, false, nil)
-	q := &meterQuota{}
-	srv.Quota = q
 	f := newFakeRemoteAt(t, filepath.Join(root, p.ID))
 	text := strings.Repeat(textCorpus, 200)
 	f.put("deva", "notes.md", text)
@@ -119,13 +110,6 @@ func TestStoreGetCompresses(t *testing.T) {
 	if ratio := float64(len(text)) / float64(len(wire)); ratio < 2.5 {
 		t.Fatalf("wire ratio %.2fx, want at least 2.5x", ratio)
 	}
-	// The bandwidth meter reports what left the socket, not what was stored.
-	// Inverted (counter inside the gzip writer) this reads len(text) and
-	// nothing else fails.
-	if q.egress != int64(len(wire)) {
-		t.Fatalf("RecordEgress = %d, want the compressed %d", q.egress, len(wire))
-	}
-
 	// A caller that did not ask gets exactly what it always got.
 	rec = doRaw(t, h, "GET", url, nil, nil)
 	if rec.Code != 200 || rec.Header().Get("Content-Encoding") != "" || rec.Body.String() != text {
