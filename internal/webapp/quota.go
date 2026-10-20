@@ -37,10 +37,25 @@ type QuotaProvider interface {
 	// RecordEgress is CheckRead's other half: it runs after a share-link
 	// transfer with the number of bytes actually written, and reports
 	// nothing else, so a provider can enforce CheckRead against what it has
-	// recorded. The sync proxy reported here once too, and a team's own
-	// syncing spent the public share allowance until every link in the org
-	// was refused — a provider cannot tell the two apart from (org, bytes).
+	// recorded.
 	RecordEgress(org string, bytes int64)
+}
+
+// SyncEgressRecorder is the sync proxy's meter, an optional QuotaProvider
+// capability: RecordSyncEgress runs after /store/* served a device, with
+// the bytes that left the socket (compressed, when the response was).
+//
+// It is not RecordEgress because (org, bytes) cannot say which door the
+// bytes left by: when sync reported to RecordEgress, a team's own syncing
+// spent the public share allowance until every link in the org was
+// refused. Measured, never enforced — there is no check for it, and a
+// provider must not feed it into one.
+//
+// Optional rather than a QuotaProvider method because the managed hub pins
+// this repo and a new required method fails its build on the bump; a
+// provider without it is simply not told, and nothing is refused.
+type SyncEgressRecorder interface {
+	RecordSyncEgress(org string, bytes int64)
 }
 
 // UnlimitedQuota is the open-source default: everything is allowed.

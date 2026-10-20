@@ -469,19 +469,28 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	// cookie-authenticated GET whose URL one member can hand another, answering
 	// with content the attacker wrote under a Content-Type the hub chose.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// Neither checked nor recorded. Refusing a device here surfaces as
+	// Measured, never checked. Refusing a device here surfaces as
 	// ErrForbidden, which the syncer reads as "access is gone — pause and
-	// touch nothing", and recording it fed a teammate's pull into the
-	// counter CheckRead enforces on public share links: a team's own syncing
-	// spent the share allowance until every link in the org refused its
-	// readers. Sync traffic is fair use, not metered.
+	// touch nothing". And measured on its OWN meter: reported to RecordEgress,
+	// a teammate's pull landed in the counter CheckRead enforces on public
+	// share links, and a team's own syncing spent the share allowance until
+	// every link in the org refused its readers.
+	//
+	// The counter wraps the SOCKET and gzip writes into it, never the other way
+	// round: this is a bandwidth meter, so it has to report what left the
+	// machine. Inverted, it silently meters plaintext for every compressed
+	// response and no test fails.
+	cw := &countingWriter{w: w}
 	if gzipOK {
 		w.Header().Set("Content-Encoding", "gzip")
-		gz := gzip.NewWriter(w)
+		gz := gzip.NewWriter(cw)
 		copyOrAbort(gz, src)
 		gz.Close()
 	} else {
-		copyOrAbort(w, src)
+		copyOrAbort(cw, src)
+	}
+	if m, ok := s.quota().(SyncEgressRecorder); ok {
+		m.RecordSyncEgress(s.orgOf(r.PathValue("project")), cw.n)
 	}
 }
 

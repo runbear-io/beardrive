@@ -239,13 +239,14 @@ func TestQuotaRepeatedBlobPushChargesOnce(t *testing.T) {
 	}
 }
 
-// capQuota is the managed provider's share-link cap in miniature: one
-// counter, fed by RecordEgress and read by CheckRead.
+// capQuota is the managed provider in miniature: a share-link counter fed by
+// RecordEgress and enforced by CheckRead, and a sync counter nothing checks.
 type capQuota struct {
 	UnlimitedQuota
-	mu     sync.Mutex
-	cap    int64
-	egress int64
+	mu         sync.Mutex
+	cap        int64
+	egress     int64
+	syncEgress int64
 }
 
 func (q *capQuota) CheckRead(_ string, b int64) error {
@@ -263,12 +264,19 @@ func (q *capQuota) RecordEgress(_ string, b int64) {
 	q.egress += b
 }
 
+func (q *capQuota) RecordSyncEgress(_ string, b int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.syncEgress += b
+}
+
 // The share-link transfer cap is a cap on the PUBLIC. A teammate's device
 // pulling the project through /store/* is not an audience — but the sync
 // proxy used to report its bytes to RecordEgress too, into the counter
 // CheckRead enforces, so a team's own syncing spent the monthly allowance
 // and every share link in the org answered "This link has exceeded its
-// transfer limit" to people who had downloaded nothing.
+// transfer limit" to people who had downloaded nothing. Sync is still
+// measured, on its own meter.
 func TestQuotaSyncPullSpendsNoShareEgress(t *testing.T) {
 	h, srv, alice, _, pa := orgHubSrv(t)
 	q := &capQuota{cap: 64 << 10}
@@ -305,5 +313,8 @@ func TestQuotaSyncPullSpendsNoShareEgress(t *testing.T) {
 	// The share itself is still metered, and it is the only thing that was.
 	if q.egress != int64(rec.Body.Len()) {
 		t.Fatalf("RecordEgress total = %d, want exactly the %d bytes the share served", q.egress, rec.Body.Len())
+	}
+	if want := int64(3 * len(big)); q.syncEgress != want {
+		t.Fatalf("RecordSyncEgress total = %d, want the %d bytes three devices pulled", q.syncEgress, want)
 	}
 }
