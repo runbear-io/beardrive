@@ -628,6 +628,7 @@ type RemoteSource struct {
 	jmu    sync.Mutex               // guards jcache and jbytes
 	jcache map[string]cachedJournal // "journal/<dev>.jsonl" → parsed ops
 	jbytes int64                    // raw journal bytes currently cached
+	jgen   uint64                   // hubCaches generation jcache was charged at
 
 	fmu    sync.Mutex                 // guards fcache and fbytes
 	fcache map[string]filteredJournal // scopeTag+key → journal as one account may read it
@@ -1158,9 +1159,10 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 		r.cacheJournals(keep, misses, parsed, sizes)
 	}
 	r.jmu.Lock()
-	held := r.jbytes
+	gen, evict := hubCaches.charge(r, journalCache, r.jbytes)
+	r.jgen = gen
 	r.jmu.Unlock()
-	hubCaches.charge(r, journalCache, held)
+	dropEvicted(evict)
 	return parsed, nil
 }
 

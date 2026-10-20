@@ -214,3 +214,47 @@ func TestHistoryIndexesShareTheJournalBudget(t *testing.T) {
 		t.Fatalf("a's index kept=%v, b's kept=%v: want the older project's index dropped for the newer", aIndexKept, bIndexKept)
 	}
 }
+
+// An eviction carried out after its source has re-cached does not wipe the
+// newer cache: the drop names the generation it evicted.
+func TestALateEvictionLeavesANewerCacheAlone(t *testing.T) {
+	rs, _, _ := countedProject(t)
+	ctx := context.Background()
+	rs.FilesWithMoves(ctx)
+	rs.historyIndex(ctx)
+
+	rs.jmu.Lock()
+	oldJournals := rs.jgen
+	rs.jmu.Unlock()
+	histCache.mu.Lock()
+	oldIndex := histCache.entries[rs].gen
+	histCache.mu.Unlock()
+
+	// The source re-caches (a push) before the eviction of the old
+	// generations is carried out.
+	rs.dropJournals(oldJournals)
+	keep, err := rs.listJournals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rs.parsedJournals(ctx, keep); err != nil {
+		t.Fatal(err)
+	}
+	x, _ := rs.historyIndex(ctx)
+	histCache.put(rs, "next", x)
+
+	dropEvicted([]evicted{{budgetKey{rs, journalCache}, oldJournals}, {budgetKey{rs, historyCache}, oldIndex}})
+
+	rs.jmu.Lock()
+	kept := len(rs.jcache)
+	rs.jmu.Unlock()
+	if kept == 0 {
+		t.Fatal("a late eviction wiped the journal cache rebuilt after it")
+	}
+	if histCache.get(rs, "next") == nil {
+		t.Fatal("a late eviction deleted the history index stored after it")
+	}
+	if hubCaches.held(rs) == 0 {
+		t.Fatal("the budget lost track of caches that are still held")
+	}
+}

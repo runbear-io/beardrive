@@ -103,8 +103,9 @@ func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 const histOpBytes = 400
 
 type histEntry struct {
-	fp string
-	x  *histIndex
+	fp  string
+	x   *histIndex
+	gen uint64 // hubCaches generation this entry was charged at
 }
 
 // histLRU holds each project's current history index; hubCaches decides which
@@ -129,13 +130,17 @@ func (c *histLRU) get(src *RemoteSource, fp string) *histIndex {
 
 func (c *histLRU) put(src *RemoteSource, fp string, x *histIndex) {
 	c.mu.Lock()
-	c.entries[src] = &histEntry{fp: fp, x: x}
+	gen, evict := hubCaches.charge(src, historyCache, int64(len(x.all))*histOpBytes)
+	c.entries[src] = &histEntry{fp: fp, x: x, gen: gen}
 	c.mu.Unlock()
-	hubCaches.charge(src, historyCache, int64(len(x.all))*histOpBytes)
+	dropEvicted(evict)
 }
 
-func (c *histLRU) drop(src *RemoteSource) {
+// drop deletes src's index if it is still the generation the budget evicted.
+func (c *histLRU) drop(src *RemoteSource, gen uint64) {
 	c.mu.Lock()
-	delete(c.entries, src)
+	if e := c.entries[src]; e != nil && e.gen == gen {
+		delete(c.entries, src)
+	}
 	c.mu.Unlock()
 }

@@ -47,6 +47,15 @@ type budgetKey struct {
 type budgetEntry struct {
 	bytes int64
 	used  uint64
+	gen   uint64 // the charge that set bytes; the cache records it too
+}
+
+// evicted names one cache the budget has given up, by the generation it was
+// charged at: if the cache has been rebuilt and charged again since, it is a
+// different generation and the drop leaves it alone.
+type evicted struct {
+	key budgetKey
+	gen uint64
 }
 
 func (b *cacheBudget) limitBytes() int64 {
@@ -95,10 +104,14 @@ func (b *cacheBudget) touch(src *RemoteSource, kind cacheKind) {
 
 // charge records that one of src's caches now holds bytes, marks it most
 // recently used, and evicts caches of OTHER sources, least recently used
-// first, until the total fits. Eviction runs after b.mu is released, since
-// dropping a cache takes that cache's own lock.
-func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) {
+// first, until the total fits. It returns the generation the cache must record
+// and the evicted caches, which the caller drops with dropEvicted once it has
+// recorded that generation and released its own lock: dropping takes each
+// victim's lock, and two sources evicting each other while holding their own
+// would deadlock.
+func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) (uint64, []evicted) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	key := budgetKey{src, kind}
 	e := b.entries[key]
 	if e == nil {
@@ -106,10 +119,9 @@ func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) {
 		b.entries[key] = e
 	}
 	b.total += bytes - e.bytes
-	e.bytes = bytes
 	b.tick++
-	e.used = b.tick
-	var drop []budgetKey
+	e.bytes, e.used, e.gen = bytes, b.tick, b.tick
+	var drop []evicted
 	for b.total > b.limit {
 		var victim budgetKey
 		var oldest *budgetEntry
@@ -123,23 +135,28 @@ func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) {
 		}
 		b.total -= oldest.bytes
 		delete(b.entries, victim)
-		drop = append(drop, victim)
+		drop = append(drop, evicted{victim, oldest.gen})
 	}
-	b.mu.Unlock()
-	for _, k := range drop {
-		switch k.kind {
+	return e.gen, drop
+}
+
+func dropEvicted(vs []evicted) {
+	for _, v := range vs {
+		switch v.key.kind {
 		case journalCache:
-			k.src.dropJournals()
+			v.key.src.dropJournals(v.gen)
 		case historyCache:
-			histCache.drop(k.src)
+			histCache.drop(v.key.src, v.gen)
 		}
 	}
 }
 
-// dropJournals empties a source's parsed-journal cache after the budget has
-// chosen it.
-func (r *RemoteSource) dropJournals() {
+// dropJournals empties a source's parsed-journal cache if it is still the
+// generation the budget evicted.
+func (r *RemoteSource) dropJournals(gen uint64) {
 	r.jmu.Lock()
-	r.jcache, r.jbytes = nil, 0
+	if r.jgen == gen {
+		r.jcache, r.jbytes = nil, 0
+	}
 	r.jmu.Unlock()
 }
