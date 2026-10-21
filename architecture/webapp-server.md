@@ -642,13 +642,18 @@ classDiagram
         +RecordEgress(org, bytes)
     }
     class UnlimitedQuota
-    note for QuotaProvider "The read half is deliberately ASYMMETRIC. CheckRead is called on /s/* and nowhere else: a public share link is the only unauthenticated door to stored bytes, so it is the only egress a plan can cap and the only bandwidth number worth publishing. Refusing a device mid-sync would surface as ErrForbidden, which the syncer reads as 'access is gone — pause and touch nothing', so /store/* and the viewer only RecordEgress. Sync must never break over a bill"
+    class SyncEgressRecorder {
+        <<interface>>
+        +RecordSyncEgress(org, bytes)
+    }
+    note for SyncEgressRecorder "The sync proxy's meter: measured, never enforced, and never RecordEgress — that one is the counter CheckRead enforces, and when /store/* reported to it a team's own syncing spent the share allowance until every link in the org was refused. OPTIONAL (type-asserted on Server.Quota) rather than a QuotaProvider method, because the managed hub pins this repo and a new required method fails its build on the bump; a provider without it is simply not told"
+    note for QuotaProvider "The read half is deliberately ASYMMETRIC. CheckRead is called on /s/* and nowhere else: a public share link is the only unauthenticated door to stored bytes, so it is the only egress a plan can cap and the only bandwidth number worth publishing. Refusing a device mid-sync would surface as ErrForbidden, which the syncer reads as 'access is gone — pause and touch nothing', so /store/* and the viewer are never checked. Metering is split by door, because (org, bytes) cannot say which door the bytes left by: RecordEgress is CheckRead's other half and reports share-link bytes ONLY, and the /store/* GET reports to SyncEgressRecorder when the provider has it — measured, never enforced. When /store/* reported to RecordEgress, a team's own syncing spent the share allowance until every link in the org was refused. Sync must never break over a bill, and never break a share link either"
     class countingWriter {
         <<quota.go>>
         +Write(p) n
         +n int64
     }
-    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file. It wraps the SOCKET and gzip writes INTO it, never the reverse — RecordEgress is a bandwidth meter, so a compressed response must report its compressed size, and getting that backwards bills plaintext while nothing fails"
+    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file. Used by the share route (RecordEgress) and the /store/* GET (SyncEgressRecorder). It wraps the SOCKET and gzip writes INTO it, never the reverse — this is a bandwidth meter, so a compressed response must report its compressed size, and getting that backwards meters plaintext while nothing fails"
 
     class grant {
         +project +org +key
@@ -700,6 +705,7 @@ classDiagram
     reservations *-- grant
     reservations ..> QuotaProvider : CheckWrite(size + outstanding), RecordUsage on landing
     ShareDB ..> QuotaProvider : CheckRead before the stream, RecordEgress after
+    Server ..> SyncEgressRecorder : /store/* GET, when Quota implements it — never checked
     Server ..> secretScan : handleShareCreate scans the first 1 MiB unless confirmed or alreadyPublic
     Server ..> renderFindings : handleRender + renderVersion, every markdown view
     renderFindings ..> secretScan
