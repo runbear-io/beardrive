@@ -26,13 +26,13 @@ import (
 const textCorpus = "# release notes\n\nthe corpus is markdown and source files, " +
 	"five to ten kilobytes each, which is exactly what gzip is good at.\n"
 
-// meterQuota records what the hub bills, separately per meter: usage is a
-// storage bill (uncompressed), egress is a bandwidth bill (compressed).
+// meterQuota records what the hub meters, separately per meter: usage is a
+// storage bill (uncompressed), sync egress is bandwidth (compressed).
 type meterQuota struct {
 	UnlimitedQuota
-	mu     sync.Mutex
-	usage  int64
-	egress int64
+	mu         sync.Mutex
+	usage      int64
+	syncEgress int64
 }
 
 func (q *meterQuota) RecordUsage(_ string, b int64) {
@@ -41,10 +41,10 @@ func (q *meterQuota) RecordUsage(_ string, b int64) {
 	q.usage += b
 }
 
-func (q *meterQuota) RecordEgress(_ string, b int64) {
+func (q *meterQuota) RecordSyncEgress(_ string, b int64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.egress += b
+	q.syncEgress += b
 }
 
 // doRaw sends an exact body with exact headers — reads_test.go's doHdr
@@ -122,10 +122,9 @@ func TestStoreGetCompresses(t *testing.T) {
 	// The bandwidth meter reports what left the socket, not what was stored.
 	// Inverted (counter inside the gzip writer) this reads len(text) and
 	// nothing else fails.
-	if q.egress != int64(len(wire)) {
-		t.Fatalf("RecordEgress = %d, want the compressed %d", q.egress, len(wire))
+	if q.syncEgress != int64(len(wire)) {
+		t.Fatalf("RecordSyncEgress = %d, want the compressed %d", q.syncEgress, len(wire))
 	}
-
 	// A caller that did not ask gets exactly what it always got.
 	rec = doRaw(t, h, "GET", url, nil, nil)
 	if rec.Code != 200 || rec.Header().Get("Content-Encoding") != "" || rec.Body.String() != text {

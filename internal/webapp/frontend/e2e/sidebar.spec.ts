@@ -230,3 +230,75 @@ test("active nav is neutral; honey marks only the selected tree file's icon", as
   await expect(page.locator("#vault-name")).toHaveText("BearDrive");
   await expect(page.locator("#vault button")).toHaveCount(0);
 });
+
+test("dragging the sidebar edge resizes it, persists, and double-click resets", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.goto(`/${pid}`);
+  const sidebar = page.locator("#sidebar");
+  const width = async () => Math.round((await sidebar.boundingBox())!.width);
+  expect(await width()).toBe(256);
+
+  const handle = (await page.locator("#sb-resize").boundingBox())!;
+  const y = handle.y + handle.height / 2;
+  await page.mouse.move(handle.x + 3, y);
+  await page.mouse.down();
+  await page.mouse.move(340, y, { steps: 5 });
+  await page.mouse.up();
+  expect(await width()).toBe(340);
+
+  await page.mouse.move(337, y);
+  await page.mouse.down();
+  await page.mouse.move(900, y, { steps: 5 });
+  await page.mouse.up();
+  expect(await width()).toBe(480);
+
+  await page.reload();
+  await page.waitForSelector("#sidebar");
+  expect(await width()).toBe(480);
+
+  await page.locator("#sb-resize").focus();
+  await page.keyboard.press("ArrowLeft");
+  expect(await width()).toBe(472);
+
+  await page.locator("#sb-resize").dblclick();
+  expect(await width()).toBe(256);
+});
+
+test("a wide desktop width never covers the mobile drawer's scrim", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  await page.evaluate(() => localStorage.setItem("bdrive.sidebarWidth", "480"));
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`/${pid}`);
+  await page.click("#menu-btn");
+  await expect(page.locator("body")).toHaveClass(/sb-open/);
+  expect(Math.round((await page.locator("#sidebar").boundingBox())!.width)).toBe(256);
+  await page.mouse.click(370, 400);
+  await expect(page.locator("body")).not.toHaveClass(/sb-open/);
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  expect(Math.round((await page.locator("#sidebar").boundingBox())!.width)).toBe(480);
+});
+
+test("a saved wide sidebar never pushes the editing topbar off a narrow desktop window", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const name = `resize-${Date.now()}.html`;
+  const put = await page.request.put(`/api/p/${pid}/upload/content?path=${name}`, {
+    data: "<!doctype html><html><body><h1>Resize</h1></body></html>",
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+  expect(put.ok()).toBeTruthy();
+  try {
+    await page.evaluate(() => localStorage.setItem("bdrive.sidebarWidth", "480"));
+    await page.setViewportSize({ width: 901, height: 800 });
+    await page.goto(`/${pid}/${name}`);
+    await page.click("#edit-btn");
+    await page.frameLocator("iframe.htmlview").locator("html[data-bd-ready]").waitFor();
+    const more = (await page.locator("#more-btn").boundingBox())!;
+    expect(more.x + more.width).toBeLessThanOrEqual(901);
+  } finally {
+    await page.request.post(`/api/p/${pid}/remove`, { data: { path: name } }).catch(() => {});
+  }
+});

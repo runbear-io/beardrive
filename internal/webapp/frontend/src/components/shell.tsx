@@ -180,7 +180,89 @@ export function syncSidebarInert() {
   document.getElementById("menu-btn")?.setAttribute("aria-expanded", String(!hidden));
 }
 
+const SIDEBAR_WIDTH_KEY = "bdrive.sidebarWidth";
+const SIDEBAR_MIN = 210;
+const SIDEBAR_MAX = 480;
+
+function applySidebarWidth(px: number | null) {
+  const root = document.documentElement.style;
+  if (px === null) root.removeProperty("--sb-w");
+  else root.setProperty("--sb-w", `${px}px`);
+}
+
+function saveSidebarWidth(px: number | null) {
+  try {
+    if (px === null) localStorage.removeItem(SIDEBAR_WIDTH_KEY);
+    else localStorage.setItem(SIDEBAR_WIDTH_KEY, String(px));
+  } catch {
+    /* ignore */
+  }
+}
+
+const clampWidth = (px: number) => Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, px)));
+
+function SidebarResizer() {
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const handle = e.currentTarget;
+    const left = handle.parentElement!.getBoundingClientRect().left;
+    handle.setPointerCapture(e.pointerId);
+    document.body.classList.add("sb-resizing");
+    let width: number | null = null;
+    const move = (ev: PointerEvent) => {
+      width = clampWidth(ev.clientX - left);
+      applySidebarWidth(width);
+    };
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      document.body.classList.remove("sb-resizing");
+      if (width !== null) saveSidebarWidth(width);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  };
+  const reset = () => {
+    applySidebarWidth(null);
+    saveSidebarWidth(null);
+  };
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 32 : 8;
+    const delta = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+    if (!delta) return;
+    e.preventDefault();
+    const current = document.getElementById("sidebar")!.getBoundingClientRect().width;
+    const width = clampWidth(current + delta);
+    applySidebarWidth(width);
+    saveSidebarWidth(width);
+  };
+  return (
+    <div
+      id="sb-resize"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      aria-valuemin={SIDEBAR_MIN}
+      aria-valuemax={SIDEBAR_MAX}
+      tabIndex={0}
+      title="Drag to resize · double-click to reset"
+      onPointerDown={onPointerDown}
+      onDoubleClick={reset}
+      onKeyDown={onKeyDown}
+    />
+  );
+}
+
 if (typeof window !== "undefined") {
+  try {
+    const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    if (saved) applySidebarWidth(clampWidth(saved));
+  } catch {
+    /* ignore */
+  }
   // Restore the remembered collapse before React mounts, so the first paint at
   // desktop width is already correct (the mobile drawer always loads closed).
   try {
@@ -413,6 +495,7 @@ export function AppShell(props: {
         {props.projectsNav}
         {props.tree ?? <nav id="tree" aria-label="Files" />}
         {props.orgBar}
+        <SidebarResizer />
         <div id="rail">
           {props.rail ?? <RailBase />}
         </div>

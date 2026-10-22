@@ -117,6 +117,9 @@ classDiagram
         -parsedJournals(ctx, keep) [][]journal.Op
         -cacheJournals(keep, misses, parsed, sizes)
         -foldFP/foldFiles/foldMoves last fold
+        -flight singleflight.Group one fold / history build per journal state
+        -jgen hubCaches generation of jcache
+        -dropJournals(gen) when hubCaches evicts that generation
         +FilesWithMoves(ctx) files, moves
         -appendOp(ctx, op)
         -appendOps(ctx, ops) ONE read-modify-write
@@ -140,7 +143,16 @@ classDiagram
         +moveIndex() built on first use
     }
     RemoteSource ..> histIndex : historyIndex, per journal fingerprint
-    note for histIndex "histindex.go — everything the history feed derives that does not depend on who asks, built once per journal state and shared read-only by every request until a journal grows. A hub-wide LRU (maxHistIndexOps) bounds the ops held across projects; an evicted project rebuilds on its next request. Requests keep only the per-reader work: the folder filter, the path/prefix match, the page"
+    class cacheBudget {
+        -limit int64 GOMEMLIMIT/4, else 256 MiB
+        -entries map (source, kind)→bytes, last use
+        +charge(src, kind, bytes) gen, evicted caches of other sources
+        +touch(src, kind)
+    }
+    RemoteSource ..> cacheBudget : hubCaches.charge after each journal pass
+    histLRU ..> cacheBudget : charge per index, touch per hit
+    note for cacheBudget "cachebudget.go — one memory budget for both kinds of per-project cache: parsed journals (raw journal bytes) and history indexes (histOpBytes per op), each entry keyed by (source, kind). Over budget, the least recently used caches of OTHER projects are dropped, whichever kind; a drop names the generation it evicted, so a cache rebuilt and charged again in the meantime is left alone; the project being served is never evicted to make room for itself, since its fold needs every op in memory either way"
+    note for histIndex "histindex.go — everything the history feed derives that does not depend on who asks, built once per journal state and shared read-only by every request until a journal grows. Concurrent requests for one journal state share one build (RemoteSource.flight). Each index is charged to hubCaches (histOpBytes per op), the same budget as parsed journals, and histLRU only holds what that budget keeps; the index just built is always kept, however large, and an evicted project rebuilds on its next request. Requests keep only the per-reader work: the folder filter, the path/prefix match, the page"
     note for sourcedOp "An op's Device field is whatever the writer typed; From is the journal object it actually came out of, which the /store door gates. Attribution reads From — a peer cannot sign someone else's name on a change by editing its own journal"
     note for RemoteSource "OpenBlob is the single blob-read door: the sha must match blobRe, and verify re-hashes the bytes whenever the backend is a PutSigner — in direct-upload mode the server never saw the content, so the store is the only thing that could have swapped it. It stops re-hashing only once the object is PROVABLY immutable: both presign doors refuse a key that exists, so every URL for a blob was minted before its first PUT and dies at mint+PresignTTL; past that age the hub is the only writer left. That is what remote.Object.Modified is for"
     note for RemoteSource "reassemble is delta sync's whole backward-compatibility story: when blobs/sha is absent (or fails verify), the manifest under manifests/sha names content-defined chunks that concatenate to the blob — spool, hash-verify against the sha requested, BACKFILL blobs/sha (best-effort; a failed write never fails the read), serve. Old clients ask for whole blobs and never learn anything changed; a hostile whole blob that fails verify is HEALED by the backfill when an honest manifest exists. Bounded by maxReassembleBytes (256 MiB) on the manifest's DECLARED sum, with each chunk's copy capped at its declared size — a member-written manifest is the one non-content-addressed object in the key space, so an amplified or oversized one is refused before it can spool"
@@ -630,13 +642,18 @@ classDiagram
         +RecordEgress(org, bytes)
     }
     class UnlimitedQuota
-    note for QuotaProvider "The read half is deliberately ASYMMETRIC. CheckRead is called on /s/* and nowhere else: a public share link is the only unauthenticated door to stored bytes, so it is the only egress a plan can cap and the only bandwidth number worth publishing. Refusing a device mid-sync would surface as ErrForbidden, which the syncer reads as 'access is gone — pause and touch nothing', so /store/* and the viewer only RecordEgress. Sync must never break over a bill"
+    class SyncEgressRecorder {
+        <<interface>>
+        +RecordSyncEgress(org, bytes)
+    }
+    note for SyncEgressRecorder "The sync proxy's meter: measured, never enforced, and never RecordEgress — that one is the counter CheckRead enforces, and when /store/* reported to it a team's own syncing spent the share allowance until every link in the org was refused. OPTIONAL (type-asserted on Server.Quota) rather than a QuotaProvider method, because the managed hub pins this repo and a new required method fails its build on the bump; a provider without it is simply not told"
+    note for QuotaProvider "The read half is deliberately ASYMMETRIC. CheckRead is called on /s/* and nowhere else: a public share link is the only unauthenticated door to stored bytes, so it is the only egress a plan can cap and the only bandwidth number worth publishing. Refusing a device mid-sync would surface as ErrForbidden, which the syncer reads as 'access is gone — pause and touch nothing', so /store/* and the viewer are never checked. Metering is split by door, because (org, bytes) cannot say which door the bytes left by: RecordEgress is CheckRead's other half and reports share-link bytes ONLY, and the /store/* GET reports to SyncEgressRecorder when the provider has it — measured, never enforced. When /store/* reported to RecordEgress, a team's own syncing spent the share allowance until every link in the org was refused. Sync must never break over a bill, and never break a share link either"
     class countingWriter {
         <<quota.go>>
         +Write(p) n
         +n int64
     }
-    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file. It wraps the SOCKET and gzip writes INTO it, never the reverse — RecordEgress is a bandwidth meter, so a compressed response must report its compressed size, and getting that backwards bills plaintext while nothing fails"
+    note for countingWriter "Bills what actually reached the client. FileInfo.Size and the journal's Size are claims made BEFORE the write; a reader who abandons a download halfway must not be charged for the whole file. Used by the share route (RecordEgress) and the /store/* GET (SyncEgressRecorder). It wraps the SOCKET and gzip writes INTO it, never the reverse — this is a bandwidth meter, so a compressed response must report its compressed size, and getting that backwards meters plaintext while nothing fails"
 
     class grant {
         +project +org +key
@@ -688,6 +705,7 @@ classDiagram
     reservations *-- grant
     reservations ..> QuotaProvider : CheckWrite(size + outstanding), RecordUsage on landing
     ShareDB ..> QuotaProvider : CheckRead before the stream, RecordEgress after
+    Server ..> SyncEgressRecorder : /store/* GET, when Quota implements it — never checked
     Server ..> secretScan : handleShareCreate scans the first 1 MiB unless confirmed or alreadyPublic
     Server ..> renderFindings : handleRender + renderVersion, every markdown view
     renderFindings ..> secretScan

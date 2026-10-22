@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
@@ -627,6 +628,7 @@ type RemoteSource struct {
 	jmu    sync.Mutex               // guards jcache and jbytes
 	jcache map[string]cachedJournal // "journal/<dev>.jsonl" → parsed ops
 	jbytes int64                    // raw journal bytes currently cached
+	jgen   uint64                   // hubCaches generation jcache was charged at
 
 	fmu    sync.Mutex                 // guards fcache and fbytes
 	fcache map[string]filteredJournal // scopeTag+key → journal as one account may read it
@@ -636,6 +638,12 @@ type RemoteSource struct {
 	foldFP    string
 	foldFiles map[string]FileInfo
 	foldMoves moveIndex
+
+	// flight joins requests for the same derived state of the same journal
+	// listing (a fold, a history index) into one computation. Each copy is
+	// every op in the project, so a team opening one page at once would
+	// otherwise multiply the hub's memory by the number of people.
+	flight singleflight.Group
 }
 
 // cachedJournal is one journal's parsed ops plus the (size, modified) that
@@ -651,13 +659,6 @@ type cachedJournal struct {
 // A cache can never help a first request, and that loop is one serial round
 // trip to S3 per device that has ever synced the project.
 const journalFetchConcurrency = 8
-
-// ponytail: a per-project raw-byte cap with all-or-nothing eviction, so the
-// real ceiling is maxCachedJournalBytes x the number of projects a hub has
-// touched since start — s.vols never evicts. Closing it properly means one
-// budget shared across RemoteSources with LRU, or reading only the appended
-// tail of each journal, which makes the cache small in the first place.
-const maxCachedJournalBytes = 64 << 20
 
 // OpenBlob is the one way a blob's bytes leave the hub, and on a hub whose
 // storage can presign it is also the only place left that can tell a content
@@ -1157,12 +1158,16 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 		}
 		r.cacheJournals(keep, misses, parsed, sizes)
 	}
+	r.jmu.Lock()
+	gen, evict := hubCaches.charge(r, journalCache, r.jbytes)
+	r.jgen = gen
+	r.jmu.Unlock()
+	dropEvicted(evict)
 	return parsed, nil
 }
 
-// cacheJournals records what the fetch pass parsed, and enforces the byte
-// ceiling by dropping everything — a cold pass costs what every pass cost
-// before this cache existed, so the fallback is today's behavior, not an error.
+// cacheJournals records what the fetch pass parsed. The memory it holds is
+// bounded across projects by hubCaches.
 func (r *RemoteSource) cacheJournals(keep []remote.Object, misses []int, parsed [][]journal.Op, sizes []int64) {
 	r.jmu.Lock()
 	defer r.jmu.Unlock()
@@ -1177,9 +1182,6 @@ func (r *RemoteSource) cacheJournals(keep []remote.Object, misses []int, parsed 
 			size: keep[i].Size, mod: keep[i].Modified, bytes: sizes[i], ops: parsed[i],
 		}
 		r.jbytes += sizes[i]
-	}
-	if r.jbytes > maxCachedJournalBytes {
-		r.jcache, r.jbytes = nil, 0
 	}
 }
 
@@ -1211,17 +1213,29 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 	}
 	r.foldMu.Unlock()
 
-	parsed, err := r.parsedJournals(ctx, keep)
+	type fold struct {
+		files map[string]FileInfo
+		moves moveIndex
+	}
+	// Detached from the caller: the fold is shared, so one waiter giving up
+	// must not fail the others.
+	res, err, _ := r.flight.Do("fold\x00"+fp, func() (any, error) {
+		parsed, err := r.parsedJournals(context.WithoutCancel(ctx), keep)
+		if err != nil {
+			return nil, err
+		}
+		all := byPathOrder(parsed...)
+		f := fold{foldFiles(all), buildMoveIndex(all)}
+		r.foldMu.Lock()
+		r.foldFP, r.foldFiles, r.foldMoves = fp, f.files, f.moves
+		r.foldMu.Unlock()
+		return f, nil
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	all := byPathOrder(parsed...)
-	files, moves := foldFiles(all), buildMoveIndex(all)
-
-	r.foldMu.Lock()
-	r.foldFP, r.foldFiles, r.foldMoves = fp, files, moves
-	r.foldMu.Unlock()
-	return files, moves, nil
+	f := res.(fold)
+	return f.files, f.moves, nil
 }
 
 // journalFingerprint names a journal listing: two equal fingerprints are the

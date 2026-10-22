@@ -238,3 +238,83 @@ func TestQuotaRepeatedBlobPushChargesOnce(t *testing.T) {
 			charged, len(body), len(body))
 	}
 }
+
+// capQuota is the managed provider in miniature: a share-link counter fed by
+// RecordEgress and enforced by CheckRead, and a sync counter nothing checks.
+type capQuota struct {
+	UnlimitedQuota
+	mu         sync.Mutex
+	cap        int64
+	egress     int64
+	syncEgress int64
+}
+
+func (q *capQuota) CheckRead(_ string, b int64) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.egress+b > q.cap {
+		return fmt.Errorf("share link transfer limit reached for this month")
+	}
+	return nil
+}
+
+func (q *capQuota) RecordEgress(_ string, b int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.egress += b
+}
+
+func (q *capQuota) RecordSyncEgress(_ string, b int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.syncEgress += b
+}
+
+// The share-link transfer cap is a cap on the PUBLIC. A teammate's device
+// pulling the project through /store/* is not an audience — but the sync
+// proxy used to report its bytes to RecordEgress too, into the counter
+// CheckRead enforces, so a team's own syncing spent the monthly allowance
+// and every share link in the org answered "This link has exceeded its
+// transfer limit" to people who had downloaded nothing. Sync is still
+// measured, on its own meter.
+func TestQuotaSyncPullSpendsNoShareEgress(t *testing.T) {
+	h, srv, alice, _, pa := orgHubSrv(t)
+	q := &capQuota{cap: 64 << 10}
+	srv.Quota = q
+
+	note := []byte("# shared\n\nthe one file the public reads\n")
+	if rec := doAs(t, h, "PUT", "/api/p/"+pa.ID+"/upload/content?path=note.md", note, alice); rec.Code != 200 {
+		t.Fatalf("upload note: %d %s", rec.Code, rec.Body)
+	}
+	rec := doAs(t, h, "POST", "/api/p/"+pa.ID+"/shares", map[string]string{"path": "note.md"}, alice)
+	var sh struct {
+		Token string `json:"token"`
+	}
+	mustJSON(t, rec, &sh)
+
+	// Far past the cap, and incompressible so no Accept-Encoding can shrink
+	// it under: what the devices pull here dwarfs anything a share serves.
+	big := incompressible(256 << 10)
+	if rec := doAs(t, h, "PUT", "/api/p/"+pa.ID+"/upload/content?path=assets/big.bin", big, alice); rec.Code != 200 {
+		t.Fatalf("upload big: %d %s", rec.Code, rec.Body)
+	}
+	sum := sha256.Sum256(big)
+	for dev := 0; dev < 3; dev++ {
+		rec := doAs(t, h, "GET", "/api/p/"+pa.ID+"/store/object?key=blobs/"+hex.EncodeToString(sum[:]), nil, alice)
+		if rec.Code != 200 || rec.Body.Len() != len(big) {
+			t.Fatalf("device %d pull: %d, %d bytes", dev, rec.Code, rec.Body.Len())
+		}
+	}
+
+	rec = do(t, h, "GET", "/s/"+sh.Token, nil)
+	if rec.Code != 200 {
+		t.Fatalf("share link after teammates synced: %d %s, want 200", rec.Code, rec.Body)
+	}
+	// The share itself is still metered, and it is the only thing that was.
+	if q.egress != int64(rec.Body.Len()) {
+		t.Fatalf("RecordEgress total = %d, want exactly the %d bytes the share served", q.egress, rec.Body.Len())
+	}
+	if want := int64(3 * len(big)); q.syncEgress != want {
+		t.Fatalf("RecordSyncEgress total = %d, want the %d bytes three devices pulled", q.syncEgress, want)
+	}
+}
