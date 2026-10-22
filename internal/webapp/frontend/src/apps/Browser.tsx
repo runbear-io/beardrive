@@ -34,7 +34,7 @@ import { CommentPanel, CommentSurface } from "../components/Comments";
 import { useComments } from "../hooks/useComments";
 import { Palette, type PaletteItem } from "../components/Palette";
 import { Home } from "../components/Home";
-import { noteOpened } from "../lib/recents";
+import { noteOpened, useRecents } from "../lib/recents";
 import { Insights, useInsightsDevices } from "../components/Insights";
 import { HistoryView, historyTitle } from "../components/HistoryView";
 import { WidthHandles } from "../components/WidthHandle";
@@ -709,56 +709,64 @@ export default function Browser(props: {
 
   const paletteCandidates = useCallback((): PaletteItem[] => {
     const items: PaletteItem[] = [];
-    const add = (icon: string, label: string, kind: string, run: () => void) =>
-      items.push({ icon, label, kind, run });
-    // The project's own destinations, first and unconditional: on a path that
+    const add = (item: PaletteItem) => items.push(item);
+    // The project's own pages, first and unconditional: on a path that
     // doesn't resolve the tree-derived entries are gone and the switcher lists
     // only OTHER projects, so without these the palette — the natural escape
-    // hatch on a dead route — is the one surface with no way back. An empty
-    // query scores everything 0 and the sort is stable, so first here is first
-    // on screen. Panels aren't routes and only close on a location CHANGE, so
-    // picking the page you're already on needs the explicit close.
+    // hatch on a dead route — is the one surface with no way back (BEA-52).
+    // Panels aren't routes and only close on a location CHANGE, so picking the
+    // page you're already on needs the explicit close.
     if (hub && project) {
       const pid = project.id;
       const go = (to: string) => () => {
         props.onClosePanel?.();
         navigate(to);
       };
-      // Labelled with the project's name and tagged `project`, so typing the
-      // name of the project you are IN finds it: the switcher loop below
-      // rightly excludes the current project, which left nothing carrying its
-      // name while the palette copy promised project search (BEA-105). One row,
-      // not two — still the first, still unconditional, so BEA-52 holds.
-      add("folder", project.name + " — project root", "project", go("/" + pid));
-      add("insights", "Insights", "action", go(urlForView("dashboard", pid)));
-      add("activity", "Activity", "action", go(urlForView("history", pid)));
-      add("laptop", "Connect a device", "action", go(urlForView("install", pid)));
-      add("gear", "Settings", "action", go(urlForView("settings", pid)));
+      // Home is labelled with the project's name, so typing the name of the
+      // project you are IN finds it: the switcher below rightly leaves the
+      // current project out (BEA-105). Same order as the sidebar.
+      add({ icon: "home", label: project.name, hint: "Home", kind: "project", group: "Go to", run: go("/" + pid) });
+      const page = (icon: string, label: string, to: string) =>
+        add({ icon, label, kind: "page", group: "Go to", run: go(to) });
+      page("activity", "Activity", urlForView("history", pid));
+      page("insights", "Insights", urlForView("dashboard", pid));
+      page("gear", "Settings", urlForView("settings", pid));
+      page("laptop", "Connect a device", urlForView("install", pid));
     }
     if (hub && project && path) {
+      // Matched by what they do, not by the path they act on: typing a file's
+      // name should find the file, not five actions about it.
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      const act = (icon: string, label: string, run: () => void) =>
+        add({ icon, label, hint: name, kind: "action", group: name, run });
       // canShare, not isFile: the toolbar button and this row are the same
       // action, so they must agree on folders and on who is offered it.
-      if (canShare) add("share", "Share: " + path, "action", shareNow);
-      add("hist", "History: " + path, "action", historyNow);
-      if (isFile) add("download", "Download: " + path, "action", () => downloadRef.current?.click());
-      if (canPrint) add("printer", "Print: " + path, "action", printNow);
-      if (canCopy) add("copy", "Copy: " + path, "action", copyNow);
+      if (canShare) act("share", "Share", shareNow);
+      act("hist", "History", historyNow);
+      if (isFile) act("download", "Download", () => downloadRef.current?.click());
+      if (canPrint) act("printer", "Print", printNow);
+      if (canCopy) act("copy", "Copy", copyNow);
     }
-    if (hub && project) add("hist", "History: whole project", "action", () => openHistory(""));
     if (hub) {
       for (const p of props.projects || []) {
         if (!project || p.id !== project.id) {
-          add("folder", "Switch to project: " + p.name, "project", () => navigate("/" + p.id));
+          add({ icon: "folder", label: p.name, kind: "project", group: "Projects", run: () => navigate("/" + p.id) });
         }
       }
     }
     if (config.auth?.enabled) {
-      add("power", "Sign out", "action", () => (window.location.href = "/auth/logout"));
+      add({ icon: "power", label: "Sign out", kind: "action", group: "Account", run: () => (window.location.href = "/auth/logout") });
     }
-    for (const d of dirIndex.keys()) add("folder", d, "folder", () => openPath(d));
-    for (const f of flatFiles) add("doc", f.path, "file", () => openPath(f.path));
+    for (const d of dirIndex.keys()) add({ icon: "folder", label: d, kind: "folder", run: () => openPath(d) });
+    // A conflict copy is a badge on its original in the tree, not a row of
+    // its own; the same here.
+    for (const f of flatFiles) {
+      if (!parseConflict(f.path)) add({ icon: "doc", label: f.path, kind: "file", run: () => openPath(f.path) });
+    }
     return items;
-  }, [hub, project, path, isFile, canShare, canCopy, canPrint, config.auth?.enabled, dirIndex, flatFiles, props.projects, props.onClosePanel, shareNow, copyNow, printNow, historyNow, openHistory, openPath]);
+  }, [hub, project, path, isFile, canShare, canCopy, canPrint, config.auth?.enabled, dirIndex, flatFiles, props.projects, props.onClosePanel, shareNow, copyNow, printNow, historyNow, openPath]);
+  const recents = useRecents(hub ? project?.id : undefined);
+  const paletteRecent = useMemo(() => recents.map((r) => r.path).filter((p) => p !== path), [recents, path]);
 
   /* ---- sidebar: last visit, pins, filter mode, row actions ---- */
   const pid = hub ? project?.id : undefined;
@@ -1391,6 +1399,7 @@ export default function Browser(props: {
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         candidates={paletteCandidates}
+        recent={paletteRecent}
         initialQuery={paletteQuery}
       />
     </>
