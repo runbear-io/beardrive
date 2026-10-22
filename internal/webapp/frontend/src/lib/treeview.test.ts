@@ -81,7 +81,7 @@ test("filter matches base names, exact and prefix first", () => {
   ]);
   assert.deepEqual(r.folders.map((h) => h.path), ["projects/konny", "accounts/konny-old"]);
   assert.deepEqual(r.files.map((h) => h.path), ["s/Konny-call.md", "a/notkonny.md"]);
-  assert.equal(r.files[1].at, 3);
+  assert.deepEqual(r.files[1].ranges, [[3, 8]]);
 });
 
 test("recent order lists each level newest change first", () => {

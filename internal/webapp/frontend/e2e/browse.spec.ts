@@ -233,13 +233,11 @@ test("palette on a dead route still offers the way back", async ({ page }) => {
   await expect(page.locator(".notfound")).toBeVisible();
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.locator("#palette")).toBeVisible();
-  for (const label of ["project root", "Insights", "Activity", "Connect a device", "Settings"]) {
+  for (const label of ["Home", "Insights", "Activity", "Connect a device", "Settings"]) {
     await expect(page.locator("#palette [cmdk-list]")).toContainText(label);
   }
   // exactly one whole-project history entry, no duplicate
-  expect(
-    await page.locator("#palette [cmdk-item]", { hasText: "History: whole project" }).count(),
-  ).toBe(1);
+  expect(await page.locator("#palette [cmdk-item]", { hasText: "Activity" }).count()).toBe(1);
   await page.fill("#palette input", "Insights");
   await page.keyboard.press("Enter");
   await page.waitForURL(`/${pid}/insights`);
@@ -256,7 +254,7 @@ test("palette renders in the dark palette, not UA black (BEA-54)", async ({ page
   await wikiId(page);
   await page.keyboard.press("ControlOrMeta+k");
   const input = page.locator("#palette input");
-  await input.fill("topic");
+  await input.fill("insights");
   await expect(input).toHaveCSS("color", "rgb(238, 240, 243)"); // --text, was rgb(0, 0, 0)
   const sel = page.locator("#palette [cmdk-item][data-selected='true']");
   await expect(sel.locator(".plabel")).toHaveCSS("color", "rgb(255, 207, 133)"); // --accent-bright
@@ -1323,8 +1321,8 @@ test("Copy runs from the palette too", async ({ page, context }) => {
   await expect(page.locator("#content")).toContainText("Second version");
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.locator("#palette")).toBeVisible();
-  await page.fill("#palette input", "Copy: guide.md");
-  await page.locator("#palette [cmdk-item]", { hasText: "Copy: guide.md" }).first().click();
+  await page.fill("#palette input", "copy");
+  await page.locator('#palette [cmdk-item][data-kind="action"]', { hasText: "Copy" }).click();
   await expectToast(page, "Copied guide.md");
   expect(await clip(page)).toContain("# Guide");
   expect(await clip(page)).toContain("Second version");
@@ -1367,8 +1365,9 @@ test("Copy is absent for an image and for HTML", async ({ page }) => {
   // …and the palette does not offer it either, on the page that has no menu item.
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.locator("#palette")).toBeVisible();
-  await page.fill("#palette input", "Copy: copy/page.html");
-  await expect(page.locator("#palette [cmdk-item]", { hasText: "Copy: copy/page.html" })).toHaveCount(0);
+  await page.fill("#palette input", "copy");
+  await expect(page.locator('#palette [cmdk-item][data-kind="file"]', { hasText: "page.html" }).first()).toBeVisible(); // CONTROL
+  await expect(page.locator('#palette [cmdk-item][data-kind="action"]', { hasText: "Copy" })).toHaveCount(0);
 });
 
 test("a clipboard that isn't there gets a failure toast, not a success one", async ({ page }) => {

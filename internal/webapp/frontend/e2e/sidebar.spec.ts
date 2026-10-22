@@ -62,7 +62,7 @@ test("typing in the search field filters the tree; esc restores it", async ({ pa
     "archive/",
   );
   await expect(page.locator("#tree-filter .fgroup").first()).toContainText(/Files · \d+/);
-  await expect(page.locator("#tree-filter .fcontents")).toContainText("Search contents for “guide”");
+  await expect(page.locator("#tree-filter .fcontents")).toContainText("More results for “guide”");
 
   // ↓ moves the selection, ↵ opens it.
   await input.press("ArrowDown");

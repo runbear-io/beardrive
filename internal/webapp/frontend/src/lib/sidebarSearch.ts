@@ -39,7 +39,7 @@ export function clearFilter() {
   setFilterQuery("");
 }
 
-// `n` counts every selectable row, the "Search contents" footer included.
+// `n` counts every selectable row, the "More results" footer included.
 export function registerFilterResults(n: number, fn: (i: number) => void) {
   count = n;
   activate = fn;

@@ -715,8 +715,9 @@ The payoff, once those hooks are in place: "write a report and share it"
 becomes the agent generating `wiki/report.html` and replying with a link.
 
 The web UI lists your orgs' projects in the sidebar (⌘K opens a command
-palette: fuzzy file search, project switching, the project's own pages, and
-history — plus share and download of the file you have open); selecting one
+palette: fuzzy file-name search that forgives a typo, your recent files,
+project switching and the project's own pages — plus share, history,
+download, print and copy for the file you have open); selecting one
 browses that project's files, and the **History**
 view shows every change — which
 account made it, when, from which device (name and OS — never the connecting

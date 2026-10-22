@@ -1333,8 +1333,15 @@ a.ai-main:hover { color: var(--accent-ink); }
 #palette [cmdk-item][data-selected="true"] .plabel b { color: var(--accent-bright); }
 #palette [cmdk-item] .picon { width: 18px; flex: none; display: flex; justify-content: center; color: var(--text-faint); }
 #palette [cmdk-item] .picon .ico { width: 15px; height: 15px; }
-#palette [cmdk-item] .plabel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+/* Name first, at its natural width; the folder (or what an action acts on)
+   takes what is left and truncates first. */
+#palette [cmdk-item] .ptext { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
+#palette [cmdk-item] .plabel { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+#palette [cmdk-item] .ploc { flex: 1 1 0%; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--text-faint); }
+#palette [cmdk-item] .ploc b { color: var(--text-dim); font-weight: 600; }
 #palette [cmdk-item] .plabel b { color: var(--accent-bright); font-weight: 600; }
+#palette [cmdk-group-heading] { padding: 10px 10px 5px; font-size: 11.5px; font-weight: 500; color: var(--text-faint); }
+#palette [cmdk-group]:first-child [cmdk-group-heading] { padding-top: 4px; }
 #palette [cmdk-item] .pkind { flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-ghost); }
 #palette [cmdk-list] .pempty { color: var(--text-faint); cursor: default; justify-content: center; height: auto; padding: 14px; }
 #palette-hint { padding: 9px 16px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-ghost); }

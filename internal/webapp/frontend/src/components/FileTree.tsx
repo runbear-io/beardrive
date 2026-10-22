@@ -21,6 +21,7 @@ import {
 import { buildRows, filterTree, parentOf, systemKey, type FilterHit, type TreeOrder, type TreeStats } from "../lib/treeview";
 import { registerFilterResults, setFilterSel, useSidebarSearch } from "../lib/sidebarSearch";
 import { requestSearch } from "../search";
+import { Marked } from "./Marked";
 import { isMac } from "../util";
 
 // The sidebar file tree, virtualized: only the visible window of rows is in
@@ -412,7 +413,9 @@ export function FileTree(props: {
 /* ---- filter mode ----
    Typing in the sidebar search replaces the tree with matches: folders, then
    files, each with the folder it lives in underneath so two folders with one
-   name are told apart. The last row hands the query to the palette. */
+   name are told apart. Matching is the palette's own, held to names (see
+   filterTree). The last row hands the query to the palette, which also
+   matches the folders in a path and finds projects and actions. */
 const FOLDER_LIMIT = 5;
 const FILE_LIMIT = 8;
 
@@ -426,7 +429,7 @@ export function TreeFilter(props: {
   const { sel } = useSidebarSearch();
   const [moreFiles, setMoreFiles] = useState(false);
   useEffect(() => setMoreFiles(false), [query]);
-  const { folders, files } = useMemo(
+  const { folders, files, folderCount, fileCount } = useMemo(
     () => filterTree(query, props.dirs, props.files),
     [query, props.dirs, props.files],
   );
@@ -465,11 +468,7 @@ export function TreeFilter(props: {
         <Icon name={h.dir ? "folder" : "doc"} />
       </span>
       <span className="fhit-text">
-        <span className="fhit-name">
-          {h.name.slice(0, h.at)}
-          <mark>{h.name.slice(h.at, h.at + q.length)}</mark>
-          {h.name.slice(h.at + q.length)}
-        </span>
+        <Marked className="fhit-name" text={h.name} ranges={h.ranges} tag="mark" />
         <span className="fhit-path">{parentOf(h.path) || "/"}</span>
       </span>
       {i === sel && <span className="fhit-enter" aria-hidden="true">↵</span>}
@@ -478,9 +477,9 @@ export function TreeFilter(props: {
 
   return (
     <nav id="tree-filter" aria-label="Matching files" ref={listRef} role="listbox">
-      {shownFolders.length > 0 && <div className="fgroup">Folders · {folders.length}</div>}
+      {shownFolders.length > 0 && <div className="fgroup">Folders · {folderCount}</div>}
       {shownFolders.map((h, i) => row(h, i))}
-      {shownFiles.length > 0 && <div className="fgroup">Files · {files.length}</div>}
+      {shownFiles.length > 0 && <div className="fgroup">Files · {fileCount}</div>}
       {shownFiles.map((h, i) => row(h, shownFolders.length + i))}
       {!moreFiles && files.length > FILE_LIMIT && (
         <button className="fmore" onClick={() => setMoreFiles(true)}>
@@ -498,7 +497,7 @@ export function TreeFilter(props: {
         <span className="ticon">
           <Icon name="search" />
         </span>
-        <span className="fhit-name">Search contents for “{q}”</span>
+        <span className="fhit-name">More results for “{q}”</span>
         <kbd>{isMac ? "⌘↵" : "Ctrl+↵"}</kbd>
       </div>
     </nav>

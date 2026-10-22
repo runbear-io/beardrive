@@ -1,5 +1,6 @@
 import type { Node } from "../api/types";
 import { parseConflict } from "./conflict.ts";
+import { prepare, search, type Range } from "./fuzzy.ts";
 
 // What the sidebar tree shows, as pure functions over the project tree so the
 // rules are testable without React (treeview.test.ts):
@@ -156,35 +157,44 @@ export interface FilterHit {
   path: string;
   name: string;
   dir: boolean;
-  at: number; // where the query starts inside `name`
+  ranges: Range[]; // inside `name`
 }
 
+export interface FilterResult {
+  folders: FilterHit[];
+  files: FilterHit[];
+  folderCount: number;
+  fileCount: number;
+}
+
+const FILTER_FOLDERS = 5;
+const FILTER_FILES = 100;
+
+// The palette's matcher, held to names: the sidebar lists files and folders
+// by name, so a token must match inside the name, not across the folders
+// above it. Same ranking, same forgiven typo, same NFC fold as ⌘K, so the
+// two never disagree about a name.
 export function filterTree(
   query: string,
   dirs: Iterable<string>,
   files: Iterable<{ path: string; name: string }>,
-): { folders: FilterHit[]; files: FilterHit[] } {
-  const q = query.trim().toLowerCase();
-  if (!q) return { folders: [], files: [] };
-  const rank = (h: FilterHit) => (h.name.toLowerCase() === q ? 0 : h.at === 0 ? 1 : 2);
-  const sort = (a: FilterHit, b: FilterHit) =>
-    rank(a) - rank(b) || a.path.length - b.path.length || a.path.localeCompare(b.path);
-  const hit = (path: string, name: string, dir: boolean): FilterHit | null => {
-    const at = name.toLowerCase().indexOf(q);
-    return at < 0 ? null : { path, name, dir, at };
+): FilterResult {
+  const run = (paths: string[], dir: boolean, limit: number) => {
+    const { hits, total } = search(query, paths.map(prepare), { limit, nameOnly: true });
+    const list = hits.map((h): FilterHit => {
+      const path = paths[h.index];
+      const cut = path.lastIndexOf("/") + 1;
+      return { path, name: path.slice(cut), dir, ranges: h.ranges.map(([a, b]): Range => [a - cut, b - cut]) };
+    });
+    return { list, total };
   };
-  const folders: FilterHit[] = [];
-  for (const d of dirs) {
-    const h = hit(d, d.slice(d.lastIndexOf("/") + 1), true);
-    if (h) folders.push(h);
-  }
-  const out: FilterHit[] = [];
-  for (const f of files) {
-    if (parseConflict(f.path)) continue;
-    const h = hit(f.path, f.name, false);
-    if (h) out.push(h);
-  }
-  return { folders: folders.sort(sort), files: out.sort(sort) };
+  const d = run([...dirs], true, FILTER_FOLDERS);
+  const f = run(
+    [...files].map((x) => x.path).filter((p) => !parseConflict(p)),
+    false,
+    FILTER_FILES,
+  );
+  return { folders: d.list, files: f.list, folderCount: d.total, fileCount: f.total };
 }
 
 // The folder a path lives in, with a trailing slash ("" at the root).
