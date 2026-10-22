@@ -393,3 +393,64 @@ func headOf(page string) string {
 	}
 	return page
 }
+
+func TestShareCardForUnfurlers(t *testing.T) {
+	srv, p, _, f, h := shareHub(t)
+	f.put("dev1", "wiki/q3.html", `<html><head><title>Q3 &amp; plan</title>`+
+		`<meta name="description" content="Revenue up">`+
+		`<meta property="og:image" content="https://cdn.example/q3.png"></head><body><h1>secret</h1></body></html>`)
+	f.put("dev1", "wiki/deck.pdf", "%PDF-1.7 body")
+	f.put("dev1", "wiki/logo.png", "\x89PNG\r\n\x1a\nbinary")
+
+	get := func(file, ua, query string) string {
+		tok, _ := authedShare(t, srv, h, p.ID, file)
+		req := httptest.NewRequest("GET", "/s/"+tok+query, nil)
+		req.Header.Set("User-Agent", ua)
+		rec := doHTTP(h, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d %s", file, rec.Code, rec.Body)
+		}
+		return rec.Body.String()
+	}
+	const slack = "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)"
+
+	html := get("wiki/q3.html", slack, "")
+	for _, want := range []string{
+		"<title>Q3 &amp; plan</title>",
+		`<meta property="og:title" content="Q3 &amp; plan">`,
+		`<meta property="og:description" content="Revenue up">`,
+		`<meta property="og:image" content="https://cdn.example/q3.png">`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("html card missing %q in %s", want, html)
+		}
+	}
+	if strings.Contains(html, "secret") {
+		t.Error("html card carried the document body")
+	}
+
+	pdf := get("wiki/deck.pdf", slack, "")
+	for _, want := range []string{`content="deck.pdf"`, `og:description" content="PDF · 13B`} {
+		if !strings.Contains(pdf, want) {
+			t.Errorf("pdf card missing %q in %s", want, pdf)
+		}
+	}
+
+	// Browsers, images, and explicit downloads always get the stored bytes.
+	for _, tc := range []struct{ file, ua, query, want string }{
+		{"wiki/deck.pdf", "Mozilla/5.0", "", "%PDF-1.7 body"},
+		{"wiki/deck.pdf", slack, "?download=1", "%PDF-1.7 body"},
+		{"wiki/logo.png", slack, "", "\x89PNG\r\n\x1a\nbinary"},
+	} {
+		if got := get(tc.file, tc.ua, tc.query); got != tc.want {
+			t.Errorf("%s ua=%q%s = %q, want source bytes", tc.file, tc.ua, tc.query, got)
+		}
+	}
+}
+
+func TestHTMLHead(t *testing.T) {
+	title, desc, image := htmlHead(`<TITLE> Plain </TITLE><meta content='OG' property='og:title'><meta name=description content="x">`)
+	if title != "OG" || desc != "" || image != "" {
+		t.Errorf("got %q %q %q", title, desc, image)
+	}
+}
