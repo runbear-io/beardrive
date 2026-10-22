@@ -1157,6 +1157,12 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			s.cacheDirty = true
 			continue
 		}
+		if filter.SkipUp(rel) {
+			// The walk hides this path with the accepted-rules floor (SkipUp),
+			// not because it left the disk. Not a local delete: keep tracking
+			// it so materialize does not rewrite it, and mint nothing.
+			continue
+		}
 		ops = append(ops, nextOp(journal.KindDelete, rel))
 		delete(cache, rel)
 		s.cacheDirty = true
