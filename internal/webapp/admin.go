@@ -3,6 +3,7 @@ package webapp
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 )
 
@@ -48,6 +49,12 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	if err := s.Projects.Delete(id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// The index is derived from the project; it goes with it.
+	if s.Data != nil {
+		if err := s.Data.dropProject(r.Context(), id); err != nil {
+			log.Printf("beardrive: drop the data index of deleted project %s: %v", id, err)
+		}
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }

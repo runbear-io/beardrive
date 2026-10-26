@@ -42,6 +42,10 @@ type Project struct {
 	// Absent on every project that has never restricted one, which is why no
 	// row needs migrating and a hub without rules behaves exactly as before.
 	Folders []FolderRule `json:"folders,omitempty"`
+	// Data is whether the hub indexes this project's JSON and Markdown
+	// frontmatter for data queries (dataindex.go). A project admin turns it
+	// on; it is hub metadata, like Folders, never a file in the project.
+	Data bool `json:"data,omitempty"`
 }
 
 // level is the project's effective default level for org members.
@@ -153,6 +157,8 @@ type rowScopedProjectRepo interface {
 	PutFolder(project string, rule FolderRule) error
 	// DeleteFolder removes one rule and its grants.
 	DeleteFolder(project, prefix string) error
+	// PutData writes the project's Data setting alone.
+	PutData(project string, on bool) error
 }
 
 // put persists a mutated project's own METADATA, restoring the previous value
@@ -562,6 +568,32 @@ func (db *ProjectDB) putFolder(prev, next Project, rule FolderRule, remove bool)
 		return err
 	}
 	return nil
+}
+
+// SetData turns the project's data index on or off. It is written alone, for
+// the reason folder rules are: a rename by a hub process holding an older copy
+// of the project must not put back a setting an admin changed.
+func (db *ProjectDB) SetData(id string, on bool) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	next := p.clone()
+	next.Data = on
+	db.byID[id] = next
+	var err error
+	if rs, ok := db.repo.(rowScopedProjectRepo); ok {
+		err = rs.PutData(id, on)
+	} else {
+		err = db.repo.Put(next)
+	}
+	if err != nil {
+		db.byID[id] = p
+	}
+	return err
 }
 
 // dropPerm removes a grant with no last-admin guard. That guard stops a

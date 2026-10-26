@@ -7,7 +7,12 @@ A hub keeps a little **metadata** separate from your files: accounts, projects,
 orgs, invites, shares, devices, and read buckets.
 
 File content and the sync journals always live in the object store. The database
-never holds them.
+never holds them as the truth. The one derived copy it holds is the
+[data index](/reference/data-queries/), for projects that turn Data on. The index
+stores their JSON documents and Markdown frontmatter in the tables `data_items` and
+`data_projects`. With the `file` driver it uses its own SQLite file instead,
+`data-index.db`, which sits next to `projects.json`. Losing the index costs a
+rebuild, never data.
 
 ## The three drivers
 

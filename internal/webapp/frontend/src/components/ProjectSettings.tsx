@@ -240,6 +240,8 @@ export function ProjectSettings({
       </Card>
 
 
+      {mayEdit && <DataSetting project={project} onChanged={refresh} />}
+
       <Card>
         <CardHeader>
           <CardTitle>About</CardTitle>
@@ -322,6 +324,42 @@ export function ProjectSettings({
         </Card>
       )}
     </div>
+  );
+}
+
+// Data: whether apps and agents can query this project's JSON files and
+// Markdown frontmatter as data (POST /api/p/{id}/data/query). Admin-only, as
+// handleProjectData enforces; the files stay the source either way.
+function DataSetting({ project, onChanged }: { project: Project; onChanged: () => Promise<void> }) {
+  const on = !!project.data;
+  return (
+    <Card id="ps-data">
+      <CardHeader>
+        <CardTitle>Data</CardTitle>
+        <CardDescription>
+          {on
+            ? "Apps and agents can query this project's JSON files and Markdown frontmatter as data."
+            : "Let apps and agents query this project's JSON files and Markdown frontmatter as data. The files stay the source."}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Button
+          id="ps-data-toggle"
+          variant="outline"
+          onClick={async () => {
+            try {
+              await api("PUT", `/api/p/${project.id}/data`, { enabled: !on });
+              toast(on ? "Data queries are off." : "Data queries are on. Indexing has started.");
+              await onChanged();
+            } catch (e) {
+              toast((e as Error).message, true);
+            }
+          }}
+        >
+          {on ? "Turn off data queries" : "Turn on data queries"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 

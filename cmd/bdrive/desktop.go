@@ -148,6 +148,10 @@ var desktopRoutes = []struct {
 	{"GET /api/p/{project}/folders", routeProxy, ""},
 	{"PUT /api/p/{project}/folders", routeProxy, ""},
 	{"DELETE /api/p/{project}/folders", routeProxy, ""},
+	// The data index is the hub's, in the hub's database; this Mac has none.
+	{"PUT /api/p/{project}/data", routeProxy, ""},
+	{"POST /api/p/{project}/data/query", routeProxy, ""},
+	{"POST /api/p/{project}/data/describe", routeProxy, ""},
 
 	// Live surfaces. Hub state for the same reason every write is: the desktop
 	// never journals locally, so nothing here would ever publish, and a stream

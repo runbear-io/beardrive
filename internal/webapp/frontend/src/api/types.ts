@@ -88,6 +88,8 @@ export interface Project {
   creator?: string;
   /** the starting structure it was created from ("" / absent for an empty project) */
   template?: string;
+  /** whether the hub indexes its JSON and Markdown frontmatter for data queries */
+  data?: boolean;
   // The signed-in account's effective level on this project, resolved
   // server-side. A project you cannot read never appears in the list at all,
   // so this is always read or better here.

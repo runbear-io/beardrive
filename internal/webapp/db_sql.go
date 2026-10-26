@@ -393,6 +393,7 @@ func (s *sqlMetaStore) migrate() error {
 		"creator":       `TEXT NOT NULL DEFAULT ''`,
 		"default_level": `TEXT NOT NULL DEFAULT ''`,
 		"template":      `TEXT NOT NULL DEFAULT ''`,
+		"data":          `INTEGER NOT NULL DEFAULT 0`,
 	}, map[string]string{
 		"default_level": "it silently re-opens every restricted project to its whole organization",
 	}); err != nil {
@@ -633,7 +634,7 @@ func (r *sqlProjectRepo) Version() (string, error) { return r.s.version(regProje
 
 func (r *sqlProjectRepo) Load() ([]Project, error) {
 	rows, err := r.s.db.Query(
-		`SELECT id, name, org, created, description, icon, creator, default_level, template FROM projects`)
+		`SELECT id, name, org, created, description, icon, creator, default_level, template, data FROM projects`)
 	if err != nil {
 		return nil, err
 	}
@@ -642,12 +643,14 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 	for rows.Next() {
 		var p Project
 		var created string
+		var data int
 		if err := rows.Scan(&p.ID, &p.Name, &p.Org, &created,
-			&p.Description, &p.Icon, &p.Creator, &p.Default, &p.Template); err != nil {
+			&p.Description, &p.Icon, &p.Creator, &p.Default, &p.Template, &data); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		p.Created = tdec(created)
+		p.Data = data != 0
 		byID[p.ID] = &p
 		order = append(order, p.ID)
 	}
@@ -752,12 +755,14 @@ func (r *sqlProjectRepo) Put(p Project) error {
 	}
 	return r.s.inTx(regProjects, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(r.s.q(
-			`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template)
-			VALUES (?,?,?,?,?,?,?,?,?)
+			`INSERT INTO projects (id,name,org,created,description,icon,creator,default_level,template,data)
+			VALUES (?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, org=excluded.org, created=excluded.created,
 			description=excluded.description, icon=excluded.icon,
-			creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`),
-			p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template); err != nil {
+			creator=excluded.creator, default_level=excluded.default_level, template=excluded.template,
+			data=excluded.data`),
+			p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template,
+			boolInt(p.Data)); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(r.s.q(`DELETE FROM project_perms WHERE project = ?`), p.ID); err != nil {
@@ -854,6 +859,18 @@ func (r *sqlProjectRepo) PutMeta(p Project) error {
 		description=excluded.description, icon=excluded.icon,
 		creator=excluded.creator, default_level=excluded.default_level, template=excluded.template`,
 		p.ID, p.Name, p.Org, tenc(p.Created), p.Description, p.Icon, p.Creator, p.Default, p.Template)
+}
+
+// PutData writes the project's Data setting alone.
+func (r *sqlProjectRepo) PutData(project string, on bool) error {
+	return r.w.exec(`UPDATE projects SET data = ? WHERE id = ?`, boolInt(on), project)
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // PutPerm writes one grant row. An empty level removes it.

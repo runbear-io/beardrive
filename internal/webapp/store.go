@@ -1107,7 +1107,11 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		puts, deletes := countOps(ops, storedMax)
 		if ev, ok := changeEventFor(r, "sync", newOpPaths(ops, storedMax), puts, deletes); ok {
 			project := projectID(r)
-			refreshThen(func() { s.events().publish(project, ev) })
+			// The data index follows the fold this push just landed in.
+			refreshThen(func() {
+				s.events().publish(project, ev)
+				s.dataApplyAsync(project)
+			})
 		} else {
 			refreshThen(func() {})
 		}

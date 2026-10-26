@@ -277,6 +277,22 @@ credentials); otherwise it is relayed through this server.`,
 				srv.Root = be
 				srv.Projects = db
 				srv.Device = webapp.Identity{ID: dev.ID, Name: dev.Name, Author: dev.Author}
+				// The data index lives in the metadata database, or beside
+				// file metadata as a SQLite file of its own. It is derived from
+				// the projects, so losing it costs a rebuild, never data.
+				idxDriver, idxDSN := "sqlite", filepath.Join(filepath.Dir(projectsDB), "data-index.db")
+				if meta != nil {
+					idxDriver, idxDSN = cfg.Database.Driver, cfg.Database.DSN
+					if idxDriver == "postgres" {
+						idxDriver = "pgx"
+					}
+				}
+				dataIdx, err := webapp.OpenDataIndex(idxDriver, idxDSN)
+				if err != nil {
+					return fmt.Errorf("open data index: %w", err)
+				}
+				defer dataIdx.Close()
+				srv.Data = dataIdx
 				// Display name only — and it goes out in /api/config, which is
 				// readable anonymously, so it must not be derived from the
 				// storage URL: on s3://acme-prod-drive that named the bucket

@@ -115,6 +115,7 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	s.quota().RecordUsage(org, 0)
 	v.invalidate()
+	s.dataWrote(r.Context(), projectID(r))
 	// Before the change frame goes out, so an editor in the room has the
 	// restored text by the time it hears the file changed.
 	folded := s.foldIntoRoom(r.Context(), projectID(r), p, req.SHA)

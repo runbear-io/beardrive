@@ -277,6 +277,7 @@ func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	s.quota().RecordUsage(org, 0)
 	v.invalidate()
+	s.dataWrote(r.Context(), projectID(r))
 	// captureChange's contract is that EVERY write path calls it, so that
 	// "how many files changed" stays one number instead of a per-route set
 	// that "silently misses whichever route someone forgets" — this was that

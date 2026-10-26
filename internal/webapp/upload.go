@@ -750,6 +750,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		s.quota().RecordUsage(org, billed)
 	}
 	v.invalidate()
+	s.dataWrote(r.Context(), projectID(r))
 	s.captureChange(r, "browser", 1, 0)
 	s.publishChange(r, "browser", []string{p}, 1, 0)
 	/* The version to base the NEXT If-Match on — read back, not assumed.
@@ -827,6 +828,7 @@ func (s *Server) handleUploadCommit(v *volume, w http.ResponseWriter, r *http.Re
 		s.quota().RecordUsage(org, size)
 	}
 	v.invalidate()
+	s.dataWrote(r.Context(), projectID(r))
 	s.captureChange(r, "browser", 1, 0)
 	s.publishChange(r, "browser", []string{req.Path}, 1, 0)
 	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
