@@ -262,6 +262,86 @@ func (s *Server) publishScope(project string) {
 	s.events().publish(project, changeEvent{Type: "scope"})
 }
 
+// frameFor is the frame one subscriber may see, and whether it may see one at
+// all.
+//
+// A frame is marshalled once and fanned out to every listener on the project,
+// including ones relayed from another process, so it carries every path the
+// write touched. Sent as is, a member denied a folder learned the name of every
+// file changed inside it — and, from presence, every file a teammate opened
+// there — although the tree, history and the sync wire all hide those paths.
+//
+// A change frame keeps only the paths this reader can read, and is not sent
+// once none are left: a frame naming nothing would still say "something you
+// cannot see just changed". The one exception is a truncated frame (More),
+// whose remaining paths are unknown here; it goes out with no paths, which
+// asks the client to refetch its own filtered view and names nothing. Its
+// counts are dropped whenever a path was, because they were counts of what
+// was hidden too. A presence frame keeps every person and blanks the path of
+// anyone on a hidden one. Anything that does not decode is not sent.
+func frameFor(frame []byte, vis pathFilter) ([]byte, bool) {
+	if !vis.hides() {
+		return frame, true
+	}
+	var ev changeEvent
+	if err := json.Unmarshal(frame, &ev); err != nil {
+		return nil, false
+	}
+	switch ev.Type {
+	case "change":
+		kept := make([]string, 0, len(ev.Paths))
+		for _, p := range ev.Paths {
+			if vis.canRead(p) {
+				kept = append(kept, p)
+			}
+		}
+		if len(kept) == len(ev.Paths) {
+			return frame, true
+		}
+		if len(kept) == 0 && !ev.More {
+			return nil, false
+		}
+		ev.Paths, ev.Puts, ev.Deletes = kept, 0, 0
+	case "presence":
+		people, changed := visiblePeople(ev.People, vis)
+		if !changed {
+			return frame, true
+		}
+		ev.People = people
+	default:
+		return frame, true
+	}
+	out, err := json.Marshal(ev)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// frameType reads just the type of an encoded frame.
+func frameType(frame []byte) string {
+	var ev struct {
+		Type string `json:"type"`
+	}
+	json.Unmarshal(frame, &ev)
+	return ev.Type
+}
+
+// streamVisibility re-resolves a stream's visibility from the registry, for a
+// stream that has just been told its project's rules moved. The Project the
+// stream opened with is the one proj() resolved then, which no longer says
+// what the rules are. False when the project is gone.
+func (s *Server) streamVisibility(r *http.Request, project string) (pathFilter, bool) {
+	if s.Projects == nil {
+		return pathFilter{}, true
+	}
+	p, ok := s.Projects.Get(project)
+	if !ok {
+		return pathFilter{}, false
+	}
+	return s.visibilityFor(r, p), true
+}
+
 // newOpPaths is countOps' sibling: the paths of the ops this push actually
 // added, in journal order. Same storedMax filter — an op the hub already had
 // is not news. Deduped, because a push that rewrote one file ten times is one
@@ -327,6 +407,11 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 		s.events().unsubscribe(project, sub)
 		s.streamGone(project, actor)
 	}()
+	// Frames are published once for every listener, so what this one may see
+	// is decided here, on the way out (frameFor). Resolved now and again on
+	// every scope frame: a rule change is announced on this same stream, so
+	// the frames after it are filtered by the rules as they then stand.
+	vis := s.visibility(r)
 
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
@@ -359,7 +444,17 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 					return
 				}
 			}
-			if !writeFrame(w, rc, frame) {
+			if frameType(frame) == "scope" {
+				var ok bool
+				if vis, ok = s.streamVisibility(r, project); !ok {
+					return // the project is gone; there is nothing left to watch
+				}
+			}
+			out, ok := frameFor(frame, vis)
+			if !ok {
+				continue
+			}
+			if !writeFrame(w, rc, out) {
 				return
 			}
 		case <-tick.C:
