@@ -13,11 +13,24 @@ import (
 // <prefix>/<key>. Used by the web server to host many projects in one
 // storage root. Closing the returned backend does not close the underlying
 // one (it is shared across prefixes).
+//
+// The optional capabilities pass through too. A capability the namespace
+// dropped is not an error anywhere: callers type-assert for it and take the
+// slower path when it is missing. That is how every hub project lost
+// compare-and-swap — the journal append looked for ConditionalPutter on this
+// wrapper, never found it, and appended last-writer-wins on GCS as well.
 func Prefixed(be Backend, prefix string) Backend {
 	prefix = strings.Trim(prefix, "/")
 	p := &prefixed{be: be, prefix: prefix}
-	if signer, ok := be.(PutSigner); ok {
+	signer, signs := be.(PutSigner)
+	cond, conditional := be.(ConditionalPutter)
+	switch {
+	case signs && conditional:
+		return &prefixedSignerCond{prefixedCond: &prefixedCond{prefixed: p, cond: cond}, signer: signer}
+	case signs:
 		return &prefixedSigner{prefixed: p, signer: signer}
+	case conditional:
+		return &prefixedCond{prefixed: p, cond: cond}
 	}
 	return p
 }
@@ -121,9 +134,45 @@ type prefixedSigner struct {
 }
 
 func (p *prefixedSigner) SignPut(ctx context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error) {
+	return p.signPut(ctx, p.signer, key, size, ttl)
+}
+
+func (p *prefixed) signPut(ctx context.Context, signer PutSigner, key string, size int64, ttl time.Duration) (*SignedPut, error) {
 	k, err := p.key(key)
 	if err != nil {
 		return nil, err
 	}
-	return p.signer.SignPut(ctx, k, size, ttl)
+	return signer.SignPut(ctx, k, size, ttl)
+}
+
+// prefixedCond adds compare-and-swap when the underlying backend supports it.
+type prefixedCond struct {
+	*prefixed
+	cond ConditionalPutter
+}
+
+func (p *prefixedCond) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {
+	k, err := p.key(key)
+	if err != nil {
+		return nil, VersionAbsent, err
+	}
+	return p.cond.GetVersioned(ctx, k)
+}
+
+func (p *prefixedCond) PutIf(ctx context.Context, key string, r io.Reader, size int64, expect Version) (Version, error) {
+	k, err := p.key(key)
+	if err != nil {
+		return VersionAbsent, err
+	}
+	return p.cond.PutIf(ctx, k, r, size, expect)
+}
+
+// prefixedSignerCond is both, which is what a GCS root is.
+type prefixedSignerCond struct {
+	*prefixedCond
+	signer PutSigner
+}
+
+func (p *prefixedSignerCond) SignPut(ctx context.Context, key string, size int64, ttl time.Duration) (*SignedPut, error) {
+	return p.signPut(ctx, p.signer, key, size, ttl)
 }

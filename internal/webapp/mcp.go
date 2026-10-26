@@ -403,9 +403,17 @@ func (m *memWriter) Write(b []byte) (int, error) { return m.body.Write(b) }
 // call re-enters the hub's own mux as the grant's account. This is the seam
 // that buys every permission and quota check for free; see the file comment.
 func (s *Server) call(ctx context.Context, method, target string, body io.Reader) (*memWriter, error) {
+	return s.callWith(ctx, method, target, body, nil)
+}
+
+// callWith is call with request headers.
+func (s *Server) callWith(ctx context.Context, method, target string, body io.Reader, hdr http.Header) (*memWriter, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, err
+	}
+	for k, v := range hdr {
+		req.Header[k] = v
 	}
 	if s.apiMux == nil {
 		return nil, fmt.Errorf("server handler not built")
@@ -1366,58 +1374,45 @@ func (s *Server) mcpWrite(ctx context.Context, in writeIn) (string, error) {
 	// path. "Rewrite this file" has to use write (edit needs exact old text),
 	// and without this that whole class of task had no lost-update defence at
 	// all: two agents rewriting one file, no warning to either.
+	var base string
 	if in.SHA != "" {
-		// Lock ACROSS the check and the write, or the check is advisory.
-		defer lockPath(project, rest)()
-		if err := s.checkStale(ctx, project, rest, in.SHA, in.Path); err != nil {
+		// The check names the version, and the write is held to it: the
+		// version rides along as the upload's If-Match, so a write that lands
+		// between the two is caught where the op is appended.
+		if base, err = s.checkStale(ctx, project, rest, in.SHA, in.Path); err != nil {
 			return "", err
 		}
 	}
-	msg, err := s.putFile(ctx, project, rest, []byte(in.Content), "wrote")
+	msg, err := s.putFile(ctx, project, rest, []byte(in.Content), "wrote", base)
 	if err != nil {
 		return "", err
 	}
 	return msg + s.guideLine(ctx, project, nil, rest), nil
 }
 
-// pathLocks serializes compare-and-swap writes per (project, path).
-//
-// ponytail: an in-process keyed mutex, not a distributed lock. It closes the
-// window that made the advertised guarantee false — eight concurrent writers
-// passing one sha were all accepted, seven updates lost — for callers coming
-// through this door, which is the door that advertises it. Two hub processes
-// still race; that needs a conditional write in the storage layer.
-var pathLocks sync.Map // "project\x00path" -> *sync.Mutex
-
-func lockPath(project, rest string) func() {
-	v, _ := pathLocks.LoadOrStore(project+"\x00"+rest, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
-}
-
-// checkStale refuses when a file has moved on since the caller read it.
-// Shared by write and edit so the two cannot drift into different contracts
-// for one concept.
-func (s *Server) checkStale(ctx context.Context, project, rest, want, shown string) error {
+// checkStale refuses when a file has moved on since the caller read it, and
+// otherwise returns the full sha of the version the caller named — the base
+// its write is then held to. Shared by write and edit so the two cannot drift
+// into different contracts for one concept.
+func (s *Server) checkStale(ctx context.Context, project, rest, want, shown string) (string, error) {
 	// A sha that is not a sha is a caller mistake, not a concurrent edit.
 	// Reporting it as "stale" sent the agent into a re-read/retry loop that
 	// could never converge.
 	if !shaLike(want) {
 		if shaLike(strings.ToLower(want)) {
-			return fmt.Errorf("shas are lowercase hex; pass %s exactly as read or history printed it",
+			return "", fmt.Errorf("shas are lowercase hex; pass %s exactly as read or history printed it",
 				strings.ToLower(want))
 		}
-		return fmt.Errorf("%q is not a sha; pass one exactly as read or history printed it "+
+		return "", fmt.Errorf("%q is not a sha; pass one exactly as read or history printed it "+
 			"(hex, at least 6 characters)", want)
 	}
 	files, _, err := s.visibleIn(ctx, project, PermRead)
 	if err != nil {
-		return err
+		return "", err
 	}
 	fi, ok := files[rest]
 	if !ok {
-		return fmt.Errorf("no such file: %s (you passed a sha, so this expected an existing file)", shown)
+		return "", fmt.Errorf("no such file: %s (you passed a sha, so this expected an existing file)", shown)
 	}
 	if !strings.HasPrefix(fi.Blob, strings.TrimSuffix(want, "…")) {
 		// "Stale" asserts the file CHANGED, and tells the caller to re-read
@@ -1426,12 +1421,12 @@ func (s *Server) checkStale(ctx context.Context, project, rest, want, shown stri
 		// and fails again the same way. restore already discriminates; this is
 		// the same question, asked before the accusation.
 		if _, err := s.resolveSHA(ctx, project, rest, want); err != nil {
-			return err
+			return "", err
 		}
-		return fmt.Errorf("stale: %s has changed since you read it (now sha %s). Read it again, then retry",
+		return "", fmt.Errorf("stale: %s has changed since you read it (now sha %s). Read it again, then retry",
 			shown, short(fi.Blob))
 	}
-	return nil
+	return fi.Blob, nil
 }
 
 // putFile is the one write path, shared by write/edit/move/restore-as-copy:
@@ -1439,11 +1434,29 @@ func (s *Server) checkStale(ctx context.Context, project, rest, want, shown stri
 // a write safe — the read-only check, path validation, folder permissions,
 // quota, journaling, cache invalidation, live-change fan-out — happens inside
 // that handler, so there is nothing to duplicate and nothing to forget.
-func (s *Server) putFile(ctx context.Context, project, rest string, content []byte, verb string) (string, error) {
+//
+// base, when set, is the version the content was built on. It goes as the
+// upload's If-Match, which is the browser editor's own precondition: one
+// check, under one lock, repeated where the op is appended. The shrink guard
+// that rides on conditional writes is confirmed — it exists for an editor
+// whose buffer came up empty, and an agent's smaller file is what it meant.
+func (s *Server) putFile(ctx context.Context, project, rest string, content []byte, verb, base string) (string, error) {
 	target := "/api/p/" + url.PathEscape(project) + "/upload/content?path=" + url.QueryEscape(rest)
-	w, err := s.call(ctx, http.MethodPut, target, bytes.NewReader(content))
+	var hdr http.Header
+	if base != "" {
+		hdr = http.Header{"If-Match": {`"` + base + `"`}, confirmShrinkHeader: {"1"}}
+	}
+	w, err := s.callWith(ctx, http.MethodPut, target, bytes.NewReader(content), hdr)
 	if err != nil {
 		return "", err
+	}
+	if w.code == http.StatusConflict && base != "" {
+		var now struct {
+			SHA string `json:"sha"`
+		}
+		json.Unmarshal(w.body.Bytes(), &now)
+		return "", fmt.Errorf("stale: %s has changed since you read it (now sha %s). Read it again, then retry",
+			labelPath(s.projectLabels(ctx), project, rest), short(now.SHA))
 	}
 	if w.code < 200 || w.code >= 300 {
 		return "", callErr(w)
@@ -1485,12 +1498,12 @@ func (s *Server) mcpEdit(ctx context.Context, in editIn) (string, error) {
 			return "", fmt.Errorf("you cannot write to %s", in.Path)
 		}
 	}
-	// edit is a read-modify-write, so the critical section is the WHOLE
-	// operation, not just the sha check — two concurrent edits each replacing
-	// the one occurrence of a token both reported "1 replacement(s)".
-	defer lockPath(project, rest)()
+	// edit is a read-modify-write. It is held to the version it read (see
+	// putFile below), so of two concurrent edits replacing the one occurrence
+	// of a token, the second is refused as stale instead of both reporting
+	// "1 replacement(s)".
 	if in.SHA != "" {
-		if err := s.checkStale(ctx, project, rest, in.SHA, in.Path); err != nil {
+		if _, err := s.checkStale(ctx, project, rest, in.SHA, in.Path); err != nil {
 			return "", err
 		}
 	}
@@ -1528,7 +1541,10 @@ func (s *Server) mcpEdit(ctx context.Context, in editIn) (string, error) {
 	} else {
 		body = strings.Replace(body, in.OldString, in.NewString, 1)
 	}
-	msg, err := s.putFile(ctx, project, rest, []byte(body), "edited")
+	// Held to fi, the version the substitution was made on, whether or not the
+	// agent named one: an edit is a read-modify-write, and a write that lands
+	// after the read must refuse it rather than be overwritten by it.
+	msg, err := s.putFile(ctx, project, rest, []byte(body), "edited", fi.Blob)
 	if err != nil {
 		return "", err
 	}
@@ -1700,7 +1716,7 @@ func (s *Server) mcpMove(ctx context.Context, in moveIn) (string, error) {
 	// endpoint, and a put + delete is exactly what one would journal anyway.
 	// The window where both paths exist is one cycle; if a crash lands in it,
 	// the copy survives and nothing is lost.
-	if _, err := s.putFile(ctx, toP, toR, data, "wrote"); err != nil {
+	if _, err := s.putFile(ctx, toP, toR, data, "wrote", ""); err != nil {
 		return "", err
 	}
 	if _, err := s.mcpDelete(ctx, pathIn{Path: in.From}); err != nil {
