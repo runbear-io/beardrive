@@ -455,7 +455,10 @@ can filter, sort, group and count them over `POST /api/p/<id>/data/query` (or
 the MCP `query` and `describe` tools) instead of reading every file. Each answer
 carries an ETag, so an unchanged screen gets `304`. The index is derived from
 the files and lives in the metadata database. With the file backend it is
-`data-index.db`, next to `projects.json`. See
+`data-index.db`, next to `projects.json`. A server reads data with its own
+credential: an organization owner creates an **app** (`app:<id>`), grants it
+read access in a project's People like a member, and mints `bda_` keys for it.
+A key reaches only `data/query`, `data/describe` and `history`. See
 [Data queries](https://docs.beardrive.ai/reference/data-queries/).
 
 Projects are walled by **organization**: every project belongs to one org

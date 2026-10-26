@@ -440,7 +440,7 @@ function People({ project, org }: { project: Project; org: Org | null }) {
   const addPerson = async () => {
     const email = await modalPrompt(
       "Add an exception",
-      "Email of a workspace member. They get Read access; change it in the table.",
+      "Email of a workspace member, or an app's id (app:…). They get Read access; change it in the table.",
       "",
       "Add",
     );

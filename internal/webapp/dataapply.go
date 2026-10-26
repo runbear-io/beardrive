@@ -651,8 +651,12 @@ func dataURLBase(r *http.Request) string {
 
 // recordDataReads counts a whole document returned by a query as a read of
 // its file, as reading the file would: an agent's through MCP, a person's
-// otherwise. A projection of a few fields is not a read.
+// otherwise. A projection of a few fields is not a read, and neither is
+// anything an app reads: a server mirroring data is not attention.
 func (s *Server) recordDataReads(r *http.Request, paths map[string]bool) {
+	if isAppPrincipal(s.requestUser(r).Email) {
+		return
+	}
 	for path := range paths {
 		if _, mcp := grantFrom(r.Context()); mcp {
 			s.recordAgentRead(r, path)

@@ -12,7 +12,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { api, getJSON, postJSON } from "../api/http";
 import type { Org, OrgInviteInfo, ShareInfo, Project } from "../api/types";
-import { modalConfirm } from "../modal";
+import { modalConfirm, modalPrompt } from "../modal";
 import { toast } from "../toast";
 import { copyText } from "../util";
 import { Button } from "@/components/ui/button";
@@ -202,6 +202,8 @@ export function OrgAdmin({
             ))}
           </div>
 
+          <AppsSection org={org} />
+
           <h3>Public share links</h3>
           <p className="admin-sub">
             Every live link across this organization's projects. A project's own links are on its
@@ -216,6 +218,116 @@ export function OrgAdmin({
         </>
       )}
     </div>
+  );
+}
+
+/* ---- apps: a server's own credential (apps.go) ---- */
+
+type AppKeyInfo = { id: string; hint: string; created: string; last_used?: string };
+type AppInfo = { id: string; name: string; principal: string; created: string; keys: AppKeyInfo[] };
+
+const day = (iso?: string) => (iso ? new Date(iso).toLocaleDateString() : "");
+
+function AppsSection({ org }: { org: Org }) {
+  const qc = useQueryClient();
+  const base = `/api/orgs/${org.id}/apps`;
+  const { data: apps } = useQuery({
+    queryKey: ["apps", org.id],
+    queryFn: () => getJSON<{ apps: AppInfo[] }>(base),
+    select: (d) => d.apps || [],
+  });
+  const run = async (fn: () => Promise<unknown>, ok?: string) => {
+    try {
+      await fn();
+      if (ok) toast(ok);
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+    qc.invalidateQueries({ queryKey: ["apps", org.id] });
+  };
+  // The key exists once, in this answer: copied, and shown until dismissed.
+  const showKey = async (key: string) => {
+    await copyText(key);
+    await modalPrompt("New app key", "Copied to your clipboard. It is not shown again.", key, "Done");
+  };
+
+  return (
+    <>
+      <div className="admin-h">
+        <h3>Apps</h3>
+        <Button
+          variant="subtle"
+          id="org-app-new"
+          onClick={async () => {
+            const name = await modalPrompt("New app", "Name of the server or service", "", "Create");
+            if (name === null || !name.trim()) return;
+            await run(() => postJSON(base, { name: name.trim() }), "App created.");
+          }}
+        >
+          New app
+        </Button>
+      </div>
+      <p className="admin-sub">
+        A server's own key to query a project's data and read its history. An app sees only what it
+        is granted: add its id under a project's Settings → People.
+      </p>
+      <div className="admin-list">
+        {apps && apps.length === 0 && <div className="admin-empty">No apps.</div>}
+        {(apps || []).map((a) => (
+          <div key={a.id}>
+            <div className="admin-item">
+              <span className="ai-main" title={a.name}>{a.name}</span>
+              <button
+                type="button"
+                className="ai-tag mono ai-copy"
+                aria-label={`Copy ${a.principal}`}
+                onClick={() => copyText(a.principal).then((ok) => toast(ok ? "Copied." : a.principal))}
+              >
+                {a.principal}
+              </button>
+              <Button
+                variant="subtle"
+                onClick={() =>
+                  run(async () => showKey((await postJSON<{ key: string }>(`${base}/${a.id}/keys`)).key))
+                }
+              >
+                New key
+              </Button>
+              <button
+                className="ai-del"
+                aria-label={`Delete app ${a.name}`}
+                onClick={async () => {
+                  if (!(await modalConfirm("Delete app", `Delete “${a.name}” and every key it holds?`, "Delete", true)))
+                    return;
+                  await run(() => api("DELETE", `${base}/${a.id}`), "Deleted.");
+                }}
+              >
+                Delete
+              </button>
+            </div>
+            {a.keys.map((k) => (
+              <div className="admin-item" key={k.id}>
+                <span className="ai-main mono">bda_…{k.hint}</span>
+                <span className="ai-tag">
+                  {"created " + day(k.created) + " · " + (k.last_used ? "last used " + day(k.last_used) : "never used")}
+                </span>
+                <button
+                  className="ai-del"
+                  aria-label={`Revoke key ending ${k.hint}`}
+                  onClick={async () => {
+                    if (!(await modalConfirm("Revoke key", `Revoke the key ending ${k.hint}? Anything using it stops working.`, "Revoke", true)))
+                      return;
+                    await run(() => api("DELETE", `${base}/${a.id}/keys/${k.id}`), "Revoked.");
+                  }}
+                >
+                  Revoke
+                </button>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 

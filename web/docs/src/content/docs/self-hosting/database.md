@@ -4,7 +4,7 @@ description: Where a hub keeps its metadata — file, SQLite, or Postgres — an
 ---
 
 A hub keeps a little **metadata** separate from your files: accounts, projects,
-orgs, invites, shares, devices, and read buckets.
+orgs, invites, shares, devices, read buckets, and apps with their keys.
 
 File content and the sync journals always live in the object store. The database
 never holds them as the truth. The one derived copy it holds is the

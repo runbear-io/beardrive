@@ -123,7 +123,9 @@ type Server struct {
 	// Data, when set, indexes the JSON and Markdown frontmatter of projects
 	// whose Data setting is on, for /data/query (dataindex.go). Nil means the
 	// hub answers data queries with 404.
-	Data          *DataIndex
+	Data *DataIndex
+	// Apps, when set, enables app principals and their bda_ keys (apps.go).
+	Apps          *AppDB
 	dataState     sync.Map // project id -> *dataProject
 	dataLimitOnce sync.Once
 	dataLimit     *rateLimiter
@@ -1525,6 +1527,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/orgs/{org}/members/{email}", s.handleMemberUpdate)
 	mux.HandleFunc("DELETE /api/orgs/{org}/members/{email}", s.handleMemberRemove)
 	mux.HandleFunc("GET /api/orgs/{org}/shares", s.handleOrgShares)
+	mux.HandleFunc("GET /api/orgs/{org}/apps", s.handleAppList)
+	mux.HandleFunc("POST /api/orgs/{org}/apps", s.handleAppCreate)
+	mux.HandleFunc("DELETE /api/orgs/{org}/apps/{app}", s.handleAppDelete)
+	mux.HandleFunc("POST /api/orgs/{org}/apps/{app}/keys", s.handleAppKeyCreate)
+	mux.HandleFunc("DELETE /api/orgs/{org}/apps/{app}/keys/{key}", s.handleAppKeyRevoke)
 	mux.HandleFunc("POST /api/invites/{token}", s.handleInviteAccept)
 
 	mux.HandleFunc("PATCH /api/projects/{project}", s.handleProjectUpdate)

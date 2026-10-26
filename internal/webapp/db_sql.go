@@ -39,6 +39,7 @@ type sqlMetaStore struct {
 	reads    *sqlReadRepo
 	sessions *sqlSessionReadRepo
 	pending  *sqlPendingRepo
+	apps     *sqlAppRepo
 }
 
 // pgMaxOpenConns bounds this store's share of a Postgres server's connection
@@ -105,6 +106,7 @@ func OpenSQLStore(driver, dsn string) (MetaStore, error) {
 	s.reads = &sqlReadRepo{s: s, w: regWriter{s, regReads}}
 	s.sessions = &sqlSessionReadRepo{s: s}
 	s.pending = &sqlPendingRepo{s: s}
+	s.apps = &sqlAppRepo{s: s, w: regWriter{s, regApps}}
 	return s, nil
 }
 
@@ -117,6 +119,7 @@ func (s *sqlMetaStore) Devices() DeviceRepo           { return s.devices }
 func (s *sqlMetaStore) Reads() ReadRepo               { return s.reads }
 func (s *sqlMetaStore) SessionReads() SessionReadRepo { return s.sessions }
 func (s *sqlMetaStore) Pending() PendingRepo          { return s.pending }
+func (s *sqlMetaStore) Apps() AppRepo                 { return s.apps }
 func (s *sqlMetaStore) Close() error                  { return s.db.Close() }
 
 // q rebinds ?-placeholders to $1,$2,… for Postgres; SQLite keeps ?.
@@ -153,6 +156,7 @@ const (
 	regMCP      = "mcp"
 	regDevices  = "devices"
 	regReads    = "reads"
+	regApps     = "apps"
 )
 
 // inTx runs fn in a transaction that also bumps reg's change token. Same
@@ -254,6 +258,12 @@ func (s *sqlMetaStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS invites (
 			token TEXT PRIMARY KEY, org TEXT NOT NULL, creator TEXT NOT NULL DEFAULT '',
 			created TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '', uses INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS apps (
+			id TEXT PRIMARY KEY, org TEXT NOT NULL, name TEXT NOT NULL,
+			creator TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS app_keys (
+			id TEXT PRIMARY KEY, app TEXT NOT NULL, digest TEXT NOT NULL UNIQUE,
+			hint TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '', last_used TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS shares (
 			token TEXT PRIMARY KEY, project TEXT NOT NULL, path TEXT NOT NULL,
 			creator TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '')`,
@@ -1090,6 +1100,84 @@ func (r *sqlShareRepo) Put(s Share) error {
 
 func (r *sqlShareRepo) Delete(token string) error {
 	return r.w.exec(`DELETE FROM shares WHERE token = ?`, token)
+}
+
+// ---- apps + keys ----
+
+type sqlAppRepo struct {
+	s *sqlMetaStore
+	w regWriter
+}
+
+func (r *sqlAppRepo) Version() (string, error) { return r.s.version(regApps) }
+
+func (r *sqlAppRepo) Load() ([]App, []AppKey, error) {
+	rows, err := r.s.db.Query(`SELECT id, org, name, creator, created FROM apps`)
+	if err != nil {
+		return nil, nil, err
+	}
+	var apps []App
+	for rows.Next() {
+		var a App
+		var created string
+		if err := rows.Scan(&a.ID, &a.Org, &a.Name, &a.Creator, &created); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		a.Created = tdec(created)
+		apps = append(apps, a)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	rows, err = r.s.db.Query(`SELECT id, app, digest, hint, created, last_used FROM app_keys`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var keys []AppKey
+	for rows.Next() {
+		var k AppKey
+		var created, used string
+		if err := rows.Scan(&k.ID, &k.App, &k.Digest, &k.Hint, &created, &used); err != nil {
+			return nil, nil, err
+		}
+		k.Created, k.LastUsed = tdec(created), tdec(used)
+		keys = append(keys, k)
+	}
+	return apps, keys, rows.Err()
+}
+
+func (r *sqlAppRepo) PutApp(a App) error {
+	return r.w.exec(`INSERT INTO apps (id,org,name,creator,created) VALUES (?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET org=excluded.org, name=excluded.name,
+		creator=excluded.creator, created=excluded.created`,
+		a.ID, a.Org, a.Name, a.Creator, tenc(a.Created))
+}
+
+func (r *sqlAppRepo) DeleteApp(id string) error {
+	return r.s.inTx(regApps, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(r.s.q(`DELETE FROM app_keys WHERE app = ?`), id); err != nil {
+			return err
+		}
+		_, err := tx.Exec(r.s.q(`DELETE FROM apps WHERE id = ?`), id)
+		return err
+	})
+}
+
+func (r *sqlAppRepo) PutKey(k AppKey) error {
+	return r.w.exec(`INSERT INTO app_keys (id,app,digest,hint,created,last_used) VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET last_used=excluded.last_used`,
+		k.ID, k.App, k.Digest, k.Hint, tenc(k.Created), tenc(k.LastUsed))
+}
+
+func (r *sqlAppRepo) TouchKey(id string, at time.Time) error {
+	return r.w.exec(`UPDATE app_keys SET last_used = ? WHERE id = ?`, tenc(at), id)
+}
+
+func (r *sqlAppRepo) DeleteKey(id string) error {
+	return r.w.exec(`DELETE FROM app_keys WHERE id = ?`, id)
 }
 
 // ---- mcp grants + clients ----

@@ -117,6 +117,15 @@ func (s *Server) authGate(next http.Handler) http.Handler {
 			p == "/api/config" ||
 			!strings.HasPrefix(p, "/api/") // static frontend; its API calls are gated
 		if !open {
+			// An app key before the provider: it is the hub's own credential,
+			// which no provider has heard of, and it opens a few read routes
+			// only (apps.go).
+			if u, handled, ok := s.appUser(w, r); handled {
+				if ok {
+					next.ServeHTTP(w, withUser(r, u))
+				}
+				return
+			}
 			u, ok := s.Auth.Authenticate(r)
 			if !ok {
 				http.Error(w, "authentication required (bdrive login, or sign in at /auth/login)", http.StatusUnauthorized)

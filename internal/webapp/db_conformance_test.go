@@ -67,7 +67,7 @@ func metaBackends(t *testing.T) []metaBackend {
 				db.Exec(`DROP TABLE IF EXISTS accounts, tokens, auth_policy, projects, project_perms,
 					project_folders, project_folder_perms,
 					orgs, org_members, invites, shares, devices, device_rows, read_stats,
-					read_sessions, meta_version, schema_meta`)
+					read_sessions, apps, app_keys, meta_version, schema_meta`)
 			},
 			open: func(t *testing.T) MetaStore {
 				s, err := OpenSQLStore("pgx", dsn)

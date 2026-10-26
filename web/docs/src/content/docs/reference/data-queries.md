@@ -96,6 +96,25 @@ common values, across a sample of up to 500 documents.
 - One page has at most 1,000 rows. A grouped query has at most 1,000 groups. An answer is at most 4 MiB, and a query may run for at most 2 seconds. A query over a limit is refused with an error; the answer is never cut short.
 - Each account may send 600 queries per minute.
 
+## From a server: apps and keys
+
+A server that reads a project's data, such as a dashboard or another product's
+backend, should not sign in as a person. An organization owner creates an
+**app** for it under the organization's settings (**Apps**). The app has an id
+of the form `app:<id>`. The owner then mints the app's keys.
+
+```http
+POST /api/orgs/<org>/apps                   {"name": "SearchD"}   → {"id", "principal": "app:…"}
+POST /api/orgs/<org>/apps/<app>/keys                              → {"key": "bda_…"}   (shown once)
+DELETE /api/orgs/<org>/apps/<app>/keys/<key>
+```
+
+- **An app sees only what it is granted.** Add its id under a project's Settings → People, or name it in a folder rule, as you would an email address. An app never inherits a project's default access, and it can be granted read or write, never admin.
+- **A key opens a few routes only.** Send it as `Authorization: Bearer bda_…`. It reaches `data/query`, `data/describe` and `history` on projects the app was granted. Every other route answers `403`.
+- **A key is stored as a digest.** It can be revoked at any time. An app can hold several keys at once, so you can replace one without a gap. The Apps list shows when each key was last used.
+- **Deleting an app** revokes every key it holds.
+- **An app's reads do not count** toward read heat.
+
 ## From an agent
 
 The MCP door has the same two operations as tools: `query` and `describe`.

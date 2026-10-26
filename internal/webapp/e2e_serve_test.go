@@ -184,6 +184,12 @@ func TestE2EServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.Shares = shares
+	if srv.Apps, err = OpenAppDB(filepath.Join(state, "apps.json")); err != nil {
+		t.Fatal(err)
+	}
+	if srv.Data, err = OpenDataIndex("sqlite", filepath.Join(state, "data-index.db")); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Logf("e2e hub on http://%s (state: %s) — %s / %s", e2eAddr, state, e2eAdmin, e2ePassword)
 	serveHub(t, ln, srv.Handler(), 2*time.Hour) // Playwright kills the process when the run ends
