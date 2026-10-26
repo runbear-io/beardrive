@@ -51,6 +51,21 @@ func TestFrameForFiltersPathsPerReader(t *testing.T) {
 		t.Fatalf("truncated frame for bob = %s (sent %v), want more with no paths", out, ok)
 	}
 
+	// Every named path visible, but truncated: the unnamed ones may be hidden,
+	// so the counts go.
+	visibleButTruncated := enc(changeEvent{Type: "change", Paths: []string{"b.md"}, More: true, Puts: 100})
+	out, ok = frameFor(visibleButTruncated, bobsView())
+	if ev := dec(out); !ok || !ev.More || len(ev.Paths) != 1 || ev.Puts != 0 {
+		t.Fatalf("truncated frame naming only visible paths, for bob = %s (sent %v), want b.md and no counts", out, ok)
+	}
+
+	if out, ok := frameFor(enc(changeEvent{Type: "comments", Paths: []string{"a/x.md"}}), bobsView()); ok {
+		t.Fatalf("a comments frame on a hidden file was sent: %s", out)
+	}
+	if out, ok := frameFor(enc(changeEvent{Type: "comments", Paths: []string{"b.md"}}), bobsView()); !ok {
+		t.Fatalf("a comments frame on a visible file was withheld: %s", out)
+	}
+
 	roster := enc(changeEvent{Type: "presence", People: []person{{Name: "Alice", Path: "a/x.md"}, {Name: "Carol", Path: "b.md"}}})
 	out, ok = frameFor(roster, bobsView())
 	ev := dec(out)
@@ -317,6 +332,22 @@ func TestEventStreamResendsItsOwnRosterForARelayedScope(t *testing.T) {
 	nextFrame(t, bob, "scope")
 	if ev := nextFrame(t, bob, "presence"); len(ev.People) != 1 || ev.People[0].Path != "" {
 		t.Fatalf("bob's roster after a relayed scope change: %+v, want alice with no path", ev)
+	}
+}
+
+// A comment names its file on the stream, so a reader who cannot see the file
+// is not told that something happened there.
+func TestEventStreamWithholdsCommentsOnHiddenFiles(t *testing.T) {
+	h, srv, cookies, p, _ := commentHub(t)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	sendAs(t, ts, "PUT", "/api/p/"+p.ID+"/folders", `{"prefix":"secret","default":"none"}`, cookies["alice"])
+	bob := streamAs(t, srv, ts, p.ID, "bob@x.io", cookies["bob"])
+	postComment(t, h, p.ID, map[string]any{"path": "secret/plan.md", "body": "Not for bob."}, cookies["alice"])
+	postComment(t, h, p.ID, map[string]any{"path": "wiki/report.md", "body": "For everyone."}, cookies["alice"])
+	ev := nextFrame(t, bob, "comments")
+	if len(ev.Paths) != 1 || ev.Paths[0] != "wiki/report.md" {
+		t.Fatalf("bob's first comments frame = %+v, want only the one on wiki/report.md", ev)
 	}
 }
 

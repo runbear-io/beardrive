@@ -591,11 +591,22 @@ func (s *Server) writeCommentEvent(ctx context.Context, project string, ev comme
 	if after, err := s.loadCommentEvents(ctx, project); err == nil && !slices.ContainsFunc(after, func(e commentEvent) bool { return e.key == ev.key }) {
 		return errCommentLimit{"this project has reached its limit of comments"}
 	}
-	// No paths: the stream has no per-reader filter, and a path under a
-	// folder hidden from some subscriber must not reach them. A viewer only
-	// needs to know to refetch its comment list, which is filtered.
-	s.events().publish(project, changeEvent{Type: "comments"})
+	s.publishComments(project, commentPath(ev, evs))
 	return nil
+}
+
+// commentPath is the file a comment event is about: its own path when it
+// opens a thread, the opening event's otherwise.
+func commentPath(ev commentEvent, evs []commentEvent) string {
+	if ev.Path != "" {
+		return ev.Path
+	}
+	for _, e := range evs {
+		if e.Thread == ev.Thread && e.Path != "" {
+			return e.Path
+		}
+	}
+	return ""
 }
 
 // cleanCommentText keeps what a person typed, minus what renders as nothing:
@@ -916,8 +927,12 @@ func (s *Server) retireThread(ctx context.Context, project, thread, email, name 
 	c := s.commentStore()
 	c.mu.Lock()
 	pc := c.project(project)
+	path := ""
 	for k, ev := range pc.events {
 		if ev.Thread == thread {
+			if ev.Path != "" {
+				path = ev.Path
+			}
 			delete(pc.events, k)
 			pc.bytes -= ev.size
 			c.bytes -= ev.size
@@ -925,7 +940,7 @@ func (s *Server) retireThread(ctx context.Context, project, thread, email, name 
 	}
 	pc.listedAt = time.Time{}
 	c.mu.Unlock()
-	s.events().publish(project, changeEvent{Type: "comments"})
+	s.publishComments(project, path)
 	return nil
 }
 

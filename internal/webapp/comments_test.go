@@ -297,26 +297,6 @@ func TestCommentOnARecreatedPathIsMissing(t *testing.T) {
 	}
 }
 
-// The live stream has no per-reader filter, so a comment frame must not name
-// the path: the path may sit under a folder hidden from a subscriber.
-func TestCommentFrameCarriesNoPath(t *testing.T) {
-	h, srv, c, p, _ := commentHub(t)
-	sub, ok := srv.events().subscribe(p.ID, "watcher")
-	if !ok {
-		t.Fatal("subscribe")
-	}
-	defer srv.events().unsubscribe(p.ID, sub)
-	postComment(t, h, p.ID, map[string]any{"path": "secret/plan.md", "body": "x"}, c["alice"])
-	select {
-	case frame := <-sub.ch:
-		if strings.Contains(string(frame), "secret") || !strings.Contains(string(frame), `"comments"`) {
-			t.Fatalf("comment frame = %s", frame)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no frame for a new comment")
-	}
-}
-
 // A hidden thread answers 404 to DELETE before the author check can answer
 // 403 — a 403 would confirm it exists.
 func TestDeletingAHiddenThreadIs404(t *testing.T) {

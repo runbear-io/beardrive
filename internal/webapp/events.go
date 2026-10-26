@@ -268,21 +268,41 @@ func (s *Server) publishScope(project string) {
 	s.events().publish(project, changeEvent{Type: "scope"})
 }
 
+// publishComments tells a project's listeners that a file's comments moved. The
+// frame names the file, so a reader who cannot see it is not told that
+// something happened there (frameFor); a viewer that is told refetches its own
+// comment list, which is filtered.
+func (s *Server) publishComments(project, path string) {
+	ev := changeEvent{Type: "comments"}
+	if path != "" {
+		ev.Paths = []string{path}
+	}
+	s.events().publish(project, ev)
+}
+
 // scopeFrame is the frame publishScope sends, byte for byte: what a stream
 // receives for it, whether it was published here or relayed from elsewhere.
 var scopeFrame, _ = json.Marshal(changeEvent{Type: "scope"})
 
 // publishOrgScope is publishScope for every project of an organization: a
 // member's role or membership is part of every project-level permission there.
+// In the background: the change has committed, and with a relay each project
+// is a round trip that an owner's request should not wait on.
 func (s *Server) publishOrgScope(org string) {
 	if s.Projects == nil {
 		return
 	}
+	var ids []string
 	for _, p := range s.Projects.List() {
 		if p.Org == org {
-			s.publishScope(p.ID)
+			ids = append(ids, p.ID)
 		}
 	}
+	go func() {
+		for _, id := range ids {
+			s.publishScope(id)
+		}
+	}()
 }
 
 // frameFor is the frame one subscriber may see, and whether it may see one at
@@ -299,9 +319,11 @@ func (s *Server) publishOrgScope(org string) {
 // cannot see just changed". The one exception is a truncated frame (More),
 // whose remaining paths are unknown here; it goes out with no paths, which
 // asks the client to refetch its own filtered view and names nothing. Its
-// counts are dropped whenever a path was, because they were counts of what
-// was hidden too. A presence frame keeps every person and blanks the path of
-// anyone on a hidden one. Anything that does not decode is not sent.
+// counts are dropped whenever a path was, or may have been past the truncation,
+// because they were counts of what was hidden too. A comments frame is not sent
+// when the file it names is hidden. A presence frame keeps every person and
+// blanks the path of anyone on a hidden one. Anything that does not decode is
+// not sent.
 func frameFor(frame []byte, vis pathFilter) ([]byte, bool) {
 	if !vis.hides() {
 		return frame, true
@@ -318,13 +340,22 @@ func frameFor(frame []byte, vis pathFilter) ([]byte, bool) {
 				kept = append(kept, p)
 			}
 		}
-		if len(kept) == len(ev.Paths) {
+		// A truncated frame (More) loses its counts even when every path it
+		// names is visible: the paths it does not name may not be.
+		if len(kept) == len(ev.Paths) && !ev.More {
 			return frame, true
 		}
 		if len(kept) == 0 && !ev.More {
 			return nil, false
 		}
 		ev.Paths, ev.Puts, ev.Deletes = kept, 0, 0
+	case "comments":
+		for _, p := range ev.Paths {
+			if !vis.canRead(p) {
+				return nil, false
+			}
+		}
+		return frame, true
 	case "presence":
 		people, changed := visiblePeople(ev.People, vis)
 		if !changed {
@@ -503,18 +534,18 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 			// would otherwise stay stale until its stream aged out, since
 			// the thing that tells it to refetch is the very traffic that
 			// has stopped.
+			// Access is re-checked here too, so a revocation that published
+			// no scope frame this process heard (a provider deleting an
+			// account on its own side) ends a quiet stream within one
+			// keepalive rather than at streamMaxAge.
+			if _, ok := s.streamVisibility(r, project); !ok {
+				return
+			}
 			if sub.lost.Swap(false) {
 				if !writeFrame(w, rc, []byte(`{"type":"resync"}`)) {
 					return
 				}
 				continue
-			}
-			// And access is re-checked here too, so a revocation that
-			// published no scope frame this process heard (a provider
-			// deleting an account on its own side) ends a quiet stream
-			// within one keepalive rather than at streamMaxAge.
-			if _, ok := s.streamVisibility(r, project); !ok {
-				return
 			}
 			if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
 				return
