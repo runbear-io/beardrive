@@ -109,7 +109,7 @@ POST /api/orgs/<org>/apps/<app>/keys                              → {"key": "b
 DELETE /api/orgs/<org>/apps/<app>/keys/<key>
 ```
 
-- **An app sees only what it is granted.** Add its id under a project's Settings → People, or name it in a folder rule, as you would an email address. An app never inherits a project's default access, and it can be granted read or write, never admin.
+- **An app sees only what it is granted.** Add its id under a project's Settings → People, as you would an email address. A folder rule can then name it to narrow or widen what it sees inside that project; a folder rule alone opens nothing. An app never inherits a project's default access, and it can be granted read or write, never admin. Deleting an app removes its grants.
 - **A key opens a few routes only.** Send it as `Authorization: Bearer bda_…`. It reaches `data/query`, `data/describe` and `history` on projects the app was granted. Every other route answers `403`.
 - **A key is stored as a digest.** It can be revoked at any time. An app can hold several keys at once, so you can replace one without a gap. The Apps list shows when each key was last used.
 - **Deleting an app** revokes every key it holds.

@@ -2,15 +2,17 @@ package webapp
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 /* Apps are principals for servers: SearchD reading a project's data is not a
@@ -196,6 +198,10 @@ func (db *AppDB) Mint(app string) (string, AppKey, error) {
 	return token, k, nil
 }
 
+// errNoSuchKey is Revoke's answer for a key that is not the app's: a 404, where
+// a store failure is a 502 that never shows the store's own message.
+var errNoSuchKey = errors.New("no such key")
+
 // Revoke deletes one key of an app.
 func (db *AppDB) Revoke(app, id string) error {
 	db.mu.Lock()
@@ -203,7 +209,7 @@ func (db *AppDB) Revoke(app, id string) error {
 	db.refresh()
 	k, ok := db.keys[id]
 	if !ok || k.App != app {
-		return fmt.Errorf("no such key")
+		return errNoSuchKey
 	}
 	if err := db.repo.DeleteKey(id); err != nil {
 		return err
@@ -359,8 +365,10 @@ func (s *Server) handleAppCreate(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req)
-	name := strings.TrimSpace(req.Name)
-	if name == "" || len(name) > 80 {
+	// The same label rules as a project's name: no control, format or bidi
+	// characters, which would reorder a row of the owner's admin table.
+	name := strings.TrimSpace(trimText(req.Name, 81))
+	if name == "" || utf8.RuneCountInString(name) > 80 {
 		http.Error(w, "give the app a name of at most 80 characters", http.StatusBadRequest)
 		return
 	}
@@ -385,7 +393,37 @@ func (s *Server) handleAppDelete(w http.ResponseWriter, r *http.Request) {
 		storageErr(w, http.StatusBadGateway, "could not delete the app", err)
 		return
 	}
+	s.dropAppGrants(a)
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// dropAppGrants removes a deleted app's grants from its org's projects and
+// folder rules. They confer nothing once the app is gone (roleIn), but they
+// would stay on every People list and rule, naming an app that no longer
+// exists. A failure is logged and left: the grant is already inert.
+func (s *Server) dropAppGrants(a App) {
+	if s.Projects == nil {
+		return
+	}
+	principal := appPrincipal(a.ID)
+	for _, p := range s.Projects.List() {
+		if p.Org != a.Org {
+			continue
+		}
+		if err := s.Projects.dropPerm(p.ID, principal); err != nil {
+			log.Printf("beardrive: delete app %s: project %s grant: %v", a.ID, p.ID, err)
+		}
+		for _, rule := range p.Folders {
+			if _, has := rule.Perms[principal]; !has {
+				continue
+			}
+			rule.Perms = maps.Clone(rule.Perms)
+			delete(rule.Perms, principal)
+			if err := s.Projects.SetFolder(p.ID, rule); err != nil {
+				log.Printf("beardrive: delete app %s: project %s folder %s: %v", a.ID, p.ID, rule.Prefix, err)
+			}
+		}
+	}
 }
 
 func (s *Server) handleAppKeyCreate(w http.ResponseWriter, r *http.Request) {
@@ -414,8 +452,11 @@ func (s *Server) handleAppKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Apps.Revoke(a.ID, r.PathValue("key")); err != nil {
+	if err := s.Apps.Revoke(a.ID, r.PathValue("key")); errors.Is(err, errNoSuchKey) {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	} else if err != nil {
+		storageErr(w, http.StatusBadGateway, "could not revoke the key", err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
