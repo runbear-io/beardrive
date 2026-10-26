@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -259,17 +260,17 @@ func changeEventFor(r *http.Request, source string, paths []string, puts, delete
 // watched poll — and loadScope runs before the scan specifically so a scan
 // cannot mint an op the hub would refuse with a 403 that wedges the journal.
 //
-// The roster follows it. A browser keeps the last roster it was sent, and a
-// teammate shown on a file that just became hidden would stay on screen until
-// someone else moved; sent again here, each stream filters it by the new rules
-// on the way out. The scope frame also makes every stream re-check its
-// reader's access (streamVisibility), so a revoked reader's stream ends at it.
+// Every stream re-checks its reader's access at this frame (streamVisibility),
+// so a revoked reader's stream ends at it, and follows it with its own
+// process's roster (handleEvents) — on every process, since the relay carries
+// the frame to all of them.
 func (s *Server) publishScope(project string) {
 	s.events().publish(project, changeEvent{Type: "scope"})
-	if people, ok := s.presence().roster(project); ok {
-		s.events().publish(project, changeEvent{Type: "presence", People: people})
-	}
 }
+
+// scopeFrame is the frame publishScope sends, byte for byte: what a stream
+// receives for it, whether it was published here or relayed from elsewhere.
+var scopeFrame, _ = json.Marshal(changeEvent{Type: "scope"})
 
 // publishOrgScope is publishScope for every project of an organization: a
 // member's role or membership is part of every project-level permission there.
@@ -484,6 +485,18 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 			if !writeFrame(w, rc, out) {
 				return
 			}
+			// A browser keeps the last roster it was sent, so after a scope
+			// change a teammate on a file that just became hidden would stay
+			// on screen until somebody moved. The roster is this process's,
+			// sent by every process to its own streams: the publisher's would
+			// leave out everyone whose stream lives elsewhere.
+			if bytes.Equal(frame, scopeFrame) {
+				people, _ := visiblePeople(s.presence().roster(project), vis)
+				roster, err := json.Marshal(changeEvent{Type: "presence", People: people})
+				if err != nil || !writeFrame(w, rc, roster) {
+					return
+				}
+			}
 		case <-tick.C:
 			// The resync also rides the keepalive, not just the next frame:
 			// a client that overflowed and then saw the project go quiet
@@ -495,6 +508,13 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 					return
 				}
 				continue
+			}
+			// And access is re-checked here too, so a revocation that
+			// published no scope frame this process heard (a provider
+			// deleting an account on its own side) ends a quiet stream
+			// within one keepalive rather than at streamMaxAge.
+			if _, ok := s.streamVisibility(r, project); !ok {
+				return
 			}
 			if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
 				return

@@ -222,18 +222,7 @@ func TestEventStreamEndsWhenItsReaderLosesTheProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.events().publish(p.ID, changeEvent{Type: "change", Paths: []string{"open/notes.md"}, Puts: 1})
-	deadline := time.Now().Add(5 * time.Second)
-	for srv.events().hasActor(p.ID, "bob@x.io") {
-		if time.Now().After(deadline) {
-			t.Fatal("bob's stream is still open after bob's access was revoked")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	select {
-	case ev := <-bob:
-		t.Fatalf("a frame reached bob after the revocation: %+v", ev)
-	case <-time.After(100 * time.Millisecond):
-	}
+	streamEnds(t, srv, p.ID, "bob@x.io", bob)
 }
 
 // A member removed from the organization while their stream sits idle loses
@@ -254,16 +243,34 @@ func TestEventStreamEndsWhenItsReaderLeavesTheOrg(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("removing bob: %d", resp.StatusCode)
 	}
+	streamEnds(t, srv, p.ID, "bob@x.io", bob)
+}
+
+// Deleting an account (offboard, which every provider's removal runs) ends its
+// idle streams the same way.
+func TestEventStreamEndsWhenItsReaderIsOffboarded(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	bob := streamAs(t, srv, ts, p.ID, "bob@x.io", cookies["bob"])
+	srv.offboard("bob@x.io")
+	streamEnds(t, srv, p.ID, "bob@x.io", bob)
+}
+
+// streamEnds waits for the hub to drop a member's stream, and checks that no
+// frame reached them on the way out.
+func streamEnds(t *testing.T, srv *Server, project, email string, frames <-chan changeEvent) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for srv.events().hasActor(p.ID, "bob@x.io") {
+	for srv.events().hasActor(project, email) {
 		if time.Now().After(deadline) {
-			t.Fatal("bob's idle stream is still open after bob left the org")
+			t.Fatalf("%s's stream is still open after their access was taken away", email)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	select {
-	case ev := <-bob:
-		t.Fatalf("a frame reached bob after the removal: %+v", ev)
+	case ev := <-frames:
+		t.Fatalf("a frame reached %s after their access was taken away: %+v", email, ev)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
@@ -285,6 +292,31 @@ func TestEventStreamResendsTheRosterWhenScopeMoves(t *testing.T) {
 	ev := nextFrame(t, bob, "presence")
 	if len(ev.People) != 1 || ev.People[0].Path != "" {
 		t.Fatalf("bob's roster after the rule: %+v, want alice with no path", ev)
+	}
+}
+
+// A rule changed on another hub process arrives here as a relayed scope frame.
+// The roster after it is this process's own, so the people whose streams live
+// here are in it, with the newly hidden path blanked.
+func TestEventStreamResendsItsOwnRosterForARelayedScope(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	bus := newMemRelay()
+	srv.UseRelay(bus.join())
+	other := &Server{}
+	other.UseRelay(bus.join())
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	bob := streamAs(t, srv, ts, p.ID, "bob@x.io", cookies["bob"])
+	sendAs(t, ts, "POST", "/api/p/"+p.ID+"/presence", `{"path":"secret/plan.md"}`, cookies["alice"])
+	nextFrame(t, bob, "presence")
+	// The other process wrote the rule to the shared registry and announced it.
+	if err := srv.Projects.SetFolder(p.ID, FolderRule{Prefix: "secret/", Default: PermNone}); err != nil {
+		t.Fatal(err)
+	}
+	other.publishScope(p.ID)
+	nextFrame(t, bob, "scope")
+	if ev := nextFrame(t, bob, "presence"); len(ev.People) != 1 || ev.People[0].Path != "" {
+		t.Fatalf("bob's roster after a relayed scope change: %+v, want alice with no path", ev)
 	}
 }
 

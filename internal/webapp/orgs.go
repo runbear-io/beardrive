@@ -731,6 +731,20 @@ func (s *Server) offboard(email string) {
 	if e == "" {
 		return
 	}
+	// The account's open change streams end at a scope frame on each of its
+	// orgs' projects, not at the next write there. Read before the
+	// memberships are dropped below.
+	var orgs []string
+	if s.Dir != nil {
+		for _, o := range s.Dir.OrgsFor(e) {
+			orgs = append(orgs, o.ID)
+		}
+	}
+	defer func() {
+		for _, o := range orgs {
+			s.publishOrgScope(o)
+		}
+	}()
 	if s.Projects != nil {
 		for _, p := range s.Projects.List() {
 			if _, has := p.Perms[e]; has {
