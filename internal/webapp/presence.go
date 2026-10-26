@@ -105,6 +105,13 @@ func (h *presenceHub) mark(project, actor, name, path string, now time.Time, sti
 	return rosterOf(room), changed, true
 }
 
+// roster is a project's current roster.
+func (h *presenceHub) roster(project string) []person {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return rosterOf(h.at[project])
+}
+
 // drop removes an actor immediately, for a client that says it is leaving.
 func (h *presenceHub) drop(project, actor string) ([]person, bool) {
 	h.mu.Lock()
@@ -148,6 +155,30 @@ func (s *Server) streamGone(project, actor string) {
 	if people, changed := s.presence().drop(project, actor); changed {
 		s.events().publish(project, changeEvent{Type: "presence", People: people})
 	}
+}
+
+// visiblePeople is a roster as one reader may see it: everyone stays on it,
+// and a path the reader cannot read is blanked. Who is in the project is not
+// what a folder rule hides; which hidden file they have open is. Reports
+// whether anything was blanked, so an unchanged roster can be passed through.
+func visiblePeople(people []person, vis pathFilter) ([]person, bool) {
+	if !vis.hides() {
+		return people, false
+	}
+	var out []person
+	for i, p := range people {
+		if p.Path == "" || vis.canRead(p.Path) {
+			continue
+		}
+		if out == nil {
+			out = append([]person(nil), people...)
+		}
+		out[i].Path = ""
+	}
+	if out == nil {
+		return people, false
+	}
+	return out, true
 }
 
 // rosterOf renders a room. The actor key never appears in the result: it is an
@@ -209,12 +240,16 @@ func (s *Server) handlePresence(v *volume, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	project := projectID(r)
+	// The answer carries the same roster the stream does, so it is filtered
+	// the same way (frameFor).
+	vis := s.visibility(r)
 
 	if req.Leave {
 		people, changed := s.presence().drop(project, actor)
 		if changed {
 			s.events().publish(project, changeEvent{Type: "presence", People: people})
 		}
+		people, _ = visiblePeople(people, vis)
 		writeJSON(w, map[string]any{"ok": true, "people": people})
 		return
 	}
@@ -228,5 +263,6 @@ func (s *Server) handlePresence(v *volume, w http.ResponseWriter, r *http.Reques
 		path = ""
 	}
 	people, _, _ := s.markPresence(project, actor, name, path, time.Now())
+	people, _ = visiblePeople(people, vis)
 	writeJSON(w, map[string]any{"ok": true, "people": people})
 }

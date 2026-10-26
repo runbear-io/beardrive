@@ -365,7 +365,15 @@ func (s *Server) visibilityFor(r *http.Request, p Project) pathFilter {
 	if len(p.Folders) == 0 {
 		return pathFilter{}
 	}
-	base := s.projectPermOf(r, p)
+	return s.visibilityAt(r, p, s.projectPermOf(r, p))
+}
+
+// visibilityAt is visibilityFor for a caller that has already resolved the
+// project-level permission it is built on.
+func (s *Server) visibilityAt(r *http.Request, p Project, base string) pathFilter {
+	if len(p.Folders) == 0 {
+		return pathFilter{}
+	}
 	if base == PermAdmin {
 		return pathFilter{} // admin everywhere; nothing to hide
 	}

@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -258,8 +259,139 @@ func changeEventFor(r *http.Request, source string, paths []string, puts, delete
 // (watchedPollFactor). Without a push, a narrowing rule would wait out the
 // watched poll — and loadScope runs before the scan specifically so a scan
 // cannot mint an op the hub would refuse with a 403 that wedges the journal.
+//
+// Every stream re-checks its reader's access at this frame (streamVisibility),
+// so a revoked reader's stream ends at it, and follows it with its own
+// process's roster (handleEvents) — on every process, since the relay carries
+// the frame to all of them.
 func (s *Server) publishScope(project string) {
 	s.events().publish(project, changeEvent{Type: "scope"})
+}
+
+// publishComments tells a project's listeners that a file's comments moved. The
+// frame names the file, so a reader who cannot see it is not told that
+// something happened there (frameFor); a viewer that is told refetches its own
+// comment list, which is filtered.
+func (s *Server) publishComments(project, path string) {
+	ev := changeEvent{Type: "comments"}
+	if path != "" {
+		ev.Paths = []string{path}
+	}
+	s.events().publish(project, ev)
+}
+
+// scopeFrame is the frame publishScope sends, byte for byte: what a stream
+// receives for it, whether it was published here or relayed from elsewhere.
+var scopeFrame, _ = json.Marshal(changeEvent{Type: "scope"})
+
+// publishOrgScope is publishScope for every project of an organization: a
+// member's role or membership is part of every project-level permission there.
+// In the background: the change has committed, and with a relay each project
+// is a round trip that an owner's request should not wait on.
+func (s *Server) publishOrgScope(org string) {
+	if s.Projects == nil {
+		return
+	}
+	var ids []string
+	for _, p := range s.Projects.List() {
+		if p.Org == org {
+			ids = append(ids, p.ID)
+		}
+	}
+	go func() {
+		for _, id := range ids {
+			s.publishScope(id)
+		}
+	}()
+}
+
+// frameFor is the frame one subscriber may see, and whether it may see one at
+// all.
+//
+// A frame is marshalled once and fanned out to every listener on the project,
+// including ones relayed from another process, so it carries every path the
+// write touched. Sent as is, a member denied a folder learned the name of every
+// file changed inside it — and, from presence, every file a teammate opened
+// there — although the tree, history and the sync wire all hide those paths.
+//
+// A change frame keeps only the paths this reader can read, and is not sent
+// once none are left: a frame naming nothing would still say "something you
+// cannot see just changed". The one exception is a truncated frame (More),
+// whose remaining paths are unknown here; it goes out with no paths, which
+// asks the client to refetch its own filtered view and names nothing. Its
+// counts are dropped whenever a path was, or may have been past the truncation,
+// because they were counts of what was hidden too. A comments frame is not sent
+// when the file it names is hidden. A presence frame keeps every person and
+// blanks the path of anyone on a hidden one. Anything that does not decode is
+// not sent.
+func frameFor(frame []byte, vis pathFilter) ([]byte, bool) {
+	if !vis.hides() {
+		return frame, true
+	}
+	var ev changeEvent
+	if err := json.Unmarshal(frame, &ev); err != nil {
+		return nil, false
+	}
+	switch ev.Type {
+	case "change":
+		kept := make([]string, 0, len(ev.Paths))
+		for _, p := range ev.Paths {
+			if vis.canRead(p) {
+				kept = append(kept, p)
+			}
+		}
+		// A truncated frame (More) loses its counts even when every path it
+		// names is visible: the paths it does not name may not be.
+		if len(kept) == len(ev.Paths) && !ev.More {
+			return frame, true
+		}
+		if len(kept) == 0 && !ev.More {
+			return nil, false
+		}
+		ev.Paths, ev.Puts, ev.Deletes = kept, 0, 0
+	case "comments":
+		for _, p := range ev.Paths {
+			if !vis.canRead(p) {
+				return nil, false
+			}
+		}
+		return frame, true
+	case "presence":
+		people, changed := visiblePeople(ev.People, vis)
+		if !changed {
+			return frame, true
+		}
+		ev.People = people
+	default:
+		return frame, true
+	}
+	out, err := json.Marshal(ev)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// streamVisibility resolves a stream's access from the registry as it stands,
+// for one frame: whether its reader may still read the project at all, and if
+// so which paths. proj() checked the permission once, when the stream opened,
+// and a stream lives for streamMaxAge; a member whose grant or membership was
+// taken away since must stop hearing about the project, not only about a
+// folder. Re-reading is the registry's change-token check, not a load. False
+// when the project is gone or its reader may no longer read it.
+func (s *Server) streamVisibility(r *http.Request, project string) (pathFilter, bool) {
+	if s.Projects == nil {
+		return pathFilter{}, true
+	}
+	p, ok := s.Projects.Get(project)
+	if !ok {
+		return pathFilter{}, false
+	}
+	base := s.projectPermOf(r, p)
+	if !atLeast(base, PermRead) {
+		return pathFilter{}, false
+	}
+	return s.visibilityAt(r, p, base), true
 }
 
 // newOpPaths is countOps' sibling: the paths of the ops this push actually
@@ -327,7 +459,6 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 		s.events().unsubscribe(project, sub)
 		s.streamGone(project, actor)
 	}()
-
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	// The frames are small and the stream is long-lived: gzip here buffers
@@ -359,8 +490,43 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 					return
 				}
 			}
-			if !writeFrame(w, rc, frame) {
+			// Frames are published once for every listener, so what this one
+			// may see is decided here, on the way out, from the project as it
+			// stands NOW. Not cached for the stream: a rule set before this
+			// stream subscribed announces itself to nobody here, and a frame
+			// queued before a rule's scope frame would still cross the change
+			// under the old filter. Resolving per frame is the fence: the rules
+			// are read after the frame was dequeued, so after the change it
+			// describes, and a path reaches this reader only if it could read
+			// that path at that instant — what a listing fetched then would
+			// show. And the scope frame every rule or access change publishes
+			// is the fence on the wire: this goroutine reads the rules and
+			// writes a frame before it dequeues the next, so every frame
+			// written after the scope frame was filtered by rules at least as
+			// new as the change it announces, whatever order the fan-out
+			// queued them in.
+			vis, ok := s.streamVisibility(r, project)
+			if !ok {
+				return // the project is gone, or this reader may no longer read it
+			}
+			out, ok := frameFor(frame, vis)
+			if !ok {
+				continue
+			}
+			if !writeFrame(w, rc, out) {
 				return
+			}
+			// A browser keeps the last roster it was sent, so after a scope
+			// change a teammate on a file that just became hidden would stay
+			// on screen until somebody moved. The roster is this process's,
+			// sent by every process to its own streams: the publisher's would
+			// leave out everyone whose stream lives elsewhere.
+			if bytes.Equal(frame, scopeFrame) {
+				people, _ := visiblePeople(s.presence().roster(project), vis)
+				roster, err := json.Marshal(changeEvent{Type: "presence", People: people})
+				if err != nil || !writeFrame(w, rc, roster) {
+					return
+				}
 			}
 		case <-tick.C:
 			// The resync also rides the keepalive, not just the next frame:
@@ -368,6 +534,13 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 			// would otherwise stay stale until its stream aged out, since
 			// the thing that tells it to refetch is the very traffic that
 			// has stopped.
+			// Access is re-checked here too, so a revocation that published
+			// no scope frame this process heard (a provider deleting an
+			// account on its own side) ends a quiet stream within one
+			// keepalive rather than at streamMaxAge.
+			if _, ok := s.streamVisibility(r, project); !ok {
+				return
+			}
 			if sub.lost.Swap(false) {
 				if !writeFrame(w, rc, []byte(`{"type":"resync"}`)) {
 					return
