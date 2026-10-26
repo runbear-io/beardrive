@@ -751,9 +751,17 @@ func (r *fileAppRepo) edit(fn func()) error {
 	return r.write()
 }
 
-func (r *fileAppRepo) PutApp(a App) error { return r.edit(func() { r.apps[a.ID] = a }) }
-func (r *fileAppRepo) PutKey(k AppKey) error { return r.edit(func() { r.keys[k.ID] = k }) }
+func (r *fileAppRepo) PutApp(a App) error        { return r.edit(func() { r.apps[a.ID] = a }) }
+func (r *fileAppRepo) PutKey(k AppKey) error     { return r.edit(func() { r.keys[k.ID] = k }) }
 func (r *fileAppRepo) DeleteKey(id string) error { return r.edit(func() { delete(r.keys, id) }) }
+func (r *fileAppRepo) TouchKey(id string, at time.Time) error {
+	return r.edit(func() {
+		if k, ok := r.keys[id]; ok {
+			k.LastUsed = at
+			r.keys[id] = k
+		}
+	})
+}
 func (r *fileAppRepo) DeleteApp(id string) error {
 	return r.edit(func() {
 		delete(r.apps, id)

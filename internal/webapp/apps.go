@@ -230,7 +230,7 @@ func (db *AppDB) Authenticate(token string) (App, bool) {
 	}
 	if now := time.Now().UTC(); now.Sub(k.LastUsed) >= appTouchEvery {
 		k.LastUsed = now
-		if err := db.repo.PutKey(k); err == nil {
+		if err := db.repo.TouchKey(id, now); err == nil {
 			db.keys[id] = k
 		}
 	}
@@ -245,7 +245,7 @@ var appRoutes = []struct {
 	path   *regexp.Regexp
 }{
 	{http.MethodPost, regexp.MustCompile(`^/api/p/[^/]+/data/(query|describe)$`)},
-	{http.MethodGet, regexp.MustCompile(`^/api/p/[^/]+/history(/summary)?$`)},
+	{http.MethodGet, regexp.MustCompile(`^/api/p/[^/]+/history(/summary|/emptied)?$`)},
 }
 
 func appRoute(r *http.Request) bool {

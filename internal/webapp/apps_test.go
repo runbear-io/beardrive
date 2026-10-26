@@ -87,8 +87,10 @@ func TestAppKeyReadsOnlyWhatItIsGranted(t *testing.T) {
 	}
 
 	// A key reaches data and history, and nothing else.
-	if rec := keyCall(d, "GET", "/api/p/"+pid+"/history?prefix=konny/", "", key); rec.Code != 200 {
-		t.Fatalf("history with a key: %d %s", rec.Code, rec.Body)
+	for _, h := range []string{"/history?prefix=konny/", "/history/summary", "/history/emptied"} {
+		if rec := keyCall(d, "GET", "/api/p/"+pid+h, "", key); rec.Code != 200 {
+			t.Fatalf("%s with a key: %d %s", h, rec.Code, rec.Body)
+		}
 	}
 	for _, c := range []struct{ method, url string }{
 		{"GET", "/api/p/" + pid + "/tree"},
@@ -180,6 +182,14 @@ func TestAppsConformance(t *testing.T) {
 			}
 			if _, ok := other.Authenticate(tok); ok {
 				t.Fatal("a key revoked by one registry still works in the other")
+			}
+			// A use recorded after the revocation, by a process that resolved
+			// the key just before it, does not write the key back.
+			if err := s.Apps().TouchKey(k.ID, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if _, left, err := s.Apps().Load(); err != nil || len(left) != 0 {
+				t.Fatalf("a use after the revocation wrote the key back: %+v %v", left, err)
 			}
 			tok2, _, _ := db.Mint(a.ID)
 			if err := db.Delete(a.ID); err != nil {

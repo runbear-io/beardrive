@@ -1172,6 +1172,10 @@ func (r *sqlAppRepo) PutKey(k AppKey) error {
 		k.ID, k.App, k.Digest, k.Hint, tenc(k.Created), tenc(k.LastUsed))
 }
 
+func (r *sqlAppRepo) TouchKey(id string, at time.Time) error {
+	return r.w.exec(`UPDATE app_keys SET last_used = ? WHERE id = ?`, tenc(at), id)
+}
+
 func (r *sqlAppRepo) DeleteKey(id string) error {
 	return r.w.exec(`DELETE FROM app_keys WHERE id = ?`, id)
 }

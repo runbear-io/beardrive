@@ -105,6 +105,9 @@ type AppRepo interface {
 	PutApp(a App) error
 	DeleteApp(id string) error // and its keys
 	PutKey(k AppKey) error
+	// TouchKey records a key's last use only while the key still exists: a
+	// use that races a revocation must not write the key back.
+	TouchKey(id string, at time.Time) error
 	DeleteKey(id string) error
 }
 
