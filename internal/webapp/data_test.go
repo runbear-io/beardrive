@@ -3,6 +3,8 @@ package webapp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"math/rand/v2"
 	"net/http"
@@ -520,4 +522,74 @@ func TestDataQuerySQLDropsAFileThatBecameALink(t *testing.T) {
 	if got := count(); got != 0 {
 		t.Fatalf("the link's path came back with %d rows", got)
 	}
+}
+
+// A row another process indexed from a newer fold stays when this process's
+// fold has not caught up with it: no delete ended it, so nothing here may
+// remove it, and removing it would let an older fold put back its own row.
+func TestDataQuerySQLKeepsARowItsFoldPredates(t *testing.T) {
+	for name, open := range dataBackends(t) {
+		t.Run(name, func(t *testing.T) {
+			x := open(t)
+			d := newDataHub(t, x)
+			d.enable()
+			op := journal.Op{
+				Lamport: 1 << 40, Time: time.Now().UTC(), Device: "elsewhere", Seq: 1,
+				Kind: journal.KindPut, Path: "y/new.json", Blob: strings.Repeat("a", 64), Size: 7,
+			}
+			row := dataRow{path: op.Path, win: winKey(op), sha: op.Blob, changedAt: op.Time, doc: []byte(`{"n":1}`)}
+			if _, err := x.write(context.Background(), d.p.ID, []dataRow{row}); err != nil {
+				t.Fatal(err)
+			}
+			// Loaded after this process's fold was read, as on a pass that raced the other.
+			st := d.srv.dataProjectState(d.p.ID)
+			st.mu.Lock()
+			st.known = nil
+			st.mu.Unlock()
+			d.srv.dataWrote(context.Background(), d.p.ID)
+			if got := d.query("alice", map[string]any{"pattern": "y/*.json", "count": true}).Count; got != 1 {
+				t.Fatalf("a row from a newer fold was removed: %d rows", got)
+			}
+		})
+	}
+}
+
+// A pass that could not fetch a file reports the index behind until a later
+// pass fetches it.
+func TestDataQuerySQLReportsAPassThatMissedAFile(t *testing.T) {
+	h, srv, cookies, p, root := permHubAt(t)
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	srv.Data = x
+	d := &dataHub{t: t, h: h, srv: srv, cookies: cookies, p: p}
+	d.enable()
+	dev := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	body := `{"v":1}`
+	sum := sha256.Sum256([]byte(body))
+	blob := hex.EncodeToString(sum[:])
+	dev.append("laptop", journal.Op{Kind: journal.KindPut, Path: "x/a.json", Blob: blob, Size: int64(len(body))})
+	wait := func(what string, ok func(dataAnswer) bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			srv.dataBoot()
+			if ok(d.query("alice", map[string]any{"pattern": "x/*.json", "count": true})) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal(what)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	wait("a pass that could not fetch a file still reports the index complete",
+		func(a dataAnswer) bool { return !a.Complete })
+	if err := os.WriteFile(filepath.Join(root, p.ID, "blobs", blob), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wait("the index never caught up once the file could be fetched",
+		func(a dataAnswer) bool { return a.Complete && a.Count == 1 })
 }

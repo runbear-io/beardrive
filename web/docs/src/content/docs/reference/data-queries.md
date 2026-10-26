@@ -75,7 +75,7 @@ numbers in numeric order, then strings in byte order, then nulls.
 - `groups` replaces `rows` when the query groups. `count` replaces `rows` when the query only counts.
 - `errors` is how many matching files could not be read as data: invalid JSON, invalid frontmatter, or a file over 2 MiB. They are counted, never silently left out.
 - `as_of` is when the index last caught up with the project.
-- `complete` is false while the first build after turning Data on is still running.
+- `complete` is false while the index is behind the project: during the first build after turning Data on, or after a pass that could not fetch every file (the next change retries them).
 
 Every answer has an **ETag**. Send it back as `If-None-Match`, and the hub
 answers `304 Not Modified` while nothing you can see has changed. The ETag

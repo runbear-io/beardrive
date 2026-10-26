@@ -218,7 +218,9 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 	// no longer data because its winner is something else (a link): that
 	// winner is the key. A path absent from the fold ends in a delete, and
 	// every delete takes effect, so its key is the greatest delete of the path.
-	var forget []string
+	// An absent path with no delete at all is a row from a fold newer than this
+	// pass's (another process indexed it), so it is left for a pass that has
+	// read one: removing it would drop the only fence against older folds.
 	var write []dataRow
 	var absent []string
 	for _, path := range gone {
@@ -254,7 +256,6 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 		for _, path := range gone {
 			op, ok := last[path]
 			if !ok {
-				forget = append(forget, path)
 				continue
 			}
 			write = append(write, dataRow{
@@ -267,16 +268,10 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 	if err := s.dataWriteKnown(ctx, id, st, write); err != nil {
 		return err
 	}
-	for _, path := range forget {
-		if err := s.Data.forget(ctx, id, path, []byte(st.known[path].win)); err != nil {
-			return err
-		}
-		delete(st.known, path)
+	if !complete {
+		return s.Data.lower(ctx, id)
 	}
-	if complete {
-		return s.Data.setState(ctx, id, true, time.Now())
-	}
-	return nil
+	return s.Data.setState(ctx, id, true, time.Now())
 }
 
 // dataWriteKnown writes rows and records what the index then holds. A row the

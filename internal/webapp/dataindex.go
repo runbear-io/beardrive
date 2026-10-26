@@ -286,14 +286,6 @@ func (x *DataIndex) write(ctx context.Context, project string, rows []dataRow) (
 	return refused, nil
 }
 
-// forget drops a row that left the fold with no delete op to key a
-// tombstone on — only while it still holds the key the caller saw.
-func (x *DataIndex) forget(ctx context.Context, project, path string, win []byte) error {
-	_, err := x.w.ExecContext(ctx, x.q(`DELETE FROM data_items WHERE project = ? AND path = ? AND win = ?`),
-		project, path, win)
-	return err
-}
-
 // dropProject removes a project's whole index, when its Data setting goes off
 // or the project goes away.
 func (x *DataIndex) dropProject(ctx context.Context, project string) error {
@@ -339,6 +331,14 @@ func (x *DataIndex) readTx(ctx context.Context) (*sql.Tx, error) {
 		}
 	}
 	return tx, nil
+}
+
+// lower marks a project's index behind, keeping as_of at the last pass that
+// caught up: a pass that could not fetch every file leaves the rest for the
+// next one, and until then a query must not report the index complete.
+func (x *DataIndex) lower(ctx context.Context, project string) error {
+	_, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET complete = 0 WHERE project = ?`), project)
+	return err
 }
 
 // state is a project's index state as a query reports it.
