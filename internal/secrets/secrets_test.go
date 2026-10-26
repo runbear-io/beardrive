@@ -25,6 +25,17 @@ func TestScanSecrets(t *testing.T) {
 		{"clean", "# Notes\n\nnothing to see, sk- is just a prefix here\n", nil},
 		{"aws", "line1\nline2\nkey = " + fakeAWSKey + "\n", []Finding{{"aws_access_key_id", 3}}},
 		{"openai", "OPENAI=" + fakeOpenAIKey, []Finding{{"openai_api_key", 1}}},
+		{"openai at line start", "a\n" + fakeOpenAIKey, []Finding{{"openai_api_key", 2}}},
+		{"openai quoted", "key: \"" + fakeOpenAIKey + "\"", []Finding{{"openai_api_key", 1}}},
+		{
+			// Slugs whose words end in "sk": the prefix is the tail of a word.
+			"slugs are not keys",
+			"accounts/acme/helpdesk-onboarding-rollout-plan-2026\n" +
+				"[[clientdesk-migration-notes-and-followups]]\n" +
+				"ask-anything-about-the-customer-onboarding\n" +
+				"https://example.com/news/sk-hynix-quarterly-results-2026\n",
+			nil,
+		},
 		{"github", "\n\n" + fakeGitHubPAT, []Finding{{"github_pat", 3}}},
 		{"slack", "token: " + fakeSlackTok, []Finding{{"slack_token", 1}}},
 		{"gitlab", "x\n" + fakeGitLabPAT, []Finding{{"gitlab_pat", 2}}},
