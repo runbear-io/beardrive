@@ -236,6 +236,58 @@ func TestEventStreamEndsWhenItsReaderLosesTheProject(t *testing.T) {
 	}
 }
 
+// A member removed from the organization while their stream sits idle loses
+// it at once: the removal publishes scope, and the stream ends at that frame
+// rather than at the next write or an hour later.
+func TestEventStreamEndsWhenItsReaderLeavesTheOrg(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	bob := streamAs(t, srv, ts, p.ID, "bob@x.io", cookies["bob"])
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/orgs/"+p.Org+"/members/bob@x.io", nil)
+	req.AddCookie(cookies["alice"])
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("removing bob: %d", resp.StatusCode)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.events().hasActor(p.ID, "bob@x.io") {
+		if time.Now().After(deadline) {
+			t.Fatal("bob's idle stream is still open after bob left the org")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case ev := <-bob:
+		t.Fatalf("a frame reached bob after the removal: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A browser keeps the last roster it was sent. When a rule hides the file a
+// teammate has open, the reader gets a roster with that path blanked right
+// after the scope frame, though nobody has moved since.
+func TestEventStreamResendsTheRosterWhenScopeMoves(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	bob := streamAs(t, srv, ts, p.ID, "bob@x.io", cookies["bob"])
+	sendAs(t, ts, "POST", "/api/p/"+p.ID+"/presence", `{"path":"secret/plan.md"}`, cookies["alice"])
+	if ev := nextFrame(t, bob, "presence"); len(ev.People) != 1 || ev.People[0].Path != "secret/plan.md" {
+		t.Fatalf("bob's roster before the rule: %+v", ev)
+	}
+	sendAs(t, ts, "PUT", "/api/p/"+p.ID+"/folders", `{"prefix":"secret","default":"none"}`, cookies["alice"])
+	nextFrame(t, bob, "scope")
+	ev := nextFrame(t, bob, "presence")
+	if len(ev.People) != 1 || ev.People[0].Path != "" {
+		t.Fatalf("bob's roster after the rule: %+v, want alice with no path", ev)
+	}
+}
+
 // Frames and a narrowing rule race each other. A frame's rules are read after
 // it was dequeued, so after the change it describes: a path reaches the reader
 // only if the reader could read it at that instant. Two things follow, and

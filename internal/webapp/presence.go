@@ -105,6 +105,17 @@ func (h *presenceHub) mark(project, actor, name, path string, now time.Time, sti
 	return rosterOf(room), changed, true
 }
 
+// roster is a project's current roster, false when nobody is in the room.
+func (h *presenceHub) roster(project string) ([]person, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	room := h.at[project]
+	if len(room) == 0 {
+		return nil, false
+	}
+	return rosterOf(room), true
+}
+
 // drop removes an actor immediately, for a client that says it is leaving.
 func (h *presenceHub) drop(project, actor string) ([]person, bool) {
 	h.mu.Lock()

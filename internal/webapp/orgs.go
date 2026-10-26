@@ -898,6 +898,7 @@ func (s *Server) handleMemberUpdate(w http.ResponseWriter, r *http.Request) {
 		s.writeDirErr(w, orgID, err)
 		return
 	}
+	s.publishOrgScope(orgID)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -911,6 +912,8 @@ func (s *Server) handleMemberRemove(w http.ResponseWriter, r *http.Request) {
 		s.writeDirErr(w, orgID, err)
 		return
 	}
+	// Their open change streams end at the scope frame, not an hour later.
+	s.publishOrgScope(orgID)
 	writeJSON(w, map[string]any{"ok": true})
 }
 

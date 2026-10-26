@@ -258,8 +258,30 @@ func changeEventFor(r *http.Request, source string, paths []string, puts, delete
 // (watchedPollFactor). Without a push, a narrowing rule would wait out the
 // watched poll — and loadScope runs before the scan specifically so a scan
 // cannot mint an op the hub would refuse with a 403 that wedges the journal.
+//
+// The roster follows it. A browser keeps the last roster it was sent, and a
+// teammate shown on a file that just became hidden would stay on screen until
+// someone else moved; sent again here, each stream filters it by the new rules
+// on the way out. The scope frame also makes every stream re-check its
+// reader's access (streamVisibility), so a revoked reader's stream ends at it.
 func (s *Server) publishScope(project string) {
 	s.events().publish(project, changeEvent{Type: "scope"})
+	if people, ok := s.presence().roster(project); ok {
+		s.events().publish(project, changeEvent{Type: "presence", People: people})
+	}
+}
+
+// publishOrgScope is publishScope for every project of an organization: a
+// member's role or membership is part of every project-level permission there.
+func (s *Server) publishOrgScope(org string) {
+	if s.Projects == nil {
+		return
+	}
+	for _, p := range s.Projects.List() {
+		if p.Org == org {
+			s.publishScope(p.ID)
+		}
+	}
 }
 
 // frameFor is the frame one subscriber may see, and whether it may see one at
@@ -445,8 +467,12 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 			// are read after the frame was dequeued, so after the change it
 			// describes, and a path reaches this reader only if it could read
 			// that path at that instant — what a listing fetched then would
-			// show. A frame dequeued after the scope frame is filtered by rules
-			// at least as new as that change.
+			// show. And the scope frame every rule or access change publishes
+			// is the fence on the wire: this goroutine reads the rules and
+			// writes a frame before it dequeues the next, so every frame
+			// written after the scope frame was filtered by rules at least as
+			// new as the change it announces, whatever order the fan-out
+			// queued them in.
 			vis, ok := s.streamVisibility(r, project)
 			if !ok {
 				return // the project is gone, or this reader may no longer read it
