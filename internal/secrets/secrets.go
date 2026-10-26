@@ -39,7 +39,12 @@ var secretRules = []struct {
 	// sentence is not a key. If one still fires on real docs, tighten the body
 	// rather than dropping the rule — `--force` and Share anyway are the
 	// escape hatch, which is why they ship in the same change.
-	{"openai_api_key", regexp.MustCompile(`sk-[A-Za-z0-9_-]{20,}`)},
+	//
+	// `sk-` must also start a token: inside a slug like `helpdesk-…` or
+	// `ask-…` it is the tail of a word, and after a `/` it is a URL path segment
+	// (`/sk-hynix-…`, image CDN paths). Go's regexp has no lookbehind, so the
+	// boundary is consumed and the key itself is the first group.
+	{"openai_api_key", regexp.MustCompile(`(?:^|[^A-Za-z0-9_/-])(sk-[A-Za-z0-9_-]{20,})`)},
 	{"github_pat", regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`)},
 	{"slack_token", regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`)},
 	{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
@@ -81,8 +86,15 @@ func Scan(buf []byte) []Finding {
 	seen := map[Finding]bool{}
 	var out []Finding
 	for _, rule := range secretRules {
-		for _, m := range rule.re.FindAllIndex(buf, -1) {
-			f := Finding{Rule: rule.id, Line: bytes.Count(buf[:m[0]], []byte("\n")) + 1}
+		for _, m := range rule.re.FindAllSubmatchIndex(buf, -1) {
+			// A rule with a group reports where the group starts, not where its
+			// boundary character does — that character may be the previous
+			// line's newline.
+			at := m[0]
+			if len(m) > 2 {
+				at = m[2]
+			}
+			f := Finding{Rule: rule.id, Line: bytes.Count(buf[:at], []byte("\n")) + 1}
 			if !seen[f] {
 				seen[f] = true
 				out = append(out, f)
