@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -316,5 +317,69 @@ func TestARetriedAppendTakesTheNextSeq(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Fatalf("journal holds %d ops, want 3 (seed, theirs, ours): %v", len(seen), seen)
+	}
+}
+
+// The hub's next seq counts only its own journal. An op's Device field is
+// JSON its pusher chose: a member's op naming the hub with seq MaxInt64 used
+// to wrap every later hub op onto one (device, seq) slot.
+func TestTheHubSeqIgnoresOpsForgedInAnotherJournal(t *testing.T) {
+	root, h, p := casHub(t)
+	line, _ := journal.Marshal([]journal.Op{{
+		Seq: math.MaxInt64, Lamport: 1, Time: time.Now().UTC(), Device: webDevice.ID,
+		Kind: journal.KindPut, Path: "forged.md", Blob: shaOf("x"), Size: 1,
+	}})
+	if err := root.Backend.Put(context.Background(), p.ID+"/journal/laptop.jsonl", bytes.NewReader(line), int64(len(line))); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.md", "b.md"} {
+		if rec := putIfMatch(h, p.ID, name, name, ""); rec.Code != 200 {
+			t.Fatalf("write %s: %d %s", name, rec.Code, rec.Body)
+		}
+	}
+	seen := map[int64]string{}
+	for _, op := range hubOps(t, root, p.ID) {
+		if op.Seq <= 0 || seen[op.Seq] != "" {
+			t.Fatalf("hub op %s took seq %d (seen: %v)", op.Path, op.Seq, seen)
+		}
+		seen[op.Seq] = op.Path
+	}
+}
+
+// A write refused for a stale base had already stored its blob. It is billed
+// then, once: a retry of the same bytes finds the blob there and adds nothing.
+func TestARefusedWriteStillBillsTheBlobItStored(t *testing.T) {
+	var root *casRoot
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		root = &casRoot{Backend: be}
+		return root
+	})
+	q := &recQuota{}
+	srv.Quota = q
+	h := srv.Handler()
+	if rec := putIfMatch(h, p.ID, "note.md", "v1", ""); rec.Code != 200 {
+		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
+	}
+	billed := func() (n int64) {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		for _, u := range q.usage {
+			n += u.bytes
+		}
+		return n
+	}
+	before := billed()
+	root.beforePutIf = func(key string) { theOtherProcessAppends(t, root, key, "note.md", "theirs") }
+	if rec := putIfMatch(h, p.ID, "note.md", "ours", shaOf("v1")); rec.Code != http.StatusConflict {
+		t.Fatalf("stale write: %d %s", rec.Code, rec.Body)
+	}
+	if got := billed() - before; got != int64(len("ours")) {
+		t.Fatalf("a refused write that stored its blob billed %d bytes, want %d", got, len("ours"))
+	}
+	if rec := putIfMatch(h, p.ID, "note.md", "ours", shaOf("theirs")); rec.Code != 200 {
+		t.Fatalf("retry: %d %s", rec.Code, rec.Body)
+	}
+	if got := billed() - before; got != int64(len("ours")) {
+		t.Fatalf("the retry billed again: %d bytes in all, want %d", got, len("ours"))
 	}
 }

@@ -264,16 +264,20 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 	defer r.upmu.Unlock()
 
 	next := func() ([]byte, error) {
-		all, err := r.loadOps(ctx)
+		sourced, err := r.loadSourcedOps(ctx)
 		if err != nil {
 			return nil, err
 		}
 		if base != nil {
+			all := make([]journal.Op, len(sourced))
+			for i, so := range sourced {
+				all[i] = so.Op
+			}
 			if err := base.holds(all); err != nil {
 				return nil, err
 			}
 		}
-		r.stamp(all, ops)
+		r.stamp(sourced, ops)
 		return journal.Marshal(ops)
 	}
 	key := "journal/" + r.Device.ID + ".jsonl"
@@ -288,13 +292,16 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 }
 
 // stamp gives ops this server's identity and the next places in its journal
-// and in replay order, as all stands.
-func (r *RemoteSource) stamp(all, ops []journal.Op) {
+// and in replay order, as the journals stand. The seq counts only ops read
+// from this server's own journal: an op's Device field is JSON its pusher
+// chose, and a member's op naming the hub's device with seq MaxInt64 would
+// otherwise wrap every later hub op onto one (device, seq) slot.
+func (r *RemoteSource) stamp(sourced []sourcedOp, ops []journal.Op) {
 	var maxLamport, mySeq int64
-	for _, prev := range all {
-		maxLamport = max(maxLamport, prev.Lamport)
-		if prev.Device == r.Device.ID {
-			mySeq = max(mySeq, prev.Seq)
+	for _, so := range sourced {
+		maxLamport = max(maxLamport, so.Op.Lamport)
+		if so.From == r.Device.ID {
+			mySeq = max(mySeq, so.Op.Seq)
 		}
 	}
 	now := time.Now().UTC()
@@ -732,6 +739,12 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// process is guaranteed to be seen.
 	if rs, ok := up.(*RemoteSource); ok {
 		err = rs.uploadIf(r.Context(), p, tmp, s.requestUser(r), "", base)
+		// A write refused after its blob landed (a stale base, a failed
+		// append) still stored the blob, and a retry of the same bytes is
+		// billed nothing (billableBytes): they are charged here or never.
+		if err != nil && billed > 0 && billableBytes(r.Context(), rs.Backend, "blobs/"+blob, size) == 0 {
+			s.quota().RecordUsage(org, billed)
+		}
 	} else {
 		err = up.Upload(r.Context(), p, tmp, size, s.requestUser(r), "")
 	}
