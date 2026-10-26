@@ -94,16 +94,20 @@ func TestDataIndexSQLKeepsTheNewerRow(t *testing.T) {
 			row := func(op journal.Op, doc string) dataRow {
 				return dataRow{path: op.Path, win: winKey(op), sha: op.Blob, doc: []byte(doc), deleted: op.Kind == journal.KindDelete}
 			}
-			for _, rows := range [][]dataRow{{row(newer, `{"v":2}`)}, {row(old, `{"v":1}`)}} {
-				if err := x.write(ctx, project, rows); err != nil {
+			for i, rows := range [][]dataRow{{row(newer, `{"v":2}`)}, {row(old, `{"v":1}`)}} {
+				refused, err := x.write(ctx, project, rows)
+				if err != nil {
 					t.Fatal(err)
+				}
+				if refused != i {
+					t.Fatalf("write %d refused %d rows, want %d", i, refused, i)
 				}
 			}
 			if k, _ := x.known(ctx, project); k["a.json"].win != string(winKey(newer)) {
 				t.Fatal("an older fold wrote over the newer row")
 			}
 			for _, rows := range [][]dataRow{{{path: "a.json", win: winKey(del), deleted: true}}, {row(newer, `{"v":2}`)}} {
-				if err := x.write(ctx, project, rows); err != nil {
+				if _, err := x.write(ctx, project, rows); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -473,5 +477,47 @@ func TestDataQuerySQLAppliesInSlices(t *testing.T) {
 	d.put("lit/ab1.json", `{"n":3}`)
 	if got := d.query("alice", map[string]any{"pattern": "lit/ab1.json", "select": []string{"n"}}); len(got.Rows) != 1 || string(got.Rows[0]["n"]) != "3" {
 		t.Fatalf("after a change: %v", got.Rows)
+	}
+}
+
+// A JSON file that becomes a link stops being data. Its row is removed under
+// the key of the link that replaced it — not under an older delete in its
+// history, which the index would refuse while the applier went on believing
+// the row was gone. Review (runbear-bot) on #320.
+func TestDataQuerySQLDropsAFileThatBecameALink(t *testing.T) {
+	h, srv, cookies, p, root := permHubAt(t)
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	srv.Data = x
+	d := &dataHub{t: t, h: h, srv: srv, cookies: cookies, p: p}
+	d.enable()
+	dev := newFakeRemoteAt(t, filepath.Join(root, p.ID))
+	count := func() int { return d.query("alice", map[string]any{"pattern": "x/*.json", "count": true}).Count }
+	settle := func(want int) {
+		t.Helper()
+		srv.dataBoot()
+		deadline := time.Now().Add(5 * time.Second)
+		for count() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("the index never reached %d rows", want)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	// A delete in the path's history, older than the version indexed now.
+	dev.put("laptop", "x/a.json", `{"v":1}`)
+	dev.del("laptop", "x/a.json")
+	dev.put("laptop", "x/a.json", `{"v":2}`)
+	settle(1)
+	dev.append("laptop", journal.Op{Kind: journal.KindPut, Path: "x/a.json", Link: "elsewhere.json"})
+	settle(0)
+	// And it stays gone: a later pass does not skip it, and nothing brings it back.
+	srv.dataBoot()
+	time.Sleep(100 * time.Millisecond)
+	if got := count(); got != 0 {
+		t.Fatalf("the link's path came back with %d rows", got)
 	}
 }

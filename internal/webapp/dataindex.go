@@ -240,9 +240,10 @@ type dataKnown struct {
 	deleted bool
 }
 
-// write applies rows, each only over an older one. Chunked so the initial
-// build of a large project is not one transaction.
-func (x *DataIndex) write(ctx context.Context, project string, rows []dataRow) error {
+// write applies rows, each only over an older one, and reports how many it
+// refused because the index already held a newer one. Chunked so the
+// initial build of a large project is not one transaction.
+func (x *DataIndex) write(ctx context.Context, project string, rows []dataRow) (refused int, err error) {
 	docParam := "?"
 	if x.d == dialectPostgres {
 		docParam = "CAST(? AS JSONB)"
@@ -259,25 +260,30 @@ func (x *DataIndex) write(ctx context.Context, project string, rows []dataRow) e
 		n := min(chunk, len(rows))
 		tx, err := x.w.BeginTx(ctx, nil)
 		if err != nil {
-			return err
+			return refused, err
 		}
 		for _, r := range rows[:n] {
 			var doc any
 			if r.doc != nil {
 				doc = string(r.doc)
 			}
-			if _, err := tx.ExecContext(ctx, stmt, project, r.path, r.win, r.sha, dataTime(r.changedAt),
-				r.changedBy, doc, r.err, boolInt(r.deleted)); err != nil {
+			res, err := tx.ExecContext(ctx, stmt, project, r.path, r.win, r.sha, dataTime(r.changedAt),
+				r.changedBy, doc, r.err, boolInt(r.deleted))
+			if err != nil {
 				tx.Rollback()
-				return fmt.Errorf("index %s: %w", r.path, err)
+				return refused, fmt.Errorf("index %s: %w", r.path, err)
+			}
+			// An upsert whose WHERE refused it changes no row.
+			if n, err := res.RowsAffected(); err == nil && n == 0 {
+				refused++
 			}
 		}
 		if err := tx.Commit(); err != nil {
-			return err
+			return refused, err
 		}
 		rows = rows[n:]
 	}
-	return nil
+	return refused, nil
 }
 
 // forget drops a row that left the fold with no delete op to key a

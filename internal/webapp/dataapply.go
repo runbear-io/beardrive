@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -212,13 +213,26 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 		puts = puts[n:]
 	}
 
-	// A path that left the fold is a tombstone keyed on its delete op, so an
-	// older fold can never put it back. Absent from the fold means its last
-	// effective op is a delete, and every delete takes effect, so that op is
-	// the greatest delete of the path.
+	// A path that stopped being data is a tombstone keyed on the op that ended
+	// it, so an older fold can never put it back. A path still in the fold is
+	// no longer data because its winner is something else (a link): that
+	// winner is the key. A path absent from the fold ends in a delete, and
+	// every delete takes effect, so its key is the greatest delete of the path.
 	var forget []string
 	var write []dataRow
-	if len(gone) > 0 {
+	var absent []string
+	for _, path := range gone {
+		if fi, ok := snap.files[path]; ok {
+			win := fi.winOp(path)
+			write = append(write, dataRow{
+				path: path, win: winKey(win), changedAt: win.Time,
+				changedBy: firstNonEmpty(fi.User, fi.Author), deleted: true,
+			})
+			continue
+		}
+		absent = append(absent, path)
+	}
+	if gone = absent; len(gone) > 0 {
 		ops, err := rs.loadSourcedOps(ctx)
 		if err != nil {
 			return err
@@ -265,10 +279,18 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 	return nil
 }
 
-// dataWriteKnown writes rows and records them as what the index holds.
+// dataWriteKnown writes rows and records what the index then holds. A row the
+// index refused already held a newer one, from another process or a newer
+// fold; recording ours as known would make later passes skip a path whose row
+// they never wrote, so a refusal reloads what is really there instead.
 func (s *Server) dataWriteKnown(ctx context.Context, id string, st *dataProject, rows []dataRow) error {
-	if err := s.Data.write(ctx, id, rows); err != nil {
-		st.known = nil // reload: some of the batch may have landed
+	refused, err := s.Data.write(ctx, id, rows)
+	if err != nil || refused > 0 {
+		var lerr error
+		if st.known, lerr = s.Data.known(ctx, id); lerr != nil {
+			st.known = nil
+			return errors.Join(err, lerr)
+		}
 		return err
 	}
 	for _, r := range rows {
