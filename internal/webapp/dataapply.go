@@ -160,43 +160,56 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 		gone = append(gone, path)
 	}
 
-	rows := make([]dataRow, len(puts))
-	fetched := make([]bool, len(puts))
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(journalFetchConcurrency)
-	for i, pt := range puts {
-		g.Go(func() error {
-			row := dataRow{
-				path: pt.path, win: pt.win, sha: pt.fi.Blob, changedAt: pt.fi.Time,
-				changedBy: firstNonEmpty(pt.fi.User, pt.fi.Author),
-			}
-			if pt.fi.Size > dataMaxFile {
-				row.err = fmt.Sprintf("larger than the %d MiB a file may index", dataMaxFile>>20)
-			} else {
-				rc, err := rs.OpenBlob(gctx, pt.fi.Blob)
-				if err != nil {
-					return nil // retried next pass; this one is incomplete
-				}
-				b, err := io.ReadAll(io.LimitReader(rc, dataMaxFile+1))
-				rc.Close()
-				if err != nil {
-					return nil
-				}
-				row.doc, row.err = decodeData(pt.path, b)
-			}
-			rows[i], fetched[i] = row, true
-			return nil
-		})
-	}
-	g.Wait()
+	// Fetched, decoded and written a slice at a time, so a first build of a
+	// large project holds one slice of documents in memory, not all of them.
 	complete := true
-	var write []dataRow
-	for i := range rows {
-		if fetched[i] {
-			write = append(write, rows[i])
-		} else {
-			complete = false
+	for len(puts) > 0 {
+		n, bytes := 0, int64(0)
+		for n < len(puts) && n < dataApplyChunkFiles && bytes < dataApplyChunkBytes {
+			bytes += min(puts[n].fi.Size, dataMaxFile)
+			n++
 		}
+		rows := make([]dataRow, n)
+		fetched := make([]bool, n)
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(journalFetchConcurrency)
+		for i, pt := range puts[:n] {
+			g.Go(func() error {
+				row := dataRow{
+					path: pt.path, win: pt.win, sha: pt.fi.Blob, changedAt: pt.fi.Time,
+					changedBy: firstNonEmpty(pt.fi.User, pt.fi.Author),
+				}
+				if pt.fi.Size > dataMaxFile {
+					row.err = fmt.Sprintf("larger than the %d MiB a file may index", dataMaxFile>>20)
+				} else {
+					rc, err := rs.OpenBlob(gctx, pt.fi.Blob)
+					if err != nil {
+						return nil // retried next pass; this one is incomplete
+					}
+					b, err := io.ReadAll(io.LimitReader(rc, dataMaxFile+1))
+					rc.Close()
+					if err != nil {
+						return nil
+					}
+					row.doc, row.err = decodeData(pt.path, b)
+				}
+				rows[i], fetched[i] = row, true
+				return nil
+			})
+		}
+		g.Wait()
+		var write []dataRow
+		for i := range rows {
+			if fetched[i] {
+				write = append(write, rows[i])
+			} else {
+				complete = false
+			}
+		}
+		if err := s.dataWriteKnown(ctx, id, st, write); err != nil {
+			return err
+		}
+		puts = puts[n:]
 	}
 
 	// A path that left the fold is a tombstone keyed on its delete op, so an
@@ -204,6 +217,7 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 	// effective op is a delete, and every delete takes effect, so that op is
 	// the greatest delete of the path.
 	var forget []string
+	var write []dataRow
 	if len(gone) > 0 {
 		ops, err := rs.loadSourcedOps(ctx)
 		if err != nil {
@@ -236,12 +250,8 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 		}
 	}
 
-	if err := s.Data.write(ctx, id, write); err != nil {
-		st.known = nil // reload: some of the batch may have landed
+	if err := s.dataWriteKnown(ctx, id, st, write); err != nil {
 		return err
-	}
-	for _, r := range write {
-		st.known[r.path] = dataKnown{win: string(r.win), deleted: r.deleted}
 	}
 	for _, path := range forget {
 		if err := s.Data.forget(ctx, id, path, []byte(st.known[path].win)); err != nil {
@@ -254,6 +264,24 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 	}
 	return nil
 }
+
+// dataWriteKnown writes rows and records them as what the index holds.
+func (s *Server) dataWriteKnown(ctx context.Context, id string, st *dataProject, rows []dataRow) error {
+	if err := s.Data.write(ctx, id, rows); err != nil {
+		st.known = nil // reload: some of the batch may have landed
+		return err
+	}
+	for _, r := range rows {
+		st.known[r.path] = dataKnown{win: string(r.win), deleted: r.deleted}
+	}
+	return nil
+}
+
+// A pass fetches and writes at most this much at a time.
+var (
+	dataApplyChunkFiles       = 256
+	dataApplyChunkBytes int64 = 16 << 20
+)
 
 func firstNonEmpty(a, b string) string {
 	if a != "" {

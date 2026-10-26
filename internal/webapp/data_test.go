@@ -452,3 +452,26 @@ func TestDataQuerySQLFollowsTheFoldAfterBoot(t *testing.T) {
 	dev.del("laptop", "x/a.json")
 	waitFor(0)
 }
+
+// A pass writes a slice at a time; with slices of two files every file still
+// lands, and a later change still replaces its row.
+func TestDataQuerySQLAppliesInSlices(t *testing.T) {
+	files, bytes := dataApplyChunkFiles, dataApplyChunkBytes
+	dataApplyChunkFiles, dataApplyChunkBytes = 2, 1<<20
+	defer func() { dataApplyChunkFiles, dataApplyChunkBytes = files, bytes }()
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	x.SetMaxConns(1, 1)
+	d := newDataHub(t, x)
+	d.enable()
+	if got := d.query("alice", map[string]any{"pattern": "**/*.json", "count": true}); got.Count != 8 || got.Errors != 1 {
+		t.Fatalf("indexed %d files with %d errors, want 8 and 1", got.Count, got.Errors)
+	}
+	d.put("lit/ab1.json", `{"n":3}`)
+	if got := d.query("alice", map[string]any{"pattern": "lit/ab1.json", "select": []string{"n"}}); len(got.Rows) != 1 || string(got.Rows[0]["n"]) != "3" {
+		t.Fatalf("after a change: %v", got.Rows)
+	}
+}

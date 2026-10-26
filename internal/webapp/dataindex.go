@@ -105,6 +105,15 @@ func OpenDataIndex(driver, dsn string) (*DataIndex, error) {
 	return x, nil
 }
 
+// SetMaxConns bounds the index's two pools: the applier's and the queries'.
+// The defaults (2 and 4) assume a database with room to spare; a deployment
+// sharing a small one — a db-f1-micro allows about 25 connections for every
+// pool in the process — sizes them to its own budget.
+func (x *DataIndex) SetMaxConns(applier, queries int) {
+	x.w.SetMaxOpenConns(applier)
+	x.r.SetMaxOpenConns(queries)
+}
+
 func (x *DataIndex) Close() error {
 	x.r.Close()
 	return x.w.Close()
