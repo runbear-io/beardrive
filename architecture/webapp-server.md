@@ -419,6 +419,7 @@ classDiagram
         +Default string
         +Perms map email→level
         +Folders FolderRule slice
+        +Data bool
         +ruleFor(path) longest prefix
     }
     class FolderRule {
@@ -612,6 +613,31 @@ classDiagram
     }
     note for DeviceRegistry "A device is keyed by (account, id), not by id alone — two accounts naming the same id hold two independent rows, so nothing a stranger sends can overwrite yours. Hub-wide ownership is FIRST CLAIM WINS, decided by FirstSeen. Bind, at token issuance, is the only thing that creates a row for an id that has never synced: it refuses an id another account already owns when the caller can see that account (same org) and otherwise binds nothing and says nothing, so the error is never a cross-org existence oracle. OwnerOf is the write gate the /store journal door asks; MayActAs is the looser telemetry gate (mine, or unclaimed); Release is offboarding's half. IDs are shape-checked and lower-cased at one door (deviceID), so case alone can't fork an identity"
 
+    class DataIndex {
+        <<dataindex.go>>
+        -w sql.DB the applier
+        -r sql.DB queries: READ ONLY, 4 conns, 2s statement timeout
+        +write(project, rows) only over an OLDER win
+        +rowsDigest(where) visible (path, win)
+        +readTx() one snapshot per query
+        +dropProject(project)
+    }
+    note for DataIndex "One row per JSON file, and per Markdown file's frontmatter, of every project whose Data setting is on: data_items(project, path, win, sha, changed_at, changed_by, doc, error, deleted) + data_projects(complete, applied_at). In the metadata SQL database, or data-index.db beside file metadata. DERIVED: dropped with the setting or the project, rebuilt by the next pass. win is winKey — journal.Less as bytes over the winning op — and every upsert carries WHERE data_items.win < excluded.win, so no older fold from any process can write over a newer row; a deletion is a tombstone keyed on the path's greatest delete op for the same reason. Queries never touch a snapshot or a blob, which is what makes them the same on every instance and fast on a cold one"
+    class dataProject {
+        <<dataapply.go, one per project>>
+        -mu one pass at a time
+        -known path→win, loaded once
+        +dataApplyLocked() diff snapshot.files vs index
+    }
+    note for dataProject "The applier follows the FOLD, never the op stream. Triggers: the refreshThen callback after a device push lands (dataApplyAsync, coalesced), inside every hub-door write's own request (dataWrote: the writer reads its write), and once after boot. Each pass diffs the whole fold, so a missed one is made up by the next. Only changed shas are fetched and decoded (JSON as written; frontmatter typed by YAML; over 2 MiB or undecodable is an error row, counted by queries, never silently absent)"
+    class dataQuery {
+        <<dataquery.go>>
+        pattern with {captures}, each
+        where select order limit cursor group count
+        +compileDataQuery(dialect, vis) dataPlan
+    }
+    note for dataQuery "The query carries the interpretation — nothing is declared in the project. Captures and wildcards compile to segment checks (split_part / bd_seg), a literal prefix to a key range, never regex; every value is a numbered parameter, never SQL text. Comparisons are typed (null or a string is never > 50). Folder rules become one predicate, longest prefix first, exactly as ruleFor. The ETag hashes the query, the engine version and the (path, win) of the VISIBLE matching rows, so a change behind a rule never moves it; a cursor is bound to that ETag and answers 409 once it moves. Caps (1000 rows, 1000 groups, 4 MiB, 2s, 600/min per principal) refuse rather than truncate"
+
     class ReadLedger {
         -repo ReadRepo
         -sessions SessionReadRepo
@@ -704,6 +730,14 @@ classDiagram
     CommentThread *-- CommentAnchor
     Server ..> commentView : serveBlob
     Server o-- ReadLedger
+    Server o-- DataIndex : Data
+    Server *-- dataProject : per project
+    dataProject ..> volume : snapshot.files, FileInfo win fields
+    dataProject ..> RemoteSource : changed blobs, delete ops
+    dataProject ..> DataIndex : write
+    Server ..> dataQuery : /data/query, /data/describe
+    dataQuery ..> pathFilter : folder rules as SQL
+    mcpTools ..> dataQuery : query, describe through internalClient
     Server ..> recordingMux : Handler registers through it
     Server ..> gzipWriter : Handler wraps the whole chain (gzipResponses, outermost)
     Server o-- QuotaProvider
@@ -866,10 +900,11 @@ classDiagram
     note for capByGrant "Wraps projectPermOf, so it applies to every per-project route at once — including routes written before MCP existed and routes written after. Mutation-tested: disabling it fails 7 tests. Anything reached with an MCP bearer token is capped here or it is not capped at all"
 
     class mcpTools {
-        <<10 tools>>
+        <<12 tools>>
         list read glob grep
         write edit delete move
         history restore
+        query describe
     }
     note for mcpTools "mcp.go — list and glob are the ls/tree pair; grep is an on-demand bounded scan (2000 files / 64 MiB / 200 matches), no index to build or invalidate. history and restore are the two BearDrive has that a local filesystem does not, and they are why an agent can undo itself. Bounds are reported in the output, never silent: a truncated grep says so, because a scan that quietly stopped reads to an agent as proof the string is absent"
 

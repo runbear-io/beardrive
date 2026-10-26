@@ -120,6 +120,14 @@ type Server struct {
 	// Reads, when set, aggregates read telemetry (viewer, share, and agent
 	// reads) for the heat API. Nil means read tracking is off.
 	Reads *ReadLedger
+	// Data, when set, indexes the JSON and Markdown frontmatter of projects
+	// whose Data setting is on, for /data/query (dataindex.go). Nil means the
+	// hub answers data queries with 404.
+	Data          *DataIndex
+	dataState     sync.Map // project id -> *dataProject
+	dataLimitOnce sync.Once
+	dataLimit     *rateLimiter
+	dataBootOnce  sync.Once
 	// routes is what Handler registered, filled in by Handler itself. Read
 	// through APIRoutes; see recordingMux for why it is captured at all.
 	routes []string
@@ -266,6 +274,22 @@ type FileInfo struct {
 	UserName string
 	Author   string
 	Device   string
+	// The rest of the replay-order key of the op that produced this state
+	// (journal.Less), beside Time, Blob and Size above. A derived index keys
+	// its rows on it (dataindex.go) so that a fold older than the one a row
+	// came from can never write over it. Set by foldFiles; zero elsewhere.
+	Lamport  int64
+	Seq      int64
+	DeviceID string
+	Mode     uint32
+}
+
+// winOp is the op that produced fi at path, as far as journal.Less reads it.
+func (fi FileInfo) winOp(path string) journal.Op {
+	return journal.Op{
+		Lamport: fi.Lamport, Time: fi.Time, Device: fi.DeviceID, Seq: fi.Seq,
+		Kind: journal.KindPut, Path: path, Blob: fi.Blob, Size: fi.Size, Mode: fi.Mode,
+	}
 }
 
 // volume is one browsable/syncable file set: a source plus its snapshot
@@ -1322,6 +1346,7 @@ func foldFiles(ops []journal.Op) map[string]FileInfo {
 					Link: op.Link, Time: op.Time,
 					User: op.User, UserName: op.UserName,
 					Author: op.Author, Device: op.DeviceName,
+					Lamport: op.Lamport, Seq: op.Seq, DeviceID: op.Device, Mode: op.Mode,
 				}
 				continue
 			}
@@ -1338,6 +1363,7 @@ func foldFiles(ops []journal.Op) map[string]FileInfo {
 				Blob: op.Blob, Size: op.Size, Time: op.Time,
 				User: op.User, UserName: op.UserName,
 				Author: op.Author, Device: op.DeviceName,
+				Lamport: op.Lamport, Seq: op.Seq, DeviceID: op.Device, Mode: op.Mode,
 			}
 		case journal.KindDelete:
 			delete(files, op.Path)
@@ -1528,6 +1554,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/p/{project}/comments/{thread}", proj(PermRead, s.handleCommentUpdate))
 	mux.HandleFunc("DELETE /api/p/{project}/comments/{thread}", proj(PermRead, s.handleCommentDelete))
 	mux.HandleFunc("GET /api/p/{project}/heat", proj(PermRead, s.handleHeat))
+	// Data queries read the index, never the files (dataapply.go). POST
+	// because a query is a JSON body, not a URL.
+	mux.HandleFunc("POST /api/p/{project}/data/query", proj(PermRead, s.handleDataQuery))
+	mux.HandleFunc("POST /api/p/{project}/data/describe", proj(PermRead, s.handleDataDescribe))
 	mux.HandleFunc("POST /api/p/{project}/reads", proj(PermRead, s.handleReadReport))
 	mux.HandleFunc("POST /api/p/{project}/shares", proj(PermWrite, s.handleShareCreate))
 	mux.HandleFunc("GET /api/p/{project}/shares", proj(PermRead, s.handleShareList))
@@ -1549,6 +1579,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/p/{project}/folders", s.handleProjectFolders)
 	mux.HandleFunc("PUT /api/p/{project}/folders", s.handleProjectFolderSet)
 	mux.HandleFunc("DELETE /api/p/{project}/folders", s.handleProjectFolderClear)
+	// The Data setting is the folders' shape: self-checked, admin only.
+	mux.HandleFunc("PUT /api/p/{project}/data", s.handleProjectData)
 
 	// The sync (store) API only exists per project: hub mode is what
 	// storage-blind devices sync through. Reading the store is how a
@@ -1588,6 +1620,7 @@ func (s *Server) Handler() http.Handler {
 	// back through authGate would ask a cookie-shaped gate about a request
 	// that has no cookie.
 	s.apiMux = mux
+	s.dataBootOnce.Do(s.dataBoot)
 	return h
 }
 

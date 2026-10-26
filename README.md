@@ -449,6 +449,15 @@ whole folders through the hub without ever knowing where the storage is or
 holding any cloud credentials; the server device is the only one configured
 with the bucket.
 
+A project admin can turn on **Data** in the project's Settings. The hub then
+indexes the project's JSON files and Markdown frontmatter, so apps and agents
+can filter, sort, group and count them over `POST /api/p/<id>/data/query` (or
+the MCP `query` and `describe` tools) instead of reading every file. Each answer
+carries an ETag, so an unchanged screen gets `304`. The index is derived from
+the files and lives in the metadata database. With the file backend it is
+`data-index.db`, next to `projects.json`. See
+[Data queries](https://docs.beardrive.ai/reference/data-queries/).
+
 Projects are walled by **organization**: every project belongs to one org
 (file-backed `orgs.json`), and only that org's members — accounts with the
 `owner` or `member` role — can see, browse, or sync it. Your first

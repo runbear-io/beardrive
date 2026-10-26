@@ -674,6 +674,57 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 	mcpTool(srv, "restore",
 		"Restore a previous version of a file, using a sha exactly as history printed it.",
 		s.mcpRestore)
+	mcpTool(srv, "query",
+		"Query a project's JSON files and Markdown frontmatter as data: filter, pick fields, sort, "+
+			"group and count, without reading the files one by one. Needs the project's Data setting on. "+
+			"Run describe first to see which fields exist. Answers JSON.",
+		s.mcpDataQuery)
+	mcpTool(srv, "describe",
+		"List the fields of the documents under a pattern, one level at a time: how often each "+
+			"appears, its types, and its most common values. Answers JSON.",
+		s.mcpDataDescribe)
+}
+
+type dataQueryIn struct {
+	Project string `json:"project" jsonschema:"The project's id or name"`
+	dataQuery
+}
+
+type dataDescribeIn struct {
+	Project string `json:"project" jsonschema:"The project's id or name"`
+	dataDescribeQuery
+}
+
+func (s *Server) mcpDataQuery(ctx context.Context, in dataQueryIn) (string, error) {
+	return s.mcpData(ctx, in.Project, "query", in.dataQuery)
+}
+
+func (s *Server) mcpDataDescribe(ctx context.Context, in dataDescribeIn) (string, error) {
+	return s.mcpData(ctx, in.Project, "describe", in.dataDescribeQuery)
+}
+
+// mcpData sends a data request through the hub's own route, like every other
+// tool, so the grant, folder rules, limits and heat apply exactly once.
+func (s *Server) mcpData(ctx context.Context, project, verb string, body any) (string, error) {
+	id, err := s.resolveProject(ctx, project)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return "", fmt.Errorf("name the project to query")
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	w, err := s.call(ctx, http.MethodPost, "/api/p/"+url.PathEscape(id)+"/data/"+verb, bytes.NewReader(b))
+	if err != nil {
+		return "", err
+	}
+	if w.code != http.StatusOK {
+		return "", callErr(w)
+	}
+	return strings.TrimSpace(w.body.String()), nil
 }
 
 // ---- read-side tools (native) ----

@@ -332,8 +332,24 @@ func (r *fileProjectRepo) PutMeta(p Project) error {
 	// Folders is preserved for exactly the reason Perms is: a rename carries
 	// the writer's whole in-memory Project, so without this a stale process
 	// renaming a project resurrects every folder rule an admin removed.
-	p.Perms, p.Folders = r.byID[p.ID].Perms, r.byID[p.ID].Folders
+	p.Perms, p.Folders, p.Data = r.byID[p.ID].Perms, r.byID[p.ID].Folders, r.byID[p.ID].Data
 	r.byID[p.ID] = p
+	return r.write()
+}
+
+// PutData writes the project's Data setting and nothing else.
+func (r *fileProjectRepo) PutData(project string, on bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	p, ok := r.byID[project]
+	if !ok {
+		return fmt.Errorf("no such project %q", project)
+	}
+	p.Data = on
+	r.byID[project] = p
 	return r.write()
 }
 

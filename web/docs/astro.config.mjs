@@ -167,6 +167,7 @@ export default defineConfig({
             { label: "CLI", slug: "reference/cli" },
             { label: "Project files", slug: "reference/project-files" },
             { label: "Hub config", slug: "reference/hub-config" },
+            { label: "Data queries", slug: "reference/data-queries" },
             { label: "Migrate between hubs", slug: "reference/migration" },
           ],
         },

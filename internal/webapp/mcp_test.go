@@ -204,7 +204,7 @@ func TestMCPConnectAndListTools(t *testing.T) {
 	want := map[string]bool{
 		"list": false, "read": false, "glob": false, "grep": false,
 		"write": false, "edit": false, "delete": false, "move": false,
-		"history": false, "restore": false,
+		"history": false, "restore": false, "query": false, "describe": false,
 	}
 	for _, tl := range tools.Tools {
 		if _, ok := want[tl.Name]; !ok {
