@@ -50,6 +50,16 @@ const (
 	dataMaxLimit     = 1000
 	dataMaxGroups    = 1000
 	dataMaxResponse  = 4 << 20
+	// dataMaxTerms bounds a filter's comparisons, each in/nin item counted
+	// as one, and dataMaxDepth its nesting: SQLite parses a long OR chain as
+	// a tree as deep as it is long, and refuses one past 1000. dataMaxFields
+	// bounds select, order and group, each of which is read once per row.
+	dataMaxTerms  = 256
+	dataMaxDepth  = 16
+	dataMaxFields = 64
+	// dataMaxTopValue is the longest value describe counts toward a field's
+	// top values.
+	dataMaxTopValue = 256
 	// dataMaxFile bounds what one file may put in the index. A file over it
 	// is a row with an error, so a query counts it as missing rather than
 	// silently leaving it out.
@@ -154,6 +164,16 @@ type dataSQL struct {
 	each  []string // pointer keys; nil without each
 	args  []any
 	where []string
+	terms int // comparisons compiled so far (dataMaxTerms)
+	depth int // filter nesting (dataMaxDepth)
+}
+
+// term counts one comparison against dataMaxTerms.
+func (c *dataSQL) term() error {
+	if c.terms++; c.terms > dataMaxTerms {
+		return fmt.Errorf("a filter may compare at most %d values", dataMaxTerms)
+	}
+	return nil
 }
 
 // arg adds a parameter and returns its numbered placeholder. Numbered, so a
@@ -300,7 +320,10 @@ func (c *dataSQL) expr(s string) (dataExpr, error) {
 			} else if len(args) > 2 {
 				return dataExpr{}, fmt.Errorf("week takes a field and a time zone")
 			}
-			if _, err := time.LoadLocation(tz); err != nil {
+			// "" and "Local" are Go's names for the hub's own zone, not a
+			// zone the database knows: SQLite would answer in the server's
+			// zone and Postgres would refuse.
+			if _, err := time.LoadLocation(tz); err != nil || tz == "" || tz == "Local" {
 				return dataExpr{}, fmt.Errorf("unknown time zone %q", tz)
 			}
 			if c.d == dialectSQLite {
@@ -486,6 +509,10 @@ func (c *dataSQL) cond(where map[string]any) (string, error) {
 	if len(where) == 0 {
 		return "1 = 1", nil
 	}
+	if c.depth++; c.depth > dataMaxDepth {
+		return "", fmt.Errorf("filters nest at most %d deep", dataMaxDepth)
+	}
+	defer func() { c.depth-- }()
 	keys := make([]string, 0, len(where))
 	for k := range where {
 		keys = append(keys, k)
@@ -565,6 +592,9 @@ func (c *dataSQL) fieldCond(field string, v any) (string, error) {
 }
 
 func (c *dataSQL) compare(e dataExpr, op string, v any) (string, error) {
+	if err := c.term(); err != nil {
+		return "", err
+	}
 	switch op {
 	case "eq":
 		return c.eq(e, v)
@@ -578,6 +608,9 @@ func (c *dataSQL) compare(e dataExpr, op string, v any) (string, error) {
 		}
 		var subs []string
 		for _, item := range list {
+			if err := c.term(); err != nil {
+				return "", err
+			}
 			p, err := c.eq(e, item)
 			if err != nil {
 				return "", err
@@ -714,6 +747,9 @@ func compileDataQuery(d dialect, project string, vis pathFilter, q dataQuery, of
 			return nil, err
 		}
 	}
+	if len(q.Select) > dataMaxFields || len(q.Order) > dataMaxFields || len(q.Group) > dataMaxFields {
+		return nil, fmt.Errorf("select, order and group take at most %d fields each", dataMaxFields)
+	}
 	plan := &dataPlan{limit: q.Limit, offset: offset}
 	if plan.limit == 0 {
 		plan.limit = dataDefaultLimit
@@ -786,7 +822,13 @@ func compileDataQuery(d dialect, project string, vis pathFilter, q dataQuery, of
 			selects = []string{"$path"}
 		}
 		sel := []string{"f.path"}
+		seen := map[string]bool{}
 		for _, s := range selects {
+			// A row is keyed by label, so a repeated field is read once.
+			if seen[s] {
+				continue
+			}
+			seen[s] = true
 			e, err := c.expr(s)
 			if err != nil {
 				return nil, err

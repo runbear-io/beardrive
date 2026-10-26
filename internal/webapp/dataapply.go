@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
@@ -84,7 +85,14 @@ func (s *Server) dataWrote(ctx context.Context, id string) {
 		return
 	}
 	st := s.dataProjectState(id)
-	st.mu.Lock()
+	// A running pass holds the lock for as long as it fetches, which on a
+	// first build is minutes; the write must not wait on it. The pass this
+	// queues reads the fold after the write, so the index still catches up,
+	// only not before this request returns.
+	if !st.mu.TryLock() {
+		s.dataApplyAsync(id)
+		return
+	}
 	defer st.mu.Unlock()
 	if err := s.dataApplyLocked(ctx, id, st); err != nil {
 		log.Printf("beardrive: data index for %s: %v (retried on the next change)", id, err)
@@ -114,9 +122,32 @@ func isDataFile(path string, fi FileInfo) bool {
 	return ext == "json" || ext == "md"
 }
 
+// dataApplyLocked runs one pass. A pass that fails leaves the project marked
+// behind, best effort and on its own clock: the request's context may be what
+// ended it.
 func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject) error {
+	err := s.dataPass(ctx, id, st)
+	if err != nil && s.dataOn(id) {
+		lctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if lerr := s.Data.lower(lctx, id); lerr != nil {
+			err = errors.Join(err, lerr)
+		}
+	}
+	return err
+}
+
+// dataOn says whether a project still has Data on, as the registry stands: a
+// pass checks it before each write, so turning Data off (here or on another
+// process) ends a pass at its next slice rather than letting it write rows
+// back after the index was dropped.
+func (s *Server) dataOn(id string) bool {
 	p, ok := s.Projects.Get(id)
-	if !ok || !p.Data {
+	return ok && p.Data
+}
+
+func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error {
+	if !s.dataOn(id) {
 		return nil
 	}
 	_, v, err := s.projectVolume(id)
@@ -207,6 +238,9 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 				complete = false
 			}
 		}
+		if !s.dataOn(id) {
+			return nil
+		}
 		if err := s.dataWriteKnown(ctx, id, st, write); err != nil {
 			return err
 		}
@@ -265,6 +299,9 @@ func (s *Server) dataApplyLocked(ctx context.Context, id string, st *dataProject
 		}
 	}
 
+	if !s.dataOn(id) {
+		return nil
+	}
 	if err := s.dataWriteKnown(ctx, id, st, write); err != nil {
 		return err
 	}
@@ -312,6 +349,42 @@ func firstNonEmpty(a, b string) string {
 // Markdown is its frontmatter, typed by YAML; a note with none is an empty
 // document, not an error — most notes are not data.
 func decodeData(path string, b []byte) ([]byte, string) {
+	doc, msg := decodeDoc(path, b)
+	if doc != nil && !dataHoldable(doc) {
+		return nil, "holds a character the index cannot store (a NUL, an unpaired surrogate, or bytes that are not UTF-8)"
+	}
+	return doc, msg
+}
+
+// dataHoldable says whether both index dialects can store a document.
+// json.Valid accepts bytes that are not UTF-8 and the escapes for a NUL and
+// an unpaired surrogate; Postgres refuses all three in JSONB, and one such
+// row used to fail its whole slice on every pass, so nothing after it was
+// ever indexed. Go decodes an unpaired surrogate as U+FFFD, so a document
+// that spells U+FFFD itself and also uses an escape is refused with it.
+func dataHoldable(doc []byte) bool {
+	if !utf8.Valid(doc) {
+		return false
+	}
+	if !bytes.Contains(doc, []byte(`\u`)) {
+		return true // neither escape can be there, and a raw NUL is not valid JSON
+	}
+	dec := json.NewDecoder(bytes.NewReader(doc))
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+		if s, ok := tok.(string); ok && strings.ContainsAny(s, "\x00\ufffd") {
+			return false
+		}
+	}
+}
+
+func decodeDoc(path string, b []byte) ([]byte, string) {
 	if len(b) > dataMaxFile {
 		return nil, fmt.Sprintf("larger than the %d MiB a file may index", dataMaxFile>>20)
 	}
@@ -502,6 +575,7 @@ func (s *Server) handleDataQuery(v *volume, w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer rows.Close()
+	scanned := 0
 	switch {
 	case plan.countOnly:
 		var n int
@@ -519,6 +593,10 @@ func (s *Server) handleDataQuery(v *volume, w http.ResponseWriter, r *http.Reque
 			}
 			if err := rows.Scan(ptrs...); err != nil {
 				dataQueryErr(w, err)
+				return
+			}
+			if scanned += scannedBytes(vals); scanned > dataMaxResponse {
+				tooLarge(w)
 				return
 			}
 			g := map[string]any{}
@@ -545,6 +623,10 @@ func (s *Server) handleDataQuery(v *volume, w http.ResponseWriter, r *http.Reque
 			}
 			if err := rows.Scan(ptrs...); err != nil {
 				dataQueryErr(w, err)
+				return
+			}
+			if scanned += scannedBytes(vals); scanned > dataMaxResponse {
+				tooLarge(w)
 				return
 			}
 			path := sqlString(vals[0])
@@ -579,11 +661,33 @@ func (s *Server) handleDataQuery(v *volume, w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if len(body) > dataMaxResponse {
-		http.Error(w, "the answer is larger than 4 MiB; select fewer fields or lower the limit", http.StatusRequestEntityTooLarge)
+		tooLarge(w)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
+}
+
+// scannedBytes is what one scanned row holds, counted as it arrives: an
+// answer past dataMaxResponse is refused before the rest of it is read into
+// memory, not after the whole page is built.
+func scannedBytes(vals []any) int {
+	n := 0
+	for _, v := range vals {
+		switch x := v.(type) {
+		case []byte:
+			n += len(x)
+		case string:
+			n += len(x)
+		default:
+			n += 8
+		}
+	}
+	return n
+}
+
+func tooLarge(w http.ResponseWriter) {
+	http.Error(w, "the answer is larger than 4 MiB; select fewer fields or lower the limit", http.StatusRequestEntityTooLarge)
 }
 
 // dataETag is a query's version: its meaning (the engine), the question, and
@@ -766,10 +870,13 @@ func (s *Server) handleDataDescribe(v *volume, w http.ResponseWriter, r *http.Re
 			}
 			st.Present++
 			st.Types[jsonTypeName(val)]++
+			// Only short values are tallied: a top value is a label, and
+			// keeping every long string would hold the whole sample twice.
 			switch val.(type) {
 			case string, float64, bool:
-				b, _ := json.Marshal(val)
-				st.values[string(b)]++
+				if b, _ := json.Marshal(val); len(b) <= dataMaxTopValue {
+					st.values[string(b)]++
+				}
 			}
 		}
 	}

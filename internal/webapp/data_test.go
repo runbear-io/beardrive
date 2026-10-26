@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -592,4 +593,100 @@ func TestDataQuerySQLReportsAPassThatMissedAFile(t *testing.T) {
 	}
 	wait("the index never caught up once the file could be fetched",
 		func(a dataAnswer) bool { return a.Complete && a.Count == 1 })
+}
+
+// A document neither dialect can store the same way (a NUL, an unpaired
+// surrogate, bytes that are not UTF-8) is an error row on both. On Postgres it
+// used to fail its whole slice on every pass, so nothing after it was indexed.
+func TestDataQuerySQLRefusesWhatTheIndexCannotHold(t *testing.T) {
+	for name, open := range dataBackends(t) {
+		t.Run(name, func(t *testing.T) {
+			d := newDataHub(t, open(t))
+			d.enable()
+			d.put("z/a-good.json", `{"n":1}`)
+			d.put("z/b-nul.json", `{"s":"a\u0000b"}`)
+			d.put("z/c-surrogate.json", `{"s":"\ud800"}`)
+			d.put("z/d-latin1.json", "{\"s\":\"caf\xe9\"}")
+			d.put("z/e-escaped.json", `{"s":"a\\u0000b","t":"café"}`)
+			d.put("z/f-nul.md", "---\ns: \"a\\0b\"\n---\nbody\n")
+			d.put("z/g-later.json", `{"n":2}`)
+			a := d.query("alice", map[string]any{"pattern": "z/*", "select": []string{"$path"}})
+			if got := strs(a.Rows, "$path"); strings.Join(got, ",") != `"z/a-good.json","z/e-escaped.json","z/g-later.json"` || a.Errors != 4 {
+				t.Fatalf("rows %v errors %d; want the three holdable files and four errors", got, a.Errors)
+			}
+		})
+	}
+}
+
+// A write through the hub does not wait for a pass already running (a first
+// build can take minutes); the pass it queues indexes it.
+func TestDataQuerySQLHubWritesDoNotWaitForAPass(t *testing.T) {
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	d := newDataHub(t, x)
+	d.enable()
+	st := d.srv.dataProjectState(d.p.ID)
+	st.mu.Lock() // a pass in progress
+	done := make(chan int, 1)
+	go func() {
+		done <- d.send("PUT", "/api/p/"+d.p.ID+"/upload/content?path=w/new.json", `{"n":1}`, "alice", nil, 0).Code
+	}()
+	select {
+	case code := <-done:
+		if code != 200 {
+			st.mu.Unlock()
+			t.Fatalf("write: %d", code)
+		}
+	case <-time.After(3 * time.Second):
+		st.mu.Unlock()
+		t.Fatal("a hub write waited for the running pass")
+	}
+	st.mu.Unlock()
+	deadline := time.Now().Add(5 * time.Second)
+	for d.query("alice", map[string]any{"pattern": "w/*.json", "count": true}).Count != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the queued pass never indexed the write")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// A query's size is bounded where it is compiled, so an oversized one is the
+// caller's 400 rather than the database's error (a 502 that reads as the
+// hub's fault).
+func TestDataQueryBoundsItsSize(t *testing.T) {
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	d := newDataHub(t, x)
+	d.enable()
+	many := make([]any, dataMaxTerms+1)
+	for i := range many {
+		many[i] = float64(i)
+	}
+	deep := map[string]any{"dr": 1.0}
+	for range dataMaxDepth + 1 {
+		deep = map[string]any{"not": deep}
+	}
+	fields := make([]string, dataMaxFields+1)
+	for i := range fields {
+		fields[i] = "f" + strconv.Itoa(i)
+	}
+	for name, q := range map[string]map[string]any{
+		"a long in list":  {"pattern": "**/*.json", "where": map[string]any{"dr": map[string]any{"in": many}}},
+		"deep nesting":    {"pattern": "**/*.json", "where": deep},
+		"too many fields": {"pattern": "**/*.json", "select": fields},
+		"the hub's zone":  {"pattern": "**/*.json", "group": []string{"week(sends.0.at, Local)"}},
+		"an empty zone":   {"pattern": "**/*.json", "group": []string{"week(sends.0.at, )"}},
+	} {
+		body, _ := json.Marshal(q)
+		if rec := d.send("POST", "/api/p/"+d.p.ID+"/data/query", string(body), "alice", nil, 0); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d %s, want 400", name, rec.Code, rec.Body)
+		}
+	}
 }
