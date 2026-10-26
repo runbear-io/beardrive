@@ -129,6 +129,13 @@ func spool(src io.Reader) (f *os.File, size int64, sum string, err error) {
 // Upload stores content through the server: spool to disk while hashing,
 // push the blob, then journal the op.
 func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ int64, who User, note string) error {
+	return r.uploadIf(ctx, p, src, who, note, "")
+}
+
+// uploadIf is Upload held to base, the version of p the writer built on (an
+// If-Match sha; "" holds it to nothing), all the way into the journal append.
+// See commitBase.
+func (r *RemoteSource) uploadIf(ctx context.Context, p string, src io.Reader, who User, note, base string) error {
 	tmp, size, blob, err := spool(src)
 	if err != nil {
 		return err
@@ -139,7 +146,7 @@ func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ in
 	if err := r.Backend.Put(ctx, "blobs/"+blob, tmp, size); err != nil {
 		return fmt.Errorf("push blob: %w", err)
 	}
-	return r.Commit(ctx, p, blob, size, who, note)
+	return r.commitIf(ctx, p, blob, size, who, note, base)
 }
 
 // Commit appends a put op for path→blob to this server's own journal. It
@@ -148,6 +155,10 @@ func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ in
 // the read-modify-write below has a single writer; upmu serializes it across
 // concurrent requests.
 func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, who User, note string) error {
+	return r.commitIf(ctx, p, blob, size, who, note, "")
+}
+
+func (r *RemoteSource) commitIf(ctx context.Context, p, blob string, size int64, who User, note, base string) error {
 	if r.Device.ID == "" {
 		return fmt.Errorf("no device identity configured for uploads")
 	}
@@ -158,10 +169,53 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, w
 	if !ok {
 		return errBlobMissing
 	}
-	return r.appendOp(ctx, journal.Op{
+	var cb *commitBase
+	if base != "" {
+		cb = &commitBase{path: p, sha: base, blob: blob}
+	}
+	return r.appendOpsIf(ctx, []journal.Op{{
 		Kind: journal.KindPut, Path: p, Blob: blob, Size: size, Mode: 0o644,
 		User: who.Email, UserName: who.Name, Note: note,
-	})
+	}}, cb)
+}
+
+// commitBase is the version of one path a write was built on: what its
+// If-Match named. A write that holds a base must not replace a version it
+// never saw.
+//
+// It is checked against the journals the append is about to land on, inside
+// the append's compare-and-swap loop, and again on every retry. A check made
+// anywhere earlier — the upload handler's head lookup, an MCP tool's — reads a
+// snapshot that another hub process's write can postdate: both pass, both
+// append, and the later lamport silently replaces the other's content.
+type commitBase struct {
+	path string
+	sha  string // the version the writer read
+	blob string // what it writes: finding that already there is no conflict
+}
+
+// staleWriteError is a write whose base no longer holds. head is the version
+// that replaced it, so the caller can say what it missed.
+type staleWriteError struct{ head string }
+
+func (e *staleWriteError) Error() string { return "this file changed since you last read it" }
+
+// holds reports whether the path still resolves to the base in the fold of
+// all, through the same replay the tree uses. A path that no longer resolves
+// holds, as it always has at the handler: a base binds a file that exists.
+func (b *commitBase) holds(all []journal.Op) error {
+	var ops []journal.Op
+	for _, op := range all {
+		if op.Path == b.path {
+			ops = append(ops, op)
+		}
+	}
+	journal.Sort(ops)
+	fi, ok := foldFiles(ops)[b.path]
+	if !ok || fi.Blob == b.sha || fi.Blob == b.blob {
+		return nil
+	}
+	return &staleWriteError{head: fi.Blob}
 }
 
 // nextLamport is maxLamport+1 without the wrap.
@@ -190,6 +244,17 @@ func (r *RemoteSource) appendOp(ctx context.Context, op journal.Op) error {
 // that loops appendOp instead gets N whole-journal round trips AND a
 // partially-applied write with nothing to report it.
 func (r *RemoteSource) appendOps(ctx context.Context, ops []journal.Op) error {
+	return r.appendOpsIf(ctx, ops, nil)
+}
+
+// appendOpsIf is appendOps held to a base (nil holds to nothing).
+//
+// Every attempt reads the journals again, checks the base against them and
+// stamps the ops from them. A retry used to re-append the first attempt's
+// bytes: their seq could be one another process had just taken, and nothing
+// asked whether the write that beat it had replaced the version this one was
+// built on.
+func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *commitBase) error {
 	// Never rewrite an unchanged journal: a Put of identical bytes still
 	// bumps Modified, which invalidates every reader's journal cache.
 	if len(ops) == 0 {
@@ -198,10 +263,33 @@ func (r *RemoteSource) appendOps(ctx context.Context, ops []journal.Op) error {
 	r.upmu.Lock()
 	defer r.upmu.Unlock()
 
-	all, err := r.loadOps(ctx)
+	next := func() ([]byte, error) {
+		all, err := r.loadOps(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if base != nil {
+			if err := base.holds(all); err != nil {
+				return nil, err
+			}
+		}
+		r.stamp(all, ops)
+		return journal.Marshal(ops)
+	}
+	key := "journal/" + r.Device.ID + ".jsonl"
+	if cp, ok := r.Backend.(remote.ConditionalPutter); ok {
+		return r.appendConditional(ctx, cp, key, next)
+	}
+	line, err := next()
 	if err != nil {
 		return err
 	}
+	return r.appendLastWriterWins(ctx, key, line)
+}
+
+// stamp gives ops this server's identity and the next places in its journal
+// and in replay order, as all stands.
+func (r *RemoteSource) stamp(all, ops []journal.Op) {
 	var maxLamport, mySeq int64
 	for _, prev := range all {
 		maxLamport = max(maxLamport, prev.Lamport)
@@ -224,16 +312,6 @@ func (r *RemoteSource) appendOps(ctx context.Context, ops []journal.Op) error {
 		ops[i].Seq, ops[i].Lamport, ops[i].Time = mySeq+int64(i)+1, lam, now
 		ops[i].Device, ops[i].DeviceName, ops[i].Author = r.Device.ID, r.Device.Name, r.Device.Author
 	}
-
-	line, err := journal.Marshal(ops)
-	if err != nil {
-		return err
-	}
-	key := "journal/" + r.Device.ID + ".jsonl"
-	if cp, ok := r.Backend.(remote.ConditionalPutter); ok {
-		return r.appendConditional(ctx, cp, key, line)
-	}
-	return r.appendLastWriterWins(ctx, key, line)
 }
 
 var errBlobMissing = fmt.Errorf("content not uploaded yet")
@@ -618,7 +696,8 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// Optional by design. A caller that sends no If-Match gets the old
 	// behaviour, so older clients, the MCP tools and every other writer here
 	// are untouched.
-	if base := strings.Trim(r.Header.Get("If-Match"), `"`); base != "" {
+	base := strings.Trim(r.Header.Get("If-Match"), `"`)
+	if base != "" {
 		if head, ok := s.headBlob(r.Context(), v, p); ok && head != base {
 			// The current sha travels with the refusal, so the client can fetch
 			// what it missed without a second round trip to find out what to ask
@@ -647,7 +726,23 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// size against a quota of zero bytes and billed it at zero — the hole round
 	// 1 closed on the device door, still open on this one.
 
-	if err := up.Upload(r.Context(), p, tmp, size, s.requestUser(r), ""); err != nil {
+	// The check above reads this process's snapshot. On a journal-backed
+	// source the base also rides into the append, which checks it against the
+	// journals the op lands on — the only place a write from another hub
+	// process is guaranteed to be seen.
+	if rs, ok := up.(*RemoteSource); ok {
+		err = rs.uploadIf(r.Context(), p, tmp, s.requestUser(r), "", base)
+	} else {
+		err = up.Upload(r.Context(), p, tmp, size, s.requestUser(r), "")
+	}
+	var stale *staleWriteError
+	if errors.As(err, &stale) {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{
+			"error": stale.Error(), "sha": stale.head, "path": p,
+		})
+		return
+	}
+	if err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -742,9 +837,11 @@ appendConditional is the journal append when the store can compare and swap.
 
 	The read and the write are ONE transaction as far as the store is
 	concerned: read the journal at a version, append, write back only if
-	nothing moved. If something did, re-read and redo it — the ops being
-	appended are already stamped and do not change, so a retry re-appends onto
-	whatever is there now rather than duplicating anything.
+	nothing moved. If something did, re-read and redo it. next builds the
+	bytes to append, and is called again on every attempt AFTER the version is
+	read: whatever it checks or stamps is then at least as new as the journal
+	the write is conditioned on, so a write that lands in between fails the
+	PutIf and gets looked at by the retry.
 
 	upmu is still held, and is not redundant. Within one process it stops N
 	goroutines from all taking the slow path; the precondition covers the case
@@ -757,13 +854,17 @@ appendConditional is the journal append when the store can compare and swap.
 	times running is more likely a store misbehaving than a busy one, and
 	failing it is how the caller learns to retry instead of the hub spinning.
 */
-func (r *RemoteSource) appendConditional(ctx context.Context, cp remote.ConditionalPutter, key string, line []byte) error {
+func (r *RemoteSource) appendConditional(ctx context.Context, cp remote.ConditionalPutter, key string, next func() ([]byte, error)) error {
 	const attempts = 5
 	var lastErr error
 	for i := 0; i < attempts; i++ {
 		existing, version, err := readVersioned(ctx, cp, key)
 		if err != nil {
 			return fmt.Errorf("fetch journal: %w", err)
+		}
+		line, err := next()
+		if err != nil {
+			return err
 		}
 		data := append(append([]byte(nil), existing...), line...)
 		_, err = cp.PutIf(ctx, key, bytes.NewReader(data), int64(len(data)), version)

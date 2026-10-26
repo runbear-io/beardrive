@@ -121,6 +121,9 @@ func (b *condBackend) Exists(_ context.Context, key string) (bool, error) {
 func (b *condBackend) List(context.Context, string) ([]remote.Object, error) { return nil, nil }
 func (b *condBackend) Close() error                                          { return nil }
 
+// ours is the bytes these tests append, on every attempt.
+func ours() ([]byte, error) { return []byte("ours\n"), nil }
+
 func TestConditionalAppendRetriesInsteadOfLosingAnUpdate(t *testing.T) {
 	be := newCondBackend()
 	const key = "journal/dev-a.jsonl"
@@ -133,7 +136,7 @@ func TestConditionalAppendRetriesInsteadOfLosingAnUpdate(t *testing.T) {
 	}
 
 	r := &RemoteSource{}
-	if err := r.appendConditional(context.Background(), be, key, []byte("ours\n")); err != nil {
+	if err := r.appendConditional(context.Background(), be, key, ours); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 
@@ -163,7 +166,7 @@ func TestConditionalAppendCreatesWithoutClobbering(t *testing.T) {
 	be.beforePut = func(k string) { be.write(k, []byte("someone-else-created-it\n")) }
 
 	r := &RemoteSource{}
-	if err := r.appendConditional(context.Background(), be, key, []byte("ours\n")); err != nil {
+	if err := r.appendConditional(context.Background(), be, key, ours); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	got := string(be.get(key))
@@ -181,7 +184,7 @@ func TestConditionalAppendCreatesWithoutClobbering(t *testing.T) {
 func TestConditionalAppendGivesUpRatherThanSpinning(t *testing.T) {
 	be := &alwaysConflict{}
 	r := &RemoteSource{}
-	err := r.appendConditional(context.Background(), be, "journal/x.jsonl", []byte("ours\n"))
+	err := r.appendConditional(context.Background(), be, "journal/x.jsonl", ours)
 	if err == nil {
 		t.Fatal("an append that never won reported success")
 	}
