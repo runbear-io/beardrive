@@ -434,8 +434,12 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 			// stands NOW. Not cached for the stream: a rule set before this
 			// stream subscribed announces itself to nobody here, and a frame
 			// queued before a rule's scope frame would still cross the change
-			// under the old filter. Resolving per frame means no frame is ever
-			// filtered by rules older than its delivery.
+			// under the old filter. Resolving per frame is the fence: the rules
+			// are read after the frame was dequeued, so after the change it
+			// describes, and a path reaches this reader only if it could read
+			// that path at that instant — what a listing fetched then would
+			// show. A frame dequeued after the scope frame is filtered by rules
+			// at least as new as that change.
 			vis, ok := s.streamVisibility(r, project)
 			if !ok {
 				return // the project is gone; there is nothing left to watch

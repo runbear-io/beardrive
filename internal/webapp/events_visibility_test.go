@@ -3,10 +3,13 @@ package webapp
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -204,5 +207,92 @@ func TestEventStreamFiltersByTheRulesAtDelivery(t *testing.T) {
 	srv.events().publish(p.ID, changeEvent{Type: "change", Paths: []string{"open/notes.md"}, Puts: 1})
 	if ev := nextFrame(t, bob, "change"); len(ev.Paths) != 1 || ev.Paths[0] != "open/notes.md" {
 		t.Fatalf("bob's first change frame = %+v; a frame crossed the rule under the old filter", ev)
+	}
+}
+
+// Frames and a narrowing rule race each other. A frame's rules are read after
+// it was dequeued, so after the change it describes: a path reaches the reader
+// only if the reader could read it at that instant. Two things follow, and
+// this checks both under contention: a change made after the rule took effect
+// never names the hidden path, and nothing names it once the scope frame is
+// through, whatever order the fan-out queued the frames in.
+func TestEventStreamHoldsTheRuleUnderConcurrentFrames(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	bob := streamAs(t, srv, ts, p.ID, "bob@x.io", cookies["bob"])
+	for round := 0; round < 5; round++ {
+		dir := fmt.Sprintf("secret%d/", round)
+		var narrowed atomic.Bool
+		var wg sync.WaitGroup
+		for w := 0; w < 4; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 0; i < 150; i++ {
+					when := "early"
+					if narrowed.Load() {
+						when = "late"
+					}
+					path := fmt.Sprintf("%s%s-%d-%d.md", dir, when, w, i)
+					if i%2 == 0 {
+						srv.events().publish(p.ID, changeEvent{Type: "change", Paths: []string{path, "open/x.md"}, Puts: 2})
+					} else {
+						srv.events().publish(p.ID, changeEvent{Type: "presence", People: []person{{Name: "Carol", Path: path}}})
+					}
+					time.Sleep(100 * time.Microsecond)
+				}
+			}()
+		}
+		ruled := make(chan error, 1)
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			req, _ := http.NewRequest("PUT", ts.URL+"/api/p/"+p.ID+"/folders", strings.NewReader(`{"prefix":"`+dir+`","default":"none"}`))
+			req.AddCookie(cookies["alice"])
+			resp, err := http.DefaultClient.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode != 200 {
+					err = fmt.Errorf("restricting %s: %d", dir, resp.StatusCode)
+				}
+			}
+			narrowed.Store(true)
+			ruled <- err
+			wg.Wait()
+			// Let the queue drain first: a frame dropped on overflow would be this one.
+			time.Sleep(50 * time.Millisecond)
+			srv.events().publish(p.ID, changeEvent{Type: "change", Paths: []string{"open/done.md"}, Puts: 1})
+		}()
+
+		scoped, resynced := false, false
+		deadline := time.After(10 * time.Second)
+		for done := false; !done; {
+			select {
+			case ev := <-bob:
+				named := append([]string(nil), ev.Paths...)
+				for _, who := range ev.People {
+					named = append(named, who.Path)
+				}
+				for _, path := range named {
+					if strings.HasPrefix(path, dir+"late-") {
+						t.Fatalf("round %d: a change made after the rule reached bob: %+v", round, ev)
+					}
+					if scoped && strings.HasPrefix(path, dir) {
+						t.Fatalf("round %d: a hidden path reached bob after the scope frame: %+v", round, ev)
+					}
+					done = done || path == "open/done.md"
+				}
+				scoped = scoped || ev.Type == "scope"
+				resynced = resynced || ev.Type == "resync"
+			case <-deadline:
+				t.Fatalf("round %d: the stream never delivered the last frame", round)
+			}
+		}
+		if err := <-ruled; err != nil {
+			t.Fatal(err)
+		}
+		if !scoped && !resynced { // an overflow may drop the scope frame, and says so
+			t.Fatalf("round %d: bob never saw the scope frame", round)
+		}
 	}
 }
