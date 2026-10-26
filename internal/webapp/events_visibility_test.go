@@ -185,3 +185,24 @@ func TestEventStreamRefiltersWhenAFolderIsRestricted(t *testing.T) {
 		t.Fatalf("bob's first change frame after the rule = %+v, want only open/notes.md", ev)
 	}
 }
+
+// No frame crosses a rule change under the old filter, whatever order things
+// reach the stream in. Here the rule lands in the registry and a write's frame
+// is published with NO scope frame at all — standing in for a stream that
+// subscribed just after the rule's scope frame went out, and for a change
+// frame that was queued ahead of it.
+func TestEventStreamFiltersByTheRulesAtDelivery(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+
+	bob := streamAs(t, srv, ts, p.ID, "bob@x.io", cookies["bob"])
+	if err := srv.Projects.SetFolder(p.ID, FolderRule{Prefix: "secret/", Default: PermNone}); err != nil {
+		t.Fatal(err)
+	}
+	srv.events().publish(p.ID, changeEvent{Type: "change", Paths: []string{"secret/plan.md"}, Puts: 1})
+	srv.events().publish(p.ID, changeEvent{Type: "change", Paths: []string{"open/notes.md"}, Puts: 1})
+	if ev := nextFrame(t, bob, "change"); len(ev.Paths) != 1 || ev.Paths[0] != "open/notes.md" {
+		t.Fatalf("bob's first change frame = %+v; a frame crossed the rule under the old filter", ev)
+	}
+}

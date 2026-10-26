@@ -318,19 +318,10 @@ func frameFor(frame []byte, vis pathFilter) ([]byte, bool) {
 	return out, true
 }
 
-// frameType reads just the type of an encoded frame.
-func frameType(frame []byte) string {
-	var ev struct {
-		Type string `json:"type"`
-	}
-	json.Unmarshal(frame, &ev)
-	return ev.Type
-}
-
-// streamVisibility re-resolves a stream's visibility from the registry, for a
-// stream that has just been told its project's rules moved. The Project the
-// stream opened with is the one proj() resolved then, which no longer says
-// what the rules are. False when the project is gone.
+// streamVisibility resolves a stream's visibility from the registry as it
+// stands, for one frame. The Project the stream opened with is the one proj()
+// resolved then, which may no longer say what the rules are. Re-reading is the
+// registry's change-token check, not a load. False when the project is gone.
 func (s *Server) streamVisibility(r *http.Request, project string) (pathFilter, bool) {
 	if s.Projects == nil {
 		return pathFilter{}, true
@@ -407,12 +398,6 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 		s.events().unsubscribe(project, sub)
 		s.streamGone(project, actor)
 	}()
-	// Frames are published once for every listener, so what this one may see
-	// is decided here, on the way out (frameFor). Resolved now and again on
-	// every scope frame: a rule change is announced on this same stream, so
-	// the frames after it are filtered by the rules as they then stand.
-	vis := s.visibility(r)
-
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	// The frames are small and the stream is long-lived: gzip here buffers
@@ -444,11 +429,16 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 					return
 				}
 			}
-			if frameType(frame) == "scope" {
-				var ok bool
-				if vis, ok = s.streamVisibility(r, project); !ok {
-					return // the project is gone; there is nothing left to watch
-				}
+			// Frames are published once for every listener, so what this one
+			// may see is decided here, on the way out, from the project as it
+			// stands NOW. Not cached for the stream: a rule set before this
+			// stream subscribed announces itself to nobody here, and a frame
+			// queued before a rule's scope frame would still cross the change
+			// under the old filter. Resolving per frame means no frame is ever
+			// filtered by rules older than its delivery.
+			vis, ok := s.streamVisibility(r, project)
+			if !ok {
+				return // the project is gone; there is nothing left to watch
 			}
 			out, ok := frameFor(frame, vis)
 			if !ok {
