@@ -318,10 +318,13 @@ func frameFor(frame []byte, vis pathFilter) ([]byte, bool) {
 	return out, true
 }
 
-// streamVisibility resolves a stream's visibility from the registry as it
-// stands, for one frame. The Project the stream opened with is the one proj()
-// resolved then, which may no longer say what the rules are. Re-reading is the
-// registry's change-token check, not a load. False when the project is gone.
+// streamVisibility resolves a stream's access from the registry as it stands,
+// for one frame: whether its reader may still read the project at all, and if
+// so which paths. proj() checked the permission once, when the stream opened,
+// and a stream lives for streamMaxAge; a member whose grant or membership was
+// taken away since must stop hearing about the project, not only about a
+// folder. Re-reading is the registry's change-token check, not a load. False
+// when the project is gone or its reader may no longer read it.
 func (s *Server) streamVisibility(r *http.Request, project string) (pathFilter, bool) {
 	if s.Projects == nil {
 		return pathFilter{}, true
@@ -330,7 +333,11 @@ func (s *Server) streamVisibility(r *http.Request, project string) (pathFilter, 
 	if !ok {
 		return pathFilter{}, false
 	}
-	return s.visibilityFor(r, p), true
+	base := s.projectPermOf(r, p)
+	if !atLeast(base, PermRead) {
+		return pathFilter{}, false
+	}
+	return s.visibilityAt(r, p, base), true
 }
 
 // newOpPaths is countOps' sibling: the paths of the ops this push actually
@@ -442,7 +449,7 @@ func (s *Server) handleEvents(v *volume, w http.ResponseWriter, r *http.Request)
 			// at least as new as that change.
 			vis, ok := s.streamVisibility(r, project)
 			if !ok {
-				return // the project is gone; there is nothing left to watch
+				return // the project is gone, or this reader may no longer read it
 			}
 			out, ok := frameFor(frame, vis)
 			if !ok {

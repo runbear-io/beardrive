@@ -210,6 +210,32 @@ func TestEventStreamFiltersByTheRulesAtDelivery(t *testing.T) {
 	}
 }
 
+// A stream outlives the check proj() made when it opened. A member whose
+// grant is taken away while the stream is open hears nothing more about the
+// project, and the stream ends.
+func TestEventStreamEndsWhenItsReaderLosesTheProject(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	bob := streamAs(t, srv, ts, p.ID, "bob@x.io", cookies["bob"])
+	if err := srv.Projects.SetPerm(p.ID, "bob@x.io", PermNone); err != nil {
+		t.Fatal(err)
+	}
+	srv.events().publish(p.ID, changeEvent{Type: "change", Paths: []string{"open/notes.md"}, Puts: 1})
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.events().hasActor(p.ID, "bob@x.io") {
+		if time.Now().After(deadline) {
+			t.Fatal("bob's stream is still open after bob's access was revoked")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case ev := <-bob:
+		t.Fatalf("a frame reached bob after the revocation: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 // Frames and a narrowing rule race each other. A frame's rules are read after
 // it was dequeued, so after the change it describes: a path reaches the reader
 // only if the reader could read it at that instant. Two things follow, and
