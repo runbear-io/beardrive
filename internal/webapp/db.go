@@ -30,6 +30,7 @@ type MetaStore interface {
 	Reads() ReadRepo
 	SessionReads() SessionReadRepo
 	Pending() PendingRepo
+	Apps() AppRepo
 	Close() error
 }
 
@@ -94,6 +95,17 @@ type OrgRepo interface {
 	DeleteOrg(id string) error
 	PutInvite(i OrgInvite) error
 	DeleteInvite(token string) error
+}
+
+// AppRepo persists apps — org-owned principals for servers — and their keys.
+// A key is stored as its digest; the plaintext exists once, in the answer
+// that minted it.
+type AppRepo interface {
+	Load() ([]App, []AppKey, error)
+	PutApp(a App) error
+	DeleteApp(id string) error // and its keys
+	PutKey(k AppKey) error
+	DeleteKey(id string) error
 }
 
 type ShareRepo interface {

@@ -724,6 +724,7 @@ classDiagram
     Server o-- Directory
     Server o-- DeviceRegistry
     Server o-- ShareDB
+    Server o-- AppDB : Apps
     Server *-- commentCache : built on first use
     commentCache ..> Backend : comments/ in the project prefix
     commentCache ..> commentEvent
@@ -969,6 +970,7 @@ classDiagram
         +Reads() ReadRepo
         +SessionReads() SessionReadRepo
         +MCP() MCPRepo
+        +Apps() AppRepo
         +Close()
     }
 
@@ -992,6 +994,12 @@ classDiagram
         <<interface>>
         +Load() +Put +Delete(user, id)
     }
+    class AppRepo {
+        <<interface>>
+        +Load() apps, keys
+        +PutApp +DeleteApp(and its keys) +PutKey +DeleteKey
+    }
+    note for AppRepo "apps.json (file) / apps + app_keys (SQL). A key is stored as its DIGEST; the plaintext exists once, in the answer that minted it, and the list API never returns the digest either"
     class MCPRepo {
         <<interface>>
         +LoadGrants() +PutGrant +DeleteGrant
@@ -1075,6 +1083,7 @@ classDiagram
     MetaStore *-- ReadRepo
     MetaStore *-- SessionReadRepo
     MetaStore *-- MCPRepo
+    MetaStore *-- AppRepo
 
     class BuiltinAuth
     class ProjectDB
@@ -1083,6 +1092,16 @@ classDiagram
     class DeviceRegistry
     class ReadLedger
     class MCPAuth
+    class AppDB {
+        <<apps.go>>
+        -apps -keys -digest→key
+        +Create(org, name) +Delete
+        +Mint(app) bda_ key, once +Revoke
+        +Authenticate(key) App, last_used ≤1/min
+    }
+    note for AppDB "Apps are org-owned principals for servers, in the hub's own metadata rather than the AuthProvider's directory, so they work under any provider. authGate resolves a bda_ key BEFORE the provider (appUser) and admits it to POST data/query|describe and GET history only (appRoute) — everything else is 403. The app acts as app:<id>, a key every email-keyed grant map takes as is; roleIn answers RoleApp for an app of the project's own org, and projectPermWithRole gives RoleApp its EXPLICIT grant only: never the project default, never admin. Owners manage apps at /api/orgs/<org>/apps; refresh() through versionGate means a key revoked on one hub process stops on all"
+    AppDB o-- AppRepo
+    AppDB *-- versionGate
 
     BuiltinAuth o-- AccountRepo
     ProjectDB o-- ProjectRepo

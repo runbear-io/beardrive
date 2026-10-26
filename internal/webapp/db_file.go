@@ -93,6 +93,7 @@ type fileMetaStore struct {
 	devices  *fileDeviceRepo
 	reads    *fileReadRepo
 	sessions *fileSessionReadRepo
+	apps     *fileAppRepo
 }
 
 // OpenFileStore builds the file backend over dir, using the historical
@@ -108,6 +109,7 @@ func OpenFileStore(dir string) (MetaStore, error) {
 		devices:  newFileDeviceRepo(filepath.Join(dir, "devices.json")),
 		reads:    newFileReadRepo(filepath.Join(dir, "reads.json")),
 		sessions: newFileSessionReadRepo(filepath.Join(dir, "sessions.json")),
+		apps:     newFileAppRepo(filepath.Join(dir, "apps.json")),
 	}, nil
 }
 
@@ -120,6 +122,7 @@ func (s *fileMetaStore) Pending() PendingRepo          { return s.pending }
 func (s *fileMetaStore) Devices() DeviceRepo           { return s.devices }
 func (s *fileMetaStore) Reads() ReadRepo               { return s.reads }
 func (s *fileMetaStore) SessionReads() SessionReadRepo { return s.sessions }
+func (s *fileMetaStore) Apps() AppRepo                 { return s.apps }
 func (s *fileMetaStore) Close() error                  { return nil }
 
 // ---- accounts (auth.json: users + tokens + policy) ----
@@ -676,6 +679,90 @@ func (r *fileShareRepo) Delete(token string) error {
 	}
 	delete(r.byToken, token)
 	return r.write()
+}
+
+// ---- apps + keys (apps.json) ----
+
+type fileAppRepo struct {
+	path string
+	mu   sync.Mutex
+	apps map[string]App
+	keys map[string]AppKey
+}
+
+func newFileAppRepo(path string) *fileAppRepo {
+	return &fileAppRepo{path: path, apps: map[string]App{}, keys: map[string]AppKey{}}
+}
+
+func (r *fileAppRepo) Version() (string, error) { return fileVersion(r.path) }
+
+type appFileShape struct {
+	Apps []App    `json:"apps"`
+	Keys []AppKey `json:"keys"`
+}
+
+func (r *fileAppRepo) Load() ([]App, []AppKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f, err := r.reload()
+	return f.Apps, f.Keys, err
+}
+
+// reload re-reads before every write, for the reason fileShareRepo.reload
+// states: a key revoked by one process must not come back when another
+// writes. Callers hold mu.
+func (r *fileAppRepo) reload() (appFileShape, error) {
+	var f appFileShape
+	if _, err := readJSONFile(r.path, &f); err != nil {
+		return f, err
+	}
+	r.apps, r.keys = map[string]App{}, map[string]AppKey{}
+	for _, a := range f.Apps {
+		r.apps[a.ID] = a
+	}
+	for _, k := range f.Keys {
+		r.keys[k.ID] = k
+	}
+	return f, nil
+}
+
+func (r *fileAppRepo) write() error {
+	var f appFileShape
+	for _, a := range r.apps {
+		f.Apps = append(f.Apps, a)
+	}
+	for _, k := range r.keys {
+		f.Keys = append(f.Keys, k)
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(r.path, append(data, '\n'))
+}
+
+func (r *fileAppRepo) edit(fn func()) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	fn()
+	return r.write()
+}
+
+func (r *fileAppRepo) PutApp(a App) error { return r.edit(func() { r.apps[a.ID] = a }) }
+func (r *fileAppRepo) PutKey(k AppKey) error { return r.edit(func() { r.keys[k.ID] = k }) }
+func (r *fileAppRepo) DeleteKey(id string) error { return r.edit(func() { delete(r.keys, id) }) }
+func (r *fileAppRepo) DeleteApp(id string) error {
+	return r.edit(func() {
+		delete(r.apps, id)
+		for kid, k := range r.keys {
+			if k.App == id {
+				delete(r.keys, kid)
+			}
+		}
+	})
 }
 
 // ---- mcp grants + clients (mcp.json) ----

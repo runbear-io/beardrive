@@ -418,6 +418,16 @@ credentials); otherwise it is relayed through this server.`,
 					return fmt.Errorf("open share registry: %w", err)
 				}
 				srv.Shares = shares
+				var apps *webapp.AppDB
+				if meta != nil {
+					apps, err = webapp.NewAppDB(meta.Apps())
+				} else {
+					apps, err = webapp.OpenAppDB(filepath.Join(filepath.Dir(projectsDB), "apps.json"))
+				}
+				if err != nil {
+					return fmt.Errorf("open app registry: %w", err)
+				}
+				srv.Apps = apps
 				if cfg.MCP != nil && cfg.MCP.Enabled {
 					// The consent screen needs two things the server owns: who
 					// the browser session is, and which projects that account

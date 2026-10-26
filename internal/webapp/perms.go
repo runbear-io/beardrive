@@ -116,7 +116,7 @@ func (s *Server) resolveProjectPerm(r *http.Request, p Project) string {
 // a public share link, which has to ask whether the account that MINTED it can
 // still read what it publishes (shareStillReadable).
 func (s *Server) projectPermFor(p Project, email string) string {
-	return projectPermWithRole(p, email, s.Dir.Role(p.Org, email))
+	return projectPermWithRole(p, email, s.roleIn(p.Org, email))
 }
 
 // projectPermWithRole is projectPermFor once the account's role in the
@@ -127,6 +127,18 @@ func projectPermWithRole(p Project, email, role string) string {
 	}
 	if role == "" {
 		return PermNone // not a member of the project's org
+	}
+	// An app holds what it was granted and nothing else: no project default,
+	// and never admin, which would let a server key manage people.
+	if role == RoleApp {
+		switch l := p.Perms[email]; l {
+		case "":
+			return PermNone
+		case PermAdmin:
+			return PermWrite
+		default:
+			return l
+		}
 	}
 	if l, ok := p.Perms[email]; ok {
 		return l
@@ -247,6 +259,10 @@ func (s *Server) handleProjectPermSet(w http.ResponseWriter, r *http.Request) {
 	if !s.grantable(w, p, email) {
 		return
 	}
+	if isAppPrincipal(email) && req.Level == PermAdmin {
+		http.Error(w, "an app can be granted read or write, never admin", http.StatusBadRequest)
+		return
+	}
 	if err := s.Projects.SetPerm(id, email, req.Level); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -278,7 +294,7 @@ func (s *Server) grantable(w http.ResponseWriter, p Project, email string) bool 
 	if s.Dir == nil || p.Org == "" {
 		return true
 	}
-	switch s.Dir.Role(p.Org, email) {
+	switch s.roleIn(p.Org, email) {
 	case "":
 		http.Error(w, "that account is not a member of this project's organization", http.StatusBadRequest)
 		return false
