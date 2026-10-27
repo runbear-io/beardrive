@@ -106,6 +106,9 @@ type eventHub struct {
 	// back into fanout. Nil on a single-instance hub, which is the default
 	// and costs nothing (relay.go).
 	relay eventRelay
+	// changed hears every file change this process publishes, for the
+	// co-editing rooms holding those files (ycollab.go, roomsChanged).
+	changed func(project string, paths []string, more bool)
 }
 
 // events returns the hub's fan-out, built on first use. Servers are assembled
@@ -113,7 +116,7 @@ type eventHub struct {
 // constructor to do this in.
 func (s *Server) events() *eventHub {
 	s.evOnce.Do(func() {
-		s.ev = &eventHub{subs: map[string]map[*subscriber]struct{}{}}
+		s.ev = &eventHub{subs: map[string]map[*subscriber]struct{}{}, changed: s.roomsChanged}
 	})
 	return s.ev
 }
@@ -175,6 +178,9 @@ func (h *eventHub) publish(project string, ev changeEvent) {
 		return // a struct of strings and ints; unreachable, and not worth a log
 	}
 	h.fanout(project, frame)
+	if ev.Type == "change" && h.changed != nil {
+		h.changed(project, ev.Paths, ev.More)
+	}
 	// And to the processes this one is not. Deliberately AFTER the local
 	// fan-out: a relay that is slow or broken must not delay the clients this
 	// process is already holding, and it must never fail a write — publish
