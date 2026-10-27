@@ -201,7 +201,10 @@ func (s *Server) UseRelay(r eventRelay) {
 	h.mu.Lock()
 	h.relay = r
 	h.mu.Unlock()
-	if err := r.start(func(project string, frame []byte) { h.fanout(project, frame) }); err != nil {
+	if err := r.start(func(project string, frame []byte) {
+		h.fanout(project, frame)
+		h.relayed(project, frame)
+	}); err != nil {
 		log.Printf("beardrive: change relay could not start, this process will only "+
 			"notify the clients it is holding: %v", err)
 	}

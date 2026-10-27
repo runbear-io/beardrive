@@ -196,6 +196,21 @@ func (h *eventHub) publish(project string, ev changeEvent) {
 	}
 }
 
+// relayed tells this process's rooms about a change another process
+// published: the write landed there, and a room for the file may live here.
+// The fold it can lead to is published like any write, and the relay drops a
+// process's own frames, so this cannot loop.
+func (h *eventHub) relayed(project string, frame []byte) {
+	if h.changed == nil {
+		return
+	}
+	var ev changeEvent
+	if json.Unmarshal(frame, &ev) != nil || ev.Type != "change" {
+		return
+	}
+	h.changed(project, ev.Paths, ev.More)
+}
+
 // fanout delivers one already-encoded frame to this process's subscribers. It
 // is the half that a relay re-enters with a frame from somewhere else, which
 // is why it takes bytes rather than a changeEvent: what arrives from another

@@ -3,6 +3,7 @@ package webapp
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -347,4 +348,36 @@ func TestDroppedRoomDoesNotWrite(t *testing.T) {
 		t.Fatalf("a dropped room still wrote: %q", got)
 	}
 	_ = context.Background()
+}
+
+// A file deleted from outside while its room is open stays deleted: the room
+// does not write it back. What the room typed since is parked beside it when
+// the room empties, so it is not lost either.
+func TestRoomDoesNotBringBackAFileDeletedOutside(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "before\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/api/p/"+p.ID+"/remove", strings.NewReader(`{"path":"notes.md"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remove: %d %s", rec.Code, rec.Body.String())
+	}
+	typeInto(doc, "typed after\n")
+	time.Sleep(600 * time.Millisecond)
+	if code := get(t, h, url).Code; code != http.StatusNotFound {
+		t.Fatalf("the room wrote back a file deleted from outside: %d", code)
+	}
+
+	srv.finalSnapshot(context.Background(), room)
+	if code := get(t, h, url).Code; code != http.StatusNotFound {
+		t.Fatalf("the room's last snapshot wrote back a deleted file: %d", code)
+	}
+	if tree := get(t, h, "/api/p/"+p.ID+"/tree?slim=1").Body.String(); !strings.Contains(tree, "notes.md.bdrive-conflict-An-Editor-") {
+		t.Fatal("what the room typed after the delete was dropped: no conflict copy")
+	}
 }

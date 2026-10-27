@@ -367,3 +367,24 @@ func convergeAcross(t *testing.T, a, b *Server, p Project) {
 		s.rooms().settle()
 	}
 }
+
+// A write that lands on another process reaches a room on this one through
+// the change relay, without anybody in the room typing.
+func TestRoomHearsAWriteMadeOnAnotherProcess(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	a, b, p := newHubPair(t)
+	bus := newMemRelay()
+	a.UseRelay(bus.join())
+	b.UseRelay(bus.join())
+	putContent(t, a.Handler(), "/api/p/"+p.ID+"/upload/content?path=notes.md", "one\n", "")
+	doc := openRoom(t, b, p.ID+"/notes.md")
+
+	putContent(t, a.Handler(), "/api/p/"+p.ID+"/upload/content?path=notes.md", "one\ntwo\n", "")
+	deadline := time.Now().Add(3 * time.Second)
+	for doc.GetText("body").ToString() != "one\ntwo\n" {
+		if time.Now().After(deadline) {
+			t.Fatalf("the room on the other process still says %q", doc.GetText("body").ToString())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

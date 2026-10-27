@@ -515,35 +515,42 @@ func (s *Server) projectBackend(project string) (remote.Backend, bool) {
 // roomBytes is the file behind a room, bounded, with the blob it currently is
 // — the sha every write to it must name in If-Match.
 func (s *Server) roomBytes(room string) ([]byte, string, bool) {
+	body, sha, ok, _ := s.roomFile(room)
+	return body, sha, ok
+}
+
+// roomFile is roomBytes that also says whether the file is absent, as
+// opposed to unreadable just now.
+func (s *Server) roomFile(room string) (body []byte, sha string, ok, absent bool) {
 	project, path, ok := strings.Cut(room, "/")
 	if !ok {
-		return nil, "", false
+		return nil, "", false, false
 	}
 	_, v, err := s.projectVolume(project)
 	if err != nil {
-		return nil, "", false
+		return nil, "", false, false
 	}
 	ctx := context.Background()
 	// A room is built from what the file IS, not from a snapshot a background
 	// rebuild has not caught up on yet.
 	snap, err := v.current(ctx)
 	if err != nil {
-		return nil, "", false
+		return nil, "", false, false
 	}
-	fi, ok := snap.files[path]
-	if !ok {
-		return nil, "", false
+	fi, found := snap.files[path]
+	if !found {
+		return nil, "", false, true
 	}
 	rc, err := v.source.Open(ctx, path, fi)
 	if err != nil {
-		return nil, "", false
+		return nil, "", false, false
 	}
 	defer rc.Close()
-	body, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes))
+	body, err = io.ReadAll(io.LimitReader(rc, maxSeedBytes))
 	if err != nil {
-		return nil, "", false
+		return nil, "", false, false
 	}
-	return body, fi.Blob, true
+	return body, fi.Blob, true, false
 }
 
 // snapshotRoom writes the document back to the file.
@@ -601,7 +608,7 @@ func (s *Server) snapshotOnce(ctx context.Context, room, project, path string, f
 	if !ok {
 		return false
 	}
-	cur, curSha, have := s.roomBytes(room)
+	cur, curSha, have, absent := s.roomFile(room)
 	if have && string(cur) == text {
 		if s.rooms().base(room) != curSha {
 			s.storeRoomHistory(project, path, curSha, state)
@@ -621,6 +628,24 @@ func (s *Server) snapshotOnce(ctx context.Context, room, project, path string, f
 		return false
 	}
 	base := s.rooms().base(room)
+	if absent && base != "" {
+		/* Deleted from outside since the room last wrote it or was built.
+		   Writing the room's text back would undo the delete — a missing
+		   path does not refuse a conditional write. The file stays deleted;
+		   what the room typed since is parked beside it once the room
+		   empties, the way a refused shrink is. */
+		if !final || s.rooms().isParked(room, text) {
+			return false
+		}
+		if st := s.roomHistory(project, base); st != nil {
+			if was, ok := replayed(st); ok && was == text {
+				return false // nothing typed since: nothing to keep
+			}
+		}
+		s.rooms().park(room, text)
+		s.parkCopy(who, project, path, conflictPath(path, who, time.Now()), text)
+		return false
+	}
 	if have && curSha != base && s.contains(doc, project, curSha) {
 		// The head was written by this room on another process — the
 		// previous lease holder — and the relay has already delivered every
