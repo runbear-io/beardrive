@@ -417,6 +417,9 @@ the positional argument), `--upload` (allow client writes, off by default),
   "share_rpm": 120,                  // per-IP rate limit on public /s/* links
   "trust_proxy": false,              // read X-Forwarded-For from a proxy on a PUBLIC address;
                                      // a proxy on loopback/private is already trusted
+  "collab": {                        // co-editing across hub PROCESSES (one process needs none)
+    "redis": "127.0.0.1:6379"        // Redis that relays document updates between them (Streams);
+  },                                 // without it a second process refuses a room another holds
   "auth": {                          // optional knobs; hub auth is always on
     // Signup is invite-only by default. To allow self-service signup,
     // open it WITH a gate (an ungated open hub is refused at startup):

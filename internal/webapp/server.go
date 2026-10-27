@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/reearth/ygo/cluster"
 	ygows "github.com/reearth/ygo/provider/websocket"
 	"io"
 	"io/fs"
@@ -110,6 +111,14 @@ type Server struct {
 	// us when the room was created. See ycollab.go.
 	roomOnce sync.Once
 	roomReg  *roomRegistry
+	// Collab is how co-editing crosses hub processes. See collab_relay.go.
+	Collab CollabConfig
+	// collabRelay carries document updates between processes; nil means
+	// one process holds each document (lease.go).
+	collabRelay cluster.Relay
+	// This process's name on a room lease (lease.go).
+	nodeOnce sync.Once
+	node     string
 
 	// Review comments (comments.go), built on first use.
 	commentsOnce sync.Once
