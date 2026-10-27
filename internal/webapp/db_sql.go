@@ -372,6 +372,13 @@ func (s *sqlMetaStore) migrate() error {
 			project TEXT NOT NULL, prefix TEXT NOT NULL, email TEXT NOT NULL,
 			level TEXT NOT NULL, granted_by TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (project, prefix, email))`,
+		// Apps' grants on single folders (Project.AppFolders): beside the
+		// folder rules, never in them. Not guarded: a table that went missing
+		// would only take grants away.
+		`CREATE TABLE IF NOT EXISTS project_app_folders (
+			project TEXT NOT NULL, prefix TEXT NOT NULL, app TEXT NOT NULL,
+			level TEXT NOT NULL, granted_by TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (project, prefix, app))`,
 		// pending is short-lived single-use sign-in state: a `bdrive login`
 		// mid-flight, an OAuth state nonce, an MCP consent code. Keyed by
 		// (kind, key) so several owners share one table without sharing a key
@@ -816,6 +823,26 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 		return nil, err
 	}
 
+	rows, err = r.s.db.Query(`SELECT project, prefix, app, level, granted_by FROM project_app_folders ORDER BY prefix, app`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var project string
+		var g AppFolderGrant
+		if err := rows.Scan(&project, &g.Prefix, &g.App, &g.Level, &g.By); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if p := byID[project]; p != nil {
+			p.AppFolders = append(p.AppFolders, g)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	out := make([]Project, 0, len(order))
 	for _, id := range order {
 		out = append(out, *byID[id])
@@ -870,6 +897,16 @@ func (r *sqlProjectRepo) Put(p Project) error {
 				}
 			}
 		}
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_app_folders WHERE project = ?`), p.ID); err != nil {
+			return err
+		}
+		for _, g := range p.AppFolders {
+			if _, err := tx.Exec(r.s.q(
+				`INSERT INTO project_app_folders (project,prefix,app,level,granted_by) VALUES (?,?,?,?,?)`),
+				p.ID, g.Prefix, g.App, g.Level, g.By); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
@@ -909,23 +946,20 @@ func (r *sqlProjectRepo) PutFolder(project string, rule FolderRule) error {
 	})
 }
 
-// PutFolderPerm writes one grant on one prefix. The rule's row is created,
-// inheriting the project level, only if there is none; an existing rule's
-// default and its other grants are never written.
-func (r *sqlProjectRepo) PutFolderPerm(project, prefix, email, level, by string) error {
-	if err := storable(project, prefix, email, level, by); err != nil {
+// PutAppFolder writes one app's grant on one folder, and nothing else.
+func (r *sqlProjectRepo) PutAppFolder(project string, g AppFolderGrant) error {
+	if err := storable(project, g.Prefix, g.App, g.Level, g.By); err != nil {
 		return err
 	}
-	return r.s.inTx(regProjects, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(r.s.q(`INSERT INTO project_folders (project,prefix,default_level)
-			VALUES (?,?,'') ON CONFLICT(project,prefix) DO NOTHING`), project, prefix); err != nil {
-			return err
-		}
-		_, err := tx.Exec(r.s.q(`INSERT INTO project_folder_perms (project,prefix,email,level,granted_by)
-			VALUES (?,?,?,?,?) ON CONFLICT(project,prefix,email) DO UPDATE SET
-			level=excluded.level, granted_by=excluded.granted_by`), project, prefix, email, level, by)
-		return err
-	})
+	return r.w.exec(`INSERT INTO project_app_folders (project,prefix,app,level,granted_by) VALUES (?,?,?,?,?)
+		ON CONFLICT(project,prefix,app) DO UPDATE SET level=excluded.level, granted_by=excluded.granted_by`,
+		project, g.Prefix, g.App, g.Level, g.By)
+}
+
+// DropAppFolder removes one app's grant on one folder.
+func (r *sqlProjectRepo) DropAppFolder(project, prefix, app string) error {
+	return r.w.exec(`DELETE FROM project_app_folders WHERE project = ? AND prefix = ? AND app = ?`,
+		project, prefix, app)
 }
 
 // DropFolderPerm removes one grant from one rule, and only the grant: the
@@ -997,6 +1031,9 @@ func (r *sqlProjectRepo) Delete(id string) error {
 			return err
 		}
 		if _, err := tx.Exec(r.s.q(`DELETE FROM project_folders WHERE project = ?`), id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_app_folders WHERE project = ?`), id); err != nil {
 			return err
 		}
 		_, err := tx.Exec(r.s.q(`DELETE FROM projects WHERE id = ?`), id)

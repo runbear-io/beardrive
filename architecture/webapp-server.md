@@ -409,7 +409,7 @@ classDiagram
         +SetCreator +SetDefault +SetTemplate
         +SetPerm +SetPermBy +ClearPerm
         +SetFolder +ClearFolder
-        +SetFolderGrant +DropFolderGrant
+        +SetAppFolder +DropAppFolder
         -refresh re-reads the store on reads AND mutators
     }
     class Project {
@@ -421,6 +421,7 @@ classDiagram
         +Perms map email→level
         +GrantedBy map app→giver
         +Folders FolderRule slice
+        +AppFolders AppFolderGrant slice
         +Data bool
         +ruleFor(path) longest prefix
     }
@@ -430,6 +431,11 @@ classDiagram
         +Perms map email→level
         +GrantedBy map app→giver
     }
+    class AppFolderGrant {
+        +Prefix +App +Level +By
+    }
+    Project *-- AppFolderGrant : beside the rules, never in them
+    note for AppFolderGrant "An app's grant on one folder. Not a FolderRule: a rule decides what everyone gets under its prefix, and a grant made for one app must not change that for anyone else. honoredGrants joins it into that app's own view only"
     class seedTemplate {
         <<Server method>>
         POST /api/projects `template`
@@ -455,12 +461,14 @@ classDiagram
     class honoredGrants {
         <<Server method, perms.go>>
         p as one app may use it
+        joins the app's AppFolders as rules naming it
         each grant capped at grantCeiling of its giver
         folder grants only → those folders only
+        explicit project none stays a denial
     }
     projectPerm ..> honoredGrants : for RoleApp
     pathFilter ..> honoredGrants : visibilityAt, for an app
-    honoredGrants ..> Project : reads GrantedBy
+    honoredGrants ..> Project : reads GrantedBy, AppFolders
     note for honoredGrants "Each app grant counts only as far as the member who gave it could still give it on that folder — read is a writer's to give, more an admin's — judged on every request, so a departed, demoted or narrowed giver's grants stop at once with no offboarding hook. A grant with no recorded giver predates attribution and counts as before. It only ever lowers what the app would have had. Folder grants alone: the view gives the app read on the project and denies every path none of its own grants reaches, with a rule on &quot;&quot; that the SQL predicate reads as its ELSE"
     note for projectPerm "The Desktop arm is FIRST in both projectPerm and projectPermOf: the desktop viewer is read-only for everyone, and reusing this ladder rather than adding a second gate is what keeps every local write route refused by the machinery that already guards the hub. It cannot widen a hub — Desktop is false there"
     class folderLevel {
@@ -1046,7 +1054,7 @@ classDiagram
         +PutMeta(p)
         +PutPerm(project, email, level, by)
         +PutFolder(project, rule)
-        +PutFolderPerm(project, prefix, email, level, by)
+        +PutAppFolder(project, g) +DropAppFolder(project, prefix, app)
         +DropFolderPerm(project, prefix, email)
         +DeleteFolder(project, prefix)
     }

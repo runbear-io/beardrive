@@ -45,6 +45,11 @@ type Project struct {
 	// (Server.honoredGrants). Absent for an account's grant, and for an app
 	// grant made before grants were attributed.
 	GrantedBy map[string]string `json:"granted_by,omitempty"`
+	// AppFolders are apps' grants on single folders. They sit beside Folders,
+	// never in them: a folder rule decides what everyone gets under its
+	// prefix, and a grant made for one app must not change that for anyone
+	// else. Only that app's own view reads them (Server.honoredGrants).
+	AppFolders []AppFolderGrant `json:"app_folders,omitempty"`
 	// Folders narrow those levels over individual subtrees (folders.go).
 	// Absent on every project that has never restricted one, which is why no
 	// row needs migrating and a hub without rules behaves exactly as before.
@@ -113,6 +118,18 @@ func OpenProjectDB(path string) (*ProjectDB, error) {
 	return NewProjectDB(newFileProjectRepo(path))
 }
 
+// AppFolderGrant is one app's level on one folder, and who gave it.
+type AppFolderGrant struct {
+	Prefix string `json:"prefix"` // normalized, slash-terminated
+	App    string `json:"app"`    // app:<id>
+	Level  string `json:"level"`
+	By     string `json:"by,omitempty"`
+}
+
+// maxAppFolders bounds one project's app folder grants, read on every request
+// an app makes (honoredGrants).
+const maxAppFolders = 256
+
 // clone copies a Project so its Perms map never leaves the registry: the
 // struct is a value but the map inside it is a pointer, and a caller holding
 // the live map could grant itself PermAdmin without SetPerm, its last-admin
@@ -121,6 +138,7 @@ func (p Project) clone() Project {
 	c := p
 	c.Perms = maps.Clone(p.Perms)
 	c.GrantedBy = maps.Clone(p.GrantedBy)
+	c.AppFolders = slices.Clone(p.AppFolders)
 	// Folders is a slice of structs each holding a map: copying the Project
 	// value shares both the backing array and every Perms map inside it, so a
 	// caller could rewrite a folder grant without SetFolder, its validation,
@@ -164,10 +182,10 @@ type rowScopedProjectRepo interface {
 	// DropFolderPerm removes one grant from one rule. It never writes the
 	// rule itself, so a rule another process removed stays removed.
 	DropFolderPerm(project, prefix, email string) error
-	// PutFolderPerm writes one grant, and who gave it, on one prefix: the
-	// rule's own row is created (inheriting the project level) if it is not
-	// there, and never otherwise written.
-	PutFolderPerm(project, prefix, email, level, by string) error
+	// PutAppFolder writes one app's grant on one folder; DropAppFolder
+	// removes it. Neither touches a folder rule.
+	PutAppFolder(project string, g AppFolderGrant) error
+	DropAppFolder(project, prefix, app string) error
 	// PutData writes the project's Data setting alone.
 	PutData(project string, on bool) error
 }
@@ -637,14 +655,11 @@ func (db *ProjectDB) dropFolderGrants(id, email string) error {
 	return nil
 }
 
-// SetFolderGrant gives one account or app a level on one folder, recording who
-// gave it, without touching the rest of the rule: a writer granting an app
-// read must not be able to change what anyone else gets there. A folder with
-// no rule gets one that inherits the project level and names only this grant.
-func (db *ProjectDB) SetFolderGrant(id, prefix, email, level, by string) error {
-	e := normEmail(email)
-	if e == "" || !validLevel(level) || level == PermAdmin {
-		return fmt.Errorf("a folder grant needs an account and a level of none, read, or write")
+// SetAppFolder gives an app a level on one folder, replacing its grant there.
+// The folder's rules are not touched, so nobody else's access changes.
+func (db *ProjectDB) SetAppFolder(id string, g AppFolderGrant) error {
+	if !isAppPrincipal(g.App) || !validLevel(g.Level) || g.Level == PermAdmin {
+		return fmt.Errorf("an app folder grant needs an app and a level of none, read, or write")
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -654,37 +669,20 @@ func (db *ProjectDB) SetFolderGrant(id, prefix, email, level, by string) error {
 		return fmt.Errorf("no such project %q", id)
 	}
 	next := p.clone()
-	i := slices.IndexFunc(next.Folders, func(r FolderRule) bool { return r.Prefix == prefix })
-	if i < 0 {
-		if len(next.Folders) >= maxFolderRules {
-			return fmt.Errorf("a project may hold at most %d folder rules", maxFolderRules)
-		}
-		next.Folders = append(next.Folders, FolderRule{Prefix: prefix})
-		i = len(next.Folders) - 1
+	i := slices.IndexFunc(next.AppFolders, func(a AppFolderGrant) bool { return a.Prefix == g.Prefix && a.App == g.App })
+	switch {
+	case i >= 0:
+		next.AppFolders[i] = g
+	case len(next.AppFolders) >= maxAppFolders:
+		return fmt.Errorf("a project may hold at most %d app folder grants", maxAppFolders)
+	default:
+		next.AppFolders = append(next.AppFolders, g)
 	}
-	rule := &next.Folders[i]
-	if rule.Perms == nil {
-		rule.Perms = map[string]string{}
-	}
-	rule.Perms[e] = level
-	setGranter(&rule.GrantedBy, e, by)
-	db.byID[id] = next
-	var err error
-	if rs, ok := db.repo.(rowScopedProjectRepo); ok {
-		err = rs.PutFolderPerm(id, prefix, e, level, by)
-	} else {
-		err = db.repo.Put(next)
-	}
-	if err != nil {
-		db.byID[id] = p
-	}
-	return err
+	return db.putAppFolder(p, next, func(rs rowScopedProjectRepo) error { return rs.PutAppFolder(id, g) })
 }
 
-// DropFolderGrant removes one account's or app's grant from one folder rule,
-// row by row like dropFolderGrants.
-func (db *ProjectDB) DropFolderGrant(id, prefix, email string) error {
-	e := normEmail(email)
+// DropAppFolder removes an app's grant on one folder.
+func (db *ProjectDB) DropAppFolder(id, prefix, app string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.refresh()
@@ -692,25 +690,43 @@ func (db *ProjectDB) DropFolderGrant(id, prefix, email string) error {
 	if !ok {
 		return fmt.Errorf("no such project %q", id)
 	}
-	i := slices.IndexFunc(p.Folders, func(r FolderRule) bool { return r.Prefix == prefix })
-	if i < 0 {
-		return fmt.Errorf("%s has no grant on %s", email, prefix)
-	}
-	if _, has := p.Folders[i].Perms[e]; !has {
-		return fmt.Errorf("%s has no grant on %s", email, prefix)
-	}
 	next := p.clone()
-	delete(next.Folders[i].Perms, e)
-	delete(next.Folders[i].GrantedBy, e)
-	db.byID[id] = next
+	next.AppFolders = slices.DeleteFunc(next.AppFolders, func(a AppFolderGrant) bool { return a.Prefix == prefix && a.App == app })
+	if len(next.AppFolders) == len(p.AppFolders) {
+		return fmt.Errorf("%s has no grant on %s", app, prefix)
+	}
+	return db.putAppFolder(p, next, func(rs rowScopedProjectRepo) error { return rs.DropAppFolder(id, prefix, app) })
+}
+
+// dropAppFolders removes every folder grant an app holds on a project, for a
+// deleted app.
+func (db *ProjectDB) dropAppFolders(id, app string) error {
+	p, ok := db.Get(id)
+	if !ok {
+		return nil
+	}
+	for _, g := range p.AppFolders {
+		if g.App == app {
+			if err := db.DropAppFolder(id, g.Prefix, app); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// putAppFolder persists one app folder grant change row by row, with the
+// rollback put and putPerm have. Callers hold mu.
+func (db *ProjectDB) putAppFolder(prev, next Project, row func(rowScopedProjectRepo) error) error {
+	db.byID[next.ID] = next
 	var err error
 	if rs, ok := db.repo.(rowScopedProjectRepo); ok {
-		err = rs.DropFolderPerm(id, prefix, e)
+		err = row(rs)
 	} else {
 		err = db.repo.Put(next)
 	}
 	if err != nil {
-		db.byID[id] = p
+		db.byID[prev.ID] = prev
 	}
 	return err
 }

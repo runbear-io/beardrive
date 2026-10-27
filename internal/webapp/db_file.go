@@ -335,8 +335,11 @@ func (r *fileProjectRepo) PutMeta(p Project) error {
 	}
 	// Folders is preserved for exactly the reason Perms is: a rename carries
 	// the writer's whole in-memory Project, so without this a stale process
-	// renaming a project resurrects every folder rule an admin removed.
-	p.Perms, p.Folders, p.Data = r.byID[p.ID].Perms, r.byID[p.ID].Folders, r.byID[p.ID].Data
+	// renaming a project resurrects every folder rule an admin removed. Who
+	// gave each app grant goes with the grants: a stale copy written over it
+	// would make them read as unattributed, which counts them unconditionally.
+	disk := r.byID[p.ID]
+	p.Perms, p.GrantedBy, p.Folders, p.AppFolders, p.Data = disk.Perms, disk.GrantedBy, disk.Folders, disk.AppFolders, disk.Data
 	r.byID[p.ID] = p
 	return r.write()
 }
@@ -388,12 +391,26 @@ func (r *fileProjectRepo) PutFolder(project string, rule FolderRule) error {
 	return r.write()
 }
 
-// PutFolderPerm writes one grant on one prefix as the file stands on disk,
-// creating the rule (inheriting the project level) only if it is not there.
-func (r *fileProjectRepo) PutFolderPerm(project, prefix, email, level, by string) error {
-	if err := storable(project, prefix, email, level, by); err != nil {
+// PutAppFolder writes one app's grant on one folder as the file stands on disk.
+func (r *fileProjectRepo) PutAppFolder(project string, g AppFolderGrant) error {
+	if err := storable(project, g.Prefix, g.App, g.Level, g.By); err != nil {
 		return err
 	}
+	return r.editProject(project, func(p *Project) {
+		p.AppFolders = slices.DeleteFunc(p.AppFolders, func(a AppFolderGrant) bool { return a.Prefix == g.Prefix && a.App == g.App })
+		p.AppFolders = append(p.AppFolders, g)
+	})
+}
+
+// DropAppFolder removes one app's grant on one folder as the file stands.
+func (r *fileProjectRepo) DropAppFolder(project, prefix, app string) error {
+	return r.editProject(project, func(p *Project) {
+		p.AppFolders = slices.DeleteFunc(p.AppFolders, func(a AppFolderGrant) bool { return a.Prefix == prefix && a.App == app })
+	})
+}
+
+// editProject applies fn to a project as it stands on disk and writes it back.
+func (r *fileProjectRepo) editProject(project string, fn func(*Project)) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, err := r.reload(); err != nil {
@@ -404,16 +421,7 @@ func (r *fileProjectRepo) PutFolderPerm(project, prefix, email, level, by string
 		return fmt.Errorf("no such project %q", project)
 	}
 	p = p.clone()
-	i := slices.IndexFunc(p.Folders, func(f FolderRule) bool { return f.Prefix == prefix })
-	if i < 0 {
-		p.Folders = append(p.Folders, FolderRule{Prefix: prefix})
-		i = len(p.Folders) - 1
-	}
-	if p.Folders[i].Perms == nil {
-		p.Folders[i].Perms = map[string]string{}
-	}
-	p.Folders[i].Perms[email] = level
-	setGranter(&p.Folders[i].GrantedBy, email, by)
+	fn(&p)
 	r.byID[project] = p
 	return r.write()
 }

@@ -168,10 +168,14 @@ func effectiveLevel(p Project, email, filePath, base string) string {
 // responsible for the org, so offboarding never orphans a subtree.
 func (s *Server) pathPermOf(r *http.Request, p Project, filePath string) string {
 	base := s.projectPermOf(r, p)
+	email := normEmail(s.requestUser(r).Email)
+	if isAppPrincipal(email) {
+		p = s.honoredGrants(p, email)
+	}
 	if base == PermAdmin || len(p.Folders) == 0 {
 		return base
 	}
-	return folderLevel(p, normEmail(s.requestUser(r).Email), filePath, base)
+	return folderLevel(p, email, filePath, base)
 }
 
 // requirePathPerm answers the request itself when the caller is short of level
@@ -362,7 +366,7 @@ func (s *Server) visibility(r *http.Request) pathFilter {
 // one, and it is a real one: the org-wide share audit walks every project in
 // the org, and a share row carries the public /s/ token.
 func (s *Server) visibilityFor(r *http.Request, p Project) pathFilter {
-	if len(p.Folders) == 0 {
+	if len(p.Folders) == 0 && len(p.AppFolders) == 0 {
 		return pathFilter{}
 	}
 	return s.visibilityAt(r, p, s.projectPermOf(r, p))
@@ -371,15 +375,17 @@ func (s *Server) visibilityFor(r *http.Request, p Project) pathFilter {
 // visibilityAt is visibilityFor for a caller that has already resolved the
 // project-level permission it is built on.
 func (s *Server) visibilityAt(r *http.Request, p Project, base string) pathFilter {
+	email := normEmail(s.requestUser(r).Email)
+	// An app's view first: its folder grants are rules only there, so a
+	// project with no rules of its own can still hide most of itself from it.
+	if isAppPrincipal(email) {
+		p = s.honoredGrants(p, email)
+	}
 	if len(p.Folders) == 0 {
 		return pathFilter{}
 	}
 	if base == PermAdmin {
 		return pathFilter{} // admin everywhere; nothing to hide
-	}
-	email := normEmail(s.requestUser(r).Email)
-	if isAppPrincipal(email) {
-		p = s.honoredGrants(p, email)
 	}
 	// "on" means something is hidden FROM THIS ACCOUNT, not merely that the
 	// project has rules. A project can be full of read-only folders and hide

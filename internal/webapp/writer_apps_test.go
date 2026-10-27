@@ -203,10 +203,9 @@ func TestAppGrantsHoldOnlyWhileTheirGiverCould(t *testing.T) {
 		if paths := keyPaths(t, d, d.dataQuery(), key); !under(paths, "acme/") {
 			t.Fatalf("folder grant: %v", paths)
 		}
-		// An admin edits the rule, keeping the app's grant as it was: it
-		// stays bob's, and so it ends with bob's access there.
-		d.send("PUT", "/api/p/"+d.p.ID+"/folders",
-			`{"prefix":"acme","perms":{"bob@x.io":"none","`+principal+`":"read"}}`, "alice", nil, 200)
+		// An admin shuts bob out of acme/; the app's grant there was bob's, so
+		// it ends with bob's access.
+		d.send("PUT", "/api/p/"+d.p.ID+"/folders", `{"prefix":"acme","perms":{"bob@x.io":"none"}}`, "alice", nil, 200)
 		refused(t, d, key, "bob shut out of acme/")
 	})
 	t.Run("an owner's grant stands when a writer leaves", func(t *testing.T) {
@@ -291,7 +290,7 @@ func TestGrantAndKeyAttributionPersists(t *testing.T) {
 			if err := db.SetPermBy(p.ID, "app:a1", PermRead, "bob@x.io"); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.SetFolderGrant(p.ID, "docs/", "app:a1", PermRead, "carol@x.io"); err != nil {
+			if err := db.SetAppFolder(p.ID, AppFolderGrant{Prefix: "docs/", App: "app:a1", Level: PermRead, By: "carol@x.io"}); err != nil {
 				t.Fatal(err)
 			}
 			apps, err := NewAppDB(s.Apps())
@@ -311,9 +310,9 @@ func TestGrantAndKeyAttributionPersists(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, _ := fresh.Get(p.ID)
-			if got.GrantedBy["app:a1"] != "bob@x.io" || len(got.Folders) != 1 ||
-				got.Folders[0].Prefix != "docs/" || got.Folders[0].Default != "" ||
-				got.Folders[0].GrantedBy["app:a1"] != "carol@x.io" {
+			want := AppFolderGrant{Prefix: "docs/", App: "app:a1", Level: PermRead, By: "carol@x.io"}
+			if got.GrantedBy["app:a1"] != "bob@x.io" || len(got.Folders) != 0 ||
+				len(got.AppFolders) != 1 || got.AppFolders[0] != want {
 				t.Fatalf("after a reload: %+v", got)
 			}
 			freshApps, err := NewAppDB(s.Apps())
@@ -324,12 +323,12 @@ func TestGrantAndKeyAttributionPersists(t *testing.T) {
 				t.Fatalf("keys after a reload: %+v", keys)
 			}
 
-			if err := db.DropFolderGrant(p.ID, "docs/", "app:a1"); err != nil {
+			if err := db.DropAppFolder(p.ID, "docs/", "app:a1"); err != nil {
 				t.Fatal(err)
 			}
 			fresh, _ = NewProjectDB(s.Projects())
-			if got, _ := fresh.Get(p.ID); len(got.Folders) != 1 || len(got.Folders[0].Perms) != 0 {
-				t.Fatalf("after dropping the folder grant: %+v", got.Folders)
+			if got, _ := fresh.Get(p.ID); len(got.AppFolders) != 0 || len(got.Folders) != 0 {
+				t.Fatalf("after dropping the folder grant: %+v %+v", got.AppFolders, got.Folders)
 			}
 		})
 	}
@@ -372,5 +371,100 @@ func TestMigrateNeverRevivesUnattributedGrants(t *testing.T) {
 	db, _ = NewProjectDB(s.Projects())
 	if got, _ := db.Get(p.ID); got.Perms["app:a1"] != PermRead || got.GrantedBy["app:a1"] != "" {
 		t.Fatalf("an older store's grant after the column: %+v", got)
+	}
+}
+
+// An app's folder grant changes nobody else's access: it is no folder rule,
+// so it cannot re-open, for every other member, a folder an enclosing rule
+// closes, whether that rule came first or later.
+func TestAnAppFolderGrantChangesNobodyElsesAccess(t *testing.T) {
+	d := writerHub(t)
+	app, principal := newApp(d, d.p.Org, "bob", "B")
+	key := keyAs(d, app, "alice")
+	hidden := func(path string) {
+		t.Helper()
+		d.send("GET", "/api/p/"+d.p.ID+"/file?path="+path, "", "carol", nil, http.StatusNotFound)
+	}
+
+	// private/ is closed to everyone but alice and bob; bob gives the app
+	// read on a subfolder of it.
+	d.send("PUT", "/api/p/"+d.p.ID+"/folders", `{"prefix":"private","default":"none","perms":{"bob@x.io":"write"}}`, "alice", nil, 200)
+	d.put("private/sub/x.json", `{"n":1}`)
+	d.grant("bob", principal, `{"level":"read","path":"private/sub"}`, 200)
+	hidden("private/sub/x.json")
+	if paths := keyPaths(t, d, d.dataQuery(), key); !slices.Contains(paths, "private/sub/x.json") {
+		t.Fatalf("the app granted private/sub/ sees %v", paths)
+	}
+
+	// The other order: the grant first, the closing rule after.
+	d.put("reports/q3/y.json", `{"n":2}`)
+	d.grant("bob", principal, `{"level":"read","path":"reports/q3"}`, 200)
+	d.send("PUT", "/api/p/"+d.p.ID+"/folders", `{"prefix":"reports","default":"none"}`, "alice", nil, 200)
+	hidden("reports/q3/y.json")
+
+	// And a person cannot be given a folder this way at all.
+	d.grant("alice", "carol@x.io", `{"level":"read","path":"private/sub"}`, http.StatusBadRequest)
+}
+
+// A folder grant alone, on a project with no folder rules of its own, still
+// opens only that folder.
+func TestAFolderGrantAloneOnAProjectWithNoRules(t *testing.T) {
+	d := writerHub(t)
+	d.send("DELETE", "/api/p/"+d.p.ID+"/folders?prefix=secret", "", "alice", nil, 200)
+	if p, _ := d.srv.Projects.Get(d.p.ID); len(p.Folders) != 0 {
+		t.Fatalf("fixture: the project still has rules: %+v", p.Folders)
+	}
+	app, principal := newApp(d, d.p.Org, "bob", "B")
+	key := keyAs(d, app, "alice")
+	d.grant("bob", principal, `{"level":"read","path":"acme"}`, 200)
+	if paths := keyPaths(t, d, d.dataQuery(), key); !under(paths, "acme/") {
+		t.Fatalf("an app granted acme/ alone on a project with no rules sees %v", paths)
+	}
+}
+
+// An explicit none for an app on the project is a denial, and no folder grant
+// opens what it closes.
+func TestAnExplicitNoneOnTheProjectHoldsAgainstFolderGrants(t *testing.T) {
+	d := writerHub(t)
+	app, principal := newApp(d, d.p.Org, "bob", "B")
+	key := keyAs(d, app, "alice")
+	d.grant("alice", principal, `{"level":"none"}`, 200)
+	d.grant("bob", principal, `{"level":"read","path":"acme"}`, 200)
+	if rec := keyCall(d, "POST", d.dataQuery(), `{"pattern":"**/*.json"}`, key); rec.Code != http.StatusForbidden {
+		t.Fatalf("an app denied the project read through a folder grant: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A metadata write from a stale copy keeps who gave each grant, as it keeps the
+// grants: on the file backend a copy without them would make every app grant
+// read as unattributed, which counts it whoever gave it.
+func TestFilePutMetaKeepsWhoGaveEachGrant(t *testing.T) {
+	repo := newFileProjectRepo(filepath.Join(t.TempDir(), "projects.json"))
+	db, err := NewProjectDB(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := db.GetOrCreate("w", "org1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := p // before any grant
+	if err := db.SetPermBy(p.ID, "app:a1", PermRead, "bob@x.io"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetAppFolder(p.ID, AppFolderGrant{Prefix: "docs/", App: "app:a1", Level: PermRead, By: "bob@x.io"}); err != nil {
+		t.Fatal(err)
+	}
+	stale.Name = "renamed"
+	if err := repo.PutMeta(stale); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := NewProjectDB(newFileProjectRepo(repo.path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := fresh.Get(p.ID)
+	if got.Name != "renamed" || got.GrantedBy["app:a1"] != "bob@x.io" || len(got.AppFolders) != 1 {
+		t.Fatalf("after a stale metadata write: %+v", got)
 	}
 }

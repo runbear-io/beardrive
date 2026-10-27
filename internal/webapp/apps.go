@@ -470,6 +470,9 @@ func (s *Server) dropAppGrants(a App) {
 		if err := s.Projects.dropFolderGrants(p.ID, principal); err != nil {
 			log.Printf("beardrive: delete app %s: project %s folder grants: %v", a.ID, p.ID, err)
 		}
+		if err := s.Projects.dropAppFolders(p.ID, principal); err != nil {
+			log.Printf("beardrive: delete app %s: project %s app folder grants: %v", a.ID, p.ID, err)
+		}
 	}
 }
 
