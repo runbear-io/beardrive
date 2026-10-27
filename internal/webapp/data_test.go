@@ -610,9 +610,16 @@ func TestDataQuerySQLRefusesWhatTheIndexCannotHold(t *testing.T) {
 			d.put("z/e-escaped.json", `{"s":"a\\u0000b","t":"café"}`)
 			d.put("z/f-nul.md", "---\ns: \"a\\0b\"\n---\nbody\n")
 			d.put("z/g-later.json", `{"n":2}`)
+			// U+FFFD itself, written as an escape or as the character, and a
+			// paired surrogate are ordinary text; a lone surrogate is not.
+			d.put("z/h-replacement.json", `{"s":"\ufffd","t":"`+"\ufffd"+`","u":"\u00e9"}`)
+			d.put("z/i-pair.json", `{"s":"\ud83d\ude00"}`)
+			d.put("z/j-low.json", `{"s":"\udc00x"}`)
+			d.put("z/k-high-then-text.json", `{"s":"\ud83dx"}`)
 			a := d.query("alice", map[string]any{"pattern": "z/*", "select": []string{"$path"}})
-			if got := strs(a.Rows, "$path"); strings.Join(got, ",") != `"z/a-good.json","z/e-escaped.json","z/g-later.json"` || a.Errors != 4 {
-				t.Fatalf("rows %v errors %d; want the three holdable files and four errors", got, a.Errors)
+			want := `"z/a-good.json","z/e-escaped.json","z/g-later.json","z/h-replacement.json","z/i-pair.json"`
+			if got := strs(a.Rows, "$path"); strings.Join(got, ",") != want || a.Errors != 6 {
+				t.Fatalf("rows %v errors %d; want the five holdable files and six errors", got, a.Errors)
 			}
 		})
 	}
@@ -644,9 +651,18 @@ func TestDataQuerySQLHubWritesDoNotWaitForAPass(t *testing.T) {
 		st.mu.Unlock()
 		t.Fatal("a hub write waited for the running pass")
 	}
+	// Until the queued pass has run, the index is behind the write, and says so.
+	if d.query("alice", map[string]any{"pattern": "w/*.json", "count": true}).Complete {
+		st.mu.Unlock()
+		t.Fatal("the index reads complete while a write it does not hold waits for a pass")
+	}
 	st.mu.Unlock()
 	deadline := time.Now().Add(5 * time.Second)
-	for d.query("alice", map[string]any{"pattern": "w/*.json", "count": true}).Count != 1 {
+	for {
+		a := d.query("alice", map[string]any{"pattern": "w/*.json", "count": true})
+		if a.Count == 1 && a.Complete {
+			break
+		}
 		if time.Now().After(deadline) {
 			t.Fatal("the queued pass never indexed the write")
 		}
@@ -677,6 +693,9 @@ func TestDataQueryBoundsItsSize(t *testing.T) {
 	for i := range fields {
 		fields[i] = "f" + strconv.Itoa(i)
 	}
+	// Exactly the limit is allowed: each item counts once, the operator not at all.
+	body, _ := json.Marshal(map[string]any{"pattern": "**/*.json", "where": map[string]any{"dr": map[string]any{"in": many[:dataMaxTerms]}}})
+	d.send("POST", "/api/p/"+d.p.ID+"/data/query", string(body), "alice", nil, http.StatusOK)
 	for name, q := range map[string]map[string]any{
 		"a long in list":  {"pattern": "**/*.json", "where": map[string]any{"dr": map[string]any{"in": many}}},
 		"deep nesting":    {"pattern": "**/*.json", "where": deep},

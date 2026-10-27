@@ -129,24 +129,50 @@ func spool(src io.Reader) (f *os.File, size int64, sum string, err error) {
 // Upload stores content through the server: spool to disk while hashing,
 // push the blob, then journal the op.
 func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ int64, who User, note string) error {
-	return r.uploadIf(ctx, p, src, who, note, "")
+	_, err := r.uploadIf(ctx, p, src, who, note, "")
+	return err
 }
 
 // uploadIf is Upload held to base, the version of p the writer built on (an
 // If-Match sha; "" holds it to nothing), all the way into the journal append.
 // See commitBase.
-func (r *RemoteSource) uploadIf(ctx context.Context, p string, src io.Reader, who User, note, base string) error {
+//
+// created reports whether this write stored the blob, which is what bills it:
+// a blob is billed once, by the write that stored it, whether or not the op
+// naming it then lands. Content addressing means a blob already there is the
+// same bytes. Stored only if absent, atomically where the backend can create
+// conditionally (GCS); elsewhere a look comes first, which two writers of the
+// same new bytes can both pass.
+func (r *RemoteSource) uploadIf(ctx context.Context, p string, src io.Reader, who User, note, base string) (created bool, err error) {
 	tmp, size, blob, err := spool(src)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	// Blob before journal, always.
-	if err := r.Backend.Put(ctx, "blobs/"+blob, tmp, size); err != nil {
-		return fmt.Errorf("push blob: %w", err)
+	key := "blobs/" + blob
+	if cp, ok := r.Backend.(remote.ConditionalPutter); ok {
+		switch _, err := cp.PutIf(ctx, key, tmp, size, remote.VersionAbsent); {
+		case errors.Is(err, remote.ErrVersionMismatch):
+		case err != nil:
+			return false, fmt.Errorf("push blob: %w", err)
+		default:
+			created = true
+		}
+	} else {
+		there, err := r.Backend.Exists(ctx, key)
+		if err != nil {
+			return false, fmt.Errorf("check blob: %w", err)
+		}
+		if !there {
+			if err := r.Backend.Put(ctx, key, tmp, size); err != nil {
+				return false, fmt.Errorf("push blob: %w", err)
+			}
+			created = true
+		}
 	}
-	return r.commitIf(ctx, p, blob, size, who, note, base)
+	return created, r.commitIf(ctx, p, blob, size, who, note, base)
 }
 
 // Commit appends a put op for path→blob to this server's own journal. It
@@ -277,7 +303,9 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 				return nil, err
 			}
 		}
-		r.stamp(sourced, ops)
+		if err := r.stamp(sourced, ops); err != nil {
+			return nil, err
+		}
 		return journal.Marshal(ops)
 	}
 	key := "journal/" + r.Device.ID + ".jsonl"
@@ -296,13 +324,20 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 // from this server's own journal: an op's Device field is JSON its pusher
 // chose, and a member's op naming the hub's device with seq MaxInt64 would
 // otherwise wrap every later hub op onto one (device, seq) slot.
-func (r *RemoteSource) stamp(sourced []sourcedOp, ops []journal.Op) {
+//
+// A seq with no room after it is refused rather than wrapped: no request can
+// write the hub's journal (ownJournal), so one there came from outside the
+// hub, and wrapping would reuse a (device, seq) on every later op.
+func (r *RemoteSource) stamp(sourced []sourcedOp, ops []journal.Op) error {
 	var maxLamport, mySeq int64
 	for _, so := range sourced {
 		maxLamport = max(maxLamport, so.Op.Lamport)
 		if so.From == r.Device.ID {
 			mySeq = max(mySeq, so.Op.Seq)
 		}
+	}
+	if mySeq > math.MaxInt64-int64(len(ops)) {
+		return fmt.Errorf("this hub's journal holds seq %d, with no room after it; it was written from outside the hub", mySeq)
 	}
 	now := time.Now().UTC()
 	lam := maxLamport
@@ -319,6 +354,7 @@ func (r *RemoteSource) stamp(sourced []sourcedOp, ops []journal.Op) {
 		ops[i].Seq, ops[i].Lamport, ops[i].Time = mySeq+int64(i)+1, lam, now
 		ops[i].Device, ops[i].DeviceName, ops[i].Author = r.Device.ID, r.Device.Name, r.Device.Author
 	}
+	return nil
 }
 
 var errBlobMissing = fmt.Errorf("content not uploaded yet")
@@ -738,15 +774,19 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// journals the op lands on — the only place a write from another hub
 	// process is guaranteed to be seen.
 	if rs, ok := up.(*RemoteSource); ok {
-		err = rs.uploadIf(r.Context(), p, tmp, s.requestUser(r), "", base)
-		// A write refused after its blob landed (a stale base, a failed
-		// append) still stored the blob, and a retry of the same bytes is
-		// billed nothing (billableBytes): they are charged here or never.
-		if err != nil && billed > 0 && billableBytes(r.Context(), rs.Backend, "blobs/"+blob, size) == 0 {
+		// Billed by whether this write stored the blob (see uploadIf), even
+		// when the op is then refused: a stale base still left the blob in
+		// the store, and a retry of the same bytes stores nothing. A write
+		// that found the blob already stored is billed nothing, whoever
+		// stored it and whatever happened to their op.
+		var created bool
+		created, err = rs.uploadIf(r.Context(), p, tmp, s.requestUser(r), "", base)
+		if billed = 0; created {
+			billed = size
 			s.quota().RecordUsage(org, billed)
 		}
-	} else {
-		err = up.Upload(r.Context(), p, tmp, size, s.requestUser(r), "")
+	} else if err = up.Upload(r.Context(), p, tmp, size, s.requestUser(r), ""); err == nil && billed > 0 {
+		s.quota().RecordUsage(org, billed)
 	}
 	var stale *staleWriteError
 	if errors.As(err, &stale) {
@@ -758,9 +798,6 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	if err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
-	}
-	if billed > 0 {
-		s.quota().RecordUsage(org, billed)
 	}
 	v.invalidate()
 	s.dataWrote(r.Context(), projectID(r))

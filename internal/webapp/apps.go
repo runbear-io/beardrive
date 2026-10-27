@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"maps"
 	"net/http"
 	"regexp"
 	"sort"
@@ -413,15 +412,10 @@ func (s *Server) dropAppGrants(a App) {
 		if err := s.Projects.dropPerm(p.ID, principal); err != nil {
 			log.Printf("beardrive: delete app %s: project %s grant: %v", a.ID, p.ID, err)
 		}
-		for _, rule := range p.Folders {
-			if _, has := rule.Perms[principal]; !has {
-				continue
-			}
-			rule.Perms = maps.Clone(rule.Perms)
-			delete(rule.Perms, principal)
-			if err := s.Projects.SetFolder(p.ID, rule); err != nil {
-				log.Printf("beardrive: delete app %s: project %s folder %s: %v", a.ID, p.ID, rule.Prefix, err)
-			}
+		// Grant by grant, never rule by rule: rewriting a rule from this
+		// listing would put back one another process has just removed.
+		if err := s.Projects.dropFolderGrants(p.ID, principal); err != nil {
+			log.Printf("beardrive: delete app %s: project %s folder grants: %v", a.ID, p.ID, err)
 		}
 	}
 }

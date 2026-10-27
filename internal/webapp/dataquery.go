@@ -592,8 +592,11 @@ func (c *dataSQL) fieldCond(field string, v any) (string, error) {
 }
 
 func (c *dataSQL) compare(e dataExpr, op string, v any) (string, error) {
-	if err := c.term(); err != nil {
-		return "", err
+	// in and nin count each item instead, below.
+	if op != "in" && op != "nin" {
+		if err := c.term(); err != nil {
+			return "", err
+		}
 	}
 	switch op {
 	case "eq":

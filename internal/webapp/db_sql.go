@@ -881,6 +881,13 @@ func (r *sqlProjectRepo) PutFolder(project string, rule FolderRule) error {
 	})
 }
 
+// DropFolderPerm removes one grant from one rule, and only the grant: the
+// rule's row is not written, so a rule another process removed stays removed.
+func (r *sqlProjectRepo) DropFolderPerm(project, prefix, email string) error {
+	return r.w.exec(`DELETE FROM project_folder_perms WHERE project = ? AND prefix = ? AND email = ?`,
+		project, prefix, email)
+}
+
 // DeleteFolder removes one rule and its grants. A prefix with no rule is not
 // an error: the caller's intent already holds.
 func (r *sqlProjectRepo) DeleteFolder(project, prefix string) error {

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -36,12 +37,15 @@ import (
 // pass that was missed is made up by the next one.
 
 // dataProject is one project's applier state. mu admits one pass at a time;
-// queued says a background pass is already waiting for it.
+// queued says a background pass is already waiting for it. changes counts the
+// changes this process has asked the index to catch up with: a pass that
+// began before the latest one may not report the index complete.
 type dataProject struct {
-	mu     sync.Mutex
-	known  map[string]dataKnown // what the index holds; nil until loaded
-	qmu    sync.Mutex
-	queued bool
+	mu      sync.Mutex
+	known   map[string]dataKnown // what the index holds; nil until loaded
+	qmu     sync.Mutex
+	queued  bool
+	changes atomic.Uint64
 }
 
 func (s *Server) dataProjectState(id string) *dataProject {
@@ -56,6 +60,7 @@ func (s *Server) dataApplyAsync(id string) {
 		return
 	}
 	st := s.dataProjectState(id)
+	st.changes.Add(1)
 	st.qmu.Lock()
 	if st.queued {
 		st.qmu.Unlock()
@@ -85,11 +90,17 @@ func (s *Server) dataWrote(ctx context.Context, id string) {
 		return
 	}
 	st := s.dataProjectState(id)
+	st.changes.Add(1)
 	// A running pass holds the lock for as long as it fetches, which on a
 	// first build is minutes; the write must not wait on it. The pass this
 	// queues reads the fold after the write, so the index still catches up,
-	// only not before this request returns.
+	// only not before this request returns, and until it has, the index is
+	// behind: it says so now, and the running pass may not say otherwise
+	// when it ends (dataPass reads changes when it starts).
 	if !st.mu.TryLock() {
+		if err := s.Data.lower(ctx, id); err != nil {
+			log.Printf("beardrive: data index for %s: %v", id, err)
+		}
 		s.dataApplyAsync(id)
 		return
 	}
@@ -150,6 +161,9 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 	if !s.dataOn(id) {
 		return nil
 	}
+	// Read before the fold: a change counted after this is one the fold may
+	// not hold, and then this pass is not the one that catches the index up.
+	changes := st.changes.Load()
 	_, v, err := s.projectVolume(id)
 	if err != nil {
 		return err
@@ -305,7 +319,7 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 	if err := s.dataWriteKnown(ctx, id, st, write); err != nil {
 		return err
 	}
-	if !complete {
+	if !complete || st.changes.Load() != changes {
 		return s.Data.lower(ctx, id)
 	}
 	return s.Data.setState(ctx, id, true, time.Now())
@@ -360,28 +374,57 @@ func decodeData(path string, b []byte) ([]byte, string) {
 // json.Valid accepts bytes that are not UTF-8 and the escapes for a NUL and
 // an unpaired surrogate; Postgres refuses all three in JSONB, and one such
 // row used to fail its whole slice on every pass, so nothing after it was
-// ever indexed. Go decodes an unpaired surrogate as U+FFFD, so a document
-// that spells U+FFFD itself and also uses an escape is refused with it.
+// ever indexed. The escapes are read as written: a decoder would turn an
+// unpaired surrogate into U+FFFD, the same character a document may spell on
+// purpose, and that one every dialect stores.
 func dataHoldable(doc []byte) bool {
 	if !utf8.Valid(doc) {
 		return false
 	}
-	if !bytes.Contains(doc, []byte(`\u`)) {
-		return true // neither escape can be there, and a raw NUL is not valid JSON
-	}
-	dec := json.NewDecoder(bytes.NewReader(doc))
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			return true
+	// The document is valid JSON, so every backslash opens an escape inside
+	// a string, and the only escape with digits is \uXXXX.
+	for i := 0; i < len(doc); i++ {
+		if doc[i] != '\\' {
+			continue
 		}
-		if err != nil {
+		if doc[i+1] != 'u' {
+			i++
+			continue
+		}
+		r := jsonEscape(doc[i+2 : i+6])
+		i += 5
+		switch {
+		case r == 0:
 			return false
-		}
-		if s, ok := tok.(string); ok && strings.ContainsAny(s, "\x00\ufffd") {
-			return false
+		case r >= 0xdc00 && r <= 0xdfff:
+			return false // a low surrogate with no high one before it
+		case r >= 0xd800 && r <= 0xdbff:
+			if i+6 >= len(doc) || doc[i+1] != '\\' || doc[i+2] != 'u' {
+				return false
+			}
+			if lo := jsonEscape(doc[i+3 : i+7]); lo < 0xdc00 || lo > 0xdfff {
+				return false
+			}
+			i += 6
 		}
 	}
+	return true
+}
+
+// jsonEscape is the code unit four hex digits name.
+func jsonEscape(hex []byte) rune {
+	var r rune
+	for _, c := range hex {
+		switch {
+		case c >= '0' && c <= '9':
+			r = r<<4 | rune(c-'0')
+		case c >= 'a' && c <= 'f':
+			r = r<<4 | rune(c-'a'+10)
+		default:
+			r = r<<4 | rune(c-'A'+10)
+		}
+	}
+	return r
 }
 
 func decodeDoc(path string, b []byte) ([]byte, string) {

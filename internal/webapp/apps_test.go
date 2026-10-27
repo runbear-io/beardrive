@@ -256,3 +256,68 @@ func TestAppKeyRevokeAndNameEdges(t *testing.T) {
 	}
 	d.send("DELETE", "/api/orgs/"+org+"/apps/"+app+"/keys/knope", "", "alice", nil, http.StatusNotFound)
 }
+
+// loadThen is a project store that runs a hook once, right after a load: what
+// another hub process does between this one's read and its write.
+type loadThen struct {
+	*sqlProjectRepo
+	after func()
+}
+
+func (l *loadThen) Load() ([]Project, error) {
+	ps, err := l.sqlProjectRepo.Load()
+	if f := l.after; f != nil {
+		l.after = nil
+		f()
+	}
+	return ps, err
+}
+
+// Deleting an app removes its folder grants one row at a time. A rule another
+// process removed in the meantime stays removed: rewriting rules from this
+// process's listing used to put it back.
+func TestDeletingAnAppNeverPutsBackARemovedRule(t *testing.T) {
+	store, err := OpenSQLStore("sqlite", filepath.Join(t.TempDir(), "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	other, err := NewProjectDB(store.Projects())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := other.GetOrCreate("wiki", "org1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := appPrincipal("a1")
+	if err := other.SetFolder(p.ID, FolderRule{Prefix: "secret/", Default: PermNone, Perms: map[string]string{principal: PermRead}}); err != nil {
+		t.Fatal(err)
+	}
+	hooked := &loadThen{sqlProjectRepo: store.Projects().(*sqlProjectRepo)}
+	mine, err := NewProjectDB(hooked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A change this process has not read yet, so its next read reloads; the
+	// other process removes the rule right after that reload.
+	if err := other.SetFolder(p.ID, FolderRule{Prefix: "open/", Default: PermRead}); err != nil {
+		t.Fatal(err)
+	}
+	hooked.after = func() {
+		if err := other.ClearFolder(p.ID, "secret/"); err != nil {
+			t.Error(err)
+		}
+	}
+	(&Server{Projects: mine}).dropAppGrants(App{ID: "a1", Org: "org1"})
+	fresh, err := NewProjectDB(store.Projects())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := fresh.Get(p.ID)
+	for _, rule := range got.Folders {
+		if rule.Prefix == "secret/" {
+			t.Fatalf("a removed rule came back: %+v", rule)
+		}
+	}
+}

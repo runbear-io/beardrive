@@ -147,9 +147,10 @@ func toolText(res *mcp.CallToolResult) string {
 // conditional write — standing in for another hub process.
 type casRoot struct {
 	remote.Backend
-	mu          sync.Mutex
-	beforePutIf func(key string)
-	conflicts   int
+	mu            sync.Mutex
+	beforePutIf   func(key string) // before a conditional journal write
+	beforeBlobPut func(key string) // before a conditional blob write
+	conflicts     int
 }
 
 func versionOf(b []byte) remote.Version {
@@ -184,9 +185,13 @@ func (c *casRoot) GetVersioned(ctx context.Context, key string) (io.ReadCloser, 
 }
 
 func (c *casRoot) PutIf(ctx context.Context, key string, r io.Reader, _ int64, expect remote.Version) (remote.Version, error) {
-	if hook := c.beforePutIf; hook != nil {
-		c.beforePutIf = nil
-		hook(key)
+	hook := &c.beforePutIf
+	if strings.Contains(key, "blobs/") {
+		hook = &c.beforeBlobPut
+	}
+	if f := *hook; f != nil {
+		*hook = nil
+		f(key)
 	}
 	body, err := io.ReadAll(r)
 	if err != nil {
@@ -381,5 +386,79 @@ func TestARefusedWriteStillBillsTheBlobItStored(t *testing.T) {
 	}
 	if got := billed() - before; got != int64(len("ours")) {
 		t.Fatalf("the retry billed again: %d bytes in all, want %d", got, len("ours"))
+	}
+}
+
+// Two hub processes upload the same new bytes. The one that stores the blob is
+// billed for it. The other found it stored and is billed nothing, even when
+// its own op is then refused (which used to bill it again).
+func TestOnlyTheWriteThatStoresABlobIsBilledForIt(t *testing.T) {
+	var root *casRoot
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		root = &casRoot{Backend: be}
+		return root
+	})
+	q := &recQuota{}
+	srv.Quota = q
+	h := srv.Handler()
+	if rec := putIfMatch(h, p.ID, "note.md", "v1", ""); rec.Code != 200 {
+		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
+	}
+	billed := func() (n int64) {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		for _, u := range q.usage {
+			n += u.bytes
+		}
+		return n
+	}
+	before := billed()
+	ctx := context.Background()
+	root.beforeBlobPut = func(key string) { // the other process stored the same bytes first
+		root.Backend.Put(ctx, key, strings.NewReader("ours"), 4)
+	}
+	root.beforePutIf = func(key string) { theOtherProcessAppends(t, root, key, "note.md", "theirs") }
+	if rec := putIfMatch(h, p.ID, "note.md", "ours", shaOf("v1")); rec.Code != http.StatusConflict {
+		t.Fatalf("stale write: %d %s", rec.Code, rec.Body)
+	}
+	if got := billed() - before; got != 0 {
+		t.Fatalf("a write that found its blob already stored was billed %d bytes", got)
+	}
+}
+
+// No request writes the hub's own journal, the project-admin recovery path
+// included: every op the hub stamps takes its seq from that journal.
+func TestTheHubJournalIsWrittenOnlyByTheHub(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	forged := `{"kind":"put","path":"x.md","seq":9223372036854775807,"lamport":1,"device":"` + srv.Device.ID + `"}` + "\n"
+	req := httptest.NewRequest("PUT", "/api/p/"+p.ID+"/store/object?key=journal/"+srv.Device.ID+".jsonl", strings.NewReader(forged))
+	req.Header.Set("X-Bdrive-Device", srv.Device.ID)
+	req.AddCookie(cookies["alice"]) // the org owner: a project admin
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("an admin wrote the hub's journal through the store: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A seq with no room after it, put in the hub's journal from outside the hub,
+// stops the hub's writes rather than wrapping every later op onto one slot.
+func TestTheHubRefusesASeqWithNoRoomAfterIt(t *testing.T) {
+	root, h, p := casHub(t)
+	line, _ := journal.Marshal([]journal.Op{{
+		Seq: math.MaxInt64, Lamport: 1, Time: time.Now().UTC(), Device: webDevice.ID,
+		Kind: journal.KindPut, Path: "forged.md", Blob: shaOf("x"), Size: 1,
+	}})
+	key := p.ID + "/journal/" + webDevice.ID + ".jsonl"
+	if err := root.Backend.Put(context.Background(), key, bytes.NewReader(line), int64(len(line))); err != nil {
+		t.Fatal(err)
+	}
+	if rec := putIfMatch(h, p.ID, "a.md", "a", ""); rec.Code == 200 {
+		t.Fatal("the hub stamped an op after seq MaxInt64")
+	}
+	for _, op := range hubOps(t, root, p.ID) {
+		if op.Seq <= 0 {
+			t.Fatalf("hub op %s took seq %d", op.Path, op.Seq)
+		}
 	}
 }
