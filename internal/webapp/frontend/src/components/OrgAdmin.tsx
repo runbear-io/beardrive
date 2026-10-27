@@ -202,8 +202,6 @@ export function OrgAdmin({
             ))}
           </div>
 
-          <AppsSection org={org} />
-
           <h3>Public share links</h3>
           <p className="admin-sub">
             Every live link across this organization's projects. A project's own links are on its
@@ -217,6 +215,10 @@ export function OrgAdmin({
           />
         </>
       )}
+
+      {/* Every member: any of them may create an app, and manages the ones
+          they created (apps.go). */}
+      <AppsSection org={org} />
     </div>
   );
 }
@@ -224,7 +226,14 @@ export function OrgAdmin({
 /* ---- apps: a server's own credential (apps.go) ---- */
 
 type AppKeyInfo = { id: string; hint: string; created: string; last_used?: string };
-type AppInfo = { id: string; name: string; principal: string; created: string; keys: AppKeyInfo[] };
+type AppInfo = {
+  id: string;
+  name: string;
+  principal: string;
+  created: string;
+  manage: boolean; // the caller created it, or owns the org
+  keys: AppKeyInfo[];
+};
 
 const day = (iso?: string) => (iso ? new Date(iso).toLocaleDateString() : "");
 
@@ -268,8 +277,8 @@ function AppsSection({ org }: { org: Org }) {
         </Button>
       </div>
       <p className="admin-sub">
-        A server's own key to query a project's data and read its history. An app sees only what it
-        is granted: add its id under a project's Settings → People.
+        A server's own key to query a project's data and read its history. Any member can create
+        one. An app sees only what it is granted on each project.
       </p>
       <div className="admin-list">
         {apps && apps.length === 0 && <div className="admin-empty">No apps.</div>}
@@ -285,25 +294,29 @@ function AppsSection({ org }: { org: Org }) {
               >
                 {a.principal}
               </button>
-              <Button
-                variant="subtle"
-                onClick={() =>
-                  run(async () => showKey((await postJSON<{ key: string }>(`${base}/${a.id}/keys`)).key))
-                }
-              >
-                New key
-              </Button>
-              <button
-                className="ai-del"
-                aria-label={`Delete app ${a.name}`}
-                onClick={async () => {
-                  if (!(await modalConfirm("Delete app", `Delete “${a.name}” and every key it holds?`, "Delete", true)))
-                    return;
-                  await run(() => api("DELETE", `${base}/${a.id}`), "Deleted.");
-                }}
-              >
-                Delete
-              </button>
+              {a.manage && (
+                <>
+                  <Button
+                    variant="subtle"
+                    onClick={() =>
+                      run(async () => showKey((await postJSON<{ key: string }>(`${base}/${a.id}/keys`)).key))
+                    }
+                  >
+                    New key
+                  </Button>
+                  <button
+                    className="ai-del"
+                    aria-label={`Delete app ${a.name}`}
+                    onClick={async () => {
+                      if (!(await modalConfirm("Delete app", `Delete “${a.name}” and every key it holds?`, "Delete", true)))
+                        return;
+                      await run(() => api("DELETE", `${base}/${a.id}`), "Deleted.");
+                    }}
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
             </div>
             {a.keys.map((k) => (
               <div className="admin-item" key={k.id}>

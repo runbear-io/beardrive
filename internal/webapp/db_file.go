@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -387,6 +388,36 @@ func (r *fileProjectRepo) PutFolder(project string, rule FolderRule) error {
 	return r.write()
 }
 
+// PutFolderPerm writes one grant on one prefix as the file stands on disk,
+// creating the rule (inheriting the project level) only if it is not there.
+func (r *fileProjectRepo) PutFolderPerm(project, prefix, email, level, by string) error {
+	if err := storable(project, prefix, email, level, by); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	p, ok := r.byID[project]
+	if !ok {
+		return fmt.Errorf("no such project %q", project)
+	}
+	p = p.clone()
+	i := slices.IndexFunc(p.Folders, func(f FolderRule) bool { return f.Prefix == prefix })
+	if i < 0 {
+		p.Folders = append(p.Folders, FolderRule{Prefix: prefix})
+		i = len(p.Folders) - 1
+	}
+	if p.Folders[i].Perms == nil {
+		p.Folders[i].Perms = map[string]string{}
+	}
+	p.Folders[i].Perms[email] = level
+	setGranter(&p.Folders[i].GrantedBy, email, by)
+	r.byID[project] = p
+	return r.write()
+}
+
 // DropFolderPerm removes one grant from one rule as it stands on disk; a rule
 // that is no longer there is left absent.
 func (r *fileProjectRepo) DropFolderPerm(project, prefix, email string) error {
@@ -403,6 +434,7 @@ func (r *fileProjectRepo) DropFolderPerm(project, prefix, email string) error {
 	for i := range p.Folders {
 		if p.Folders[i].Prefix == prefix {
 			delete(p.Folders[i].Perms, email)
+			delete(p.Folders[i].GrantedBy, email)
 		}
 	}
 	r.byID[project] = p
@@ -434,8 +466,8 @@ func (r *fileProjectRepo) DeleteFolder(project, prefix string) error {
 }
 
 // PutPerm writes one grant. An empty level removes it.
-func (r *fileProjectRepo) PutPerm(project, email, level string) error {
-	if err := storable(project, email, level); err != nil {
+func (r *fileProjectRepo) PutPerm(project, email, level, by string) error {
+	if err := storable(project, email, level, by); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -451,11 +483,13 @@ func (r *fileProjectRepo) PutPerm(project, email, level string) error {
 	switch {
 	case level == "":
 		delete(p.Perms, email)
+		by = ""
 	case p.Perms == nil:
 		p.Perms = map[string]string{email: level}
 	default:
 		p.Perms[email] = level
 	}
+	setGranter(&p.GrantedBy, email, by)
 	r.byID[project] = p
 	return r.write()
 }

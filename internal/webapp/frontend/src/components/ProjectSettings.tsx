@@ -240,7 +240,7 @@ export function ProjectSettings({
       </Card>
 
 
-      {mayEdit && <DataSetting project={project} onChanged={refresh} />}
+      {atLeast(project.perm, "write") && <DataSetting project={project} onChanged={refresh} />}
 
       <Card>
         <CardHeader>

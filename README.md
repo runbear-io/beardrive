@@ -449,16 +449,18 @@ whole folders through the hub without ever knowing where the storage is or
 holding any cloud credentials; the server device is the only one configured
 with the bucket.
 
-A project admin can turn on **Data** in the project's Settings. The hub then
+Any member who can write a project can turn on **Data** in its Settings. The hub then
 indexes the project's JSON files and Markdown frontmatter, so apps and agents
 can filter, sort, group and count them over `POST /api/p/<id>/data/query` (or
 the MCP `query` and `describe` tools) instead of reading every file. Each answer
 carries an ETag, so an unchanged screen gets `304`. The index is derived from
 the files and lives in the metadata database. With the file backend it is
 `data-index.db`, next to `projects.json`. A server reads data with its own
-credential: an organization owner creates an **app** (`app:<id>`), grants it
-read access in a project's People like a member, and mints `bda_` keys for it.
-A key reaches only `data/query`, `data/describe` and `history`. See
+credential: any organization member creates an **app** (`app:<id>`) and mints
+`bda_` keys for it, and a member who can write a project grants the app read
+there (more takes a project admin). A grant and a key last only while the
+member who gave or minted it still could. A key reaches only `data/query`,
+`data/describe` and `history`. See
 [Data queries](https://docs.beardrive.ai/reference/data-queries/).
 
 Projects are walled by **organization**: every project belongs to one org

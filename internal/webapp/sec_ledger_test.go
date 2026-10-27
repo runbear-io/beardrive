@@ -703,6 +703,10 @@ func TestSec_DB_QueryRewriteOnlyEverSeesStaticSQL(t *testing.T) {
 						}
 						continue
 					}
+					// A schema version, which no DDL is built from.
+					if bl, ok := a.(*ast.BasicLit); ok && bl.Kind == token.INT {
+						continue
+					}
 					lit, ok := a.(*ast.CompositeLit)
 					if !ok {
 						bad = append(bad, fmt.Sprintf("%s: addColumns column spec is not a literal map",
