@@ -514,3 +514,34 @@ func TestMigrateRefusesToRecreateGrantTablesEmpty(t *testing.T) {
 		})
 	}
 }
+
+// A member shut out of a folder learns nothing about apps' grants inside it,
+// and the general project responses carry no app grant or giver at all.
+func TestProjectResponsesKeepAppGrantsToThemselves(t *testing.T) {
+	d := writerHub(t) // secret/ is closed to everyone but alice
+	_, principal := newApp(d, d.p.Org, "alice", "A")
+	d.grant("alice", principal, `{"level":"read","path":"secret/reports"}`, 200)
+	d.grant("alice", principal, `{"level":"read","path":"acme"}`, 200)
+	d.send("PUT", "/api/p/"+d.p.ID+"/folders", `{"prefix":"konny","perms":{"`+principal+`":"read"}}`, "alice", nil, 200)
+
+	for _, url := range []string{"/api/projects", "/api/projects/" + d.p.ID} {
+		body := d.send("GET", url, "", "bob", nil, 200).Body.String()
+		for _, leak := range []string{"secret/reports", "app_folders", "granted_by", principal} {
+			if strings.Contains(body, leak) {
+				t.Errorf("GET %s as a member shut out of secret/ carries %q: %s", url, leak, body)
+			}
+		}
+	}
+	perms := d.send("GET", "/api/p/"+d.p.ID+"/permissions", "", "bob", nil, 200).Body.String()
+	if strings.Contains(perms, "secret/reports") || !strings.Contains(perms, `"path":"acme/"`) {
+		t.Errorf("permissions as a member shut out of secret/: %s", perms)
+	}
+	folders := d.send("GET", "/api/p/"+d.p.ID+"/folders", "", "bob", nil, 200).Body.String()
+	if strings.Contains(folders, "granted_by") || strings.Contains(folders, "secret/reports") {
+		t.Errorf("folders as a member shut out of secret/: %s", folders)
+	}
+	// An admin still sees every app grant where grants are listed.
+	if all := d.send("GET", "/api/p/"+d.p.ID+"/permissions", "", "alice", nil, 200).Body.String(); !strings.Contains(all, "secret/reports/") {
+		t.Errorf("permissions as the owner: %s", all)
+	}
+}

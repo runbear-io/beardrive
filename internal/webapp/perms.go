@@ -351,8 +351,14 @@ func (s *Server) handleProjectPerms(w http.ResponseWriter, r *http.Request) {
 		grants = append(grants, map[string]string{"email": email, "level": level})
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i]["email"] < grants[j]["email"] })
+	// Apps' folder grants, only on folders the caller can read: one inside a
+	// folder they are denied would name that folder's contents.
+	vis := s.visibilityFor(r, p)
 	folders := make([]map[string]string, 0, len(p.AppFolders))
 	for _, g := range p.AppFolders {
+		if !vis.canRead(g.Prefix) {
+			continue
+		}
 		folders = append(folders, map[string]string{"app": g.App, "path": g.Prefix, "level": g.Level, "by": g.By})
 	}
 	writeJSON(w, map[string]any{

@@ -256,7 +256,9 @@ func visibleFolders(p Project, email, base string) []FolderRule {
 		if base != PermAdmin && !atLeast(folderLevel(p, email, r.Prefix, base), PermRead) {
 			continue
 		}
-		out = append(out, r.clone())
+		rule := r.clone()
+		rule.GrantedBy = nil // who gave an app its grant is the hub's to judge, not to list
+		out = append(out, rule)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Prefix < out[j].Prefix })
 	return out

@@ -1871,7 +1871,11 @@ func projectJSON(p Project, perm string) projectView {
 	// what makes this line necessary and is still the right shape — a
 	// hand-listed struct fails silently in the other direction, by dropping a
 	// field nobody remembered to add.
-	p.Perms, p.Default, p.Folders = nil, "", nil
+	//
+	// GrantedBy and AppFolders leak the same way: an app's folder grant names
+	// a path (possibly inside a folder the caller is denied), the app, and the
+	// member who gave it. /api/p/{id}/permissions answers for them, filtered.
+	p.Perms, p.Default, p.Folders, p.GrantedBy, p.AppFolders = nil, "", nil, nil, nil
 	return projectView{p, perm}
 }
 
