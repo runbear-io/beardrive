@@ -224,7 +224,7 @@ func TestDataQuerySQLAnswersFromTheIndex(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			d := newDataHub(t, open(t))
 			d.send("POST", "/api/p/"+d.p.ID+"/data/query", `{"pattern":"**/*.json"}`, "alice", nil, http.StatusNotFound)
-			d.send("PUT", "/api/p/"+d.p.ID+"/data", `{"enabled":true}`, "bob", nil, http.StatusForbidden)
+			d.send("PUT", "/api/p/"+d.p.ID+"/data", `{"enabled":true}`, "dave", nil, http.StatusForbidden)
 			d.enable()
 			placements := "{client}/placements/**/*.json"
 

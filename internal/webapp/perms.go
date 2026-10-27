@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
+	"strings"
 )
 
 // Per-project permissions. Orgs wall projects off from outsiders; these four
@@ -116,7 +118,156 @@ func (s *Server) resolveProjectPerm(r *http.Request, p Project) string {
 // a public share link, which has to ask whether the account that MINTED it can
 // still read what it publishes (shareStillReadable).
 func (s *Server) projectPermFor(p Project, email string) string {
-	return projectPermWithRole(p, email, s.roleIn(p.Org, email))
+	role := s.roleIn(p.Org, email)
+	if role == RoleApp {
+		p = s.honoredGrants(p, email)
+	}
+	return projectPermWithRole(p, email, role)
+}
+
+// mayGrant says whether a member could give a grant of level on a folder
+// (prefix "" for the whole project) as the project stands: read is any
+// writer's to give, more than read only an admin's.
+func (s *Server) mayGrant(p Project, by, prefix, level string) bool {
+	return atLeast(s.grantCeiling(p, by, prefix), level)
+}
+
+// grantCeiling is the most a member could give on a folder (prefix "" for the
+// project) as the project stands: anything for an admin, read for a writer,
+// nothing for anyone else.
+func (s *Server) grantCeiling(p Project, by, prefix string) string {
+	if by == "" || isAppPrincipal(by) {
+		return PermNone
+	}
+	at := s.projectPermFor(p, by)
+	if prefix != "" {
+		at = effectiveLevel(p, by, prefix, at)
+	}
+	switch at {
+	case PermAdmin:
+		return PermAdmin
+	case PermWrite:
+		return PermRead
+	}
+	return PermNone
+}
+
+// lowerOf is the lower of two levels.
+func lowerOf(a, b string) string {
+	if atLeast(a, b) {
+		return b
+	}
+	return a
+}
+
+// honoredGrants is p as one app may use it. Each grant the app holds counts
+// only as far as the member who gave it could still give it, judged on every
+// request: an app set up by a member who has since left, been demoted or been
+// shut out of a folder stops reading there at once, with nothing to clean up.
+// A grant with no recorded giver predates attribution and was an admin's or an
+// owner's; it counts as it always has.
+//
+// Two kinds of grant reach a path. Where the longest folder rule names the
+// app, that grant decides, held to its giver on that folder. Elsewhere the
+// app's project grant decides, through the rule's default, so the project
+// grant's giver is held to what they could give on that folder too. Rules are
+// the only places a member's level changes within a project, so holding each
+// one covers every path. A cap only ever lowers what the app would have had.
+//
+// An app with folder grants and no project grant reads those folders and
+// nothing else. It is given read on the project only so the folders are
+// reachable at all, and every path none of its own grants reaches is denied:
+// a rule on "" covers paths no rule matches, and a denial covers each rule
+// that does not name the app.
+func (s *Server) honoredGrants(p Project, app string) Project {
+	ceilings := map[[2]string]string{}
+	honor := func(level, by, prefix string) string {
+		if by == "" || level == PermNone {
+			return level
+		}
+		k := [2]string{by, prefix}
+		c, ok := ceilings[k]
+		if !ok {
+			c = s.grantCeiling(p, by, prefix)
+			ceilings[k] = c
+		}
+		return lowerOf(level, c)
+	}
+	v := p.clone()
+	// The app's folder grants join its own view as rules naming it. They are
+	// never rules anyone else resolves through. A rule an admin wrote that
+	// names the app already decides there.
+	for _, g := range v.AppFolders {
+		if g.App != app {
+			continue
+		}
+		i := slices.IndexFunc(v.Folders, func(r FolderRule) bool { return r.Prefix == g.Prefix })
+		if i < 0 {
+			v.Folders = append(v.Folders, FolderRule{Prefix: g.Prefix})
+			i = len(v.Folders) - 1
+		}
+		rule := &v.Folders[i]
+		if _, named := rule.Perms[app]; named {
+			continue
+		}
+		if rule.Perms == nil {
+			rule.Perms = map[string]string{}
+		}
+		rule.Perms[app] = g.Level
+		setGranter(&rule.GrantedBy, app, g.By)
+	}
+	level, granted := v.Perms[app]
+	by := v.GrantedBy[app]
+	// An explicit none on the project is a denial and stays one: folder
+	// grants do not open a project an admin closed to this app. A grant its
+	// giver can no longer give is simply gone.
+	if granted && level != PermNone {
+		if level = honor(level, by, ""); level == PermNone {
+			delete(v.Perms, app)
+			granted = false
+		} else {
+			v.Perms[app] = level
+		}
+	}
+	reaches := false // the app reads some folder by a grant of its own
+	for i := range v.Folders {
+		rule := &v.Folders[i]
+		if l, ok := rule.Perms[app]; ok {
+			if h := honor(l, rule.GrantedBy[app], rule.Prefix); h != PermNone || l == PermNone {
+				rule.Perms[app] = h
+				reaches = reaches || atLeast(h, PermRead)
+				continue
+			}
+			// Its giver can give nothing here now: the folder falls to the
+			// rule's default, like a folder the app was never named on.
+			delete(rule.Perms, app)
+		}
+		if !granted { // only the app's own folder grants open anything
+			if rule.Perms == nil {
+				rule.Perms = map[string]string{}
+			}
+			rule.Perms[app] = PermNone
+			continue
+		}
+		would := rule.Default
+		if would == "" {
+			would = level
+		}
+		if capped := honor(would, by, rule.Prefix); capped != would {
+			if rule.Perms == nil {
+				rule.Perms = map[string]string{}
+			}
+			rule.Perms[app] = capped
+		}
+	}
+	if !granted && reaches {
+		if v.Perms == nil {
+			v.Perms = map[string]string{}
+		}
+		v.Perms[app] = PermRead
+		v.Folders = append(v.Folders, FolderRule{Prefix: "", Perms: map[string]string{app: PermNone}})
+	}
+	return v
 }
 
 // projectPermWithRole is projectPermFor once the account's role in the
@@ -200,11 +351,22 @@ func (s *Server) handleProjectPerms(w http.ResponseWriter, r *http.Request) {
 		grants = append(grants, map[string]string{"email": email, "level": level})
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i]["email"] < grants[j]["email"] })
+	// Apps' folder grants, only on folders the caller can read: one inside a
+	// folder they are denied would name that folder's contents.
+	vis := s.visibilityFor(r, p)
+	folders := make([]map[string]string, 0, len(p.AppFolders))
+	for _, g := range p.AppFolders {
+		if !vis.canRead(g.Prefix) {
+			continue
+		}
+		folders = append(folders, map[string]string{"app": g.App, "path": g.Prefix, "level": g.Level, "by": g.By})
+	}
 	writeJSON(w, map[string]any{
-		"default": p.level(),
-		"me":      s.projectPermOf(r, p),
-		"creator": p.Creator,
-		"grants":  grants,
+		"default":     p.level(),
+		"me":          s.projectPermOf(r, p),
+		"creator":     p.Creator,
+		"grants":      grants,
+		"app_folders": folders,
 	})
 }
 
@@ -238,14 +400,22 @@ func (s *Server) handleProjectPermDefault(w http.ResponseWriter, r *http.Request
 }
 
 // handleProjectPermSet grants one account an explicit level. Admin only.
+//
+// A project admin may give anyone any level. A member who can write the
+// project may give an app read, on the project or on a folder they can write,
+// and nothing else: the key that reads through it is a safer credential than
+// the device token they can already mint. Either way an app's grant records
+// who gave it, and counts only while they could still give it (honoredGrants).
+// "path" names a folder; without it the grant is on the project.
 func (s *Server) handleProjectPermSet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("project")
-	p, ok := s.project(w, r, id, PermAdmin)
+	p, ok := s.project(w, r, id, PermWrite)
 	if !ok {
 		return
 	}
 	var req struct {
 		Level string `json:"level"`
+		Path  string `json:"path"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
@@ -256,6 +426,14 @@ func (s *Server) handleProjectPermSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := normEmail(r.PathValue("email"))
+	prefix, ok := s.grantPrefix(w, req.Path, email)
+	if !ok {
+		return
+	}
+	me, admin := s.granter(r, p)
+	if !admin && !s.writerMayGrant(w, p, me, email, prefix, req.Level) {
+		return
+	}
 	if !s.grantable(w, p, email) {
 		return
 	}
@@ -263,7 +441,17 @@ func (s *Server) handleProjectPermSet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "an app can be granted read or write, never admin", http.StatusBadRequest)
 		return
 	}
-	if err := s.Projects.SetPerm(id, email, req.Level); err != nil {
+	by := ""
+	if isAppPrincipal(email) {
+		by = me
+	}
+	var err error
+	if prefix == "" {
+		err = s.Projects.SetPermBy(id, email, req.Level, by)
+	} else {
+		err = s.Projects.SetAppFolder(id, AppFolderGrant{Prefix: prefix, App: email, Level: req.Level, By: by})
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -272,18 +460,101 @@ func (s *Server) handleProjectPermSet(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleProjectPermClear drops an explicit grant, reverting that account to
-// the project default. Admin only.
+// the project default (or, with ?path=, that folder's grant to the rule). A
+// project admin may drop any; a member who can write may drop an app grant
+// they gave.
 func (s *Server) handleProjectPermClear(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("project")
-	if _, ok := s.project(w, r, id, PermAdmin); !ok {
+	p, ok := s.project(w, r, id, PermWrite)
+	if !ok {
 		return
 	}
-	if err := s.Projects.ClearPerm(id, normEmail(r.PathValue("email"))); err != nil {
+	email := normEmail(r.PathValue("email"))
+	prefix, ok := s.grantPrefix(w, r.URL.Query().Get("path"), email)
+	if !ok {
+		return
+	}
+	if me, admin := s.granter(r, p); !admin && !s.ownGrant(w, p, me, email, prefix) {
+		return
+	}
+	var err error
+	if prefix == "" {
+		err = s.Projects.ClearPerm(id, email)
+	} else {
+		err = s.Projects.DropAppFolder(id, prefix, email)
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.publishScope(id)
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// grantPrefix normalizes the folder a grant names, "" for the whole project.
+// Only an app's grant can name a folder here: it is kept beside the folder
+// rules (Project.AppFolders) and changes nobody else's access. A person's
+// access to a folder is that folder's rule, set where rules are.
+func (s *Server) grantPrefix(w http.ResponseWriter, path, email string) (string, bool) {
+	if strings.Trim(strings.TrimSpace(path), "/") == "" {
+		return "", true
+	}
+	if !isAppPrincipal(email) {
+		http.Error(w, "a folder here can only be given to an app; set a person's folder access in the folder's rule", http.StatusBadRequest)
+		return "", false
+	}
+	prefix, err := normPrefix(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return "", false
+	}
+	return prefix, true
+}
+
+// granter is who is giving a grant and whether they administer the project.
+func (s *Server) granter(r *http.Request, p Project) (string, bool) {
+	return normEmail(s.requestUser(r).Email), atLeast(s.projectPermOf(r, p), PermAdmin)
+}
+
+// writerMayGrant answers unless a member who is not a project admin may give
+// this grant: read, to an app, where they can write, and not over a grant
+// someone else gave.
+func (s *Server) writerMayGrant(w http.ResponseWriter, p Project, me, email, prefix, level string) bool {
+	if !isAppPrincipal(email) || level != PermRead {
+		http.Error(w, "only a project admin can give that; a member who can write may give an app read",
+			http.StatusForbidden)
+		return false
+	}
+	if !s.mayGrant(p, me, prefix, level) {
+		http.Error(w, "you can give an app read only where you can write", http.StatusForbidden)
+		return false
+	}
+	return s.ownGrant(w, p, me, email, prefix)
+}
+
+// ownGrant answers unless the app's grant there, if it has one, was given by
+// me. A member who is not an admin must not replace or remove a grant an admin
+// or another member gave.
+func (s *Server) ownGrant(w http.ResponseWriter, p Project, me, email, prefix string) bool {
+	if !isAppPrincipal(email) {
+		http.Error(w, "only a project admin can change that", http.StatusForbidden)
+		return false
+	}
+	_, has := p.Perms[email]
+	by := p.GrantedBy[email]
+	if prefix != "" {
+		has, by = false, ""
+		for _, g := range p.AppFolders {
+			if g.Prefix == prefix && g.App == email {
+				has, by = true, g.By
+			}
+		}
+	}
+	if has && by != me {
+		http.Error(w, "someone else gave this app that grant; ask a project admin to change it", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // grantable checks the target of a grant: org members only, and never an org

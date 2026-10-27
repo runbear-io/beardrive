@@ -482,11 +482,12 @@ func frontmatterYAML(src []byte) ([]byte, bool) {
 
 // ---- the Data setting ----
 
-// handleProjectData turns a project's data index on or off. Project admins
-// only — like folder rules, it changes what the hub holds about the project.
+// handleProjectData turns a project's data index on or off. Any member who can
+// write the project may: the index holds nothing more than the files, and a
+// query is filtered for each reader like every other route.
 func (s *Server) handleProjectData(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("project")
-	if _, ok := s.project(w, r, id, PermAdmin); !ok {
+	if _, ok := s.project(w, r, id, PermWrite); !ok {
 		return
 	}
 	if s.Data == nil {

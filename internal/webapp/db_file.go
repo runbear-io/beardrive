@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -334,8 +335,11 @@ func (r *fileProjectRepo) PutMeta(p Project) error {
 	}
 	// Folders is preserved for exactly the reason Perms is: a rename carries
 	// the writer's whole in-memory Project, so without this a stale process
-	// renaming a project resurrects every folder rule an admin removed.
-	p.Perms, p.Folders, p.Data = r.byID[p.ID].Perms, r.byID[p.ID].Folders, r.byID[p.ID].Data
+	// renaming a project resurrects every folder rule an admin removed. Who
+	// gave each app grant goes with the grants: a stale copy written over it
+	// would make them read as unattributed, which counts them unconditionally.
+	disk := r.byID[p.ID]
+	p.Perms, p.GrantedBy, p.Folders, p.AppFolders, p.Data = disk.Perms, disk.GrantedBy, disk.Folders, disk.AppFolders, disk.Data
 	r.byID[p.ID] = p
 	return r.write()
 }
@@ -387,6 +391,41 @@ func (r *fileProjectRepo) PutFolder(project string, rule FolderRule) error {
 	return r.write()
 }
 
+// PutAppFolder writes one app's grant on one folder as the file stands on disk.
+func (r *fileProjectRepo) PutAppFolder(project string, g AppFolderGrant) error {
+	if err := storable(project, g.Prefix, g.App, g.Level, g.By); err != nil {
+		return err
+	}
+	return r.editProject(project, func(p *Project) {
+		p.AppFolders = slices.DeleteFunc(p.AppFolders, func(a AppFolderGrant) bool { return a.Prefix == g.Prefix && a.App == g.App })
+		p.AppFolders = append(p.AppFolders, g)
+	})
+}
+
+// DropAppFolder removes one app's grant on one folder as the file stands.
+func (r *fileProjectRepo) DropAppFolder(project, prefix, app string) error {
+	return r.editProject(project, func(p *Project) {
+		p.AppFolders = slices.DeleteFunc(p.AppFolders, func(a AppFolderGrant) bool { return a.Prefix == prefix && a.App == app })
+	})
+}
+
+// editProject applies fn to a project as it stands on disk and writes it back.
+func (r *fileProjectRepo) editProject(project string, fn func(*Project)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	p, ok := r.byID[project]
+	if !ok {
+		return fmt.Errorf("no such project %q", project)
+	}
+	p = p.clone()
+	fn(&p)
+	r.byID[project] = p
+	return r.write()
+}
+
 // DropFolderPerm removes one grant from one rule as it stands on disk; a rule
 // that is no longer there is left absent.
 func (r *fileProjectRepo) DropFolderPerm(project, prefix, email string) error {
@@ -403,6 +442,7 @@ func (r *fileProjectRepo) DropFolderPerm(project, prefix, email string) error {
 	for i := range p.Folders {
 		if p.Folders[i].Prefix == prefix {
 			delete(p.Folders[i].Perms, email)
+			delete(p.Folders[i].GrantedBy, email)
 		}
 	}
 	r.byID[project] = p
@@ -434,8 +474,8 @@ func (r *fileProjectRepo) DeleteFolder(project, prefix string) error {
 }
 
 // PutPerm writes one grant. An empty level removes it.
-func (r *fileProjectRepo) PutPerm(project, email, level string) error {
-	if err := storable(project, email, level); err != nil {
+func (r *fileProjectRepo) PutPerm(project, email, level, by string) error {
+	if err := storable(project, email, level, by); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -451,11 +491,13 @@ func (r *fileProjectRepo) PutPerm(project, email, level string) error {
 	switch {
 	case level == "":
 		delete(p.Perms, email)
+		by = ""
 	case p.Perms == nil:
 		p.Perms = map[string]string{email: level}
 	default:
 		p.Perms[email] = level
 	}
+	setGranter(&p.GrantedBy, email, by)
 	r.byID[project] = p
 	return r.write()
 }

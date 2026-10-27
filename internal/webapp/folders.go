@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"path"
 	"sort"
@@ -45,6 +46,9 @@ type FolderRule struct {
 	Prefix  string            `json:"prefix"`            // normalized, always slash-terminated
 	Default string            `json:"default,omitempty"` // "" = inherit the project level
 	Perms   map[string]string `json:"perms,omitempty"`   // lowercase email → level
+	// GrantedBy names the member who gave each app grant in Perms; see
+	// Project.GrantedBy.
+	GrantedBy map[string]string `json:"granted_by,omitempty"`
 }
 
 const (
@@ -61,12 +65,8 @@ const (
 
 func (f FolderRule) clone() FolderRule {
 	c := f
-	if f.Perms != nil {
-		c.Perms = make(map[string]string, len(f.Perms))
-		for k, v := range f.Perms {
-			c.Perms[k] = v
-		}
-	}
+	c.Perms = maps.Clone(f.Perms)
+	c.GrantedBy = maps.Clone(f.GrantedBy)
 	return c
 }
 
@@ -168,10 +168,14 @@ func effectiveLevel(p Project, email, filePath, base string) string {
 // responsible for the org, so offboarding never orphans a subtree.
 func (s *Server) pathPermOf(r *http.Request, p Project, filePath string) string {
 	base := s.projectPermOf(r, p)
+	email := normEmail(s.requestUser(r).Email)
+	if isAppPrincipal(email) {
+		p = s.honoredGrants(p, email)
+	}
 	if base == PermAdmin || len(p.Folders) == 0 {
 		return base
 	}
-	return folderLevel(p, normEmail(s.requestUser(r).Email), filePath, base)
+	return folderLevel(p, email, filePath, base)
 }
 
 // requirePathPerm answers the request itself when the caller is short of level
@@ -252,7 +256,9 @@ func visibleFolders(p Project, email, base string) []FolderRule {
 		if base != PermAdmin && !atLeast(folderLevel(p, email, r.Prefix, base), PermRead) {
 			continue
 		}
-		out = append(out, r.clone())
+		rule := r.clone()
+		rule.GrantedBy = nil // who gave an app its grant is the hub's to judge, not to list
+		out = append(out, rule)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Prefix < out[j].Prefix })
 	return out
@@ -362,7 +368,7 @@ func (s *Server) visibility(r *http.Request) pathFilter {
 // one, and it is a real one: the org-wide share audit walks every project in
 // the org, and a share row carries the public /s/ token.
 func (s *Server) visibilityFor(r *http.Request, p Project) pathFilter {
-	if len(p.Folders) == 0 {
+	if len(p.Folders) == 0 && len(p.AppFolders) == 0 {
 		return pathFilter{}
 	}
 	return s.visibilityAt(r, p, s.projectPermOf(r, p))
@@ -371,13 +377,18 @@ func (s *Server) visibilityFor(r *http.Request, p Project) pathFilter {
 // visibilityAt is visibilityFor for a caller that has already resolved the
 // project-level permission it is built on.
 func (s *Server) visibilityAt(r *http.Request, p Project, base string) pathFilter {
+	email := normEmail(s.requestUser(r).Email)
+	// An app's view first: its folder grants are rules only there, so a
+	// project with no rules of its own can still hide most of itself from it.
+	if isAppPrincipal(email) {
+		p = s.honoredGrants(p, email)
+	}
 	if len(p.Folders) == 0 {
 		return pathFilter{}
 	}
 	if base == PermAdmin {
 		return pathFilter{} // admin everywhere; nothing to hide
 	}
-	email := normEmail(s.requestUser(r).Email)
 	// "on" means something is hidden FROM THIS ACCOUNT, not merely that the
 	// project has rules. A project can be full of read-only folders and hide
 	// nothing from anyone; treating that as filtered would cost every read a
@@ -719,6 +730,25 @@ func (s *Server) handleProjectFolderSet(w http.ResponseWriter, r *http.Request) 
 			}
 			rule.Perms[e] = level
 		}
+	}
+	// An app's grant here records who gave it (honoredGrants): whoever gave
+	// it already, where its level is unchanged, and this admin otherwise.
+	me := normEmail(s.requestUser(r).Email)
+	var prev FolderRule
+	for _, f := range p.Folders {
+		if f.Prefix == prefix {
+			prev = f
+		}
+	}
+	for e, level := range rule.Perms {
+		if !isAppPrincipal(e) {
+			continue
+		}
+		by := me
+		if was, ok := prev.Perms[e]; ok && was == level {
+			by = prev.GrantedBy[e]
+		}
+		setGranter(&rule.GrantedBy, e, by)
 	}
 	if err := s.Projects.SetFolder(id, rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

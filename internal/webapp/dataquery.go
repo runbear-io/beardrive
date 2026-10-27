@@ -244,14 +244,21 @@ func (c *dataSQL) visible(vis pathFilter) string {
 	sort.Slice(rules, func(i, j int) bool { return len(rules[i].Prefix) > len(rules[j].Prefix) })
 	var b strings.Builder
 	b.WriteString("(CASE")
+	otherwise := 1
 	for _, r := range rules {
 		v := 0
 		if atLeast(folderLevel(vis.project, vis.email, r.Prefix, vis.base), PermRead) {
 			v = 1
 		}
+		// A rule on "" (honoredGrants, for an app with folder grants only)
+		// is every path no other rule matches: the ELSE.
+		if r.Prefix == "" {
+			otherwise = v
+			continue
+		}
 		fmt.Fprintf(&b, " WHEN f.path >= %s AND f.path < %s THEN %d", c.arg(r.Prefix), c.arg(prefixUpper(r.Prefix)), v)
 	}
-	b.WriteString(" ELSE 1 END) = 1")
+	fmt.Fprintf(&b, " ELSE %d END) = 1", otherwise)
 	return b.String()
 }
 

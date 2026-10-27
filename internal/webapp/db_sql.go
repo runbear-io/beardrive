@@ -301,7 +301,8 @@ func (s *sqlMetaStore) migrate() error {
 			creator TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS app_keys (
 			id TEXT PRIMARY KEY, app TEXT NOT NULL, digest TEXT NOT NULL UNIQUE,
-			hint TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '', last_used TEXT NOT NULL DEFAULT '')`,
+			hint TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '', last_used TEXT NOT NULL DEFAULT '',
+			minted_by TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS shares (
 			token TEXT PRIMARY KEY, project TEXT NOT NULL, path TEXT NOT NULL,
 			creator TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL DEFAULT '')`,
@@ -356,6 +357,7 @@ func (s *sqlMetaStore) migrate() error {
 		`CREATE INDEX IF NOT EXISTS read_sessions_last ON read_sessions (last)`,
 		`CREATE TABLE IF NOT EXISTS project_perms (
 			project TEXT NOT NULL, email TEXT NOT NULL, level TEXT NOT NULL,
+			granted_by TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (project, email))`,
 		// Folder rules (folders.go). Their own tables rather than a JSON
 		// column on projects, for the reason rowScopedProjectRepo exists: a
@@ -368,7 +370,15 @@ func (s *sqlMetaStore) migrate() error {
 			PRIMARY KEY (project, prefix))`,
 		`CREATE TABLE IF NOT EXISTS project_folder_perms (
 			project TEXT NOT NULL, prefix TEXT NOT NULL, email TEXT NOT NULL,
-			level TEXT NOT NULL, PRIMARY KEY (project, prefix, email))`,
+			level TEXT NOT NULL, granted_by TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (project, prefix, email))`,
+		// Apps' grants on single folders (Project.AppFolders): beside the
+		// folder rules, never in them. GUARDED (see guardedTable below): it
+		// holds denials, and an empty one would drop them.
+		`CREATE TABLE IF NOT EXISTS project_app_folders (
+			project TEXT NOT NULL, prefix TEXT NOT NULL, app TEXT NOT NULL,
+			level TEXT NOT NULL, granted_by TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (project, prefix, app))`,
 		// pending is short-lived single-use sign-in state: a `bdrive login`
 		// mid-flight, an OAuth state nonce, an MCP consent code. Keyed by
 		// (kind, key) so several owners share one table without sharing a key
@@ -421,6 +431,36 @@ func (s *sqlMetaStore) migrate() error {
 		"every restricted folder would re-open to the whole organization", 2); err != nil {
 		return err
 	}
+	// The grant tables carry denials as well as grants: an explicit none on a
+	// project, a none for one account inside a folder rule, a none for an app
+	// on one folder. Recreated empty, each denial would fall back to a wider
+	// default. project_perms predates schema versions (any store that recorded
+	// one has it); the folder grants came with schema 2, apps' folder grants
+	// with schema 3.
+	perms, err := s.db.Query(`SELECT * FROM project_perms LIMIT 0`)
+	if err == nil {
+		perms.Close()
+	}
+	if err := s.guardedTable(err, "project_perms",
+		"every explicit none on a project would fall back to the project default", 1); err != nil {
+		return err
+	}
+	folderPerms, err := s.db.Query(`SELECT * FROM project_folder_perms LIMIT 0`)
+	if err == nil {
+		folderPerms.Close()
+	}
+	if err := s.guardedTable(err, "project_folder_perms",
+		"every account denied a folder by its rule would get the rule's default there", 2); err != nil {
+		return err
+	}
+	appFolders, err := s.db.Query(`SELECT * FROM project_app_folders LIMIT 0`)
+	if err == nil {
+		appFolders.Close()
+	}
+	if err := s.guardedTable(err, "project_app_folders",
+		"every app denied a folder would read it through its project grant", 3); err != nil {
+		return err
+	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
 			return fmt.Errorf("migrate: %w", err)
@@ -444,7 +484,7 @@ func (s *sqlMetaStore) migrate() error {
 		"data":          `INTEGER NOT NULL DEFAULT 0`,
 	}, map[string]string{
 		"default_level": "it silently re-opens every restricted project to its whole organization",
-	}); err != nil {
+	}, 1); err != nil {
 		return err
 	}
 	// A member row's join time. Rows written before it carry '' — the zero
@@ -452,7 +492,28 @@ func (s *sqlMetaStore) migrate() error {
 	// and that is the right answer for rows that predate the column.
 	if err := s.addColumns("org_members", map[string]string{
 		"joined": `TEXT NOT NULL DEFAULT ''`,
-	}, map[string]string{}); err != nil {
+	}, map[string]string{}, 0); err != nil {
+		return err
+	}
+	// Who gave each grant and who minted each app key, since schema 3. Both
+	// are GUARDED: '' reads as "from before grants were attributed", which an
+	// app's grant and an app's key count unconditionally (honoredGrants,
+	// keyStands). Re-added to a table that already holds attributed rows, the
+	// column would revive every grant a departed writer gave and every key a
+	// departed member minted.
+	if err := s.addColumns("project_perms", map[string]string{
+		"granted_by": `TEXT NOT NULL DEFAULT ''`,
+	}, map[string]string{"granted_by": "every app grant and app key it held would count again, whoever gave it"}, 3); err != nil {
+		return err
+	}
+	if err := s.addColumns("project_folder_perms", map[string]string{
+		"granted_by": `TEXT NOT NULL DEFAULT ''`,
+	}, map[string]string{"granted_by": "every app grant and app key it held would count again, whoever gave it"}, 3); err != nil {
+		return err
+	}
+	if err := s.addColumns("app_keys", map[string]string{
+		"minted_by": `TEXT NOT NULL DEFAULT ''`,
+	}, map[string]string{"minted_by": "every app grant and app key it held would count again, whoever gave it"}, 3); err != nil {
 		return err
 	}
 	return s.exec(`INSERT INTO schema_meta (key,value) VALUES (?,?)
@@ -462,7 +523,7 @@ func (s *sqlMetaStore) migrate() error {
 // schemaVersion is what THIS binary's migration produces. Bump it when adding
 // a column whose DEFAULT cannot be told apart from a real value — see the
 // guarded set in migrate.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // readSchemaVersion reads the version the store last recorded. 0 means a store
 // written before versioning existed, which is the ordinary upgrade path and the
@@ -505,8 +566,10 @@ func (s *sqlMetaStore) guardedTable(probe error, table, why string, introduced i
 // addColumns adds any of cols that the table doesn't already have. The live
 // column set comes from an empty result set's metadata, which both drivers
 // (modernc/sqlite and pgx) report the same way — no engine-specific catalog
-// query, and safe to run on every start.
-func (s *sqlMetaStore) addColumns(table string, cols, guarded map[string]string) error {
+// query, and safe to run on every start. since is the schema version that
+// introduced the guarded columns: a store older than that has simply never
+// had them.
+func (s *sqlMetaStore) addColumns(table string, cols, guarded map[string]string, since int) error {
 	rows, err := s.db.Query(`SELECT * FROM ` + table + ` LIMIT 0`)
 	if err != nil {
 		return fmt.Errorf("migrate %s: %w", table, err)
@@ -530,7 +593,7 @@ func (s *sqlMetaStore) addColumns(table string, cols, guarded map[string]string)
 		// ever recorded a version — and on an empty table, where there is no
 		// meaning to rewrite. Anywhere else it is a rollback or an older dump,
 		// and it fails closed and loudly instead of widening access in silence.
-		if why := guarded[col]; why != "" && s.ver > 0 {
+		if why := guarded[col]; why != "" && s.ver > 0 && s.ver >= since {
 			var rows int
 			if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&rows); err != nil {
 				return fmt.Errorf("migrate %s: %w", table, err)
@@ -707,13 +770,13 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 		return nil, err
 	}
 
-	rows, err = r.s.db.Query(`SELECT project, email, level FROM project_perms`)
+	rows, err = r.s.db.Query(`SELECT project, email, level, granted_by FROM project_perms`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var project, email, level string
-		if err := rows.Scan(&project, &email, &level); err != nil {
+		var project, email, level, by string
+		if err := rows.Scan(&project, &email, &level, &by); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -722,6 +785,7 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 				p.Perms = map[string]string{}
 			}
 			p.Perms[email] = level
+			setGranter(&p.GrantedBy, email, by)
 		}
 	}
 	rows.Close()
@@ -758,13 +822,13 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 		return nil, err
 	}
 
-	rows, err = r.s.db.Query(`SELECT project, prefix, email, level FROM project_folder_perms`)
+	rows, err = r.s.db.Query(`SELECT project, prefix, email, level, granted_by FROM project_folder_perms`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var project, prefix, email, level string
-		if err := rows.Scan(&project, &prefix, &email, &level); err != nil {
+		var project, prefix, email, level, by string
+		if err := rows.Scan(&project, &prefix, &email, &level, &by); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -782,6 +846,27 @@ func (r *sqlProjectRepo) Load() ([]Project, error) {
 			p.Folders[idx].Perms = map[string]string{}
 		}
 		p.Folders[idx].Perms[email] = level
+		setGranter(&p.Folders[idx].GrantedBy, email, by)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = r.s.db.Query(`SELECT project, prefix, app, level, granted_by FROM project_app_folders ORDER BY prefix, app`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var project string
+		var g AppFolderGrant
+		if err := rows.Scan(&project, &g.Prefix, &g.App, &g.Level, &g.By); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if p := byID[project]; p != nil {
+			p.AppFolders = append(p.AppFolders, g)
+		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -817,8 +902,8 @@ func (r *sqlProjectRepo) Put(p Project) error {
 			return err
 		}
 		for email, level := range p.Perms {
-			if _, err := tx.Exec(r.s.q(`INSERT INTO project_perms (project,email,level) VALUES (?,?,?)`),
-				p.ID, email, level); err != nil {
+			if _, err := tx.Exec(r.s.q(`INSERT INTO project_perms (project,email,level,granted_by) VALUES (?,?,?,?)`),
+				p.ID, email, level, p.GrantedBy[email]); err != nil {
 				return err
 			}
 		}
@@ -836,10 +921,20 @@ func (r *sqlProjectRepo) Put(p Project) error {
 			}
 			for email, level := range f.Perms {
 				if _, err := tx.Exec(r.s.q(
-					`INSERT INTO project_folder_perms (project,prefix,email,level) VALUES (?,?,?,?)`),
-					p.ID, f.Prefix, email, level); err != nil {
+					`INSERT INTO project_folder_perms (project,prefix,email,level,granted_by) VALUES (?,?,?,?,?)`),
+					p.ID, f.Prefix, email, level, f.GrantedBy[email]); err != nil {
 					return err
 				}
+			}
+		}
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_app_folders WHERE project = ?`), p.ID); err != nil {
+			return err
+		}
+		for _, g := range p.AppFolders {
+			if _, err := tx.Exec(r.s.q(
+				`INSERT INTO project_app_folders (project,prefix,app,level,granted_by) VALUES (?,?,?,?,?)`),
+				p.ID, g.Prefix, g.App, g.Level, g.By); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -872,13 +967,29 @@ func (r *sqlProjectRepo) PutFolder(project string, rule FolderRule) error {
 		}
 		for email, level := range rule.Perms {
 			if _, err := tx.Exec(r.s.q(
-				`INSERT INTO project_folder_perms (project,prefix,email,level) VALUES (?,?,?,?)`),
-				project, rule.Prefix, email, level); err != nil {
+				`INSERT INTO project_folder_perms (project,prefix,email,level,granted_by) VALUES (?,?,?,?,?)`),
+				project, rule.Prefix, email, level, rule.GrantedBy[email]); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+// PutAppFolder writes one app's grant on one folder, and nothing else.
+func (r *sqlProjectRepo) PutAppFolder(project string, g AppFolderGrant) error {
+	if err := storable(project, g.Prefix, g.App, g.Level, g.By); err != nil {
+		return err
+	}
+	return r.w.exec(`INSERT INTO project_app_folders (project,prefix,app,level,granted_by) VALUES (?,?,?,?,?)
+		ON CONFLICT(project,prefix,app) DO UPDATE SET level=excluded.level, granted_by=excluded.granted_by`,
+		project, g.Prefix, g.App, g.Level, g.By)
+}
+
+// DropAppFolder removes one app's grant on one folder.
+func (r *sqlProjectRepo) DropAppFolder(project, prefix, app string) error {
+	return r.w.exec(`DELETE FROM project_app_folders WHERE project = ? AND prefix = ? AND app = ?`,
+		project, prefix, app)
 }
 
 // DropFolderPerm removes one grant from one rule, and only the grant: the
@@ -929,15 +1040,16 @@ func boolInt(b bool) int {
 }
 
 // PutPerm writes one grant row. An empty level removes it.
-func (r *sqlProjectRepo) PutPerm(project, email, level string) error {
-	if err := storable(project, email, level); err != nil {
+func (r *sqlProjectRepo) PutPerm(project, email, level, by string) error {
+	if err := storable(project, email, level, by); err != nil {
 		return err
 	}
 	if level == "" {
 		return r.w.exec(`DELETE FROM project_perms WHERE project = ? AND email = ?`, project, email)
 	}
-	return r.w.exec(`INSERT INTO project_perms (project,email,level) VALUES (?,?,?)
-		ON CONFLICT(project,email) DO UPDATE SET level=excluded.level`, project, email, level)
+	return r.w.exec(`INSERT INTO project_perms (project,email,level,granted_by) VALUES (?,?,?,?)
+		ON CONFLICT(project,email) DO UPDATE SET level=excluded.level, granted_by=excluded.granted_by`,
+		project, email, level, by)
 }
 
 func (r *sqlProjectRepo) Delete(id string) error {
@@ -949,6 +1061,9 @@ func (r *sqlProjectRepo) Delete(id string) error {
 			return err
 		}
 		if _, err := tx.Exec(r.s.q(`DELETE FROM project_folders WHERE project = ?`), id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(r.s.q(`DELETE FROM project_app_folders WHERE project = ?`), id); err != nil {
 			return err
 		}
 		_, err := tx.Exec(r.s.q(`DELETE FROM projects WHERE id = ?`), id)
@@ -1176,7 +1291,7 @@ func (r *sqlAppRepo) Load() ([]App, []AppKey, error) {
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
-	rows, err = r.s.db.Query(`SELECT id, app, digest, hint, created, last_used FROM app_keys`)
+	rows, err = r.s.db.Query(`SELECT id, app, digest, hint, created, last_used, minted_by FROM app_keys`)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1185,7 +1300,7 @@ func (r *sqlAppRepo) Load() ([]App, []AppKey, error) {
 	for rows.Next() {
 		var k AppKey
 		var created, used string
-		if err := rows.Scan(&k.ID, &k.App, &k.Digest, &k.Hint, &created, &used); err != nil {
+		if err := rows.Scan(&k.ID, &k.App, &k.Digest, &k.Hint, &created, &used, &k.MintedBy); err != nil {
 			return nil, nil, err
 		}
 		k.Created, k.LastUsed = tdec(created), tdec(used)
@@ -1212,9 +1327,9 @@ func (r *sqlAppRepo) DeleteApp(id string) error {
 }
 
 func (r *sqlAppRepo) PutKey(k AppKey) error {
-	return r.w.exec(`INSERT INTO app_keys (id,app,digest,hint,created,last_used) VALUES (?,?,?,?,?,?)
+	return r.w.exec(`INSERT INTO app_keys (id,app,digest,hint,created,last_used,minted_by) VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET last_used=excluded.last_used`,
-		k.ID, k.App, k.Digest, k.Hint, tenc(k.Created), tenc(k.LastUsed))
+		k.ID, k.App, k.Digest, k.Hint, tenc(k.Created), tenc(k.LastUsed), k.MintedBy)
 }
 
 func (r *sqlAppRepo) TouchKey(id string, at time.Time) error {

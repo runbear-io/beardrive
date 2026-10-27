@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,26 @@ func keyCall(d *dataHub, method, url, body, key string) *httptest.ResponseRecord
 	rec := httptest.NewRecorder()
 	d.h.ServeHTTP(rec, req)
 	return rec
+}
+
+// keyPaths is the paths a key's query over every JSON file returns.
+func keyPaths(t *testing.T, d *dataHub, query, key string) []string {
+	t.Helper()
+	rec := keyCall(d, "POST", query, `{"pattern":"**/*.json","select":["$path"],"limit":1000}`, key)
+	if rec.Code != 200 {
+		t.Fatalf("query with a key: %d %s", rec.Code, rec.Body)
+	}
+	var a dataAnswer
+	if err := json.Unmarshal(rec.Body.Bytes(), &a); err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, row := range a.Rows {
+		var p string
+		json.Unmarshal(row["$path"], &p)
+		out = append(out, p)
+	}
+	return out
 }
 
 func newApp(d *dataHub, org, who, name string) (id, principal string) {
@@ -60,9 +81,10 @@ func TestAppKeyReadsOnlyWhatItIsGranted(t *testing.T) {
 	org, pid := d.p.Org, d.p.ID
 	query := "/api/p/" + pid + "/data/query"
 
-	// Only an owner manages apps.
-	d.send("POST", "/api/orgs/"+org+"/apps", `{"name":"x"}`, "bob", nil, http.StatusForbidden)
-	d.send("GET", "/api/orgs/"+org+"/apps", "", "bob", nil, http.StatusForbidden)
+	// Only a member of the org uses its apps (who manages which:
+	// TestMembersCreateAppsAndManageTheirOwn).
+	d.send("POST", "/api/orgs/"+org+"/apps", `{"name":"x"}`, "dave", nil, http.StatusForbidden)
+	d.send("GET", "/api/orgs/"+org+"/apps", "", "dave", nil, http.StatusForbidden)
 	app, principal := newApp(d, org, "alice", "SearchD")
 	key := mintKey(d, org, app)
 
@@ -71,11 +93,12 @@ func TestAppKeyReadsOnlyWhatItIsGranted(t *testing.T) {
 	if rec := keyCall(d, "POST", query, `{"pattern":"**/*.json"}`, key); rec.Code != http.StatusForbidden {
 		t.Fatalf("an ungranted app queried: %d %s", rec.Code, rec.Body)
 	}
-	// Nor does a folder rule alone: a rule narrows or widens a project the
-	// app can already see, and never opens one.
+	// A folder grant alone opens that folder and nothing else.
 	d.send("PUT", "/api/p/"+pid+"/folders", `{"prefix":"konny","perms":{"`+principal+`":"read"}}`, "alice", nil, 200)
-	if rec := keyCall(d, "POST", query, `{"pattern":"konny/**/*.json"}`, key); rec.Code != http.StatusForbidden {
-		t.Fatalf("a folder rule alone opened the project to an app: %d %s", rec.Code, rec.Body)
+	if paths := keyPaths(t, d, query, key); len(paths) == 0 || slices.ContainsFunc(paths, func(p string) bool {
+		return !strings.HasPrefix(p, "konny/")
+	}) {
+		t.Fatalf("an app granted only konny/ sees %v", paths)
 	}
 	d.send("PUT", "/api/p/"+pid+"/permissions/"+principal, `{"level":"admin"}`, "alice", nil, http.StatusBadRequest)
 	d.send("PUT", "/api/p/"+pid+"/permissions/"+principal, `{"level":"read"}`, "alice", nil, 200)
@@ -178,7 +201,7 @@ func TestAppsConformance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tok, k, err := db.Mint(a.ID)
+			tok, k, err := db.Mint(a.ID, "alice@x.io")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -188,7 +211,7 @@ func TestAppsConformance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got, ok := other.Authenticate(tok); !ok || got.ID != a.ID {
+			if got, gk, ok := other.Authenticate(tok); !ok || got.ID != a.ID || gk.MintedBy != "alice@x.io" {
 				t.Fatalf("the other registry does not know the key")
 			}
 			if _, keys := db.List("org-" + name); len(keys[a.ID]) != 1 || keys[a.ID][0].LastUsed.IsZero() {
@@ -197,7 +220,7 @@ func TestAppsConformance(t *testing.T) {
 			if err := db.Revoke(a.ID, k.ID); err != nil {
 				t.Fatal(err)
 			}
-			if _, ok := other.Authenticate(tok); ok {
+			if _, _, ok := other.Authenticate(tok); ok {
 				t.Fatal("a key revoked by one registry still works in the other")
 			}
 			// A use recorded after the revocation, by a process that resolved
@@ -208,11 +231,11 @@ func TestAppsConformance(t *testing.T) {
 			if _, left, err := s.Apps().Load(); err != nil || len(left) != 0 {
 				t.Fatalf("a use after the revocation wrote the key back: %+v %v", left, err)
 			}
-			tok2, _, _ := db.Mint(a.ID)
+			tok2, _, _ := db.Mint(a.ID, "alice@x.io")
 			if err := db.Delete(a.ID); err != nil {
 				t.Fatal(err)
 			}
-			if _, ok := other.Authenticate(tok2); ok {
+			if _, _, ok := other.Authenticate(tok2); ok {
 				t.Fatal("a deleted app's key still works in the other registry")
 			}
 		})

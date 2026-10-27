@@ -47,6 +47,10 @@ type AppKey struct {
 	Hint     string    `json:"hint"`
 	Created  time.Time `json:"created"`
 	LastUsed time.Time `json:"last_used,omitzero"`
+	// MintedBy is the member who minted the key. It works only while they
+	// could still mint it (Server.keyStands); empty on a key minted before
+	// keys were attributed, which only an owner could do.
+	MintedBy string `json:"minted_by,omitempty"`
 }
 
 // RoleApp is an app's role in its own organization: it can hold explicit
@@ -184,9 +188,12 @@ func (db *AppDB) Delete(id string) error {
 }
 
 // Mint issues a key and returns its plaintext — the only time it exists.
-func (db *AppDB) Mint(app string) (string, AppKey, error) {
+func (db *AppDB) Mint(app, by string) (string, AppKey, error) {
 	token := appKeyPrefix + randHex(24)
-	k := AppKey{ID: "k" + randHex(8), App: app, Digest: hashToken(token), Hint: token[len(token)-4:], Created: time.Now().UTC()}
+	k := AppKey{
+		ID: "k" + randHex(8), App: app, Digest: hashToken(token), Hint: token[len(token)-4:],
+		Created: time.Now().UTC(), MintedBy: by,
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if err := db.repo.PutKey(k); err != nil {
@@ -220,18 +227,18 @@ func (db *AppDB) Revoke(app, id string) error {
 
 // Authenticate resolves a key to its app, re-reading the registry first so a
 // revocation anywhere is honoured, and records the use at most once a minute.
-func (db *AppDB) Authenticate(token string) (App, bool) {
+func (db *AppDB) Authenticate(token string) (App, AppKey, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.refresh()
 	id, ok := db.digest[hashToken(token)]
 	if !ok {
-		return App{}, false
+		return App{}, AppKey{}, false
 	}
 	k := db.keys[id]
 	a, ok := db.apps[k.App]
 	if !ok {
-		return App{}, false
+		return App{}, AppKey{}, false
 	}
 	if now := time.Now().UTC(); now.Sub(k.LastUsed) >= appTouchEvery {
 		k.LastUsed = now
@@ -239,7 +246,7 @@ func (db *AppDB) Authenticate(token string) (App, bool) {
 			db.keys[id] = k
 		}
 	}
-	return a, true
+	return a, k, true
 }
 
 // ---- requests ----
@@ -271,10 +278,11 @@ func (s *Server) appUser(w http.ResponseWriter, r *http.Request) (u User, handle
 		return User{}, false, false
 	}
 	var a App
+	var k AppKey
 	if s.Apps != nil {
-		a, ok = s.Apps.Authenticate(tok)
+		a, k, ok = s.Apps.Authenticate(tok)
 	}
-	if !ok {
+	if !ok || !s.keyStands(a, k) {
 		http.Error(w, "this app key is not valid; it may have been revoked", http.StatusUnauthorized)
 		return User{}, true, false
 	}
@@ -301,22 +309,47 @@ func (s *Server) roleIn(org, principal string) string {
 	return s.Dir.Role(org, principal)
 }
 
-// ---- administration: org owners ----
+// keyStands says whether a key still works: only while the member who minted
+// it could still mint it, judged on every request. So the keys of a member
+// who left the organization, or of an app's creator who left it, stop at
+// once, with nothing to clean up.
+func (s *Server) keyStands(a App, k AppKey) bool {
+	if k.MintedBy == "" || s.Dir == nil {
+		return true // minted before keys were attributed: by an owner
+	}
+	return manages(a, k.MintedBy, s.Dir.Role(a.Org, k.MintedBy))
+}
 
-// appOwner answers unless the caller owns the organization. Apps are an
-// organization's credentials to its projects, so creating one, minting its
-// keys and revoking them is an owner's job, as invites are.
-func (s *Server) appOwner(w http.ResponseWriter, r *http.Request) (string, bool) {
+// manages says whether a member with role in an app's organization may mint
+// and revoke its keys and delete it: an owner, or the member who created it.
+func manages(a App, email, role string) bool {
+	switch role {
+	case RoleOwner:
+		return true
+	case "", RoleApp:
+		return false
+	}
+	return email != "" && normEmail(a.Creator) == email
+}
+
+// ---- administration: org members ----
+
+// appMember answers unless the caller is a member of the organization. Any
+// member may create an app: a scoped, read-only key is a safer credential
+// than the device token every member can already mint for themselves.
+func (s *Server) appMember(w http.ResponseWriter, r *http.Request) (org, me, role string, ok bool) {
 	if s.Apps == nil || s.Dir == nil {
 		http.Error(w, "apps are not enabled on this hub", http.StatusNotFound)
-		return "", false
+		return "", "", "", false
 	}
-	org := r.PathValue("org")
-	if s.Dir.Role(org, normEmail(s.requestUser(r).Email)) != RoleOwner {
-		http.Error(w, "only an owner of this organization can manage its apps", http.StatusForbidden)
-		return "", false
+	org = r.PathValue("org")
+	me = normEmail(s.requestUser(r).Email)
+	role = s.Dir.Role(org, me)
+	if role == "" || role == RoleApp {
+		http.Error(w, "only a member of this organization can use its apps", http.StatusForbidden)
+		return "", "", "", false
 	}
-	return org, true
+	return org, me, role, true
 }
 
 // appOf resolves the {app} of the path inside the caller's organization.
@@ -329,18 +362,42 @@ func (s *Server) appOf(w http.ResponseWriter, r *http.Request, org string) (App,
 	return a, true
 }
 
+// appManaged resolves the {app} of the path and answers unless the caller
+// manages it.
+func (s *Server) appManaged(w http.ResponseWriter, r *http.Request) (App, string, bool) {
+	org, me, role, ok := s.appMember(w, r)
+	if !ok {
+		return App{}, "", false
+	}
+	a, ok := s.appOf(w, r, org)
+	if !ok {
+		return App{}, "", false
+	}
+	if !manages(a, me, role) {
+		http.Error(w, "only the member who created this app, or an owner, can manage it", http.StatusForbidden)
+		return App{}, "", false
+	}
+	return a, me, true
+}
+
 func (s *Server) handleAppList(w http.ResponseWriter, r *http.Request) {
-	org, ok := s.appOwner(w, r)
+	org, me, role, ok := s.appMember(w, r)
 	if !ok {
 		return
 	}
 	apps, keys := s.Apps.List(org)
 	out := []map[string]any{}
 	for _, a := range apps {
+		// Every member sees the org's apps, so they can grant one read; only
+		// the apps they manage come with their keys.
+		mine := manages(a, me, role)
 		// Never the digest: it is as good as the key to anyone who can try
 		// it against a copy of the store.
 		ks := []map[string]any{}
 		for _, k := range keys[a.ID] {
+			if !mine {
+				break
+			}
 			row := map[string]any{"id": k.ID, "hint": k.Hint, "created": k.Created}
 			if !k.LastUsed.IsZero() {
 				row["last_used"] = k.LastUsed
@@ -349,14 +406,14 @@ func (s *Server) handleAppList(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, map[string]any{
 			"id": a.ID, "name": a.Name, "principal": appPrincipal(a.ID),
-			"creator": a.Creator, "created": a.Created, "keys": ks,
+			"creator": a.Creator, "created": a.Created, "manage": mine, "keys": ks,
 		})
 	}
 	writeJSON(w, map[string]any{"apps": out})
 }
 
 func (s *Server) handleAppCreate(w http.ResponseWriter, r *http.Request) {
-	org, ok := s.appOwner(w, r)
+	org, me, _, ok := s.appMember(w, r)
 	if !ok {
 		return
 	}
@@ -371,7 +428,7 @@ func (s *Server) handleAppCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "give the app a name of at most 80 characters", http.StatusBadRequest)
 		return
 	}
-	a, err := s.Apps.Create(org, name, normEmail(s.requestUser(r).Email))
+	a, err := s.Apps.Create(org, name, me)
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "could not create the app", err)
 		return
@@ -380,11 +437,7 @@ func (s *Server) handleAppCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAppDelete(w http.ResponseWriter, r *http.Request) {
-	org, ok := s.appOwner(w, r)
-	if !ok {
-		return
-	}
-	a, ok := s.appOf(w, r, org)
+	a, _, ok := s.appManaged(w, r)
 	if !ok {
 		return
 	}
@@ -417,19 +470,18 @@ func (s *Server) dropAppGrants(a App) {
 		if err := s.Projects.dropFolderGrants(p.ID, principal); err != nil {
 			log.Printf("beardrive: delete app %s: project %s folder grants: %v", a.ID, p.ID, err)
 		}
+		if err := s.Projects.dropAppFolders(p.ID, principal); err != nil {
+			log.Printf("beardrive: delete app %s: project %s app folder grants: %v", a.ID, p.ID, err)
+		}
 	}
 }
 
 func (s *Server) handleAppKeyCreate(w http.ResponseWriter, r *http.Request) {
-	org, ok := s.appOwner(w, r)
+	a, me, ok := s.appManaged(w, r)
 	if !ok {
 		return
 	}
-	a, ok := s.appOf(w, r, org)
-	if !ok {
-		return
-	}
-	token, k, err := s.Apps.Mint(a.ID)
+	token, k, err := s.Apps.Mint(a.ID, me)
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "could not create the key", err)
 		return
@@ -438,11 +490,7 @@ func (s *Server) handleAppKeyCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAppKeyRevoke(w http.ResponseWriter, r *http.Request) {
-	org, ok := s.appOwner(w, r)
-	if !ok {
-		return
-	}
-	a, ok := s.appOf(w, r, org)
+	a, _, ok := s.appManaged(w, r)
 	if !ok {
 		return
 	}

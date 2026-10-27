@@ -3,8 +3,8 @@ title: Data queries
 description: Query a project's JSON files and Markdown frontmatter as data — filter, pick fields, sort, group and count — over the hub API or MCP, without reading files one by one.
 ---
 
-A project's files stay the source of truth. When a project admin turns on
-**Data** in the project's Settings, the hub also indexes every JSON file in the
+A project's files stay the source of truth. When a member who can write the
+project turns on **Data** in the project's Settings, the hub also indexes every JSON file in the
 project, and the YAML frontmatter of every Markdown file, so that an app or an
 agent can ask questions of them as data:
 
@@ -102,9 +102,10 @@ common values, across a sample of up to 500 documents.
 ## From a server: apps and keys
 
 A server that reads a project's data, such as a dashboard or another product's
-backend, should not sign in as a person. An organization owner creates an
-**app** for it under the organization's settings (**Apps**). The app has an id
-of the form `app:<id>`. The owner then mints the app's keys.
+backend, should not sign in as a person. Any member of the organization can
+create an **app** for it under the organization's settings (**Apps**). The app
+has an id of the form `app:<id>`. The member who created it, or an owner, mints
+and revokes its keys.
 
 ```http
 POST /api/orgs/<org>/apps                   {"name": "SearchD"}   → {"id", "principal": "app:…"}
@@ -112,7 +113,17 @@ POST /api/orgs/<org>/apps/<app>/keys                              → {"key": "b
 DELETE /api/orgs/<org>/apps/<app>/keys/<key>
 ```
 
-- **An app sees only what it is granted.** Add its id under a project's Settings → People, as you would an email address. A folder rule can then name it to narrow or widen what it sees inside that project; a folder rule alone opens nothing. An app never inherits a project's default access, and it can be granted read or write, never admin. Deleting an app removes its grants.
+Then give the app access to a project:
+
+```http
+PUT /api/p/<project>/permissions/app:<id>   {"level": "read"}                     the whole project
+PUT /api/p/<project>/permissions/app:<id>   {"level": "read", "path": "reports"}  one folder
+DELETE /api/p/<project>/permissions/app:<id>[?path=reports]
+```
+
+- **An app sees only what it is granted.** A member who can write the project may give an app **read**, on the project or on a folder they can write. Giving more, or giving anything to a person, takes a project admin, who can also add the app under the project's Settings → People. A grant on a folder alone opens that folder and nothing else, and it is the app's alone: it changes nobody else's access to that folder. An app never inherits a project's default access, and it is never admin. Deleting an app removes its grants.
+- **A grant lasts as long as its giver could give it.** The hub records who gave each app grant and checks on every request that they could still give it there. If the giver leaves the organization, can no longer write the project, or is shut out of the folder, the app stops reading there at once. A member can take back a grant they gave; changing one someone else gave takes a project admin.
+- **A key lasts as long as its minter could mint it.** A key minted by the app's creator stops working when they leave the organization. A key minted by an owner keeps working.
 - **A key opens a few routes only.** Send it as `Authorization: Bearer bda_…`. It reaches `data/query`, `data/describe` and `history` on projects the app was granted. Every other route answers `403`.
 - **A key is stored as a digest.** It can be revoked at any time. An app can hold several keys at once, so you can replace one without a gap. The Apps list shows when each key was last used.
 - **Deleting an app** revokes every key it holds.
