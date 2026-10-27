@@ -69,14 +69,10 @@ func OpenDataIndex(driver, dsn string) (*DataIndex, error) {
 	case "sqlite", "sqlite3":
 		driver = "sqlite"
 		registerSQLiteFuncs.Do(registerDataSQLiteFuncs)
-		sep := "?"
-		if strings.Contains(dsn, "?") {
-			sep = "&"
-		}
-		// Waiting out the applier's write lock beats failing a read, and WAL
-		// lets a read run beside a write at all.
-		dsn += sep + "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
-		readDSN = dsn + "&_pragma=query_only(1)"
+		// The file may be the metadata store's too (SQLiteDSN). Queries keep
+		// deferred transactions: they never write, and query_only says so.
+		readDSN = sqliteDSN(dsn, "_pragma=query_only(1)")
+		dsn = SQLiteDSN(dsn)
 	default:
 		return nil, fmt.Errorf("unsupported database driver %q for the data index", driver)
 	}
