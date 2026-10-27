@@ -14,7 +14,9 @@ agent can ask questions of them as data:
 - "Everything awaiting a reply with a DR over 50."
 
 The index follows the files. A write through the hub is in it before the write's
-request returns. A device's sync is in it as soon as the hub has folded the push.
+request returns, unless the index is busy, for example with its first build. In
+that case the next update, which starts right after, picks the write up. A
+device's sync is in it as soon as the hub has folded the push.
 Turning Data off drops the index.
 
 ## Asking
@@ -59,7 +61,7 @@ A **field** is a dot path into the document (`next_action.due`), a capture
 
 Two functions are available:
 - `lower(field)` lowercases a string, so that `Closed` and `closed` count as one value.
-- `week(field, Asia/Seoul)` gives the ISO week (`2026-W43`) of an ISO 8601 date or timestamp in a time zone. Without a zone it uses UTC.
+- `week(field, Asia/Seoul)` gives the ISO week (`2026-W43`) of an ISO 8601 date or timestamp in a time zone. The zone is an IANA name. Without a zone it uses UTC.
 
 Comparisons are **typed**. `{"dr": {"gt": 50}}` is false for a `dr` that is
 `null`, missing, or the string `"70"`; it is never an error. Sorting puts
@@ -73,7 +75,7 @@ numbers in numeric order, then strings in byte order, then nulls.
 ```
 
 - `groups` replaces `rows` when the query groups. `count` replaces `rows` when the query only counts.
-- `errors` is how many matching files could not be read as data: invalid JSON, invalid frontmatter, or a file over 2 MiB. They are counted, never silently left out.
+- `errors` is how many matching files could not be read as data: invalid JSON, invalid frontmatter, a file over 2 MiB, or a file that holds a character the index cannot store (a NUL, an unpaired surrogate, or bytes that are not UTF-8). They are counted, never silently left out.
 - `as_of` is when the index last caught up with the project.
 - `complete` is false while the index is behind the project: during the first build after turning Data on, or after a pass that could not fetch every file (the next change retries them).
 
@@ -94,6 +96,7 @@ common values, across a sample of up to 500 documents.
 - Reading needs read access to the project. Folder rules apply row by row: a file in a folder you are denied is not in your rows, counts or groups.
 - A query that returns `$doc` counts as a read of each file in [read heat](/guides/what-agents-read/). A query that returns other fields does not.
 - One page has at most 1,000 rows. A grouped query has at most 1,000 groups. An answer is at most 4 MiB, and a query may run for at most 2 seconds. A query over a limit is refused with an error; the answer is never cut short.
+- A filter may compare at most 256 values (each item of an `in` or `nin` list counts) and nest at most 16 levels deep. `select`, `order` and `group` take at most 64 fields each. A query over these limits is refused with `400`.
 - Each account may send 600 queries per minute.
 
 ## From a server: apps and keys
