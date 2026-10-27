@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -466,5 +467,50 @@ func TestFilePutMetaKeepsWhoGaveEachGrant(t *testing.T) {
 	got, _ := fresh.Get(p.ID)
 	if got.Name != "renamed" || got.GrantedBy["app:a1"] != "bob@x.io" || len(got.AppFolders) != 1 {
 		t.Fatalf("after a stale metadata write: %+v", got)
+	}
+}
+
+// The grant tables hold denials, so a store whose recorded schema says a table
+// should exist refuses to start without it rather than recreate it empty; a
+// store from before the table simply gains it.
+func TestMigrateRefusesToRecreateGrantTablesEmpty(t *testing.T) {
+	for _, c := range []struct {
+		table      string
+		introduced int
+	}{
+		{"project_perms", 1},
+		{"project_folder_perms", 2},
+		{"project_app_folders", 3},
+	} {
+		t.Run(c.table, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "meta.db")
+			s, err := OpenSQLStore("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			if _, err := raw.Exec(`DROP TABLE ` + c.table); err != nil {
+				t.Fatal(err)
+			}
+			if s, err := OpenSQLStore("sqlite", path); err == nil || !strings.Contains(err.Error(), c.table) {
+				if s != nil {
+					s.Close()
+				}
+				t.Fatalf("a store at schema %d without %s opened: %v", schemaVersion, c.table, err)
+			}
+			if _, err := raw.Exec(`UPDATE schema_meta SET value = ? WHERE key = 'version'`, strconv.Itoa(c.introduced-1)); err != nil {
+				t.Fatal(err)
+			}
+			s, err = OpenSQLStore("sqlite", path)
+			if err != nil {
+				t.Fatalf("a store from before %s did not gain it: %v", c.table, err)
+			}
+			s.Close()
+		})
 	}
 }

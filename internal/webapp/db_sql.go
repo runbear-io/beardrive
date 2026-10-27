@@ -373,8 +373,8 @@ func (s *sqlMetaStore) migrate() error {
 			level TEXT NOT NULL, granted_by TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (project, prefix, email))`,
 		// Apps' grants on single folders (Project.AppFolders): beside the
-		// folder rules, never in them. Not guarded: a table that went missing
-		// would only take grants away.
+		// folder rules, never in them. GUARDED (see guardedTable below): it
+		// holds denials, and an empty one would drop them.
 		`CREATE TABLE IF NOT EXISTS project_app_folders (
 			project TEXT NOT NULL, prefix TEXT NOT NULL, app TEXT NOT NULL,
 			level TEXT NOT NULL, granted_by TEXT NOT NULL DEFAULT '',
@@ -429,6 +429,36 @@ func (s *sqlMetaStore) migrate() error {
 	}
 	if err := s.guardedTable(err, "project_folders",
 		"every restricted folder would re-open to the whole organization", 2); err != nil {
+		return err
+	}
+	// The grant tables carry denials as well as grants: an explicit none on a
+	// project, a none for one account inside a folder rule, a none for an app
+	// on one folder. Recreated empty, each denial would fall back to a wider
+	// default. project_perms predates schema versions (any store that recorded
+	// one has it); the folder grants came with schema 2, apps' folder grants
+	// with schema 3.
+	perms, err := s.db.Query(`SELECT * FROM project_perms LIMIT 0`)
+	if err == nil {
+		perms.Close()
+	}
+	if err := s.guardedTable(err, "project_perms",
+		"every explicit none on a project would fall back to the project default", 1); err != nil {
+		return err
+	}
+	folderPerms, err := s.db.Query(`SELECT * FROM project_folder_perms LIMIT 0`)
+	if err == nil {
+		folderPerms.Close()
+	}
+	if err := s.guardedTable(err, "project_folder_perms",
+		"every account denied a folder by its rule would get the rule's default there", 2); err != nil {
+		return err
+	}
+	appFolders, err := s.db.Query(`SELECT * FROM project_app_folders LIMIT 0`)
+	if err == nil {
+		appFolders.Close()
+	}
+	if err := s.guardedTable(err, "project_app_folders",
+		"every app denied a folder would read it through its project grant", 3); err != nil {
 		return err
 	}
 	for _, st := range stmts {

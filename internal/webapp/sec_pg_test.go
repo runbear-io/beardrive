@@ -47,8 +47,12 @@ func secpgSQL(t *testing.T) (*sql.DB, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
+	// schema_meta too: a fresh database records no schema version, and one
+	// that still recorded a version would (rightly) refuse to recreate the
+	// guarded grant tables dropped here.
 	if _, err := db.Exec(`DROP TABLE IF EXISTS accounts, tokens, auth_policy, projects, orgs,
-		org_members, invites, shares, devices, device_rows, read_stats, project_perms`); err != nil {
+		org_members, invites, shares, devices, device_rows, read_stats, project_perms,
+		project_folders, project_folder_perms, project_app_folders, schema_meta`); err != nil {
 		t.Fatal(err)
 	}
 	return db, dsn
