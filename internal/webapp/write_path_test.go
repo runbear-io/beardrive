@@ -147,10 +147,9 @@ func toolText(res *mcp.CallToolResult) string {
 // conditional write — standing in for another hub process.
 type casRoot struct {
 	remote.Backend
-	mu            sync.Mutex
-	beforePutIf   func(key string) // before a conditional journal write
-	beforeBlobPut func(key string) // before a conditional blob write
-	conflicts     int
+	mu          sync.Mutex
+	beforePutIf func(key string)
+	conflicts   int
 }
 
 func versionOf(b []byte) remote.Version {
@@ -185,13 +184,9 @@ func (c *casRoot) GetVersioned(ctx context.Context, key string) (io.ReadCloser, 
 }
 
 func (c *casRoot) PutIf(ctx context.Context, key string, r io.Reader, _ int64, expect remote.Version) (remote.Version, error) {
-	hook := &c.beforePutIf
-	if strings.Contains(key, "blobs/") {
-		hook = &c.beforeBlobPut
-	}
-	if f := *hook; f != nil {
-		*hook = nil
-		f(key)
+	if hook := c.beforePutIf; hook != nil {
+		c.beforePutIf = nil
+		hook(key)
 	}
 	body, err := io.ReadAll(r)
 	if err != nil {
@@ -348,81 +343,6 @@ func TestTheHubSeqIgnoresOpsForgedInAnotherJournal(t *testing.T) {
 			t.Fatalf("hub op %s took seq %d (seen: %v)", op.Path, op.Seq, seen)
 		}
 		seen[op.Seq] = op.Path
-	}
-}
-
-// A write refused for a stale base had already stored its blob. It is billed
-// then, once: a retry of the same bytes finds the blob there and adds nothing.
-func TestARefusedWriteStillBillsTheBlobItStored(t *testing.T) {
-	var root *casRoot
-	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
-		root = &casRoot{Backend: be}
-		return root
-	})
-	q := &recQuota{}
-	srv.Quota = q
-	h := srv.Handler()
-	if rec := putIfMatch(h, p.ID, "note.md", "v1", ""); rec.Code != 200 {
-		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
-	}
-	billed := func() (n int64) {
-		q.mu.Lock()
-		defer q.mu.Unlock()
-		for _, u := range q.usage {
-			n += u.bytes
-		}
-		return n
-	}
-	before := billed()
-	root.beforePutIf = func(key string) { theOtherProcessAppends(t, root, key, "note.md", "theirs") }
-	if rec := putIfMatch(h, p.ID, "note.md", "ours", shaOf("v1")); rec.Code != http.StatusConflict {
-		t.Fatalf("stale write: %d %s", rec.Code, rec.Body)
-	}
-	if got := billed() - before; got != int64(len("ours")) {
-		t.Fatalf("a refused write that stored its blob billed %d bytes, want %d", got, len("ours"))
-	}
-	if rec := putIfMatch(h, p.ID, "note.md", "ours", shaOf("theirs")); rec.Code != 200 {
-		t.Fatalf("retry: %d %s", rec.Code, rec.Body)
-	}
-	if got := billed() - before; got != int64(len("ours")) {
-		t.Fatalf("the retry billed again: %d bytes in all, want %d", got, len("ours"))
-	}
-}
-
-// Two hub processes upload the same new bytes. The one that stores the blob is
-// billed for it. The other found it stored and is billed nothing, even when
-// its own op is then refused (which used to bill it again).
-func TestOnlyTheWriteThatStoresABlobIsBilledForIt(t *testing.T) {
-	var root *casRoot
-	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
-		root = &casRoot{Backend: be}
-		return root
-	})
-	q := &recQuota{}
-	srv.Quota = q
-	h := srv.Handler()
-	if rec := putIfMatch(h, p.ID, "note.md", "v1", ""); rec.Code != 200 {
-		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
-	}
-	billed := func() (n int64) {
-		q.mu.Lock()
-		defer q.mu.Unlock()
-		for _, u := range q.usage {
-			n += u.bytes
-		}
-		return n
-	}
-	before := billed()
-	ctx := context.Background()
-	root.beforeBlobPut = func(key string) { // the other process stored the same bytes first
-		root.Backend.Put(ctx, key, strings.NewReader("ours"), 4)
-	}
-	root.beforePutIf = func(key string) { theOtherProcessAppends(t, root, key, "note.md", "theirs") }
-	if rec := putIfMatch(h, p.ID, "note.md", "ours", shaOf("v1")); rec.Code != http.StatusConflict {
-		t.Fatalf("stale write: %d %s", rec.Code, rec.Body)
-	}
-	if got := billed() - before; got != 0 {
-		t.Fatalf("a write that found its blob already stored was billed %d bytes", got)
 	}
 }
 

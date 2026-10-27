@@ -129,50 +129,24 @@ func spool(src io.Reader) (f *os.File, size int64, sum string, err error) {
 // Upload stores content through the server: spool to disk while hashing,
 // push the blob, then journal the op.
 func (r *RemoteSource) Upload(ctx context.Context, p string, src io.Reader, _ int64, who User, note string) error {
-	_, err := r.uploadIf(ctx, p, src, who, note, "")
-	return err
+	return r.uploadIf(ctx, p, src, who, note, "")
 }
 
 // uploadIf is Upload held to base, the version of p the writer built on (an
 // If-Match sha; "" holds it to nothing), all the way into the journal append.
 // See commitBase.
-//
-// created reports whether this write stored the blob, which is what bills it:
-// a blob is billed once, by the write that stored it, whether or not the op
-// naming it then lands. Content addressing means a blob already there is the
-// same bytes. Stored only if absent, atomically where the backend can create
-// conditionally (GCS); elsewhere a look comes first, which two writers of the
-// same new bytes can both pass.
-func (r *RemoteSource) uploadIf(ctx context.Context, p string, src io.Reader, who User, note, base string) (created bool, err error) {
+func (r *RemoteSource) uploadIf(ctx context.Context, p string, src io.Reader, who User, note, base string) error {
 	tmp, size, blob, err := spool(src)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	// Blob before journal, always.
-	key := "blobs/" + blob
-	if cp, ok := r.Backend.(remote.ConditionalPutter); ok {
-		switch _, err := cp.PutIf(ctx, key, tmp, size, remote.VersionAbsent); {
-		case errors.Is(err, remote.ErrVersionMismatch):
-		case err != nil:
-			return false, fmt.Errorf("push blob: %w", err)
-		default:
-			created = true
-		}
-	} else {
-		there, err := r.Backend.Exists(ctx, key)
-		if err != nil {
-			return false, fmt.Errorf("check blob: %w", err)
-		}
-		if !there {
-			if err := r.Backend.Put(ctx, key, tmp, size); err != nil {
-				return false, fmt.Errorf("push blob: %w", err)
-			}
-			created = true
-		}
+	if err := r.Backend.Put(ctx, "blobs/"+blob, tmp, size); err != nil {
+		return fmt.Errorf("push blob: %w", err)
 	}
-	return created, r.commitIf(ctx, p, blob, size, who, note, base)
+	return r.commitIf(ctx, p, blob, size, who, note, base)
 }
 
 // Commit appends a put op for path→blob to this server's own journal. It
@@ -774,19 +748,9 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// journals the op lands on — the only place a write from another hub
 	// process is guaranteed to be seen.
 	if rs, ok := up.(*RemoteSource); ok {
-		// Billed by whether this write stored the blob (see uploadIf), even
-		// when the op is then refused: a stale base still left the blob in
-		// the store, and a retry of the same bytes stores nothing. A write
-		// that found the blob already stored is billed nothing, whoever
-		// stored it and whatever happened to their op.
-		var created bool
-		created, err = rs.uploadIf(r.Context(), p, tmp, s.requestUser(r), "", base)
-		if billed = 0; created {
-			billed = size
-			s.quota().RecordUsage(org, billed)
-		}
-	} else if err = up.Upload(r.Context(), p, tmp, size, s.requestUser(r), ""); err == nil && billed > 0 {
-		s.quota().RecordUsage(org, billed)
+		err = rs.uploadIf(r.Context(), p, tmp, s.requestUser(r), "", base)
+	} else {
+		err = up.Upload(r.Context(), p, tmp, size, s.requestUser(r), "")
 	}
 	var stale *staleWriteError
 	if errors.As(err, &stale) {
@@ -798,6 +762,9 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	if err != nil {
 		http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
 		return
+	}
+	if billed > 0 {
+		s.quota().RecordUsage(org, billed)
 	}
 	v.invalidate()
 	s.dataWrote(r.Context(), projectID(r))

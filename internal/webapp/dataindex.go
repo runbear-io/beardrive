@@ -137,9 +137,32 @@ func (x *DataIndex) migrate() error {
 		`CREATE TABLE IF NOT EXISTS data_projects (
 			project    TEXT PRIMARY KEY,
 			complete   INTEGER NOT NULL DEFAULT 0,
-			applied_at TEXT NOT NULL DEFAULT '')`,
+			applied_at TEXT NOT NULL DEFAULT '',
+			gen        BIGINT NOT NULL DEFAULT 0)`,
 	} {
 		if _, err := x.w.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate data index: %w", err)
+		}
+	}
+	// gen came after the table did. Added where it is missing; a second
+	// process that added it first is not an error.
+	if x.d == dialectPostgres {
+		_, err := x.w.Exec(`ALTER TABLE data_projects ADD COLUMN IF NOT EXISTS gen BIGINT NOT NULL DEFAULT 0`)
+		if err != nil {
+			return fmt.Errorf("migrate data index: %w", err)
+		}
+		return nil
+	}
+	has := func() (bool, error) {
+		var n int
+		err := x.w.QueryRow(`SELECT count(*) FROM pragma_table_info('data_projects') WHERE name = 'gen'`).Scan(&n)
+		return n > 0, err
+	}
+	if ok, err := has(); err != nil || ok {
+		return err
+	}
+	if _, err := x.w.Exec(`ALTER TABLE data_projects ADD COLUMN gen BIGINT NOT NULL DEFAULT 0`); err != nil {
+		if ok, _ := has(); !ok {
 			return fmt.Errorf("migrate data index: %w", err)
 		}
 	}
@@ -293,13 +316,42 @@ func (x *DataIndex) dropProject(ctx context.Context, project string) error {
 	return nil
 }
 
-// setState records a project's index state. complete is only ever raised by a
-// pass with nothing left to retry; starting a fresh build lowers it.
-func (x *DataIndex) setState(ctx context.Context, project string, complete bool, at time.Time) error {
-	_, err := x.w.ExecContext(ctx, x.q(`INSERT INTO data_projects (project, complete, applied_at) VALUES (?, ?, ?)
-		ON CONFLICT (project) DO UPDATE SET complete = excluded.complete, applied_at = excluded.applied_at`),
-		project, boolInt(complete), dataTime(at))
+// The project's state row is the completion fence, and it is shared by every
+// hub process. gen moves with each change the index must catch up with; a pass
+// reads it before its fold and may raise complete only while it has not moved.
+// A fold read before a change, on any process, therefore cannot report the
+// index complete after it.
+
+// start records a fresh build: incomplete, never caught up, under a
+// generation no earlier pass read (a nanosecond clock: the row of a project
+// whose Data went off is gone, so its count cannot simply go on).
+func (x *DataIndex) start(ctx context.Context, project string) error {
+	_, err := x.w.ExecContext(ctx, x.q(`INSERT INTO data_projects (project, complete, applied_at, gen) VALUES (?, 0, '', ?)
+		ON CONFLICT (project) DO UPDATE SET complete = 0, applied_at = '', gen = excluded.gen`),
+		project, time.Now().UnixNano())
 	return err
+}
+
+// generation is what a pass reads before its fold.
+func (x *DataIndex) generation(ctx context.Context, project string) (int64, error) {
+	var gen int64
+	err := x.w.QueryRowContext(ctx, x.q(`SELECT gen FROM data_projects WHERE project = ?`), project).Scan(&gen)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return gen, err
+}
+
+// finish raises complete for a pass that read gen before its fold, only while
+// the generation is still gen, and reports whether it did.
+func (x *DataIndex) finish(ctx context.Context, project string, gen int64, at time.Time) (bool, error) {
+	res, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET complete = 1, applied_at = ? WHERE project = ? AND gen = ?`),
+		dataTime(at), project, gen)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // readTx is a consistent, read-only view for one query: its ETag and its rows
@@ -329,11 +381,12 @@ func (x *DataIndex) readTx(ctx context.Context) (*sql.Tx, error) {
 	return tx, nil
 }
 
-// lower marks a project's index behind, keeping as_of at the last pass that
-// caught up: a pass that could not fetch every file leaves the rest for the
-// next one, and until then a query must not report the index complete.
+// lower marks a project's index behind and moves its generation, keeping as_of
+// at the last pass that caught up. Every change the index must catch up with
+// lowers it: a write through the hub, a push, a pass that could not fetch every
+// file. A pass that read the old generation then cannot raise it.
 func (x *DataIndex) lower(ctx context.Context, project string) error {
-	_, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET complete = 0 WHERE project = ?`), project)
+	_, err := x.w.ExecContext(ctx, x.q(`UPDATE data_projects SET complete = 0, gen = gen + 1 WHERE project = ?`), project)
 	return err
 }
 

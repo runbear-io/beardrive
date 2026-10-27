@@ -16,7 +16,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -37,15 +36,24 @@ import (
 // pass that was missed is made up by the next one.
 
 // dataProject is one project's applier state. mu admits one pass at a time;
-// queued says a background pass is already waiting for it. changes counts the
-// changes this process has asked the index to catch up with: a pass that
-// began before the latest one may not report the index complete.
+// queued says a background pass is already waiting for it.
 type dataProject struct {
-	mu      sync.Mutex
-	known   map[string]dataKnown // what the index holds; nil until loaded
-	qmu     sync.Mutex
-	queued  bool
-	changes atomic.Uint64
+	mu     sync.Mutex
+	known  map[string]dataKnown // what the index holds; nil until loaded
+	qmu    sync.Mutex
+	queued bool
+}
+
+// dataBehind tells the index a change has landed that it must catch up with,
+// before any pass is asked to: it moves the shared generation, so no pass
+// whose fold predates the change (on this process or another) can report the
+// index complete. Best effort, like every applier write.
+func (s *Server) dataBehind(id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Data.lower(ctx, id); err != nil {
+		log.Printf("beardrive: data index for %s: %v", id, err)
+	}
 }
 
 func (s *Server) dataProjectState(id string) *dataProject {
@@ -59,8 +67,8 @@ func (s *Server) dataApplyAsync(id string) {
 	if s.Data == nil {
 		return
 	}
+	s.dataBehind(id)
 	st := s.dataProjectState(id)
-	st.changes.Add(1)
 	st.qmu.Lock()
 	if st.queued {
 		st.qmu.Unlock()
@@ -89,18 +97,14 @@ func (s *Server) dataWrote(ctx context.Context, id string) {
 	if s.Data == nil || id == "" {
 		return
 	}
+	s.dataBehind(id)
 	st := s.dataProjectState(id)
-	st.changes.Add(1)
 	// A running pass holds the lock for as long as it fetches, which on a
 	// first build is minutes; the write must not wait on it. The pass this
 	// queues reads the fold after the write, so the index still catches up,
-	// only not before this request returns, and until it has, the index is
-	// behind: it says so now, and the running pass may not say otherwise
-	// when it ends (dataPass reads changes when it starts).
+	// only not before this request returns; until then it reads behind, and
+	// the running pass cannot say otherwise (dataBehind).
 	if !st.mu.TryLock() {
-		if err := s.Data.lower(ctx, id); err != nil {
-			log.Printf("beardrive: data index for %s: %v", id, err)
-		}
 		s.dataApplyAsync(id)
 		return
 	}
@@ -161,9 +165,13 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 	if !s.dataOn(id) {
 		return nil
 	}
-	// Read before the fold: a change counted after this is one the fold may
-	// not hold, and then this pass is not the one that catches the index up.
-	changes := st.changes.Load()
+	// Read before the fold: a change that moves it after this is one the
+	// fold may not hold, and then this pass is not the one that catches the
+	// index up (DataIndex.finish).
+	gen, err := s.Data.generation(ctx, id)
+	if err != nil {
+		return err
+	}
 	_, v, err := s.projectVolume(id)
 	if err != nil {
 		return err
@@ -319,10 +327,11 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 	if err := s.dataWriteKnown(ctx, id, st, write); err != nil {
 		return err
 	}
-	if !complete || st.changes.Load() != changes {
+	if !complete {
 		return s.Data.lower(ctx, id)
 	}
-	return s.Data.setState(ctx, id, true, time.Now())
+	_, err = s.Data.finish(ctx, id, gen, time.Now())
+	return err
 }
 
 // dataWriteKnown writes rows and records what the index then holds. A row the
@@ -497,7 +506,7 @@ func (s *Server) handleProjectData(w http.ResponseWriter, r *http.Request) {
 	}
 	st := s.dataProjectState(id)
 	if *req.Enabled {
-		if err := s.Data.setState(r.Context(), id, false, time.Time{}); err != nil {
+		if err := s.Data.start(r.Context(), id); err != nil {
 			storageErr(w, http.StatusBadGateway, "could not start the data index", err)
 			return
 		}

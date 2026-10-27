@@ -14,9 +14,10 @@ import (
 	"github.com/runbear-io/beardrive/internal/journal"
 )
 
-// A pass that began before a write may not end by reporting the index
-// complete: its fold may not hold that write. The pass is held mid-fetch on a
-// blob that is a FIFO while a write is counted, then let go.
+// A pass that began before a change may not end by reporting the index
+// complete: its fold may not hold that change. The pass is held mid-fetch on
+// a blob that is a FIFO while a change lands elsewhere (another hub process
+// lowering the shared state row), then let go.
 func TestDataQuerySQLAPassOlderThanAWriteDoesNotReportComplete(t *testing.T) {
 	h, srv, cookies, p, root := permHubAt(t)
 	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
@@ -43,13 +44,17 @@ func TestDataQuerySQLAPassOlderThanAWriteDoesNotReportComplete(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- srv.dataPass(context.Background(), p.ID, st) }()
 	// Opening the FIFO to write returns once the pass has opened it to read,
-	// so the pass is past its start; a write is counted while it waits.
+	// so the pass is past its start; another process's change lands while it
+	// waits.
 	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
 	if err != nil {
 		st.mu.Unlock()
 		t.Fatal(err)
 	}
-	st.changes.Add(1)
+	if err := x.lower(context.Background(), p.ID); err != nil {
+		st.mu.Unlock()
+		t.Fatal(err)
+	}
 	w.Write(body)
 	w.Close()
 	err = <-done
@@ -58,6 +63,6 @@ func TestDataQuerySQLAPassOlderThanAWriteDoesNotReportComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	if d.query("alice", map[string]any{"pattern": "slow/*.json", "count": true}).Complete {
-		t.Fatal("a pass that began before a write reported the index complete")
+		t.Fatal("a pass that began before a change reported the index complete")
 	}
 }

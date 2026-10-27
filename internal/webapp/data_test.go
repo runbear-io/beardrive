@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"math/rand/v2"
@@ -575,8 +576,13 @@ func TestDataQuerySQLReportsAPassThatMissedAFile(t *testing.T) {
 	wait := func(what string, ok func(dataAnswer) bool) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)
-		for {
-			srv.dataBoot()
+		// A pass every second, not every poll: each trigger moves the
+		// completion fence, so one per poll would keep a pass slower than
+		// the poll from ever finishing.
+		for n := 0; ; n++ {
+			if n%10 == 0 {
+				srv.dataBoot()
+			}
 			if ok(d.query("alice", map[string]any{"pattern": "x/*.json", "count": true})) {
 				return
 			}
@@ -707,5 +713,86 @@ func TestDataQueryBoundsItsSize(t *testing.T) {
 		if rec := d.send("POST", "/api/p/"+d.p.ID+"/data/query", string(body), "alice", nil, 0); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d %s, want 400", name, rec.Code, rec.Body)
 		}
+	}
+}
+
+// The state row is the completion fence for every hub process: a pass raises
+// complete only under the generation it read before its fold, and every change
+// moves the generation.
+func TestDataIndexSQLCompletesOnlyUnderItsGeneration(t *testing.T) {
+	for name, open := range dataBackends(t) {
+		t.Run(name, func(t *testing.T) {
+			x := open(t)
+			ctx := context.Background()
+			project := "fence-" + name
+			complete := func() bool {
+				t.Helper()
+				tx, err := x.readTx(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback()
+				c, _, err := x.state(ctx, tx, project)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return c
+			}
+			if err := x.start(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			old, err := x.generation(ctx, project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := x.lower(ctx, project); err != nil { // a change, after that pass read its fold
+				t.Fatal(err)
+			}
+			if ok, err := x.finish(ctx, project, old, time.Now()); err != nil || ok || complete() {
+				t.Fatalf("a pass older than a change raised complete: ok=%v err=%v", ok, err)
+			}
+			cur, _ := x.generation(ctx, project)
+			if ok, err := x.finish(ctx, project, cur, time.Now()); err != nil || !ok || !complete() {
+				t.Fatalf("a pass under the current generation did not raise complete: ok=%v err=%v", ok, err)
+			}
+			// A fresh build never reuses a generation a pass from before it read.
+			if err := x.dropProject(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			if err := x.start(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			if ok, _ := x.finish(ctx, project, cur, time.Now()); ok {
+				t.Fatal("a pass from before Data went off and on raised complete")
+			}
+		})
+	}
+}
+
+// An index made before the generation existed gets the column on open.
+func TestDataIndexAddsTheGenerationToAnOlderTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE data_projects (project TEXT PRIMARY KEY,
+		complete INTEGER NOT NULL DEFAULT 0, applied_at TEXT NOT NULL DEFAULT '')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`INSERT INTO data_projects (project, complete, applied_at) VALUES ('p', 1, '')`)
+	db.Close()
+	for range 2 { // and opening it again is not an error
+		x, err := OpenDataIndex("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := x.lower(context.Background(), "p"); err != nil {
+			t.Fatal(err)
+		}
+		if gen, err := x.generation(context.Background(), "p"); err != nil || gen == 0 {
+			t.Fatalf("generation %d %v", gen, err)
+		}
+		x.Close()
 	}
 }
