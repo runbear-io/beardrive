@@ -153,9 +153,16 @@ func (s *Server) keepLease(room string) {
 	}
 	stop := make(chan struct{})
 	r.renewals[room] = stop
+	every := leaseTTL / 3
+	r.renewing++
 	r.mu.Unlock()
 	go func() {
-		t := time.NewTicker(leaseTTL / 3)
+		defer func() {
+			r.mu.Lock()
+			r.renewing--
+			r.mu.Unlock()
+		}()
+		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
 			select {

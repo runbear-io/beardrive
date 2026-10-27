@@ -359,4 +359,11 @@ func convergeAcross(t *testing.T, a, b *Server, p Project) {
 			t.Fatalf("converged editing still parked %s", e.Path)
 		}
 	}
+	// Torn down here, before fastRoom's cleanup restores the timings: a
+	// snapshot timer or lease renewer still running would read them racing
+	// that write.
+	for _, s := range []*Server{a, b} {
+		s.Close(context.Background())
+		s.rooms().settle()
+	}
 }

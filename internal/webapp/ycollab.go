@@ -755,9 +755,11 @@ func conflictPath(path string, who User, at time.Time) string {
 // write.
 type roomRegistry struct {
 	mu sync.Mutex
-	// flushing counts snapshots running on a timer's goroutine, so a caller
-	// tearing rooms down can wait for the ones already in flight (settle).
+	// flushing counts snapshots running on a timer's goroutine, and renewing
+	// the lease renewers still running, so a caller tearing rooms down can
+	// wait for the ones already in flight (settle).
 	flushing int
+	renewing int
 	docs     map[string]*crdt.Doc
 	users    map[string]User
 	// bases is the blob each room last wrote or was seeded from: the If-Match
@@ -940,7 +942,7 @@ func (r *roomRegistry) settled(room string) {
 func (r *roomRegistry) settle() {
 	for {
 		r.mu.Lock()
-		busy := r.flushing > 0 || len(r.pending) > 0
+		busy := r.flushing > 0 || r.renewing > 0 || len(r.pending) > 0
 		r.mu.Unlock()
 		if !busy {
 			return
@@ -1046,8 +1048,11 @@ func (s *Server) Close(ctx context.Context) error {
 	if s.y != nil {
 		err = s.y.Shutdown(ctx)
 	}
+	// Shutdown closes peers, and a room with none — one the relay or Apply
+	// created — is never unloaded by it, so its renewer and timers would
+	// outlive the server. The process is going away: every room ends here.
 	for _, room := range rooms {
-		s.releaseLease(room)
+		s.dropRoom(room)
 	}
 	if s.collabRelay != nil {
 		s.collabRelay.Close()
