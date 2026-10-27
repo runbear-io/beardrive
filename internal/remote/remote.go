@@ -99,12 +99,11 @@ ConditionalPutter is the optional compare-and-swap capability, in the
 	has always prevented BETWEEN devices, reappearing inside one device id the
 	moment the hub runs more than once (docs/hub-load-prd.md Stage 10).
 
-	Implemented for GCS, which is what the managed hub stores in. Not for S3
-	(conditional PutObject is recent and unevenly supported), not for file://
-	(a rename is atomic but a compare-and-swap across processes is not, and
-	inventing one would be a worse lie than not offering the capability), and
-	not for the https:// client — that one talks to a hub, and the hub is the
-	process doing the conditional write.
+	Implemented for GCS, which is what the managed hub stores in, and for
+	file:// under a lock on the directory (local_cas.go — local filesystems
+	only). Not for S3 (conditional PutObject is recent and unevenly
+	supported), and not for the https:// client — that one talks to a hub,
+	and the hub is the process doing the conditional write.
 */
 type ConditionalPutter interface {
 	// GetVersioned reads an object and reports the version it was at, so a

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -62,21 +63,33 @@ func (s *Server) ydocs() *ygows.Server {
 		// offers: the document is built from the file before anyone attaches,
 		// kept addressable while the room lives, and written back when the
 		// last editor leaves.
-		srv.OnLoadDocument = func(_ context.Context, room string, doc *crdt.Doc) error {
+		srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
 			s.rooms().load(room, doc)
-			if err := s.seedDoc(room, doc); err != nil {
+			// Without a relay the processes cannot share a document, so
+			// only the lease holder opens the room; ygo answers the refused
+			// joiner with a 500 and y-websocket's retry carries it to
+			// another process (lease.go). With one, the lease is taken by
+			// the snapshot path instead — a room the relay created on a
+			// process nobody is editing from cannot write, so it must not
+			// hold the pen either.
+			if s.collabRelay == nil && !s.holdLease(ctx, room) {
 				s.rooms().drop(room)
+				return errRoomElsewhere
+			}
+			if err := s.seedDoc(room, doc); err != nil {
+				s.dropRoom(room)
 				return err
 			}
 			// AFTER the seed, so the bytes the document was built from are
 			// never mistaken for an edit that needs writing back.
 			s.watchRoom(room, doc)
+			s.keepLease(room)
 			return nil
 		}
 		srv.OnLastPeer = func(ctx context.Context, room string) { s.finalSnapshot(ctx, room) }
 		srv.OnUnloadDocument = func(ctx context.Context, room string) {
 			s.finalSnapshot(ctx, room)
-			s.rooms().drop(room)
+			s.dropRoom(room)
 		}
 		/* Authorization runs per CONNECTION, after proj() has already decided
 		   this caller may see this project.
@@ -166,10 +179,9 @@ func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
 	if len(body) >= maxSeedBytes {
 		return fmt.Errorf("%s is too large to co-edit", room) // a truncated seed would be written back over the rest
 	}
-	project, _, _ := strings.Cut(room, "/")
-	prev := s.rooms().base(room) // what the last room for this file wrote, if any
+	project, path, _ := strings.Cut(room, "/")
 	s.rooms().rebase(room, sha)
-	txt := doc.GetText("body")
+	text := string(body)
 
 	/* The document is rebuilt from the same HISTORY, not from the bytes.
 
@@ -184,29 +196,121 @@ func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
 	   So a snapshot stores the document's state beside the blob it wrote
 	   (ydoc/<sha>), and a room for a file that IS that blob replays it: the
 	   same items, the same ids, and a returning browser's state is a no-op to
-	   merge. A file somebody wrote from outside in the meantime has no state
-	   of its own, so the previous room's state is replayed and the outside
-	   change spliced in as one edit — which is also how a returning browser's
-	   unsynced typing lands beside that write instead of on top of a second
-	   copy of the file. Only a hub that never saw this file being edited, or
-	   was restarted since, starts from the bytes. */
-	if state := s.roomHistory(project, sha); state != nil && replayInto(doc, state, string(body)) {
-		return nil
+	   merge.
+
+	   The NEWEST state any room stored for this path (ydoc/head/<path>) wins
+	   over the one filed under the file's own blob, spliced to the file
+	   where the file moved on. A file somebody wrote from outside has no
+	   state of its own, so this is how the outside change lands as one edit
+	   — which is also how a returning browser's unsynced typing lands beside
+	   that write instead of on top of a second copy of the file. And a file
+	   taken BACK to an older version from outside does have a state of its
+	   own, from back then — one that knows nothing of the edits since. The
+	   relay replays a room's retained log when a process activates the room
+	   (cluster/redis), and against that older state those edits would go
+	   right back into a file somebody deliberately reverted. Built on the
+	   newest state they are known and deleted, and replaying them changes
+	   nothing. Only a hub that never saw this file being edited starts from
+	   the bytes. */
+	var newest []byte
+	if head := s.roomHead(project, path); head != "" && head != sha {
+		newest = s.roomHistory(project, head)
 	}
-	if prev != "" && prev != sha {
-		if state := s.roomHistory(project, prev); state != nil {
-			if was, ok := replayed(state); ok && replayInto(doc, state, was) {
-				splice(doc, txt, was, string(body))
-				s.storeRoomHistory(project, sha, doc.EncodeStateAsUpdate())
-				return nil
-			}
+	if newest == nil {
+		if state := s.roomHistory(project, sha); state != nil && replayInto(doc, state, text) {
+			return nil
 		}
 	}
-	doc.Transact(func(txn *crdt.Transaction) {
-		txt.Insert(txn, 0, string(body), nil)
-	})
-	s.storeRoomHistory(project, sha, doc.EncodeStateAsUpdate())
+	/* Built on a scratch document and claimed before it is applied: two
+	   processes opening a file no room has held both reach this point, and a
+	   seed is a set of items under a fresh random client id, so two of them
+	   spell the same text twice when they meet. Whichever process stores
+	   ydoc/<sha> first has seeded the file; the other applies that state
+	   instead of its own (claimRoomHistory). */
+	tmp := crdt.New()
+	ttxt := tmp.GetText("body")
+	seeded := false
+	if newest != nil {
+		if was, ok := replayed(newest); ok && tmp.ApplyUpdate(newest) == nil {
+			splice(tmp, ttxt, was, text)
+			seeded = true
+		}
+	}
+	if !seeded {
+		tmp.Transact(func(txn *crdt.Transaction) {
+			ttxt.Insert(txn, 0, text, nil)
+		})
+	}
+	state := s.claimRoomHistory(project, path, sha, tmp.EncodeStateAsUpdate(), text, newest)
+	if !replayInto(doc, state, text) {
+		return fmt.Errorf("%s: the stored document does not spell the file", room)
+	}
 	return nil
+}
+
+// claimRoomHistory stores a seed as ydoc/<sha> and returns the state every
+// process must build the room from: the stored one when it spells the file
+// and knows everything the newest state does, ours otherwise — written with
+// compare-and-swap, so two processes seeding at once end up with one of
+// their seeds rather than one each.
+func (s *Server) claimRoomHistory(project, path, sha string, state []byte, body string, newest []byte) []byte {
+	be, ok := s.projectBackend(project)
+	if !ok || sha == "" || len(state) > maxHistoryBytes {
+		return state
+	}
+	cond, ok := be.(remote.ConditionalPutter)
+	if !ok {
+		s.storeRoomHistory(project, path, sha, state)
+		return state
+	}
+	ctx := context.Background()
+	key := historyKey(sha)
+	var err error
+	for range 3 {
+		var theirs []byte
+		var v remote.Version
+		theirs, v, err = readVersioned(ctx, cond, key)
+		if err != nil {
+			break
+		}
+		if theirs != nil {
+			if got, ok := replayed(theirs); ok && got == body && knows(theirs, newest) {
+				return theirs
+			}
+		}
+		if _, err = cond.PutIf(ctx, key, bytes.NewReader(state), int64(len(state)), v); err == nil {
+			s.storeRoomHead(project, path, sha)
+			return state
+		}
+		if !errors.Is(err, remote.ErrVersionMismatch) {
+			break
+		}
+	}
+	log.Printf("bdrive: claiming room history %s/%s: %v", project, sha, err)
+	return state
+}
+
+// knows reports whether a stored state holds every item of another — the
+// only comparison a CRDT offers: two states that spell the same text are not
+// the same document.
+func knows(state, other []byte) bool {
+	if other == nil {
+		return true
+	}
+	have, ok := docFrom(state)
+	if !ok {
+		return false
+	}
+	missing, err := crdt.DiffUpdateV1(other, have.StateVector())
+	return err == nil && bytes.Equal(missing, emptyUpdate)
+}
+
+func docFrom(state []byte) (*crdt.Doc, bool) {
+	tmp := crdt.New()
+	if err := tmp.ApplyUpdate(state); err != nil {
+		return nil, false
+	}
+	return tmp, true
 }
 
 // replayed is the text a stored state spells, on a scratch document, so a
@@ -283,7 +387,7 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 		// Too large to hold, so not folded as a prefix: the room ends with no
 		// snapshot (dropped from the registry first, so the unload finds
 		// nothing to write), and a reconnect is refused by seedDoc.
-		s.rooms().drop(room)
+		s.dropRoom(room)
 		_ = s.ydocs().CloseRoom(room, true)
 		return false
 	}
@@ -298,7 +402,7 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 	}
 	s.rooms().rebase(room, sha)
 	if doc, _, ok := s.rooms().get(room); ok {
-		s.storeRoomHistory(project, sha, doc.EncodeStateAsUpdate())
+		s.storeRoomHistory(project, path, sha, doc.EncodeStateAsUpdate())
 	}
 	return true
 }
@@ -327,7 +431,7 @@ func (s *Server) adoptRoomWrite(project, path, sha string, body io.ReadSeeker) {
 		return
 	}
 	s.rooms().rebase(room, sha)
-	s.storeRoomHistory(project, sha, state)
+	s.storeRoomHistory(project, path, sha, state)
 }
 
 // A room's history lives in the project's own storage as ydoc/<sha>: the
@@ -357,13 +461,43 @@ func (s *Server) roomHistory(project, sha string) []byte {
 	return state
 }
 
-func (s *Server) storeRoomHistory(project, sha string, state []byte) {
+func (s *Server) storeRoomHistory(project, path, sha string, state []byte) {
 	be, ok := s.projectBackend(project)
 	if !ok || sha == "" || len(state) > maxHistoryBytes {
 		return
 	}
 	if err := be.Put(context.Background(), historyKey(sha), bytes.NewReader(state), int64(len(state))); err != nil {
 		log.Printf("bdrive: storing room history %s/%s: %v", project, sha, err)
+		return
+	}
+	s.storeRoomHead(project, path, sha)
+}
+
+// ydoc/head/<path> names the newest state stored for a path — what the next
+// room for it builds from, on any process (seedDoc).
+func headKey(path string) string { return "ydoc/head/" + path }
+
+func (s *Server) roomHead(project, path string) string {
+	be, ok := s.projectBackend(project)
+	if !ok {
+		return ""
+	}
+	rc, err := be.Get(context.Background(), headKey(path))
+	if err != nil {
+		return ""
+	}
+	defer rc.Close()
+	sha, _ := io.ReadAll(io.LimitReader(rc, 128))
+	return strings.TrimSpace(string(sha))
+}
+
+func (s *Server) storeRoomHead(project, path, sha string) {
+	be, ok := s.projectBackend(project)
+	if !ok {
+		return
+	}
+	if err := be.Put(context.Background(), headKey(path), strings.NewReader(sha), int64(len(sha))); err != nil {
+		log.Printf("bdrive: storing room head %s/%s: %v", project, path, err)
 	}
 }
 
@@ -454,20 +588,38 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	cur, curSha, have := s.roomBytes(room)
 	if have && string(cur) == text {
 		if s.rooms().base(room) != curSha {
-			s.storeRoomHistory(project, curSha, state)
+			s.storeRoomHistory(project, path, curSha, state)
 			s.rooms().rebase(room, curSha)
+			// Written by another process. Its change frame reached only
+			// its own browsers; ours still show the edit as unsaved until
+			// a frame tells them the file now says what they see.
+			s.events().publish(project, changeEvent{Type: "change", Puts: 1, Source: "collab", Paths: []string{path}})
 		}
+		s.rooms().settled(room)
 		return // the file already says this
+	}
+	if !s.holdLease(ctx, room) {
+		// Another process writes this file. Look again once it has had
+		// time to, so this process's browsers see the save land.
+		s.rooms().awaitWriter(room, func() { s.snapshotRoom(context.Background(), room) })
+		return
 	}
 	if s.apiMux == nil {
 		return
 	}
 	base := s.rooms().base(room)
+	if have && curSha != base && s.contains(doc, project, curSha) {
+		// The head was written by this room on another process — the
+		// previous lease holder — and the relay has already delivered every
+		// item it wrote, so build on it instead of parking beside it.
+		base = curSha
+		s.rooms().rebase(room, curSha)
+	}
 	w := s.putAs(ctx, who, project, path, text, base)
 	switch w.code {
 	case http.StatusOK:
 		if sha := reportedSha(w); sha != "" {
-			s.storeRoomHistory(project, sha, state)
+			s.storeRoomHistory(project, path, sha, state)
 			s.rooms().rebase(room, sha)
 		}
 	case http.StatusConflict:
@@ -620,6 +772,14 @@ type roomRegistry struct {
 	// parked is the text a room last set aside as a conflict copy, so the
 	// two final snapshots (last peer, unload) park it once.
 	parked map[string]string
+	// leases is what this process holds for each room, under its own lock
+	// because taking one is a storage round-trip (lease.go).
+	leaseMu  sync.Mutex
+	leases   map[string]*roomLease
+	renewals map[string]chan struct{}
+	// waits counts how many times a room on a process that does not write
+	// it has looked for the writer's write since the last edit.
+	waits map[string]int
 }
 
 type roomFlush struct {
@@ -632,7 +792,8 @@ func (s *Server) rooms() *roomRegistry {
 		s.roomReg = &roomRegistry{
 			docs: map[string]*crdt.Doc{}, users: map[string]User{},
 			bases: map[string]string{}, pending: map[string]*roomFlush{}, unsubs: map[string]func(){},
-			parked: map[string]string{},
+			parked: map[string]string{}, leases: map[string]*roomLease{}, renewals: map[string]chan struct{}{},
+			waits: map[string]int{},
 		}
 	})
 	return s.roomReg
@@ -715,6 +876,7 @@ func (s *Server) watchRoom(room string, doc *crdt.Doc) {
 func (r *roomRegistry) touched(room string, flush func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	delete(r.waits, room)
 	now := time.Now()
 	p := r.pending[room]
 	if p == nil {
@@ -727,6 +889,11 @@ func (r *roomRegistry) touched(room string, flush func()) {
 	if left := p.deadline.Sub(now); left < wait {
 		wait = max(left, 0)
 	}
+	r.arm(room, p, wait, flush)
+}
+
+// arm schedules a room's flush. Caller holds r.mu.
+func (r *roomRegistry) arm(room string, p *roomFlush, wait time.Duration, flush func()) {
 	p.timer = time.AfterFunc(wait, func() {
 		r.mu.Lock()
 		delete(r.pending, room)
@@ -739,6 +906,33 @@ func (r *roomRegistry) touched(room string, flush func()) {
 		}()
 		flush()
 	})
+}
+
+// maxWriterWaits bounds how long a process that does not write a room keeps
+// looking for the writer's write: the writer has snapshotMax to make it and
+// this process up to Refresh to see it, and a writer that cannot write (a
+// refused quota) must not keep a timer alive forever.
+const maxWriterWaits = 10
+
+// awaitWriter looks at the file again after another process has had time to
+// write it, so that this process's browsers see the save land.
+func (r *roomRegistry) awaitWriter(room string, flush func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending[room] != nil || r.waits[room] >= maxWriterWaits {
+		return
+	}
+	r.waits[room]++
+	p := &roomFlush{deadline: time.Now().Add(snapshotMax)}
+	r.pending[room] = p
+	r.arm(room, p, snapshotIdle, flush)
+}
+
+// settled is the file saying what the room says: nothing left to wait for.
+func (r *roomRegistry) settled(room string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.waits, room)
 }
 
 // settle waits until no armed or running snapshot is left. Drop the rooms
@@ -779,6 +973,11 @@ func (r *roomRegistry) drop(room string) {
 		u()
 		delete(r.unsubs, room)
 	}
+	if stop := r.renewals[room]; stop != nil {
+		close(stop)
+		delete(r.renewals, room)
+	}
+	delete(r.waits, room)
 	delete(r.docs, room)
 	delete(r.users, room)
 	delete(r.parked, room)
@@ -796,3 +995,62 @@ const maxSeedBytes = 2 << 20
 // made in a room and not just the text. Past it the room still works from the
 // bytes; what it loses is a lossless rebuild for a returning browser.
 const maxHistoryBytes = 8 << 20
+
+// errRoomElsewhere is a room another process holds, on a hub with no relay.
+var errRoomElsewhere = errors.New("another hub process holds this document")
+
+// dropRoom forgets a room and gives its lease back.
+func (s *Server) dropRoom(room string) {
+	s.rooms().drop(room)
+	s.releaseLease(room)
+}
+
+// contains reports whether the room's document already holds everything the
+// stored state for sha does — the test for "the head is a version of this
+// document, not an outsider's write". Compared by item identity, which is the
+// only comparison a CRDT offers: two texts that read the same are not the
+// same document (seedDoc).
+func (s *Server) contains(doc *crdt.Doc, project, sha string) bool {
+	state := s.roomHistory(project, sha)
+	if state == nil {
+		return false
+	}
+	missing, err := crdt.DiffUpdateV1(state, doc.StateVector())
+	return err == nil && bytes.Equal(missing, emptyUpdate)
+}
+
+// emptyUpdate is what DiffUpdateV1 answers when nothing is missing.
+var emptyUpdate = crdt.EncodeStateAsUpdateV1(crdt.New(), nil)
+
+// Close writes every live room back and stops the document server. Cloud Run
+// gives a process ten seconds between SIGTERM and SIGKILL, and a peer's
+// reconnect lands on a fresh process that builds the room from what was
+// stored — so a room not written here is up to one snapshot interval of
+// typing that exists only in browsers. Bounded by ctx; a Close past its
+// deadline costs the tail, never a hang.
+func (s *Server) Close(ctx context.Context) error {
+	if s.roomReg == nil {
+		return nil
+	}
+	r := s.rooms()
+	r.mu.Lock()
+	rooms := make([]string, 0, len(r.docs))
+	for room := range r.docs {
+		rooms = append(rooms, room)
+	}
+	r.mu.Unlock()
+	for _, room := range rooms {
+		s.snapshotRoom(ctx, room)
+	}
+	var err error
+	if s.y != nil {
+		err = s.y.Shutdown(ctx)
+	}
+	for _, room := range rooms {
+		s.releaseLease(room)
+	}
+	if s.collabRelay != nil {
+		s.collabRelay.Close()
+	}
+	return err
+}

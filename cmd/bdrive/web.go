@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -80,6 +84,11 @@ type webConfig struct {
 		// which changes no heat total.
 		SessionRetentionDays int `json:"session_retention_days,omitempty"`
 	} `json:"reads,omitempty"`
+	// Collab relays co-editing between hub processes. Required once the hub
+	// runs as more than one process; a single process needs none.
+	Collab *struct {
+		Redis string `json:"redis,omitempty"` // host:port or redis:// URL
+	} `json:"collab,omitempty"`
 }
 
 func loadWebConfig(path string) (webConfig, error) {
@@ -206,6 +215,9 @@ credentials); otherwise it is relayed through this server.`,
 				Upload:     webapp.UploadConfig{Enabled: upload, TTL: uploadTTL},
 				ShareRPM:   cfg.ShareRPM,
 				TrustProxy: cfg.TrustProxy,
+			}
+			if cfg.Collab != nil {
+				srv.Collab = webapp.CollabConfig{Redis: cfg.Collab.Redis}
 			}
 			var display string
 			var meta webapp.MetaStore // hub metadata store; nil means the file backend
@@ -494,7 +506,10 @@ credentials); otherwise it is relayed through this server.`,
 				shown = "localhost" + shown
 			}
 			fmt.Printf("serving %s\n  volume: %s\n  url:    http://%s\n", display, srv.Volume, shown)
-			return http.ListenAndServe(addr, srv.Handler())
+			if err := srv.ConnectCollab(cmd.Context()); err != nil {
+				return err
+			}
+			return serveUntilSignalled(srv, addr)
 		},
 	}
 	c.Flags().StringVarP(&remoteURL, "remote", "r", "", "remote to serve (s3://bucket/prefix, gs://bucket/prefix, file:///path)")
@@ -507,4 +522,28 @@ credentials); otherwise it is relayed through this server.`,
 	c.Flags().StringVarP(&configPath, "config", "c", "", "JSON config file; explicit flags override its values")
 	c.Flags().StringVar(&projectsDB, "projects-db", "", "hub project registry file (default: $BDRIVE_HOME/projects.json)")
 	return c
+}
+
+// serveUntilSignalled runs the hub until SIGTERM or SIGINT, then writes every
+// live co-editing room back before exiting. Cloud Run sends SIGKILL ten
+// seconds after SIGTERM; a Go process with no handler exits at once, which
+// used to drop whatever the rooms held since their last snapshot.
+func serveUntilSignalled(srv *webapp.Server, addr string) error {
+	hs := &http.Server{Addr: addr, Handler: srv.Handler()}
+	errc := make(chan error, 1)
+	go func() { errc <- hs.ListenAndServe() }()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	shut, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	closeErr := srv.Close(shut)
+	if err := hs.Shutdown(shut); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return closeErr
 }
