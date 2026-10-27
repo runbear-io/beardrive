@@ -387,6 +387,28 @@ func (r *fileProjectRepo) PutFolder(project string, rule FolderRule) error {
 	return r.write()
 }
 
+// DropFolderPerm removes one grant from one rule as it stands on disk; a rule
+// that is no longer there is left absent.
+func (r *fileProjectRepo) DropFolderPerm(project, prefix, email string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.reload(); err != nil {
+		return err
+	}
+	p, ok := r.byID[project]
+	if !ok {
+		return nil
+	}
+	p = p.clone()
+	for i := range p.Folders {
+		if p.Folders[i].Prefix == prefix {
+			delete(p.Folders[i].Perms, email)
+		}
+	}
+	r.byID[project] = p
+	return r.write()
+}
+
 // DeleteFolder removes one rule. A prefix with no rule is not an error: the
 // caller's intent (this prefix carries no rule) already holds.
 func (r *fileProjectRepo) DeleteFolder(project, prefix string) error {

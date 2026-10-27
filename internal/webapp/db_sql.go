@@ -48,9 +48,47 @@ type sqlMetaStore struct {
 // what is wrong — which is exactly when the last free connection matters.
 const pgMaxOpenConns = 10
 
+// SQLiteDSN is how every pool on a hub's SQLite file opens it for writing.
+// Several pools share one file (the metadata store, the data index, and
+// whatever a deployment opens beside them), and SQLite admits one writer at a
+// time:
+//   - busy_timeout: a writer that meets another's lock waits for it, where the
+//     default (zero) fails SQLITE_BUSY at once;
+//   - WAL: a reader runs beside a writer rather than behind it;
+//   - _txlock=immediate: a transaction takes the write lock when it begins. A
+//     deferred one that reads before it writes fails SQLITE_BUSY as soon as
+//     another writer has committed since its read, and no timeout helps it.
+//
+// Each is a per-connection setting, so it rides on the DSN and reaches every
+// connection a pool opens; a PRAGMA run once reaches only the connection it
+// ran on. A setting the DSN already names is left as the operator wrote it.
+func SQLiteDSN(dsn string) string {
+	return sqliteDSN(dsn, "_txlock=immediate")
+}
+
+// sqliteDSN is dsn with the settings every SQLite pool shares, and extra.
+func sqliteDSN(dsn string, extra ...string) string {
+	for _, p := range append([]string{"_pragma=busy_timeout(5000)", "_pragma=journal_mode(WAL)"}, extra...) {
+		name := strings.TrimPrefix(p, "_pragma=")
+		name = name[:strings.IndexAny(name, "(=")]
+		if strings.Contains(dsn, name) {
+			continue
+		}
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		dsn += sep + p
+	}
+	return dsn
+}
+
 // OpenSQLStore opens (and migrates) a SQL metadata store. driver is "sqlite"
 // or "pgx" (Postgres/Supabase); dsn is the connection string / file path.
 func OpenSQLStore(driver, dsn string) (MetaStore, error) {
+	if driver == "sqlite" {
+		dsn = SQLiteDSN(dsn)
+	}
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", driver, err)
@@ -841,6 +879,13 @@ func (r *sqlProjectRepo) PutFolder(project string, rule FolderRule) error {
 		}
 		return nil
 	})
+}
+
+// DropFolderPerm removes one grant from one rule, and only the grant: the
+// rule's row is not written, so a rule another process removed stays removed.
+func (r *sqlProjectRepo) DropFolderPerm(project, prefix, email string) error {
+	return r.w.exec(`DELETE FROM project_folder_perms WHERE project = ? AND prefix = ? AND email = ?`,
+		project, prefix, email)
 }
 
 // DeleteFolder removes one rule and its grants. A prefix with no rule is not

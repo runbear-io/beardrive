@@ -157,6 +157,9 @@ type rowScopedProjectRepo interface {
 	PutFolder(project string, rule FolderRule) error
 	// DeleteFolder removes one rule and its grants.
 	DeleteFolder(project, prefix string) error
+	// DropFolderPerm removes one grant from one rule. It never writes the
+	// rule itself, so a rule another process removed stays removed.
+	DropFolderPerm(project, prefix, email string) error
 	// PutData writes the project's Data setting alone.
 	PutData(project string, on bool) error
 }
@@ -566,6 +569,40 @@ func (db *ProjectDB) putFolder(prev, next Project, rule FolderRule, remove bool)
 	if err != nil {
 		db.byID[prev.ID] = prev
 		return err
+	}
+	return nil
+}
+
+// dropFolderGrants removes one principal from every folder rule of a project,
+// one grant row at a time: a rule is never rewritten from this process's copy,
+// which may still hold a rule another process has since removed.
+func (db *ProjectDB) dropFolderGrants(id, email string) error {
+	e := normEmail(email)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.refresh()
+	p, ok := db.byID[id]
+	if !ok {
+		return fmt.Errorf("no such project %q", id)
+	}
+	for i, rule := range p.Folders {
+		if _, has := rule.Perms[e]; !has {
+			continue
+		}
+		next := p.clone()
+		delete(next.Folders[i].Perms, e)
+		db.byID[id] = next
+		var err error
+		if rs, ok := db.repo.(rowScopedProjectRepo); ok {
+			err = rs.DropFolderPerm(id, rule.Prefix, e)
+		} else {
+			err = db.repo.Put(next)
+		}
+		if err != nil {
+			db.byID[id] = p
+			return err
+		}
+		p = next
 	}
 	return nil
 }

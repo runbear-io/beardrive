@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -316,5 +317,68 @@ func TestARetriedAppendTakesTheNextSeq(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Fatalf("journal holds %d ops, want 3 (seed, theirs, ours): %v", len(seen), seen)
+	}
+}
+
+// The hub's next seq counts only its own journal. An op's Device field is
+// JSON its pusher chose: a member's op naming the hub with seq MaxInt64 used
+// to wrap every later hub op onto one (device, seq) slot.
+func TestTheHubSeqIgnoresOpsForgedInAnotherJournal(t *testing.T) {
+	root, h, p := casHub(t)
+	line, _ := journal.Marshal([]journal.Op{{
+		Seq: math.MaxInt64, Lamport: 1, Time: time.Now().UTC(), Device: webDevice.ID,
+		Kind: journal.KindPut, Path: "forged.md", Blob: shaOf("x"), Size: 1,
+	}})
+	if err := root.Backend.Put(context.Background(), p.ID+"/journal/laptop.jsonl", bytes.NewReader(line), int64(len(line))); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.md", "b.md"} {
+		if rec := putIfMatch(h, p.ID, name, name, ""); rec.Code != 200 {
+			t.Fatalf("write %s: %d %s", name, rec.Code, rec.Body)
+		}
+	}
+	seen := map[int64]string{}
+	for _, op := range hubOps(t, root, p.ID) {
+		if op.Seq <= 0 || seen[op.Seq] != "" {
+			t.Fatalf("hub op %s took seq %d (seen: %v)", op.Path, op.Seq, seen)
+		}
+		seen[op.Seq] = op.Path
+	}
+}
+
+// No request writes the hub's own journal, the project-admin recovery path
+// included: every op the hub stamps takes its seq from that journal.
+func TestTheHubJournalIsWrittenOnlyByTheHub(t *testing.T) {
+	h, srv, cookies, p := permHub(t)
+	forged := `{"kind":"put","path":"x.md","seq":9223372036854775807,"lamport":1,"device":"` + srv.Device.ID + `"}` + "\n"
+	req := httptest.NewRequest("PUT", "/api/p/"+p.ID+"/store/object?key=journal/"+srv.Device.ID+".jsonl", strings.NewReader(forged))
+	req.Header.Set("X-Bdrive-Device", srv.Device.ID)
+	req.AddCookie(cookies["alice"]) // the org owner: a project admin
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("an admin wrote the hub's journal through the store: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A seq with no room after it, put in the hub's journal from outside the hub,
+// stops the hub's writes rather than wrapping every later op onto one slot.
+func TestTheHubRefusesASeqWithNoRoomAfterIt(t *testing.T) {
+	root, h, p := casHub(t)
+	line, _ := journal.Marshal([]journal.Op{{
+		Seq: math.MaxInt64, Lamport: 1, Time: time.Now().UTC(), Device: webDevice.ID,
+		Kind: journal.KindPut, Path: "forged.md", Blob: shaOf("x"), Size: 1,
+	}})
+	key := p.ID + "/journal/" + webDevice.ID + ".jsonl"
+	if err := root.Backend.Put(context.Background(), key, bytes.NewReader(line), int64(len(line))); err != nil {
+		t.Fatal(err)
+	}
+	if rec := putIfMatch(h, p.ID, "a.md", "a", ""); rec.Code == 200 {
+		t.Fatal("the hub stamped an op after seq MaxInt64")
+	}
+	for _, op := range hubOps(t, root, p.ID) {
+		if op.Seq <= 0 {
+			t.Fatalf("hub op %s took seq %d", op.Path, op.Seq)
+		}
 	}
 }

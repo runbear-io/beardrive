@@ -264,16 +264,22 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 	defer r.upmu.Unlock()
 
 	next := func() ([]byte, error) {
-		all, err := r.loadOps(ctx)
+		sourced, err := r.loadSourcedOps(ctx)
 		if err != nil {
 			return nil, err
 		}
 		if base != nil {
+			all := make([]journal.Op, len(sourced))
+			for i, so := range sourced {
+				all[i] = so.Op
+			}
 			if err := base.holds(all); err != nil {
 				return nil, err
 			}
 		}
-		r.stamp(all, ops)
+		if err := r.stamp(sourced, ops); err != nil {
+			return nil, err
+		}
 		return journal.Marshal(ops)
 	}
 	key := "journal/" + r.Device.ID + ".jsonl"
@@ -288,14 +294,24 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 }
 
 // stamp gives ops this server's identity and the next places in its journal
-// and in replay order, as all stands.
-func (r *RemoteSource) stamp(all, ops []journal.Op) {
+// and in replay order, as the journals stand. The seq counts only ops read
+// from this server's own journal: an op's Device field is JSON its pusher
+// chose, and a member's op naming the hub's device with seq MaxInt64 would
+// otherwise wrap every later hub op onto one (device, seq) slot.
+//
+// A seq with no room after it is refused rather than wrapped: no request can
+// write the hub's journal (ownJournal), so one there came from outside the
+// hub, and wrapping would reuse a (device, seq) on every later op.
+func (r *RemoteSource) stamp(sourced []sourcedOp, ops []journal.Op) error {
 	var maxLamport, mySeq int64
-	for _, prev := range all {
-		maxLamport = max(maxLamport, prev.Lamport)
-		if prev.Device == r.Device.ID {
-			mySeq = max(mySeq, prev.Seq)
+	for _, so := range sourced {
+		maxLamport = max(maxLamport, so.Op.Lamport)
+		if so.From == r.Device.ID {
+			mySeq = max(mySeq, so.Op.Seq)
 		}
+	}
+	if mySeq > math.MaxInt64-int64(len(ops)) {
+		return fmt.Errorf("this hub's journal holds seq %d, with no room after it; it was written from outside the hub", mySeq)
 	}
 	now := time.Now().UTC()
 	lam := maxLamport
@@ -312,6 +328,7 @@ func (r *RemoteSource) stamp(all, ops []journal.Op) {
 		ops[i].Seq, ops[i].Lamport, ops[i].Time = mySeq+int64(i)+1, lam, now
 		ops[i].Device, ops[i].DeviceName, ops[i].Author = r.Device.ID, r.Device.Name, r.Device.Author
 	}
+	return nil
 }
 
 var errBlobMissing = fmt.Errorf("content not uploaded yet")

@@ -25,7 +25,9 @@ rebuild, never data.
 - **file** (default) — zero dependencies, human-readable JSON. Right for a
   laptop or a small self-hosted hub.
 - **sqlite** — one embedded database file. A real database locally, with no
-  server to run.
+  server to run. The hub runs it in WAL mode, so `hub.db-wal` and `hub.db-shm`
+  sit beside it while the hub is up: back up all three with the hub stopped, or
+  run `sqlite3 hub.db ".backup /path/to/copy.db"` while it runs.
 - **postgres** — a managed Postgres such as **Supabase** for production. Point
   `dsn` at its connection string; use the transaction pooler when you expect
   many connections. Since Supabase *is* Postgres, this stays fully open source

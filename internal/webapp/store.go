@@ -162,6 +162,14 @@ func (s *Server) ownJournal(w http.ResponseWriter, r *http.Request, key string) 
 		http.Error(w, "a device may only write its own journal", http.StatusForbidden)
 		return false
 	}
+	// The hub's own journal has one writer, the hub, which appends to it in
+	// storage (appendOpsIf) and never through this door. No request writes
+	// it, the recovery path below included: every op the hub stamps takes
+	// its seq from that journal.
+	if s.Device.ID != "" && dev == canonDeviceID(s.Device.ID) {
+		http.Error(w, "the hub's own journal is written only by the hub", http.StatusForbidden)
+		return false
+	}
 	// Matching the key against the header binds nothing on its own: the same
 	// request supplies both, so moving them together satisfies the check by
 	// construction and any member could replace any peer's journal object —

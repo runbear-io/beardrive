@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"math/rand/v2"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -574,8 +576,13 @@ func TestDataQuerySQLReportsAPassThatMissedAFile(t *testing.T) {
 	wait := func(what string, ok func(dataAnswer) bool) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)
-		for {
-			srv.dataBoot()
+		// A pass every second, not every poll: each trigger moves the
+		// completion fence, so one per poll would keep a pass slower than
+		// the poll from ever finishing.
+		for n := 0; ; n++ {
+			if n%10 == 0 {
+				srv.dataBoot()
+			}
 			if ok(d.query("alice", map[string]any{"pattern": "x/*.json", "count": true})) {
 				return
 			}
@@ -592,4 +599,200 @@ func TestDataQuerySQLReportsAPassThatMissedAFile(t *testing.T) {
 	}
 	wait("the index never caught up once the file could be fetched",
 		func(a dataAnswer) bool { return a.Complete && a.Count == 1 })
+}
+
+// A document neither dialect can store the same way (a NUL, an unpaired
+// surrogate, bytes that are not UTF-8) is an error row on both. On Postgres it
+// used to fail its whole slice on every pass, so nothing after it was indexed.
+func TestDataQuerySQLRefusesWhatTheIndexCannotHold(t *testing.T) {
+	for name, open := range dataBackends(t) {
+		t.Run(name, func(t *testing.T) {
+			d := newDataHub(t, open(t))
+			d.enable()
+			d.put("z/a-good.json", `{"n":1}`)
+			d.put("z/b-nul.json", `{"s":"a\u0000b"}`)
+			d.put("z/c-surrogate.json", `{"s":"\ud800"}`)
+			d.put("z/d-latin1.json", "{\"s\":\"caf\xe9\"}")
+			d.put("z/e-escaped.json", `{"s":"a\\u0000b","t":"café"}`)
+			d.put("z/f-nul.md", "---\ns: \"a\\0b\"\n---\nbody\n")
+			d.put("z/g-later.json", `{"n":2}`)
+			// U+FFFD itself, written as an escape or as the character, and a
+			// paired surrogate are ordinary text; a lone surrogate is not.
+			d.put("z/h-replacement.json", `{"s":"\ufffd","t":"`+"\ufffd"+`","u":"\u00e9"}`)
+			d.put("z/i-pair.json", `{"s":"\ud83d\ude00"}`)
+			d.put("z/j-low.json", `{"s":"\udc00x"}`)
+			d.put("z/k-high-then-text.json", `{"s":"\ud83dx"}`)
+			a := d.query("alice", map[string]any{"pattern": "z/*", "select": []string{"$path"}})
+			want := `"z/a-good.json","z/e-escaped.json","z/g-later.json","z/h-replacement.json","z/i-pair.json"`
+			if got := strs(a.Rows, "$path"); strings.Join(got, ",") != want || a.Errors != 6 {
+				t.Fatalf("rows %v errors %d; want the five holdable files and six errors", got, a.Errors)
+			}
+		})
+	}
+}
+
+// A write through the hub does not wait for a pass already running (a first
+// build can take minutes); the pass it queues indexes it.
+func TestDataQuerySQLHubWritesDoNotWaitForAPass(t *testing.T) {
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	d := newDataHub(t, x)
+	d.enable()
+	st := d.srv.dataProjectState(d.p.ID)
+	st.mu.Lock() // a pass in progress
+	done := make(chan int, 1)
+	go func() {
+		done <- d.send("PUT", "/api/p/"+d.p.ID+"/upload/content?path=w/new.json", `{"n":1}`, "alice", nil, 0).Code
+	}()
+	select {
+	case code := <-done:
+		if code != 200 {
+			st.mu.Unlock()
+			t.Fatalf("write: %d", code)
+		}
+	case <-time.After(3 * time.Second):
+		st.mu.Unlock()
+		t.Fatal("a hub write waited for the running pass")
+	}
+	// Until the queued pass has run, the index is behind the write, and says so.
+	if d.query("alice", map[string]any{"pattern": "w/*.json", "count": true}).Complete {
+		st.mu.Unlock()
+		t.Fatal("the index reads complete while a write it does not hold waits for a pass")
+	}
+	st.mu.Unlock()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a := d.query("alice", map[string]any{"pattern": "w/*.json", "count": true})
+		if a.Count == 1 && a.Complete {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the queued pass never indexed the write")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// A query's size is bounded where it is compiled, so an oversized one is the
+// caller's 400 rather than the database's error (a 502 that reads as the
+// hub's fault).
+func TestDataQueryBoundsItsSize(t *testing.T) {
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	d := newDataHub(t, x)
+	d.enable()
+	many := make([]any, dataMaxTerms+1)
+	for i := range many {
+		many[i] = float64(i)
+	}
+	deep := map[string]any{"dr": 1.0}
+	for range dataMaxDepth + 1 {
+		deep = map[string]any{"not": deep}
+	}
+	fields := make([]string, dataMaxFields+1)
+	for i := range fields {
+		fields[i] = "f" + strconv.Itoa(i)
+	}
+	// Exactly the limit is allowed: each item counts once, the operator not at all.
+	body, _ := json.Marshal(map[string]any{"pattern": "**/*.json", "where": map[string]any{"dr": map[string]any{"in": many[:dataMaxTerms]}}})
+	d.send("POST", "/api/p/"+d.p.ID+"/data/query", string(body), "alice", nil, http.StatusOK)
+	for name, q := range map[string]map[string]any{
+		"a long in list":  {"pattern": "**/*.json", "where": map[string]any{"dr": map[string]any{"in": many}}},
+		"deep nesting":    {"pattern": "**/*.json", "where": deep},
+		"too many fields": {"pattern": "**/*.json", "select": fields},
+		"the hub's zone":  {"pattern": "**/*.json", "group": []string{"week(sends.0.at, Local)"}},
+		"an empty zone":   {"pattern": "**/*.json", "group": []string{"week(sends.0.at, )"}},
+	} {
+		body, _ := json.Marshal(q)
+		if rec := d.send("POST", "/api/p/"+d.p.ID+"/data/query", string(body), "alice", nil, 0); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d %s, want 400", name, rec.Code, rec.Body)
+		}
+	}
+}
+
+// The state row is the completion fence for every hub process: a pass raises
+// complete only under the generation it read before its fold, and every change
+// moves the generation.
+func TestDataIndexSQLCompletesOnlyUnderItsGeneration(t *testing.T) {
+	for name, open := range dataBackends(t) {
+		t.Run(name, func(t *testing.T) {
+			x := open(t)
+			ctx := context.Background()
+			project := "fence-" + name
+			complete := func() bool {
+				t.Helper()
+				tx, err := x.readTx(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback()
+				c, _, err := x.state(ctx, tx, project)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return c
+			}
+			if err := x.start(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			old, err := x.generation(ctx, project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := x.lower(ctx, project); err != nil { // a change, after that pass read its fold
+				t.Fatal(err)
+			}
+			if ok, err := x.finish(ctx, project, old, time.Now()); err != nil || ok || complete() {
+				t.Fatalf("a pass older than a change raised complete: ok=%v err=%v", ok, err)
+			}
+			cur, _ := x.generation(ctx, project)
+			if ok, err := x.finish(ctx, project, cur, time.Now()); err != nil || !ok || !complete() {
+				t.Fatalf("a pass under the current generation did not raise complete: ok=%v err=%v", ok, err)
+			}
+			// A fresh build never reuses a generation a pass from before it read.
+			if err := x.dropProject(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			if err := x.start(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+			if ok, _ := x.finish(ctx, project, cur, time.Now()); ok {
+				t.Fatal("a pass from before Data went off and on raised complete")
+			}
+		})
+	}
+}
+
+// An index made before the generation existed gets the column on open.
+func TestDataIndexAddsTheGenerationToAnOlderTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE data_projects (project TEXT PRIMARY KEY,
+		complete INTEGER NOT NULL DEFAULT 0, applied_at TEXT NOT NULL DEFAULT '')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`INSERT INTO data_projects (project, complete, applied_at) VALUES ('p', 1, '')`)
+	db.Close()
+	for range 2 { // and opening it again is not an error
+		x, err := OpenDataIndex("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := x.lower(context.Background(), "p"); err != nil {
+			t.Fatal(err)
+		}
+		if gen, err := x.generation(context.Background(), "p"); err != nil || gen == 0 {
+			t.Fatalf("generation %d %v", gen, err)
+		}
+		x.Close()
+	}
 }

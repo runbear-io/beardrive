@@ -133,7 +133,9 @@ A hub upgraded from a pre-org version sweeps its existing projects into a
 
 Everything irreplaceable is in two places: the **storage root** (blobs and
 journals — files and their entire history) and the **metadata database**
-(accounts, projects, orgs, shares). Snapshot both; restore is copy-back.
+(accounts, projects, orgs, shares). Snapshot both; restore is copy-back. A
+SQLite database needs its `-wal` file too, or `sqlite3`'s `.backup` (see
+[Database](/self-hosting/database/)).
 
 ## Upgrading
 

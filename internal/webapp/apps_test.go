@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -70,6 +71,12 @@ func TestAppKeyReadsOnlyWhatItIsGranted(t *testing.T) {
 	if rec := keyCall(d, "POST", query, `{"pattern":"**/*.json"}`, key); rec.Code != http.StatusForbidden {
 		t.Fatalf("an ungranted app queried: %d %s", rec.Code, rec.Body)
 	}
+	// Nor does a folder rule alone: a rule narrows or widens a project the
+	// app can already see, and never opens one.
+	d.send("PUT", "/api/p/"+pid+"/folders", `{"prefix":"konny","perms":{"`+principal+`":"read"}}`, "alice", nil, 200)
+	if rec := keyCall(d, "POST", query, `{"pattern":"konny/**/*.json"}`, key); rec.Code != http.StatusForbidden {
+		t.Fatalf("a folder rule alone opened the project to an app: %d %s", rec.Code, rec.Body)
+	}
 	d.send("PUT", "/api/p/"+pid+"/permissions/"+principal, `{"level":"admin"}`, "alice", nil, http.StatusBadRequest)
 	d.send("PUT", "/api/p/"+pid+"/permissions/"+principal, `{"level":"read"}`, "alice", nil, 200)
 	rec := keyCall(d, "POST", query, `{"pattern":"**/*.json","select":["$doc"]}`, key)
@@ -135,6 +142,16 @@ func TestAppKeyReadsOnlyWhatItIsGranted(t *testing.T) {
 	if rec := keyCall(d, "POST", query, `{"pattern":"**/*.json","count":true}`, second); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("a deleted app's key: %d", rec.Code)
 	}
+	// Its grants went with it, from the project and from every folder rule.
+	p, _ := d.srv.Projects.Get(pid)
+	if _, has := p.Perms[principal]; has {
+		t.Fatalf("a deleted app keeps its project grant: %v", p.Perms)
+	}
+	for _, rule := range p.Folders {
+		if _, has := rule.Perms[principal]; has {
+			t.Fatalf("a deleted app keeps its grant on %s: %v", rule.Prefix, rule.Perms)
+		}
+	}
 
 	// Another organization's app cannot be granted here.
 	other, err := d.srv.Dir.Create("elsewhere", "dave@x.io")
@@ -199,5 +216,108 @@ func TestAppsConformance(t *testing.T) {
 				t.Fatal("a deleted app's key still works in the other registry")
 			}
 		})
+	}
+}
+
+// failingKeyDelete is an app store whose key deletion fails the way a database
+// does, with a message that names its own host.
+type failingKeyDelete struct{ AppRepo }
+
+func (failingKeyDelete) DeleteKey(string) error {
+	return errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+}
+
+// A failed revocation is the store's failure, not a missing key: a 502 that
+// does not repeat the store's message, while an unknown key stays a 404.
+// And an app's name keeps to the same label rules as a project's.
+func TestAppKeyRevokeAndNameEdges(t *testing.T) {
+	x, err := OpenDataIndex("sqlite", filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	d := newDataHub(t, x)
+	apps, err := NewAppDB(failingKeyDelete{newFileAppRepo(filepath.Join(t.TempDir(), "apps.json"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.srv.Apps = apps
+	org := d.p.Org
+	app, _ := newApp(d, org, "alice", `Search\u202eD\u0000`) // JSON escapes: a bidi override and a NUL
+	if a, _ := apps.Get(app); a.Name != "SearchD" {
+		t.Fatalf("stored name %q, want the label without control or bidi characters", a.Name)
+	}
+	d.send("POST", "/api/orgs/"+org+"/apps", `{"name":"\u202e\u0007"}`, "alice", nil, http.StatusBadRequest)
+	mintKey(d, org, app)
+	_, keys := apps.List(org)
+	rec := d.send("DELETE", "/api/orgs/"+org+"/apps/"+app+"/keys/"+keys[app][0].ID, "", "alice", nil, http.StatusBadGateway)
+	if strings.Contains(rec.Body.String(), "10.0.0.5") {
+		t.Fatalf("a revocation failure showed the store's message: %s", rec.Body)
+	}
+	d.send("DELETE", "/api/orgs/"+org+"/apps/"+app+"/keys/knope", "", "alice", nil, http.StatusNotFound)
+}
+
+// loadThen is a project store that runs a hook once, right after a load: what
+// another hub process does between this one's read and its write.
+type loadThen struct {
+	*sqlProjectRepo
+	after func()
+}
+
+func (l *loadThen) Load() ([]Project, error) {
+	ps, err := l.sqlProjectRepo.Load()
+	if f := l.after; f != nil {
+		l.after = nil
+		f()
+	}
+	return ps, err
+}
+
+// Deleting an app removes its folder grants one row at a time. A rule another
+// process removed in the meantime stays removed: rewriting rules from this
+// process's listing used to put it back.
+func TestDeletingAnAppNeverPutsBackARemovedRule(t *testing.T) {
+	store, err := OpenSQLStore("sqlite", filepath.Join(t.TempDir(), "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	other, err := NewProjectDB(store.Projects())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := other.GetOrCreate("wiki", "org1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := appPrincipal("a1")
+	if err := other.SetFolder(p.ID, FolderRule{Prefix: "secret/", Default: PermNone, Perms: map[string]string{principal: PermRead}}); err != nil {
+		t.Fatal(err)
+	}
+	hooked := &loadThen{sqlProjectRepo: store.Projects().(*sqlProjectRepo)}
+	mine, err := NewProjectDB(hooked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A change this process has not read yet, so its next read reloads; the
+	// other process removes the rule right after that reload.
+	if err := other.SetFolder(p.ID, FolderRule{Prefix: "open/", Default: PermRead}); err != nil {
+		t.Fatal(err)
+	}
+	hooked.after = func() {
+		if err := other.ClearFolder(p.ID, "secret/"); err != nil {
+			t.Error(err)
+		}
+	}
+	(&Server{Projects: mine}).dropAppGrants(App{ID: "a1", Org: "org1"})
+	fresh, err := NewProjectDB(store.Projects())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := fresh.Get(p.ID)
+	for _, rule := range got.Folders {
+		if rule.Prefix == "secret/" {
+			t.Fatalf("a removed rule came back: %+v", rule)
+		}
 	}
 }
