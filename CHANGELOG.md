@@ -5,6 +5,15 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+- **Images uploaded to a project show up in the documents that embed them.**
+  A markdown file with `![shot](screenshots/shot.png)` rendered a broken-image
+  icon: the hub served every stored image with the same sandbox header it uses
+  to wall off uploaded HTML and SVG, and a sandboxed image is not a sandboxed
+  image — it is a broken one. The sandbox is now applied to markup a reader
+  OPENS and not to an image a document EMBEDS, which the browser itself marks
+  (`Sec-Fetch-Dest: image`, a header a page cannot forge). Opened as a page, an
+  uploaded SVG is still a sandboxed document. Applies to PNG/JPEG/GIF/WebP/
+  AVIF/BMP/ICO and SVG.
 - **Local watcher recovery releases resources.** Recreated directories are re-registered, and macOS watcher shutdown no longer retains file descriptors.
 - **Share links no longer run out because your team synced.** The hub reported every byte a device pulled through `/store/*` to `QuotaProvider.RecordEgress`, the counter a managed hub enforces its monthly share-link transfer cap against, so ordinary syncing used up the allowance and every `/s/*` link in the org answered "This link has exceeded its transfer limit". `RecordEgress` now reports share-link transfers only, and sync traffic goes to `RecordSyncEgress` on a provider that implements the new optional `SyncEgressRecorder` — measured, never enforced. Existing providers keep compiling and simply aren't told.
 

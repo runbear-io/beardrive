@@ -536,13 +536,14 @@ classDiagram
 
     class sandboxInline {
         <<Server, every bytes-out route>>
-        inlineMarkup(ct) / inlineType(ct)
+        inlineMarkup(ct) / inlineType(ct) / imageSubresource(ct, r) / safeRaster(ct)
         nosniff always
         CSP sandbox allow-scripts allow-downloads for markup
         setContentLength from the stream
         storageErr logs detail, says little
     }
     note for sandboxInline "One helper for every route that returns stored bytes — serveBlob, render, a historical version, the history blob view, and /s/*. Uploaded HTML/SVG/XML is a document a member can author and another member will open on the hub's origin; the sandbox header is what keeps it from acting as the hub. Length is measured from the stream rather than trusting a recorded FileInfo.Size"
+    note for sandboxInline "An IMAGE SUBRESOURCE is exempt — a PNG or SVG an <img> renders is not a document, and the sandbox header on it is only a broken-image icon, which was the whole of 'I uploaded a screenshot and the doc that embeds it shows nothing'. The discriminator is Sec-Fetch-Dest: image, the one vector a page cannot forge (fetch() forces empty) and the one a document navigation never carries (see imageSubresource). safeRaster is an ALLOWLIST, so a type the hub has not listed stays sandboxed and the wall fails closed"
     class printView {
         <<serveBlob + handleBlob, ?print=1>>
         text/html only, inline only
