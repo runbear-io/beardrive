@@ -5,7 +5,7 @@
 [![Website](https://img.shields.io/badge/website-beardrive.ai-f5a623)](https://beardrive.ai)
 [![Docs](https://img.shields.io/badge/docs-docs.beardrive.ai-2f81f7)](https://docs.beardrive.ai)
 
-**[beardrive.ai](https://beardrive.ai)** · [Docs](https://docs.beardrive.ai) · [Managed cloud, free during beta](https://beardrive.ai/pricing/)
+**[beardrive.ai](https://beardrive.ai)** · [Docs](https://docs.beardrive.ai) · [Managed cloud: free personal workspace on signup](https://beardrive.ai/pricing/)
 
 **BearDrive** mounts any folder as a synced volume: its contents stay
 synchronized across all your devices and teammates through a BearDrive
