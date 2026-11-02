@@ -223,6 +223,38 @@ func TestMCPConnectAndListTools(t *testing.T) {
 	}
 }
 
+// Clients gate confirmation prompts on these hints, and the Claude connector
+// directory rejects any tool without a title and a read-only or destructive
+// hint. A new tool that forgets them fails here rather than in review.
+func TestMCPToolsDeclareTitleAndSafety(t *testing.T) {
+	f := newMCPHub(t)
+	cs := f.session(f.connect("alice", f.wiki.ID))
+
+	tools, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readOnly := map[string]bool{
+		"list": true, "read": true, "glob": true, "grep": true,
+		"history": true, "query": true, "describe": true,
+	}
+	for _, tl := range tools.Tools {
+		a := tl.Annotations
+		if tl.Title == "" || a == nil || a.Title == "" {
+			t.Errorf("tool %q has no title", tl.Name)
+			continue
+		}
+		destructive := a.DestructiveHint != nil && *a.DestructiveHint
+		if readOnly[tl.Name] {
+			if !a.ReadOnlyHint || destructive {
+				t.Errorf("tool %q reads only but is not annotated readOnlyHint", tl.Name)
+			}
+		} else if a.ReadOnlyHint || !destructive {
+			t.Errorf("tool %q changes files but is not annotated destructiveHint", tl.Name)
+		}
+	}
+}
+
 func TestMCPUnauthenticatedGets401WithChallenge(t *testing.T) {
 	f := newMCPHub(t)
 	res, err := http.Post(f.ts.URL+"/mcp", "application/json", strings.NewReader(`{}`))
