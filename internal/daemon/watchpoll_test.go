@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,10 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
@@ -385,6 +389,183 @@ func TestMaterializationEchoSuppressionKeepsChangedEvents(t *testing.T) {
 	batch := lw.take(root)
 	if len(batch.events) != 1 || batch.events[0].path != changed {
 		t.Fatalf("suppressed batch = %+v, want only concurrent change %s", batch.events, changed)
+	}
+}
+
+func TestWorkerSuppressesLateMaterializationEchoes(t *testing.T) {
+	for _, concurrentEdit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("concurrent_edit=%v", concurrentEdit), func(t *testing.T) {
+			hub := newFakeHub(t)
+			hub.killStreams()
+			m := watchMount(t, hub)
+			proj, ok, err := config.LoadProject(m.folder)
+			if err != nil || !ok {
+				t.Fatalf("load project: ok=%v err=%v", ok, err)
+			}
+			st, err := store.Open(m.volDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dev, err := config.LoadDevice()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			peerDir := filepath.Join(m.folder, "peer")
+			// Hold recursive watch installation, not materialization: the peer
+			// directory's Create must arrive in pending AFTER the cycle's
+			// original post-materialization fence. This happens naturally when
+			// Darwin is still adding watches for a newly populated directory.
+			var enteredOnce sync.Once
+			localWatchWalkHook = func(path string) {
+				if path == peerDir {
+					enteredOnce.Do(func() { close(entered) })
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+				}
+			}
+			var cycles atomic.Int64
+			workerCycleHook = func(volDir string) {
+				if volDir == m.volDir {
+					cycles.Add(1)
+				}
+			}
+			wake := make(chan struct{}, 1)
+			done := make(chan error, 1)
+			const scanInterval = 100 * time.Millisecond
+			go func() {
+				done <- runVolumeWorker(ctx, m.volDir, proj.Remote, scanInterval, time.Hour, wake)
+			}()
+			t.Cleanup(func() {
+				unblock()
+				cancel()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Errorf("worker shutdown: %v", err)
+					}
+					workerCycleHook, localWatchWalkHook = nil, nil
+				case <-time.After(5 * time.Second):
+					t.Error("worker did not stop; leaving hooks installed to avoid racing it")
+				}
+			})
+			waitFor := func(label string, ready func() bool) {
+				t.Helper()
+				deadline := time.Now().Add(10 * time.Second)
+				for !ready() {
+					select {
+					case err := <-done:
+						// Keep the result available to the cleanup join.
+						done <- err
+						t.Fatalf("worker exited before %s: %v", label, err)
+					case <-time.After(10 * time.Millisecond):
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("timed out waiting for %s; cycles=%d", label, cycles.Load())
+					}
+				}
+			}
+			logContains := func(text string) bool {
+				data, err := os.ReadFile(LogPath(m.volDir))
+				return err == nil && strings.Contains(string(data), text)
+			}
+			waitFor("initial push", func() bool { return logContains("local+1 pulled+0") })
+			time.Sleep(3 * scanInterval)
+			before := cycles.Load()
+
+			const peerFiles = 20
+			hub.mu.Lock()
+			var lines []byte
+			for i := range peerFiles {
+				content := []byte(fmt.Sprintf("peer %d\n", i))
+				sum := sha256.Sum256(content)
+				blob := hex.EncodeToString(sum[:])
+				line, err := json.Marshal(journal.Op{
+					Device: "peer", Seq: int64(i + 1), Lamport: int64(i + 100),
+					Time: time.Now().UTC(), Kind: journal.KindPut,
+					Path: fmt.Sprintf("peer/nested/%03d.md", i), Blob: blob,
+					Size: int64(len(content)), Mode: 0o644,
+				})
+				if err != nil {
+					hub.mu.Unlock()
+					t.Fatal(err)
+				}
+				hub.objects["blobs/"+blob] = content
+				lines = append(append(lines, line...), '\n')
+			}
+			hub.objects["journal/peer.jsonl"] = lines
+			hub.mu.Unlock()
+			wake <- struct{}{}
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("peer directory never reached recursive watch installation")
+			}
+			// The activity log is written after Cycle, cache persistence, and
+			// the old suppression call, so releasing cannot race that fence.
+			waitFor("completed peer materialization", func() bool { return logContains("pulled+20") })
+			if got := cycles.Load(); got != before+1 {
+				t.Fatalf("peer pull ran %d cycles before delayed events, want 1", got-before)
+			}
+			for i := range peerFiles {
+				data, err := os.ReadFile(filepath.Join(peerDir, "nested", fmt.Sprintf("%03d.md", i)))
+				if err != nil || string(data) != fmt.Sprintf("peer %d\n", i) {
+					t.Fatalf("materialized peer file %d: bytes=%q err=%v", i, data, err)
+				}
+			}
+
+			wantCycles := before + 1
+			if concurrentEdit {
+				for _, path := range []string{"notes.md", "peer/user.md"} {
+					if err := os.WriteFile(filepath.Join(m.folder, filepath.FromSlash(path)), []byte("concurrent user edit\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// One local discovery and its immediate remote push are needed;
+				// the peer directory echo must not add another discovery.
+				wantCycles += 2
+			}
+			unblock()
+			if concurrentEdit {
+				waitFor("concurrent edits journaled and pushed", func() bool {
+					ops, err := st.DeviceOps(dev.ID)
+					if err != nil {
+						return false
+					}
+					syncState, err := st.LoadSync()
+					if err != nil || syncState.PushedOps != int64(len(ops)) {
+						return false
+					}
+					found := make(map[string]bool)
+					for _, op := range ops {
+						if op.Path == "notes.md" || op.Path == "peer/user.md" {
+							data, err := os.ReadFile(st.BlobPath(op.Blob))
+							found[op.Path] = op.Kind == journal.KindPut && err == nil && string(data) == "concurrent user edit\n"
+						}
+					}
+					return found["notes.md"] && found["peer/user.md"]
+				})
+			}
+			time.Sleep(5 * scanInterval)
+			if got := cycles.Load(); got != wantCycles {
+				t.Fatalf("cycles after peer materialization = %d, want %d (no echo-only discovery)", got-before, wantCycles-before)
+			}
+			data, err := os.ReadFile(LogPath(m.volDir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, failure := range []string{"watcher stopped", "watcher unavailable", "cycle error:", "cycle panic", "offline, will retry:"} {
+				if strings.Contains(string(data), failure) {
+					t.Fatalf("worker lost healthy-watcher precondition: %s", data)
+				}
+			}
+		})
 	}
 }
 

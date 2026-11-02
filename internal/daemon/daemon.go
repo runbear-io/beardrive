@@ -1419,17 +1419,27 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		localWatchHealthy = false
 		forceFull = true
 	}
-	collectLocalHints := func() {
+	collectLocalHints := func() bool {
 		if localWatch == nil || localWatch.take == nil {
-			return
+			return false
 		}
+		haveLocalWork := false
 		for _, target := range activeMountsForVolume(volDir, expectedRemote) {
+			// fsnotify can deliver materialization events after Cycle returns,
+			// especially while adding a newly created directory. Fence and
+			// suppress while they are still pending, immediately before take.
+			// A changed fingerprint and every event after this fence survive.
+			if !forceFull && localWatch.fence != nil {
+				suppressMaterializationEchoes(localWatch, target.folder, target.folder, target.proj.ID, st, localWatch.fence())
+			}
 			batch := localWatch.take(target.folder)
 			nextHints[target.folder] = scanHintForBatch(batch, target.folder)
 			if batch.full {
 				forceFull = true
 			}
+			haveLocalWork = haveLocalWork || batch.full || len(batch.events) > 0
 		}
+		return haveLocalWork
 	}
 	stopWatch := func() {
 		if watchCancel != nil {
@@ -1638,9 +1648,6 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			if hint.Full {
 				lastFullScan = localWatchNow()
 			}
-			if rerr == nil && localWatch != nil && localWatch.fence != nil {
-				suppressMaterializationEchoes(localWatch, target.folder, target.folder, target.proj.ID, st, localWatch.fence())
-			}
 			if rerr != nil && cycleErr == nil {
 				cycleErr = rerr
 			}
@@ -1754,6 +1761,8 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 		}
 
+		waitDeadline := time.Now().Add(waitFor)
+	waitForEvent:
 		select {
 		case <-ctx.Done():
 			logger.Printf("daemon stopping")
@@ -1796,7 +1805,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				localWatchRetryAt = time.Now().Add(localWatchRetry)
 				continue
 			}
-			collectLocalHints()
+			// Leave events pending throughout the debounce window. Draining on
+			// each wake would both bypass echo suppression and overwrite hints
+			// collected for earlier user edits in the same window.
+			remoteWake := false
 			if wait := time.Until(lastCycle.Add(scanInterval)); wait > 0 {
 				timer := time.NewTimer(wait)
 			localWait:
@@ -1806,6 +1818,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 						timer.Stop()
 						return nil
 					case _, open := <-watch:
+						remoteWake = true
 						if !open {
 							lived := time.Since(watchOpened)
 							stopWatch()
@@ -1841,14 +1854,18 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 							timer.Stop()
 							break localWait
 						}
-						collectLocalHints()
 					case <-timer.C:
 						break localWait
 					}
 				}
 			}
+			if !collectLocalHints() && !forceFull && !remoteWake {
+				// A wake is only a notification, not proof of local work. Keep
+				// the original remote deadline when it contained only echoes.
+				goto waitForEvent
+			}
 			continue
-		case <-time.After(waitFor):
+		case <-time.After(time.Until(waitDeadline)):
 		}
 	}
 }
