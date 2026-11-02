@@ -489,6 +489,83 @@ func TestEmptyHintPullMaterializesDanglingSymlinkToRegularTransition(t *testing.
 	}
 }
 
+func TestEmptyHintPullPreservesUntrackedSymlinksAtPeerRegularPaths(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+	const (
+		danglingPath   = "dangling-shortcut"
+		danglingTarget = "missing-local-target"
+		livePath       = "live-shortcut"
+		liveTarget     = "local-target.txt"
+		body           = "peer regular content"
+	)
+	write(t, a.Folder, danglingPath, body)
+	write(t, a.Folder, livePath, body)
+	cycle(t, a)
+	peerBlob := sha(body)
+	for _, key := range []string{"blobs/" + peerBlob, "journal/deva.jsonl"} {
+		exists, err := be.Exists(context.Background(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !exists {
+			t.Fatalf("remote object %s is missing", key)
+		}
+	}
+
+	res := targetedSafetyMutateDuringPull(t, b, func() {
+		write(t, b.Folder, liveTarget, "local target content")
+		if err := os.Symlink(danglingTarget, filepath.Join(b.Folder, danglingPath)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(liveTarget, filepath.Join(b.Folder, livePath)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if res.LocalOps != 0 || res.PulledOps == 0 {
+		t.Fatalf("empty-hint untracked-symlink pull = %+v, want peer ops without local journaling", res)
+	}
+	targetedSafetyAssertOps(t, b, 0, nil)
+
+	for path, wantTarget := range map[string]string{
+		danglingPath: danglingTarget,
+		livePath:     liveTarget,
+	} {
+		abs := filepath.Join(b.Folder, filepath.FromSlash(path))
+		fi, err := os.Lstat(abs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("%s became a regular file: mode %v", path, fi.Mode())
+		}
+		if got, err := os.Readlink(abs); err != nil || got != wantTarget {
+			t.Errorf("%s target = %q, err %v; want %q", path, got, err, wantTarget)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(b.Folder, danglingPath)); !os.IsNotExist(err) {
+		t.Errorf("dangling symlink path resolves to local content: %v", err)
+	}
+	if got := read(t, b.Folder, liveTarget); got != "local target content" {
+		t.Errorf("non-dangling symlink target content = %q, want local target content", got)
+	}
+
+	if !b.Store.HasBlob(peerBlob) {
+		t.Fatalf("peer regular blob %s was not fetched", peerBlob)
+	}
+	if got, err := os.ReadFile(b.Store.BlobPath(peerBlob)); err != nil {
+		t.Fatal(err)
+	} else if string(got) != body {
+		t.Errorf("fetched peer blob = %q, want %q", got, body)
+	}
+	if exists, err := be.Exists(context.Background(), "blobs/"+peerBlob); err != nil {
+		t.Fatal(err)
+	} else if !exists {
+		t.Fatalf("peer regular blob %s disappeared from remote", peerBlob)
+	}
+}
+
 func TestTargetedUnknownDeletionDoesNotDeleteUnrelatedFiles(t *testing.T) {
 	be := sharedRemote(t)
 	a := newDevice(t, "deva", be)

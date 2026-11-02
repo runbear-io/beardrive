@@ -2122,6 +2122,16 @@ func (s *Session) materializeFile(rel string, want journal.FileState, cache map[
 			return false, nil
 		}
 	}
+	if !ok {
+		// An untracked symlink is local user state, even when its target is
+		// readable. Lstat is required here: Stat would follow a non-dangling
+		// link into content that can be adopted or a dangling link into an
+		// error, and both cases would fall through to writeFile and replace
+		// the link with peer bytes.
+		if fi, err := os.Lstat(abs); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return false, nil
+		}
+	}
 	if fi, err := os.Stat(abs); err == nil {
 		if ok && c.Link == "" && (fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS) {
 			// The one place a dirty file is not left alone. Everywhere else
