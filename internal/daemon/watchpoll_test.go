@@ -123,6 +123,148 @@ func TestLocalFolderWatcherReaddsRecreatedDirectoryTree(t *testing.T) {
 	waitWake("write in recreated descendant")
 }
 
+func TestLocalFolderWatcherBatchesPerMount(t *testing.T) {
+	rootA, rootB := t.TempDir(), t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{rootA, rootB})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer lw.close()
+
+	pathA := filepath.Join(rootA, "a.txt")
+	pathB := filepath.Join(rootB, "b.txt")
+	if err := os.WriteFile(pathA, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathA, []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathB, []byte("three"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not wake")
+	}
+	time.Sleep(25 * time.Millisecond)
+	a := lw.take(rootA)
+	b := lw.take(rootB)
+	if len(a.events) != 1 || a.events[0].path != pathA {
+		t.Fatalf("mount A batch = %+v, want one coalesced event for %s", a.events, pathA)
+	}
+	if len(b.events) != 1 || b.events[0].path != pathB {
+		t.Fatalf("mount B batch = %+v, want one event for %s", b.events, pathB)
+	}
+	if len(lw.take(rootA).events) != 0 {
+		t.Fatal("mount A batch was consumed by a second take")
+	}
+}
+
+func TestWatcherRebuildsOnChildENOENT(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+
+	failOnce := true
+	localWatchAddHook = func(path string) error {
+		if failOnce && filepath.Base(path) == "race" {
+			failOnce = false
+			return os.ErrNotExist
+		}
+		return nil
+	}
+	defer func() { localWatchAddHook = nil }()
+	defer lw.close()
+	raceDir := filepath.Join(root, "race")
+	if err := os.Mkdir(raceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case watchErr := <-lw.err:
+		t.Fatalf("child ENOENT made watcher unhealthy: %v", watchErr)
+	default:
+	}
+	if batch := lw.take(root); !batch.full {
+		t.Fatal("child ENOENT rebuild did not force a full fallback batch")
+	}
+	if err := os.WriteFile(filepath.Join(raceDir, "after.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("rebuilt watcher failed: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("rebuilt watcher did not report later child write")
+	}
+}
+
+func TestEventsDuringScanAreFenced(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer lw.close()
+
+	echo := filepath.Join(root, "echo.txt")
+	if err := os.WriteFile(echo, []byte("materialized"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("echo write did not wake watcher")
+	}
+	_ = lw.take(root)
+
+	if err := os.WriteFile(echo, []byte("materialized again"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("post-cycle echo did not wake watcher")
+	}
+	fence := lw.fence()
+	lw.suppress(root, fence, func(ev localWatchEvent) bool {
+		return ev.path != echo
+	})
+
+	late := filepath.Join(root, "late.txt")
+	if err := os.WriteFile(late, []byte("concurrent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("post-fence write did not wake watcher")
+	}
+	batch := lw.take(root)
+	foundLate := false
+	for _, ev := range batch.events {
+		if ev.path == late {
+			foundLate = true
+		}
+		if ev.path == echo {
+			t.Fatal("fenced echo remained queued")
+		}
+	}
+	if !foundLate {
+		t.Fatalf("post-fence event missing from batch: %+v", batch.events)
+	}
+}
+
 func TestWatchSuppressesThePoll(t *testing.T) {
 	hub := newFakeHub(t)
 	m := watchMount(t, hub)

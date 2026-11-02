@@ -901,23 +901,58 @@ const (
 	localWatchSafetyInterval = time.Minute
 	localWatchRetry          = time.Minute
 )
+// localWatchNow is a clock seam for the independent full-scan deadline.
+var localWatchNow = time.Now
+
+type localWatchEvent struct {
+	root      string
+	path      string
+	op        fsnotify.Op
+	directory bool
+	seq       uint64
+}
+
+type localWatchBatch struct {
+	events []localWatchEvent
+	full   bool
+	fence  uint64
+}
 
 type localFolderWatcher struct {
-	wake  <-chan struct{}
-	err   <-chan error
-	close func()
+	wake     <-chan struct{}
+	err      <-chan error
+	close    func()
+	take     func(string) localWatchBatch
+	fence    func() uint64
+	suppress func(string, uint64, func(localWatchEvent) bool)
 }
+
+const maxLocalWatchEvents = 4096
+
+// localWatchAddHook is a deterministic seam for the recursive Add race. It is
+// nil in production and lets Darwin tests force one child ENOENT.
+var localWatchAddHook func(string) error
 
 func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderWatcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
+	var watcherMu sync.Mutex
+	watcher := fw
+	rootList := make([]string, len(roots))
+	for i, root := range roots {
+		rootList[i] = filepath.Clean(root)
+	}
 	var closeOnce sync.Once
 	closeWatcher := func() {
-		closeOnce.Do(func() { _ = fw.Close() })
+		closeOnce.Do(func() {
+			watcherMu.Lock()
+			defer watcherMu.Unlock()
+			_ = watcher.Close()
+		})
 	}
-	seen := make(map[string]bool)
+	seen := make(map[string]string)
 	addDir := func(root string) error {
 		return filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -927,16 +962,52 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				return nil
 			}
 			path = filepath.Clean(path)
-			if seen[path] {
+			if _, ok := seen[path]; ok {
 				return nil
 			}
-			if err := fw.Add(path); err != nil {
+			if localWatchAddHook != nil {
+				if err := localWatchAddHook(path); err != nil {
+					return err
+				}
+			}
+			watcherMu.Lock()
+			w := watcher
+			err := w.Add(path)
+			watcherMu.Unlock()
+			if err != nil {
 				return err
 			}
-			seen[path] = true
+			seen[path] = root
 			return nil
 		})
 	}
+	for _, root := range rootList {
+		if err := addDir(root); err != nil {
+			closeWatcher()
+			return nil, err
+		}
+	}
+	rebuildWatcher := func() error {
+		nw, err := fsnotify.NewWatcher()
+		if err != nil {
+			return err
+		}
+		watcherMu.Lock()
+		old := watcher
+		watcher = nw
+		watcherMu.Unlock()
+		seen = make(map[string]string)
+		for _, root := range rootList {
+			if err := addDir(root); err != nil {
+				_ = nw.Close()
+				_ = old.Close()
+				return err
+			}
+		}
+		_ = old.Close()
+		return nil
+	}
+
 	forgetDir := func(path string) {
 		path = filepath.Clean(path)
 		for watched := range seen {
@@ -946,13 +1017,19 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			}
 		}
 	}
-
-	for _, root := range roots {
-		if err := addDir(root); err != nil {
-			closeWatcher()
-			return nil, err
+	rootFor := func(name string) string {
+		name = filepath.Clean(name)
+		best := ""
+		for _, root := range rootList {
+			rel, err := filepath.Rel(root, name)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) &&
+				(best == "" || len(root) > len(best)) {
+				best = root
+			}
 		}
+		return best
 	}
+
 	wake := make(chan struct{}, 1)
 	errCh := make(chan error, 1)
 	notify := func() {
@@ -967,6 +1044,82 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		default:
 		}
 	}
+	var pendingMu sync.Mutex
+	pending := make(map[string][]localWatchEvent)
+	full := make(map[string]bool)
+	var sequence uint64
+	addEvent := func(root string, ev localWatchEvent) {
+		pendingMu.Lock()
+		defer pendingMu.Unlock()
+		sequence++
+		ev.seq = sequence
+		if root == "" {
+			for _, r := range rootList {
+				full[r] = true
+				pending[r] = nil
+			}
+			return
+		}
+		if full[root] {
+			return
+		}
+		for i := range pending[root] {
+			if pending[root][i].path == ev.path {
+				pending[root][i].op |= ev.op
+				pending[root][i].directory = pending[root][i].directory || ev.directory
+				pending[root][i].seq = ev.seq
+				return
+			}
+		}
+		if len(pending[root]) >= maxLocalWatchEvents {
+			full[root] = true
+			pending[root] = nil
+			return
+		}
+		pending[root] = append(pending[root], ev)
+	}
+	take := func(root string) localWatchBatch {
+		root = filepath.Clean(root)
+		pendingMu.Lock()
+		defer pendingMu.Unlock()
+		b := localWatchBatch{events: pending[root], full: full[root], fence: sequence}
+		delete(pending, root)
+		delete(full, root)
+		return b
+	}
+	fence := func() uint64 {
+		pendingMu.Lock()
+		defer pendingMu.Unlock()
+		return sequence
+	}
+	suppress := func(root string, upto uint64, keep func(localWatchEvent) bool) {
+		root = filepath.Clean(root)
+		pendingMu.Lock()
+		defer pendingMu.Unlock()
+		evs := pending[root]
+		kept := evs[:0]
+		for _, ev := range evs {
+			if ev.seq <= upto && !keep(ev) {
+				continue
+			}
+			kept = append(kept, ev)
+		}
+		pending[root] = kept
+	}
+	filterEvent := func(root string, name string, op fsnotify.Op) bool {
+		rel, err := filepath.Rel(root, name)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return false
+		}
+		rel = filepath.ToSlash(rel)
+		base := filepath.Base(rel)
+		if strings.HasPrefix(base, ".bdrive-tmp-") || config.ReservedPath(rel) {
+			// A rename is retained: the destination may be the real user path
+			// that follows a temporary write.
+			return op&fsnotify.Rename != 0
+		}
+		return true
+	}
 	go func() {
 		defer closeWatcher()
 		defer close(wake)
@@ -975,30 +1128,58 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			select {
 			case <-ctx.Done():
 				return
-			case ev, ok := <-fw.Events:
+			case ev, ok := <-watcher.Events:
 				if !ok {
 					report(errors.New("local filesystem watcher closed"))
 					return
 				}
-				if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-					forgetDir(ev.Name)
+				root := rootFor(ev.Name)
+				name := filepath.Clean(ev.Name)
+				directory := false
+				if watchedRoot, ok := seen[name]; ok {
+					root, directory = watchedRoot, true
+				} else if info, statErr := os.Stat(name); statErr == nil {
+					directory = info.IsDir()
 				}
-				if ev.Op&fsnotify.Create != 0 {
-					if info, statErr := os.Stat(ev.Name); statErr == nil && info.IsDir() {
-						if addErr := addDir(ev.Name); addErr != nil {
-							report(addErr)
-							return
-						}
+				if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && root != "" && name == root {
+					if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
+						report(fmt.Errorf("local watcher root vanished: %s", root))
+						return
 					}
 				}
-				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename|fsnotify.Chmod) != 0 {
-					notify()
+				if ev.Op&fsnotify.Create != 0 && directory && root != "" {
+					if addErr := addDir(root); addErr != nil {
+						if os.IsNotExist(addErr) {
+							if _, statErr := os.Stat(root); statErr == nil {
+								if rebuildErr := rebuildWatcher(); rebuildErr == nil {
+									addEvent("", localWatchEvent{})
+									notify()
+									continue
+								} else {
+									report(rebuildErr)
+								}
+							} else {
+								report(addErr)
+							}
+						} else {
+							report(addErr)
+						}
+						return
+					}
 				}
-			case err, ok := <-fw.Errors:
+				if root == "" || !filterEvent(root, name, ev.Op) {
+					continue
+				}
+				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename|fsnotify.Chmod) == 0 {
+					continue
+				}
+				addEvent(root, localWatchEvent{root: root, path: name, op: ev.Op, directory: directory})
+				notify()
+			case watchErr, ok := <-watcher.Errors:
 				if !ok {
 					report(errors.New("local filesystem watcher error channel closed"))
-				} else if err != nil {
-					report(err)
+				} else if watchErr != nil {
+					report(watchErr)
 				} else {
 					report(errors.New("local filesystem watcher error"))
 				}
@@ -1006,10 +1187,88 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			}
 		}
 	}()
-	return &localFolderWatcher{wake: wake, err: errCh, close: closeWatcher}, nil
+	return &localFolderWatcher{
+		wake: wake, err: errCh, close: closeWatcher,
+		take: take, fence: fence, suppress: suppress,
+	}, nil
 }
 
-func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logger *log.Logger) (res *syncer.Result, err error, panicked bool) {
+func scanHintForBatch(batch localWatchBatch, root string) *syncer.ScanHint {
+	hint := &syncer.ScanHint{Full: batch.full}
+	if batch.full {
+		return hint
+	}
+	for _, ev := range batch.events {
+		rel, err := filepath.Rel(root, ev.path)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			hint.Full = true
+			hint.Events = nil
+			return hint
+		}
+		kind := syncer.ScanWrite
+		switch {
+		case ev.op&fsnotify.Remove != 0:
+			kind = syncer.ScanRemove
+		case ev.op&fsnotify.Rename != 0:
+			kind = syncer.ScanRename
+		case ev.op&fsnotify.Create != 0:
+			kind = syncer.ScanCreate
+		case ev.op&fsnotify.Chmod != 0:
+			kind = syncer.ScanChmod
+		}
+		hint.Events = append(hint.Events, syncer.ScanEvent{
+			Path: filepath.ToSlash(rel), Kind: kind, Directory: ev.directory,
+		})
+	}
+	return hint
+}
+
+func suppressMaterializationEchoes(lw *localFolderWatcher, root, folder, mountID string, st *store.Store, upto uint64) {
+	if lw == nil || lw.suppress == nil || upto == 0 {
+		return
+	}
+	cache, err := st.LoadCache(mountID)
+	if err != nil {
+		return
+	}
+	lw.suppress(root, upto, func(ev localWatchEvent) bool {
+		rel, err := filepath.Rel(folder, ev.path)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == syncer.IgnoreFile {
+			// Rule changes alter what discovery is allowed to see; retain the
+			// event so the next cycle takes the full-policy path.
+			return true
+		}
+		abs := filepath.Join(folder, filepath.FromSlash(rel))
+		info, statErr := os.Lstat(abs)
+		if ev.directory {
+			if ev.op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				_, cached := cache[rel]
+				return !cached && os.IsNotExist(statErr)
+			}
+			return statErr == nil && info.IsDir()
+		}
+		if ev.op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+			_, cached := cache[rel]
+			return !cached && os.IsNotExist(statErr)
+		}
+		cached, ok := cache[rel]
+		if !ok || statErr != nil {
+			return false
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, readErr := os.Readlink(abs)
+			return readErr == nil && cached.Link == target && cached.Size == info.Size() &&
+				cached.MTimeNS == info.ModTime().UnixNano()
+		}
+		return info.Size() == cached.Size && info.ModTime().UnixNano() == cached.MTimeNS
+	})
+}
+
+func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logger *log.Logger, hint *syncer.ScanHint) (res *syncer.Result, err error, panicked bool) {
 	defer func() {
 		if p := recover(); p != nil {
 			logger.Printf("cycle panic recovered: %v\n%s", p, debug.Stack())
@@ -1020,7 +1279,11 @@ func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logge
 	if workerCycleHook != nil {
 		workerCycleHook(volDir)
 	}
-	res, err = sess.Cycle(ctx)
+	if hint == nil {
+		res, err = sess.Cycle(ctx)
+	} else {
+		res, err = sess.CycleWithScanHint(ctx, hint)
+	}
 	return
 }
 
@@ -1075,6 +1338,9 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	var localWatchRoots string
 	var localWatchRetryAt time.Time
 	localWatchHealthy := false
+	nextHints := make(map[string]*syncer.ScanHint)
+	forceFull := true
+	lastFullScan := time.Time{}
 	stopLocalWatch := func() {
 		if localWatch != nil {
 			localWatch.close()
@@ -1082,6 +1348,19 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		}
 		localWatchWake, localWatchErr = nil, nil
 		localWatchHealthy = false
+		forceFull = true
+	}
+	collectLocalHints := func() {
+		if localWatch == nil || localWatch.take == nil {
+			return
+		}
+		for _, target := range activeMountsForVolume(volDir, expectedRemote) {
+			batch := localWatch.take(target.folder)
+			nextHints[target.folder] = scanHintForBatch(batch, target.folder)
+			if batch.full {
+				forceFull = true
+			}
+		}
 	}
 	stopWatch := func() {
 		if watchCancel != nil {
@@ -1120,6 +1399,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			} else {
 				localWatch, localWatchWake, localWatchErr = lw, lw.wake, lw.err
 				localWatchHealthy = true
+				forceFull = true
 			}
 		}
 		proj := targets[0].proj
@@ -1176,6 +1456,9 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		waitFor := pollEvery
 		remoteFailed := false
 		doRemote := proj.Remote != "" && time.Since(lastRemote) >= remotePollEvery
+		if !localWatchHealthy || lastFullScan.IsZero() || localWatchNow().Sub(lastFullScan) >= localWatchSafetyInterval {
+			forceFull = true
+		}
 		if doRemote && be == nil {
 			b, err := remote.Open(ctx, proj.Remote)
 			if err != nil {
@@ -1243,6 +1526,15 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 		}
 
+		// A full discovery consumes the current fence too: those events are
+		// represented by the walk, and must not be replayed as a second local
+		// batch after materialization.
+		if forceFull && localWatch != nil && localWatch.take != nil {
+			for _, target := range targets {
+				_ = localWatch.take(target.folder)
+			}
+		}
+
 		// Run the primary target first, then each sibling. A sibling gets the
 		// backend on a remote tick, or when an earlier sibling committed local
 		// ops that must be published before this target catches up.
@@ -1263,10 +1555,22 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			if doRemote || res.LocalOps > 0 {
 				sess.Backend = be
 			}
-			r, rerr, panicked := cycleSafely(ctx, sess, volDir, logger)
+			hint := nextHints[target.folder]
+			if forceFull {
+				hint = &syncer.ScanHint{Full: true}
+			} else if hint == nil {
+				hint = &syncer.ScanHint{}
+			}
+			r, rerr, panicked := cycleSafely(ctx, sess, volDir, logger, hint)
 			if panicked {
 				cyclePanicked = true
 				break
+			}
+			if hint.Full {
+				lastFullScan = localWatchNow()
+			}
+			if rerr == nil && localWatch != nil && localWatch.fence != nil {
+				suppressMaterializationEchoes(localWatch, target.folder, target.folder, target.proj.ID, st, localWatch.fence())
 			}
 			if rerr != nil && cycleErr == nil {
 				cycleErr = rerr
@@ -1292,7 +1596,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 					Device:         dev,
 					Account:        settings,
 				}
-				r, rerr, panicked := cycleSafely(ctx, sess, volDir, logger)
+				r, rerr, panicked := cycleSafely(ctx, sess, volDir, logger, &syncer.ScanHint{})
 				if panicked {
 					cyclePanicked = true
 					break
@@ -1313,6 +1617,12 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 			continue
 		}
+		if cycleErr != nil {
+			forceFull = true
+		} else {
+			forceFull = false
+		}
+		nextHints = make(map[string]*syncer.ScanHint)
 		lastCycle = time.Now()
 
 		switch {
@@ -1396,8 +1706,11 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			// A peer pushed. Clearing the gate makes the cycle below a remote
 			// one instead of a cheap local scan.
 			lastRemote = time.Time{}
+			nextHints = make(map[string]*syncer.ScanHint)
 		case <-wakeCh:
 			lastRemote = time.Time{}
+			forceFull = true
+			nextHints = make(map[string]*syncer.ScanHint)
 		case watchErr, ok := <-localWatchErr:
 			if !ok {
 				watchErr = errors.New("local filesystem watcher channel closed")
@@ -1405,6 +1718,8 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			logger.Printf("local filesystem watcher stopped; polling: %v", watchErr)
 			stopLocalWatch()
 			localWatchRetryAt = time.Now().Add(localWatchRetry)
+			forceFull = true
+			nextHints = make(map[string]*syncer.ScanHint)
 			continue
 		case _, ok := <-localWatchWake:
 			if !ok {
@@ -1412,6 +1727,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				localWatchRetryAt = time.Now().Add(localWatchRetry)
 				continue
 			}
+			collectLocalHints()
 			if wait := time.Until(lastCycle.Add(scanInterval)); wait > 0 {
 				timer := time.NewTimer(wait)
 			localWait:
@@ -1434,6 +1750,8 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 						break localWait
 					case <-wakeCh:
 						lastRemote = time.Time{}
+						forceFull = true
+						nextHints = make(map[string]*syncer.ScanHint)
 						timer.Stop()
 						break localWait
 					case watchErr, ok := <-localWatchErr:
@@ -1443,6 +1761,8 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 						logger.Printf("local filesystem watcher stopped; polling: %v", watchErr)
 						stopLocalWatch()
 						localWatchRetryAt = time.Now().Add(localWatchRetry)
+						forceFull = true
+						nextHints = make(map[string]*syncer.ScanHint)
 						timer.Stop()
 						break localWait
 					case _, ok := <-localWatchWake:
@@ -1452,6 +1772,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 							timer.Stop()
 							break localWait
 						}
+						collectLocalHints()
 					case <-timer.C:
 						break localWait
 					}
