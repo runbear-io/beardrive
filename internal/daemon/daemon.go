@@ -901,6 +901,7 @@ const (
 	localWatchSafetyInterval = time.Minute
 	localWatchRetry          = time.Minute
 )
+
 // localWatchNow is a clock seam for the independent full-scan deadline.
 var localWatchNow = time.Now
 
@@ -933,6 +934,11 @@ const maxLocalWatchEvents = 4096
 // nil in production and lets Darwin tests force one child ENOENT.
 var localWatchAddHook func(string) error
 
+// localWatchWalkHook observes the root of each incremental recursive walk.
+// It is nil in production and lets tests ensure directory creates do not
+// rescan the mount root.
+var localWatchWalkHook func(string)
+
 func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderWatcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -953,36 +959,39 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		})
 	}
 	seen := make(map[string]string)
-	addDir := func(root string) error {
-		return filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+	addDir := func(path, owner string) error {
+		if localWatchWalkHook != nil {
+			localWatchWalkHook(filepath.Clean(path))
+		}
+		return filepath.WalkDir(path, func(walkPath string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
 			}
 			if !d.IsDir() {
 				return nil
 			}
-			path = filepath.Clean(path)
-			if _, ok := seen[path]; ok {
+			walkPath = filepath.Clean(walkPath)
+			if _, ok := seen[walkPath]; ok {
 				return nil
 			}
 			if localWatchAddHook != nil {
-				if err := localWatchAddHook(path); err != nil {
+				if err := localWatchAddHook(walkPath); err != nil {
 					return err
 				}
 			}
 			watcherMu.Lock()
 			w := watcher
-			err := w.Add(path)
+			err := w.Add(walkPath)
 			watcherMu.Unlock()
 			if err != nil {
 				return err
 			}
-			seen[path] = root
+			seen[walkPath] = owner
 			return nil
 		})
 	}
 	for _, root := range rootList {
-		if err := addDir(root); err != nil {
+		if err := addDir(root, root); err != nil {
 			closeWatcher()
 			return nil, err
 		}
@@ -998,7 +1007,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		watcherMu.Unlock()
 		seen = make(map[string]string)
 		for _, root := range rootList {
-			if err := addDir(root); err != nil {
+			if err := addDir(root, root); err != nil {
 				_ = nw.Close()
 				_ = old.Close()
 				return err
@@ -1151,7 +1160,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 					}
 				}
 				if ev.Op&fsnotify.Create != 0 && directory && root != "" {
-					if addErr := addDir(root); addErr != nil {
+					if addErr := addDir(name, root); addErr != nil {
 						if os.IsNotExist(addErr) {
 							if _, statErr := os.Stat(root); statErr == nil {
 								if rebuildErr := rebuildWatcher(); rebuildErr == nil {
@@ -1234,10 +1243,72 @@ func suppressMaterializationEchoes(lw *localFolderWatcher, root, folder, mountID
 	if err != nil {
 		return
 	}
+	hasCachedDescendant := func(rel string) bool {
+		prefix := rel + "/"
+		for cachedRel := range cache {
+			if strings.HasPrefix(cachedRel, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	sameCachedFile := func(rel, abs string) bool {
+		cached, ok := cache[rel]
+		if !ok {
+			return false
+		}
+		info, err := os.Lstat(abs)
+		if err != nil {
+			return false
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(abs)
+			return err == nil && cached.Link == target &&
+				cached.Size == info.Size() && cached.MTimeNS == info.ModTime().UnixNano()
+		}
+		return cached.Link == "" && info.Mode().IsRegular() &&
+			info.Size() == cached.Size && info.ModTime().UnixNano() == cached.MTimeNS
+	}
+	knownDirectory := func(rel, abs string) bool {
+		prefix := rel + "/"
+		known := false
+		found := make(map[string]bool)
+		err := filepath.WalkDir(abs, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == abs {
+				return nil
+			}
+			childRel, err := filepath.Rel(folder, path)
+			if err != nil {
+				return err
+			}
+			childRel = filepath.ToSlash(childRel)
+			if d.IsDir() {
+				return nil
+			}
+			if !strings.HasPrefix(childRel, prefix) || !sameCachedFile(childRel, path) {
+				return os.ErrInvalid
+			}
+			known = true
+			found[childRel] = true
+			return nil
+		})
+		if err != nil || !known {
+			return false
+		}
+		for cachedRel := range cache {
+			if strings.HasPrefix(cachedRel, prefix) && !found[cachedRel] {
+				return false
+			}
+		}
+		return true
+	}
 	lw.suppress(root, upto, func(ev localWatchEvent) bool {
 		rel, err := filepath.Rel(folder, ev.path)
 		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return true
+			return true // keep: the path cannot be proven to be an echo
 		}
 		rel = filepath.ToSlash(rel)
 		if rel == syncer.IgnoreFile {
@@ -1246,28 +1317,23 @@ func suppressMaterializationEchoes(lw *localFolderWatcher, root, folder, mountID
 			return true
 		}
 		abs := filepath.Join(folder, filepath.FromSlash(rel))
-		info, statErr := os.Lstat(abs)
-		if ev.directory {
-			if ev.op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-				_, cached := cache[rel]
-				return !cached && os.IsNotExist(statErr)
-			}
-			return statErr == nil && info.IsDir()
-		}
 		if ev.op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 			_, cached := cache[rel]
-			return !cached && os.IsNotExist(statErr)
+			_, statErr := os.Lstat(abs)
+			// A missing, untracked path is the only remove/rename that can be
+			// known to be a materialization echo. A tracked path must remain
+			// queued so scan can journal the deletion.
+			safe := !cached && !hasCachedDescendant(rel) && os.IsNotExist(statErr)
+			return !safe
 		}
-		cached, ok := cache[rel]
-		if !ok || statErr != nil {
-			return false
+		if ev.directory {
+			// Directory creates from materialization are safe only when every
+			// descendant is a tracked file with its cached fingerprint.
+			return !knownDirectory(rel, abs)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, readErr := os.Readlink(abs)
-			return readErr == nil && cached.Link == target && cached.Size == info.Size() &&
-				cached.MTimeNS == info.ModTime().UnixNano()
-		}
-		return info.Size() == cached.Size && info.ModTime().UnixNano() == cached.MTimeNS
+		// Unknown paths, missing cache entries, and any stat/read mismatch stay
+		// queued for the next scan.
+		return !sameCachedFile(rel, abs)
 	})
 }
 

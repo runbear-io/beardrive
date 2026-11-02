@@ -316,7 +316,6 @@ func TestEmptyHintPullsWithoutLocalDeletePass(t *testing.T) {
 	}
 }
 
-
 func TestTwoDeviceSync(t *testing.T) {
 	be := sharedRemote(t)
 	a := newDevice(t, "deva", be)
@@ -549,9 +548,14 @@ func TestNestedMountExcluded(t *testing.T) {
 	// team/ becomes a nested mount on A (its own project).
 	write(t, a.Folder, "team/.bdrive/config.json", `{"mount_id":"m-nested"}`)
 	write(t, a.Folder, "team/local.md", "only for the nested project")
-	res := cycle(t, a)
+	res, err := a.CycleWithScanHint(context.Background(), &ScanHint{Events: []ScanEvent{{
+		Path: "team/local.md", Kind: ScanWrite,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.LocalOps != 0 {
-		t.Fatalf("a journaled %d ops for nested-mount content, want 0", res.LocalOps)
+		t.Fatalf("targeted nested-mount scan journaled %d ops, want 0", res.LocalOps)
 	}
 
 	// B must keep its copy (no delete propagated) and never see new files.

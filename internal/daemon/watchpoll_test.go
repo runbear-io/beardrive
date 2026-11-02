@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 /* The poll that ran beside a healthy push channel.
@@ -76,6 +77,54 @@ func TestLocalFolderWatcherWakesAndAddsDirectories(t *testing.T) {
 	}
 	lw.close()
 	lw.close()
+}
+
+func TestLocalFolderWatcherAddsOnlyCreatedDirectorySubtree(t *testing.T) {
+	root := t.TempDir()
+	unrelated := filepath.Join(root, "unrelated")
+	if err := os.Mkdir(unrelated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer lw.close()
+
+	var mu sync.Mutex
+	var walked []string
+	localWatchWalkHook = func(path string) {
+		mu.Lock()
+		walked = append(walked, path)
+		mu.Unlock()
+	}
+	defer func() { localWatchWalkHook = nil }()
+
+	created := filepath.Join(root, "created")
+	if err := os.Mkdir(created, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report a new directory")
+	}
+	mu.Lock()
+	got := append([]string(nil), walked...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != created {
+		t.Fatalf("incremental watcher walks = %v, want only %s", got, created)
+	}
+	if err := os.WriteFile(filepath.Join(created, "file.txt"), []byte("contents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not add the created directory")
+	}
 }
 
 func TestLocalFolderWatcherReaddsRecreatedDirectoryTree(t *testing.T) {
@@ -266,6 +315,76 @@ func TestEventsDuringScanAreFenced(t *testing.T) {
 		case <-deadline.C:
 			t.Fatalf("post-fence event missing from batches before deadline")
 		}
+	}
+}
+
+func TestMaterializationEchoSuppressionKeepsChangedEvents(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer lw.close()
+
+	echo := filepath.Join(root, "echo.txt")
+	changed := filepath.Join(root, "changed.txt")
+	if err := os.WriteFile(echo, []byte("materialized"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(changed, []byte("before"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("initial writes did not wake watcher")
+	}
+	_ = lw.take(root)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "volume"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := func(path string) store.CachedFile {
+		t.Helper()
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store.CachedFile{Size: info.Size(), MTimeNS: info.ModTime().UnixNano()}
+	}
+	cache := map[string]store.CachedFile{
+		"echo.txt":    fingerprint(echo),
+		"changed.txt": fingerprint(changed),
+	}
+
+	if err := os.WriteFile(echo, []byte("materialized"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("materialization echo did not wake watcher")
+	}
+	cache["echo.txt"] = fingerprint(echo)
+	if err := os.WriteFile(changed, []byte("concurrent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent change did not wake watcher")
+	}
+	if err := st.SaveCache("mount", cache); err != nil {
+		t.Fatal(err)
+	}
+	suppressMaterializationEchoes(lw, root, root, "mount", st, lw.fence())
+
+	batch := lw.take(root)
+	if len(batch.events) != 1 || batch.events[0].path != changed {
+		t.Fatalf("suppressed batch = %+v, want only concurrent change %s", batch.events, changed)
 	}
 }
 

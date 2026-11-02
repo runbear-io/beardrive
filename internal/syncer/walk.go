@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"io/fs"
+	"os"
 	"path/filepath"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -29,6 +30,33 @@ func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.Dir
 	return walkFolderPaths(folder, filter, nil, fn)
 }
 
+// targetUnderNestedMount inspects the ancestors of a targeted watcher path
+// before WalkDir starts at that path. A targeted walk otherwise never visits
+// the boundary directory itself, so the parent mount could journal a child
+// belonging to a nested project.
+func targetUnderNestedMount(folder, rel string, filter *Filter) bool {
+	dir := filepath.ToSlash(filepath.Dir(filepath.Clean(rel)))
+	for dir != "." && dir != "/" && dir != "" {
+		abs := filepath.Join(folder, filepath.FromSlash(dir))
+		info, err := os.Stat(abs)
+		if err != nil {
+			return false
+		}
+		if !info.IsDir() {
+			return false
+		}
+		if ignoredDir(filepath.Base(dir)) || filter.PruneDir(dir) {
+			return true
+		}
+		if config.IsMount(abs) {
+			filter.addNestedMount(dir)
+			return true
+		}
+		dir = filepath.ToSlash(filepath.Dir(filepath.FromSlash(dir)))
+	}
+	return false
+}
+
 // walkFolderPaths is the same walk predicate as walkFolder, restricted to the
 // supplied mount-relative roots. A nil roots slice means the whole mount.
 // Roots are deliberately walked independently: a watcher hint can name one
@@ -42,6 +70,9 @@ func walkFolderPaths(folder string, filter *Filter, roots []string, fn func(abs,
 		root = filepath.ToSlash(filepath.Clean(root))
 		if root == "." {
 			root = ""
+		}
+		if root != "" && targetUnderNestedMount(folder, root, filter) {
+			continue
 		}
 		absRoot := folder
 		if root != "" {
