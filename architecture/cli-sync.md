@@ -23,7 +23,8 @@ classDiagram
         +Prune bool
         +OnProgress func
         +Cycle(ctx) Result
-        -cycleLocked(ctx) Result
+        +CycleWithScanHint(ctx, hint) Result
+        -cycleLocked(ctx, hint) Result
         -loadScope(ctx, st) scopeMoved
         -readOnlyPath / deniedPath
         -forgetPeerJournals()
@@ -35,6 +36,18 @@ classDiagram
         -fetchChunked(ctx, op, basis) error
         -chunkSpans(blob) []span
     }
+    class ScanHint {
+        +Full bool
+        +Events []ScanEvent
+    }
+    class ScanEvent {
+        +Path string
+        +Kind ScanEventKind
+        +Directory bool
+    }
+    note for ScanHint "Daemon-only local discovery hint. Nil keeps the full-scan compatibility path; empty skips local discovery while pull/materialize still run. Uncertain or overflowed batches force Full."
+    ScanHint o-- ScanEvent
+    Session ..> ScanHint : targeted local discovery
     note for Session "syncer also exposes LogEntries (causal order, what bdrive restore walks) plus CommitTime / DisplayTime / SortForDisplay — the order bdrive log prints: newest-first by when a change was journaled (CommitTime), tie-broken by the file's own write time (DisplayTime) so one scan reads by edit time"
     note for Session "Restore writes a historical blob back into the working folder as an ordinary edit (fetching it from the hub when this device never held it) — the next Cycle journals it like any other change; it takes no lock and appends to no journal itself"
     note for Session "internal/syncer — re-derive the clock → scan → commit local ops → pull peer journals → adopt on join → re-assert withdrawn ops → preserve conflicts → refresh rules → prune → materialize → push blobs then own journal"
@@ -235,8 +248,13 @@ classDiagram
         -chan wake
         -chan err
         +close()
+        +take(root) localWatchBatch
+        +fence() sequence
+        +suppress(root, fence, keep)
     }
-    note for localFolderWatcher "runVolumeWorker watches every active mount directory recursively, wakes local cycles on filesystem changes, adds newly created directories, and falls back to scanInterval after setup or runtime errors. A healthy watcher uses a one-minute safety cadence when remote polling does not require an earlier cycle; local events do not force remote polling, while local ops and backfill schedule their own immediate remote leg"
+    note for localFolderWatcher "The watcher accumulates bounded per-mount events, coalesces paths, and keeps post-fence events queued. Child ENOENT during recursive setup triggers candidate rebuild and full-scan fallback when roots still exist; missing roots, closed channels, overflow and other backend errors remain fatal."
+    volumeWorker --> ScanHint : routes per-mount event batches
+    ScanHint ..> localFolderWatcher : batch source
     note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back"
 
     note for volumeWorker "remote.Watcher wakes a remote cycle when a peer pushes, reducing arrival latency from about 10s to 1s. A live stream stretches polling to remoteInterval x watchedPollFactor (5m by default); losing it restores remoteInterval on the next tick. Token changes and offline cycles drop the stream. Failed or ended dials back off for watchRetry (1m), including an older hub's 404. Periodic polling still bounds silent stream failure"
