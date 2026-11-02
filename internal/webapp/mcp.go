@@ -533,11 +533,38 @@ func (s *Server) computeGrantProjects(ctx context.Context) []Project {
 // text; say so by declaring no schema at all.
 type noOut = any
 
+// toolKind says whether a tool only reads or can change files. Clients use it
+// to decide which calls need the user's confirmation: read tools may run
+// unprompted, and every write is marked destructive because each one can
+// overwrite, remove, or roll back a teammate's file.
+type toolKind bool
+
+const (
+	reads  toolKind = true
+	writes toolKind = false
+)
+
+// mcpToolDef builds the advertised tool. Every tool carries a human title and
+// an explicit read-only or destructive hint; the Claude connector directory
+// rejects a server whose tools omit either.
+func mcpToolDef(name, title, desc string, kind toolKind) *mcp.Tool {
+	closed := false
+	ann := &mcp.ToolAnnotations{Title: title, OpenWorldHint: &closed}
+	if kind == reads {
+		ann.ReadOnlyHint = true
+		ann.IdempotentHint = true
+	} else {
+		destructive := true
+		ann.DestructiveHint = &destructive
+	}
+	return &mcp.Tool{Name: name, Title: title, Description: desc, Annotations: ann}
+}
+
 // mcpContentTool is mcpTool for a tool that can answer with something other
 // than text. Only `read` needs it (images); everything else stays on the
 // string-returning helper rather than making every tool pay for the one.
-func mcpContentTool[In any](srv *mcp.Server, name, desc string, fn func(context.Context, In) ([]mcp.Content, error)) {
-	mcp.AddTool(srv, &mcp.Tool{Name: name, Description: desc},
+func mcpContentTool[In any](srv *mcp.Server, name, title string, kind toolKind, desc string, fn func(context.Context, In) ([]mcp.Content, error)) {
+	mcp.AddTool(srv, mcpToolDef(name, title, desc, kind),
 		func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, noOut, error) {
 			out, err := fn(ctx, in)
 			if err != nil {
@@ -550,8 +577,8 @@ func mcpContentTool[In any](srv *mcp.Server, name, desc string, fn func(context.
 // mcpTool registers a tool whose output is plain text. Every tool in this
 // file returns text rather than structured content: an agent reads these, and
 // a listing it can scan beats a JSON blob it has to re-serialize to quote.
-func mcpTool[In any](srv *mcp.Server, name, desc string, fn func(context.Context, In) (string, error)) {
-	mcp.AddTool(srv, &mcp.Tool{Name: name, Description: desc},
+func mcpTool[In any](srv *mcp.Server, name, title string, kind toolKind, desc string, fn func(context.Context, In) (string, error)) {
+	mcp.AddTool(srv, mcpToolDef(name, title, desc, kind),
 		func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, noOut, error) {
 			out, err := fn(ctx, in)
 			if err != nil {
@@ -627,59 +654,59 @@ type restoreIn struct {
 }
 
 func (s *Server) addMCPTools(srv *mcp.Server) {
-	mcpTool(srv, "list",
+	mcpTool(srv, "list", "List files", reads,
 		"List files and folders at a path. The root (/) lists the connected projects; "+
 			"everything below it is an ordinary path inside one, e.g. /my-project/docs. "+
 			"A project can be named by its name or its id. Directories are implicit — "+
 			"there is no mkdir, writing a nested path creates it.",
 		s.mcpList)
-	mcpContentTool(srv, "read",
+	mcpContentTool(srv, "read", "Read file", reads,
 		"Read a file's contents. Returns numbered lines; use offset/limit to page through a large "+
 			"file. Pass raw:true to get the exact bytes with no numbering — use that whenever you "+
 			"are COPYING a file, because numbered output cannot be turned back into the original. "+
 			"Small images are returned as images.",
 		s.mcpRead)
-	mcpTool(srv, "glob",
+	mcpTool(srv, "glob", "Find files by name", reads,
 		"Find files by name pattern across connected projects, most recently changed first. "+
 			"Patterns are relative to the search path — no leading slash. ** spans any number of "+
 			"directories (**/*.md); a pattern with no slash at all (*.md) is matched against every "+
 			"file's name at any depth. Brace expansion is not supported.",
 		s.mcpGlob)
-	mcpTool(srv, "grep",
+	mcpTool(srv, "grep", "Search file contents", reads,
 		"Search file contents with a regular expression across connected projects. "+
 			"Pass context:N to see N lines around each match (like grep -C), which saves a "+
 			"follow-up read. Reports any file it could not search.",
 		s.mcpGrep)
-	mcpTool(srv, "write",
+	mcpTool(srv, "write", "Write file", writes,
 		"Create or overwrite a file with the given contents. Creates parent folders implicitly. "+
 			"When changing a file that already exists, pass the sha you read so the write is "+
 			"refused if a teammate changed it in the meantime. Content is limited to roughly "+
 			"2 MB (it travels JSON-encoded, so heavily-escaped text hits the limit sooner).",
 		s.mcpWrite)
-	mcpTool(srv, "edit",
+	mcpTool(srv, "edit", "Edit file", writes,
 		"Replace exact text in a file. Pass the sha you read to be refused if a teammate "+
 			"changed the file in the meantime, rather than silently overwriting them.",
 		s.mcpEdit)
-	mcpTool(srv, "delete",
+	mcpTool(srv, "delete", "Delete files", writes,
 		"Delete a file, or every file under a path ending in /.",
 		s.mcpDelete)
-	mcpTool(srv, "move",
+	mcpTool(srv, "move", "Move or rename file", writes,
 		"Move or rename one file within a project. Refuses if something already exists at the "+
 			"destination — delete it first if you mean to replace it.",
 		s.mcpMove)
-	mcpTool(srv, "history",
+	mcpTool(srv, "history", "File history", reads,
 		"Show who changed a file, when, and the sha of each version. Pass one of those shas to "+
 			"restore to bring that version back.",
 		s.mcpHistory)
-	mcpTool(srv, "restore",
+	mcpTool(srv, "restore", "Restore file version", writes,
 		"Restore a previous version of a file, using a sha exactly as history printed it.",
 		s.mcpRestore)
-	mcpTool(srv, "query",
+	mcpTool(srv, "query", "Query project data", reads,
 		"Query a project's JSON files and Markdown frontmatter as data: filter, pick fields, sort, "+
 			"group and count, without reading the files one by one. Needs the project's Data setting on. "+
 			"Run describe first to see which fields exist. Answers JSON.",
 		s.mcpDataQuery)
-	mcpTool(srv, "describe",
+	mcpTool(srv, "describe", "Describe data fields", reads,
 		"List the fields of the documents under a pattern, one level at a time: how often each "+
 			"appears, its types, and its most common values. Answers JSON.",
 		s.mcpDataDescribe)
