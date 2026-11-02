@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -216,6 +219,27 @@ func TestLocalFolderWatcherBatchesPerMount(t *testing.T) {
 	}
 }
 
+func TestLocalWatchNotExist(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil"},
+		{name: "not exist", err: fs.ErrNotExist, want: true},
+		{name: "syscall", err: syscall.ENOENT, want: true},
+		{name: "wrapped path", err: fmt.Errorf("watch: %w", &os.PathError{Op: "lstat", Path: "child", Err: syscall.ENOENT}), want: true},
+		{name: "permission", err: fs.ErrPermission},
+		{name: "text only", err: errors.New("lstat child: no such file or directory")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := localWatchNotExist(tc.err); got != tc.want {
+				t.Fatalf("localWatchNotExist(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWatcherRebuildsOnChildENOENT(t *testing.T) {
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -229,7 +253,7 @@ func TestWatcherRebuildsOnChildENOENT(t *testing.T) {
 	localWatchAddHook = func(path string) error {
 		if failOnce && filepath.Base(path) == "race" {
 			failOnce = false
-			return os.ErrNotExist
+			return fmt.Errorf("add: %w", &os.PathError{Op: "lstat", Path: path, Err: syscall.ENOENT})
 		}
 		return nil
 	}
@@ -239,11 +263,12 @@ func TestWatcherRebuildsOnChildENOENT(t *testing.T) {
 	if err := os.Mkdir(raceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond)
 	select {
 	case watchErr := <-lw.err:
 		t.Fatalf("child ENOENT made watcher unhealthy: %v", watchErr)
-	default:
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not recover from synchronous child ENOENT")
 	}
 	if batch := lw.take(root); !batch.full {
 		t.Fatal("child ENOENT rebuild did not force a full fallback batch")
@@ -279,17 +304,17 @@ func TestWatcherRecoversFromAsyncChildENOENT(t *testing.T) {
 	localWatchAddHook = func(path string) error {
 		if failRebuild && filepath.Clean(path) == root {
 			failRebuild = false
-			return os.ErrNotExist
+			return fmt.Errorf("rebuild: %w", syscall.ENOENT)
 		}
 		return nil
 	}
 	defer func() { localWatchAddHook = nil }()
 
-	asyncErrors <- &os.PathError{
+	asyncErrors <- fmt.Errorf("watch: %w", &os.PathError{
 		Op:   "lstat",
 		Path: filepath.Join(root, ".bdrive-tmp-0"),
-		Err:  os.ErrNotExist,
-	}
+		Err:  syscall.ENOENT,
+	})
 	select {
 	case watchErr := <-lw.err:
 		t.Fatalf("child ENOENT made watcher unhealthy: %v", watchErr)
@@ -311,6 +336,43 @@ func TestWatcherRecoversFromAsyncChildENOENT(t *testing.T) {
 		t.Fatalf("watcher failed after asynchronous child ENOENT: %v", watchErr)
 	case <-time.After(time.Second):
 		t.Fatal("watcher did not report a later root write")
+	}
+}
+
+func TestWatcherRejectsRootLostDuringChildENOENTRecovery(t *testing.T) {
+	root, sibling := t.TempDir(), t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asyncErrors := make(chan error, 1)
+	localWatchErrorHook = func() <-chan error { return asyncErrors }
+	defer func() { localWatchErrorHook = nil }()
+
+	lw, err := startLocalFolderWatcher(ctx, []string{root, sibling})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer lw.close()
+	localWatchAddHook = func(path string) error {
+		if filepath.Clean(path) == root {
+			if err := os.Remove(sibling); err != nil {
+				return err
+			}
+			return fmt.Errorf("rebuild: %w", syscall.ENOENT)
+		}
+		return nil
+	}
+	defer func() { localWatchAddHook = nil }()
+
+	asyncErrors <- fmt.Errorf("watch: %w", syscall.ENOENT)
+	select {
+	case watchErr, ok := <-lw.err:
+		if !ok || watchErr == nil || !strings.Contains(watchErr.Error(), "local watcher root vanished: "+sibling) {
+			t.Fatalf("missing sibling root error = %v, channel open = %v", watchErr, ok)
+		}
+	case <-lw.wake:
+		t.Fatal("missing sibling root was treated as a transient child error")
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not reject the missing sibling root")
 	}
 }
 

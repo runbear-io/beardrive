@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -943,6 +944,12 @@ var localWatchErrorHook func() <-chan error
 // rescan the mount root.
 var localWatchWalkHook func(string)
 
+// localWatchNotExist follows wrapped backend errors as well as direct path
+// errors. A missing configured root must still be rejected separately.
+func localWatchNotExist(err error) bool {
+	return errors.Is(err, fs.ErrNotExist)
+}
+
 func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderWatcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -1096,7 +1103,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 	rootsExist := func() error {
 		for _, root := range rootList {
 			if _, err := os.Stat(root); err != nil {
-				if os.IsNotExist(err) {
+				if localWatchNotExist(err) {
 					return fmt.Errorf("local watcher root vanished: %s", root)
 				}
 				return err
@@ -1108,7 +1115,6 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 	if localWatchErrorHook != nil {
 		injectedErrors = localWatchErrorHook()
 	}
-	var errorCooldown <-chan time.Time
 	handleWatcherError := func(watchErr error, ok bool) bool {
 		if !ok {
 			report(errors.New("local filesystem watcher error channel closed"))
@@ -1118,7 +1124,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			report(errors.New("local filesystem watcher error"))
 			return false
 		}
-		if !os.IsNotExist(watchErr) {
+		if !localWatchNotExist(watchErr) {
 			report(watchErr)
 			return false
 		}
@@ -1126,14 +1132,8 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			report(rootErr)
 			return false
 		}
-		// Temporarily stop consuming watcher errors after a recoverable
-		// inventory race so a backend that repeats the same error cannot spin
-		// this goroutine.
-		if errorCooldown == nil {
-			errorCooldown = time.After(100 * time.Millisecond)
-		}
 		if rebuildErr := rebuildWatcher(); rebuildErr != nil {
-			if !os.IsNotExist(rebuildErr) {
+			if !localWatchNotExist(rebuildErr) {
 				report(rebuildErr)
 				return false
 			}
@@ -1196,18 +1196,9 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			watcherMu.Lock()
 			currentWatcher := watcher
 			watcherMu.Unlock()
-			watcherErrors := currentWatcher.Errors
-			injectedWatcherErrors := injectedErrors
-			if errorCooldown != nil {
-				watcherErrors = nil
-				injectedWatcherErrors = nil
-			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-errorCooldown:
-				errorCooldown = nil
-				continue
 			case ev, ok := <-currentWatcher.Events:
 				if !ok {
 					report(errors.New("local filesystem watcher closed"))
@@ -1225,43 +1216,16 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 					forgetDir(name)
 				}
 				if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && root != "" && name == root {
-					if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
-						report(fmt.Errorf("local watcher root vanished: %s", root))
+					if rootErr := rootsExist(); rootErr != nil {
+						report(rootErr)
 						return
 					}
 				}
 				if ev.Op&fsnotify.Create != 0 && directory && root != "" {
 					if addErr := addDir(name, root); addErr != nil {
-						if !os.IsNotExist(addErr) {
-							report(addErr)
+						if !handleWatcherError(addErr, true) {
 							return
 						}
-						if _, statErr := os.Stat(root); statErr != nil {
-							if os.IsNotExist(statErr) {
-								report(fmt.Errorf("local watcher root vanished: %s", root))
-							} else {
-								report(statErr)
-							}
-							return
-						}
-						if rebuildErr := rebuildWatcher(); rebuildErr != nil {
-							if !os.IsNotExist(rebuildErr) {
-								report(rebuildErr)
-								return
-							}
-							for _, watchedRoot := range rootList {
-								if _, statErr := os.Stat(watchedRoot); statErr != nil {
-									if os.IsNotExist(statErr) {
-										report(fmt.Errorf("local watcher root vanished: %s", watchedRoot))
-									} else {
-										report(statErr)
-									}
-									return
-								}
-							}
-						}
-						addEvent("", localWatchEvent{})
-						notify()
 						continue
 					}
 				}
@@ -1273,11 +1237,11 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				}
 				addEvent(root, localWatchEvent{root: root, path: name, op: ev.Op, directory: directory})
 				notify()
-			case watchErr, ok := <-watcherErrors:
+			case watchErr, ok := <-currentWatcher.Errors:
 				if !handleWatcherError(watchErr, ok) {
 					return
 				}
-			case watchErr, ok := <-injectedWatcherErrors:
+			case watchErr, ok := <-injectedErrors:
 				if !handleWatcherError(watchErr, ok) {
 					return
 				}
