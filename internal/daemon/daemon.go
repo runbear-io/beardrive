@@ -1141,6 +1141,9 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				} else if info, statErr := os.Stat(name); statErr == nil {
 					directory = info.IsDir()
 				}
+				if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+					forgetDir(name)
+				}
 				if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && root != "" && name == root {
 					if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
 						report(fmt.Errorf("local watcher root vanished: %s", root))
