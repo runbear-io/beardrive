@@ -260,6 +260,54 @@ func TestWatcherRebuildsOnChildENOENT(t *testing.T) {
 	}
 }
 
+func TestWatcherKeepsPriorWatcherAfterRepeatedChildENOENT(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer lw.close()
+
+	failures := 2
+	localWatchAddHook = func(path string) error {
+		if failures > 0 && filepath.Base(path) == "race" {
+			failures--
+			return os.ErrNotExist
+		}
+		return nil
+	}
+	defer func() { localWatchAddHook = nil }()
+
+	raceDir := filepath.Join(root, "race")
+	if err := os.Mkdir(raceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("repeated child ENOENT made watcher unhealthy: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not recover from repeated child ENOENT")
+	}
+	if batch := lw.take(root); !batch.full {
+		t.Fatal("repeated child ENOENT did not force a full fallback batch")
+	}
+
+	later := filepath.Join(root, "later.txt")
+	if err := os.WriteFile(later, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("prior watcher failed after repeated child ENOENT: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("prior watcher did not report a later root write")
+	}
+}
+
 func TestEventsDuringScanAreFenced(t *testing.T) {
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())

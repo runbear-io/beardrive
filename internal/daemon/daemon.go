@@ -959,7 +959,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		})
 	}
 	seen := make(map[string]string)
-	addDir := func(path, owner string) error {
+	addDirTo := func(w *fsnotify.Watcher, watched map[string]string, path, owner string) error {
 		if localWatchWalkHook != nil {
 			localWatchWalkHook(filepath.Clean(path))
 		}
@@ -971,7 +971,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				return nil
 			}
 			walkPath = filepath.Clean(walkPath)
-			if _, ok := seen[walkPath]; ok {
+			if _, ok := watched[walkPath]; ok {
 				return nil
 			}
 			if localWatchAddHook != nil {
@@ -980,15 +980,17 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				}
 			}
 			watcherMu.Lock()
-			w := watcher
 			err := w.Add(walkPath)
 			watcherMu.Unlock()
 			if err != nil {
 				return err
 			}
-			seen[walkPath] = owner
+			watched[walkPath] = owner
 			return nil
 		})
+	}
+	addDir := func(path, owner string) error {
+		return addDirTo(watcher, seen, path, owner)
 	}
 	for _, root := range rootList {
 		if err := addDir(root, root); err != nil {
@@ -1001,18 +1003,18 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		if err != nil {
 			return err
 		}
-		watcherMu.Lock()
-		old := watcher
-		watcher = nw
-		watcherMu.Unlock()
-		seen = make(map[string]string)
+		candidateSeen := make(map[string]string)
 		for _, root := range rootList {
-			if err := addDir(root, root); err != nil {
+			if err := addDirTo(nw, candidateSeen, root, root); err != nil {
 				_ = nw.Close()
-				_ = old.Close()
 				return err
 			}
 		}
+		watcherMu.Lock()
+		old := watcher
+		watcher = nw
+		seen = candidateSeen
+		watcherMu.Unlock()
 		_ = old.Close()
 		return nil
 	}
@@ -1038,6 +1040,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		}
 		return best
 	}
+	
 
 	wake := make(chan struct{}, 1)
 	errCh := make(chan error, 1)
@@ -1161,22 +1164,37 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				}
 				if ev.Op&fsnotify.Create != 0 && directory && root != "" {
 					if addErr := addDir(name, root); addErr != nil {
-						if os.IsNotExist(addErr) {
-							if _, statErr := os.Stat(root); statErr == nil {
-								if rebuildErr := rebuildWatcher(); rebuildErr == nil {
-									addEvent("", localWatchEvent{})
-									notify()
-									continue
-								} else {
-									report(rebuildErr)
-								}
-							} else {
-								report(addErr)
-							}
-						} else {
+						if !os.IsNotExist(addErr) {
 							report(addErr)
+							return
 						}
-						return
+						if _, statErr := os.Stat(root); statErr != nil {
+							if os.IsNotExist(statErr) {
+								report(fmt.Errorf("local watcher root vanished: %s", root))
+							} else {
+								report(statErr)
+							}
+							return
+						}
+						if rebuildErr := rebuildWatcher(); rebuildErr != nil {
+							if !os.IsNotExist(rebuildErr) {
+								report(rebuildErr)
+								return
+							}
+							for _, watchedRoot := range rootList {
+								if _, statErr := os.Stat(watchedRoot); statErr != nil {
+									if os.IsNotExist(statErr) {
+										report(fmt.Errorf("local watcher root vanished: %s", watchedRoot))
+									} else {
+										report(statErr)
+									}
+									return
+								}
+							}
+						}
+						addEvent("", localWatchEvent{})
+						notify()
+						continue
 					}
 				}
 				if root == "" || !filterEvent(root, name, ev.Op) {
