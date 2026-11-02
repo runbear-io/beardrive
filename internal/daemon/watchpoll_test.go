@@ -245,23 +245,27 @@ func TestEventsDuringScanAreFenced(t *testing.T) {
 	if err := os.WriteFile(late, []byte("concurrent"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-lw.wake:
-	case <-time.After(time.Second):
-		t.Fatal("post-fence write did not wake watcher")
-	}
-	batch := lw.take(root)
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
 	foundLate := false
-	for _, ev := range batch.events {
-		if ev.path == late {
-			foundLate = true
+	for !foundLate {
+		select {
+		case _, ok := <-lw.wake:
+			if !ok {
+				t.Fatal("watcher stopped before post-fence event was observed")
+			}
+			batch := lw.take(root)
+			for _, ev := range batch.events {
+				if ev.path == echo {
+					t.Fatal("fenced echo remained queued")
+				}
+				if ev.path == late {
+					foundLate = true
+				}
+			}
+		case <-deadline.C:
+			t.Fatalf("post-fence event missing from batches before deadline")
 		}
-		if ev.path == echo {
-			t.Fatal("fenced echo remained queued")
-		}
-	}
-	if !foundLate {
-		t.Fatalf("post-fence event missing from batch: %+v", batch.events)
 	}
 }
 
