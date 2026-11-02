@@ -260,6 +260,60 @@ func TestWatcherRebuildsOnChildENOENT(t *testing.T) {
 	}
 }
 
+func TestWatcherRecoversFromAsyncChildENOENT(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	asyncErrors := make(chan error, 1)
+	localWatchErrorHook = func() <-chan error { return asyncErrors }
+	defer func() { localWatchErrorHook = nil }()
+
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer lw.close()
+
+	failRebuild := true
+	localWatchAddHook = func(path string) error {
+		if failRebuild && filepath.Clean(path) == root {
+			failRebuild = false
+			return os.ErrNotExist
+		}
+		return nil
+	}
+	defer func() { localWatchAddHook = nil }()
+
+	asyncErrors <- &os.PathError{
+		Op:   "lstat",
+		Path: filepath.Join(root, ".bdrive-tmp-0"),
+		Err:  os.ErrNotExist,
+	}
+	select {
+	case watchErr := <-lw.err:
+		t.Fatalf("child ENOENT made watcher unhealthy: %v", watchErr)
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not recover from asynchronous child ENOENT")
+	}
+	if batch := lw.take(root); !batch.full {
+		t.Fatal("asynchronous child ENOENT did not force a full fallback batch")
+	}
+
+	later := filepath.Join(root, "later.txt")
+	if err := os.WriteFile(later, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("watcher failed after asynchronous child ENOENT: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report a later root write")
+	}
+}
+
 func TestWatcherKeepsPriorWatcherAfterRepeatedChildENOENT(t *testing.T) {
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())

@@ -934,6 +934,10 @@ const maxLocalWatchEvents = 4096
 // nil in production and lets Darwin tests force one child ENOENT.
 var localWatchAddHook func(string) error
 
+// localWatchErrorHook is a deterministic seam for watcher.Errors. It is nil
+// in production and lets tests inject the same errors the backend reports.
+var localWatchErrorHook func() <-chan error
+
 // localWatchWalkHook observes the root of each incremental recursive walk.
 // It is nil in production and lets tests ensure directory creates do not
 // rescan the mount root.
@@ -1040,7 +1044,6 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		}
 		return best
 	}
-	
 
 	wake := make(chan struct{}, 1)
 	errCh := make(chan error, 1)
@@ -1090,6 +1093,59 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		}
 		pending[root] = append(pending[root], ev)
 	}
+	rootsExist := func() error {
+		for _, root := range rootList {
+			if _, err := os.Stat(root); err != nil {
+				if os.IsNotExist(err) {
+					return fmt.Errorf("local watcher root vanished: %s", root)
+				}
+				return err
+			}
+		}
+		return nil
+	}
+	var injectedErrors <-chan error
+	if localWatchErrorHook != nil {
+		injectedErrors = localWatchErrorHook()
+	}
+	var errorCooldown <-chan time.Time
+	handleWatcherError := func(watchErr error, ok bool) bool {
+		if !ok {
+			report(errors.New("local filesystem watcher error channel closed"))
+			return false
+		}
+		if watchErr == nil {
+			report(errors.New("local filesystem watcher error"))
+			return false
+		}
+		if !os.IsNotExist(watchErr) {
+			report(watchErr)
+			return false
+		}
+		if rootErr := rootsExist(); rootErr != nil {
+			report(rootErr)
+			return false
+		}
+		// Temporarily stop consuming watcher errors after a recoverable
+		// inventory race so a backend that repeats the same error cannot spin
+		// this goroutine.
+		if errorCooldown == nil {
+			errorCooldown = time.After(100 * time.Millisecond)
+		}
+		if rebuildErr := rebuildWatcher(); rebuildErr != nil {
+			if !os.IsNotExist(rebuildErr) {
+				report(rebuildErr)
+				return false
+			}
+			if rootErr := rootsExist(); rootErr != nil {
+				report(rootErr)
+				return false
+			}
+		}
+		addEvent("", localWatchEvent{})
+		notify()
+		return true
+	}
 	take := func(root string) localWatchBatch {
 		root = filepath.Clean(root)
 		pendingMu.Lock()
@@ -1137,10 +1193,22 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		defer close(wake)
 		defer close(errCh)
 		for {
+			watcherMu.Lock()
+			currentWatcher := watcher
+			watcherMu.Unlock()
+			watcherErrors := currentWatcher.Errors
+			injectedWatcherErrors := injectedErrors
+			if errorCooldown != nil {
+				watcherErrors = nil
+				injectedWatcherErrors = nil
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case ev, ok := <-watcher.Events:
+			case <-errorCooldown:
+				errorCooldown = nil
+				continue
+			case ev, ok := <-currentWatcher.Events:
 				if !ok {
 					report(errors.New("local filesystem watcher closed"))
 					return
@@ -1205,15 +1273,14 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				}
 				addEvent(root, localWatchEvent{root: root, path: name, op: ev.Op, directory: directory})
 				notify()
-			case watchErr, ok := <-watcher.Errors:
-				if !ok {
-					report(errors.New("local filesystem watcher error channel closed"))
-				} else if watchErr != nil {
-					report(watchErr)
-				} else {
-					report(errors.New("local filesystem watcher error"))
+			case watchErr, ok := <-watcherErrors:
+				if !handleWatcherError(watchErr, ok) {
+					return
 				}
-				return
+			case watchErr, ok := <-injectedWatcherErrors:
+				if !handleWatcherError(watchErr, ok) {
+					return
+				}
 			}
 		}
 	}()
