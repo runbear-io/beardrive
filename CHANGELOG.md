@@ -5,7 +5,7 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
-- **Local watcher recovery releases resources.** Recreated directories are re-registered, and macOS watcher shutdown no longer retains file descriptors.
+- **Local watcher wakes scan only affected paths.** Materialization echoes no longer trigger extra full-tree scans, and transient macOS watcher `ENOENT` races recover without stopping the watcher. Full scans remain the safety path for startup, policy changes, uncertain batches, and the one-minute deadline. (#328)
 - **Share links no longer run out because your team synced.** The hub reported every byte a device pulled through `/store/*` to `QuotaProvider.RecordEgress`, the counter a managed hub enforces its monthly share-link transfer cap against, so ordinary syncing used up the allowance and every `/s/*` link in the org answered "This link has exceeded its transfer limit". `RecordEgress` now reports share-link transfers only, and sync traffic goes to `RecordSyncEgress` on a provider that implements the new optional `SyncEgressRecorder` — measured, never enforced. Existing providers keep compiling and simply aren't told.
 
 
