@@ -38,9 +38,14 @@ func targetUnderNestedMount(folder, rel string, filter *Filter) bool {
 	dir := filepath.ToSlash(filepath.Dir(filepath.Clean(rel)))
 	for dir != "." && dir != "/" && dir != "" {
 		abs := filepath.Join(folder, filepath.FromSlash(dir))
-		info, err := os.Stat(abs)
+		// Lstat is deliberate: Stat would follow a symlink and let a
+		// targeted descendant walk enter the link's target tree.
+		info, err := os.Lstat(abs)
 		if err != nil {
 			return false
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true
 		}
 		if !info.IsDir() {
 			return false

@@ -2112,8 +2112,18 @@ func (s *Session) materializeFile(rel string, want journal.FileState, cache map[
 	if ok && c.Blob == want.Blob && c.Mode == want.Mode && !s.readOnlyDrifted(rel, abs, c) {
 		return false, nil
 	}
+	if ok && !s.readOnlyPath(rel) {
+		fi, err := os.Lstat(abs)
+		if err != nil || !cachedPathMatches(abs, fi, c) {
+			// A tracked writable path is safe to replace only when the
+			// current entry still matches the cached type and fingerprint.
+			// Missing entries and local type/content changes belong to the
+			// next targeted scan.
+			return false, nil
+		}
+	}
 	if fi, err := os.Stat(abs); err == nil {
-		if ok && (fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS) {
+		if ok && c.Link == "" && (fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS) {
 			// The one place a dirty file is not left alone. Everywhere else
 			// "dirty" means the next scan will commit it — under a read-only
 			// folder the next scan will NOT, so leaving it would mean a file
@@ -2251,6 +2261,25 @@ func unsafeRel(rel string) bool { return !journal.SafePath(rel) }
 // goes too: a synced file is never a drop box for other users on the machine.
 func safeMode(m uint32) uint32 { return m & 0o777 &^ 0o022 }
 
+// cachedPathMatches reports whether the current filesystem entry still has
+// the type and fingerprint captured in the materialization cache. Lstat is
+// required: a cached dangling link must be compared as a link rather than
+// treated as a missing file through Stat.
+func cachedPathMatches(abs string, fi os.FileInfo, c store.CachedFile) bool {
+	if c.Link != "" {
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return false
+		}
+		cur, err := os.Readlink(abs)
+		return err == nil && cur == c.Link &&
+			fi.Size() == c.Size &&
+			fi.ModTime().UnixNano() == c.MTimeNS
+	}
+	return fi.Mode().IsRegular() &&
+		fi.Size() == c.Size &&
+		fi.ModTime().UnixNano() == c.MTimeNS
+}
+
 // materializeSymlink recreates a peer's symbolic link. It writes only the link
 // entry: the target string is reproduced verbatim and never resolved, so a link
 // pointing outside the mount lands as a dangling or escaping link that this
@@ -2258,9 +2287,20 @@ func safeMode(m uint32) uint32 { return m & 0o777 &^ 0o022 }
 func (s *Session) materializeSymlink(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
 	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
 	c, ok := cache[rel]
-	if ok && c.Link == want.Link {
-		if cur, err := os.Readlink(abs); err == nil && cur == want.Link {
-			return false, nil // already the right link
+	if ok && !s.readOnlyPath(rel) {
+		fi, err := os.Lstat(abs)
+		if err != nil || !cachedPathMatches(abs, fi, c) {
+			// A tracked writable path is safe to replace only when the
+			// current entry still matches the cached type and fingerprint.
+			// Missing entries and local type/content changes belong to the
+			// next targeted scan.
+			return false, nil
+		}
+		if c.Link != "" {
+			cur, err := os.Readlink(abs)
+			if err == nil && cur == want.Link {
+				return false, nil
+			}
 		}
 	}
 	if fi, err := os.Lstat(abs); err == nil {
@@ -2334,7 +2374,11 @@ func (s *Session) writeFile(abs string, want journal.FileState) error {
 	// descend into one, so such a directory is a one-way door: it takes peer
 	// writes and never reports them. Checked before MkdirAll, so a refused op
 	// does not even build the parent chain on the far side.
-	if !store.UnderRoot(s.Folder, abs) {
+	//
+	// The final entry itself may be a dangling symlink from a tracked prior
+	// state. Checking its parent permits replacing that entry atomically while
+	// still rejecting symlinked ancestor directories.
+	if !store.UnderRoot(s.Folder, filepath.Dir(abs)) {
 		return fmt.Errorf("resolves outside the mount root")
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {

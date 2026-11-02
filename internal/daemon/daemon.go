@@ -895,6 +895,10 @@ var workerInitHook func(string)
 // after all workers finish; production leaves it nil.
 var workerCycleHook func(string)
 
+// workerRemoteWakeHook is a test seam called after a remote wake is received
+// and before pending local watcher events are collected.
+var workerRemoteWakeHook func(string)
+
 // A healthy local watcher replaces the tight safety scan with this slow poll.
 // The watcher is only an accelerator: losing it immediately restores the
 // existing scanInterval polling path.
@@ -1641,9 +1645,19 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		}
 		waitFor := pollEvery
 		remoteFailed := false
+		now := localWatchNow()
 		doRemote := proj.Remote != "" && time.Since(lastRemote) >= remotePollEvery
-		if !localWatchHealthy || lastFullScan.IsZero() || localWatchNow().Sub(lastFullScan) >= localWatchSafetyInterval {
+		if !localWatchHealthy || lastFullScan.IsZero() || now.Sub(lastFullScan) >= localWatchSafetyInterval {
 			forceFull = true
+		}
+		if localWatchHealthy && !lastFullScan.IsZero() {
+			remaining := lastFullScan.Add(localWatchSafetyInterval).Sub(now)
+			if remaining < 0 {
+				remaining = 0
+			}
+			if remaining < waitFor {
+				waitFor = remaining
+			}
 		}
 		if doRemote && be == nil {
 			b, err := remote.Open(ctx, proj.Remote)
@@ -1888,10 +1902,13 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				}
 				break
 			}
-			// A peer pushed. Clearing the gate makes the cycle below a remote
-			// one instead of a cheap local scan.
+			// A peer pushed. Collect local events before this remote cycle so
+			// scan-before-pull still journals edits that raced the wake.
+			if hook := workerRemoteWakeHook; hook != nil {
+				hook(volDir)
+			}
 			lastRemote = time.Time{}
-			nextHints = make(map[string]*syncer.ScanHint)
+			collectLocalHints()
 		case <-wakeCh:
 			lastRemote = time.Time{}
 			forceFull = true
