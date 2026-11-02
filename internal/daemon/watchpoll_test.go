@@ -41,6 +41,23 @@ import (
    second half is the one that matters for safety — the stream is an
    optimisation, and every guarantee still has to survive losing it. */
 
+// Hook cleanup runs after deferred watcher joins, including on t.Fatal.
+func setLocalWatcherTestHooks(t *testing.T, add func(string) error, errors func() <-chan error, walk func(string)) {
+	t.Helper()
+	setLocalWatchHooks(add, errors, walk)
+	t.Cleanup(func() { setLocalWatchHooks(nil, nil, nil) })
+}
+
+func closeLocalWatcher(t *testing.T, lw *localFolderWatcher) {
+	t.Helper()
+	lw.close()
+	select {
+	case <-lw.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not stop before hook cleanup")
+	}
+}
+
 func TestLocalFolderWatcherRejectsMissingRoot(t *testing.T) {
 	_, err := startLocalFolderWatcher(context.Background(), []string{filepath.Join(t.TempDir(), "missing")})
 	if err == nil {
@@ -56,7 +73,7 @@ func TestLocalFolderWatcherWakesAndAddsDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 	if err := os.WriteFile(filepath.Join(root, "first.txt"), []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -98,16 +115,15 @@ func TestLocalFolderWatcherAddsOnlyCreatedDirectorySubtree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 
 	var mu sync.Mutex
 	var walked []string
-	localWatchWalkHook = func(path string) {
+	setLocalWatcherTestHooks(t, nil, nil, func(path string) {
 		mu.Lock()
 		walked = append(walked, path)
 		mu.Unlock()
-	}
-	defer func() { localWatchWalkHook = nil }()
+	})
 
 	created := filepath.Join(root, "created")
 	if err := os.Mkdir(created, 0o755); err != nil {
@@ -148,7 +164,7 @@ func TestLocalFolderWatcherReaddsRecreatedDirectoryTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 
 	waitWake := func(label string) {
 		t.Helper()
@@ -187,7 +203,7 @@ func TestLocalFolderWatcherBatchesPerMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 
 	pathA := filepath.Join(rootA, "a.txt")
 	pathB := filepath.Join(rootB, "b.txt")
@@ -250,15 +266,14 @@ func TestWatcherRebuildsOnChildENOENT(t *testing.T) {
 	}
 
 	failOnce := true
-	localWatchAddHook = func(path string) error {
+	setLocalWatcherTestHooks(t, func(path string) error {
 		if failOnce && filepath.Base(path) == "race" {
 			failOnce = false
 			return fmt.Errorf("add: %w", &os.PathError{Op: "lstat", Path: path, Err: syscall.ENOENT})
 		}
 		return nil
-	}
-	defer func() { localWatchAddHook = nil }()
-	defer lw.close()
+	}, nil, nil)
+	defer closeLocalWatcher(t, lw)
 	raceDir := filepath.Join(root, "race")
 	if err := os.Mkdir(raceDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -291,24 +306,22 @@ func TestWatcherRecoversFromAsyncChildENOENT(t *testing.T) {
 	defer cancel()
 
 	asyncErrors := make(chan error, 1)
-	localWatchErrorHook = func() <-chan error { return asyncErrors }
-	defer func() { localWatchErrorHook = nil }()
+	setLocalWatcherTestHooks(t, nil, func() <-chan error { return asyncErrors }, nil)
 
 	lw, err := startLocalFolderWatcher(ctx, []string{root})
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 
 	failRebuild := true
-	localWatchAddHook = func(path string) error {
+	setLocalWatcherTestHooks(t, func(path string) error {
 		if failRebuild && filepath.Clean(path) == root {
 			failRebuild = false
 			return fmt.Errorf("rebuild: %w", syscall.ENOENT)
 		}
 		return nil
-	}
-	defer func() { localWatchAddHook = nil }()
+	}, func() <-chan error { return asyncErrors }, nil)
 
 	asyncErrors <- fmt.Errorf("watch: %w", &os.PathError{
 		Op:   "lstat",
@@ -344,15 +357,14 @@ func TestWatcherRejectsRootLostDuringChildENOENTRecovery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	asyncErrors := make(chan error, 1)
-	localWatchErrorHook = func() <-chan error { return asyncErrors }
-	defer func() { localWatchErrorHook = nil }()
+	setLocalWatcherTestHooks(t, nil, func() <-chan error { return asyncErrors }, nil)
 
 	lw, err := startLocalFolderWatcher(ctx, []string{root, sibling})
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
-	localWatchAddHook = func(path string) error {
+	defer closeLocalWatcher(t, lw)
+	setLocalWatcherTestHooks(t, func(path string) error {
 		if filepath.Clean(path) == root {
 			if err := os.Remove(sibling); err != nil {
 				return err
@@ -360,8 +372,7 @@ func TestWatcherRejectsRootLostDuringChildENOENTRecovery(t *testing.T) {
 			return fmt.Errorf("rebuild: %w", syscall.ENOENT)
 		}
 		return nil
-	}
-	defer func() { localWatchAddHook = nil }()
+	}, func() <-chan error { return asyncErrors }, nil)
 
 	asyncErrors <- fmt.Errorf("watch: %w", syscall.ENOENT)
 	select {
@@ -384,17 +395,16 @@ func TestWatcherKeepsPriorWatcherAfterRepeatedChildENOENT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 
 	failures := 2
-	localWatchAddHook = func(path string) error {
+	setLocalWatcherTestHooks(t, func(path string) error {
 		if failures > 0 && filepath.Base(path) == "race" {
 			failures--
 			return os.ErrNotExist
 		}
 		return nil
-	}
-	defer func() { localWatchAddHook = nil }()
+	}, nil, nil)
 
 	raceDir := filepath.Join(root, "race")
 	if err := os.Mkdir(raceDir, 0o755); err != nil {
@@ -432,56 +442,89 @@ func TestEventsDuringScanAreFenced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 
 	echo := filepath.Join(root, "echo.txt")
 	if err := os.WriteFile(echo, []byte("materialized"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-lw.wake:
-	case <-time.After(time.Second):
-		t.Fatal("echo write did not wake watcher")
+	deadline := time.Now().Add(time.Second)
+	waitWake := func(label string) {
+		t.Helper()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("timed out waiting for %s", label)
+		}
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case _, ok := <-lw.wake:
+			if !ok {
+				t.Fatalf("watcher stopped before %s", label)
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s", label)
+		}
 	}
-	_ = lw.take(root)
+	var initial localWatchBatch
+	for len(initial.events) == 0 {
+		waitWake("initial echo batch")
+		initial = lw.take(root)
+	}
+	if initial.full || len(initial.events) != 1 || initial.events[0].path != echo {
+		t.Fatalf("initial batch = %+v, want echo event", initial)
+	}
+	if initial.events[0].seq > initial.fence {
+		t.Fatal("take returned an event newer than its fence")
+	}
 
 	if err := os.WriteFile(echo, []byte("materialized again"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-lw.wake:
-	case <-time.After(time.Second):
-		t.Fatal("post-cycle echo did not wake watcher")
+	var fence uint64
+	suppressedEcho := false
+	for !suppressedEcho {
+		waitWake("pre-fence echo suppression")
+		fence = lw.fence()
+		lw.suppress(root, fence, func(ev localWatchEvent) bool {
+			if ev.path == echo {
+				suppressedEcho = true
+				return false
+			}
+			return true
+		})
+		batch := lw.take(root)
+		if batch.full {
+			t.Fatal("echo unexpectedly forced a full batch")
+		}
+		for _, ev := range batch.events {
+			if ev.path == echo && ev.seq <= fence {
+				t.Fatal("pre-fence echo remained queued")
+			}
+			// Backend delivery after the fence is valid, even for echo.
+		}
 	}
-	fence := lw.fence()
-	lw.suppress(root, fence, func(ev localWatchEvent) bool {
-		return ev.path != echo
-	})
 
 	late := filepath.Join(root, "late.txt")
 	if err := os.WriteFile(late, []byte("concurrent"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.NewTimer(time.Second)
-	defer deadline.Stop()
 	foundLate := false
 	for !foundLate {
-		select {
-		case _, ok := <-lw.wake:
-			if !ok {
-				t.Fatal("watcher stopped before post-fence event was observed")
+		waitWake("post-fence event retention")
+		// Even rejecting every pre-fence event must retain later deliveries.
+		lw.suppress(root, fence, func(localWatchEvent) bool { return false })
+		batch := lw.take(root)
+		if batch.full {
+			t.Fatal("later write unexpectedly forced a full batch")
+		}
+		for _, ev := range batch.events {
+			if ev.seq <= fence {
+				t.Fatalf("pre-fence event remained queued: %+v", ev)
 			}
-			batch := lw.take(root)
-			for _, ev := range batch.events {
-				if ev.path == echo {
-					t.Fatal("fenced echo remained queued")
-				}
-				if ev.path == late {
-					foundLate = true
-				}
+			if ev.path == late {
+				foundLate = true
 			}
-		case <-deadline.C:
-			t.Fatalf("post-fence event missing from batches before deadline")
 		}
 	}
 }
@@ -494,7 +537,7 @@ func TestMaterializationEchoSuppressionKeepsChangedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 
 	echo := filepath.Join(root, "echo.txt")
 	changed := filepath.Join(root, "changed.txt")
@@ -585,7 +628,7 @@ func TestWorkerSuppressesLateMaterializationEchoes(t *testing.T) {
 			// original post-materialization fence. This happens naturally when
 			// Darwin is still adding watches for a newly populated directory.
 			var enteredOnce sync.Once
-			localWatchWalkHook = func(path string) {
+			setLocalWatcherTestHooks(t, nil, nil, func(path string) {
 				if path == peerDir {
 					enteredOnce.Do(func() { close(entered) })
 					select {
@@ -593,7 +636,7 @@ func TestWorkerSuppressesLateMaterializationEchoes(t *testing.T) {
 					case <-ctx.Done():
 					}
 				}
-			}
+			})
 			var cycles atomic.Int64
 			workerCycleHook = func(volDir string) {
 				if volDir == m.volDir {
@@ -614,7 +657,7 @@ func TestWorkerSuppressesLateMaterializationEchoes(t *testing.T) {
 					if err != nil {
 						t.Errorf("worker shutdown: %v", err)
 					}
-					workerCycleHook, localWatchWalkHook = nil, nil
+					workerCycleHook = nil
 				case <-time.After(5 * time.Second):
 					t.Error("worker did not stop; leaving hooks installed to avoid racing it")
 				}

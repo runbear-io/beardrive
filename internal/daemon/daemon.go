@@ -921,6 +921,7 @@ type localWatchBatch struct {
 }
 
 type localFolderWatcher struct {
+	done     <-chan struct{}
 	wake     <-chan struct{}
 	err      <-chan error
 	close    func()
@@ -930,6 +931,8 @@ type localFolderWatcher struct {
 }
 
 const maxLocalWatchEvents = 4096
+
+var localWatchHooksMu sync.RWMutex
 
 // localWatchAddHook is a deterministic seam for the recursive Add race. It is
 // nil in production and lets Darwin tests force one child ENOENT.
@@ -943,6 +946,18 @@ var localWatchErrorHook func() <-chan error
 // It is nil in production and lets tests ensure directory creates do not
 // rescan the mount root.
 var localWatchWalkHook func(string)
+
+func getLocalWatchHooks() (func(string) error, func() <-chan error, func(string)) {
+	localWatchHooksMu.RLock()
+	defer localWatchHooksMu.RUnlock()
+	return localWatchAddHook, localWatchErrorHook, localWatchWalkHook
+}
+
+func setLocalWatchHooks(add func(string) error, errors func() <-chan error, walk func(string)) {
+	localWatchHooksMu.Lock()
+	defer localWatchHooksMu.Unlock()
+	localWatchAddHook, localWatchErrorHook, localWatchWalkHook = add, errors, walk
+}
 
 // localWatchNotExist follows wrapped backend errors as well as direct path
 // errors. A missing configured root must still be rejected separately.
@@ -971,8 +986,9 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 	}
 	seen := make(map[string]string)
 	addDirTo := func(w *fsnotify.Watcher, watched map[string]string, path, owner string) error {
-		if localWatchWalkHook != nil {
-			localWatchWalkHook(filepath.Clean(path))
+		_, _, walkHook := getLocalWatchHooks()
+		if walkHook != nil {
+			walkHook(filepath.Clean(path))
 		}
 		return filepath.WalkDir(path, func(walkPath string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -985,8 +1001,9 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			if _, ok := watched[walkPath]; ok {
 				return nil
 			}
-			if localWatchAddHook != nil {
-				if err := localWatchAddHook(walkPath); err != nil {
+			addHook, _, _ := getLocalWatchHooks()
+			if addHook != nil {
+				if err := addHook(walkPath); err != nil {
 					return err
 				}
 			}
@@ -1112,8 +1129,9 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		return nil
 	}
 	var injectedErrors <-chan error
-	if localWatchErrorHook != nil {
-		injectedErrors = localWatchErrorHook()
+	_, errorHook, _ := getLocalWatchHooks()
+	if errorHook != nil {
+		injectedErrors = errorHook()
 	}
 	handleWatcherError := func(watchErr error, ok bool) bool {
 		if !ok {
@@ -1188,7 +1206,9 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		}
 		return true
 	}
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		defer closeWatcher()
 		defer close(wake)
 		defer close(errCh)
@@ -1249,7 +1269,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		}
 	}()
 	return &localFolderWatcher{
-		wake: wake, err: errCh, close: closeWatcher,
+		done: done, wake: wake, err: errCh, close: closeWatcher,
 		take: take, fence: fence, suppress: suppress,
 	}, nil
 }
@@ -1462,6 +1482,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	stopLocalWatch := func() {
 		if localWatch != nil {
 			localWatch.close()
+			<-localWatch.done
 			localWatch = nil
 		}
 		localWatchWake, localWatchErr = nil, nil
