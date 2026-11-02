@@ -19,10 +19,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/store"
 )
+
+func setLocalWatcherCreatedHook(t *testing.T, hook func(*fsnotify.Watcher)) {
+	t.Helper()
+	setLocalWatchCreatedHook(hook)
+	t.Cleanup(func() { setLocalWatchCreatedHook(nil) })
+}
 
 /* The poll that ran beside a healthy push channel.
 
@@ -431,6 +438,110 @@ func TestWatcherKeepsPriorWatcherAfterRepeatedChildENOENT(t *testing.T) {
 		t.Fatalf("prior watcher failed after repeated child ENOENT: %v", watchErr)
 	case <-time.After(time.Second):
 		t.Fatal("prior watcher did not report a later root write")
+	}
+}
+
+func TestWatcherClosesReplacementDuringShutdown(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	asyncErrors := make(chan error, 1)
+	setLocalWatcherTestHooks(t, nil, func() <-chan error { return asyncErrors }, nil)
+	created := make(chan *fsnotify.Watcher, 2)
+	setLocalWatcherCreatedHook(t, func(w *fsnotify.Watcher) { created <- w })
+
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	_ = <-created // the initial watcher
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
+	var releaseOnce sync.Once
+	releaseBuild := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseBuild()
+	setLocalWatcherTestHooks(t, func(path string) error {
+		if filepath.Clean(path) == root {
+			enterOnce.Do(func() { close(entered) })
+			<-release
+		}
+		return nil
+	}, func() <-chan error { return asyncErrors }, nil)
+
+	asyncErrors <- fmt.Errorf("watch: %w", syscall.ENOENT)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not enter replacement build")
+	}
+	var replacement *fsnotify.Watcher
+	select {
+	case replacement = <-created:
+	case <-time.After(time.Second):
+		t.Fatal("replacement watcher was not created")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		lw.close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("watcher close blocked during replacement build")
+	}
+	releaseBuild()
+
+	select {
+	case <-lw.done:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not stop after replacement build shutdown")
+	}
+	select {
+	case _, ok := <-replacement.Events:
+		if ok {
+			t.Fatal("replacement watcher remained open after shutdown")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement watcher was not closed after shutdown")
+	}
+}
+
+func TestWatcherRoutesNestedRootToMostSpecificBatch(t *testing.T) {
+	parent := t.TempDir()
+	nested := filepath.Join(parent, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{parent, nested})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	path := filepath.Join(nested, "file.txt")
+	if err := os.WriteFile(path, []byte("contents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("nested root write made watcher unhealthy: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report nested root write")
+	}
+	if batch := lw.take(parent); len(batch.events) != 0 || batch.full {
+		t.Fatalf("parent batch = %+v, want no nested-root event", batch)
+	}
+	batch := lw.take(nested)
+	if len(batch.events) != 1 || batch.events[0].path != path {
+		t.Fatalf("nested batch = %+v, want one event for %s", batch, path)
 	}
 }
 

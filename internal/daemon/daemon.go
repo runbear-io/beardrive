@@ -947,16 +947,39 @@ var localWatchErrorHook func() <-chan error
 // rescan the mount root.
 var localWatchWalkHook func(string)
 
+// localWatchCreatedHook observes every watcher allocated by
+// startLocalFolderWatcher. It is nil in production and exists only so tests
+// can prove a replacement watcher is closed during a concurrent shutdown.
+var localWatchCreatedHook func(*fsnotify.Watcher)
+
 func getLocalWatchHooks() (func(string) error, func() <-chan error, func(string)) {
 	localWatchHooksMu.RLock()
 	defer localWatchHooksMu.RUnlock()
 	return localWatchAddHook, localWatchErrorHook, localWatchWalkHook
 }
 
+func getLocalWatchCreatedHook() func(*fsnotify.Watcher) {
+	localWatchHooksMu.RLock()
+	defer localWatchHooksMu.RUnlock()
+	return localWatchCreatedHook
+}
+
 func setLocalWatchHooks(add func(string) error, errors func() <-chan error, walk func(string)) {
 	localWatchHooksMu.Lock()
 	defer localWatchHooksMu.Unlock()
 	localWatchAddHook, localWatchErrorHook, localWatchWalkHook = add, errors, walk
+}
+
+func setLocalWatchCreatedHook(hook func(*fsnotify.Watcher)) {
+	localWatchHooksMu.Lock()
+	defer localWatchHooksMu.Unlock()
+	localWatchCreatedHook = hook
+}
+
+func localWatchCreated(w *fsnotify.Watcher) {
+	if hook := getLocalWatchCreatedHook(); hook != nil {
+		hook(w)
+	}
 }
 
 // localWatchNotExist follows wrapped backend errors as well as direct path
@@ -970,19 +993,24 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 	if err != nil {
 		return nil, err
 	}
+	localWatchCreated(fw)
 	var watcherMu sync.Mutex
 	watcher := fw
+	closed := false
 	rootList := make([]string, len(roots))
 	for i, root := range roots {
 		rootList[i] = filepath.Clean(root)
 	}
-	var closeOnce sync.Once
 	closeWatcher := func() {
-		closeOnce.Do(func() {
-			watcherMu.Lock()
-			defer watcherMu.Unlock()
-			_ = watcher.Close()
-		})
+		watcherMu.Lock()
+		if closed {
+			watcherMu.Unlock()
+			return
+		}
+		closed = true
+		current := watcher
+		watcherMu.Unlock()
+		_ = current.Close()
 	}
 	seen := make(map[string]string)
 	addDirTo := func(w *fsnotify.Watcher, watched map[string]string, path, owner string) error {
@@ -1031,6 +1059,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		if err != nil {
 			return err
 		}
+		localWatchCreated(nw)
 		candidateSeen := make(map[string]string)
 		for _, root := range rootList {
 			if err := addDirTo(nw, candidateSeen, root, root); err != nil {
@@ -1039,6 +1068,11 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			}
 		}
 		watcherMu.Lock()
+		if closed {
+			watcherMu.Unlock()
+			_ = nw.Close()
+			return nil
+		}
 		old := watcher
 		watcher = nw
 		seen = candidateSeen
@@ -1228,7 +1262,10 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				name := filepath.Clean(ev.Name)
 				directory := false
 				if watchedRoot, ok := seen[name]; ok {
-					root, directory = watchedRoot, true
+					directory = true
+					if root == "" {
+						root = watchedRoot
+					}
 				} else if info, statErr := os.Stat(name); statErr == nil {
 					directory = info.IsDir()
 				}
