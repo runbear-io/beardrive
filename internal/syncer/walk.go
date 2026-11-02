@@ -26,57 +26,87 @@ const (
 // Explain both go through it, so what `bdrive scope --explain` reports cannot
 // drift from what actually leaves the machine.
 func walkFolder(folder string, filter *Filter, fn func(abs, rel string, d fs.DirEntry, v verdict) error) error {
-	return filepath.WalkDir(folder, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil // skip unreadable entries
-		}
-		rel, err := filepath.Rel(folder, p)
-		if err != nil || rel == "." {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
+	return walkFolderPaths(folder, filter, nil, fn)
+}
 
-		var v verdict
-		switch {
-		case !d.IsDir():
-			// ReservedPath, not ignoredFile(name): the builtin exclusions
-			// include a whole-path rule (agent hook config) that a base name
-			// cannot express, and the outbound half has to match the inbound
-			// one or a file lands on the hub that no peer will ever materialize.
-			// SkipUp, not Skip: this walk is the upload door, and a negation a
-			// TEAMMATE pushed must not widen what leaves this machine. See
-			// Filter.SkipUp.
-			switch {
-			case !journal.SafePath(rel) || config.ReservedPath(rel) || filter.SkipUp(rel):
-				v = vSkipFile
-			case d.Type()&fs.ModeSymlink != 0:
-				// A symlink syncs as the eleven characters of its target,
-				// never its content: the scan reads the link with Readlink and
-				// never opens what it points at. See scan() and materialize.
-				v = vSymlink
-			case d.Type().IsRegular():
-				v = vSync
-			default:
-				v = vSkipFile // socket, device, fifo: nothing to sync
+// walkFolderPaths is the same walk predicate as walkFolder, restricted to the
+// supplied mount-relative roots. A nil roots slice means the whole mount.
+// Roots are deliberately walked independently: a watcher hint can name one
+// leaf without causing an unrelated directory to be statted.
+func walkFolderPaths(folder string, filter *Filter, roots []string, fn func(abs, rel string, d fs.DirEntry, v verdict) error) error {
+	if len(roots) == 0 {
+		roots = []string{"."}
+	}
+	seen := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		root = filepath.ToSlash(filepath.Clean(root))
+		if root == "." {
+			root = ""
+		}
+		absRoot := folder
+		if root != "" {
+			absRoot = filepath.Join(folder, filepath.FromSlash(root))
+		}
+		if seen[absRoot] {
+			continue
+		}
+		seen[absRoot] = true
+		err := filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil // skip unreadable or vanished entries
 			}
-		case ignoredDir(d.Name()) || filter.PruneDir(rel):
-			v = vPruneDir
-		case config.IsMount(p):
-			// A mount of its own: it syncs through its own project.
-			filter.addNestedMount(rel)
-			v = vNested
-		default:
-			v = vDescend
-		}
+			rel, err := filepath.Rel(folder, p)
+			if err != nil || rel == "." {
+				if rel == "." && root != "" {
+					rel = root
+				} else {
+					return nil
+				}
+			}
+			rel = filepath.ToSlash(rel)
 
-		if err := fn(p, rel, d, v); err != nil {
+			var v verdict
+			switch {
+			case !d.IsDir():
+				// ReservedPath, not ignoredFile(name): the builtin exclusions
+				// include a whole-path rule (agent hook config) that a base name
+				// cannot express, and the outbound half has to match the inbound
+				// one or a file lands on the hub that no peer will ever materialize.
+				// SkipUp, not Skip: this walk is the upload door, and a negation a
+				// TEAMMATE pushed must not widen what leaves this machine. See
+				// Filter.SkipUp.
+				switch {
+				case !journal.SafePath(rel) || config.ReservedPath(rel) || filter.SkipUp(rel):
+					v = vSkipFile
+				case d.Type()&fs.ModeSymlink != 0:
+					v = vSymlink
+				case d.Type().IsRegular():
+					v = vSync
+				default:
+					v = vSkipFile // socket, device, fifo: nothing to sync
+				}
+			case ignoredDir(d.Name()) || filter.PruneDir(rel):
+				v = vPruneDir
+			case config.IsMount(p):
+				filter.addNestedMount(rel)
+				v = vNested
+			default:
+				v = vDescend
+			}
+
+			if err := fn(p, rel, d, v); err != nil {
+				return err
+			}
+			if v == vPruneDir || v == vNested {
+				return fs.SkipDir
+			}
+			return nil
+		})
+		if err != nil {
 			return err
 		}
-		if v == vPruneDir || v == vNested {
-			return fs.SkipDir
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // SyncedFiles lists the mount-relative paths that sync, in walk order. It is

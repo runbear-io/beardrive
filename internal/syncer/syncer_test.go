@@ -148,7 +148,91 @@ func TestQuietCycleDoesNotRewriteCache(t *testing.T) {
 	}
 }
 
+func TestTargetedScanDoesNotDeleteUnvisitedCacheKeys(t *testing.T) {
+	a := newDevice(t, "deva", nil)
+	write(t, a.Folder, "left.txt", "left")
+	write(t, a.Folder, "right.txt", "right")
+	cycle(t, a)
+	write(t, a.Folder, "left.txt", "left v2")
+	res, err := a.CycleWithScanHint(context.Background(), &ScanHint{Events: []ScanEvent{{
+		Path: "left.txt", Kind: ScanWrite,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LocalOps != 1 {
+		t.Fatalf("targeted LocalOps = %d, want 1", res.LocalOps)
+	}
+	cache, err := a.Store.LoadCache(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cache["right.txt"]; !ok {
+		t.Fatalf("targeted scan deleted unvisited cache key: %v", cache)
+	}
+}
+
+func TestCycleWithoutHintStillJournalsUnnamedEdit(t *testing.T) {
+	a := newDevice(t, "deva", nil)
+	write(t, a.Folder, "first.txt", "one")
+	cycle(t, a)
+	write(t, a.Folder, "second.txt", "two")
+	if res := cycle(t, a); res.LocalOps != 1 {
+		t.Fatalf("nil-hint cycle LocalOps = %d, want 1", res.LocalOps)
+	}
+}
+
+func TestTargetedScanReconcilesExactDelete(t *testing.T) {
+	a := newDevice(t, "deva", nil)
+	write(t, a.Folder, "gone.txt", "gone")
+	write(t, a.Folder, "keep.txt", "keep")
+	cycle(t, a)
+	if err := os.Remove(filepath.Join(a.Folder, "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := a.CycleWithScanHint(context.Background(), &ScanHint{Events: []ScanEvent{{
+		Path: "gone.txt", Kind: ScanRemove,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LocalOps != 1 {
+		t.Fatalf("targeted delete LocalOps = %d, want 1", res.LocalOps)
+	}
+	cache, err := a.Store.LoadCache(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cache["keep.txt"]; !ok {
+		t.Fatalf("targeted delete removed sibling cache key: %v", cache)
+	}
+}
+
+func TestIgnoreEditForcesFullScan(t *testing.T) {
+	a := newDevice(t, "deva", nil)
+	write(t, a.Folder, "ignored/secret.txt", "secret")
+	cycle(t, a)
+	write(t, a.Folder, IgnoreFile, "ignored/\n")
+	res, err := a.CycleWithScanHint(context.Background(), &ScanHint{Events: []ScanEvent{{
+		Path: IgnoreFile, Kind: ScanWrite,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LocalOps != 1 {
+		t.Fatalf("ignore edit LocalOps = %d, want ignore-file put only", res.LocalOps)
+	}
+	cache, err := a.Store.LoadCache(a.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cache["ignored/secret.txt"]; ok {
+		t.Fatalf("ignored path remained in cache after full policy scan: %v", cache)
+	}
+}
+
 func TestEmptyFilteredMountInitializesCache(t *testing.T) {
+
 	st, err := store.Open(filepath.Join(t.TempDir(), "volume"))
 	if err != nil {
 		t.Fatal(err)
@@ -184,6 +268,54 @@ func TestEmptyFilteredMountInitializesCache(t *testing.T) {
 		t.Fatalf("later local file was treated as a join adoption: %+v", res)
 	}
 }
+
+func TestJoiningIgnoresPartialHint(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	write(t, a.Folder, "shared.txt", "project")
+	cycle(t, a)
+
+	b := newDevice(t, "devb", be)
+	write(t, b.Folder, "shared.txt", "stale local")
+	res, err := b.CycleWithScanHint(context.Background(), &ScanHint{Events: []ScanEvent{{
+		Path: "unrelated.txt", Kind: ScanWrite,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Adopted == 0 {
+		t.Fatalf("joining cycle did not use adoption path: %+v", res)
+	}
+	if got := read(t, b.Folder, "shared.txt"); got != "project" {
+		t.Fatalf("joined content = %q, want project", got)
+	}
+}
+
+func TestEmptyHintPullsWithoutLocalDeletePass(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", be)
+	write(t, a.Folder, "peer.txt", "peer")
+	cycle(t, a)
+	cycle(t, b)
+	write(t, a.Folder, "new-peer.txt", "new")
+	cycle(t, a)
+	res, err := b.CycleWithScanHint(context.Background(), &ScanHint{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.PulledOps == 0 || read(t, b.Folder, "new-peer.txt") != "new" {
+		t.Fatalf("empty hint did not pull peer update: %+v", res)
+	}
+	cache, err := b.Store.LoadCache(b.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cache["peer.txt"]; !ok {
+		t.Fatalf("remote-only cycle deleted unrelated cached path: %v", cache)
+	}
+}
+
 
 func TestTwoDeviceSync(t *testing.T) {
 	be := sharedRemote(t)
