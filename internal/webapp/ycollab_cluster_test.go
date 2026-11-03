@@ -277,6 +277,95 @@ func TestCollabProcessesConvergeOverRedis(t *testing.T) {
 	convergeAcross(t, a, b, p)
 }
 
+func TestConnectCollabRedisParseErrorOmitsSecrets(t *testing.T) {
+	tests := []struct {
+		name      string
+		redis     string
+		forbidden []string
+	}{
+		{
+			name:  "malformed userinfo escape",
+			redis: "redis://redis-parse-user:redis-parse-pass%zz@127.0.0.1:6379",
+			forbidden: []string{
+				"redis://redis-parse-user:redis-parse-pass%zz@127.0.0.1:6379",
+				"redis-parse-user",
+				"redis-parse-pass",
+			},
+		},
+		{
+			name:  "malformed path escape",
+			redis: "redis://redis-path-user:redis-path-pass@127.0.0.1:6379/a%zz",
+			forbidden: []string{
+				"redis://redis-path-user:redis-path-pass@127.0.0.1:6379/a%zz",
+				"redis-path-user",
+				"redis-path-pass",
+			},
+		},
+		{
+			name:  "malformed scheme-less userinfo escape",
+			redis: "redis-scheme-user%zz:redis-scheme-pass@127.0.0.1:6379",
+			forbidden: []string{
+				"redis-scheme-user%zz:redis-scheme-pass@127.0.0.1:6379",
+				"redis-scheme-user",
+				"redis-scheme-pass",
+			},
+		},
+		{
+			name:  "secret in invalid query value",
+			redis: "redis://redis-query-user:redis-query-pass@127.0.0.1:6379?dial_timeout=redis-query-secret",
+			forbidden: []string{
+				"redis://redis-query-user:redis-query-pass@127.0.0.1:6379?dial_timeout=redis-query-secret",
+				"redis-query-user",
+				"redis-query-pass",
+				"redis-query-secret",
+			},
+		},
+		{
+			name:  "invalid scheme control",
+			redis: "http://redis-control-user:redis-control-pass@127.0.0.1:6379",
+			forbidden: []string{
+				"http://redis-control-user:redis-control-pass@127.0.0.1:6379",
+				"redis-control-user",
+				"redis-control-pass",
+			},
+		},
+		{
+			name:  "invalid database control",
+			redis: "redis://redis-db-user:redis-db-pass@127.0.0.1:6379/notadb",
+			forbidden: []string{
+				"redis://redis-db-user:redis-db-pass@127.0.0.1:6379/notadb",
+				"redis-db-user",
+				"redis-db-pass",
+			},
+		},
+		{
+			name:  "invalid query control",
+			redis: "redis://redis-query-control-user:redis-query-control-pass@127.0.0.1:6379?dial_timeout=not-a-duration",
+			forbidden: []string{
+				"redis://redis-query-control-user:redis-query-control-pass@127.0.0.1:6379?dial_timeout=not-a-duration",
+				"redis-query-control-user",
+				"redis-query-control-pass",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{Collab: CollabConfig{Redis: tc.redis}}
+			err := srv.ConnectCollab(context.Background())
+			if err == nil {
+				t.Fatalf("malformed Redis configuration was accepted")
+			}
+			message := err.Error()
+			for _, forbidden := range tc.forbidden {
+				if strings.Contains(message, forbidden) {
+					t.Fatalf("Redis configuration details appeared in the error")
+				}
+			}
+		})
+	}
+}
+
 // convergeAcross is one file edited from two processes: every edit reaches
 // the other process, one process writes the file, and when its room ends the
 // other takes the pen and builds on what was written instead of parking a
