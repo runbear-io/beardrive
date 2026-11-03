@@ -37,7 +37,7 @@ type watchSafetyWorker struct {
 	cycles atomic.Int64
 }
 
-func startWatchSafetyWorker(t *testing.T, m watchFixture, remoteInterval time.Duration, now func() time.Time, beforeCycle func()) *watchSafetyWorker {
+func startWatchSafetyWorker(t *testing.T, m watchFixture, remoteInterval time.Duration, now func() time.Time, beforeCycle func(), scanIntervals ...time.Duration) *watchSafetyWorker {
 	t.Helper()
 	proj, ok, err := config.LoadProject(m.folder)
 	if err != nil || !ok {
@@ -64,9 +64,13 @@ func startWatchSafetyWorker(t *testing.T, m watchFixture, remoteInterval time.Du
 			}
 		}
 	}
+	scanInterval := 20 * time.Millisecond
+	if len(scanIntervals) > 0 {
+		scanInterval = scanIntervals[0]
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		w.done <- runVolumeWorker(ctx, m.volDir, proj.Remote, 20*time.Millisecond, remoteInterval, nil)
+		w.done <- runVolumeWorker(ctx, m.volDir, proj.Remote, scanInterval, remoteInterval, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -380,6 +384,151 @@ func TestWorkerRemoteWakePreservesPendingLocalEdit(t *testing.T) {
 	w.wait("remote content materialized after the pull", func() bool {
 		return w.pushed("notes.md", journal.KindPut, localContents) &&
 			worktreeFileEquals(m.folder, "notes.md", remoteContents)
+	})
+}
+
+func TestWorkerRemoteTimerPreservesQueuedLocalChanges(t *testing.T) {
+	hub := newFakeHub(t)
+	proxy := newRemoteWakeProxy(t, hub)
+	m := watchMountWithRemote(t, strings.TrimSuffix(proxy.URL, "/")+"/p/p-test")
+	if err := os.WriteFile(filepath.Join(m.folder, "remove.md"), []byte("delete me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const firstContents = "first local operation\n"
+	const localContents = "second local edit racing remote timer\n"
+	barrier := filepath.Join(m.folder, "remote-timer-barrier")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	setLocalWatchHooks(nil, nil, func(path string) {
+		if path == barrier {
+			enterOnce.Do(func() {
+				close(entered)
+				<-release
+			})
+		}
+	})
+
+	initStarted := make(chan struct{})
+	var initOnce sync.Once
+	workerInitHook = func(volDir string) {
+		if volDir == m.volDir {
+			initOnce.Do(func() { close(initStarted) })
+		}
+	}
+	t.Cleanup(func() { workerInitHook = nil })
+
+	var remoteWakes atomic.Int32
+	workerRemoteWakeHook = func(volDir string) {
+		if volDir == m.volDir {
+			remoteWakes.Add(1)
+		}
+	}
+
+	var phase atomic.Int32
+	hookErrors := make(chan error, 1)
+	w := startWatchSafetyWorker(t, m, time.Hour, nil, func() {
+		if !phase.CompareAndSwap(1, 2) {
+			return
+		}
+		if err := os.WriteFile(filepath.Join(m.folder, "notes.md"), []byte(localContents), 0o644); err != nil {
+			hookErrors <- err
+			return
+		}
+		if err := os.Remove(filepath.Join(m.folder, "remove.md")); err != nil {
+			hookErrors <- err
+			return
+		}
+		if err := os.Mkdir(barrier, 0o755); err != nil {
+			hookErrors <- err
+			return
+		}
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			hookErrors <- errors.New("local watcher did not queue the second edit and delete after hint collection")
+		}
+	}, 2*time.Second)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	select {
+	case <-initStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not initialize")
+	}
+	w.wait("completed initial full scan", func() bool {
+		return w.pushed("notes.md", journal.KindPut, "hello\n") &&
+			w.pushed("remove.md", journal.KindPut, "delete me\n")
+	})
+	select {
+	case <-proxy.connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote watcher did not connect")
+	}
+
+	gate := proxy.blockPull()
+	t.Cleanup(gate.unblock)
+	remoteContents := seedRemoteNotes(t, hub)
+	phase.Store(1)
+	if err := os.WriteFile(filepath.Join(m.folder, "first.md"), []byte(firstContents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-entered:
+	case err := <-hookErrors:
+		t.Fatal(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("local watcher did not queue the second edit and delete after the first cycle's hint collection")
+	}
+	select {
+	case <-gate.started:
+	case err := <-hookErrors:
+		t.Fatal(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote timer did not reach its pull gate")
+	}
+	if got := remoteWakes.Load(); got != 0 {
+		t.Fatalf("remote wake hook fired %d times; expected timer-only ordering", got)
+	}
+	w.wait("first local operation journaled before remote pull", func() bool {
+		ops, err := w.st.DeviceOps(w.device)
+		if err != nil {
+			return false
+		}
+		for _, op := range ops {
+			if op.Kind != journal.KindPut || op.Path != "first.md" {
+				continue
+			}
+			data, err := os.ReadFile(w.st.BlobPath(op.Blob))
+			return err == nil && string(data) == firstContents
+		}
+		return false
+	})
+	w.wait("queued local changes journaled before remote pull", func() bool {
+		ops, err := w.st.DeviceOps(w.device)
+		if err != nil {
+			return false
+		}
+		var edit, deleted bool
+		for _, op := range ops {
+			switch {
+			case op.Kind == journal.KindPut && op.Path == "notes.md":
+				data, err := os.ReadFile(w.st.BlobPath(op.Blob))
+				edit = edit || (err == nil && string(data) == localContents)
+			case op.Kind == journal.KindDelete && op.Path == "remove.md":
+				deleted = true
+			}
+		}
+		return edit && deleted
+	})
+	gate.unblock()
+	w.wait("remote content materialized after the pull", func() bool {
+		_, err := os.Stat(filepath.Join(m.folder, "remove.md"))
+		return w.pushed("notes.md", journal.KindPut, localContents) &&
+			w.pushed("remove.md", journal.KindDelete, "") &&
+			worktreeFileEquals(m.folder, "notes.md", remoteContents) &&
+			os.IsNotExist(err)
 	})
 }
 

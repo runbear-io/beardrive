@@ -1544,7 +1544,12 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				suppressMaterializationEchoes(localWatch, target.folder, target.folder, target.proj.ID, st, localWatch.fence())
 			}
 			batch := localWatch.take(target.folder)
-			nextHints[target.folder] = scanHintForBatch(batch, target.folder)
+			hint := scanHintForBatch(batch, target.folder)
+			if prior := nextHints[target.folder]; prior == nil || hint.Full {
+				nextHints[target.folder] = hint
+			} else if !prior.Full {
+				prior.Events = append(prior.Events, hint.Events...)
+			}
 			if batch.full {
 				forceFull = true
 			}
@@ -1735,6 +1740,14 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 		}
 
+		// A bounded cycle still has to drain events that raced the remote
+		// deadline. This keeps scan-before-pull true for timer cycles and the
+		// local-ops follow-up without turning the healthy watcher path into a
+		// full-tree scan.
+		if !forceFull {
+			collectLocalHints()
+		}
+
 		// Run the primary target first, then each sibling. A sibling gets the
 		// backend on a remote tick, or when an earlier sibling committed local
 		// ops that must be published before this target catches up.
@@ -1902,13 +1915,12 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				}
 				break
 			}
-			// A peer pushed. Collect local events before this remote cycle so
-			// scan-before-pull still journals edits that raced the wake.
+			// A peer pushed. Clear the remote deadline; the common cycle path
+			// drains local events before starting the bounded scan.
 			if hook := workerRemoteWakeHook; hook != nil {
 				hook(volDir)
 			}
 			lastRemote = time.Time{}
-			collectLocalHints()
 		case <-wakeCh:
 			lastRemote = time.Time{}
 			forceFull = true
