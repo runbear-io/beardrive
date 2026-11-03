@@ -4,10 +4,226 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
+
+const localCASTestGuard = 3 * time.Second
+
+func holdLocalCASLock(t *testing.T, root string) (*os.File, func()) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(root, localLockName), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+		})
+	}
+	t.Cleanup(release)
+	return f, release
+}
+
+func assertLocalCASLockBlocked(t *testing.T, f *os.File) {
+	t.Helper()
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EWOULDBLOCK) {
+		t.Fatalf("third descriptor acquired held CAS lock: %v", err)
+	}
+}
+
+func assertLocalCASLockFree(t *testing.T, f *os.File) {
+	t.Helper()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("third descriptor could not acquire CAS lock after release: %v", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitLocalCASCall(t *testing.T, done <-chan error, release func()) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(localCASTestGuard):
+		release()
+		select {
+		case <-done:
+		case <-time.After(localCASTestGuard):
+		}
+		t.Fatal("CAS operation did not observe context cancellation while the external lock was held")
+		return nil
+	}
+}
+
+func TestLocalCASLockCancellationPreservesHolderAndBytes(t *testing.T) {
+	for _, operation := range []string{"GetVersioned", "PutIf"} {
+		t.Run(operation, func(t *testing.T) {
+			root := t.TempDir()
+			be, err := newLocal(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const key = "journal/dev.jsonl"
+			const original = "original\n"
+			if err := be.Put(context.Background(), key, strings.NewReader(original), int64(len(original))); err != nil {
+				t.Fatal(err)
+			}
+
+			var expect Version
+			if operation == "PutIf" {
+				rc, version, err := be.GetVersioned(context.Background(), key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := io.ReadAll(rc); err != nil {
+					t.Fatal(err)
+				}
+				if err := rc.Close(); err != nil {
+					t.Fatal(err)
+				}
+				expect = version
+			}
+
+			_, release := holdLocalCASLock(t, root)
+			probe, err := os.OpenFile(filepath.Join(root, localLockName), os.O_CREATE|os.O_RDWR, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer probe.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				if operation == "GetVersioned" {
+					rc, _, err := be.GetVersioned(ctx, key)
+					if rc != nil {
+						_ = rc.Close()
+					}
+					done <- err
+					return
+				}
+				_, err := be.PutIf(ctx, key, strings.NewReader("replacement\n"), int64(len("replacement\n")), expect)
+				done <- err
+			}()
+
+			err = waitLocalCASCall(t, done, release)
+			if ctx.Err() != context.DeadlineExceeded || !errors.Is(err, ctx.Err()) {
+				t.Fatalf("%s error = %v, context error = %v, want context deadline exceeded", operation, err, ctx.Err())
+			}
+			assertLocalCASLockBlocked(t, probe)
+			gotWhileHeld, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(key)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(gotWhileHeld) != original {
+				t.Fatalf("cancelled %s changed bytes while the external lock was held: %q", operation, gotWhileHeld)
+			}
+
+			release()
+			assertLocalCASLockFree(t, probe)
+
+			rc, _, err := be.GetVersioned(context.Background(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := io.ReadAll(rc)
+			if closeErr := rc.Close(); err != nil {
+				t.Fatal(err)
+			} else if closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if string(got) != original {
+				t.Fatalf("cancelled %s changed bytes to %q", operation, got)
+			}
+		})
+	}
+}
+
+func TestLocalCASAlreadyCanceledContextDoesNotWriteOrHoldLock(t *testing.T) {
+	for _, operation := range []string{"GetVersioned", "PutIf"} {
+		t.Run(operation, func(t *testing.T) {
+			root := t.TempDir()
+			be, err := newLocal(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const key = "journal/dev.jsonl"
+			const original = "original\n"
+			if err := be.Put(context.Background(), key, strings.NewReader(original), int64(len(original))); err != nil {
+				t.Fatal(err)
+			}
+
+			var expect Version
+			if operation == "PutIf" {
+				rc, version, err := be.GetVersioned(context.Background(), key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := io.ReadAll(rc); err != nil {
+					t.Fatal(err)
+				}
+				if err := rc.Close(); err != nil {
+					t.Fatal(err)
+				}
+				expect = version
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if operation == "GetVersioned" {
+				rc, _, err := be.GetVersioned(ctx, key)
+				if rc != nil {
+					_ = rc.Close()
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("%s error = %v, want context canceled", operation, err)
+				}
+			} else {
+				_, err := be.PutIf(ctx, key, strings.NewReader("replacement\n"), int64(len("replacement\n")), expect)
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("%s error = %v, want context canceled", operation, err)
+				}
+			}
+
+			probe, err := os.OpenFile(filepath.Join(root, localLockName), os.O_CREATE|os.O_RDWR, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer probe.Close()
+			assertLocalCASLockFree(t, probe)
+
+			rc, _, err := be.GetVersioned(context.Background(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := io.ReadAll(rc)
+			if closeErr := rc.Close(); err != nil {
+				t.Fatal(err)
+			} else if closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if string(got) != original {
+				t.Fatalf("cancelled %s changed bytes to %q", operation, got)
+			}
+		})
+	}
+}
 
 func TestLocalPutIfIsACompareAndSwapAcrossProcesses(t *testing.T) {
 	root := t.TempDir()

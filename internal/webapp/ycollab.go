@@ -51,6 +51,29 @@ import (
    way a cgo sqlite would, which is the constraint that made this a relay in
    the first place and the one that changed. */
 
+// collabContext is captured when background work is created, so Close can
+// cancel work already waiting in storage without rebinding its context.
+func (s *Server) collabContext() context.Context {
+	s.collabMu.Lock()
+	defer s.collabMu.Unlock()
+	if s.collabBG == nil {
+		s.collabBG, s.collabCancel = context.WithCancel(context.Background())
+	}
+	return s.collabBG
+}
+
+func (s *Server) collabHookContext() context.Context {
+	s.collabMu.Lock()
+	defer s.collabMu.Unlock()
+	if s.collabClosing != nil {
+		return s.collabClosing
+	}
+	if s.collabBG == nil {
+		s.collabBG, s.collabCancel = context.WithCancel(context.Background())
+	}
+	return s.collabBG
+}
+
 // ydocs is the document server, built once. Rooms are created on demand and
 // swept when idle (ygo's own idle sweep), which is the shape the memory
 // measurement argued for: a held document is ~100 KB while actively edited —
@@ -64,32 +87,55 @@ func (s *Server) ydocs() *ygows.Server {
 		// kept addressable while the room lives, and written back when the
 		// last editor leaves.
 		srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
-			s.rooms().load(room, doc)
-			// Without a relay the processes cannot share a document, so
-			// only the lease holder opens the room; ygo answers the refused
-			// joiner with a 500 and y-websocket's retry carries it to
-			// another process (lease.go). With one, the lease is taken by
-			// the snapshot path instead — a room the relay created on a
-			// process nobody is editing from cannot write, so it must not
-			// hold the pen either.
-			if s.collabRelay == nil && !s.holdLease(ctx, room) {
-				s.rooms().drop(room)
-				return errRoomElsewhere
+			bg := s.collabContext()
+			ctx, cancel := context.WithCancel(ctx)
+			stop := context.AfterFunc(bg, cancel)
+			defer func() {
+				stop()
+				cancel()
+			}()
+			if bg.Err() != nil {
+				cancel()
 			}
-			if err := s.seedDoc(room, doc); err != nil {
-				s.dropRoom(room)
+			if err := ctx.Err(); err != nil {
 				return err
 			}
-			// AFTER the seed, so the bytes the document was built from are
-			// never mistaken for an edit that needs writing back.
+			s.rooms().load(room, doc)
+			// Without a relay, only the lease holder can open the room.
+			if s.collabRelay == nil && !s.holdLease(ctx, room) {
+				s.rooms().drop(room)
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return errRoomElsewhere
+			}
+			if err := s.seedDoc(ctx, room, doc); err != nil {
+				s.rooms().drop(room)
+				s.releaseLease(s.collabHookContext(), room)
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				s.rooms().drop(room)
+				s.releaseLease(s.collabHookContext(), room)
+				return err
+			}
 			s.watchRoom(room, doc)
 			s.keepLease(room)
 			return nil
 		}
-		srv.OnLastPeer = func(ctx context.Context, room string) { s.finalSnapshot(ctx, room) }
-		srv.OnUnloadDocument = func(ctx context.Context, room string) {
+		srv.OnLastPeer = func(_ context.Context, room string) {
+			s.finalSnapshot(s.collabHookContext(), room)
+		}
+		srv.OnUnloadDocument = func(_ context.Context, room string) {
+			ctx := s.collabHookContext()
 			s.finalSnapshot(ctx, room)
-			s.dropRoom(room)
+			// Close owns the final caller-context snapshot after it cancels
+			// an unload already in flight. Keep its document addressable.
+			if ctx.Err() != nil {
+				return
+			}
+			s.rooms().drop(room)
+			s.releaseLease(ctx, room)
 		}
 		/* Authorization runs per CONNECTION, after proj() has already decided
 		   this caller may see this project.
@@ -171,8 +217,11 @@ func (s *Server) handleYCollab(v *volume, w http.ResponseWriter, r *http.Request
 //
 // The hub can just do it. This runs once, when the room is created and before
 // any client is attached, so there is nothing to claim and nothing to race.
-func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
-	body, sha, ok := s.roomBytes(room)
+func (s *Server) seedDoc(ctx context.Context, room string, doc *crdt.Doc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	body, sha, ok := s.roomBytes(ctx, room)
 	if !ok || len(body) == 0 {
 		return nil // a file that does not exist yet starts empty
 	}
@@ -213,11 +262,11 @@ func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
 	   nothing. Only a hub that never saw this file being edited starts from
 	   the bytes. */
 	var newest []byte
-	if head := s.roomHead(project, path); head != "" && head != sha {
-		newest = s.roomHistory(project, head)
+	if head := s.roomHead(ctx, project, path); head != "" && head != sha {
+		newest = s.roomHistory(ctx, project, head)
 	}
 	if newest == nil {
-		if state := s.roomHistory(project, sha); state != nil && replayInto(doc, state, text) {
+		if state := s.roomHistory(ctx, project, sha); state != nil && replayInto(doc, state, text) {
 			return nil
 		}
 	}
@@ -241,7 +290,7 @@ func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
 			ttxt.Insert(txn, 0, text, nil)
 		})
 	}
-	state := s.claimRoomHistory(project, path, sha, tmp.EncodeStateAsUpdate(), text, newest)
+	state := s.claimRoomHistory(ctx, project, path, sha, tmp.EncodeStateAsUpdate(), text, newest)
 	if !replayInto(doc, state, text) {
 		return fmt.Errorf("%s: the stored document does not spell the file", room)
 	}
@@ -253,17 +302,16 @@ func (s *Server) seedDoc(room string, doc *crdt.Doc) error {
 // and knows everything the newest state does, ours otherwise — written with
 // compare-and-swap, so two processes seeding at once end up with one of
 // their seeds rather than one each.
-func (s *Server) claimRoomHistory(project, path, sha string, state []byte, body string, newest []byte) []byte {
+func (s *Server) claimRoomHistory(ctx context.Context, project, path, sha string, state []byte, body string, newest []byte) []byte {
 	be, ok := s.projectBackend(project)
 	if !ok || sha == "" || len(state) > maxHistoryBytes {
 		return state
 	}
 	cond, ok := be.(remote.ConditionalPutter)
 	if !ok {
-		s.storeRoomHistory(project, path, sha, state)
+		s.storeRoomHistory(ctx, project, path, sha, state)
 		return state
 	}
-	ctx := context.Background()
 	key := historyKey(sha)
 	var err error
 	for range 3 {
@@ -279,7 +327,7 @@ func (s *Server) claimRoomHistory(project, path, sha string, state []byte, body 
 			}
 		}
 		if _, err = cond.PutIf(ctx, key, bytes.NewReader(state), int64(len(state)), v); err == nil {
-			s.storeRoomHead(project, path, sha)
+			s.storeRoomHead(ctx, project, path, sha)
 			return state
 		}
 		if !errors.Is(err, remote.ErrVersionMismatch) {
@@ -379,7 +427,7 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 	if _, _, ok := s.rooms().get(room); !ok {
 		return false
 	}
-	body, cur, ok := s.roomBytes(room)
+	body, cur, ok := s.roomBytes(ctx, room)
 	if !ok || cur != sha {
 		return false
 	}
@@ -402,7 +450,7 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 	}
 	s.rooms().rebase(room, sha)
 	if doc, _, ok := s.rooms().get(room); ok {
-		s.storeRoomHistory(project, path, sha, doc.EncodeStateAsUpdate())
+		s.storeRoomHistory(ctx, project, path, sha, doc.EncodeStateAsUpdate())
 	}
 	return true
 }
@@ -413,7 +461,7 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 // snapshot must build on this version rather than be refused for a stale
 // base and parked as a conflict copy. A write that differs from the
 // document is an outsider's and leaves the room alone.
-func (s *Server) adoptRoomWrite(project, path, sha string, body io.ReadSeeker) {
+func (s *Server) adoptRoomWrite(ctx context.Context, project, path, sha string, body io.ReadSeeker) {
 	room := project + "/" + path
 	doc, _, ok := s.rooms().get(room)
 	if !ok || sha == "" {
@@ -431,7 +479,7 @@ func (s *Server) adoptRoomWrite(project, path, sha string, body io.ReadSeeker) {
 		return
 	}
 	s.rooms().rebase(room, sha)
-	s.storeRoomHistory(project, path, sha, state)
+	s.storeRoomHistory(ctx, project, path, sha, state)
 }
 
 // A room's history lives in the project's own storage as ydoc/<sha>: the
@@ -441,12 +489,12 @@ func (s *Server) adoptRoomWrite(project, path, sha string, body io.ReadSeeker) {
 // room still works, it just cannot be rebuilt losslessly.
 func historyKey(sha string) string { return "ydoc/" + sha }
 
-func (s *Server) roomHistory(project, sha string) []byte {
+func (s *Server) roomHistory(ctx context.Context, project, sha string) []byte {
 	be, ok := s.projectBackend(project)
 	if !ok || sha == "" {
 		return nil
 	}
-	rc, err := be.Get(context.Background(), historyKey(sha))
+	rc, err := be.Get(ctx, historyKey(sha))
 	if err != nil {
 		if !remote.IsNotExist(err) {
 			log.Printf("bdrive: reading room history %s/%s: %v", project, sha, err)
@@ -461,28 +509,31 @@ func (s *Server) roomHistory(project, sha string) []byte {
 	return state
 }
 
-func (s *Server) storeRoomHistory(project, path, sha string, state []byte) {
+func (s *Server) storeRoomHistory(ctx context.Context, project, path, sha string, state []byte) {
+	if ctx.Err() != nil {
+		return
+	}
 	be, ok := s.projectBackend(project)
 	if !ok || sha == "" || len(state) > maxHistoryBytes {
 		return
 	}
-	if err := be.Put(context.Background(), historyKey(sha), bytes.NewReader(state), int64(len(state))); err != nil {
+	if err := be.Put(ctx, historyKey(sha), bytes.NewReader(state), int64(len(state))); err != nil {
 		log.Printf("bdrive: storing room history %s/%s: %v", project, sha, err)
 		return
 	}
-	s.storeRoomHead(project, path, sha)
+	s.storeRoomHead(ctx, project, path, sha)
 }
 
 // ydoc/head/<path> names the newest state stored for a path — what the next
 // room for it builds from, on any process (seedDoc).
 func headKey(path string) string { return "ydoc/head/" + path }
 
-func (s *Server) roomHead(project, path string) string {
+func (s *Server) roomHead(ctx context.Context, project, path string) string {
 	be, ok := s.projectBackend(project)
 	if !ok {
 		return ""
 	}
-	rc, err := be.Get(context.Background(), headKey(path))
+	rc, err := be.Get(ctx, headKey(path))
 	if err != nil {
 		return ""
 	}
@@ -491,12 +542,15 @@ func (s *Server) roomHead(project, path string) string {
 	return strings.TrimSpace(string(sha))
 }
 
-func (s *Server) storeRoomHead(project, path, sha string) {
+func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string) {
+	if ctx.Err() != nil {
+		return
+	}
 	be, ok := s.projectBackend(project)
 	if !ok {
 		return
 	}
-	if err := be.Put(context.Background(), headKey(path), strings.NewReader(sha), int64(len(sha))); err != nil {
+	if err := be.Put(ctx, headKey(path), strings.NewReader(sha), int64(len(sha))); err != nil {
 		log.Printf("bdrive: storing room head %s/%s: %v", project, path, err)
 	}
 }
@@ -515,7 +569,7 @@ func (s *Server) projectBackend(project string) (remote.Backend, bool) {
 
 // roomBytes is the file behind a room, bounded, with the blob it currently is
 // — the sha every write to it must name in If-Match.
-func (s *Server) roomBytes(room string) ([]byte, string, bool) {
+func (s *Server) roomBytes(ctx context.Context, room string) ([]byte, string, bool) {
 	project, path, ok := strings.Cut(room, "/")
 	if !ok {
 		return nil, "", false
@@ -524,7 +578,6 @@ func (s *Server) roomBytes(room string) ([]byte, string, bool) {
 	if err != nil {
 		return nil, "", false
 	}
-	ctx := context.Background()
 	// A room is built from what the file IS, not from a snapshot a background
 	// rebuild has not caught up on yet.
 	snap, err := v.current(ctx)
@@ -568,6 +621,9 @@ func (s *Server) snapshotRoom(ctx context.Context, room string) { s.snapshot(ctx
 func (s *Server) finalSnapshot(ctx context.Context, room string) { s.snapshot(ctx, room, true) }
 
 func (s *Server) snapshot(ctx context.Context, room string, final bool) {
+	if ctx.Err() != nil {
+		return
+	}
 	project, path, ok := strings.Cut(room, "/")
 	if !ok {
 		return
@@ -585,10 +641,13 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	if !ok {
 		return
 	}
-	cur, curSha, have := s.roomBytes(room)
+	cur, curSha, have := s.roomBytes(ctx, room)
+	if ctx.Err() != nil {
+		return
+	}
 	if have && string(cur) == text {
 		if s.rooms().base(room) != curSha {
-			s.storeRoomHistory(project, path, curSha, state)
+			s.storeRoomHistory(ctx, project, path, curSha, state)
 			s.rooms().rebase(room, curSha)
 			// Written by another process. Its change frame reached only
 			// its own browsers; ours still show the edit as unsaved until
@@ -601,14 +660,17 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	if !s.holdLease(ctx, room) {
 		// Another process writes this file. Look again once it has had
 		// time to, so this process's browsers see the save land.
-		s.rooms().awaitWriter(room, func() { s.snapshotRoom(context.Background(), room) })
+		bg := s.collabContext()
+		if ctx.Err() == nil && bg.Err() == nil {
+			s.rooms().awaitWriter(room, func() { s.snapshotRoom(bg, room) })
+		}
 		return
 	}
 	if s.apiMux == nil {
 		return
 	}
 	base := s.rooms().base(room)
-	if have && curSha != base && s.contains(doc, project, curSha) {
+	if have && curSha != base && s.contains(ctx, doc, project, curSha) {
 		// The head was written by this room on another process — the
 		// previous lease holder — and the relay has already delivered every
 		// item it wrote, so build on it instead of parking beside it.
@@ -619,7 +681,7 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	switch w.code {
 	case http.StatusOK:
 		if sha := reportedSha(w); sha != "" {
-			s.storeRoomHistory(project, path, sha, state)
+			s.storeRoomHistory(ctx, project, path, sha, state)
 			s.rooms().rebase(room, sha)
 		}
 	case http.StatusConflict:
@@ -658,7 +720,7 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		// must not start another.
 		s.rooms().park(room, text)
 		copy := conflictPath(path, who, time.Now())
-		s.parkCopy(who, project, path, copy, text)
+		s.parkCopy(ctx, who, project, path, copy, text)
 		return
 	}
 }
@@ -675,9 +737,9 @@ var (
 // budget: once the room is evicted this text exists nowhere else, so giving
 // up would be the loss the copy exists to prevent. Held in memory only, so a
 // hub restart before the store recovers still loses it.
-func (s *Server) parkCopy(who User, project, path, copy, text string) {
-	try := func() bool {
-		cw := s.putAs(context.Background(), who, project, copy, text, "")
+func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, text string) {
+	try := func(ctx context.Context) bool {
+		cw := s.putAs(ctx, who, project, copy, text, "")
 		if cw.code == http.StatusOK {
 			log.Printf("bdrive: %s: the room's text would empty or sharply shrink it; parked beside it as %s", path, copy)
 			return true
@@ -685,17 +747,29 @@ func (s *Server) parkCopy(who User, project, path, copy, text string) {
 		log.Printf("bdrive: %s: could not park the room's refused text (%d bytes) as %s (%d); retrying", path, len(text), copy, cw.code)
 		return false
 	}
-	if try() {
+	backoff, backoffMax := parkBackoff, parkBackoffMax
+	if try(ctx) {
+		return
+	}
+	bg := s.collabContext()
+	if bg.Err() != nil {
 		return
 	}
 	go func() {
-		wait := parkBackoff
+		wait := backoff
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
 		for {
-			time.Sleep(wait)
-			if try() {
+			select {
+			case <-bg.Done():
 				return
+			case <-timer.C:
+				if bg.Err() != nil || try(bg) {
+					return
+				}
+				wait = min(wait*2, backoffMax)
+				timer.Reset(wait)
 			}
-			wait = min(wait*2, parkBackoffMax)
 		}
 	}()
 }
@@ -863,7 +937,12 @@ var (
 )
 
 func (s *Server) watchRoom(room string, doc *crdt.Doc) {
-	unsub := doc.OnUpdate(func(_ []byte, _ any) { s.rooms().touched(room, func() { s.snapshotRoom(context.Background(), room) }) })
+	bg := s.collabContext()
+	unsub := doc.OnUpdate(func(_ []byte, _ any) {
+		if bg.Err() == nil {
+			s.rooms().touched(room, func() { s.snapshotRoom(bg, room) })
+		}
+	})
 	r := s.rooms()
 	r.mu.Lock()
 	if old := r.unsubs[room]; old != nil {
@@ -1004,7 +1083,7 @@ var errRoomElsewhere = errors.New("another hub process holds this document")
 // dropRoom forgets a room and gives its lease back.
 func (s *Server) dropRoom(room string) {
 	s.rooms().drop(room)
-	s.releaseLease(room)
+	s.releaseLease(s.collabHookContext(), room)
 }
 
 // contains reports whether the room's document already holds everything the
@@ -1012,8 +1091,8 @@ func (s *Server) dropRoom(room string) {
 // document, not an outsider's write". Compared by item identity, which is the
 // only comparison a CRDT offers: two texts that read the same are not the
 // same document (seedDoc).
-func (s *Server) contains(doc *crdt.Doc, project, sha string) bool {
-	state := s.roomHistory(project, sha)
+func (s *Server) contains(ctx context.Context, doc *crdt.Doc, project, sha string) bool {
+	state := s.roomHistory(ctx, project, sha)
 	if state == nil {
 		return false
 	}
@@ -1031,9 +1110,16 @@ var emptyUpdate = crdt.EncodeStateAsUpdateV1(crdt.New(), nil)
 // typing that exists only in browsers. Bounded by ctx; a Close past its
 // deadline costs the tail, never a hang.
 func (s *Server) Close(ctx context.Context) error {
-	if s.roomReg == nil {
-		return nil
-	}
+	_ = s.collabContext()
+	s.collabMu.Lock()
+	s.collabClosing = ctx
+	s.collabCancel()
+	s.collabMu.Unlock()
+	defer func() {
+		s.collabMu.Lock()
+		s.collabClosing = nil
+		s.collabMu.Unlock()
+	}()
 	r := s.rooms()
 	r.mu.Lock()
 	rooms := make([]string, 0, len(r.docs))
@@ -1049,13 +1135,23 @@ func (s *Server) Close(ctx context.Context) error {
 		err = s.y.Shutdown(ctx)
 	}
 	// Shutdown closes peers, and a room with none — one the relay or Apply
-	// created — is never unloaded by it, so its renewer and timers would
-	// outlive the server. The process is going away: every room ends here.
+	// created — is never unloaded by it. Include rooms that finished loading
+	// after the first snapshot, so their leases and workers cannot outlive us.
+	r.mu.Lock()
+	rooms = rooms[:0]
+	for room := range r.docs {
+		rooms = append(rooms, room)
+	}
+	r.mu.Unlock()
 	for _, room := range rooms {
-		s.dropRoom(room)
+		r.drop(room)
+		s.releaseLease(ctx, room)
 	}
 	if s.collabRelay != nil {
 		s.collabRelay.Close()
+	}
+	if err == nil {
+		err = ctx.Err()
 	}
 	return err
 }

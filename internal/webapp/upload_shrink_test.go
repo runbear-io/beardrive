@@ -115,7 +115,7 @@ func TestFinalSnapshotParksARefusedShrink(t *testing.T) {
 		t.Fatalf("seed write: %d", rec.Code)
 	}
 	doc := crdt.New()
-	if err := srv.seedDoc(room, doc); err != nil {
+	if err := srv.seedDoc(context.Background(), room, doc); err != nil {
 		t.Fatal(err)
 	}
 	srv.rooms().load(room, doc)
@@ -193,7 +193,7 @@ func TestRefusedShrinkCopyIsRetriedAfterTheRoomCloses(t *testing.T) {
 	full := strings.Repeat("a standup line\n", 100)
 	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", full, "")
 	doc := crdt.New()
-	if err := srv.seedDoc(room, doc); err != nil {
+	if err := srv.seedDoc(context.Background(), room, doc); err != nil {
 		t.Fatal(err)
 	}
 	srv.rooms().load(room, doc)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 /* Compare-and-swap for a directory.
@@ -30,15 +31,22 @@ import (
 
 var _ ConditionalPutter = (*localBackend)(nil)
 
-// Under the temp-file prefix, so the scanner and List already skip it.
-const localLockName = ".bdrive-tmp-cas.lock"
+// Keep the retry interval private: it is an implementation detail, not a
+// configuration knob or a timing contract.
+const (
+	localLockName         = ".bdrive-tmp-cas.lock"
+	localCASRetryInterval = 5 * time.Millisecond
+)
 
-func (b *localBackend) GetVersioned(_ context.Context, key string) (io.ReadCloser, Version, error) {
+func (b *localBackend) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, VersionAbsent, err
+	}
 	p, err := b.path(key)
 	if err != nil {
 		return nil, VersionAbsent, err
 	}
-	unlock, err := b.lock()
+	unlock, err := b.lock(ctx)
 	if err != nil {
 		return nil, VersionAbsent, err
 	}
@@ -51,6 +59,9 @@ func (b *localBackend) GetVersioned(_ context.Context, key string) (io.ReadClose
 }
 
 func (b *localBackend) PutIf(ctx context.Context, key string, r io.Reader, _ int64, expect Version) (Version, error) {
+	if err := ctx.Err(); err != nil {
+		return VersionAbsent, err
+	}
 	p, err := b.path(key)
 	if err != nil {
 		return VersionAbsent, err
@@ -59,7 +70,7 @@ func (b *localBackend) PutIf(ctx context.Context, key string, r io.Reader, _ int
 	if err != nil {
 		return VersionAbsent, err
 	}
-	unlock, err := b.lock()
+	unlock, err := b.lock(ctx)
 	if err != nil {
 		return VersionAbsent, err
 	}
@@ -85,17 +96,51 @@ func versionOf(data []byte) Version {
 	return Version(hex.EncodeToString(sum[:]))
 }
 
-func (b *localBackend) lock() (func(), error) {
+func (b *localBackend) lock(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(filepath.Join(b.root, localLockName), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
+	unlock := func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}
+	try := func() error {
+		return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	}
+	if err := try(); err == nil {
+		if err := ctx.Err(); err != nil {
+			unlock()
+			return nil, err
+		}
+		return unlock, nil
+	} else if !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EWOULDBLOCK) {
+		_ = f.Close()
 		return nil, err
 	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, nil
+
+	timer := time.NewTimer(localCASRetryInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+			if err := try(); err == nil {
+				if err := ctx.Err(); err != nil {
+					unlock()
+					return nil, err
+				}
+				return unlock, nil
+			} else if !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EWOULDBLOCK) {
+				_ = f.Close()
+				return nil, err
+			}
+			timer.Reset(localCASRetryInterval)
+		}
+	}
 }

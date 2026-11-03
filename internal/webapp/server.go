@@ -116,6 +116,12 @@ type Server struct {
 	// collabRelay carries document updates between processes; nil means
 	// one process holds each document (lease.go).
 	collabRelay cluster.Relay
+	// collabMu protects the process-lifetime collab context and the caller
+	// context exposed only while Close is tearing rooms down.
+	collabMu      sync.Mutex
+	collabBG      context.Context
+	collabCancel  context.CancelFunc
+	collabClosing context.Context
 	// This process's name on a room lease (lease.go).
 	nodeOnce sync.Once
 	node     string
