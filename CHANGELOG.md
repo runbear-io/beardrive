@@ -5,10 +5,44 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
-- **Local watcher recovery releases resources.** Recreated directories are re-registered, and macOS watcher shutdown no longer retains file descriptors.
+## v0.18.2 — 2026-11-03
+
+Update your devices for targeted watcher scans, and update self-hosted hubs for
+the co-editing and MCP changes. A single-process hub needs no Redis setting.
+For co-editing across processes, configure `collab.redis` and use shared project
+storage that supports conditional writes.
+
+- **Co-editing across hub processes.** An optional Redis Streams relay carries
+  document updates between processes, while a storage lease chooses the one
+  that writes each room's snapshots. Processes share the document's seed and
+  rebuild from its newest stored history, avoiding duplicate seeding and replay
+  of edits that an outside revert removed. Without the relay, a second process
+  refuses a room another holds so the browser can retry on the holder. (#325)
+- **Conditional writes for local hub storage.** The `file://` backend now
+  supports compare-and-swap under a filesystem lock, used by leases, room
+  history, and the hub's existing conditional journal-append path. This relies
+  on local-filesystem locking, not shared network-filesystem guarantees. (#325)
+- **Save live co-editing rooms on graceful shutdown.** `bdrive serve` snapshots
+  rooms on SIGTERM or SIGINT before closing the HTTP server. Shutdown is best
+  effort within an eight-second budget; a hard kill cannot flush live rooms.
+  (#325)
+- **MCP tool titles and safety hints.** Every tool has a human-readable title
+  and closed-world annotations. Read tools declare read-only and idempotent
+  behavior; tools that change files declare destructive behavior. These are
+  hints for clients, not a replacement for permission checks. (#330)
 - **Local watcher wakes scan only affected paths.** Materialization echoes no longer trigger extra full-tree scans, and transient macOS watcher `ENOENT` races recover without stopping the watcher. Full scans remain the safety path for startup, policy changes, uncertain batches, and the one-minute deadline. (#328)
-- **Malformed collab Redis settings no longer expose credentials.** BearDrive still refuses to start with an invalid setting.
+- **Malformed collab Redis settings no longer expose credentials.** Parse
+  errors omit the URL and input values. BearDrive still refuses to start with
+  an invalid setting; the error is generic, so the parser's detailed diagnosis
+  is no longer available.
 - **Shutdowns no longer hang on a busy local file remote.** A canceled file CAS lock wait returns without disturbing the other writer, while normal graceful shutdowns still save live co-editing changes.
+- **Website and setup references are easier to find.** The README links
+  directly to the website and documentation, and the CLI and hub configuration
+  references explain targeted scans and the optional Redis relay. (#327)
+
+## v0.18.1 — 2026-10-27
+
+- **Local watcher recovery releases resources.** Recreated directories are re-registered, and macOS watcher shutdown no longer retains file descriptors.
 - **Share links no longer run out because your team synced.** The hub reported every byte a device pulled through `/store/*` to `QuotaProvider.RecordEgress`, the counter a managed hub enforces its monthly share-link transfer cap against, so ordinary syncing used up the allowance and every `/s/*` link in the org answered "This link has exceeded its transfer limit". `RecordEgress` now reports share-link transfers only, and sync traffic goes to `RecordSyncEgress` on a provider that implements the new optional `SyncEgressRecorder` — measured, never enforced. Existing providers keep compiling and simply aren't told.
 
 
