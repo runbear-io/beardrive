@@ -22,10 +22,11 @@ storage that supports conditional writes.
   supports compare-and-swap under a filesystem lock, used by leases, room
   history, and the hub's existing conditional journal-append path. This relies
   on local-filesystem locking, not shared network-filesystem guarantees. (#325)
-- **Save live co-editing rooms on graceful shutdown.** `bdrive serve` snapshots
-  rooms on SIGTERM or SIGINT before closing the HTTP server. Shutdown is best
-  effort within an eight-second budget; a hard kill cannot flush live rooms.
-  (#325)
+- **Snapshot live co-editing rooms on graceful shutdown.** `bdrive serve`
+  attempts to snapshot live rooms on SIGTERM or SIGINT before HTTP shutdown.
+  It supplies an eight-second shutdown context, but storage I/O and lock
+  acquisition are not uniformly deadline-aware. A hard kill can interrupt
+  saving. (#325)
 - **MCP tool titles and safety hints.** Every tool has a human-readable title
   and closed-world annotations. Read tools declare read-only and idempotent
   behavior; tools that change files declare destructive behavior. These are
@@ -41,6 +42,10 @@ storage that supports conditional writes.
   references explain targeted scans and the optional Redis relay. (#327)
 
 ## v0.18.1 — 2026-10-27
+
+The entries below preserve two fixes already included in v0.18.1. See the
+[original release](https://github.com/runbear-io/beardrive/releases/tag/v0.18.1)
+for the full commit list.
 
 - **Local watcher recovery releases resources.** Recreated directories are re-registered, and macOS watcher shutdown no longer retains file descriptors.
 - **Share links no longer run out because your team synced.** The hub reported every byte a device pulled through `/store/*` to `QuotaProvider.RecordEgress`, the counter a managed hub enforces its monthly share-link transfer cap against, so ordinary syncing used up the allowance and every `/s/*` link in the org answered "This link has exceeded its transfer limit". `RecordEgress` now reports share-link transfers only, and sync traffic goes to `RecordSyncEgress` on a provider that implements the new optional `SyncEgressRecorder` — measured, never enforced. Existing providers keep compiling and simply aren't told.
