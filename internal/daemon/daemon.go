@@ -1655,15 +1655,6 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		if !localWatchHealthy || lastFullScan.IsZero() || now.Sub(lastFullScan) >= localWatchSafetyInterval {
 			forceFull = true
 		}
-		if localWatchHealthy && !lastFullScan.IsZero() {
-			remaining := lastFullScan.Add(localWatchSafetyInterval).Sub(now)
-			if remaining < 0 {
-				remaining = 0
-			}
-			if remaining < waitFor {
-				waitFor = remaining
-			}
-		}
 		if doRemote && be == nil {
 			b, err := remote.Open(ctx, proj.Remote)
 			if err != nil {
@@ -1892,6 +1883,16 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			if res.Backfilling {
 				lastRemote = time.Time{} // fetch the next batch on the next tick
 				waitFor = min(waitFor, scanInterval)
+			}
+		}
+
+		if localWatchHealthy && !lastFullScan.IsZero() {
+			remaining := lastFullScan.Add(localWatchSafetyInterval).Sub(localWatchNow())
+			if remaining < 0 {
+				remaining = 0
+			}
+			if remaining < waitFor {
+				waitFor = remaining
 			}
 		}
 

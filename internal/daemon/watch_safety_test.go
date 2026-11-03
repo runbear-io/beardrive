@@ -405,6 +405,102 @@ func TestWorkerRemoteOnlyWakeDoesNotDiscoverUnhintedLocalFile(t *testing.T) {
 	w.requireHealthyWatcher()
 }
 
+func TestWorkerRemoteCycleCannotExtendSafetyDeadline(t *testing.T) {
+	hub := newFakeHub(t)
+	proxy := newRemoteWakeProxy(t, hub)
+	m := watchMountWithRemote(t, strings.TrimSuffix(proxy.URL, "/")+"/p/p-test")
+	var offset atomic.Int64
+	clock := func() time.Time {
+		return time.Now().Add(time.Duration(offset.Load()))
+	}
+	held := filepath.Join(m.folder, "held")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	setLocalWatchHooks(nil, nil, func(path string) {
+		if path != held {
+			return
+		}
+		enterOnce.Do(func() { close(entered) })
+		<-release
+	})
+	w := startWatchSafetyWorker(t, m, time.Hour, clock, nil)
+	t.Cleanup(unblock)
+	w.wait("completed initial full scan", func() bool {
+		return w.pushed("notes.md", journal.KindPut, "hello\n") &&
+			strings.Contains(w.log(), "local+1 pulled+0")
+	})
+	w.requireHealthyWatcher()
+	select {
+	case <-proxy.connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote watcher did not connect")
+	}
+
+	offset.Store(int64(10 * time.Second))
+	remoteContents := seedRemoteNotes(t, hub)
+	gate := proxy.blockPull()
+	t.Cleanup(gate.unblock)
+	proxy.wake <- struct{}{}
+	select {
+	case <-gate.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote-only wake did not reach the pull gate")
+	}
+	// Pull follows the bounded local scan. Block event admission only now,
+	// so this file must be discovered by a later full scan, never this cycle.
+	if err := os.Mkdir(held, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("new directory never reached recursive watcher installation")
+	}
+	const localPath = "held/missed.txt"
+	const localContents = "unobserved user edit during remote cycle\n"
+	if err := os.WriteFile(filepath.Join(m.folder, localPath), []byte(localContents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ops, err := w.st.DeviceOps(w.device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || ops[0].Path != "notes.md" {
+		t.Fatalf("remote-only cycle changed the local journal: %+v", ops)
+	}
+	offset.Store(int64(localWatchSafetyInterval + 5*time.Second))
+	gate.unblock()
+
+	// Do not release the watcher or send another wake: the completed remote
+	// cycle must schedule safety discovery against the original deadline.
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if worktreeFileEquals(m.folder, "notes.md", remoteContents) &&
+			w.pushed(localPath, journal.KindPut, localContents) {
+			break
+		}
+		select {
+		case err := <-w.done:
+			w.done <- err
+			t.Fatalf("worker exited before safety full scan: %v", err)
+		case <-deadline.C:
+			t.Fatalf("bounded remote cycle postponed safety discovery past its deadline; peer materialized=%v; log=%s",
+				worktreeFileEquals(m.folder, "notes.md", remoteContents), w.log())
+		case <-tick.C:
+		}
+	}
+	if !worktreeFileEquals(m.folder, localPath, localContents) {
+		t.Fatal("safety full scan changed the user's disk bytes")
+	}
+	w.requireHealthyWatcher()
+	unblock()
+}
+
 func TestWorkerRemoteWakePreservesPendingLocalEdit(t *testing.T) {
 	hub := newFakeHub(t)
 	proxy := newRemoteWakeProxy(t, hub)
