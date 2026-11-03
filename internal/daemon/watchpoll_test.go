@@ -2,19 +2,34 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/store"
 )
+
+func setLocalWatcherCreatedHook(t *testing.T, hook func(*fsnotify.Watcher)) {
+	t.Helper()
+	setLocalWatchCreatedHook(hook)
+	t.Cleanup(func() { setLocalWatchCreatedHook(nil) })
+}
 
 /* The poll that ran beside a healthy push channel.
 
@@ -33,6 +48,23 @@ import (
    second half is the one that matters for safety — the stream is an
    optimisation, and every guarantee still has to survive losing it. */
 
+// Hook cleanup runs after deferred watcher joins, including on t.Fatal.
+func setLocalWatcherTestHooks(t *testing.T, add func(string) error, errors func() <-chan error, walk func(string)) {
+	t.Helper()
+	setLocalWatchHooks(add, errors, walk)
+	t.Cleanup(func() { setLocalWatchHooks(nil, nil, nil) })
+}
+
+func closeLocalWatcher(t *testing.T, lw *localFolderWatcher) {
+	t.Helper()
+	lw.close()
+	select {
+	case <-lw.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not stop before hook cleanup")
+	}
+}
+
 func TestLocalFolderWatcherRejectsMissingRoot(t *testing.T) {
 	_, err := startLocalFolderWatcher(context.Background(), []string{filepath.Join(t.TempDir(), "missing")})
 	if err == nil {
@@ -48,7 +80,7 @@ func TestLocalFolderWatcherWakesAndAddsDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 	if err := os.WriteFile(filepath.Join(root, "first.txt"), []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +110,53 @@ func TestLocalFolderWatcherWakesAndAddsDirectories(t *testing.T) {
 	lw.close()
 }
 
+func TestLocalFolderWatcherAddsOnlyCreatedDirectorySubtree(t *testing.T) {
+	root := t.TempDir()
+	unrelated := filepath.Join(root, "unrelated")
+	if err := os.Mkdir(unrelated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	var mu sync.Mutex
+	var walked []string
+	setLocalWatcherTestHooks(t, nil, nil, func(path string) {
+		mu.Lock()
+		walked = append(walked, path)
+		mu.Unlock()
+	})
+
+	created := filepath.Join(root, "created")
+	if err := os.Mkdir(created, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report a new directory")
+	}
+	mu.Lock()
+	got := append([]string(nil), walked...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != created {
+		t.Fatalf("incremental watcher walks = %v, want only %s", got, created)
+	}
+	if err := os.WriteFile(filepath.Join(created, "file.txt"), []byte("contents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not add the created directory")
+	}
+}
+
 func TestLocalFolderWatcherReaddsRecreatedDirectoryTree(t *testing.T) {
 	root := t.TempDir()
 	recreated := filepath.Join(root, "nested")
@@ -92,7 +171,7 @@ func TestLocalFolderWatcherReaddsRecreatedDirectoryTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("filesystem watcher unavailable: %v", err)
 	}
-	defer lw.close()
+	defer closeLocalWatcher(t, lw)
 
 	waitWake := func(label string) {
 		t.Helper()
@@ -121,6 +200,691 @@ func TestLocalFolderWatcherReaddsRecreatedDirectoryTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitWake("write in recreated descendant")
+}
+
+func TestLocalFolderWatcherBatchesPerMount(t *testing.T) {
+	rootA, rootB := t.TempDir(), t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{rootA, rootB})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	pathA := filepath.Join(rootA, "a.txt")
+	pathB := filepath.Join(rootB, "b.txt")
+	if err := os.WriteFile(pathA, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathA, []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathB, []byte("three"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not wake")
+	}
+	time.Sleep(25 * time.Millisecond)
+	a := lw.take(rootA)
+	b := lw.take(rootB)
+	if len(a.events) != 1 || a.events[0].path != pathA {
+		t.Fatalf("mount A batch = %+v, want one coalesced event for %s", a.events, pathA)
+	}
+	if len(b.events) != 1 || b.events[0].path != pathB {
+		t.Fatalf("mount B batch = %+v, want one event for %s", b.events, pathB)
+	}
+	if len(lw.take(rootA).events) != 0 {
+		t.Fatal("mount A batch was consumed by a second take")
+	}
+}
+
+func TestLocalWatchNotExist(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil"},
+		{name: "not exist", err: fs.ErrNotExist, want: true},
+		{name: "syscall", err: syscall.ENOENT, want: true},
+		{name: "wrapped path", err: fmt.Errorf("watch: %w", &os.PathError{Op: "lstat", Path: "child", Err: syscall.ENOENT}), want: true},
+		{name: "permission", err: fs.ErrPermission},
+		{name: "text only", err: errors.New("lstat child: no such file or directory")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := localWatchNotExist(tc.err); got != tc.want {
+				t.Fatalf("localWatchNotExist(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWatcherRebuildsOnChildENOENT(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+
+	failOnce := true
+	setLocalWatcherTestHooks(t, func(path string) error {
+		if failOnce && filepath.Base(path) == "race" {
+			failOnce = false
+			return fmt.Errorf("add: %w", &os.PathError{Op: "lstat", Path: path, Err: syscall.ENOENT})
+		}
+		return nil
+	}, nil, nil)
+	defer closeLocalWatcher(t, lw)
+	raceDir := filepath.Join(root, "race")
+	if err := os.Mkdir(raceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case watchErr := <-lw.err:
+		t.Fatalf("child ENOENT made watcher unhealthy: %v", watchErr)
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not recover from synchronous child ENOENT")
+	}
+	if batch := lw.take(root); !batch.full {
+		t.Fatal("child ENOENT rebuild did not force a full fallback batch")
+	}
+	if err := os.WriteFile(filepath.Join(raceDir, "after.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("rebuilt watcher failed: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("rebuilt watcher did not report later child write")
+	}
+}
+
+func TestWatcherRecoversFromAsyncChildENOENT(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	asyncErrors := make(chan error, 1)
+	setLocalWatcherTestHooks(t, nil, func() <-chan error { return asyncErrors }, nil)
+
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	failRebuild := true
+	setLocalWatcherTestHooks(t, func(path string) error {
+		if failRebuild && filepath.Clean(path) == root {
+			failRebuild = false
+			return fmt.Errorf("rebuild: %w", syscall.ENOENT)
+		}
+		return nil
+	}, func() <-chan error { return asyncErrors }, nil)
+
+	asyncErrors <- fmt.Errorf("watch: %w", &os.PathError{
+		Op:   "lstat",
+		Path: filepath.Join(root, ".bdrive-tmp-0"),
+		Err:  syscall.ENOENT,
+	})
+	select {
+	case watchErr := <-lw.err:
+		t.Fatalf("child ENOENT made watcher unhealthy: %v", watchErr)
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not recover from asynchronous child ENOENT")
+	}
+	if batch := lw.take(root); !batch.full {
+		t.Fatal("asynchronous child ENOENT did not force a full fallback batch")
+	}
+
+	later := filepath.Join(root, "later.txt")
+	if err := os.WriteFile(later, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("watcher failed after asynchronous child ENOENT: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report a later root write")
+	}
+}
+
+func TestWatcherRejectsRootLostDuringChildENOENTRecovery(t *testing.T) {
+	root, sibling := t.TempDir(), t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asyncErrors := make(chan error, 1)
+	setLocalWatcherTestHooks(t, nil, func() <-chan error { return asyncErrors }, nil)
+
+	lw, err := startLocalFolderWatcher(ctx, []string{root, sibling})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+	setLocalWatcherTestHooks(t, func(path string) error {
+		if filepath.Clean(path) == root {
+			if err := os.Remove(sibling); err != nil {
+				return err
+			}
+			return fmt.Errorf("rebuild: %w", syscall.ENOENT)
+		}
+		return nil
+	}, func() <-chan error { return asyncErrors }, nil)
+
+	asyncErrors <- fmt.Errorf("watch: %w", syscall.ENOENT)
+	select {
+	case watchErr, ok := <-lw.err:
+		if !ok || watchErr == nil || !strings.Contains(watchErr.Error(), "local watcher root vanished: "+sibling) {
+			t.Fatalf("missing sibling root error = %v, channel open = %v", watchErr, ok)
+		}
+	case <-lw.wake:
+		t.Fatal("missing sibling root was treated as a transient child error")
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not reject the missing sibling root")
+	}
+}
+
+func TestWatcherKeepsPriorWatcherAfterRepeatedChildENOENT(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	failures := 2
+	setLocalWatcherTestHooks(t, func(path string) error {
+		if failures > 0 && filepath.Base(path) == "race" {
+			failures--
+			return os.ErrNotExist
+		}
+		return nil
+	}, nil, nil)
+
+	raceDir := filepath.Join(root, "race")
+	if err := os.Mkdir(raceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("repeated child ENOENT made watcher unhealthy: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not recover from repeated child ENOENT")
+	}
+	if batch := lw.take(root); !batch.full {
+		t.Fatal("repeated child ENOENT did not force a full fallback batch")
+	}
+
+	later := filepath.Join(root, "later.txt")
+	if err := os.WriteFile(later, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("prior watcher failed after repeated child ENOENT: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("prior watcher did not report a later root write")
+	}
+}
+
+func TestWatcherClosesReplacementDuringShutdown(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	asyncErrors := make(chan error, 1)
+	setLocalWatcherTestHooks(t, nil, func() <-chan error { return asyncErrors }, nil)
+	created := make(chan *fsnotify.Watcher, 2)
+	setLocalWatcherCreatedHook(t, func(w *fsnotify.Watcher) { created <- w })
+
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	_ = <-created // the initial watcher
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
+	var releaseOnce sync.Once
+	releaseBuild := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseBuild()
+	setLocalWatcherTestHooks(t, func(path string) error {
+		if filepath.Clean(path) == root {
+			enterOnce.Do(func() { close(entered) })
+			<-release
+		}
+		return nil
+	}, func() <-chan error { return asyncErrors }, nil)
+
+	asyncErrors <- fmt.Errorf("watch: %w", syscall.ENOENT)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not enter replacement build")
+	}
+	var replacement *fsnotify.Watcher
+	select {
+	case replacement = <-created:
+	case <-time.After(time.Second):
+		t.Fatal("replacement watcher was not created")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		lw.close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("watcher close blocked during replacement build")
+	}
+	releaseBuild()
+
+	select {
+	case <-lw.done:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not stop after replacement build shutdown")
+	}
+	select {
+	case _, ok := <-replacement.Events:
+		if ok {
+			t.Fatal("replacement watcher remained open after shutdown")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement watcher was not closed after shutdown")
+	}
+}
+
+func TestWatcherRoutesNestedRootToMostSpecificBatch(t *testing.T) {
+	parent := t.TempDir()
+	nested := filepath.Join(parent, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{parent, nested})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	path := filepath.Join(nested, "file.txt")
+	if err := os.WriteFile(path, []byte("contents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("nested root write made watcher unhealthy: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report nested root write")
+	}
+	if batch := lw.take(parent); len(batch.events) != 0 || batch.full {
+		t.Fatalf("parent batch = %+v, want no nested-root event", batch)
+	}
+	batch := lw.take(nested)
+	if len(batch.events) != 1 || batch.events[0].path != path {
+		t.Fatalf("nested batch = %+v, want one event for %s", batch, path)
+	}
+}
+
+func TestEventsDuringScanAreFenced(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	echo := filepath.Join(root, "echo.txt")
+	if err := os.WriteFile(echo, []byte("materialized"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	waitWake := func(label string) {
+		t.Helper()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("timed out waiting for %s", label)
+		}
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case _, ok := <-lw.wake:
+			if !ok {
+				t.Fatalf("watcher stopped before %s", label)
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s", label)
+		}
+	}
+	var initial localWatchBatch
+	for len(initial.events) == 0 {
+		waitWake("initial echo batch")
+		initial = lw.take(root)
+	}
+	if initial.full || len(initial.events) != 1 || initial.events[0].path != echo {
+		t.Fatalf("initial batch = %+v, want echo event", initial)
+	}
+	if initial.events[0].seq > initial.fence {
+		t.Fatal("take returned an event newer than its fence")
+	}
+
+	if err := os.WriteFile(echo, []byte("materialized again"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var fence uint64
+	suppressedEcho := false
+	for !suppressedEcho {
+		waitWake("pre-fence echo suppression")
+		fence = lw.fence()
+		lw.suppress(root, fence, func(ev localWatchEvent) bool {
+			if ev.path == echo {
+				suppressedEcho = true
+				return false
+			}
+			return true
+		})
+		batch := lw.take(root)
+		if batch.full {
+			t.Fatal("echo unexpectedly forced a full batch")
+		}
+		for _, ev := range batch.events {
+			if ev.path == echo && ev.seq <= fence {
+				t.Fatal("pre-fence echo remained queued")
+			}
+			// Backend delivery after the fence is valid, even for echo.
+		}
+	}
+
+	late := filepath.Join(root, "late.txt")
+	if err := os.WriteFile(late, []byte("concurrent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	foundLate := false
+	for !foundLate {
+		waitWake("post-fence event retention")
+		// Even rejecting every pre-fence event must retain later deliveries.
+		lw.suppress(root, fence, func(localWatchEvent) bool { return false })
+		batch := lw.take(root)
+		if batch.full {
+			t.Fatal("later write unexpectedly forced a full batch")
+		}
+		for _, ev := range batch.events {
+			if ev.seq <= fence {
+				t.Fatalf("pre-fence event remained queued: %+v", ev)
+			}
+			if ev.path == late {
+				foundLate = true
+			}
+		}
+	}
+}
+
+func TestMaterializationEchoSuppressionKeepsChangedEvents(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	echo := filepath.Join(root, "echo.txt")
+	changed := filepath.Join(root, "changed.txt")
+	if err := os.WriteFile(echo, []byte("materialized"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(changed, []byte("before"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("initial writes did not wake watcher")
+	}
+	_ = lw.take(root)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "volume"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := func(path string) store.CachedFile {
+		t.Helper()
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store.CachedFile{Size: info.Size(), MTimeNS: info.ModTime().UnixNano()}
+	}
+	cache := map[string]store.CachedFile{
+		"echo.txt":    fingerprint(echo),
+		"changed.txt": fingerprint(changed),
+	}
+
+	if err := os.WriteFile(echo, []byte("materialized"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("materialization echo did not wake watcher")
+	}
+	cache["echo.txt"] = fingerprint(echo)
+	if err := os.WriteFile(changed, []byte("concurrent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent change did not wake watcher")
+	}
+	if err := st.SaveCache("mount", cache); err != nil {
+		t.Fatal(err)
+	}
+	suppressMaterializationEchoes(lw, root, root, "mount", st, lw.fence())
+
+	batch := lw.take(root)
+	if len(batch.events) != 1 || batch.events[0].path != changed {
+		t.Fatalf("suppressed batch = %+v, want only concurrent change %s", batch.events, changed)
+	}
+}
+
+func TestWorkerSuppressesLateMaterializationEchoes(t *testing.T) {
+	for _, concurrentEdit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("concurrent_edit=%v", concurrentEdit), func(t *testing.T) {
+			hub := newFakeHub(t)
+			hub.killStreams()
+			m := watchMount(t, hub)
+			proj, ok, err := config.LoadProject(m.folder)
+			if err != nil || !ok {
+				t.Fatalf("load project: ok=%v err=%v", ok, err)
+			}
+			st, err := store.Open(m.volDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dev, err := config.LoadDevice()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			peerDir := filepath.Join(m.folder, "peer")
+			// Hold recursive watch installation, not materialization: the peer
+			// directory's Create must arrive in pending AFTER the cycle's
+			// original post-materialization fence. This happens naturally when
+			// Darwin is still adding watches for a newly populated directory.
+			var enteredOnce sync.Once
+			setLocalWatcherTestHooks(t, nil, nil, func(path string) {
+				if path == peerDir {
+					enteredOnce.Do(func() { close(entered) })
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+				}
+			})
+			var cycles atomic.Int64
+			workerCycleHook = func(volDir string) {
+				if volDir == m.volDir {
+					cycles.Add(1)
+				}
+			}
+			wake := make(chan struct{}, 1)
+			done := make(chan error, 1)
+			const scanInterval = 100 * time.Millisecond
+			go func() {
+				done <- runVolumeWorker(ctx, m.volDir, proj.Remote, scanInterval, time.Hour, wake)
+			}()
+			t.Cleanup(func() {
+				unblock()
+				cancel()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Errorf("worker shutdown: %v", err)
+					}
+					workerCycleHook = nil
+				case <-time.After(5 * time.Second):
+					t.Error("worker did not stop; leaving hooks installed to avoid racing it")
+				}
+			})
+			waitFor := func(label string, ready func() bool) {
+				t.Helper()
+				deadline := time.Now().Add(10 * time.Second)
+				for !ready() {
+					select {
+					case err := <-done:
+						// Keep the result available to the cleanup join.
+						done <- err
+						t.Fatalf("worker exited before %s: %v", label, err)
+					case <-time.After(10 * time.Millisecond):
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("timed out waiting for %s; cycles=%d", label, cycles.Load())
+					}
+				}
+			}
+			logContains := func(text string) bool {
+				data, err := os.ReadFile(LogPath(m.volDir))
+				return err == nil && strings.Contains(string(data), text)
+			}
+			waitFor("initial push", func() bool { return logContains("local+1 pulled+0") })
+			time.Sleep(3 * scanInterval)
+			before := cycles.Load()
+
+			const peerFiles = 20
+			hub.mu.Lock()
+			var lines []byte
+			for i := range peerFiles {
+				content := []byte(fmt.Sprintf("peer %d\n", i))
+				sum := sha256.Sum256(content)
+				blob := hex.EncodeToString(sum[:])
+				line, err := json.Marshal(journal.Op{
+					Device: "peer", Seq: int64(i + 1), Lamport: int64(i + 100),
+					Time: time.Now().UTC(), Kind: journal.KindPut,
+					Path: fmt.Sprintf("peer/nested/%03d.md", i), Blob: blob,
+					Size: int64(len(content)), Mode: 0o644,
+				})
+				if err != nil {
+					hub.mu.Unlock()
+					t.Fatal(err)
+				}
+				hub.objects["blobs/"+blob] = content
+				lines = append(append(lines, line...), '\n')
+			}
+			hub.objects["journal/peer.jsonl"] = lines
+			hub.mu.Unlock()
+			wake <- struct{}{}
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("peer directory never reached recursive watch installation")
+			}
+			// The activity log is written after Cycle, cache persistence, and
+			// the old suppression call, so releasing cannot race that fence.
+			waitFor("completed peer materialization", func() bool { return logContains("pulled+20") })
+			if got := cycles.Load(); got != before+1 {
+				t.Fatalf("peer pull ran %d cycles before delayed events, want 1", got-before)
+			}
+			for i := range peerFiles {
+				data, err := os.ReadFile(filepath.Join(peerDir, "nested", fmt.Sprintf("%03d.md", i)))
+				if err != nil || string(data) != fmt.Sprintf("peer %d\n", i) {
+					t.Fatalf("materialized peer file %d: bytes=%q err=%v", i, data, err)
+				}
+			}
+
+			wantCycles := before + 1
+			if concurrentEdit {
+				for _, path := range []string{"notes.md", "peer/user.md"} {
+					if err := os.WriteFile(filepath.Join(m.folder, filepath.FromSlash(path)), []byte("concurrent user edit\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// One local discovery and its immediate remote push are needed;
+				// the peer directory echo must not add another discovery.
+				wantCycles += 2
+			}
+			unblock()
+			if concurrentEdit {
+				waitFor("concurrent edits journaled and pushed", func() bool {
+					ops, err := st.DeviceOps(dev.ID)
+					if err != nil {
+						return false
+					}
+					syncState, err := st.LoadSync()
+					if err != nil || syncState.PushedOps != int64(len(ops)) {
+						return false
+					}
+					found := make(map[string]bool)
+					for _, op := range ops {
+						if op.Path == "notes.md" || op.Path == "peer/user.md" {
+							data, err := os.ReadFile(st.BlobPath(op.Blob))
+							found[op.Path] = op.Kind == journal.KindPut && err == nil && string(data) == "concurrent user edit\n"
+						}
+					}
+					return found["notes.md"] && found["peer/user.md"]
+				})
+			}
+			time.Sleep(5 * scanInterval)
+			if got := cycles.Load(); got != wantCycles {
+				t.Fatalf("cycles after peer materialization = %d, want %d (no echo-only discovery)", got-before, wantCycles-before)
+			}
+			data, err := os.ReadFile(LogPath(m.volDir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, failure := range []string{"watcher stopped", "watcher unavailable", "cycle error:", "cycle panic", "offline, will retry:"} {
+				if strings.Contains(string(data), failure) {
+					t.Fatalf("worker lost healthy-watcher precondition: %s", data)
+				}
+			}
+		})
+	}
 }
 
 func TestWatchSuppressesThePoll(t *testing.T) {

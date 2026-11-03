@@ -132,6 +132,37 @@ type Session struct {
 	cacheDirty bool
 }
 
+// ScanEventKind describes one local filesystem observation. These types are
+// intentionally internal to the daemon/syncer boundary: ordinary callers do
+// not need to know about watcher events and continue to use Cycle's full-scan
+// default.
+type ScanEventKind uint8
+
+const (
+	ScanWrite ScanEventKind = iota
+	ScanCreate
+	ScanRemove
+	ScanRename
+	ScanChmod
+)
+
+// ScanEvent is a mount-relative filesystem event captured by a daemon watcher.
+// Directory is retained separately from Kind because remove/rename events may
+// name an entry that no longer exists when the scan runs.
+type ScanEvent struct {
+	Path      string
+	Kind      ScanEventKind
+	Directory bool
+}
+
+// ScanHint bounds local discovery to the paths observed before a worker's
+// batch fence. Full requests deliberately carry no events: they invalidate
+// every cached path and use the ordinary walk.
+type ScanHint struct {
+	Full   bool
+	Events []ScanEvent
+}
+
 // logInbound records one materialized peer path both ways: on this cycle's
 // Result (for the post_sync hook, which fires from the cycle that did the
 // work) and on the store's spool (for `bdrive sync --hook`, which runs in a
@@ -401,20 +432,28 @@ func tickLamport(cur int64) int64 {
 }
 
 // Cycle runs one full scan/sync/materialize pass under the volume lock, then
-// fires the folder's post_sync hook — after the lock is released, so a hook
-// that itself runs a bdrive command starts working immediately instead of
-// blocking on the flock the cycle that spawned it is still holding (a long
-// push can hold it for a while). Splitting the body out is what makes that
-// ordering a property of the code: no call site has to remember it.
+// fires the folder's post_sync hook. A nil hint is the compatibility path:
+// every direct, CLI, hook, and desktop caller still performs a full discovery.
 func (s *Session) Cycle(ctx context.Context) (*Result, error) {
-	res, err := s.cycleLocked(ctx)
+	return s.cycle(ctx, nil)
+}
+
+// CycleWithScanHint is the daemon-only accelerator. Its hint never changes
+// pull, replay, materialization, or push ordering; it only narrows local
+// discovery when the watcher has a bounded, healthy batch.
+func (s *Session) CycleWithScanHint(ctx context.Context, hint *ScanHint) (*Result, error) {
+	return s.cycle(ctx, hint)
+}
+
+func (s *Session) cycle(ctx context.Context, hint *ScanHint) (*Result, error) {
+	res, err := s.cycleLocked(ctx, hint)
 	if err == nil && res != nil {
 		s.firePostSync(res)
 	}
 	return res, err
 }
 
-func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
+func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, error) {
 	unlock, err := s.Store.Lock()
 	if err != nil {
 		return nil, fmt.Errorf("lock volume: %w", err)
@@ -499,11 +538,10 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// without a cache must adopt that state rather than start a fresh import.
 	//
 	// ponytail: re-reads every journal, so the cycle now parses them twice (the
-	// other read is step 4's). The cycle already walks the whole working folder
-	// every tick, which is the larger cost by far. If it ever measures badly,
-	// cache the derived max against a per-journal (name, size) fingerprint in
-	// SyncState — do NOT hand-scan the JSONL for "lamport": Op.Path and Op.Note
-	// are peer-chosen strings that can contain that literal.
+	// other read is step 4's). If it ever measures badly, cache the derived max
+	// against a per-journal (name, size) fingerprint in SyncState — do NOT
+	// hand-scan the JSONL for "lamport": Op.Path and Op.Note are peer-chosen
+	// strings that can contain that literal.
 	_, hadCachedIgnore := cache[IgnoreFile]
 	ops, err := s.Store.AllOps()
 	var existingState map[string]journal.FileState
@@ -536,6 +574,7 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", IgnoreFile, err)
 	}
+	oldAccepted, oldPulled := st.IgnoreAccepted, st.IgnorePulled
 	// Accept the rules on disk as this device's own whenever they are not the
 	// copy a peer's version last wrote here — i.e. whenever somebody at this
 	// machine authored them (`bdrive init --only`, `bdrive scope`, an editor).
@@ -599,15 +638,23 @@ func (s *Session) cycleLocked(ctx context.Context) (*Result, error) {
 	// a refusal is a 403 on the whole journal PUT, and a journal is
 	// append-only, so one such op wedges this device until somebody edits its
 	// journal by hand.
-	if s.loadScope(ctx, &st) {
+	scopeMoved := s.loadScope(ctx, &st)
+	if scopeMoved {
 		// What this account may see has changed. Every peer journal on disk
 		// was filtered under the OLD scope, so it is neither a prefix of nor
 		// the same length as what the hub will serve now.
 		s.forgetPeerJournals()
 	}
 
+	fullScan := hint == nil || joining || scopeMoved ||
+		st.IgnoreAccepted != oldAccepted || st.IgnorePulled != oldPulled ||
+		s.Prune || scanHintTouchesIgnore(hint)
+	if fullScan {
+		hint = &ScanHint{Full: true}
+	}
+
 	// 1. Scan the working folder and journal any local changes.
-	localOps, err := s.scan(cache, &st, int64(len(myOps)), filter, sec)
+	localOps, err := s.scan(cache, &st, int64(len(myOps)), filter, sec, hint)
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
@@ -1025,7 +1072,40 @@ func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, 
 // are neither journaled nor deleted: a path that becomes ignored is dropped
 // from the cache without a delete op, so opting out locally never removes
 // the file from other devices.
-func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter, sec *secretLog) ([]journal.Op, error) {
+func scanHintTouchesIgnore(hint *ScanHint) bool {
+	if hint == nil || hint.Full {
+		return false
+	}
+	for _, ev := range hint.Events {
+		if ev.Path == IgnoreFile {
+			return true
+		}
+	}
+	return false
+}
+
+// scan diffs the working folder against the state cache and returns ops for
+// every local change, storing new content in the blob store. Filtered paths
+// are neither journaled nor deleted: a path that becomes ignored is dropped
+// from the cache without a delete op, so opting out locally never removes
+// the file from other devices.
+func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter, sec *secretLog, hint *ScanHint) ([]journal.Op, error) {
+	fullDiscovery := hint == nil || hint.Full
+	var roots []string
+	deleteScopes := map[string]bool{}
+	if !fullDiscovery && hint != nil {
+		for _, ev := range hint.Events {
+			rel := filepath.ToSlash(filepath.Clean(ev.Path))
+			if rel == "." || rel == "" || !journal.SafePath(rel) {
+				fullDiscovery = true
+				break
+			}
+			roots = append(roots, rel)
+			if ev.Directory || ev.Kind == ScanRemove || ev.Kind == ScanRename {
+				deleteScopes[rel] = true
+			}
+		}
+	}
 	seen := make(map[string]bool, len(cache))
 	var ops []journal.Op
 	note := s.Note
@@ -1050,7 +1130,16 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 	}
 
-	err := walkFolder(s.Folder, filter, func(p, rel string, d fs.DirEntry, v verdict) error {
+	walk := walkFolder
+	if !fullDiscovery {
+		walk = func(folder string, filter *Filter, fn func(string, string, fs.DirEntry, verdict) error) error {
+			if len(roots) == 0 {
+				return nil
+			}
+			return walkFolderPaths(folder, filter, roots, fn)
+		}
+	}
+	err := walk(s.Folder, filter, func(p, rel string, d fs.DirEntry, v verdict) error {
 		if v != vSync && v != vSymlink {
 			return nil
 		}
@@ -1132,6 +1221,18 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 	for rel := range cache {
 		if seen[rel] {
 			continue
+		}
+		if !fullDiscovery {
+			inScope := false
+			for scope := range deleteScopes {
+				if rel == scope || strings.HasPrefix(rel, scope+"/") {
+					inScope = true
+					break
+				}
+			}
+			if !inScope {
+				continue
+			}
 		}
 		// The walk only ever produces clean in-mount paths, but this pass
 		// mints an op from every cache key the walk did NOT see — and the
@@ -2011,8 +2112,28 @@ func (s *Session) materializeFile(rel string, want journal.FileState, cache map[
 	if ok && c.Blob == want.Blob && c.Mode == want.Mode && !s.readOnlyDrifted(rel, abs, c) {
 		return false, nil
 	}
+	if ok && !s.readOnlyPath(rel) {
+		fi, err := os.Lstat(abs)
+		if err != nil || !cachedPathMatches(abs, fi, c) {
+			// A tracked writable path is safe to replace only when the
+			// current entry still matches the cached type and fingerprint.
+			// Missing entries and local type/content changes belong to the
+			// next targeted scan.
+			return false, nil
+		}
+	}
+	if !ok {
+		// An untracked symlink is local user state, even when its target is
+		// readable. Lstat is required here: Stat would follow a non-dangling
+		// link into content that can be adopted or a dangling link into an
+		// error, and both cases would fall through to writeFile and replace
+		// the link with peer bytes.
+		if fi, err := os.Lstat(abs); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return false, nil
+		}
+	}
 	if fi, err := os.Stat(abs); err == nil {
-		if ok && (fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS) {
+		if ok && c.Link == "" && (fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS) {
 			// The one place a dirty file is not left alone. Everywhere else
 			// "dirty" means the next scan will commit it — under a read-only
 			// folder the next scan will NOT, so leaving it would mean a file
@@ -2150,6 +2271,25 @@ func unsafeRel(rel string) bool { return !journal.SafePath(rel) }
 // goes too: a synced file is never a drop box for other users on the machine.
 func safeMode(m uint32) uint32 { return m & 0o777 &^ 0o022 }
 
+// cachedPathMatches reports whether the current filesystem entry still has
+// the type and fingerprint captured in the materialization cache. Lstat is
+// required: a cached dangling link must be compared as a link rather than
+// treated as a missing file through Stat.
+func cachedPathMatches(abs string, fi os.FileInfo, c store.CachedFile) bool {
+	if c.Link != "" {
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return false
+		}
+		cur, err := os.Readlink(abs)
+		return err == nil && cur == c.Link &&
+			fi.Size() == c.Size &&
+			fi.ModTime().UnixNano() == c.MTimeNS
+	}
+	return fi.Mode().IsRegular() &&
+		fi.Size() == c.Size &&
+		fi.ModTime().UnixNano() == c.MTimeNS
+}
+
 // materializeSymlink recreates a peer's symbolic link. It writes only the link
 // entry: the target string is reproduced verbatim and never resolved, so a link
 // pointing outside the mount lands as a dangling or escaping link that this
@@ -2157,9 +2297,20 @@ func safeMode(m uint32) uint32 { return m & 0o777 &^ 0o022 }
 func (s *Session) materializeSymlink(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
 	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
 	c, ok := cache[rel]
-	if ok && c.Link == want.Link {
-		if cur, err := os.Readlink(abs); err == nil && cur == want.Link {
-			return false, nil // already the right link
+	if ok && !s.readOnlyPath(rel) {
+		fi, err := os.Lstat(abs)
+		if err != nil || !cachedPathMatches(abs, fi, c) {
+			// A tracked writable path is safe to replace only when the
+			// current entry still matches the cached type and fingerprint.
+			// Missing entries and local type/content changes belong to the
+			// next targeted scan.
+			return false, nil
+		}
+		if c.Link != "" {
+			cur, err := os.Readlink(abs)
+			if err == nil && cur == want.Link {
+				return false, nil
+			}
 		}
 	}
 	if fi, err := os.Lstat(abs); err == nil {
@@ -2233,7 +2384,11 @@ func (s *Session) writeFile(abs string, want journal.FileState) error {
 	// descend into one, so such a directory is a one-way door: it takes peer
 	// writes and never reports them. Checked before MkdirAll, so a refused op
 	// does not even build the parent chain on the far side.
-	if !store.UnderRoot(s.Folder, abs) {
+	//
+	// The final entry itself may be a dangling symlink from a tracked prior
+	// state. Checking its parent permits replacing that entry atomically while
+	// still rejecting symlinked ancestor directories.
+	if !store.UnderRoot(s.Folder, filepath.Dir(abs)) {
 		return fmt.Errorf("resolves outside the mount root")
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
