@@ -594,7 +594,7 @@ func TestDataQuerySQLReportsAPassThatMissedAFile(t *testing.T) {
 	}
 	wait("a pass that could not fetch a file still reports the index complete",
 		func(a dataAnswer) bool { return !a.Complete })
-	if err := os.WriteFile(filepath.Join(root, p.ID, "blobs", blob), []byte(body), 0o644); err != nil {
+	if err := srv.Root.Put(context.Background(), p.ID+"/blobs/"+blob, strings.NewReader(body), int64(len(body))); err != nil {
 		t.Fatal(err)
 	}
 	wait("the index never caught up once the file could be fetched",
