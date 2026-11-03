@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -215,6 +216,16 @@ A real websocket, through the real handler, into the real document.
 */
 func TestYCollabAcceptsARealWebsocket(t *testing.T) {
 	srv, p, _ := newHub(t, true, nil)
+	// Shutdown does not join peer disconnect hooks. Signal only after the
+	// real unload hook has finished its snapshot and released the lease.
+	unloaded := make(chan struct{})
+	var unloadOnce sync.Once
+	ydocs := srv.ydocs()
+	onUnload := ydocs.OnUnloadDocument
+	ydocs.OnUnloadDocument = func(ctx context.Context, room string) {
+		defer unloadOnce.Do(func() { close(unloaded) })
+		onUnload(ctx, room)
+	}
 	h := srv.Handler()
 	const body = "# held by the hub\n"
 	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", body, ""); rec.Code != http.StatusOK {
@@ -222,7 +233,21 @@ func TestYCollabAcceptsARealWebsocket(t *testing.T) {
 	}
 
 	ts := httptest.NewServer(h)
-	defer ts.Close()
+	var conn *websocket.Conn
+	t.Cleanup(func() {
+		// Closing the client starts the server's disconnect hook. Wait for
+		// the original unload hook before closing the hub: it performs the
+		// final snapshot and releases the room lease synchronously.
+		if conn != nil {
+			_ = conn.Close()
+			<-unloaded
+		}
+		ts.Close()
+		if err := srv.Close(context.Background()); err != nil {
+			t.Errorf("close hub: %v", err)
+		}
+		srv.rooms().settle()
+	})
 	u := "ws" + strings.TrimPrefix(ts.URL, "http") +
 		"/api/p/" + p.ID + "/ycollab/held?path=notes.md"
 
@@ -239,8 +264,6 @@ func TestYCollabAcceptsARealWebsocket(t *testing.T) {
 		}
 		t.Fatalf("dial %s: %v (HTTP %d)", u, err, status)
 	}
-	defer conn.Close()
-
 	// y-websocket opens by sending sync step 1; the hub must answer with the
 	// document it seeded rather than silence.
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
