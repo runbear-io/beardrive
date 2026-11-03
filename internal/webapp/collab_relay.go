@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -48,7 +49,7 @@ func (s *Server) ConnectCollab(ctx context.Context) error {
 	}
 	opt, err := goredis.ParseURL(addr)
 	if err != nil {
-		return fmt.Errorf("collab redis: %w", err)
+		return errors.New("collab redis: invalid URL")
 	}
 	client := goredis.NewClient(opt)
 	if err := client.Ping(ctx).Err(); err != nil {
