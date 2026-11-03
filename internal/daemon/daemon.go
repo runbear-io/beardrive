@@ -1945,7 +1945,14 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			// each wake would both bypass echo suppression and overwrite hints
 			// collected for earlier user edits in the same window.
 			remoteWake := false
-			if wait := time.Until(lastCycle.Add(scanInterval)); wait > 0 {
+			wait := time.Until(lastCycle.Add(scanInterval))
+			if localWatchHealthy && !lastFullScan.IsZero() {
+				remaining := lastFullScan.Add(localWatchSafetyInterval).Sub(localWatchNow())
+				if remaining < wait {
+					wait = remaining
+				}
+			}
+			if wait > 0 {
 				timer := time.NewTimer(wait)
 			localWait:
 				for {
@@ -1994,6 +2001,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 						break localWait
 					}
 				}
+			}
+			if localWatchHealthy && !lastFullScan.IsZero() &&
+				localWatchNow().Sub(lastFullScan) >= localWatchSafetyInterval {
+				forceFull = true
 			}
 			if !collectLocalHints() && !forceFull && !remoteWake {
 				// A wake is only a notification, not proof of local work. Keep

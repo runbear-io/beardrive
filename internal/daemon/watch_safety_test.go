@@ -770,6 +770,99 @@ func TestWorkerSafetyFullScanDeadlineSurvivesOtherCycles(t *testing.T) {
 	unblock()
 }
 
+func TestWorkerLocalWakeDebounceHonorsSafetyDeadline(t *testing.T) {
+	hub := newFakeHub(t)
+	m := watchMount(t, hub)
+	var offset atomic.Int64
+	clock := func() time.Time {
+		return time.Now().Add(time.Duration(offset.Load()))
+	}
+	held := filepath.Join(m.folder, "held")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	setLocalWatchHooks(nil, nil, func(path string) {
+		if path != held {
+			return
+		}
+		enterOnce.Do(func() {
+			if err := os.WriteFile(filepath.Join(m.folder, "held/missed.txt"), []byte("unobserved user edit\n"), 0o644); err != nil {
+				t.Errorf("write missed local edit: %v", err)
+			}
+			close(entered)
+		})
+		<-release
+	})
+	w := startWatchSafetyWorker(t, m, time.Hour, clock, nil, 15*time.Second)
+	t.Cleanup(unblock) // Release the watcher before the worker cleanup join.
+	w.wait("completed initial full scan", func() bool {
+		return w.pushed("notes.md", journal.KindPut, "hello\n") &&
+			strings.Contains(w.log(), "local+1 pulled+0")
+	})
+	beforeSync, err := w.st.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset.Store(int64(localWatchSafetyInterval - 2*time.Second))
+	const localContents = "ordinary local edit before safety deadline\n"
+	writeWorktreeFile(t, m.folder, "notes.md", localContents)
+
+	if err := os.Mkdir(held, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("new directory never reached recursive watcher installation")
+	}
+	const missedPath = "held/missed.txt"
+	if w.pushed(missedPath, journal.KindPut, "unobserved user edit\n") {
+		t.Fatal("safety scan discovered the unhinted file before the deadline")
+	}
+	ops, err := w.st.DeviceOps(w.device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if op.Path == missedPath {
+			t.Fatalf("unhinted file entered the local journal before the safety scan: %+v", op)
+		}
+	}
+	afterSync, err := w.st.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterSync.PushedOps != beforeSync.PushedOps {
+		t.Fatalf("unhinted file advanced the push cursor before the safety scan: %d -> %d", beforeSync.PushedOps, afterSync.PushedOps)
+	}
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if w.pushed(missedPath, journal.KindPut, "unobserved user edit\n") {
+			break
+		}
+		select {
+		case err := <-w.done:
+			w.done <- err
+			t.Fatalf("worker exited before safety full scan: %v", err)
+		case <-deadline.C:
+			t.Fatalf("safety full scan did not discover the unhinted file before the debounce interval; log=%s", w.log())
+		case <-tick.C:
+		}
+	}
+	if !w.pushed("notes.md", journal.KindPut, localContents) {
+		t.Fatal("ordinary local edit was not uploaded with the safety full scan")
+	}
+	if !worktreeFileEquals(m.folder, missedPath, "unobserved user edit\n") {
+		t.Fatal("safety full scan changed the user's disk bytes")
+	}
+	w.requireHealthyWatcher()
+	unblock()
+}
+
 func TestWorkerNestedSameVolumeRootsJournalDirectoryRenameAndDelete(t *testing.T) {
 	hub := newFakeHub(t)
 	m := watchMount(t, hub)
