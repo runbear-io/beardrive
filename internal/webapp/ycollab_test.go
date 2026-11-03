@@ -175,7 +175,7 @@ func TestYCollabSeedsTheDocumentFromTheFile(t *testing.T) {
 	}
 
 	doc := crdt.New()
-	if err := srv.seedDoc(p.ID+"/notes.md", doc); err != nil {
+	if err := srv.seedDoc(context.Background(), p.ID+"/notes.md", doc); err != nil {
 		t.Fatal(err)
 	}
 	if doc.GetText("body").Len() == 0 {
@@ -196,7 +196,7 @@ func TestYCollabSeedsEmptyForWhatIsNotThere(t *testing.T) {
 		"malformed-room-name",
 	} {
 		doc := crdt.New()
-		if err := srv.seedDoc(room, doc); err != nil {
+		if err := srv.seedDoc(context.Background(), room, doc); err != nil {
 			t.Errorf("%s: %v", room, err)
 		}
 		if n := doc.GetText("body").Len(); n != 0 {
@@ -299,7 +299,7 @@ func TestYCollabSnapshotsTheDocumentAsTheHuman(t *testing.T) {
 
 	// A room, as ygo would hand it to us, edited by somebody.
 	doc := crdt.New()
-	if err := srv.seedDoc(room, doc); err != nil {
+	if err := srv.seedDoc(context.Background(), room, doc); err != nil {
 		t.Fatal(err)
 	}
 	srv.rooms().load(room, doc)
@@ -341,7 +341,7 @@ func TestYCollabSnapshotOfUnchangedTextIsNotAWrite(t *testing.T) {
 	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", body, "")
 
 	doc := crdt.New()
-	if err := srv.seedDoc(room, doc); err != nil {
+	if err := srv.seedDoc(context.Background(), room, doc); err != nil {
 		t.Fatal(err)
 	}
 	srv.rooms().load(room, doc)
@@ -364,7 +364,7 @@ func TestYCollabSnapshotNeedsSomeoneToAttribute(t *testing.T) {
 	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "original\n", "")
 
 	doc := crdt.New()
-	_ = srv.seedDoc(room, doc)
+	_ = srv.seedDoc(context.Background(), room, doc)
 	srv.rooms().load(room, doc) // loaded, but no writer recorded
 	txt := doc.GetText("body")
 	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "SHOULD NOT LAND ", nil) })
@@ -397,7 +397,7 @@ func TestYCollabRebuiltRoomMergesAReturningDocumentOnce(t *testing.T) {
 	open := func() *crdt.Doc {
 		t.Helper()
 		doc := crdt.New()
-		if err := srv.seedDoc(room, doc); err != nil {
+		if err := srv.seedDoc(context.Background(), room, doc); err != nil {
 			t.Fatal(err)
 		}
 		srv.rooms().load(room, doc)
@@ -468,7 +468,7 @@ func TestYCollabSnapshotStoresTheHistoryOfWhatItWrote(t *testing.T) {
 	room := p.ID + "/notes.md"
 	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "x\n", "")
 	doc := crdt.New()
-	if err := srv.seedDoc(room, doc); err != nil {
+	if err := srv.seedDoc(context.Background(), room, doc); err != nil {
 		t.Fatal(err)
 	}
 	srv.rooms().load(room, doc)
@@ -478,7 +478,7 @@ func TestYCollabSnapshotStoresTheHistoryOfWhatItWrote(t *testing.T) {
 	srv.snapshotRoom(context.Background(), room)
 
 	sha := srv.rooms().base(room)
-	state := srv.roomHistory(p.ID, sha)
+	state := srv.roomHistory(context.Background(), p.ID, sha)
 	if state == nil {
 		t.Fatalf("no history stored for %s", sha)
 	}

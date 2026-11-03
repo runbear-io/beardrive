@@ -36,7 +36,7 @@ func openRoom(t *testing.T, srv *Server, room string) *crdt.Doc {
 	t.Helper()
 	doc := crdt.New()
 	srv.rooms().load(room, doc)
-	if err := srv.seedDoc(room, doc); err != nil {
+	if err := srv.seedDoc(context.Background(), room, doc); err != nil {
 		t.Fatal(err)
 	}
 	srv.rooms().writer(room, User{Email: "editor@example.com", Name: "An Editor"})

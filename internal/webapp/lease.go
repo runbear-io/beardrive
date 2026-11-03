@@ -62,6 +62,9 @@ func (s *Server) nodeID() string {
 // holdLease reports whether this process writes the room, taking the lease
 // if it is free or expired and renewing it once half its life has passed.
 func (s *Server) holdLease(ctx context.Context, room string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	project, path, ok := strings.Cut(room, "/")
 	if !ok {
 		return false
@@ -78,6 +81,9 @@ func (s *Server) holdLease(ctx context.Context, room string) bool {
 	// ponytail: one lock across every room's lease round-trip; per-room locks if hundreds of live rooms contend
 	r.leaseMu.Lock()
 	defer r.leaseMu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
 	now := time.Now()
 	held := r.leases[room]
 	if held != nil && now.Before(held.until.Add(-leaseTTL/2)) {
@@ -105,7 +111,9 @@ func (s *Server) holdLease(ctx context.Context, room string) bool {
 	body, _ := json.Marshal(leaseRecord{Holder: s.nodeID(), Until: now.Add(leaseTTL)})
 	v, err := cond.PutIf(ctx, leaseKey(path), bytes.NewReader(body), int64(len(body)), expect)
 	if err != nil {
-		delete(r.leases, room)
+		if ctx.Err() == nil {
+			delete(r.leases, room)
+		}
 		if !errors.Is(err, remote.ErrVersionMismatch) {
 			log.Printf("bdrive: taking lease for %s: %v", room, err)
 		}
@@ -115,29 +123,34 @@ func (s *Server) holdLease(ctx context.Context, room string) bool {
 	return true
 }
 
-// releaseLease gives a room's lease up as the room ends, so the next process
-// to open the file does not wait out the TTL. Best effort: an expired lease
-// is the same thing, later.
-func (s *Server) releaseLease(room string) {
+// releaseLease gives a room's lease up as the room ends. If its context is
+// already cancelled, it leaves the in-memory record for a later attempt or
+// TTL expiry rather than hiding a lease that is still stored remotely.
+func (s *Server) releaseLease(ctx context.Context, room string) {
 	project, path, _ := strings.Cut(room, "/")
 	r := s.rooms()
 	r.leaseMu.Lock()
 	defer r.leaseMu.Unlock()
 	held := r.leases[room]
-	if held == nil {
+	if held == nil || ctx.Err() != nil {
 		return
 	}
-	delete(r.leases, room)
 	be, ok := s.projectBackend(project)
 	if !ok {
+		delete(r.leases, room)
 		return
 	}
 	cond, ok := be.(remote.ConditionalPutter)
 	if !ok {
+		delete(r.leases, room)
 		return
 	}
 	body, _ := json.Marshal(leaseRecord{Holder: s.nodeID()})
-	_, _ = cond.PutIf(context.Background(), leaseKey(path), bytes.NewReader(body), int64(len(body)), held.version)
+	_, err := cond.PutIf(ctx, leaseKey(path), bytes.NewReader(body), int64(len(body)), held.version)
+	if err != nil && ctx.Err() != nil {
+		return
+	}
+	delete(r.leases, room)
 }
 
 // keepLease renews a room's lease for as long as the room lives — a quiet
@@ -145,6 +158,10 @@ func (s *Server) releaseLease(room string) {
 // process that does not hold it but could write, keeps asking, which is how
 // the writer's job passes on when the holder's room ends.
 func (s *Server) keepLease(room string) {
+	bg := s.collabContext()
+	if bg.Err() != nil {
+		return
+	}
 	r := s.rooms()
 	r.mu.Lock()
 	if r.renewals[room] != nil {
@@ -166,12 +183,14 @@ func (s *Server) keepLease(room string) {
 		defer t.Stop()
 		for {
 			select {
+			case <-bg.Done():
+				return
 			case <-stop:
 				return
 			case <-t.C:
 				_, who, ok := r.get(room)
 				if ok && (who.Email != "" || s.holdsLease(room)) {
-					s.holdLease(context.Background(), room)
+					s.holdLease(bg, room)
 				}
 			}
 		}
