@@ -24,9 +24,8 @@ storage that supports conditional writes.
   on local-filesystem locking, not shared network-filesystem guarantees. (#325)
 - **Snapshot live co-editing rooms on graceful shutdown.** `bdrive serve`
   attempts to snapshot live rooms on SIGTERM or SIGINT before HTTP shutdown.
-  It supplies an eight-second shutdown context, but storage I/O and lock
-  acquisition are not uniformly deadline-aware. A hard kill can interrupt
-  saving. (#325)
+  The shutdown context now cancels local file-lock waits; storage backends
+  outside that local path and a hard kill can still interrupt saving. (#325)
 - **MCP tool titles and safety hints.** Every tool has a human-readable title
   and closed-world annotations. Read tools declare read-only and idempotent
   behavior; tools that change files declare destructive behavior. These are
