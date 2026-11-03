@@ -263,6 +263,7 @@ classDiagram
         +publish(project, changeEvent)
         +fanout(project, frame)
         -relay eventRelay
+        -changed func(project, paths, more)
     }
     class eventRelay {
         <<internal/webapp, relay.go>>
@@ -294,6 +295,7 @@ classDiagram
         +OnLoadDocument lease (no relay), seed from the newest stored state
         +OnLastPeer / OnUnloadDocument snapshot to the file
         +AttachRelay cluster.Relay, one per process
+        +foldOutside merge an outside write into the room
     }
     class CollabConfig {
         &lt;&lt;internal/webapp, collab_relay.go&gt;&gt;
@@ -825,6 +827,7 @@ classDiagram
     Server *-- presenceHub : who is looking at what
     eventHub *-- subscriber
     eventHub ..> eventRelay : the processes this one is not
+    eventHub ..> ydocs : a changed file nudges its live room
     presenceHub ..> eventHub : publishes roster on the SAME stream
     presenceHub ..> person : rosterOf
 

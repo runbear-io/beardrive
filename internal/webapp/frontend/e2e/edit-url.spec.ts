@@ -191,21 +191,19 @@ test("an outside write lands in the open editor", async ({ page }) => {
   await expect(buf).toContainText("first line.STILL HERE");
 });
 
-/* ...and the case it must refuse. Half a sentence in the buffer is work
-   nothing may overwrite, so the outside write stays out and is announced. */
-test("an outside write never overwrites unsaved typing", async ({ page }) => {
+/* ...and when somebody is mid-sentence. The hub folds the outside write into
+   the document as one more edit, so the half-typed text and the agent's
+   change both stay, and there is nothing to warn about. */
+test("an outside write merges with unsaved typing", async ({ page }) => {
   await login(page, ADMIN);
   const id = await project(page);
   const file = await ownFile(page, id);
 
   await page.goto(`/${id}/edit/${file}`);
   await page.waitForSelector(".cm-host .cm-content");
-  // The editor's own save can never land, so the buffer stays genuinely
-  // unsaved for the whole test instead of racing the 700ms idle timer.
-  // Routes do not apply to page.request, so the outside write still goes.
-  await page.route("**/upload/content*", (route) => route.abort());
-  await page.locator(".cm-host .cm-content").click();
-  await page.keyboard.type("MID-SENTENCE");
+  await page.locator(".cm-host .cm-line", { hasText: "# Notes" }).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" MID-SENTENCE");
 
   const r = await page.request.put(
     `/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`,
@@ -213,10 +211,10 @@ test("an outside write never overwrites unsaved typing", async ({ page }) => {
   );
   expect(r.ok()).toBeTruthy();
 
-  await expect(page.locator("#peer-wrote")).toBeVisible();
   const buf = page.locator(".cm-host .cm-content");
-  await expect(buf).toContainText("MID-SENTENCE");
-  await expect(buf).not.toContainText("rewritten by an agent");
+  await expect(buf).toContainText("rewritten by an agent", { timeout: 10_000 });
+  await expect(buf).toContainText("# Notes MID-SENTENCE");
+  await expect(page.locator("#peer-wrote")).toHaveCount(0);
 });
 
 /* One failed read must not end an editing session.
@@ -259,11 +257,8 @@ test("a failing read leaves the editor, and the work, alone", async ({ page }) =
   await expect(buf).toContainText("SURVIVES");
   await expect(page.locator(".empty")).toHaveCount(0);
 
-  // And it is still a working editor once the hub recovers. The write that
-  // landed while the reads were failing makes this buffer stale, so the save
-  // is preserved BESIDE the file rather than on top of it — see
-  // concurrent-edit.spec.ts. Either way it is written down somewhere, which
-  // is the whole claim.
+  // And it is still a working editor once the hub recovers: what is typed
+  // next is written down, which is the whole claim.
   await page.unroute("**/file?path=*");
   await page.keyboard.type(" AND SAVES");
   await expect(page.locator("#editor-state")).toHaveAttribute("data-state", "clean");

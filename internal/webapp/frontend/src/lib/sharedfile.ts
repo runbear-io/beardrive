@@ -61,8 +61,9 @@ export type SharedFile = {
   /** Force a save now, skipping the idle wait. */
   saveNow(): Promise<void>;
   /** Fold an outside write — an agent, a CLI, another device — into the open
-      document. "blocked" means the caller should SAY so instead, because this
-      refused to resolve it. `held` says the hub has already put this text
+      document. In a hub-held room the hub folds it and this only records the
+      file's version. "blocked" means the caller should SAY so instead,
+      because this refused to resolve it. `held` says the hub has already put this text
       into the shared document (a restore into a live room): it is recorded
       as the file's content and never spliced here, which would apply it
       twice. */
@@ -507,37 +508,36 @@ export function openSharedFile(opts: {
       rebase(nextSha);
       return "same";
     }
+    /* Never into a hub-held document. The hub folds an outside write into
+       the room itself (ycollab.go, foldOutside) and this document hears it
+       over the socket like any co-editor's edit. A splice here would be the
+       same change made twice — and with the socket down it is worse: the
+       change stream outlives the socket, y-websocket has dropped everyone
+       from awareness so this tab looks alone, and the hub's snapshot of the
+       others' typing got spliced in as this tab's own text, to be merged
+       back next to theirs on reconnect. */
+    if (hubHoldsIt) {
+      saved = next;
+      rebase(nextSha);
+      // The hub's own write coming back through the stream is the save
+      // landing, so this is where "dirty" honestly ends.
+      if (next === current()) setState("clean");
+      return "same";
+    }
+
+    // Solo from here: this surface's own buffer, saved by this client alone.
     const cur = current();
-    // Already in the buffer: a co-editor snapshotted the document we share.
-    // Recording it is what keeps the check above true for the rest of the
-    // session, so their next save is not mistaken for an outsider's.
     if (next === cur) {
       saved = next;
       rebase(nextSha);
-      // For a live room this IS the save landing — the hub's write, back
-      // through the stream — so this is where "dirty" honestly ends.
-      if (hubHoldsIt) setState("clean");
       return "same";
     }
-    /* Two different questions, which used to be one.
-
-       "Can we splice their write into the buffer?" and "is their VERSION a
-       valid base for our next write?" are not the same question, and
-       answering only the first is what put a co-editing session into a loop
-       of conflict copies.
-
-       In a room everyone shares one document, so a peer's save is a PAST
-       STATE of the text we are holding: their bytes are already in our CRDT,
-       arriving over the websocket rather than through this function. We must
-       not splice it (it is already applied, and splicing would apply it
-       twice) — but their sha is exactly the right base for our next save,
-       because our text is theirs plus whatever we have typed since.
-
-       Not assumed, checked. Turning their text into ours deletes nothing iff
-       ours is a strict superset of theirs, which is precisely the condition
-       that makes their version a safe base. An outsider's write — an agent,
-       the CLI, another device — fails that test, keeps the old base, and is
-       still refused with a conflict copy, which is what If-Match is for. */
+    /* Two different questions: "can their write be spliced into the buffer?"
+       and "is their VERSION a valid base for our next write?". Turning their
+       text into ours deletes nothing iff ours is a superset of theirs, which
+       is exactly when their version is a safe base. A write that fails that
+       test keeps the old base, and our next save is refused with a conflict
+       copy, which is what If-Match is for. */
     const theirsToOurs = textEdit(next, cur);
     const oursContainsTheirs = !theirsToOurs || theirsToOurs.from === theirsToOurs.to;
 
@@ -547,31 +547,15 @@ export function openSharedFile(opts: {
       if (oursContainsTheirs) rebase(nextSha);
       return "blocked";
     }
-    // A co-editor in the room: they are looking at the same stale document
-    // and would compute the same splice, and two identical splices into one
-    // CRDT is the change applied twice.
-    if (collab.peerCount() > 0) {
-      if (oursContainsTheirs) rebase(nextSha);
-      return "blocked";
-    }
     const e = textEdit(cur, next);
     if (!e) return "same";
-    if (!collab.text.length && !opts.soloApply) return "blocked";
-    // Before the splice, not after: the document change it causes schedules a
-    // save, and this is what makes that save a no-op instead of a write-back
-    // of what we just read.
+    if (!opts.soloApply) return "blocked";
+    // Before the splice, not after: the change it causes schedules a save,
+    // and this is what makes that save a no-op instead of a write-back of
+    // what we just read.
     saved = next;
     rebase(nextSha);
-    if (collab.text.length) {
-      // One transaction, so a peer sees a replacement rather than a delete
-      // followed by a moment of missing text.
-      collab.doc.transact(() => {
-        collab.text.delete(e.from, e.to - e.from);
-        collab.text.insert(e.from, e.insert);
-      });
-    } else {
-      opts.soloApply!(e);
-    }
+    opts.soloApply(e);
     return "merged";
   };
 

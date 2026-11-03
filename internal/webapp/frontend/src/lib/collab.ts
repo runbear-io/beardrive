@@ -35,6 +35,7 @@ export class CollabDoc {
   private ws: WebsocketProvider | null = null;
   private closed = false;
   private reached = false;
+  private opened = false;
 
   // Where each OTHER participant's caret sits, by name, as an index into the
   // text. A method rather than a helper beside the editor, so a caller that
@@ -119,6 +120,7 @@ export class CollabDoc {
     // hub's document, and must not read as live in between.
     provider.on("status", (e: { status: string }) => {
       if (this.closed) return;
+      if (e.status === "connected") this.opened = true;
       this.onStatus(e.status === "connected" ? (provider.synced ? "live" : "connecting") : "offline");
     });
     provider.on("sync", (synced: boolean) => {
@@ -134,11 +136,18 @@ export class CollabDoc {
     /* A connection that never succeeds has to be reported, or the editor
        waits forever for a document that is not coming. y-websocket retries on
        its own — which is right, a flaky network should heal — so this asks
-       only once, well past the first few attempts. */
+       only once, well past the first few attempts.
+
+       "Never succeeds" means no socket ever opened: no route, or a proxy
+       that will not upgrade. A socket that opened proves the room is there,
+       so a slow handshake — a busy hub, a burst of people opening one file
+       at once — is waited out. Solo then would make this tab a second writer
+       against a room other people are typing in, and every one of its saves
+       a conflict with theirs. */
     setTimeout(() => {
       // Once reached, a later drop is a reconnect to wait out, never solo:
       // the editor is already bound to this document.
-      if (this.closed || this.reached) return;
+      if (this.closed || this.reached || this.opened) return;
       this.stop();
       this.onUnavailable();
     }, UNREACHABLE_MS);
