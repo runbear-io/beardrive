@@ -289,6 +289,122 @@ func seedRemoteNotes(t *testing.T, hub *fakeHub) string {
 	return contents
 }
 
+func TestWorkerRemoteOnlyWakeDoesNotDiscoverUnhintedLocalFile(t *testing.T) {
+	hub := newFakeHub(t)
+	proxy := newRemoteWakeProxy(t, hub)
+	m := watchMountWithRemote(t, strings.TrimSuffix(proxy.URL, "/")+"/p/p-test")
+	held := filepath.Join(m.folder, "held")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	setLocalWatchHooks(nil, nil, func(path string) {
+		if path == held {
+			enterOnce.Do(func() { close(entered) })
+			<-release
+		}
+	})
+	// Keep the safety deadline a full minute away throughout this scenario:
+	// only the SSE wake and, after release, the directory event may discover work.
+	now := time.Now()
+	w := startWatchSafetyWorker(t, m, time.Hour, func() time.Time { return now }, nil)
+	t.Cleanup(unblock)
+	w.wait("completed initial full scan", func() bool {
+		return w.pushed("notes.md", journal.KindPut, "hello\n") &&
+			strings.Contains(w.log(), "local+1 pulled+0")
+	})
+	w.requireHealthyWatcher()
+	select {
+	case <-proxy.connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote watcher did not connect")
+	}
+	beforeOps, err := w.st.DeviceOps(w.device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSync, err := w.st.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Mkdir(held, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("new directory never reached recursive watcher installation")
+	}
+	// The directory's Create has not been queued and no watch exists inside
+	// it yet. This file therefore cannot be discovered by a bounded local hint.
+	const localPath = "held/unhinted.txt"
+	const localContents = "user file awaiting its local watcher hint\n"
+	if err := os.WriteFile(filepath.Join(m.folder, localPath), []byte(localContents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	remoteContents := seedRemoteNotes(t, hub)
+	gate := proxy.blockPull()
+	t.Cleanup(gate.unblock)
+	proxy.wake <- struct{}{}
+	select {
+	case <-gate.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote-only wake did not reach the pull gate")
+	}
+	gate.unblock()
+	w.wait("completed remote cycle with peer content materialized", func() bool {
+		return worktreeFileEquals(m.folder, "notes.md", remoteContents) &&
+			strings.Contains(w.log(), "pulled+1")
+	})
+	w.requireHealthyWatcher()
+
+	peerOps, err := w.st.DeviceOps("peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peerOps) != 1 || peerOps[0].Path != "notes.md" || peerOps[0].Kind != journal.KindPut {
+		t.Fatalf("persisted peer journal = %+v, want one notes.md put", peerOps)
+	}
+	peerBytes, err := os.ReadFile(w.st.BlobPath(peerOps[0].Blob))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(peerBytes) != remoteContents {
+		t.Fatalf("persisted peer blob = %q, want %q", peerBytes, remoteContents)
+	}
+	afterOps, err := w.st.DeviceOps(w.device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range afterOps {
+		if op.Path == localPath {
+			t.Fatalf("remote-only cycle discovered unhinted local file: %+v", op)
+		}
+	}
+	if len(afterOps) != len(beforeOps) {
+		t.Fatalf("remote-only cycle changed local journal length: %d -> %d", len(beforeOps), len(afterOps))
+	}
+	afterSync, err := w.st.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterSync.PushedOps != beforeSync.PushedOps {
+		t.Fatalf("remote-only cycle advanced local push cursor: %d -> %d", beforeSync.PushedOps, afterSync.PushedOps)
+	}
+	if !worktreeFileEquals(m.folder, localPath, localContents) {
+		t.Fatal("remote-only cycle changed the unhinted user's file")
+	}
+
+	unblock()
+	w.wait("local file uploaded after its directory hint was admitted", func() bool {
+		return w.pushed(localPath, journal.KindPut, localContents)
+	})
+	if !worktreeFileEquals(m.folder, localPath, localContents) {
+		t.Fatal("local discovery changed the user's file")
+	}
+	w.requireHealthyWatcher()
+}
+
 func TestWorkerRemoteWakePreservesPendingLocalEdit(t *testing.T) {
 	hub := newFakeHub(t)
 	proxy := newRemoteWakeProxy(t, hub)
