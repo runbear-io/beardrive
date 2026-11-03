@@ -747,6 +747,7 @@ func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, te
 		log.Printf("bdrive: %s: could not park the room's refused text (%d bytes) as %s (%d); retrying", path, len(text), copy, cw.code)
 		return false
 	}
+	backoff, backoffMax := parkBackoff, parkBackoffMax
 	if try(ctx) {
 		return
 	}
@@ -755,7 +756,7 @@ func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, te
 		return
 	}
 	go func() {
-		wait := parkBackoff
+		wait := backoff
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		for {
@@ -766,7 +767,7 @@ func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, te
 				if bg.Err() != nil || try(bg) {
 					return
 				}
-				wait = min(wait*2, parkBackoffMax)
+				wait = min(wait*2, backoffMax)
 				timer.Reset(wait)
 			}
 		}
