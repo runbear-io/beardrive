@@ -1809,6 +1809,11 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 		}
 		if cyclePanicked {
+			// A panic may have consumed a targeted hint without completing its
+			// scan. Reset discovery state so the retry cannot replay stale
+			// partial work while missing unhinted files.
+			forceFull = true
+			clear(nextHints)
 			// Even a busy watch or repeated SIGHUP must not turn a panic into
 			// a hot retry loop. Other volumes keep running during this backoff.
 			select {

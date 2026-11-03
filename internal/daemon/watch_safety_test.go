@@ -865,6 +865,100 @@ func TestWorkerSafetyFullScanDeadlineSurvivesOtherCycles(t *testing.T) {
 	w.requireHealthyWatcher()
 	unblock()
 }
+func TestWorkerTargetedPanicForcesFullRediscovery(t *testing.T) {
+	hub := newFakeHub(t)
+	m := watchMount(t, hub)
+	const (
+		targetedContents = "targeted edit before panic\n"
+		unhintedContents = "unhinted edit during panic\n"
+	)
+	now := time.Now()
+	held := filepath.Join(m.folder, "held")
+	walkEntered, walkRelease := make(chan struct{}), make(chan struct{})
+	var walkOnce, walkReleaseOnce sync.Once
+	releaseWalk := func() { walkReleaseOnce.Do(func() { close(walkRelease) }) }
+	setLocalWatchHooks(nil, nil, func(path string) {
+		if path != held {
+			return
+		}
+		walkOnce.Do(func() { close(walkEntered) })
+		<-walkRelease
+	})
+
+	var armed atomic.Bool
+	var panicOnce, panicReleaseOnce sync.Once
+	panicEntered, panicRelease := make(chan struct{}), make(chan struct{})
+	releasePanic := func() { panicReleaseOnce.Do(func() { close(panicRelease) }) }
+	beforeCycle := func() {
+		if !armed.Load() {
+			return
+		}
+		panicOnce.Do(func() {
+			close(panicEntered)
+			<-panicRelease
+			panic("targeted cycle panic")
+		})
+	}
+	w := startWatchSafetyWorker(t, m, time.Hour, func() time.Time { return now }, beforeCycle)
+	t.Cleanup(func() {
+		releasePanic()
+		releaseWalk()
+	})
+	w.wait("completed initial full scan", func() bool {
+		return w.pushed("notes.md", journal.KindPut, "hello\n") &&
+			strings.Contains(w.log(), "local+1 pulled+0")
+	})
+
+	// Keep the safety deadline frozen, then arrange for the targeted hint to be
+	// consumed by a cycle that panics before syncer sees it.
+	armed.Store(true)
+	writeWorktreeFile(t, m.folder, "notes.md", targetedContents)
+	select {
+	case <-panicEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("targeted edit did not reach the one-shot panic hook")
+	}
+
+	if err := os.Mkdir(held, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-walkEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("new directory never reached recursive watcher installation")
+	}
+	const unhintedPath = "held/unhinted.txt"
+	if err := os.WriteFile(filepath.Join(m.folder, unhintedPath), []byte(unhintedContents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if w.pushed(unhintedPath, journal.KindPut, unhintedContents) {
+		t.Fatal("unhinted file was discovered before panic recovery")
+	}
+
+	releasePanic()
+	w.wait("panic recovery log and full rediscovery", func() bool {
+		return strings.Contains(w.log(), "cycle panic recovered") &&
+			w.pushed("notes.md", journal.KindPut, targetedContents) &&
+			w.pushed(unhintedPath, journal.KindPut, unhintedContents)
+	})
+	if !worktreeFileEquals(m.folder, "notes.md", targetedContents) ||
+		!worktreeFileEquals(m.folder, unhintedPath, unhintedContents) {
+		t.Fatal("panic recovery changed the user's disk bytes")
+	}
+
+	// The recursive watcher was still blocked while recovery ran. Once released,
+	// its queued event must not turn into a watcher-loss or offline state.
+	releaseWalk()
+	w.wait("healthy watcher after panic recovery", func() bool {
+		log := w.log()
+		for _, failure := range []string{"watcher stopped", "watcher unavailable", "cycle error:", "offline, will retry:"} {
+			if strings.Contains(log, failure) {
+				return false
+			}
+		}
+		return strings.Contains(log, "cycle panic recovered")
+	})
+}
 
 func TestWorkerLocalWakeDebounceHonorsSafetyDeadline(t *testing.T) {
 	hub := newFakeHub(t)
