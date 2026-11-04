@@ -736,19 +736,40 @@ func TestSuppressMaterializationEchoesSkipsCacheLoadWhenNoPendingEvents(t *testi
 	}
 	upto := lw.fence()
 
-	keepDone := make(chan struct{})
-	go lw.suppress(root, upto, func(localWatchEvent) bool {
-		_ = lw.fence()
-		close(keepDone)
-		return true
-	})
+	keepStarted := make(chan struct{})
+	keepRelease := make(chan struct{})
+	suppressDone := make(chan struct{})
+	go func() {
+		lw.suppress(root, upto, func(localWatchEvent) bool {
+			close(keepStarted)
+			<-keepRelease
+			return false
+		})
+		close(suppressDone)
+	}()
 	select {
-	case <-keepDone:
+	case <-keepStarted:
 	case <-time.After(time.Second):
-		t.Fatal("suppress held pendingMu while evaluating keep")
+		t.Fatal("suppress did not evaluate the pending event")
 	}
-	if batch := lw.take(root); len(batch.events) != 1 {
-		t.Fatalf("queued batch = %+v, want one event", batch.events)
+	if err := os.WriteFile(path, []byte("merged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for lw.fence() <= upto && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if lw.fence() <= upto {
+		t.Fatal("new event was not merged while keep was running")
+	}
+	close(keepRelease)
+	select {
+	case <-suppressDone:
+	case <-time.After(time.Second):
+		t.Fatal("suppress did not finish")
+	}
+	if batch := lw.take(root); len(batch.events) != 1 || batch.events[0].path != path {
+		t.Fatalf("newly merged event was dropped with older sequence: %+v", batch.events)
 	}
 
 	if err := os.WriteFile(filepath.Join(st.Dir(), "state-mount.json"), []byte("{"), 0o600); err != nil {
@@ -804,6 +825,13 @@ func TestLocalFolderWatcherPrunesIgnoredAndReservedDirs(t *testing.T) {
 	}
 	if !hasAdded(filepath.Join(root, "visible")) {
 		t.Fatalf("visible directory was not added to watcher; additions=%v", added)
+	}
+	runtimePkg := filepath.Join(root, "node_modules", "runtime-pkg")
+	if err := os.MkdirAll(runtimePkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if hasAdded(filepath.Join(root, "node_modules")) || hasAdded(runtimePkg) {
+		t.Fatalf("runtime ignored directory reached watcher; additions=%v", added)
 	}
 
 	if err := os.WriteFile(filepath.Join(root, syncer.IgnoreFile), nil, 0o644); err != nil {

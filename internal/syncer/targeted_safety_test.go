@@ -671,6 +671,9 @@ func TestFilterFastEquivalenceAndLargeScale(t *testing.T) {
 		"trail\\ ",
 		"*.tmp",
 		"!keep.txt",
+		"foo*",
+		"foo*/",
+		"bar**/baz",
 	}
 	patterns := compileRules(strings.Join(rules, "\n"))
 	paths := []string{
@@ -679,6 +682,8 @@ func TestFilterFastEquivalenceAndLargeScale(t *testing.T) {
 		"deep/x1", "deep/a/x2", "deep/a/b/x3", "deep/a/b/x",
 		"literal*", "literal/star", "trail ", "trail",
 		"scratch.tmp", "src/scratch.tmp", "keep.txt", "src/keep.txt",
+		"foo1", "sub/foo2", "notfoo", "foo_dir/file.txt",
+		"sub/foo_dir/file.txt", "foo_dir", "bar/baz", "bar123/a/baz",
 	}
 	for i, p := range patterns {
 		single := p

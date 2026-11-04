@@ -1041,7 +1041,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				return nil
 			}
 			walkPath = filepath.Clean(walkPath)
-			if walkPath != path && !rootSet[walkPath] {
+			if walkPath != owner && !rootSet[walkPath] {
 				if config.ReservedDir(d.Name()) || config.IsMount(walkPath) {
 					return filepath.SkipDir
 				}
@@ -1354,7 +1354,12 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 					}
 				}
 				if root != "" && filepath.Base(name) == syncer.IgnoreFile {
-					_ = addDir(root, root)
+					if ignoreErr := addDir(root, root); ignoreErr != nil {
+						if !handleWatcherError(ignoreErr, true) {
+							return
+						}
+						continue
+					}
 				}
 				if ev.Op&fsnotify.Create != 0 && directory && root != "" {
 					if addErr := addDir(name, root); addErr != nil {
@@ -1601,6 +1606,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	var localWatchRetryAt time.Time
 	localWatchHealthy := false
 	nextHints := make(map[string]*syncer.ScanHint)
+	retriedOnce := make(map[string]bool)
 	forceFull := true
 	lastFullScan := time.Time{}
 	stopLocalWatch := func() {
@@ -1827,6 +1833,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		// ops that must be published before this target catches up.
 		maxLocalTarget := -1
 		retryHints := make(map[string]*syncer.ScanHint)
+		newRetriedOnce := make(map[string]bool)
 		cyclePanicked := false
 		for i, target := range targets {
 			if i > 0 && ctx.Err() != nil {
@@ -1862,18 +1869,29 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 			mergeResult(r)
 			if r != nil && len(r.RetryPaths) > 0 {
-				retryHint := &syncer.ScanHint{}
+				var retryHint *syncer.ScanHint
 				for _, p := range r.RetryPaths {
+					key := target.folder + "\x00" + p
+					newRetriedOnce[key] = true
+					if retriedOnce[key] {
+						continue
+					}
+					if retryHint == nil {
+						retryHint = &syncer.ScanHint{}
+					}
 					retryHint.Events = append(retryHint.Events, syncer.ScanEvent{
 						Path: p, Kind: syncer.ScanWrite,
 					})
 				}
-				retryHints[target.folder] = retryHint
+				if retryHint != nil {
+					retryHints[target.folder] = retryHint
+				}
 			}
 			if r != nil && r.LocalOps > 0 {
 				maxLocalTarget = i
 			}
 		}
+		retriedOnce = newRetriedOnce
 
 		// A later target may have committed after an earlier target's cycle.
 		// Replay the shared journal into those earlier folders immediately,
