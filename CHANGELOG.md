@@ -5,7 +5,14 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
-- **Large-folder local syncs no longer stall behind full-volume ignore and cache passes.** `.bdriveignore` matching uses non-backtracking regexes with literal and segment prefilters, `backfillOps` and `materialize` skip ignore evaluation for paths whose cached state already matches the journal target, and each cycle reuses its loaded journal fold instead of re-reading and re-sorting all device journals multiple times. Local watcher setup prunes `.git`, `.bdrive`, nested mounts, and ignored directories, skips loading the state cache during echo suppression when no pre-fence events are pending, releases the prior watcher before retrying an `EMFILE`/`ENFILE` rebuild, and re-queues targeted scan paths that hit transient read errors.
+## v0.18.3 — 2026-11-05
+
+**Update your devices.** Everything here is in the client and sync daemon; the
+hub and on-disk formats are unchanged, and running daemons switch over the first
+time the updated `bdrive` runs.
+
+- **Large-folder local syncs no longer stall behind full-volume ignore and journal passes.** `.bdriveignore` matching uses non-backtracking regexes with literal and segment prefilters, `backfillOps` and `materialize` skip ignore evaluation for regular files whose cached state already matches the journal target, and each cycle reuses its loaded journal fold when peer journals on disk have not changed instead of re-reading and re-sorting all device journals up to three times. (#336)
+- **Local watcher pruning, echo suppression, and transient error retries.** Local watcher setup and runtime directory creation skip `.git`, `.bdrive`, nested mounts, and `.bdriveignore`-pruned directories. Echo suppression evaluates candidates outside `pendingMu` and skips loading the state cache when no pre-fence events are pending, `EMFILE`/`ENFILE` watcher rebuilds release the prior watcher before retrying, and non-`ENOENT` file or directory read failures during targeted scans queue a bounded single retry while preserving cached children against spurious deletes. (#336)
 
 ## v0.18.2 — 2026-11-03
 
