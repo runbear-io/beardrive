@@ -816,4 +816,43 @@ func TestTargetedScanRecordsRetryPathsOnTransientReadFailure(t *testing.T) {
 	if !found {
 		t.Fatalf("RetryPaths = %v, want %q", res.RetryPaths, rel)
 	}
+
+	const unreadableDir = "unreadable-dir"
+	const child = unreadableDir + "/child.txt"
+	if err := os.Chmod(abs, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write(t, s.Folder, child, "cached child")
+	targetedSafetyCycle(t, s, nil)
+	dirAbs := filepath.Join(s.Folder, filepath.FromSlash(unreadableDir))
+	if err := os.Chmod(dirAbs, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dirAbs, 0o755)
+	if _, err := os.ReadDir(dirAbs); err == nil {
+		t.Skip("filesystem permits reading mode-000 directories")
+	}
+	res = targetedSafetyCycle(t, s, &ScanHint{Events: []ScanEvent{{
+		Path: unreadableDir, Kind: ScanCreate, Directory: true,
+	}}})
+	found = false
+	for _, got := range res.RetryPaths {
+		if got == unreadableDir {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("RetryPaths = %v, want %q", res.RetryPaths, unreadableDir)
+	}
+	if res.LocalOps != 0 {
+		t.Fatalf("unreadable directory scan minted %d local ops", res.LocalOps)
+	}
+	cache, err := s.Store.LoadCache(s.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cache[child]; !ok {
+		t.Fatalf("unreadable directory child disappeared from cache: %v", cache)
+	}
 }

@@ -1152,11 +1152,24 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 	seen := make(map[string]bool, len(cache))
 	retrySeen := map[string]bool{}
 	var retryPaths []string
+	unreadable := map[string]bool{}
+	unreadableRoot := false
 	recordRetry := func(rel string) {
 		if !fullDiscovery && !retrySeen[rel] {
 			retrySeen[rel] = true
 			retryPaths = append(retryPaths, rel)
 		}
+	}
+	onWalkErr := func(rel string, _ error) {
+		if rel == "" {
+			unreadableRoot = true
+			for _, r := range roots {
+				recordRetry(r)
+			}
+			return
+		}
+		unreadable[rel] = true
+		recordRetry(rel)
 	}
 	var ops []journal.Op
 	note := s.Note
@@ -1181,13 +1194,17 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 	}
 
-	walk := walkFolder
-	if !fullDiscovery {
+	var walk func(string, *Filter, func(string, string, fs.DirEntry, verdict) error) error
+	if fullDiscovery {
+		walk = func(folder string, filter *Filter, fn func(string, string, fs.DirEntry, verdict) error) error {
+			return walkFolderPathsWithErr(folder, filter, nil, onWalkErr, fn)
+		}
+	} else {
 		walk = func(folder string, filter *Filter, fn func(string, string, fs.DirEntry, verdict) error) error {
 			if len(roots) == 0 {
 				return nil
 			}
-			return walkFolderPaths(folder, filter, roots, fn)
+			return walkFolderPathsWithErr(folder, filter, roots, onWalkErr, fn)
 		}
 	}
 	err := walk(s.Folder, filter, func(p, rel string, d fs.DirEntry, v verdict) error {
@@ -1271,50 +1288,64 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 	if err != nil {
 		return nil, nil, err
 	}
+	if !unreadableRoot {
 
-	for rel := range cache {
-		if seen[rel] {
-			continue
-		}
-		if !fullDiscovery {
-			inScope := false
-			for scope := range deleteScopes {
-				if rel == scope || strings.HasPrefix(rel, scope+"/") {
-					inScope = true
-					break
+		for rel := range cache {
+			if len(unreadable) > 0 {
+				blocked := false
+				for u := range unreadable {
+					if rel == u || strings.HasPrefix(rel, u+"/") {
+						blocked = true
+						break
+					}
+				}
+				if blocked {
+					continue
 				}
 			}
-			if !inScope {
+			if seen[rel] {
 				continue
 			}
-		}
-		// The walk only ever produces clean in-mount paths, but this pass
-		// mints an op from every cache key the walk did NOT see — and the
-		// cache is a JSON file in $BDRIVE_HOME, not something the walk wrote.
-		// Same rule the peer-op side applies, so this device never signs and
-		// pushes a path it would refuse from anyone else.
-		// Every arm below stops tracking the path, so every arm forgets its
-		// findings too: a warning about a file this mount no longer syncs is
-		// one nothing can clear.
-		sec.drop(rel)
-		// Deleting a read-only file locally is a local edit like any other:
-		// not journaled, and put back by materialize on this same cycle.
-		if s.readOnlyPath(rel) {
-			continue
-		}
-		if unsafeRel(rel) || neverSync(rel) {
+			if !fullDiscovery {
+				inScope := false
+				for scope := range deleteScopes {
+					if rel == scope || strings.HasPrefix(rel, scope+"/") {
+						inScope = true
+						break
+					}
+				}
+				if !inScope {
+					continue
+				}
+			}
+			// The walk only ever produces clean in-mount paths, but this pass
+			// mints an op from every cache key the walk did NOT see — and the
+			// cache is a JSON file in $BDRIVE_HOME, not something the walk wrote.
+			// Same rule the peer-op side applies, so this device never signs and
+			// pushes a path it would refuse from anyone else.
+			// Every arm below stops tracking the path, so every arm forgets its
+			// findings too: a warning about a file this mount no longer syncs is
+			// one nothing can clear.
+			sec.drop(rel)
+			// Deleting a read-only file locally is a local edit like any other:
+			// not journaled, and put back by materialize on this same cycle.
+			if s.readOnlyPath(rel) {
+				continue
+			}
+			if unsafeRel(rel) || neverSync(rel) {
+				delete(cache, rel)
+				s.cacheDirty = true
+				continue
+			}
+			if filter.Skip(rel) {
+				delete(cache, rel) // newly filtered, not deleted: stop tracking silently
+				s.cacheDirty = true
+				continue
+			}
+			ops = append(ops, nextOp(journal.KindDelete, rel))
 			delete(cache, rel)
 			s.cacheDirty = true
-			continue
 		}
-		if filter.Skip(rel) {
-			delete(cache, rel) // newly filtered, not deleted: stop tracking silently
-			s.cacheDirty = true
-			continue
-		}
-		ops = append(ops, nextOp(journal.KindDelete, rel))
-		delete(cache, rel)
-		s.cacheDirty = true
 	}
 	return ops, retryPaths, nil
 }

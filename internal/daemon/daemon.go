@@ -1879,8 +1879,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 					if retryHint == nil {
 						retryHint = &syncer.ScanHint{}
 					}
+					info, statErr := os.Stat(filepath.Join(target.folder, filepath.FromSlash(p)))
 					retryHint.Events = append(retryHint.Events, syncer.ScanEvent{
 						Path: p, Kind: syncer.ScanWrite,
+						Directory: statErr == nil && info.IsDir(),
 					})
 				}
 				if retryHint != nil {
