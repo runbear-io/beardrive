@@ -1002,8 +1002,10 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 	watcher := fw
 	closed := false
 	rootList := make([]string, len(roots))
+	rootSet := make(map[string]bool, len(roots))
 	for i, root := range roots {
 		rootList[i] = filepath.Clean(root)
+		rootSet[rootList[i]] = true
 	}
 	closeWatcher := func() {
 		watcherMu.Lock()
@@ -1017,11 +1019,20 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		_ = current.Close()
 	}
 	seen := make(map[string]string)
+	loadOwnerFilter := func(owner string) *syncer.Filter {
+		proj, ok, err := config.LoadProject(owner)
+		if err != nil || !ok {
+			return nil
+		}
+		f, _ := syncer.LoadFilter(owner, proj.Include)
+		return f
+	}
 	addDirTo := func(w *fsnotify.Watcher, watched map[string]string, path, owner string) error {
 		_, _, walkHook := getLocalWatchHooks()
 		if walkHook != nil {
 			walkHook(filepath.Clean(path))
 		}
+		ownerFilter := loadOwnerFilter(owner)
 		return filepath.WalkDir(path, func(walkPath string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
@@ -1030,6 +1041,17 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 				return nil
 			}
 			walkPath = filepath.Clean(walkPath)
+			if walkPath != path && !rootSet[walkPath] {
+				if config.ReservedDir(d.Name()) || config.IsMount(walkPath) {
+					return filepath.SkipDir
+				}
+				if ownerFilter != nil {
+					rel, relErr := filepath.Rel(owner, walkPath)
+					if relErr == nil && rel != "." && ownerFilter.PruneDir(filepath.ToSlash(rel)) {
+						return filepath.SkipDir
+					}
+				}
+			}
 			if _, ok := watched[walkPath]; ok {
 				return nil
 			}
@@ -1065,11 +1087,38 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		}
 		localWatchCreated(nw)
 		candidateSeen := make(map[string]string)
-		for _, root := range rootList {
-			if err := addDirTo(nw, candidateSeen, root, root); err != nil {
-				_ = nw.Close()
+		oldClosed := false
+		populate := func() error {
+			for _, root := range rootList {
+				if err := addDirTo(nw, candidateSeen, root, root); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		err = populate()
+		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+			_ = nw.Close()
+			watcherMu.Lock()
+			if closed {
+				watcherMu.Unlock()
+				return nil
+			}
+			old := watcher
+			_ = old.Close()
+			oldClosed = true
+			watcherMu.Unlock()
+			nw, err = fsnotify.NewWatcher()
+			if err != nil {
 				return err
 			}
+			localWatchCreated(nw)
+			candidateSeen = make(map[string]string)
+			err = populate()
+		}
+		if err != nil {
+			_ = nw.Close()
+			return err
 		}
 		watcherMu.Lock()
 		if closed {
@@ -1081,7 +1130,9 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 		watcher = nw
 		seen = candidateSeen
 		watcherMu.Unlock()
-		_ = old.Close()
+		if !oldClosed {
+			_ = old.Close()
+		}
 		return nil
 	}
 
@@ -1219,16 +1270,36 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 	suppress := func(root string, upto uint64, keep func(localWatchEvent) bool) {
 		root = filepath.Clean(root)
 		pendingMu.Lock()
-		defer pendingMu.Unlock()
+		var candidates []localWatchEvent
+		for _, ev := range pending[root] {
+			if ev.seq <= upto {
+				candidates = append(candidates, ev)
+			}
+		}
+		pendingMu.Unlock()
+		if len(candidates) == 0 {
+			return
+		}
+		drop := make(map[string]uint64)
+		for _, ev := range candidates {
+			if !keep(ev) {
+				drop[ev.path] = ev.seq
+			}
+		}
+		if len(drop) == 0 {
+			return
+		}
+		pendingMu.Lock()
 		evs := pending[root]
 		kept := evs[:0]
 		for _, ev := range evs {
-			if ev.seq <= upto && !keep(ev) {
+			if dropSeq, ok := drop[ev.path]; ok && ev.seq == dropSeq {
 				continue
 			}
 			kept = append(kept, ev)
 		}
 		pending[root] = kept
+		pendingMu.Unlock()
 	}
 	filterEvent := func(root string, name string, op fsnotify.Op) bool {
 		rel, err := filepath.Rel(root, name)
@@ -1281,6 +1352,9 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 						report(rootErr)
 						return
 					}
+				}
+				if root != "" && filepath.Base(name) == syncer.IgnoreFile {
+					_ = addDir(root, root)
 				}
 				if ev.Op&fsnotify.Create != 0 && directory && root != "" {
 					if addErr := addDir(name, root); addErr != nil {
@@ -1349,9 +1423,14 @@ func suppressMaterializationEchoes(lw *localFolderWatcher, root, folder, mountID
 	if lw == nil || lw.suppress == nil || upto == 0 {
 		return
 	}
-	cache, err := st.LoadCache(mountID)
-	if err != nil {
-		return
+	var cache map[string]store.CachedFile
+	var loadErr error
+	var loadOnce sync.Once
+	getCache := func() map[string]store.CachedFile {
+		loadOnce.Do(func() {
+			cache, loadErr = st.LoadCache(mountID)
+		})
+		return cache
 	}
 	hasCachedDescendant := func(rel string) bool {
 		prefix := rel + "/"
@@ -1416,6 +1495,10 @@ func suppressMaterializationEchoes(lw *localFolderWatcher, root, folder, mountID
 		return true
 	}
 	lw.suppress(root, upto, func(ev localWatchEvent) bool {
+		cache = getCache()
+		if loadErr != nil {
+			return true
+		}
 		rel, err := filepath.Rel(folder, ev.path)
 		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return true // keep: the path cannot be proven to be an echo
@@ -1743,6 +1826,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		// backend on a remote tick, or when an earlier sibling committed local
 		// ops that must be published before this target catches up.
 		maxLocalTarget := -1
+		retryHints := make(map[string]*syncer.ScanHint)
 		cyclePanicked := false
 		for i, target := range targets {
 			if i > 0 && ctx.Err() != nil {
@@ -1777,6 +1861,15 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				cycleErr = rerr
 			}
 			mergeResult(r)
+			if r != nil && len(r.RetryPaths) > 0 {
+				retryHint := &syncer.ScanHint{}
+				for _, p := range r.RetryPaths {
+					retryHint.Events = append(retryHint.Events, syncer.ScanEvent{
+						Path: p, Kind: syncer.ScanWrite,
+					})
+				}
+				retryHints[target.folder] = retryHint
+			}
 			if r != nil && r.LocalOps > 0 {
 				maxLocalTarget = i
 			}
@@ -1828,7 +1921,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		} else {
 			forceFull = false
 		}
-		nextHints = make(map[string]*syncer.ScanHint)
+		nextHints = retryHints
+		if len(retryHints) > 0 {
+			waitFor = min(waitFor, scanInterval)
+		}
 		lastCycle = time.Now()
 
 		switch {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -607,5 +608,207 @@ func TestTargetedUnknownDeletionDoesNotDeleteUnrelatedFiles(t *testing.T) {
 				t.Errorf("%s unrelated %s = %q, want %q", s.Device.ID, path, got, body)
 			}
 		}
+	}
+}
+
+func targetedReferenceMatch(line, rel string) bool {
+	line = trimRuleSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return false
+	}
+	if strings.HasPrefix(line, "!") {
+		line = trimRuleSpace(line[1:])
+	}
+	anchored := strings.HasPrefix(line, "/")
+	dirOnly := strings.HasSuffix(line, "/")
+	line = strings.Trim(line, "/")
+	if line == "" {
+		return false
+	}
+	anchored = anchored || strings.Contains(line, "/")
+	var b strings.Builder
+	if anchored {
+		b.WriteString("^")
+	} else {
+		b.WriteString("(^|.*/)")
+	}
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\\':
+			if i+1 < len(line) {
+				i++
+			}
+			b.WriteString(regexp.QuoteMeta(line[i : i+1]))
+		case '*':
+			if i+1 < len(line) && line[i+1] == '*' {
+				b.WriteString(".*")
+				i++
+			} else {
+				b.WriteString("[^/]*")
+			}
+		case '?':
+			b.WriteString("[^/]")
+		default:
+			b.WriteString(regexp.QuoteMeta(line[i : i+1]))
+		}
+	}
+	if dirOnly {
+		b.WriteString("/.*$")
+	} else {
+		b.WriteString("(/.*)?$")
+	}
+	re, err := regexp.Compile(b.String())
+	return err == nil && re.MatchString(rel)
+}
+
+func TestFilterFastEquivalenceAndLargeScale(t *testing.T) {
+	rules := []string{
+		"build/",
+		"/root.txt",
+		"docs/*.md",
+		"deep/**/x?",
+		"literal\\*",
+		"trail\\ ",
+		"*.tmp",
+		"!keep.txt",
+	}
+	patterns := compileRules(strings.Join(rules, "\n"))
+	paths := []string{
+		"build/main.go", "src/build/main.go", "build",
+		"root.txt", "src/root.txt", "docs/readme.md", "docs/sub/readme.md",
+		"deep/x1", "deep/a/x2", "deep/a/b/x3", "deep/a/b/x",
+		"literal*", "literal/star", "trail ", "trail",
+		"scratch.tmp", "src/scratch.tmp", "keep.txt", "src/keep.txt",
+	}
+	for i, p := range patterns {
+		single := p
+		single.negate = false
+		for _, rel := range paths {
+			got := (&Filter{ignore: []pattern{single}}).Skip(rel)
+			if want := targetedReferenceMatch(rules[i], rel); got != want {
+				t.Fatalf("fast match mismatch for rule %q and %q: got %v, regex %v", rules[i], rel, got, want)
+			}
+		}
+	}
+	filter := &Filter{ignore: patterns}
+	accepted := strings.Join(rules, "\n")
+	filter.AcceptRules(accepted)
+	for _, rel := range paths {
+		wantIgnored := false
+		for i := len(patterns) - 1; i >= 0; i-- {
+			if targetedReferenceMatch(rules[i], rel) {
+				wantIgnored = !patterns[i].negate
+				break
+			}
+		}
+		if got := filter.Skip(rel); got != wantIgnored {
+			t.Errorf("Skip(%q) = %v, want %v", rel, got, wantIgnored)
+		}
+		if got, want := filter.SkipUp(rel), wantIgnored; got != want {
+			t.Errorf("SkipUp(%q) = %v, want %v", rel, got, want)
+		}
+	}
+	floor := vouchedFloor("/*\n!keep.txt\n!never.txt\n", []string{"keep.txt"})
+	if strings.Contains(floor, "!never.txt") || !strings.Contains(floor, "!keep.txt") {
+		t.Fatalf("vouchedFloor = %q", floor)
+	}
+	pruneFilter := &Filter{ignore: compileRules("build/")}
+	if !pruneFilter.PruneDir("build") || !pruneFilter.PruneDir("src/build") || pruneFilter.PruneDir("other") {
+		t.Fatal("PruneDir disagrees with the reference directory rules")
+	}
+
+	benchRules := []string{
+		"node_modules/", "dist/", "build/", "target/", "out/", "coverage/",
+		"__pycache__/", "*.pyc", ".venv/", "venv/", ".next/", ".cache/",
+		"*.mp4", "*.mov", "*.zip", "*.tar.gz", "Library/", ".DS_Store",
+		"*.log", ".env.*",
+	}
+	benchText := strings.Join(benchRules, "\n")
+	benchFilter := &Filter{ignore: compileRules(benchText)}
+	benchFilter.AcceptRules(benchText)
+	start := time.Now()
+	for range 5000 {
+		rel := "projects/searchd/pods/engagement/runs/2026-11-05-session/notes/item.md"
+		_ = benchFilter.Skip(rel)
+		_ = benchFilter.SkipUp(rel)
+	}
+	if elapsed := time.Since(start); elapsed >= 500*time.Millisecond {
+		t.Fatalf("fast filter workload took %v", elapsed)
+	}
+}
+
+func TestMaterializeAndBackfillSkipFilterForConvergedCache(t *testing.T) {
+	s := newDevice(t, "dev", sharedRemote(t))
+	const rel = "locked/report.txt"
+	write(t, s.Folder, rel, "base")
+	targetedSafetyCycle(t, s, nil)
+	cache, err := s.Store.LoadCache(s.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := journal.Replay(targetedSafetyOps(t, s))
+	filter := &Filter{root: s.Folder}
+	if picked, _ := s.backfillOps(target, cache, filter); len(picked) != 0 {
+		t.Fatalf("converged backfill picked %v", picked)
+	}
+	before := read(t, s.Folder, rel)
+	if n, err := s.materialize(target, cache, filter); err != nil {
+		t.Fatal(err)
+	} else if n != 0 {
+		t.Fatalf("converged materialize changed %d paths", n)
+	}
+	if len(filter.nestedMiss) != 0 {
+		t.Fatalf("converged backfill/materialize evaluated Filter.Skip on cached path: nestedMiss=%v", filter.nestedMiss)
+	}
+	if got := read(t, s.Folder, rel); got != before {
+		t.Fatalf("converged content changed from %q to %q", before, got)
+	}
+
+	s.readOnly = []string{"locked/"}
+	write(t, s.Folder, rel, "local drift")
+	if n, err := s.materialize(target, cache, filter); err != nil {
+		t.Fatal(err)
+	} else if n != 1 {
+		t.Fatalf("read-only drift materialized %d paths, want 1", n)
+	}
+	if got := read(t, s.Folder, rel); got != before {
+		t.Fatalf("read-only drift was not reverted: %q", got)
+	}
+	write(t, s.Folder, rel, "ignored local drift")
+	ignored := &Filter{ignore: compileRules("locked/")}
+	if n, err := s.materialize(target, cache, ignored); err != nil {
+		t.Fatal(err)
+	} else if n != 0 {
+		t.Fatalf("ignored read-only drift materialized %d paths", n)
+	}
+	if got := read(t, s.Folder, rel); got != "ignored local drift" {
+		t.Fatalf("ignored read-only drift changed to %q", got)
+	}
+}
+
+func TestTargetedScanRecordsRetryPathsOnTransientReadFailure(t *testing.T) {
+	s := newDevice(t, "dev", sharedRemote(t))
+	const rel = "retry.txt"
+	write(t, s.Folder, rel, "first")
+	targetedSafetyCycle(t, s, nil)
+	write(t, s.Folder, rel, "second content")
+	abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
+	if err := os.Chmod(abs, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(abs, 0o644)
+	if _, err := os.ReadFile(abs); err == nil {
+		t.Skip("filesystem permits reading mode-000 files")
+	}
+	res := targetedSafetyCycle(t, s, &ScanHint{Events: []ScanEvent{{Path: rel, Kind: ScanWrite}}})
+	found := false
+	for _, got := range res.RetryPaths {
+		if got == rel {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("RetryPaths = %v, want %q", res.RetryPaths, rel)
 	}
 }

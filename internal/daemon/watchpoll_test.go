@@ -23,6 +23,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/store"
+	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
 func setLocalWatcherCreatedHook(t *testing.T, hook func(*fsnotify.Watcher)) {
@@ -707,6 +708,121 @@ func TestMaterializationEchoSuppressionKeepsChangedEvents(t *testing.T) {
 	batch := lw.take(root)
 	if len(batch.events) != 1 || batch.events[0].path != changed {
 		t.Fatalf("suppressed batch = %+v, want only concurrent change %s", batch.events, changed)
+	}
+}
+
+func TestSuppressMaterializationEchoesSkipsCacheLoadWhenNoPendingEvents(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+	st, err := store.Open(filepath.Join(t.TempDir(), "volume"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(root, "queued.txt")
+	if err := os.WriteFile(path, []byte("queued"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("write did not wake watcher")
+	}
+	upto := lw.fence()
+
+	keepDone := make(chan struct{})
+	go lw.suppress(root, upto, func(localWatchEvent) bool {
+		_ = lw.fence()
+		close(keepDone)
+		return true
+	})
+	select {
+	case <-keepDone:
+	case <-time.After(time.Second):
+		t.Fatal("suppress held pendingMu while evaluating keep")
+	}
+	if batch := lw.take(root); len(batch.events) != 1 {
+		t.Fatalf("queued batch = %+v, want one event", batch.events)
+	}
+
+	if err := os.WriteFile(filepath.Join(st.Dir(), "state-mount.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	suppressMaterializationEchoes(lw, root, root, "mount", st, upto)
+}
+
+func TestLocalFolderWatcherPrunesIgnoredAndReservedDirs(t *testing.T) {
+	root := t.TempDir()
+	if _, err := config.SaveProject(root, config.Project{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, syncer.IgnoreFile), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{".git", ".bdrive", "node_modules", "visible"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var mu sync.Mutex
+	var added []string
+	setLocalWatcherTestHooks(t, func(path string) error {
+		mu.Lock()
+		added = append(added, filepath.Clean(path))
+		mu.Unlock()
+		return nil
+	}, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	hasAdded := func(path string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, got := range added {
+			if got == path {
+				return true
+			}
+		}
+		return false
+	}
+	for _, dir := range []string{".git", ".bdrive", "node_modules"} {
+		if hasAdded(filepath.Join(root, dir)) {
+			t.Fatalf("pruned directory %s was added to watcher; additions=%v", dir, added)
+		}
+	}
+	if !hasAdded(filepath.Join(root, "visible")) {
+		t.Fatalf("visible directory was not added to watcher; additions=%v", added)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, syncer.IgnoreFile), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !hasAdded(filepath.Join(root, "node_modules")) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !hasAdded(filepath.Join(root, "node_modules")) {
+		t.Fatalf("un-pruned directory was not added after ignore update; additions=%v", added)
+	}
+	if err := os.WriteFile(filepath.Join(root, "node_modules", "later.txt"), []byte("later"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("write in newly admitted directory did not wake watcher")
 	}
 }
 
