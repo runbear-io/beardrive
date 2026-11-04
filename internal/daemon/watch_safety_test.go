@@ -1053,6 +1053,54 @@ func TestWorkerLocalWakeDebounceHonorsSafetyDeadline(t *testing.T) {
 	unblock()
 }
 
+func TestWorkerRequeuesRetryPathsFromTargetedScan(t *testing.T) {
+	hub := newFakeHub(t)
+	m := watchMount(t, hub)
+	const contents = "temporarily unreadable targeted file\n"
+	tmpDir := filepath.Join(m.volDir, "tmp")
+	now := time.Now()
+	var armed atomic.Bool
+	var step atomic.Int32
+	beforeCycle := func() {
+		if !armed.Load() {
+			return
+		}
+		switch step.Add(1) {
+		case 1:
+			_ = os.Chmod(tmpDir, 0o500)
+		case 2:
+			_ = os.Chmod(tmpDir, 0o700)
+		}
+	}
+	w := startWatchSafetyWorker(t, m, time.Hour, func() time.Time { return now }, beforeCycle, 25*time.Millisecond)
+	w.wait("completed initial full scan", func() bool {
+		return w.pushed("notes.md", journal.KindPut, "hello\n")
+	})
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o700) })
+	if err := os.Chmod(tmpDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := os.CreateTemp(tmpDir, "probe-*"); err == nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		_ = os.Chmod(tmpDir, 0o700)
+		t.Skip("running as root; cannot induce the temporary-store permission failure")
+	}
+	if err := os.Chmod(tmpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	armed.Store(true)
+	writeWorktreeFile(t, m.folder, "retry.txt", contents)
+	w.wait("targeted retry uploaded the file", func() bool {
+		return step.Load() >= 2 && w.pushed("retry.txt", journal.KindPut, contents)
+	})
+	w.requireHealthyWatcher()
+}
+
 func TestWorkerNestedSameVolumeRootsJournalDirectoryRenameAndDelete(t *testing.T) {
 	hub := newFakeHub(t)
 	m := watchMount(t, hub)

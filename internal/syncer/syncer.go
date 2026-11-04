@@ -341,13 +341,18 @@ type Result struct {
 	// with one object still lets this device push its own work (Pushed may be
 	// true alongside it), because otherwise one peer's journal line decides
 	// whether anyone else's edits ever leave their machine.
+	Offline    bool
+	OfflineErr error
 	// Reverted names paths under a read-only folder whose local edit this
 	// cycle put back from the hub's version, keeping the user's own copy
 	// beside it. Distinct from Conflicts: no op was written and no peer will
 	// ever see the change, so it is not a conflict, it is a refusal.
-	Reverted   []string
-	Offline    bool
-	OfflineErr error
+	Reverted []string
+	// RetryPaths names relative paths that a bounded ScanHint walk visited
+	// but could not stat, readlink, or hash this cycle. The daemon re-queues
+	// them into nextHints so a consumed watcher event is retried on the next
+	// tick instead of waiting for the safety full scan.
+	RetryPaths []string
 	ReadOnly   bool // the hub refused our push: pull-only from here
 	NoAccess   bool // the hub refused our pull: sync paused, nothing touched
 	AccessErr  error
@@ -537,14 +542,14 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	// a populated store whose sync.json was not saved before a crash; a mount
 	// without a cache must adopt that state rather than start a fresh import.
 	//
-	// ponytail: re-reads every journal, so the cycle now parses them twice (the
-	// other read is step 4's). If it ever measures badly, cache the derived max
-	// against a per-journal (name, size) fingerprint in SyncState — do NOT
-	// hand-scan the JSONL for "lamport": Op.Path and Op.Note are peer-chosen
-	// strings that can contain that literal.
+	// This is also the in-memory op set reused by conflict detection and
+	// materialization below. A remote cycle refreshes it only when pull or
+	// scope filtering could have changed peer journals on disk.
 	_, hadCachedIgnore := cache[IgnoreFile]
 	ops, err := s.Store.AllOps()
+	opsErr := err
 	var existingState map[string]journal.FileState
+	existingIgnoreLive := false
 	if err != nil {
 		// Never break sync: a journal we cannot read must not stop the scan
 		// from capturing local edits. The stored clock stands for this cycle.
@@ -557,9 +562,30 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 				joining = true
 			}
 		}
-		if mountJoining || hadCachedIgnore {
+		if mountJoining {
 			existingState = journal.Replay(ops)
+			_, existingIgnoreLive = existingState[IgnoreFile]
 			if want, ok := existingState[IgnoreFile]; ok {
+				wrote, _ := s.materializeFile(IgnoreFile, want, cache)
+				if wrote {
+					res.Materialized++
+				}
+			}
+		} else if hadCachedIgnore {
+			var winning journal.Op
+			found := false
+			for _, op := range ops {
+				if op.Path != IgnoreFile || !journal.SafePath(op.Path) ||
+					(op.Kind != journal.KindPut && op.Kind != journal.KindDelete) {
+					continue
+				}
+				if !found || journal.Less(winning, op) {
+					winning, found = op, true
+				}
+			}
+			if found && winning.Kind == journal.KindPut {
+				existingIgnoreLive = true
+				want := journal.FileState{Blob: winning.Blob, Size: winning.Size, Mode: winning.Mode, Link: winning.Link}
 				wrote, _ := s.materializeFile(IgnoreFile, want, cache)
 				if wrote {
 					res.Materialized++
@@ -617,7 +643,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 						_ = f.Close()
 						if readErr == nil && len(data) > 0 {
 							st.IgnoreAccepted = vouchedFloor(string(data), synced)
-							if _, live := existingState[IgnoreFile]; live {
+							if existingIgnoreLive {
 								st.IgnorePulled = string(data)
 							}
 						}
@@ -654,10 +680,11 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	}
 
 	// 1. Scan the working folder and journal any local changes.
-	localOps, err := s.scan(cache, &st, int64(len(myOps)), filter, sec, hint)
+	localOps, retryPaths, err := s.scan(cache, &st, int64(len(myOps)), filter, sec, hint)
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
+	res.RetryPaths = retryPaths
 	commitLocal := func() error {
 		if len(localOps) == 0 {
 			return nil
@@ -672,6 +699,9 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			return fmt.Errorf("append journal: %w", err)
 		}
 		myOps = append(myOps, localOps...)
+		if opsErr == nil {
+			ops = append(ops, localOps...)
+		}
 		res.LocalOps = len(localOps)
 		localOps = nil
 		return nil
@@ -695,8 +725,10 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	// peer produces at will by understating Op.Size on one journal line.
 	blocked := false
 	var pulled, gone []journal.Op
+	var pullErr error
 	if s.Backend != nil {
 		pulled, gone, err = s.pull(ctx, cache)
+		pullErr = err
 		// Before the switch, not after it: pull WRITES each peer journal to
 		// disk as it goes, and the ErrForbidden arm returns without ever
 		// reaching an absorb that sat below it — so a pull that died partway
@@ -803,6 +835,19 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 		return nil, err
 	}
 
+	// The initial AllOps result already includes local commits. A remote cycle
+	// may have changed peer journals on disk, so refresh only when that can
+	// actually have happened.
+	all := ops
+	if opsErr != nil || (s.Backend != nil &&
+		(len(pulled) > 0 || len(gone) > 0 || scopeMoved || pullErr != nil)) {
+		all, err = s.Store.AllOps()
+		if err != nil {
+			return nil, fmt.Errorf("read journals: %w", err)
+		}
+	}
+	target := journal.Replay(all)
+
 	// 3. Preserve losing local edits as conflict copies.
 	//
 	// Not gated on `len(pulled) > 0` any more. A local op can lose replay to an
@@ -812,7 +857,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	// with no copy and no message, forever (BEA-196). Unpushed ops are the
 	// candidate set now; with none there is nothing that could lose.
 	if len(pulled) > 0 || st.PushedOps < int64(len(myOps)) {
-		conflictOps, err := s.conflictCopies(myOps, st.PushedOps, pulled, &st)
+		conflictOps, err := s.conflictCopiesWithState(myOps, st.PushedOps, pulled, &st, all, target)
 		if err != nil {
 			return nil, err
 		}
@@ -821,6 +866,8 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 				return nil, fmt.Errorf("append conflict ops: %w", err)
 			}
 			myOps = append(myOps, conflictOps...)
+			all = append(all, conflictOps...)
+			target = journal.Replay(all)
 			for _, op := range conflictOps {
 				if op.Note == mergeNote {
 					res.Merged++
@@ -870,17 +917,13 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 				return nil, fmt.Errorf("append re-asserted ops: %w", err)
 			}
 			myOps = append(myOps, readopt...)
+			all = append(all, readopt...)
+			target = journal.Replay(all)
 			res.LocalOps += len(readopt)
 		}
 	}
 
 	// 4. Materialize the merged state into the working folder.
-	all, err := s.Store.AllOps()
-	if err != nil {
-		return nil, fmt.Errorf("read journals: %w", err)
-	}
-	target := journal.Replay(all)
-
 	// 4a. Backfill content the merged state names but this store lacks. pull
 	// fetches blobs only for the ops it just downloaded, and a peer journal
 	// already on disk is never downloaded again — so a blob lost in that cycle
@@ -1089,7 +1132,7 @@ func scanHintTouchesIgnore(hint *ScanHint) bool {
 // are neither journaled nor deleted: a path that becomes ignored is dropped
 // from the cache without a delete op, so opting out locally never removes
 // the file from other devices.
-func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter, sec *secretLog, hint *ScanHint) ([]journal.Op, error) {
+func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter, sec *secretLog, hint *ScanHint) ([]journal.Op, []string, error) {
 	fullDiscovery := hint == nil || hint.Full
 	var roots []string
 	deleteScopes := map[string]bool{}
@@ -1107,6 +1150,27 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 	}
 	seen := make(map[string]bool, len(cache))
+	retrySeen := map[string]bool{}
+	var retryPaths []string
+	unreadable := map[string]bool{}
+	unreadableRoot := false
+	recordRetry := func(rel string) {
+		if !fullDiscovery && !retrySeen[rel] {
+			retrySeen[rel] = true
+			retryPaths = append(retryPaths, rel)
+		}
+	}
+	onWalkErr := func(rel string, _ error) {
+		if rel == "" {
+			unreadableRoot = true
+			for _, r := range roots {
+				recordRetry(r)
+			}
+			return
+		}
+		unreadable[rel] = true
+		recordRetry(rel)
+	}
 	var ops []journal.Op
 	note := s.Note
 	if note == "" {
@@ -1130,24 +1194,29 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 	}
 
-	walk := walkFolder
-	if !fullDiscovery {
+	var walk func(string, *Filter, func(string, string, fs.DirEntry, verdict) error) error
+	if fullDiscovery {
+		walk = func(folder string, filter *Filter, fn func(string, string, fs.DirEntry, verdict) error) error {
+			return walkFolderPathsWithErr(folder, filter, nil, onWalkErr, fn)
+		}
+	} else {
 		walk = func(folder string, filter *Filter, fn func(string, string, fs.DirEntry, verdict) error) error {
 			if len(roots) == 0 {
 				return nil
 			}
-			return walkFolderPaths(folder, filter, roots, fn)
+			return walkFolderPathsWithErr(folder, filter, roots, onWalkErr, fn)
 		}
 	}
 	err := walk(s.Folder, filter, func(p, rel string, d fs.DirEntry, v verdict) error {
 		if v != vSync && v != vSymlink {
 			return nil
 		}
+		seen[rel] = true
 		info, err := d.Info()
 		if err != nil {
+			recordRetry(rel)
 			return nil
 		}
-		seen[rel] = true
 		// A read-only folder is materialized like any other and journaled
 		// never. Marking it seen first is what stops the delete pass below
 		// minting a delete for it. The local edit is not lost and not
@@ -1174,6 +1243,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			// put, so no content is ever read, hashed, or secret-scanned.
 			target, err := os.Readlink(p)
 			if err != nil {
+				recordRetry(rel)
 				return nil // vanished or unreadable; next cycle
 			}
 			if ok && c.Link == target {
@@ -1192,6 +1262,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 		sum, n, err := s.Store.PutBlobFile(p)
 		if err != nil {
+			recordRetry(rel)
 			return nil // file vanished or unreadable; next cycle
 		}
 		// Below the cheap size+mtime return above, so only a file that actually
@@ -1215,54 +1286,68 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	if !unreadableRoot {
 
-	for rel := range cache {
-		if seen[rel] {
-			continue
-		}
-		if !fullDiscovery {
-			inScope := false
-			for scope := range deleteScopes {
-				if rel == scope || strings.HasPrefix(rel, scope+"/") {
-					inScope = true
-					break
+		for rel := range cache {
+			if len(unreadable) > 0 {
+				blocked := false
+				for u := range unreadable {
+					if rel == u || strings.HasPrefix(rel, u+"/") {
+						blocked = true
+						break
+					}
+				}
+				if blocked {
+					continue
 				}
 			}
-			if !inScope {
+			if seen[rel] {
 				continue
 			}
-		}
-		// The walk only ever produces clean in-mount paths, but this pass
-		// mints an op from every cache key the walk did NOT see — and the
-		// cache is a JSON file in $BDRIVE_HOME, not something the walk wrote.
-		// Same rule the peer-op side applies, so this device never signs and
-		// pushes a path it would refuse from anyone else.
-		// Every arm below stops tracking the path, so every arm forgets its
-		// findings too: a warning about a file this mount no longer syncs is
-		// one nothing can clear.
-		sec.drop(rel)
-		// Deleting a read-only file locally is a local edit like any other:
-		// not journaled, and put back by materialize on this same cycle.
-		if s.readOnlyPath(rel) {
-			continue
-		}
-		if unsafeRel(rel) || neverSync(rel) {
+			if !fullDiscovery {
+				inScope := false
+				for scope := range deleteScopes {
+					if rel == scope || strings.HasPrefix(rel, scope+"/") {
+						inScope = true
+						break
+					}
+				}
+				if !inScope {
+					continue
+				}
+			}
+			// The walk only ever produces clean in-mount paths, but this pass
+			// mints an op from every cache key the walk did NOT see — and the
+			// cache is a JSON file in $BDRIVE_HOME, not something the walk wrote.
+			// Same rule the peer-op side applies, so this device never signs and
+			// pushes a path it would refuse from anyone else.
+			// Every arm below stops tracking the path, so every arm forgets its
+			// findings too: a warning about a file this mount no longer syncs is
+			// one nothing can clear.
+			sec.drop(rel)
+			// Deleting a read-only file locally is a local edit like any other:
+			// not journaled, and put back by materialize on this same cycle.
+			if s.readOnlyPath(rel) {
+				continue
+			}
+			if unsafeRel(rel) || neverSync(rel) {
+				delete(cache, rel)
+				s.cacheDirty = true
+				continue
+			}
+			if filter.Skip(rel) {
+				delete(cache, rel) // newly filtered, not deleted: stop tracking silently
+				s.cacheDirty = true
+				continue
+			}
+			ops = append(ops, nextOp(journal.KindDelete, rel))
 			delete(cache, rel)
 			s.cacheDirty = true
-			continue
 		}
-		if filter.Skip(rel) {
-			delete(cache, rel) // newly filtered, not deleted: stop tracking silently
-			s.cacheDirty = true
-			continue
-		}
-		ops = append(ops, nextOp(journal.KindDelete, rel))
-		delete(cache, rel)
-		s.cacheDirty = true
 	}
-	return ops, nil
+	return ops, retryPaths, nil
 }
 
 // redefinesApplied reports whether have re-uses the (device, seq) of an op in
@@ -1751,10 +1836,13 @@ var (
 func (s *Session) backfillOps(target map[string]journal.FileState, cache map[string]store.CachedFile, filter *Filter) (picked []journal.Op, more bool) {
 	var ops []journal.Op
 	for rel, want := range target {
-		if want.Blob == "" || filter.Skip(rel) || neverSync(rel) || unsafeRel(rel) {
+		if want.Blob == "" || neverSync(rel) || unsafeRel(rel) {
 			continue
 		}
 		if c, ok := cache[rel]; ok && c.Blob == want.Blob {
+			continue
+		}
+		if filter.Skip(rel) {
 			continue
 		}
 		if s.fetched[want.Blob] || s.Store.HasBlob(want.Blob) {
@@ -1801,6 +1889,14 @@ func shortSha(s string) string {
 // author, sign and push a conflict copy at a path that never existed, holding
 // content the peer chose.
 func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []journal.Op, st *store.SyncState) ([]journal.Op, error) {
+	all, err := s.Store.AllOps()
+	if err != nil {
+		return nil, err
+	}
+	return s.conflictCopiesWithState(myOps, pushed, pulled, st, all, journal.Replay(all))
+}
+
+func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pulled []journal.Op, st *store.SyncState, all []journal.Op, state map[string]journal.FileState) ([]journal.Op, error) {
 	if pushed > int64(len(myOps)) {
 		pushed = int64(len(myOps))
 	}
@@ -1839,11 +1935,6 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 	if len(unpushed) == 0 {
 		return nil, nil
 	}
-	all, err := s.Store.AllOps()
-	if err != nil {
-		return nil, err
-	}
-	state := journal.Replay(all)
 	seqBase := int64(len(myOps))
 	var out []journal.Op
 	// Every unpushed local op, not just the paths a pulled op touched: what
@@ -2030,7 +2121,16 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 		// naming one arrives from a peer's journal — where the scan-side
 		// check never ran. Writing it would let one device repoint another's
 		// mount (or drop a git hook that runs on the next commit).
-		if filter.Skip(rel) || neverSync(rel) {
+		if neverSync(rel) {
+			continue
+		}
+		if want.Link == "" {
+			if c, ok := cache[rel]; ok && c.Link == "" && c.Blob == want.Blob &&
+				c.Mode == safeMode(want.Mode) && !s.readOnlyPath(rel) {
+				continue
+			}
+		}
+		if filter.Skip(rel) {
 			continue
 		}
 		wrote, err := s.materializeFile(rel, want, cache)

@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -67,6 +68,10 @@ func targetUnderNestedMount(folder, rel string, filter *Filter) bool {
 // Roots are deliberately walked independently: a watcher hint can name one
 // leaf without causing an unrelated directory to be statted.
 func walkFolderPaths(folder string, filter *Filter, roots []string, fn func(abs, rel string, d fs.DirEntry, v verdict) error) error {
+	return walkFolderPathsWithErr(folder, filter, roots, nil, fn)
+}
+
+func walkFolderPathsWithErr(folder string, filter *Filter, roots []string, onWalkErr func(rel string, walkErr error), fn func(abs, rel string, d fs.DirEntry, v verdict) error) error {
 	if len(roots) == 0 {
 		roots = []string{"."}
 	}
@@ -89,7 +94,23 @@ func walkFolderPaths(folder string, filter *Filter, roots []string, fn func(abs,
 		seen[absRoot] = true
 		err := filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
-				return nil // skip unreadable or vanished entries
+				if onWalkErr != nil && !errors.Is(walkErr, fs.ErrNotExist) {
+					rel, err := filepath.Rel(folder, p)
+					if err == nil {
+						if rel == "." {
+							rel = root
+						}
+						rel = filepath.ToSlash(rel)
+						if d != nil && d.IsDir() &&
+							(ignoredDir(d.Name()) ||
+								(rel != "" && filter.PruneDir(rel)) ||
+								(rel != "" && config.IsMount(p))) {
+							return fs.SkipDir
+						}
+						onWalkErr(rel, walkErr)
+					}
+				}
+				return nil
 			}
 			rel, err := filepath.Rel(folder, p)
 			if err != nil || rel == "." {

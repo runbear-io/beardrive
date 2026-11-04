@@ -98,8 +98,16 @@ func (f *Filter) underMountOnDisk(rel string) bool {
 }
 
 type pattern struct {
-	re     *regexp.Regexp
-	negate bool
+	re        *regexp.Regexp
+	negate    bool
+	lit       string
+	slashLit  string
+	exactSeg  string
+	segPrefix string
+	segSuffix string
+	segInfix  string
+	anchored  bool
+	dirOnly   bool
 }
 
 // LoadFilter builds the filter for a folder from its .bdriveignore (if any)
@@ -184,11 +192,39 @@ func vouchedFloor(text string, synced []string) string {
 
 func matchesAny(p pattern, paths []string) bool {
 	for _, rel := range paths {
-		if p.re.MatchString(rel) {
+		if p.match(rel) {
 			return true
 		}
 	}
 	return false
+}
+
+func (p pattern) match(rel string) bool {
+	if p.exactSeg != "" {
+		if p.anchored {
+			if p.dirOnly {
+				return strings.HasPrefix(rel, p.segPrefix)
+			}
+			return rel == p.exactSeg || strings.HasPrefix(rel, p.segPrefix)
+		}
+		if p.dirOnly {
+			return strings.HasPrefix(rel, p.segPrefix) || strings.Contains(rel, p.segInfix)
+		}
+		return rel == p.exactSeg ||
+			strings.HasPrefix(rel, p.segPrefix) ||
+			strings.HasSuffix(rel, p.segSuffix) ||
+			strings.Contains(rel, p.segInfix)
+	}
+	if p.lit != "" {
+		if p.slashLit != "" {
+			if !strings.HasPrefix(rel, p.lit) && !strings.Contains(rel, p.slashLit) {
+				return false
+			}
+		} else if !strings.Contains(rel, p.lit) {
+			return false
+		}
+	}
+	return p.re.MatchString(rel)
 }
 
 // EscapeIgnore turns a literal project-relative path into a rule line that
@@ -259,51 +295,103 @@ func compile(line string) (pattern, bool) {
 		p.negate = true
 		line = trimRuleSpace(line[1:])
 	}
-	anchored := strings.HasPrefix(line, "/")
-	dirOnly := strings.HasSuffix(line, "/")
-	line = strings.Trim(line, "/")
 	if line == "" {
 		return pattern{}, false
 	}
-	anchored = anchored || strings.Contains(line, "/")
+	body := line
+	for len(body) > 0 && body[0] == '/' {
+		p.anchored = true
+		body = body[1:]
+	}
+	for len(body) > 0 && body[len(body)-1] == '/' {
+		n := 0
+		for i := len(body) - 2; i >= 0 && body[i] == '\\'; i-- {
+			n++
+		}
+		if n%2 == 1 {
+			break
+		}
+		p.dirOnly = true
+		body = body[:len(body)-1]
+	}
+	if body == "" {
+		return pattern{}, false
+	}
+	for i := 0; i < len(body); i++ {
+		if body[i] == '\\' {
+			i++
+		} else if body[i] == '/' {
+			p.anchored = true
+		}
+	}
 
 	var b strings.Builder
-	if anchored {
+	if p.anchored {
 		b.WriteString("^")
 	} else {
-		b.WriteString("(^|.*/)")
+		b.WriteString("(?:^|/)")
 	}
-	for i := 0; i < len(line); i++ {
-		switch line[i] {
+	var literal, unescaped strings.Builder
+	litStart, litEnd := -1, -1
+	flushLiteral := func(end int) {
+		if literal.Len() == 0 {
+			return
+		}
+		start := end - literal.Len()
+		if litStart < 0 || literal.Len() > litEnd-litStart {
+			litStart, litEnd = start, end
+			p.lit = literal.String()
+		}
+		literal.Reset()
+	}
+	wildcard := false
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
 		case '\\':
-			// gitignore's escape, and the only way a path can be written as a
-			// rule that means itself. Without it every metacharacter a
-			// filename may legally contain (`*`, `?`, a leading `!` or `#`) is
-			// a wildcard, a negation or a comment — and `bdrive forget` turns
-			// a filename into a rule and then prunes the hub in the same
-			// command. Filenames in a synced project are chosen by any
-			// teammate. A trailing backslash is a literal one.
-			if i+1 < len(line) {
+			if i+1 < len(body) {
 				i++
 			}
-			b.WriteString(regexp.QuoteMeta(line[i : i+1]))
+			literal.WriteByte(body[i])
+			unescaped.WriteByte(body[i])
+			b.WriteString(regexp.QuoteMeta(body[i : i+1]))
 		case '*':
-			if i+1 < len(line) && line[i+1] == '*' {
+			flushLiteral(i)
+			wildcard = true
+			if i+1 < len(body) && body[i+1] == '*' {
 				b.WriteString(".*")
 				i++
 			} else {
 				b.WriteString("[^/]*")
 			}
 		case '?':
+			flushLiteral(i)
+			wildcard = true
 			b.WriteString("[^/]")
 		default:
-			b.WriteString(regexp.QuoteMeta(line[i : i+1]))
+			literal.WriteByte(body[i])
+			unescaped.WriteByte(body[i])
+			b.WriteString(regexp.QuoteMeta(body[i : i+1]))
 		}
 	}
-	if dirOnly {
+	flushLiteral(len(body))
+	if p.dirOnly && p.lit != "" && litEnd == len(body) {
+		p.lit += "/"
+	}
+	if !p.anchored && litStart == 0 && p.lit != "" {
+		p.slashLit = "/" + p.lit
+	}
+	if !wildcard {
+		p.exactSeg = unescaped.String()
+		p.segPrefix = p.exactSeg + "/"
+		if !p.anchored {
+			p.segSuffix = "/" + p.exactSeg
+			p.segInfix = "/" + p.exactSeg + "/"
+		}
+	}
+	if p.dirOnly {
 		b.WriteString("/.*$") // must match something *inside* the directory
 	} else {
-		b.WriteString("(/.*)?$")
+		b.WriteString("(?:/.*)?$")
 	}
 	re, err := regexp.Compile(b.String())
 	if err != nil {
@@ -325,7 +413,7 @@ func (f *Filter) Skip(rel string) bool {
 		return false
 	}
 	for _, p := range f.include {
-		if p.re.MatchString(rel) {
+		if p.match(rel) {
 			return false
 		}
 	}
@@ -393,11 +481,10 @@ func (f *Filter) PruneDir(rel string) bool {
 func (f *Filter) ignoredFile(rel string) bool { return ignoredBy(f.ignore, rel) }
 
 func ignoredBy(pats []pattern, rel string) bool {
-	ignored := false
-	for _, p := range pats {
-		if p.re.MatchString(rel) {
-			ignored = !p.negate
+	for i := len(pats) - 1; i >= 0; i-- {
+		if pats[i].match(rel) {
+			return !pats[i].negate
 		}
 	}
-	return ignored
+	return false
 }

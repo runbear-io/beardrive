@@ -5,6 +5,8 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+- **Large-folder local syncs no longer stall behind full-volume ignore and cache passes.** `.bdriveignore` matching uses non-backtracking regexes with literal and segment prefilters, `backfillOps` and `materialize` skip ignore evaluation for paths whose cached state already matches the journal target, and each cycle reuses its loaded journal fold instead of re-reading and re-sorting all device journals multiple times. Local watcher setup prunes `.git`, `.bdrive`, nested mounts, and ignored directories, skips loading the state cache during echo suppression when no pre-fence events are pending, releases the prior watcher before retrying an `EMFILE`/`ENFILE` rebuild, and re-queues targeted scan paths that hit transient read errors.
+
 ## v0.18.2 — 2026-11-03
 
 Update your devices for targeted watcher scans, and update self-hosted hubs for
