@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { getJSON } from "../api/http";
 import type { HeatMap, Node, RenderDoc } from "../api/types";
-import { fetchBlobText, fileURLFor, useTextAt } from "../hooks/useBlob";
+import { fetchBlobText, fileURLFor, useFrameURL, useTextAt } from "../hooks/useBlob";
 import type { SharedFile } from "../lib/sharedfile";
 import {
   CSV_EXT,
@@ -216,7 +216,8 @@ export function FileView(props: {
    quieter one with it: a teammate's edit now appears instead of the page going
    stale under you. */
 function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
-  const { path, fileURL, onRendered } = props;
+  const { apiBase, path, version, onRendered } = props;
+  const fileURL = useFrameURL(apiBase, path, props.fileURL, version);
   const [rev, setRev] = useState(0);
   useEffect(() => {
     const onChanged = (e: Event) => {
@@ -225,6 +226,7 @@ function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
     window.addEventListener("bdrive:changed", onChanged);
     return () => window.removeEventListener("bdrive:changed", onChanged);
   }, [path]);
+  if (!fileURL) return null;
   return (
     <iframe
       // Re-mounted rather than re-pointed: an iframe whose src is unchanged
@@ -388,6 +390,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // says right now. Shares the ["text", url] family the rest of the app uses,
   // so a restore or a peer write invalidates it like any other read.
   const fileURL = fileURLFor(apiBase, path);
+  const frameURL = useFrameURL(apiBase, path, fileURL);
   const text = useTextAt(fileURL, ["text", fileURL], true, false);
   const { error } = text;
   // The buffer is seeded from these bytes, so they are always read again when
@@ -673,7 +676,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           </Button>
         </div>
       ) : visual ? (
-        !VisualEdit ? (
+        !VisualEdit || !frameURL ? (
           <div className="empty">Loading editor…</div>
         ) : (
         /* HTML gets the rendered page, clicked directly. Same file, same
@@ -682,7 +685,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
            express (Browser.tsx's "Edit source"). */
         <VisualEdit
           apiBase={apiBase}
-          fileURL={fileURL}
+          fileURL={frameURL}
           path={path}
           initial={data.text}
           baseSha={data.sha}

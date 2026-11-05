@@ -428,6 +428,33 @@ test("html file renders as a page in a sandboxed iframe", async ({ page }) => {
   expect(res.headers()["content-security-policy"]).toBe("sandbox allow-scripts allow-downloads");
 });
 
+// A generated report links its screenshots as siblings (src="shot.png"). The
+// frame is opaque-origin, so the browser sends no session cookie for them, and
+// /file?path= would resolve them against /api/p/<id>/ besides — both broke the
+// images. The frame's own URL is path-shaped and carries its credential.
+test("an html page's relative images load", async ({ page }) => {
+  await login(page);
+  const pid = await wikiId(page);
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  for (const p of ["shots/report/one.png", "shots/report/img/two.png"]) {
+    await page.request.put(`/api/p/${pid}/upload/content?path=${encodeURIComponent(p)}`, { data: png });
+  }
+  await page.request.put(
+    `/api/p/${pid}/upload/content?path=${encodeURIComponent("shots/report/index.html")}`,
+    { data: "<img id='a' src='one.png'><img id='b' src='img/two.png'>" },
+  );
+  await page.goto(`/${pid}/shots/report/index.html`);
+  const frame = page.frameLocator("#content iframe.htmlview");
+  for (const id of ["#a", "#b"]) {
+    await expect
+      .poll(() => frame.locator(id).evaluate((i: HTMLImageElement) => i.complete && i.naturalWidth))
+      .toBe(1);
+  }
+});
+
 // The export button every generated report has: a Blob, an object URL, a
 // synthetic click. The sandbox blocked all of it until allow-downloads was on
 // BOTH the iframe and the CSP — the browser takes the intersection, so the

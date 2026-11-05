@@ -5,6 +5,8 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+- **Synced HTML pages show their relative images again.** A page's `src="shot.png"` resolved against `/api/p/<id>/` instead of the page's folder, and the sandboxed frame sends no session cookie for it anyway, so every relative image broke. The frame now loads from a path-shaped URL (`/api/p/<id>/raw/<token>/<path>`) carrying a short-lived, folder-scoped credential minted at `/api/p/<id>/frame`. The hub stores its signing key at `hub/frame-key` in the storage root on first use.
+
 ## v0.18.3 — 2026-11-05
 
 **Update your devices.** Everything here is in the client and sync daemon; the
