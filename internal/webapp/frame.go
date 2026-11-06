@@ -72,15 +72,19 @@ var frameRouteRe = regexp.MustCompile(`^/api/(?:p/[^/]+/)?raw/([^/]+)/`)
 
 // loadFrameKey returns the signing key, creating it on first use. A hub is
 // several processes, and a token minted by one must verify on another, so the
-// key is shared through storage rather than drawn per process. Volume mode has
-// no storage root and is one process.
+// key is shared through storage rather than drawn per process. Volume mode and
+// the desktop viewer are one process, and the desktop's Root is read-only.
+//
+// The create must be atomic: two processes that each write their own key and
+// cache it would reject each other's tokens until restart. A root that offers
+// no atomic create gets no key, and the viewer falls back to /file.
 func (s *Server) loadFrameKey(ctx context.Context) ([]byte, error) {
 	s.frameMu.Lock()
 	defer s.frameMu.Unlock()
 	if s.frameKey != nil {
 		return s.frameKey, nil
 	}
-	if s.Root == nil {
+	if s.Root == nil || s.Desktop {
 		k := make([]byte, 32)
 		rand.Read(k)
 		s.frameKey = k
@@ -95,13 +99,16 @@ func (s *Server) loadFrameKey(ctx context.Context) ([]byte, error) {
 	if !ok {
 		k := make([]byte, 32)
 		rand.Read(k)
-		if cp, can := s.Root.(remote.ConditionalPutter); can {
-			_, err = cp.PutIf(ctx, frameKeyObject, bytes.NewReader(k), int64(len(k)), remote.VersionAbsent)
-			if errors.Is(err, remote.ErrVersionMismatch) {
-				err = nil // another process created it first; read theirs
-			}
-		} else {
-			err = s.Root.Put(ctx, frameKeyObject, bytes.NewReader(k), int64(len(k)))
+		switch be := s.Root.(type) {
+		case remote.ConditionalPutter:
+			_, err = be.PutIf(ctx, frameKeyObject, bytes.NewReader(k), int64(len(k)), remote.VersionAbsent)
+		case remote.CreateOnlyPutter:
+			err = be.PutIfAbsent(ctx, frameKeyObject, bytes.NewReader(k), int64(len(k)))
+		default:
+			return nil, errors.New("storage root has no atomic create; frame tokens are off")
+		}
+		if errors.Is(err, remote.ErrVersionMismatch) {
+			err = nil // another process created it first; read theirs
 		}
 		if err != nil {
 			return nil, err
@@ -192,9 +199,9 @@ func (s *Server) handleFrame(v *volume, w http.ResponseWriter, r *http.Request) 
 	if dir == "." {
 		dir = ""
 	}
+	exp := time.Now().Add(frameTokenTTL)
 	tok, err := s.signFrame(r.Context(), frameClaims{
-		Project: project, Dir: dir, UserID: u.ID, Email: u.Email,
-		Expires: time.Now().Add(frameTokenTTL).Unix(),
+		Project: project, Dir: dir, UserID: u.ID, Email: u.Email, Expires: exp.Unix(),
 	})
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "could not prepare the page", err)
@@ -208,7 +215,10 @@ func (s *Server) handleFrame(v *volume, w http.ResponseWriter, r *http.Request) 
 	for i, seg := range segs {
 		segs[i] = url.PathEscape(seg)
 	}
-	writeJSON(w, map[string]string{"url": base + "raw/" + tok + "/" + strings.Join(segs, "/")})
+	writeJSON(w, map[string]any{
+		"url":     base + "raw/" + tok + "/" + strings.Join(segs, "/"),
+		"expires": exp.UnixMilli(),
+	})
 }
 
 // handleRaw serves one file under a frame token's folder, inline, exactly as

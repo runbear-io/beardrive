@@ -85,20 +85,27 @@ export function useBlobText(apiBase: string, sha: string | undefined, enabled: b
    against /api/p/<id>/, not the page's folder, and the sandbox's opaque origin
    means the browser sends no session cookie for it anyway. The hub mints a
    path-shaped URL with its own short-lived credential instead (frame.go), so
-   siblings resolve by ordinary URL rules. undefined while it is being minted;
-   the plain file URL if minting fails, which renders the page without its
-   relative files rather than not at all. A pinned version keeps its blob URL. */
+   siblings resolve by ordinary URL rules. url is undefined while it is being
+   minted, and the plain file URL if minting fails, which renders the page
+   without its relative files rather than not at all. A pinned version keeps
+   its blob URL.
+
+   fresh() is for a reload: it resolves to a URL with time left on it, minting
+   a new one when the held one is near its expiry, so a tab left open for hours
+   does not reload into a dead token. */
 export function useFrameURL(apiBase: string, path: string, fileURL: string, version?: string) {
-  const { data, isError } = useQuery({
+  const { data, isError, refetch } = useQuery({
     queryKey: ["frame", apiBase, path],
-    queryFn: () => getJSON<{ url: string }>(apiBase + "frame?path=" + encodeURIComponent(path)),
+    queryFn: () =>
+      getJSON<{ url: string; expires: number }>(apiBase + "frame?path=" + encodeURIComponent(path)),
     enabled: !version,
-    // Well inside the server's frameTokenTTL, so a remount never reuses a
-    // URL that is about to stop working.
-    staleTime: 60 * 60 * 1000,
-    gcTime: 60 * 60 * 1000,
+    staleTime: Infinity,
     retry: 1,
   });
-  if (version || isError) return fileURL;
-  return data?.url;
+  const url = version || isError ? fileURL : data?.url;
+  const fresh = async () => {
+    if (version || !data || data.expires - Date.now() > 10 * 60 * 1000) return;
+    await refetch();
+  };
+  return { url, fresh };
 }

@@ -52,6 +52,26 @@ func (b *s3Backend) Put(ctx context.Context, key string, r io.Reader, size int64
 	return err
 }
 
+// PutIfAbsent is a create-only PutObject. 412 means the object exists. A
+// store that does not support If-None-Match rejects the request, which the
+// caller sees as an error rather than an overwrite.
+func (b *s3Backend) PutIfAbsent(ctx context.Context, key string, r io.Reader, size int64) error {
+	_, err := b.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(b.bucket),
+		Key:           aws.String(b.key(key)),
+		Body:          r,
+		ContentLength: aws.Int64(size),
+		IfNoneMatch:   aws.String("*"),
+	})
+	var ae smithy.APIError
+	if errors.As(err, &ae) && (ae.ErrorCode() == "PreconditionFailed" || ae.ErrorCode() == "ConditionalRequestConflict") {
+		return ErrVersionMismatch
+	}
+	return err
+}
+
+var _ CreateOnlyPutter = (*s3Backend)(nil)
+
 // SignPut presigns a PUT of exactly size bytes to the given key. Presigning
 // is a local signature computation — no network round-trip, no credentials in
 // the result.

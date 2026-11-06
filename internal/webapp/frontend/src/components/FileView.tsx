@@ -217,11 +217,15 @@ export function FileView(props: {
    stale under you. */
 function HtmlView(props: Parameters<typeof FileView>[0] & { fileURL: string }) {
   const { apiBase, path, version, onRendered } = props;
-  const fileURL = useFrameURL(apiBase, path, props.fileURL, version);
+  const frame = useFrameURL(apiBase, path, props.fileURL, version);
+  const fileURL = frame.url;
+  const fresh = useRef(frame.fresh);
+  fresh.current = frame.fresh;
   const [rev, setRev] = useState(0);
   useEffect(() => {
     const onChanged = (e: Event) => {
-      if ((e as CustomEvent<string[]>).detail?.includes(path)) setRev((r) => r + 1);
+      if (!(e as CustomEvent<string[]>).detail?.includes(path)) return;
+      void fresh.current().finally(() => setRev((r) => r + 1));
     };
     window.addEventListener("bdrive:changed", onChanged);
     return () => window.removeEventListener("bdrive:changed", onChanged);
@@ -390,7 +394,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   // says right now. Shares the ["text", url] family the rest of the app uses,
   // so a restore or a peer write invalidates it like any other read.
   const fileURL = fileURLFor(apiBase, path);
-  const frameURL = useFrameURL(apiBase, path, fileURL);
+  const frameURL = useFrameURL(apiBase, path, fileURL).url;
   const text = useTextAt(fileURL, ["text", fileURL], true, false);
   const { error } = text;
   // The buffer is seeded from these bytes, so they are always read again when

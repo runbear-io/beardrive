@@ -1,15 +1,22 @@
 package webapp
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/runbear-io/beardrive/internal/remote"
 )
 
 // frameHub is permHub with a report page, files beside and below it, and one
@@ -194,5 +201,95 @@ func TestFrameKeyIsSharedThroughStorage(t *testing.T) {
 	other := &Server{Root: srv.Root}
 	if _, ok := other.verifyFrame(context.Background(), tok); !ok {
 		t.Fatal("a second process on the same storage rejected the token")
+	}
+}
+
+// memRoot is a storage root with plain last-writer-wins Put, the shape of a
+// backend that has no compare-and-swap. createOnly adds PutIfAbsent.
+type memRoot struct {
+	mu       sync.Mutex
+	objs     map[string][]byte
+	readOnly bool
+}
+
+func (m *memRoot) Put(_ context.Context, key string, r io.Reader, _ int64) error {
+	if m.readOnly {
+		return errors.New("read-only")
+	}
+	b, _ := io.ReadAll(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.objs[key] = b
+	return nil
+}
+
+func (m *memRoot) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.objs[key]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return io.NopCloser(bytes.NewReader(b)), nil
+}
+
+func (m *memRoot) Exists(_ context.Context, key string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.objs[key]
+	return ok, nil
+}
+
+func (m *memRoot) List(context.Context, string) ([]remote.Object, error) { return nil, nil }
+func (m *memRoot) Close() error                                          { return nil }
+
+type createOnlyRoot struct{ *memRoot }
+
+func (c createOnlyRoot) PutIfAbsent(_ context.Context, key string, r io.Reader, _ int64) error {
+	b, _ := io.ReadAll(r)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.objs[key]; ok {
+		return remote.ErrVersionMismatch
+	}
+	c.objs[key] = b
+	return nil
+}
+
+// The desktop viewer's Root is a read-only view of local volumes; it is one
+// process, so the key never needs to be in storage.
+func TestFrameKeyOnTheDesktopNeedsNoStorage(t *testing.T) {
+	srv := &Server{Root: &memRoot{objs: map[string][]byte{}, readOnly: true}, Desktop: true}
+	if _, err := srv.signFrame(context.Background(), frameClaims{Expires: time.Now().Add(time.Hour).Unix()}); err != nil {
+		t.Fatalf("desktop could not sign: %v", err)
+	}
+}
+
+// Two processes creating the key at once must end up with ONE key, or each
+// rejects the other's tokens. Without an atomic create there is no key at all.
+func TestFrameKeyCreateIsAtomicOrRefused(t *testing.T) {
+	if _, err := (&Server{Root: &memRoot{objs: map[string][]byte{}}}).loadFrameKey(context.Background()); err == nil {
+		t.Error("a root with only last-writer-wins Put produced a key")
+	}
+
+	root := createOnlyRoot{&memRoot{objs: map[string][]byte{}}}
+	var wg sync.WaitGroup
+	keys := make([][]byte, 8)
+	for i := range keys {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			k, err := (&Server{Root: root}).loadFrameKey(context.Background())
+			if err != nil {
+				t.Error(err)
+			}
+			keys[i] = k
+		}()
+	}
+	wg.Wait()
+	for _, k := range keys[1:] {
+		if !bytes.Equal(k, keys[0]) {
+			t.Fatal("concurrent first use produced different keys")
+		}
 	}
 }

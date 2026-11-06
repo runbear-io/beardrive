@@ -114,6 +114,15 @@ type ConditionalPutter interface {
 	PutIf(ctx context.Context, key string, r io.Reader, size int64, expect Version) (Version, error)
 }
 
+// CreateOnlyPutter is the narrower half of ConditionalPutter: write an object
+// only if none exists, ErrVersionMismatch otherwise. It is enough for a value
+// created once and never changed (the hub's frame-token key) and is what S3's
+// If-None-Match: * offers. A store without it answers with an error, never a
+// silent overwrite.
+type CreateOnlyPutter interface {
+	PutIfAbsent(ctx context.Context, key string, r io.Reader, size int64) error
+}
+
 // IsNotExist reports whether err means "no such object", across backends that
 // each spell it differently (GCS has its own sentinel, a file backend uses
 // os.ErrNotExist). One place, so a caller does not have to know which backend
