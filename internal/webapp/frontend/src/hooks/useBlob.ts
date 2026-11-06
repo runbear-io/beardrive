@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { getResponse, HttpError } from "../api/http";
+import { getJSON, getResponse, HttpError } from "../api/http";
 import { MAX_BYTES, sniffBytes, type BlobText } from "../lib/sniff";
 
 // One URL's bytes, decoded as text when they are text. The sniff itself
@@ -77,4 +77,35 @@ export function useTextAt(url: string, key: unknown[], enabled: boolean, immutab
 
 export function useBlobText(apiBase: string, sha: string | undefined, enabled: boolean) {
   return useTextAt(sha ? blobURL(apiBase, sha) : "", ["blob", apiBase, sha], enabled && !!sha, true);
+}
+
+/* The URL an HTML page renders from in its sandboxed iframe.
+
+   /file?path= cannot serve one: the page's relative src="a.png" resolves
+   against /api/p/<id>/, not the page's folder, and the sandbox's opaque origin
+   means the browser sends no session cookie for it anyway. The hub mints a
+   path-shaped URL with its own short-lived credential instead (frame.go), so
+   siblings resolve by ordinary URL rules. url is undefined while it is being
+   minted, and the plain file URL if minting fails, which renders the page
+   without its relative files rather than not at all. A pinned version keeps
+   its blob URL.
+
+   fresh() is for a reload: it resolves to a URL with time left on it, minting
+   a new one when the held one is near its expiry, so a tab left open for hours
+   does not reload into a dead token. */
+export function useFrameURL(apiBase: string, path: string, fileURL: string, version?: string) {
+  const { data, isError, refetch } = useQuery({
+    queryKey: ["frame", apiBase, path],
+    queryFn: () =>
+      getJSON<{ url: string; expires: number }>(apiBase + "frame?path=" + encodeURIComponent(path)),
+    enabled: !version,
+    staleTime: Infinity,
+    retry: 1,
+  });
+  const url = version || isError ? fileURL : data?.url;
+  const fresh = async () => {
+    if (version || !data || data.expires - Date.now() > 10 * 60 * 1000) return;
+    await refetch();
+  };
+  return { url, fresh };
 }

@@ -107,6 +107,8 @@ var desktopRoutes = []struct {
 	{"GET /api/p/{project}/file", routeLocal, "local bytes"},
 	{"GET /api/p/{project}/download", routeLocal, "local bytes"},
 	{"GET /api/p/{project}/render", routeLocal, "local bytes, rendered here"},
+	{"GET /api/p/{project}/frame", routeLocal, "signed by this process, for the raw route below"},
+	{"GET /api/p/{project}/raw/{token}/{path...}", routeLocal, "local bytes, for an HTML page's relative files"},
 	{"GET /api/p/{project}/history", routeLocal, "replayed from the local volume store's journals"},
 	{"GET /api/p/{project}/history/summary", routeLocal, "counted from the same local journals the history feed replays"},
 	{"GET /api/p/{project}/history/emptied", routeLocal, "replayed from the same local journals the history feed reads"},

@@ -126,6 +126,13 @@ func (s *Server) authGate(next http.Handler) http.Handler {
 				}
 				return
 			}
+			// A framed page's own requests carry no cookie (frame.go).
+			if u, handled, ok := s.frameUser(w, r); handled {
+				if ok {
+					next.ServeHTTP(w, withUser(r, u))
+				}
+				return
+			}
 			u, ok := s.Auth.Authenticate(r)
 			if !ok {
 				http.Error(w, "authentication required (bdrive login, or sign in at /auth/login)", http.StatusUnauthorized)

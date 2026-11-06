@@ -132,6 +132,10 @@ type Server struct {
 
 	mcpOnce sync.Once
 	mcpSrv  *mcp.Server // the tool registry, built once (see mcpServer)
+
+	// Signing key for frame tokens, loaded on first use (frame.go).
+	frameMu  sync.Mutex
+	frameKey []byte
 	// Reads, when set, aggregates read telemetry (viewer, share, and agent
 	// reads) for the heat API. Nil means read tracking is off.
 	Reads *ReadLedger
@@ -1510,6 +1514,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET "+prefix+"file", resolve(PermRead, s.handleFile))
 		mux.HandleFunc("GET "+prefix+"download", resolve(PermRead, s.handleDownload))
 		mux.HandleFunc("GET "+prefix+"render", resolve(PermRead, s.handleRender))
+		mux.HandleFunc("GET "+prefix+"frame", resolve(PermRead, s.handleFrame))
+		mux.HandleFunc("GET "+prefix+"raw/{token}/{path...}", resolve(PermRead, s.handleRaw))
 		// Reading the change stream is reading the project: it names paths,
 		// so it sits behind the same permission the tree does.
 		mux.HandleFunc("GET "+prefix+"events", resolve(PermRead, s.handleEvents))

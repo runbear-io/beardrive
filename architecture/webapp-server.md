@@ -36,6 +36,7 @@ classDiagram
         -vols per-project volume cache
         -grants reservation ledger
         -routes what Handler registered
+        -frameKey frame-token HMAC key, loaded from Root
         +Handler() http.Handler
         +headBlob(ctx, volume, path) (sha, ok)
         -pathLocks sync.Map (one mutex per project+path)
@@ -559,6 +560,13 @@ classDiagram
         appends printSuffix, drops Content-Length
     }
     note for printView "The one thing allowed to relax sandboxInline's wall, and by exactly one flag. The app shell cannot print synced HTML: it renders in a cross-origin frame, and a cross-origin frame prints CLIPPED to its box — the parent may not measure the content to size it, and an over-tall guess prints the slack as blank pages. So ?print=1 serves the document as a TOP-LEVEL page that presses Print itself, which needs allow-modals (the flag that gates print/alert/confirm in a sandbox). allow-same-origin stays off, so the document is still opaque and can no more reach the API or the session cookie than the frame it replaces. text/html only, because the suffix is appended AFTER the stored bytes: HTML's parser accepts that and XHTML — parsed as XML — does not. Never on a download door, where it would corrupt the saved file, and Content-Length is dropped when it fires or the promised length truncates the script straight back off"
+    class frameToken {
+        <<frame.go, GET frame + GET raw/{token}/{path...}>>
+        HMAC over project, folder, reader, expiry
+        key shared at hub/frame-key in Root
+        reads the page's folder as its reader, inline only
+    }
+    note for frameToken "Synced HTML renders in an opaque-origin sandbox, so the browser sends no session cookie for the page's own images, and /file?path= cannot be the base a relative src resolves against. /frame mints a path-shaped URL for a signed-in reader; authGate's frameUser resolves its token before the provider, and handleRaw re-checks the folder scope and serves through serveBlob, so the reader's current permissions decide every request. The page can read its own URL, so the token is assumed to leak to the page's authors: what leaks is one reader's read access to one folder for frameTokenTTL"
     class editView {
         <<serveBlob, ?edit=1>>
         text/html only, inline only, PermWrite on the path
@@ -774,6 +782,8 @@ classDiagram
     commentEvent ..> CommentThread : foldComments
     CommentThread *-- CommentAnchor
     Server ..> commentView : serveBlob
+    Server ..> frameToken : handleFrame, handleRaw, authGate
+    frameToken ..> Backend : hub/frame-key
     Server o-- ReadLedger
     Server o-- DataIndex : Data
     Server *-- dataProject : per project
