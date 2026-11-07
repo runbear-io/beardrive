@@ -1961,7 +1961,9 @@ func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pull
 		if loser.Kind != journal.KindPut || loser.Blob == "" {
 			continue // a lost delete needs no preservation
 		}
-		if loser.Size == 0 {
+		// By blob, never by Size: a blob is the hash of its bytes, and Size
+		// is only what a peer's journal claims.
+		if loser.Blob == emptyBlob {
 			continue // an empty version holds nothing to preserve
 		}
 		if exists && cur.Blob == loser.Blob {
@@ -1993,7 +1995,7 @@ func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pull
 		// that wrote before it had the bytes. The content goes back to the
 		// real path; a copy beside an empty file leaves the reader with an
 		// empty file to look at and the work under a name nobody opens.
-		if exists && cur.Link == "" && cur.Size == 0 {
+		if exists && cur.Link == "" && cur.Blob == emptyBlob {
 			st.Lamport = tickLamport(st.Lamport)
 			seqBase++
 			out = append(out, journal.Op{

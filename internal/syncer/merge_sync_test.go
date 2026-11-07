@@ -5,6 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 // The point of the merge, at the level that matters: two real devices, one
@@ -165,6 +169,51 @@ func TestContentReplacesAnEmptyWinner(t *testing.T) {
 		}
 		if names := conflictCopiesIn(t, d.folder); len(names) != 0 {
 			t.Errorf("%s: conflict copies %v for an empty write", d.name, names)
+		}
+	}
+}
+
+// Empty means the empty blob, not a Size a journal claims: a peer can write
+// any Size beside any blob. Content declared as size zero is still content,
+// whether it won the path or lost it.
+func TestAClaimedZeroSizeIsNotAnEmptyFile(t *testing.T) {
+	s := newDevice(t, "alice", sharedRemote(t))
+	blob := func(text string) string {
+		sum, _, err := s.Store.PutBlobReader(strings.NewReader(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sum
+	}
+	at := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name                       string
+		mineLamport, theirsLamport int64
+	}{
+		{"winner claims zero", 3, 5},
+		{"loser claims zero", 5, 3},
+	} {
+		mine := journal.Op{Seq: 1, Lamport: c.mineLamport, Time: at, Device: "alice", DeviceName: "alice",
+			Kind: journal.KindPut, Path: "notes.md", Blob: blob("alice's notes\n"), Size: 14}
+		theirs := journal.Op{Seq: 1, Lamport: c.theirsLamport, Time: at, Device: "bob", DeviceName: "bob",
+			Kind: journal.KindPut, Path: "notes.md", Blob: blob("bob's notes\n"), Size: 0}
+		all := []journal.Op{mine, theirs}
+		st := &store.SyncState{}
+		out, err := s.conflictCopiesWithState([]journal.Op{mine}, 0, []journal.Op{theirs}, st, all, journal.Replay(all))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var copies, rewrites int
+		for _, op := range out {
+			switch {
+			case strings.Contains(op.Path, ".bdrive-conflict-"):
+				copies++
+			case op.Path == "notes.md":
+				rewrites++
+			}
+		}
+		if copies != 1 || rewrites != 0 {
+			t.Errorf("%s: %d conflict copies and %d rewrites of the path, want the loser preserved beside it", c.name, copies, rewrites)
 		}
 	}
 }

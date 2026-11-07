@@ -34,6 +34,9 @@ const mergeNote = "merged concurrent edits"
 // concurrent write had won. Display only, like mergeNote.
 const keptOverEmptyNote = "kept content over a concurrent empty write"
 
+// emptyBlob is sha256(""): the one blob that is an empty file.
+const emptyBlob = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 // mergedBlob is what tryMerge stored.
 type mergedBlob struct {
 	blob string
