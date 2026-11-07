@@ -1507,3 +1507,49 @@ func TestSecretScanSkipsUnchangedFiles(t *testing.T) {
 		t.Fatalf("findings = %+v, want the touched file flagged again", found)
 	}
 }
+
+func TestPullRejectsSymlinkTargetOnlySlotRedefinition(t *testing.T) {
+	be := sharedRemote(t)
+	s := newDevice(t, "local", be)
+	ctx := context.Background()
+	ts := time.Unix(1767225600, 0).UTC()
+	line := func(op journal.Op) []byte {
+		b, err := json.Marshal(op)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(b, '\n')
+	}
+	op1 := journal.Op{
+		Seq: 1, Lamport: 1, Time: ts, Device: "peer",
+		Kind: journal.KindPut, Path: "link", Link: "target-a",
+	}
+	first := line(op1)
+	if err := be.Put(ctx, "journal/peer.jsonl", strings.NewReader(string(first)), int64(len(first))); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.pull(ctx, map[string]store.CachedFile{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Link != "target-a" {
+		t.Fatalf("initial symlink pull = %+v, want Link=target-a", got)
+	}
+	op1Redefined := op1
+	op1Redefined.Link = "target-b-longer"
+	op2 := journal.Op{
+		Seq: 2, Lamport: 2, Time: ts.Add(time.Second), Device: "peer",
+		Kind: journal.KindPut, Path: "other.txt",
+	}
+	rewritten := append(line(op1Redefined), line(op2)...)
+	if err := be.Put(ctx, "journal/peer.jsonl", strings.NewReader(string(rewritten)), int64(len(rewritten))); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = s.pull(ctx, map[string]store.CachedFile{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("pull accepted symlink target-only slot redefinition: %+v", got)
+	}
+}

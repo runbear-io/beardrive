@@ -1404,9 +1404,9 @@ func redefinesApplied(have, applied []journal.Op) bool {
 func opSlot(op journal.Op) string { return fmt.Sprintf("%s\x00%d", op.Device, op.Seq) }
 
 func opID(op journal.Op) string {
-	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d",
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s",
 		opSlot(op), op.Lamport, op.Time.UTC().Format(time.RFC3339Nano),
-		op.Kind, op.Path, op.Blob, op.Size, op.Mode)
+		op.Kind, op.Path, op.Blob, op.Size, op.Mode, op.Link)
 }
 
 // sizeGrowth is the headroom a bound gets over the size an object was

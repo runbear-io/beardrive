@@ -812,8 +812,10 @@ func TestSuppressMaterializationEchoesSkipsCacheLoadWhenNoPendingEvents(t *testi
 	case <-time.After(time.Second):
 		t.Fatal("write did not wake watcher")
 	}
+	// On Linux inotify, os.WriteFile emits IN_CREATE followed by IN_MODIFY;
+	// let both events from the initial write coalesce before taking the fence.
+	time.Sleep(20 * time.Millisecond)
 	upto := lw.fence()
-
 	keepStarted := make(chan struct{})
 	keepRelease := make(chan struct{})
 	suppressDone := make(chan struct{})

@@ -1654,7 +1654,6 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	forceFull := true
 	lastFullScan := time.Time{}
 	var lastScanDuration time.Duration
-	var pendingRemoteWake bool
 	stopLocalWatch := func() {
 		if localWatch != nil {
 			localWatch.close()
@@ -1802,14 +1801,12 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		} else {
 			pollEvery = fallbackScanEvery
 		}
-		// Remote polling remains independent of the local watcher. A healthy
-		// stream can stand down the safety poll, but fallback polling must not
-		// be shortened back to the remote cadence.
+		// Remote polling remains independent of the local watcher.
 		remotePollEvery := remoteInterval
 		if watch != nil {
 			remotePollEvery = remoteInterval * watchedPollFactor
 		}
-		if localWatchHealthy && remotePollEvery < pollEvery {
+		if remotePollEvery < pollEvery {
 			pollEvery = remotePollEvery
 		}
 		waitFor := pollEvery
@@ -1818,15 +1815,8 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		fallbackDue := !localWatchHealthy &&
 			(lastFullScan.IsZero() || now.Sub(lastFullScan) >= fallbackScanEvery || forceFull)
 		doRemote := proj.Remote != "" && time.Since(lastRemote) >= remotePollEvery
-		if pendingRemoteWake {
-			doRemote = true
-			pendingRemoteWake = false
-		}
 		if fallbackDue {
 			forceFull = true
-			if proj.Remote != "" {
-				doRemote = true
-			}
 		} else if localWatchHealthy &&
 			(lastFullScan.IsZero() || now.Sub(lastFullScan) >= localWatchSafetyInterval) {
 			forceFull = true
@@ -2123,7 +2113,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				waitFor = remaining
 			}
 		}
-		if !localWatchHealthy && !lastFullScan.IsZero() && !res.Backfilling && len(retryHints) == 0 {
+		if !localWatchHealthy && !lastFullScan.IsZero() {
 			remaining := maxDuration(0, lastFullScan.Add(fallbackScanEvery).Sub(localWatchNow()))
 			if remaining < waitFor {
 				waitFor = remaining
@@ -2156,11 +2146,6 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				hook(volDir)
 			}
 			lastRemote = time.Time{}
-			if !localWatchHealthy && !lastFullScan.IsZero() &&
-				localWatchNow().Sub(lastFullScan) < fallbackScanEvery {
-				pendingRemoteWake = true
-				goto waitForEvent
-			}
 		case <-wakeCh:
 			lastRemote = time.Time{}
 			forceFull = true
@@ -2201,8 +2186,8 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 						timer.Stop()
 						return nil
 					case _, open := <-watch:
+						remoteWake = true
 						if !open {
-							remoteWake = true
 							lived := time.Since(watchOpened)
 							stopWatch()
 							if lived < watchRetry {
@@ -2213,13 +2198,6 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 								hook(volDir)
 							}
 							lastRemote = time.Time{}
-							if !localWatchHealthy && !lastFullScan.IsZero() &&
-								localWatchNow().Sub(lastFullScan) < fallbackScanEvery {
-								pendingRemoteWake = true
-								remoteWake = false
-							} else {
-								remoteWake = true
-							}
 						}
 						timer.Stop()
 						break localWait
@@ -2251,9 +2229,6 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 						break localWait
 					}
 				}
-			}
-			if pendingRemoteWake && !remoteWake {
-				goto waitForEvent
 			}
 			if localWatchHealthy && !lastFullScan.IsZero() &&
 				localWatchNow().Sub(lastFullScan) >= localWatchSafetyInterval {
