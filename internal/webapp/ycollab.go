@@ -613,7 +613,9 @@ func (s *Server) roomBytes(ctx context.Context, room string) (body []byte, sha s
 		return nil, "", false, err
 	}
 	defer rc.Close()
-	body, err = io.ReadAll(io.LimitReader(rc, maxSeedBytes))
+	// One byte past the bound, so a caller can tell a whole file from a
+	// prefix: anything longer than maxSeedBytes is only the start of one.
+	body, err = io.ReadAll(io.LimitReader(rc, maxSeedBytes+1))
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -679,6 +681,33 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		if final && strings.TrimSpace(text) != "" {
 			s.finishLater(room, who, text, base, state)
 		}
+		return
+	}
+	if have && curSha == s.rooms().yieldedTo(room) {
+		// Already parked beside this version, which the room cannot hold.
+		// Edits since are kept the same way when the room empties.
+		if final && strings.TrimSpace(text) != "" && !s.rooms().isParked(room, text) {
+			s.rooms().park(room, text)
+			s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
+		}
+		s.rooms().settled(room)
+		return
+	}
+	if have && len(cur) > maxSeedBytes {
+		// Larger than any room holds, so somebody outside wrote it, and cur
+		// is only its start: it is never compared to the text or merged.
+		s.reconcile(ctx, room, who, text, "", false, string(cur), curSha, final)
+		return
+	}
+	if !have && base != "" {
+		// This room wrote the file and somebody deleted it since. The
+		// deletion is theirs: the room does not bring the file back while
+		// it is edited, and when it empties its text goes beside it, once.
+		if final && strings.TrimSpace(text) != "" && !s.rooms().isParked(room, text) {
+			s.rooms().park(room, text)
+			s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
+		}
+		s.rooms().settled(room)
 		return
 	}
 	if have && string(cur) == text {
@@ -782,7 +811,7 @@ wrote: an agent appending to the notes, a device syncing, the CLI.
 */
 func (s *Server) reconcile(ctx context.Context, room string, who User, text, baseText string, haveBase bool, theirs, theirSha string, final bool) {
 	project, path, _ := strings.Cut(room, "/")
-	// roomBytes and blobText stop at maxSeedBytes. A prefix taken for the
+	// roomBytes and blobText stop just past maxSeedBytes. A prefix taken for the
 	// whole file would be merged and written back over its tail, so a file
 	// that large is only ever parked beside.
 	whole := len(theirs) < maxSeedBytes && len(baseText) < maxSeedBytes
@@ -815,6 +844,12 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		if !s.rooms().isParked(room, text) {
 			s.rooms().park(room, text)
 			s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
+		}
+		if !whole {
+			// Writing on top of a version the room never held in full
+			// would erase what it could not read.
+			s.rooms().yield(room, theirSha)
+			return
 		}
 		s.rooms().rebase(room, theirSha)
 	}
@@ -962,7 +997,7 @@ func (s *Server) blobText(ctx context.Context, project, sha string) (string, boo
 		return "", false
 	}
 	defer rc.Close()
-	b, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes))
+	b, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes+1))
 	if err != nil {
 		return "", false
 	}
@@ -1040,7 +1075,7 @@ func (s *Server) finishLater(room string, who User, text, base string, state []b
 			return false
 		}
 		switch {
-		case have && string(cur) == text:
+		case have && len(cur) <= maxSeedBytes && string(cur) == text:
 			settled(ctx, curSha)
 			return true
 		case !have && base != "":
@@ -1170,6 +1205,10 @@ type roomRegistry struct {
 	// parked is the text a room last set aside as a conflict copy, so the
 	// two final snapshots (last peer, unload) park it once.
 	parked map[string]string
+	// yielded is a file version this room parked beside and will not write
+	// over: one too large to hold or merge, so the room's text cannot be
+	// settled against it and every later write would erase it.
+	yielded map[string]string
 	// leases is what this process holds for each room, under its own lock
 	// because taking one is a storage round-trip (lease.go).
 	leaseMu  sync.Mutex
@@ -1190,7 +1229,7 @@ func (s *Server) rooms() *roomRegistry {
 		s.roomReg = &roomRegistry{
 			docs: map[string]*crdt.Doc{}, users: map[string]User{},
 			bases: map[string]string{}, pending: map[string]*roomFlush{}, unsubs: map[string]func(){},
-			parked: map[string]string{}, leases: map[string]*roomLease{}, renewals: map[string]chan struct{}{},
+			parked: map[string]string{}, yielded: map[string]string{}, leases: map[string]*roomLease{}, renewals: map[string]chan struct{}{},
 			waits: map[string]int{},
 		}
 	})
@@ -1221,6 +1260,18 @@ func (r *roomRegistry) park(room, text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.parked[room] = text
+}
+
+func (r *roomRegistry) yield(room, sha string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.yielded[room] = sha
+}
+
+func (r *roomRegistry) yieldedTo(room string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.yielded[room]
 }
 
 func (r *roomRegistry) base(room string) string {
@@ -1384,6 +1435,7 @@ func (r *roomRegistry) drop(room string) {
 	delete(r.docs, room)
 	delete(r.users, room)
 	delete(r.parked, room)
+	delete(r.yielded, room)
 	// bases outlives the room on purpose: it is how the NEXT room for this
 	// file finds the history to rebuild from when somebody wrote the file
 	// from outside in between (seedDoc). One sha per file ever edited.

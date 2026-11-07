@@ -461,3 +461,67 @@ func TestSnapshotDoesNotUndoARestoreFoldedMidway(t *testing.T) {
 		t.Fatalf("the snapshot undid the restore: file is %q", got)
 	}
 }
+
+// A file past the seed bound whose start spells the room's text is not the
+// room's text: the room never writes over the part it could not read.
+func TestRoomNeverWritesOverAFileItHoldsOnlyTheStartOf(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, up, "x\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+
+	line := "an agent's line, sixty-four bytes long, written well past the room\n"
+	start := strings.Repeat(line, maxSeedBytes/len(line)+1)[:maxSeedBytes]
+	big := start + "THE TAIL\n"
+	if rec := putContent(t, h, up, big, ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d", rec.Code)
+	}
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) {
+		txt.Delete(txn, 0, txt.Len())
+		txt.Insert(txn, 0, start, nil)
+	})
+	srv.snapshotRoom(context.Background(), room)
+	typeInto(doc, "typed after\n")
+	srv.snapshotRoom(context.Background(), room)
+	srv.finalSnapshot(context.Background(), room)
+
+	if got := get(t, h, url).Body.String(); got != big {
+		t.Fatalf("file is %d bytes, want the agent's %d bytes intact", len(got), len(big))
+	}
+	if n := conflictCopies(t, h, p.ID); n < 1 || n > 2 {
+		t.Fatalf("conflict copies = %d, want the room's text parked (at most once more for later edits)", n)
+	}
+}
+
+// A file deleted under a live room stays deleted while the room is edited,
+// and the room's text is parked once when it empties.
+func TestRoomDoesNotBringBackADeletedFile(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "a\nb\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+
+	if rec := do(t, h, "POST", "/api/p/"+p.ID+"/remove", map[string]string{"path": "notes.md"}); rec.Code != http.StatusOK {
+		t.Fatalf("remove: %d %s", rec.Code, rec.Body)
+	}
+	typeInto(doc, "typed after the delete\n")
+	srv.snapshotRoom(context.Background(), room)
+	if rec := get(t, h, "/api/p/"+p.ID+"/file?path=notes.md"); rec.Code == http.StatusOK {
+		t.Fatalf("a snapshot brought the deleted file back: %q", rec.Body.String())
+	}
+	srv.finalSnapshot(context.Background(), room)
+	srv.finalSnapshot(context.Background(), room)
+	if rec := get(t, h, "/api/p/"+p.ID+"/file?path=notes.md"); rec.Code == http.StatusOK {
+		t.Fatalf("the final snapshot brought the deleted file back: %q", rec.Body.String())
+	}
+	if n := conflictCopies(t, h, p.ID); n != 1 {
+		t.Fatalf("conflict copies = %d, want the room's text parked once", n)
+	}
+}
