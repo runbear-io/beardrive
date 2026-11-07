@@ -261,3 +261,58 @@ func TestARefusedConflictCopyIsRetried(t *testing.T) {
 		t.Fatalf("file = %q, want the outside write", got)
 	}
 }
+
+// The last editor leaving while the store cannot be read: the room is
+// dropped, but its text is not. It is written once the file reads again.
+func TestFinalSnapshotThatCannotReadIsFinishedLater(t *testing.T) {
+	old := parkBackoff
+	parkBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { parkBackoff = old })
+	fastRoom(t, time.Hour, time.Hour)
+	var flaky *flakyBlobs
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		flaky = &flakyBlobs{Backend: be}
+		return flaky
+	})
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "a\nb\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+	typeInto(doc, "typed before the outage\n")
+
+	flaky.broken.Store(true)
+	srv.finalSnapshot(context.Background(), room)
+	srv.rooms().drop(room)
+	time.Sleep(50 * time.Millisecond)
+	flaky.broken.Store(false)
+
+	if !waitFile(t, h, url, "a\nb\ntyped before the outage\n", 3*time.Second) {
+		t.Fatalf("the room's text was dropped with the room: file is %q", get(t, h, url).Body.String())
+	}
+	if n := conflictCopies(t, h, p.ID); n != 0 {
+		t.Fatalf("%d conflict copies for a write nobody else made", n)
+	}
+}
+
+// A final snapshot that keeps their version moves the room onto it, so an
+// editor who reopens before the room unloads is not refused for a stale base.
+func TestFinalSnapshotKeepingTheirsRebases(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	putContent(t, h, up, "one\ntwo\n", "")
+	room := p.ID + "/notes.md"
+	openRoom(t, srv, room)
+
+	putContent(t, h, up, "OUTSIDE\none\ntwo\nthree\n", "")
+	srv.finalSnapshot(context.Background(), room)
+	got := get(t, h, "/api/p/"+p.ID+"/file?path=notes.md")
+	if got.Body.String() != "OUTSIDE\none\ntwo\nthree\n" {
+		t.Fatalf("file = %q", got.Body.String())
+	}
+	if b := srv.rooms().base(room); b != shaOf("OUTSIDE\none\ntwo\nthree\n") {
+		t.Fatalf("room base = %q, want their version", b)
+	}
+}

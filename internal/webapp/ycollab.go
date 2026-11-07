@@ -666,9 +666,14 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		return
 	}
 	if err != nil {
-		// Never write over a file this process cannot see; the next pause
-		// looks again.
+		// Never write over a file this process cannot see. A pause looks
+		// again on the next one; a final snapshot has no next one, and the
+		// room is dropped right after it, so the text is held until the
+		// file can be read.
 		log.Printf("bdrive: not snapshotting %s: reading the file: %v", path, err)
+		if final && strings.TrimSpace(text) != "" {
+			s.finishLater(room, who, text, s.rooms().base(room))
+		}
 		return
 	}
 	if have && string(cur) == text {
@@ -812,6 +817,7 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 	}
 	if final {
 		if target == theirs {
+			s.rooms().rebase(room, theirSha)
 			return
 		}
 		// The last chance to keep this text: refused again, it is parked.
@@ -986,6 +992,63 @@ func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, te
 					return
 				}
 				wait = min(wait*2, backoffMax)
+				timer.Reset(wait)
+			}
+		}
+	}()
+}
+
+// finishLater is a final snapshot that could not read its file, carried
+// past the room: retried with backoff for as long as this process lives,
+// like parkCopy, and settled the way the snapshot would have settled it once
+// the file can be read. Every write it makes is conditional on base, or on
+// the version it then reads.
+func (s *Server) finishLater(room string, who User, text, base string) {
+	project, path, _ := strings.Cut(room, "/")
+	try := func(ctx context.Context) bool {
+		cur, curSha, have, err := s.roomBytes(ctx, room)
+		if err != nil {
+			return false
+		}
+		switch {
+		case have && string(cur) == text:
+			return true
+		case !have:
+			return s.putAs(ctx, who, project, path, text, "").code == http.StatusOK
+		case curSha == base:
+			w := s.putAs(ctx, who, project, path, text, base)
+			switch w.code {
+			case http.StatusOK:
+				return true
+			case http.StatusUnprocessableEntity:
+				if !fileHolds(string(cur), text) {
+					s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
+				}
+				return true
+			}
+			return false // a 409 is settled against their version next time
+		}
+		baseText, haveBase := s.blobText(ctx, project, base)
+		s.reconcile(ctx, room, who, text, baseText, haveBase, string(cur), curSha, true)
+		return true
+	}
+	bg := s.collabContext()
+	if bg.Err() != nil {
+		return
+	}
+	go func() {
+		wait := parkBackoff
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		for {
+			select {
+			case <-bg.Done():
+				return
+			case <-timer.C:
+				if bg.Err() != nil || try(bg) {
+					return
+				}
+				wait = min(wait*2, parkBackoffMax)
 				timer.Reset(wait)
 			}
 		}
