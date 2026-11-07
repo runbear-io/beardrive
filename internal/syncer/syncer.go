@@ -1996,6 +1996,12 @@ func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pull
 		// real path; a copy beside an empty file leaves the reader with an
 		// empty file to look at and the work under a name nobody opens.
 		if exists && cur.Link == "" && cur.Blob == emptyBlob {
+			// The size this op states is the blob's own, read here: the loser's
+			// Size is a peer's claim, and a puller bounds its read by it.
+			fi, err := os.Stat(s.Store.BlobPath(loser.Blob))
+			if err != nil {
+				continue
+			}
 			st.Lamport = tickLamport(st.Lamport)
 			seqBase++
 			out = append(out, journal.Op{
@@ -2003,7 +2009,7 @@ func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pull
 				Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
 				User: s.Account.Email, UserName: s.Account.Name,
 				Kind: journal.KindPut, Path: p,
-				Blob: loser.Blob, Size: loser.Size, Mode: loser.Mode,
+				Blob: loser.Blob, Size: fi.Size(), Mode: loser.Mode,
 				Note: keptOverEmptyNote,
 			})
 			continue

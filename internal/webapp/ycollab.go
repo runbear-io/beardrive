@@ -679,7 +679,7 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		// file can be read.
 		log.Printf("bdrive: not snapshotting %s: reading the file: %v", path, err)
 		if final && strings.TrimSpace(text) != "" {
-			s.finishLater(room, who, text, base, state)
+			s.finishLater(ctx, room, who, text, base, state)
 		}
 		return
 	}
@@ -764,7 +764,12 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		// this document, so a 409 here can never be a co-editor.
 		theirs, theirSha, found, err := s.roomBytes(ctx, room)
 		if err != nil || !found {
-			return // looked at again on the next pause, against the same base
+			// Looked at again on the next pause, against the same base. A
+			// final snapshot has none, so its text is carried past the room.
+			if final && strings.TrimSpace(text) != "" {
+				s.finishLater(ctx, room, who, text, base, state)
+			}
+			return
 		}
 		// A base this source cannot read back still parks rather than merges.
 		baseText, haveBase := s.blobText(ctx, project, base)
@@ -842,6 +847,15 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		}
 	}
 	park := func() {
+		if strings.TrimSpace(text) == "" {
+			// Nothing to keep; the room still steps off their version.
+			if whole {
+				s.rooms().rebase(room, theirSha)
+			} else {
+				s.rooms().yield(room, theirSha)
+			}
+			return
+		}
 		// parkCopy owns the text from here and retries a failing store, so
 		// the room can move onto their version without it being the only
 		// place the text lives.
@@ -1008,6 +1022,10 @@ func (s *Server) blobText(ctx context.Context, project, sha string) (string, boo
 	return string(b), true
 }
 
+// finishOnClose bounds how long shutdown waits on a final snapshot that
+// cannot read its file. Cloud Run gives a stopping instance ten seconds.
+var finishOnClose = 5 * time.Second
+
 // Backoff for a refused room's conflict copy, doubling up to a ceiling. Vars
 // so a test need not wait out real backoff.
 var (
@@ -1062,7 +1080,7 @@ func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, te
 // like parkCopy, and settled the way the snapshot would have settled it once
 // the file can be read. Every write it makes is conditional on base, or on
 // the version it then reads.
-func (s *Server) finishLater(room string, who User, text, base string, state []byte) {
+func (s *Server) finishLater(ctx context.Context, room string, who User, text, base string, state []byte) {
 	project, path, _ := strings.Cut(room, "/")
 	// The file now spells exactly the room's text, so the room's state is
 	// its history: a browser reconnecting with that state then replays onto
@@ -1141,6 +1159,17 @@ func (s *Server) finishLater(room string, who User, text, base string, state []b
 	}
 	bg := s.collabContext()
 	if bg.Err() != nil {
+		// Shutting down: Close cancels the collab context before its final
+		// snapshots, so no retry can outlive this call. What time the
+		// caller's context has left, up to finishOnClose, is the last chance.
+		ctx, cancel := context.WithTimeout(ctx, finishOnClose)
+		defer cancel()
+		for wait := parkBackoff; ctx.Err() == nil && !try(ctx); wait = min(wait*2, parkBackoffMax) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(wait):
+			}
+		}
 		return
 	}
 	go func() {

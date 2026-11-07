@@ -24,12 +24,12 @@ type flakyBlobs struct {
 }
 
 func (b *flakyBlobs) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	if b.broken.Load() && strings.Contains(key, "blobs/") {
-		return nil, errors.New("storage timed out")
-	}
 	if strings.Contains(key, "blobs/") {
 		if f := b.during.Swap(nil); f != nil {
 			(*f)()
+		}
+		if b.broken.Load() {
+			return nil, errors.New("storage timed out")
 		}
 	}
 	return b.Backend.Get(ctx, key)
@@ -611,5 +611,81 @@ func TestAMergePastTheSeedBoundIsParked(t *testing.T) {
 	}
 	if n := conflictCopies(t, h, p.ID); n != 1 {
 		t.Fatalf("conflict copies = %d, want the room's text parked once", n)
+	}
+}
+
+// A final snapshot refused by an outside write, whose re-read then fails, is
+// not dropped with the room.
+func TestFinalSnapshotKeepsItsTextWhenTheRereadFails(t *testing.T) {
+	old := parkBackoff
+	parkBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { parkBackoff = old })
+	fastRoom(t, time.Hour, time.Hour)
+	var flaky *flakyBlobs
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		flaky = &flakyBlobs{Backend: be}
+		return flaky
+	})
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, up, "a\nb\nc\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+	putContent(t, h, up, "a\nb\nc\nfrom the agent\n", "")
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "typed at the top\n", nil) })
+
+	// The snapshot's first read succeeds and its write gets a 409; every blob
+	// read after that fails until the room is gone.
+	var reads atomic.Int32
+	breakAfterFirst := func() {}
+	breakAfterFirst = func() {
+		if reads.Add(1) == 1 {
+			flaky.during.Store(&breakAfterFirst)
+			return
+		}
+		flaky.broken.Store(true)
+	}
+	flaky.during.Store(&breakAfterFirst)
+	srv.finalSnapshot(context.Background(), room)
+	srv.rooms().drop(room)
+	flaky.during.Store(nil)
+	flaky.broken.Store(false)
+
+	if !waitFile(t, h, url, "typed at the top\na\nb\nc\nfrom the agent\n", 3*time.Second) {
+		t.Fatalf("the room's text was dropped with the room: file is %q", get(t, h, url).Body.String())
+	}
+}
+
+// On shutdown no retry outlives Close, so a final snapshot that cannot read
+// its file tries within the caller's time instead of giving up at once.
+func TestFinishLaterTriesWithinCloseTime(t *testing.T) {
+	old := parkBackoff
+	parkBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { parkBackoff = old })
+	fastRoom(t, time.Hour, time.Hour)
+	var flaky *flakyBlobs
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		flaky = &flakyBlobs{Backend: be}
+		return flaky
+	})
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "a\n", "")
+	room := p.ID + "/notes.md"
+	base := srv.rooms().base(room)
+	if base == "" {
+		base = shaOf("a\n")
+	}
+	srv.collabContext()
+	srv.collabCancel()
+
+	flaky.broken.Store(true)
+	go func() { time.Sleep(50 * time.Millisecond); flaky.broken.Store(false) }()
+	srv.finishLater(context.Background(), room, User{Email: "editor@example.com", Name: "An Editor"}, "a\ntyped\n", base, nil)
+
+	if got := get(t, h, url).Body.String(); got != "a\ntyped\n" {
+		t.Fatalf("file = %q, want the final text written before Close returned", got)
 	}
 }

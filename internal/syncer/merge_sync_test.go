@@ -217,3 +217,34 @@ func TestAClaimedZeroSizeIsNotAnEmptyFile(t *testing.T) {
 		}
 	}
 }
+
+// Content put back over an empty winner states the blob's own size, not the
+// size the losing op claimed: a puller bounds its read by it.
+func TestContentKeptOverEmptyStatesItsRealSize(t *testing.T) {
+	s := newDevice(t, "alice", sharedRemote(t))
+	content := "alice's notes, which are longer than zero bytes\n"
+	sum, _, err := s.Store.PutBlobReader(strings.NewReader(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, _, err := s.Store.PutBlobReader(strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
+	mine := journal.Op{Seq: 1, Lamport: 3, Time: at, Device: "alice", DeviceName: "alice",
+		Kind: journal.KindPut, Path: "notes.md", Blob: sum, Size: 0}
+	theirs := journal.Op{Seq: 1, Lamport: 5, Time: at, Device: "bob", DeviceName: "bob",
+		Kind: journal.KindPut, Path: "notes.md", Blob: empty, Size: 0}
+	all := []journal.Op{mine, theirs}
+	out, err := s.conflictCopiesWithState([]journal.Op{mine}, 0, []journal.Op{theirs}, &store.SyncState{}, all, journal.Replay(all))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Path != "notes.md" || out[0].Blob != sum {
+		t.Fatalf("ops = %+v, want alice's content put back at notes.md", out)
+	}
+	if out[0].Size != int64(len(content)) {
+		t.Fatalf("Size = %d, want the blob's %d bytes", out[0].Size, len(content))
+	}
+}
