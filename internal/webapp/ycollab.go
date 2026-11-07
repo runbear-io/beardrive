@@ -652,6 +652,11 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	if !ok || who.Email == "" {
 		return // nobody with write access ever joined: nothing to attribute
 	}
+	// The base is read BEFORE the state. A restore folded in between moves
+	// the base and the document together; read the other way round, this
+	// snapshot would name the restored version with text from before it and
+	// undo the restore. Read first, the write is refused and settled below.
+	base := s.rooms().base(room)
 	// The text is derived FROM the captured state, not read beside it: a
 	// keystroke landing between the two would store a history that spells a
 	// different file than the blob it is filed under, and a room rebuilt
@@ -704,7 +709,6 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	if s.apiMux == nil {
 		return
 	}
-	base := s.rooms().base(room)
 	if have && curSha != base && s.contains(ctx, doc, project, curSha) {
 		// The head was written by this room on another process — the
 		// previous lease holder — and the relay has already delivered every
@@ -816,16 +820,29 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		return
 	}
 	if final {
-		if target == theirs {
-			s.rooms().rebase(room, theirSha)
-			return
+		if target != theirs {
+			// The last chance to keep this text: refused again, it is parked.
+			w := s.putAs(ctx, who, project, path, target, theirSha)
+			if w.code != http.StatusOK {
+				park()
+				return
+			}
+			if sha := reportedSha(w); sha != "" {
+				theirSha = sha
+			}
 		}
-		// The last chance to keep this text: refused again, it is parked.
-		w := s.putAs(ctx, who, project, path, target, theirSha)
-		if sha := reportedSha(w); w.code == http.StatusOK && sha != "" {
-			s.rooms().rebase(room, sha)
-		} else if w.code != http.StatusOK {
-			park()
+		// The document moves with the base, or a room reopened before it
+		// unloads would write its old text over this version. Nobody is
+		// connected to a room in its final snapshot, and ydocs().Apply
+		// would open the room again, so the held document is spliced
+		// directly. Typed into since, it keeps its base and is settled
+		// against this version on its next snapshot.
+		if doc, _, held := s.rooms().get(room); held {
+			txt := doc.GetText("body")
+			if txt.ToString() == text {
+				spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, text, target)
+				s.rooms().rebase(room, theirSha)
+			}
 		}
 		return
 	}

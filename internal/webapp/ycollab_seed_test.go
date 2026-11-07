@@ -20,11 +20,17 @@ import (
 type flakyBlobs struct {
 	remote.Backend
 	broken atomic.Bool
+	during atomic.Pointer[func()] // runs once, inside the next blob read
 }
 
 func (b *flakyBlobs) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	if b.broken.Load() && strings.Contains(key, "blobs/") {
 		return nil, errors.New("storage timed out")
+	}
+	if strings.Contains(key, "blobs/") {
+		if f := b.during.Swap(nil); f != nil {
+			(*f)()
+		}
 	}
 	return b.Backend.Get(ctx, key)
 }
@@ -304,7 +310,7 @@ func TestFinalSnapshotKeepingTheirsRebases(t *testing.T) {
 	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
 	putContent(t, h, up, "one\ntwo\n", "")
 	room := p.ID + "/notes.md"
-	openRoom(t, srv, room)
+	doc := openRoom(t, srv, room)
 
 	putContent(t, h, up, "OUTSIDE\none\ntwo\nthree\n", "")
 	srv.finalSnapshot(context.Background(), room)
@@ -314,5 +320,71 @@ func TestFinalSnapshotKeepingTheirsRebases(t *testing.T) {
 	}
 	if b := srv.rooms().base(room); b != shaOf("OUTSIDE\none\ntwo\nthree\n") {
 		t.Fatalf("room base = %q, want their version", b)
+	}
+	if got := doc.GetText("body").ToString(); got != "OUTSIDE\none\ntwo\nthree\n" {
+		t.Fatalf("room document = %q, want it moved with the base", got)
+	}
+}
+
+// A merged final write moves the held document too: a room reopened before
+// it unloads must not write its pre-merge text over the merge.
+func TestFinalMergeMovesTheHeldDocument(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	putContent(t, h, up, "a\nb\nc\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+
+	putContent(t, h, up, "a\nb\nc\nfrom the agent\n", "")
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "typed at the top\n", nil) })
+	srv.finalSnapshot(context.Background(), room)
+
+	want := "typed at the top\na\nb\nc\nfrom the agent\n"
+	if got := txt.ToString(); got != want {
+		t.Fatalf("room document = %q, want the merge it wrote", got)
+	}
+	if b := srv.rooms().base(room); b != shaOf(want) {
+		t.Fatalf("room base = %q, want the merged version", b)
+	}
+	srv.snapshotRoom(context.Background(), room)
+	if got := get(t, h, "/api/p/"+p.ID+"/file?path=notes.md").Body.String(); got != want {
+		t.Fatalf("a later snapshot changed the merged file: %q", got)
+	}
+}
+
+// A restore folded into the room while a snapshot is reading the file is not
+// undone by that snapshot: the snapshot's base is the one its text was built on.
+func TestSnapshotDoesNotUndoARestoreFoldedMidway(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	var hooked *flakyBlobs
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		hooked = &flakyBlobs{Backend: be}
+		return hooked
+	})
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, up, "first version\n", "")
+	putContent(t, h, up, "second version\n", "")
+	room := p.ID + "/notes.md"
+	doc := liveRoom(t, srv, room, true)
+	typeInto(doc, "typed\n")
+
+	restore := func() {
+		if out := restoreVia(t, h, p.ID, "notes.md", shaOf("first version\n")); !out.Folded {
+			t.Error("restore did not fold into the live room")
+		}
+	}
+	hooked.during.Store(&restore)
+	srv.snapshotRoom(context.Background(), room)
+	if hooked.during.Load() != nil {
+		t.Fatal("the restore never ran inside the snapshot's read")
+	}
+
+	if got := get(t, h, url).Body.String(); !strings.HasPrefix(got, "first version\n") || strings.Contains(got, "second version") {
+		t.Fatalf("the snapshot undid the restore: file is %q", got)
 	}
 }
