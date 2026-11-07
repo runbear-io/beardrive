@@ -869,7 +869,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			all = append(all, conflictOps...)
 			target = journal.Replay(all)
 			for _, op := range conflictOps {
-				if op.Note == mergeNote {
+				if op.Note == mergeNote || op.Note == keptOverEmptyNote {
 					res.Merged++
 				} else {
 					res.Conflicts++
@@ -1961,6 +1961,9 @@ func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pull
 		if loser.Kind != journal.KindPut || loser.Blob == "" {
 			continue // a lost delete needs no preservation
 		}
+		if loser.Size == 0 {
+			continue // an empty version holds nothing to preserve
+		}
 		if exists && cur.Blob == loser.Blob {
 			continue // identical content; nothing actually lost
 		}
@@ -1985,6 +1988,24 @@ func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pull
 		// so nothing about replay, ordering or the one-writer rule changes.
 		// Only against an op that actually arrived: tryMerge takes THEIR op,
 		// and without a collision there is no such op to merge with.
+		// An empty file that beat content is almost never an edit anyone
+		// meant: it is a truncated save, a failed read written back, a tool
+		// that wrote before it had the bytes. The content goes back to the
+		// real path; a copy beside an empty file leaves the reader with an
+		// empty file to look at and the work under a name nobody opens.
+		if exists && cur.Link == "" && cur.Size == 0 {
+			st.Lamport = tickLamport(st.Lamport)
+			seqBase++
+			out = append(out, journal.Op{
+				Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
+				Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
+				User: s.Account.Email, UserName: s.Account.Name,
+				Kind: journal.KindPut, Path: p,
+				Blob: loser.Blob, Size: loser.Size, Mode: loser.Mode,
+				Note: keptOverEmptyNote,
+			})
+			continue
+		}
 		merged, canMerge := mergedBlob{}, false
 		if collided {
 			merged, canMerge = s.tryMerge(p, mine, theirs, all)

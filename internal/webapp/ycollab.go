@@ -3,6 +3,8 @@ package webapp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	ygows "github.com/reearth/ygo/provider/websocket"
 	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/textmerge"
 )
 
 /* The hub holding the document, instead of relaying bytes between browsers.
@@ -221,15 +224,25 @@ func (s *Server) seedDoc(ctx context.Context, room string, doc *crdt.Doc) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	body, sha, ok := s.roomBytes(ctx, room)
-	if !ok || len(body) == 0 {
+	body, sha, found, err := s.roomBytes(ctx, room)
+	if err != nil {
+		// Refused, so the editor retries. Opened empty, its first snapshot
+		// would write that emptiness over a file nobody could read.
+		return fmt.Errorf("%s: reading the file: %w", room, err)
+	}
+	if !found {
 		return nil // a file that does not exist yet starts empty
 	}
 	if len(body) >= maxSeedBytes {
 		return fmt.Errorf("%s is too large to co-edit", room) // a truncated seed would be written back over the rest
 	}
 	project, path, _ := strings.Cut(room, "/")
+	// The base is set for an empty file too: it is what keeps every write
+	// this room makes conditional.
 	s.rooms().rebase(room, sha)
+	if len(body) == 0 {
+		return nil
+	}
 	text := string(body)
 
 	/* The document is rebuilt from the same HISTORY, not from the bytes.
@@ -427,8 +440,8 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 	if _, _, ok := s.rooms().get(room); !ok {
 		return false
 	}
-	body, cur, ok := s.roomBytes(ctx, room)
-	if !ok || cur != sha {
+	body, cur, found, err := s.roomBytes(ctx, room)
+	if err != nil || !found || cur != sha {
 		return false
 	}
 	if len(body) >= maxSeedBytes {
@@ -440,7 +453,7 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 		return false
 	}
 	folded := false
-	err := s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	err = s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		txt := doc.GetText("body")
 		spliceVia(transact, txt, txt.ToString(), string(body))
 		folded = true
@@ -568,36 +581,43 @@ func (s *Server) projectBackend(project string) (remote.Backend, bool) {
 }
 
 // roomBytes is the file behind a room, bounded, with the blob it currently is
-// — the sha every write to it must name in If-Match.
-func (s *Server) roomBytes(ctx context.Context, room string) ([]byte, string, bool) {
+// — the sha every write to it must name in If-Match. found is false only when
+// the file is not there; a file that is there but cannot be read right now is
+// an error, never an empty file.
+func (s *Server) roomBytes(ctx context.Context, room string) (body []byte, sha string, found bool, err error) {
 	project, path, ok := strings.Cut(room, "/")
-	if !ok {
-		return nil, "", false
+	if !ok || !projectIDRe.MatchString(project) {
+		return nil, "", false, nil
+	}
+	if s.Projects != nil {
+		if _, known := s.Projects.Get(project); !known {
+			return nil, "", false, nil
+		}
 	}
 	_, v, err := s.projectVolume(project)
 	if err != nil {
-		return nil, "", false
+		return nil, "", false, err
 	}
 	// A room is built from what the file IS, not from a snapshot a background
 	// rebuild has not caught up on yet.
 	snap, err := v.current(ctx)
 	if err != nil {
-		return nil, "", false
+		return nil, "", false, err
 	}
 	fi, ok := snap.files[path]
 	if !ok {
-		return nil, "", false
+		return nil, "", false, nil
 	}
 	rc, err := v.source.Open(ctx, path, fi)
 	if err != nil {
-		return nil, "", false
+		return nil, "", false, err
 	}
 	defer rc.Close()
-	body, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes))
+	body, err = io.ReadAll(io.LimitReader(rc, maxSeedBytes))
 	if err != nil {
-		return nil, "", false
+		return nil, "", false, err
 	}
-	return body, fi.Blob, true
+	return body, fi.Blob, true, nil
 }
 
 // snapshotRoom writes the document back to the file.
@@ -641,8 +661,14 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	if !ok {
 		return
 	}
-	cur, curSha, have := s.roomBytes(ctx, room)
+	cur, curSha, have, err := s.roomBytes(ctx, room)
 	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		// Never write over a file this process cannot see; the next pause
+		// looks again.
+		log.Printf("bdrive: not snapshotting %s: reading the file: %v", path, err)
 		return
 	}
 	if have && string(cur) == text {
@@ -656,6 +682,10 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		}
 		s.rooms().settled(room)
 		return // the file already says this
+	}
+	if !have && strings.TrimSpace(text) == "" {
+		s.rooms().settled(room)
+		return // nothing typed into a file that does not exist: nothing to create
 	}
 	if !s.holdLease(ctx, room) {
 		// Another process writes this file. Look again once it has had
@@ -677,6 +707,12 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		base = curSha
 		s.rooms().rebase(room, curSha)
 	}
+	if have && base == "" {
+		// The file appeared after the room opened. It is somebody else's
+		// write, and an unconditional one from here would erase it.
+		s.reconcile(ctx, room, who, text, "", true, string(cur), curSha, final)
+		return
+	}
 	w := s.putAs(ctx, who, project, path, text, base)
 	switch w.code {
 	case http.StatusOK:
@@ -685,34 +721,29 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 			s.rooms().rebase(room, sha)
 		}
 	case http.StatusConflict:
-		/* Somebody OUTSIDE the room wrote the file — an agent, the CLI, a
-		   device — since the hub last did. Everyone inside the room shares
-		   this document, so a 409 here can never be a co-editor; the room
-		   itself is the only thing that writes on their behalf.
-
-		   Same answer the client gave when it held the pen: theirs is the
-		   file, ours goes beside it under the conflict name the sync path has
-		   always used, attributed to the human who was editing. Then the room
-		   rebases onto the new head, so the NEXT snapshot is not refused for
-		   the same reason forever. Nothing is lost on either side; a reader
-		   is told, via the change frame the copy raises, that two versions
-		   exist. Folding the outside write INTO the live document is the
-		   better answer and is the hub's to give, since it is the one place
-		   the splice could be made exactly once — filed, not done. */
-		copy := conflictPath(path, who, time.Now())
-		s.putAs(ctx, who, project, copy, text, "")
-		if head := reportedSha(w); head != "" {
-			s.rooms().rebase(room, head)
+		// Somebody OUTSIDE the room wrote the file — an agent, the CLI, a
+		// device — since the hub last did. Everyone inside the room shares
+		// this document, so a 409 here can never be a co-editor.
+		theirs, theirSha, found, err := s.roomBytes(ctx, room)
+		if err != nil || !found {
+			return // looked at again on the next pause, against the same base
 		}
-		log.Printf("bdrive: %s was written outside its co-editing room; the room's version is beside it as %s", path, copy)
+		// A base this source cannot read back still parks rather than merges.
+		baseText, haveBase := s.blobText(ctx, project, base)
+		s.reconcile(ctx, room, who, text, baseText, haveBase, string(theirs), theirSha, final)
 	case http.StatusUnprocessableEntity:
 		/* sharpShrink: the room would empty or gut the file, and no editor in
 		   a live room writes for itself, so nobody can confirm it. The file
 		   keeps its bytes. While editors remain the document is still theirs;
 		   once the room empties, the room's text is parked as a conflict copy
-		   so a deliberate clear is never silently dropped. */
+		   so a deliberate clear is never silently dropped — unless there is
+		   nothing in it the file does not already hold. */
 		if !final || s.rooms().isParked(room, text) {
 			log.Printf("bdrive: not snapshotting %s: the room's text would empty or sharply shrink it", path)
+			return
+		}
+		if fileHolds(string(cur), text) || s.copyHolds(ctx, project, path, text) {
+			log.Printf("bdrive: %s: the room's text would empty or sharply shrink it and adds nothing; dropped", path)
 			return
 		}
 		// Marked before the write: parkCopy owns this text from here,
@@ -723,6 +754,165 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		s.parkCopy(ctx, who, project, path, copy, text)
 		return
 	}
+}
+
+/*
+reconcile settles a room's text against a file somebody outside the room
+wrote: an agent appending to the notes, a device syncing, the CLI.
+
+	Edits to different lines merge, three ways against the version the room
+	last wrote: the merged text goes into the live document as one edit
+	every editor receives, and the room's next pause writes it on top of
+	their version. Text the file already holds needs no copy either — the
+	file wins and the document follows it. Only lines both sides changed,
+	with something in the room's version the file does not have, are parked
+	beside the file as a conflict copy.
+
+	A final snapshot has no editors left to receive an edit, so it writes
+	the merge straight to the file instead.
+*/
+func (s *Server) reconcile(ctx context.Context, room string, who User, text, baseText string, haveBase bool, theirs, theirSha string, final bool) {
+	project, path, _ := strings.Cut(room, "/")
+	target, ok := "", false
+	if merged, can := textmerge.Merge([]byte(baseText), []byte(text), []byte(theirs)); haveBase && can {
+		target, ok = string(merged), true
+	} else if fileHolds(theirs, text) || s.copyHolds(ctx, project, path, text) {
+		target, ok = theirs, true
+	} else if haveBase && strings.TrimSpace(baseText) == "" {
+		// Both sides wrote into an empty file — a template arriving while
+		// somebody already typed. There is no ancestor to order them by, and
+		// neither is a revision of the other: keep both, theirs first.
+		target, ok = appendNew(theirs, text), true
+	}
+	park := func() {
+		copy := conflictPath(path, who, time.Now())
+		s.putAs(ctx, who, project, copy, text, "")
+		s.rooms().rebase(room, theirSha)
+		log.Printf("bdrive: %s was written outside its co-editing room; the room's version is beside it as %s", path, copy)
+	}
+	if !ok {
+		park()
+		return
+	}
+	if final {
+		if target == theirs {
+			return
+		}
+		// The last chance to keep this text: refused again, it is parked.
+		w := s.putAs(ctx, who, project, path, target, theirSha)
+		if sha := reportedSha(w); w.code == http.StatusOK && sha != "" {
+			s.rooms().rebase(room, sha)
+		} else if w.code != http.StatusOK {
+			park()
+		}
+		return
+	}
+	applied := false
+	_ = s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		txt := doc.GetText("body")
+		// Typing since the snapshot read the document is not in the merge;
+		// leave the document alone and merge again on the next pause.
+		if txt.ToString() != text {
+			return
+		}
+		spliceVia(transact, txt, text, target)
+		applied = true
+	})
+	if applied || target == text {
+		// The document is now built on their version; the next pause
+		// writes it there, conditional on it.
+		s.rooms().rebase(room, theirSha)
+		if target == text {
+			s.snapshotRoom(ctx, room)
+		}
+	}
+}
+
+// appendNew is file followed by the lines of text the file does not already
+// hold, in their order.
+func appendNew(file, text string) string {
+	have := map[string]bool{}
+	for _, l := range strings.Split(file, "\n") {
+		have[l] = true
+	}
+	var add []string
+	for _, l := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		if !have[l] || strings.TrimSpace(l) == "" {
+			add = append(add, l)
+		}
+	}
+	out := file
+	if out != "" && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return out + strings.Join(add, "\n") + "\n"
+}
+
+// fileHolds reports whether a text adds nothing to a file: empty, or every
+// line of it already a line of the file. Parking such a text beside the file
+// makes a conflict copy a reader has to open only to find nothing in it.
+func fileHolds(file, text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return true
+	}
+	have := map[string]bool{}
+	for _, l := range strings.Split(file, "\n") {
+		have[strings.TrimRight(l, "\r")] = true
+	}
+	for _, l := range strings.Split(text, "\n") {
+		if l = strings.TrimRight(l, "\r"); strings.TrimSpace(l) != "" && !have[l] {
+			return false
+		}
+	}
+	return true
+}
+
+// copyHolds reports whether a conflict copy of this path already holds
+// exactly this text, so parking it again would only add a duplicate.
+func (s *Server) copyHolds(ctx context.Context, project, path, text string) bool {
+	_, v, err := s.projectVolume(project)
+	if err != nil {
+		return false
+	}
+	snap, err := v.current(ctx)
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256([]byte(text))
+	want := hex.EncodeToString(sum[:])
+	prefix := path + ".bdrive-conflict-"
+	for p, fi := range snap.files {
+		if strings.HasPrefix(p, prefix) && fi.Blob == want {
+			return true
+		}
+	}
+	return false
+}
+
+// blobText reads one past version of a file by its blob, bounded like a seed.
+// The empty sha is the empty text.
+func (s *Server) blobText(ctx context.Context, project, sha string) (string, bool) {
+	if sha == "" {
+		return "", true
+	}
+	_, v, err := s.projectVolume(project)
+	if err != nil {
+		return "", false
+	}
+	rs, ok := v.source.(*RemoteSource)
+	if !ok {
+		return "", false
+	}
+	rc, err := rs.OpenBlob(ctx, sha)
+	if err != nil {
+		return "", false
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes))
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
 }
 
 // Backoff for a refused room's conflict copy, doubling up to a ceiling. Vars

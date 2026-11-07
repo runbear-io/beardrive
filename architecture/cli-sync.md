@@ -221,9 +221,13 @@ classDiagram
     class merge {
         <<internal/syncer, merge.go>>
         +tryMerge(path, mine, theirs, all) blob, ok
-        +mergeText(base, a, b) out, ok
+        +mergeText(base, a, b) out, ok via textmerge
         +commonAncestor(path, mine, theirs, all)
         -maxMergeBytes 4 MiB, UTF-8 only
+    }
+    class textmerge {
+        <<internal/textmerge>>
+        +Merge(base, a, b) out, ok
     }
 
     class daemon {
@@ -256,13 +260,14 @@ classDiagram
     note for localFolderWatcher "The watcher accumulates bounded per-mount events, coalesces paths, prunes reserved/nested/ignored directories, and evaluates echo suppression outside pendingMu without loading the state cache when no pre-fence events are pending. Child ENOENT during recursive setup triggers candidate rebuild (releasing the prior watcher first on EMFILE/ENFILE) and full-scan fallback when roots still exist; missing roots, closed channels, overflow and other backend errors remain fatal."
     volumeWorker --> ScanHint : routes per-mount event batches
     ScanHint ..> localFolderWatcher : batch source
-    note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back"
+    note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back. An EMPTY version never forks and never keeps a path: an empty loser is not preserved at all, and content that lost to an empty winner is put back at the real path (keptOverEmptyNote, counted as Merged) — a truncated save or a failed read written back is almost never an edit anyone meant, and a copy beside an empty file leaves the reader the empty one"
 
     note for volumeWorker "remote.Watcher wakes a remote cycle when a peer pushes, reducing arrival latency from about 10s to 1s. A live stream stretches polling to remoteInterval x watchedPollFactor (5m by default); losing it restores remoteInterval on the next tick. Token changes and offline cycles drop the stream. Failed or ended dials back off for watchRetry (1m), including an older hub's 404. Periodic polling still bounds silent stream failure"
     volumeWorker --> localFolderWatcher : local filesystem wake and safety fallback
     localFolderWatcher ..> Filter : PruneDir on watched trees
 
     Session --> merge : before a conflict copy
+    merge --> textmerge : the line merge itself
     Session --> Store : volume state
     Session --> Backend : pull and push
     Session --> Manifest : chunked push and pull, files over 4 MiB

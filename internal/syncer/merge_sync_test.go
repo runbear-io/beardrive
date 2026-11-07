@@ -109,3 +109,62 @@ func conflictCopiesIn(t *testing.T, folder string) []string {
 	}
 	return out
 }
+
+// An empty save that races a real edit never wins the path and never forks:
+// the edit stays the file, and nothing is parked beside it. Bob rewrites the
+// line the empty save removed, so the two cannot merge line by line.
+func TestAnEmptyWriteNeverBeatsContent(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "alice", be)
+	b := newDevice(t, "bob", be)
+
+	write(t, a.Folder, "notes.md", "# Daily\n")
+	cycle(t, a)
+	cycle(t, b)
+
+	write(t, b.Folder, "notes.md", "# Daily 2026-11-05\n\n- bob: shipped it\n")
+	write(t, a.Folder, "notes.md", "")
+	cycle(t, b)
+	cycle(t, a)
+	cycle(t, b)
+	cycle(t, a)
+
+	for _, d := range []struct {
+		name, folder string
+	}{{"alice", a.Folder}, {"bob", b.Folder}} {
+		if got := read(t, d.folder, "notes.md"); !strings.Contains(got, "bob: shipped it") {
+			t.Errorf("%s: notes.md = %q, want bob's edit", d.name, got)
+		}
+		if names := conflictCopiesIn(t, d.folder); len(names) != 0 {
+			t.Errorf("%s: conflict copies %v for an empty write", d.name, names)
+		}
+	}
+}
+
+// The other order: the empty write lands first, the edit arrives later.
+func TestContentReplacesAnEmptyWinner(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "alice", be)
+	b := newDevice(t, "bob", be)
+
+	write(t, a.Folder, "notes.md", "# Daily\n")
+	cycle(t, a)
+	cycle(t, b)
+
+	write(t, a.Folder, "notes.md", "")
+	write(t, b.Folder, "notes.md", "# Daily 2026-11-05\n\n- bob: shipped it\n")
+	cycle(t, a)
+	cycle(t, b)
+	cycle(t, a)
+
+	for _, d := range []struct {
+		name, folder string
+	}{{"alice", a.Folder}, {"bob", b.Folder}} {
+		if got := read(t, d.folder, "notes.md"); !strings.Contains(got, "bob: shipped it") {
+			t.Errorf("%s: notes.md = %q, want bob's edit", d.name, got)
+		}
+		if names := conflictCopiesIn(t, d.folder); len(names) != 0 {
+			t.Errorf("%s: conflict copies %v for an empty write", d.name, names)
+		}
+	}
+}
