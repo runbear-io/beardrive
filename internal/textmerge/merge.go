@@ -37,9 +37,19 @@ func Merge(base, a, b []byte) ([]byte, bool) {
 	for _, r := range cb {
 		edits = append(edits, edit{r, lb[r.toFrom:r.toTo]})
 	}
-	// Sorted by base position; regions are disjoint, so this is a total order.
+	// Sorted by base position. Disjoint regions can still START at one line:
+	// an insertion before line k and the other side replacing from line k.
+	// The insertion goes first, whichever side made it — taken the other
+	// way round the walk would step back to k and re-emit the replaced
+	// lines, and merge(base, a, b) would differ from merge(base, b, a).
+	before := func(x, y region) bool {
+		if x.from != y.from {
+			return x.from < y.from
+		}
+		return x.to < y.to
+	}
 	for i := 1; i < len(edits); i++ {
-		for j := i; j > 0 && edits[j].r.from < edits[j-1].r.from; j-- {
+		for j := i; j > 0 && before(edits[j].r, edits[j-1].r); j-- {
 			edits[j], edits[j-1] = edits[j-1], edits[j]
 		}
 	}

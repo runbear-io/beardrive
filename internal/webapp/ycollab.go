@@ -829,42 +829,54 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 }
 
 // appendNew is file followed by the lines of text the file does not already
-// hold, in their order.
+// hold, in their order. Lines are matched in order and one for one, so a line
+// typed twice is kept twice.
 func appendNew(file, text string) string {
-	have := map[string]bool{}
-	for _, l := range strings.Split(file, "\n") {
-		have[l] = true
-	}
-	var add []string
-	for _, l := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-		if !have[l] || strings.TrimSpace(l) == "" {
-			add = append(add, l)
-		}
-	}
+	rest := matchLines(file, text)
 	out := file
 	if out != "" && !strings.HasSuffix(out, "\n") {
 		out += "\n"
 	}
-	return out + strings.Join(add, "\n") + "\n"
+	if len(rest) == 0 {
+		return out
+	}
+	return out + strings.Join(rest, "\n") + "\n"
 }
 
-// fileHolds reports whether a text adds nothing to a file: empty, or every
-// line of it already a line of the file. Parking such a text beside the file
-// makes a conflict copy a reader has to open only to find nothing in it.
+// fileHolds reports whether a text adds nothing to a file: empty, or its
+// non-blank lines appear in the file in the same order, each as often.
+// Parking such a text beside the file makes a conflict copy a reader has to
+// open only to find nothing in it.
 func fileHolds(file, text string) bool {
-	if strings.TrimSpace(text) == "" {
-		return true
-	}
-	have := map[string]bool{}
+	rest := matchLines(file, text)
+	return len(rest) == 0
+}
+
+// matchLines walks the non-blank lines of text against those of file in
+// order, each file line matching at most once. rest is what found no match.
+func matchLines(file, text string) (rest []string) {
+	var have []string
 	for _, l := range strings.Split(file, "\n") {
-		have[strings.TrimRight(l, "\r")] = true
-	}
-	for _, l := range strings.Split(text, "\n") {
-		if l = strings.TrimRight(l, "\r"); strings.TrimSpace(l) != "" && !have[l] {
-			return false
+		if l = strings.TrimRight(l, "\r"); strings.TrimSpace(l) != "" {
+			have = append(have, l)
 		}
 	}
-	return true
+	at := 0
+	for _, l := range strings.Split(text, "\n") {
+		if l = strings.TrimRight(l, "\r"); strings.TrimSpace(l) == "" {
+			continue
+		}
+		k := at
+		for k < len(have) && have[k] != l {
+			k++
+		}
+		if k < len(have) {
+			at = k + 1
+			continue
+		}
+		rest = append(rest, l)
+	}
+	return rest
 }
 
 // copyHolds reports whether a conflict copy of this path already holds

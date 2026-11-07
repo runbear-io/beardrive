@@ -173,3 +173,26 @@ func TestFinalSnapshotMergesAnOutsideWrite(t *testing.T) {
 		t.Fatalf("%d conflict copies for edits that merge", n)
 	}
 }
+
+// A text adds nothing to a file only if its lines are there in order, each
+// as many times: a line typed twice is not held by a file that has it once.
+func TestFileHoldsCountsAndOrdersLines(t *testing.T) {
+	for _, c := range []struct {
+		file, text string
+		holds      bool
+		appended   string
+	}{
+		{"same\n", "same\nsame\n", false, "same\nsame\n"},
+		{"a\nb\nc\n", "a\nc\n", true, "a\nb\nc\n"},
+		{"a\nb\n", "b\na\n", false, "a\nb\na\n"},
+		{"agent template\n", "typed in the room\n", false, "agent template\ntyped in the room\n"},
+		{"anything\n", "\n\n", true, "anything\n"},
+	} {
+		if got := fileHolds(c.file, c.text); got != c.holds {
+			t.Errorf("fileHolds(%q, %q) = %v, want %v", c.file, c.text, got, c.holds)
+		}
+		if got := appendNew(c.file, c.text); got != c.appended {
+			t.Errorf("appendNew(%q, %q) = %q, want %q", c.file, c.text, got, c.appended)
+		}
+	}
+}
