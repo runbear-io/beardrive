@@ -827,7 +827,9 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 	switch {
 	case !whole:
 		// parked below
-	case canMerge:
+	case canMerge && len(merged) < maxSeedBytes:
+		// Two sides under the bound can insert past it together, and a
+		// merge no room could open again is parked rather than written.
 		target, ok = string(merged), true
 	case fileHolds(theirs, text) || s.copyHolds(ctx, project, path, text):
 		target, ok = theirs, true
@@ -835,7 +837,9 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		// Both sides wrote into an empty file — a template arriving while
 		// somebody already typed. There is no ancestor to order them by, and
 		// neither is a revision of the other: keep both, theirs first.
-		target, ok = appendNew(theirs, text), true
+		if both := appendNew(theirs, text); len(both) < maxSeedBytes {
+			target, ok = both, true
+		}
 	}
 	park := func() {
 		// parkCopy owns the text from here and retries a failing store, so
@@ -1075,13 +1079,21 @@ func (s *Server) finishLater(room string, who User, text, base string, state []b
 		if err != nil {
 			return false
 		}
-		if _, _, live := s.rooms().get(room); live {
-			// The file was opened again in the meantime. That room holds the
-			// pen and its own base; this text must not move either, so it is
-			// kept beside the file unless the file already says it.
+		// The file opened again in the meantime: that room holds the pen and
+		// its own base, and this text is kept beside the file unless the file
+		// already says it. Asked again right before each write below; a room
+		// that opens after that still finds every write conditional on the
+		// version it seeded from, or refused.
+		yieldToRoom := func() bool {
+			if _, _, live := s.rooms().get(room); !live {
+				return false
+			}
 			if !have || len(cur) > maxSeedBytes || !fileHolds(string(cur), text) {
 				s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
 			}
+			return true
+		}
+		if yieldToRoom() {
 			return true
 		}
 		switch {
@@ -1094,6 +1106,9 @@ func (s *Server) finishLater(room string, who User, text, base string, state []b
 			s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
 			return true
 		case !have:
+			if yieldToRoom() {
+				return true
+			}
 			w := s.putAs(ctx, who, project, path, text, "")
 			if w.code != http.StatusOK {
 				return false
@@ -1101,6 +1116,9 @@ func (s *Server) finishLater(room string, who User, text, base string, state []b
 			settled(ctx, reportedSha(w))
 			return true
 		case curSha == base:
+			if yieldToRoom() {
+				return true
+			}
 			w := s.putAs(ctx, who, project, path, text, base)
 			switch w.code {
 			case http.StatusOK:
@@ -1113,6 +1131,9 @@ func (s *Server) finishLater(room string, who User, text, base string, state []b
 				return true
 			}
 			return false // a 409 is settled against their version next time
+		}
+		if yieldToRoom() {
+			return true
 		}
 		baseText, haveBase := s.blobText(ctx, project, base)
 		s.reconcile(ctx, room, who, text, baseText, haveBase, string(cur), curSha, true)

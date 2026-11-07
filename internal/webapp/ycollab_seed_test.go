@@ -586,3 +586,30 @@ func TestRebaseUnheldLeavesAnOpenRoomsBase(t *testing.T) {
 		t.Fatalf("an open room's base moved to %q", srv.rooms().base(room))
 	}
 }
+
+// Two sides under the seed bound can insert past it together. A merge that
+// large is parked: written, it would be a file no room could open again.
+func TestAMergePastTheSeedBoundIsParked(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, up, "middle\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+
+	half := strings.Repeat("a line on one side of the merge\n", maxSeedBytes/32*6/10)
+	theirs := "middle\n" + half
+	putContent(t, h, up, theirs, "")
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, half, nil) })
+	srv.finalSnapshot(context.Background(), room)
+
+	if got := get(t, h, url).Body.String(); got != theirs {
+		t.Fatalf("file is %d bytes, want the outside write's %d left as it is", len(got), len(theirs))
+	}
+	if n := conflictCopies(t, h, p.ID); n != 1 {
+		t.Fatalf("conflict copies = %d, want the room's text parked once", n)
+	}
+}

@@ -85,7 +85,9 @@ func (s *Session) tryMerge(path string, mine, theirs journal.Op, all []journal.O
 		return mergedBlob{}, false
 	}
 	out, ok := mergeText(baseBytes, mineBytes, theirsBytes)
-	if !ok {
+	// Two sides each under the cap can insert past it together; a merge no
+	// device would merge again is left to the conflict copy.
+	if !ok || len(out) > maxMergeBytes {
 		return mergedBlob{}, false
 	}
 	sum, n, err := s.Store.PutBlobReader(bytes.NewReader(out))
