@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/runbear-io/beardrive/internal/journal"
 	"io"
 	"os"
 	"path"
@@ -24,13 +25,21 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
-
-	"github.com/runbear-io/beardrive/internal/journal"
 )
 
 type Store struct {
-	dir string
+	dir                string
+	mu                 sync.Mutex
+	stateCaches        map[string]cacheEntry
+	folds              map[string]*deviceFold
+	ignoreFingerprints map[string][32]byte
+	nextFoldGen        uint64
+	cachedFold         FoldResult
+	cachedFoldDevs     []string
+	cachedFoldGens     []uint64
+	cachedFoldOK       bool
 }
 
 func Open(dir string) (*Store, error) {
@@ -39,7 +48,7 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 	}
-	return &Store{dir: dir}, nil
+	return &Store{dir: dir, stateCaches: make(map[string]cacheEntry), folds: make(map[string]*deviceFold), ignoreFingerprints: make(map[string][32]byte)}, nil
 }
 
 func (s *Store) Dir() string    { return s.dir }
@@ -120,13 +129,8 @@ func (s *Store) OpenBlob(sum string) (*os.File, error) {
 }
 
 // ---- journals ----
-
 func (s *Store) JournalPath(device string) string {
 	return filepath.Join(s.dir, "journal", device+".jsonl")
-}
-
-func (s *Store) AppendOps(device string, ops []journal.Op) error {
-	return journal.Append(s.JournalPath(device), ops)
 }
 
 func (s *Store) DeviceOps(device string) ([]journal.Op, error) {
@@ -203,7 +207,6 @@ func (s *Store) cachePath(mountID string) (string, error) {
 // HasCache reports whether a materialization cache file already exists on
 // disk for mountID. A mount with no cache file has never completed a sync
 // cycle in its working folder, even when it attaches to a volume store
-// another worktree already populated.
 func (s *Store) HasCache(mountID string) bool {
 	p, err := s.cachePath(mountID)
 	if err != nil {
@@ -213,43 +216,12 @@ func (s *Store) HasCache(mountID string) bool {
 	return err == nil
 }
 
-func (s *Store) LoadCache(mountID string) (map[string]CachedFile, error) {
-	p, err := s.cachePath(mountID)
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]CachedFile{}
-	if err := readJSON(p, &out); err != nil {
-		return nil, err
-	}
-	// The keys are joined onto the working folder by the scan's delete pass
-	// and by materialize's, and turned into journal ops this device signs.
-	// The file is plain JSON in $BDRIVE_HOME, so anything running as the user
-	// (an agent session, an install script, an older bdrive) chooses them —
-	// validated where they are read, exactly like Project.ID.
-	for rel := range out {
-		if !cleanRel(rel) {
-			delete(out, rel)
-		}
-	}
-	return out, nil
-}
-
-// cleanRel reports whether rel is a clean, relative, in-volume path — the only
-// shape a cache key, and therefore an op minted from one, may have.
+// cleanRel reports whether rel is a clean, relative, in-volume path.
 func cleanRel(rel string) bool {
 	if rel == "" || rel == "." || rel == ".." || path.IsAbs(rel) || filepath.IsAbs(rel) {
 		return false
 	}
 	return path.Clean(rel) == rel && !strings.HasPrefix(rel, "../")
-}
-
-func (s *Store) SaveCache(mountID string, c map[string]CachedFile) error {
-	p, err := s.cachePath(mountID)
-	if err != nil {
-		return err
-	}
-	return WriteJSONAtomic(p, c)
 }
 
 // ---- sync state (sync.json) ----

@@ -2,7 +2,9 @@ package store
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/runbear-io/beardrive/internal/journal"
@@ -86,6 +88,77 @@ func TestJournalAndState(t *testing.T) {
 	gotSt, err := s.LoadSync()
 	if err != nil || !reflect.DeepEqual(gotSt, st) {
 		t.Fatalf("sync state roundtrip: %v %v", gotSt, err)
+	}
+}
+
+func TestReplayFoldMatchesReplay(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opsA := []journal.Op{
+		{Seq: 1, Lamport: 1, Device: "actual-a", Kind: journal.KindPut, Path: "same", Blob: "not-hex"},
+		{Seq: 2, Lamport: 3, Device: "actual-a", Kind: journal.KindDelete, Path: "gone"},
+	}
+	opsB := []journal.Op{
+		{Seq: 1, Lamport: 2, Device: "actual-b", Kind: journal.KindPut, Path: "same", Blob: strings.Repeat("A", 64)},
+		{Seq: 2, Lamport: 3, Device: "actual-b", Kind: journal.KindPut, Path: "link", Link: "target"},
+	}
+	if err := s.AppendOps("file-a", opsA); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendOps("file-b", opsB); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.AllOps()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReplayFold()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Target, journal.Replay(all)) {
+		t.Fatalf("fold target = %#v, replay = %#v", got.Target, journal.Replay(all))
+	}
+	s.SaveChangedFoldsLocked()
+	fresh, err := Open(filepath.Join(t.TempDir(), "fresh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dev := range []string{"file-a", "file-b"} {
+		data, rerr := os.ReadFile(s.JournalPath(dev))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if werr := os.WriteFile(fresh.JournalPath(dev), data, 0o600); werr != nil {
+			t.Fatal(werr)
+		}
+	}
+	again, err := fresh.ReplayFold()
+	if err != nil || !reflect.DeepEqual(again.Target, got.Target) {
+		t.Fatalf("fresh fold = %#v, %v", again.Target, err)
+	}
+}
+
+func TestSaveCacheStripsForeignKeys(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveCache("m", map[string]CachedFile{
+		"ok/file":     {Blob: "ok"},
+		"../secret":   {Blob: "bad"},
+		"/etc/passwd": {Blob: "bad"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LoadCache("m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got["ok/file"].Blob != "ok" {
+		t.Fatalf("cache = %#v", got)
 	}
 }
 

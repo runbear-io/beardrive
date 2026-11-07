@@ -180,10 +180,15 @@ func TestSec_Store_VolumeJournalsAreNotWorldReadable(t *testing.T) {
 	if err := s.AppendOps("dev-1", ops); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.ReplayFold(); err != nil {
+		t.Fatal(err)
+	}
+	s.SaveChangedFoldsLocked()
 	for _, p := range []string{
 		s.JournalPath("dev-1"),
 		filepath.Join(s.Dir(), "state-m-1234abcd.json"),
 		filepath.Join(s.Dir(), "sync.json"),
+		filepath.Join(s.Dir(), "fold-cache", "dev-1.fold"),
 	} {
 		fi, err := os.Stat(p)
 		if err != nil {

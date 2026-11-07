@@ -27,6 +27,7 @@ type Filter struct {
 	ignore  []pattern
 	include []pattern
 	negated bool // any `!` rules → directory pruning is unsafe
+	rawText string
 
 	// nested holds subdirectories that are BearDrive mounts of their own
 	// (they contain .bdrive/config.json), discovered during the scan walk.
@@ -55,6 +56,9 @@ type Filter struct {
 // AcceptRules installs the rules this device has accepted as the floor on what
 // may be uploaded. Passing "" installs no floor.
 func (f *Filter) AcceptRules(text string) { f.upGuard = compileRules(text) }
+
+func (f *Filter) RawIgnoreText() string { return f.rawText }
+func (f *Filter) HasUpGuard() bool      { return len(f.upGuard) > 0 }
 
 // addNestedMount records a nested mount root (slash-relative to the parent
 // mount) so Skip excludes everything under it for the rest of the cycle.
@@ -134,7 +138,8 @@ func loadFilter(folder string, include []string) (*Filter, error) {
 		}
 		return nil, err
 	}
-	for _, p := range compileRules(string(data)) {
+	f.rawText = string(data)
+	for _, p := range compileRules(f.rawText) {
 		f.ignore = append(f.ignore, p)
 		if p.negate {
 			f.negated = true

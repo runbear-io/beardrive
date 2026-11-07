@@ -72,6 +72,10 @@ func walkFolderPaths(folder string, filter *Filter, roots []string, fn func(abs,
 }
 
 func walkFolderPathsWithErr(folder string, filter *Filter, roots []string, onWalkErr func(rel string, walkErr error), fn func(abs, rel string, d fs.DirEntry, v verdict) error) error {
+	return walkFolderPathsFast(folder, filter, roots, nil, onWalkErr, fn)
+}
+
+func walkFolderPathsFast(folder string, filter *Filter, roots []string, fastUnchanged func(rel string, d fs.DirEntry) bool, onWalkErr func(rel string, walkErr error), fn func(abs, rel string, d fs.DirEntry, v verdict) error) error {
 	if len(roots) == 0 {
 		roots = []string{"."}
 	}
@@ -132,6 +136,9 @@ func walkFolderPathsWithErr(folder string, filter *Filter, roots []string, onWal
 				// SkipUp, not Skip: this walk is the upload door, and a negation a
 				// TEAMMATE pushed must not widen what leaves this machine. See
 				// Filter.SkipUp.
+				if fastUnchanged != nil && d.Type().IsRegular() && fastUnchanged(rel, d) {
+					return nil
+				}
 				switch {
 				case !journal.SafePath(rel) || config.ReservedPath(rel) || filter.SkipUp(rel):
 					v = vSkipFile

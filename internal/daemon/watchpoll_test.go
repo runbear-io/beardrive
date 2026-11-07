@@ -395,7 +395,85 @@ func TestWatcherRejectsRootLostDuringChildENOENTRecovery(t *testing.T) {
 	}
 }
 
+func TestWatcherRebuildsAfterENOSPCByClosingPriorWatcher(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asyncErrors := make(chan error, 1)
+	setLocalWatcherTestHooks(t, nil, func() <-chan error { return asyncErrors }, nil)
+	lw, err := startLocalFolderWatcher(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("filesystem watcher unavailable: %v", err)
+	}
+	defer closeLocalWatcher(t, lw)
+
+	var failed atomic.Bool
+	setLocalWatcherTestHooks(t, func(path string) error {
+		if filepath.Clean(path) == root && failed.CompareAndSwap(false, true) {
+			return fmt.Errorf("rebuild: %w", syscall.ENOSPC)
+		}
+		return nil
+	}, func() <-chan error { return asyncErrors }, nil)
+	asyncErrors <- fmt.Errorf("watch: %w", syscall.ENOENT)
+	select {
+	case watchErr := <-lw.err:
+		t.Fatalf("ENOSPC during rebuild made watcher unhealthy: %v", watchErr)
+	case <-lw.wake:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not recover after closing the prior watcher")
+	}
+	if batch := lw.take(root); !batch.full {
+		t.Fatal("ENOSPC rebuild did not force a full fallback batch")
+	}
+	later := filepath.Join(root, "later.txt")
+	if err := os.WriteFile(later, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lw.wake:
+	case watchErr := <-lw.err:
+		t.Fatalf("rebuilt watcher failed after ENOSPC recovery: %v", watchErr)
+	case <-time.After(time.Second):
+		t.Fatal("rebuilt watcher did not report a later write")
+	}
+}
+
+func TestLocalWatchENOSPCRetryBackoff(t *testing.T) {
+	for i, want := range []time.Duration{
+		localWatchRetry,
+		2 * localWatchRetry,
+		5 * localWatchRetry,
+		10 * localWatchRetry,
+		10 * localWatchRetry,
+	} {
+		if got := localWatchENOSPCRetry(i + 1); got != want {
+			t.Fatalf("failure %d retry delay = %s, want %s", i+1, got, want)
+		}
+	}
+}
+
+func TestLocalWatchFallbackInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		scan time.Duration
+		last time.Duration
+		want time.Duration
+	}{
+		{name: "unknown", scan: 2 * time.Second, want: 2 * time.Second},
+		{name: "minimum", scan: 2 * time.Second, last: 100 * time.Millisecond, want: 2 * time.Second},
+		{name: "adaptive", scan: 2 * time.Second, last: 1 * time.Second, want: 15 * time.Second},
+		{name: "cap", scan: 2 * time.Second, last: 10 * time.Minute, want: time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := localWatchFallbackInterval(tc.scan, tc.last); got != tc.want {
+				t.Fatalf("fallback interval = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWatcherKeepsPriorWatcherAfterRepeatedChildENOENT(t *testing.T) {
+
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -734,8 +812,10 @@ func TestSuppressMaterializationEchoesSkipsCacheLoadWhenNoPendingEvents(t *testi
 	case <-time.After(time.Second):
 		t.Fatal("write did not wake watcher")
 	}
+	// On Linux inotify, os.WriteFile emits IN_CREATE followed by IN_MODIFY;
+	// let both events from the initial write coalesce before taking the fence.
+	time.Sleep(20 * time.Millisecond)
 	upto := lw.fence()
-
 	keepStarted := make(chan struct{})
 	keepRelease := make(chan struct{})
 	suppressDone := make(chan struct{})

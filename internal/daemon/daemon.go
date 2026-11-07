@@ -613,6 +613,32 @@ type mountTarget struct {
 	proj   config.Project
 }
 
+// watcherRulesFingerprint changes whenever a mount's watcher-pruning inputs
+// change. Include is in the project config while .bdriveignore is a synced
+// file, so both local edits and materialized peer edits must trigger a rebuild.
+func watcherRulesFingerprint(targets []mountTarget) string {
+	var b strings.Builder
+	for _, target := range targets {
+		b.WriteString(target.folder)
+		b.WriteByte(0)
+		for _, include := range target.proj.Include {
+			b.WriteString(include)
+			b.WriteByte(0)
+		}
+		info, err := os.Stat(filepath.Join(target.folder, syncer.IgnoreFile))
+		if err != nil {
+			b.WriteString("missing:")
+			b.WriteString(err.Error())
+		} else {
+			b.WriteString(strconv.FormatInt(info.Size(), 10))
+			b.WriteByte(':')
+			b.WriteString(strconv.FormatInt(info.ModTime().UnixNano(), 10))
+		}
+		b.WriteByte(0)
+	}
+	return b.String()
+}
+
 type volumeWorker struct {
 	expectedRemote string
 	cancel         context.CancelFunc
@@ -903,9 +929,24 @@ var workerRemoteWakeHook func(string)
 // The watcher is only an accelerator: losing it immediately restores the
 // existing scanInterval polling path.
 const (
-	localWatchSafetyInterval = time.Minute
+	localWatchSafetyInterval = 5 * time.Minute
 	localWatchRetry          = time.Minute
 )
+
+func localWatchENOSPCRetry(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	multiplier := []int{1, 2, 5, 10}[min(failures-1, 3)]
+	return time.Duration(multiplier) * localWatchRetry
+}
+
+func localWatchFallbackInterval(scanInterval, lastScanDuration time.Duration) time.Duration {
+	if lastScanDuration <= 0 {
+		return scanInterval
+	}
+	return maxDuration(scanInterval, minDuration(time.Minute, lastScanDuration*15))
+}
 
 // localWatchNow is a clock seam for the independent full-scan deadline.
 var localWatchNow = time.Now
@@ -1097,7 +1138,7 @@ func startLocalFolderWatcher(ctx context.Context, roots []string) (*localFolderW
 			return nil
 		}
 		err = populate()
-		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.ENOSPC) {
 			_ = nw.Close()
 			watcherMu.Lock()
 			if closed {
@@ -1433,7 +1474,7 @@ func suppressMaterializationEchoes(lw *localFolderWatcher, root, folder, mountID
 	var loadOnce sync.Once
 	getCache := func() map[string]store.CachedFile {
 		loadOnce.Do(func() {
-			cache, loadErr = st.LoadCache(mountID)
+			cache, loadErr = st.LoadCacheReadOnly(mountID)
 		})
 		return cache
 	}
@@ -1604,11 +1645,15 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	var localWatchErr <-chan error
 	var localWatchRoots string
 	var localWatchRetryAt time.Time
+	var lastWatcherRulesFP string
+	var watchENOSPCFailures int
+	var lastWatchErrText string
 	localWatchHealthy := false
 	nextHints := make(map[string]*syncer.ScanHint)
 	retriedOnce := make(map[string]bool)
 	forceFull := true
 	lastFullScan := time.Time{}
+	var lastScanDuration time.Duration
 	stopLocalWatch := func() {
 		if localWatch != nil {
 			localWatch.close()
@@ -1665,6 +1710,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			logger.Printf("no active mounts remain; exiting")
 			return nil
 		}
+		currentWatcherRulesFP := watcherRulesFingerprint(targets)
 		roots := make([]string, 0, len(targets))
 		for _, target := range targets {
 			roots = append(roots, target.folder)
@@ -1674,15 +1720,35 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		if rootKey != localWatchRoots {
 			stopLocalWatch()
 			localWatchRoots, localWatchRetryAt = rootKey, time.Time{}
+			watchENOSPCFailures = 0
+			lastWatchErrText = ""
+			lastWatcherRulesFP = ""
+		}
+		if localWatchHealthy && currentWatcherRulesFP != lastWatcherRulesFP {
+			stopLocalWatch()
+			localWatchRetryAt = time.Time{}
+			forceFull = true
 		}
 		if localWatch == nil && time.Now().After(localWatchRetryAt) {
 			lw, watchErr := startLocalFolderWatcher(ctx, roots)
 			if watchErr != nil {
-				localWatchRetryAt = time.Now().Add(localWatchRetry)
-				logger.Printf("local filesystem watcher unavailable; polling: %v", watchErr)
+				if errors.Is(watchErr, syscall.ENOSPC) {
+					watchENOSPCFailures++
+					localWatchRetryAt = time.Now().Add(localWatchENOSPCRetry(watchENOSPCFailures))
+					if watchErr.Error() != lastWatchErrText {
+						logger.Printf("local filesystem watcher unavailable; polling: %v", watchErr)
+						lastWatchErrText = watchErr.Error()
+					}
+				} else {
+					localWatchRetryAt = time.Now().Add(localWatchRetry)
+					logger.Printf("local filesystem watcher unavailable; polling: %v", watchErr)
+				}
 			} else {
 				localWatch, localWatchWake, localWatchErr = lw, lw.wake, lw.err
 				localWatchHealthy = true
+				lastWatcherRulesFP = currentWatcherRulesFP
+				watchENOSPCFailures = 0
+				lastWatchErrText = ""
 				forceFull = true
 			}
 		}
@@ -1725,9 +1791,15 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		// Note this reads `watch`, which a failed dial, a token change, an
 		// offline cycle and the hub's own streamMaxAge all set back to nil —
 		// so losing the stream restores the tight remote cadence immediately.
+		fallbackScanEvery := localWatchFallbackInterval(scanInterval, 0)
+		if !localWatchHealthy {
+			fallbackScanEvery = localWatchFallbackInterval(scanInterval, lastScanDuration)
+		}
 		pollEvery := scanInterval
 		if localWatchHealthy {
 			pollEvery = localWatchSafetyInterval
+		} else {
+			pollEvery = fallbackScanEvery
 		}
 		// Remote polling remains independent of the local watcher.
 		remotePollEvery := remoteInterval
@@ -1740,8 +1812,13 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		waitFor := pollEvery
 		remoteFailed := false
 		now := localWatchNow()
+		fallbackDue := !localWatchHealthy &&
+			(lastFullScan.IsZero() || now.Sub(lastFullScan) >= fallbackScanEvery || forceFull)
 		doRemote := proj.Remote != "" && time.Since(lastRemote) >= remotePollEvery
-		if !localWatchHealthy || lastFullScan.IsZero() || now.Sub(lastFullScan) >= localWatchSafetyInterval {
+		if fallbackDue {
+			forceFull = true
+		} else if localWatchHealthy &&
+			(lastFullScan.IsZero() || now.Sub(lastFullScan) >= localWatchSafetyInterval) {
 			forceFull = true
 		}
 		if doRemote && be == nil {
@@ -1798,6 +1875,8 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			res.Materialized += r.Materialized
 			res.Pushed = res.Pushed || r.Pushed
 			res.Backfilling = res.Backfilling || r.Backfilling
+			res.ScanDuration += r.ScanDuration
+			res.ScanFull = res.ScanFull || r.ScanFull
 			res.Inbound = append(res.Inbound, r.Inbound...)
 			res.Reverted = append(res.Reverted, r.Reverted...)
 			res.Offline = res.Offline || r.Offline
@@ -1861,7 +1940,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				cyclePanicked = true
 				break
 			}
-			if hint.Full {
+			if hint.Full || (r != nil && r.ScanFull) {
 				lastFullScan = localWatchNow()
 			}
 			if rerr != nil && cycleErr == nil {
@@ -1915,10 +1994,24 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 					cyclePanicked = true
 					break
 				}
+				if r != nil && r.ScanFull {
+					lastFullScan = localWatchNow()
+				}
 				if rerr != nil && cycleErr == nil {
 					cycleErr = rerr
 				}
 				mergeResult(r)
+			}
+		}
+		if !cyclePanicked && cycleErr == nil && res.ScanFull && res.ScanDuration > 0 {
+			lastScanDuration = res.ScanDuration
+		}
+		if localWatchHealthy {
+			latestTargets := activeMountsForVolume(volDir, expectedRemote)
+			if watcherRulesFingerprint(latestTargets) != lastWatcherRulesFP {
+				stopLocalWatch()
+				localWatchRetryAt = time.Time{}
+				forceFull = true
 			}
 		}
 		if cyclePanicked {
@@ -1938,6 +2031,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		}
 		if cycleErr != nil {
 			forceFull = true
+			if !localWatchHealthy && !lastFullScan.IsZero() &&
+				localWatchNow().Sub(lastFullScan) < fallbackScanEvery {
+				forceFull = false
+			}
 		} else {
 			forceFull = false
 		}
@@ -2012,6 +2109,12 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			if remaining < 0 {
 				remaining = 0
 			}
+			if remaining < waitFor {
+				waitFor = remaining
+			}
+		}
+		if !localWatchHealthy && !lastFullScan.IsZero() {
+			remaining := maxDuration(0, lastFullScan.Add(fallbackScanEvery).Sub(localWatchNow()))
 			if remaining < waitFor {
 				waitFor = remaining
 			}
@@ -2091,6 +2194,9 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 								nextWatch = time.Now().Add(watchRetry)
 							}
 						} else {
+							if hook := workerRemoteWakeHook; hook != nil {
+								hook(volDir)
+							}
 							lastRemote = time.Time{}
 						}
 						timer.Stop()

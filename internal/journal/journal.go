@@ -15,12 +15,16 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 )
+
+const MaxValidLamport = int64(1) << 62
 
 const (
 	KindPut    = "put"
@@ -332,54 +336,161 @@ type FileState struct {
 // Replay folds a set of ops (from any number of devices) into the
 // resulting volume state. Last writer wins per path under the total order.
 func Replay(ops []Op) map[string]FileState {
-	sorted := append([]Op(nil), ops...)
-	Sort(sorted)
-	state := make(map[string]FileState)
-	for _, op := range sorted {
-		switch op.Kind {
-		case KindPut:
-			state[op.Path] = FileState{Blob: op.Blob, Size: op.Size, Mode: op.Mode, Link: op.Link}
-		case KindDelete:
-			delete(state, op.Path)
+	winnersIdx := make(map[string]int, minInt(len(ops), 8192))
+	for i := range ops {
+		if ops[i].Kind != KindPut && ops[i].Kind != KindDelete {
+			continue
+		}
+		if prevIdx, ok := winnersIdx[ops[i].Path]; !ok || !Less(ops[i], ops[prevIdx]) {
+			winnersIdx[ops[i].Path] = i
+		}
+	}
+	state := make(map[string]FileState, len(winnersIdx))
+	for p, idx := range winnersIdx {
+		op := ops[idx]
+		if op.Kind == KindPut {
+			state[p] = FileState{Blob: op.Blob, Size: op.Size, Mode: op.Mode, Link: op.Link}
 		}
 	}
 	return state
 }
 
-// Parse decodes a JSONL journal.
-//
-// A line that does not decode is skipped, never fatal. Append is a plain
-// O_APPEND write (the one state file that cannot be written atomically — it
-// only ever grows), so a crash or a full disk leaves a torn final line; and a
-// peer's journal is bytes someone else chose. All-or-nothing parsing turned
-// either of those into "every op this device ever committed is unreadable",
-// with no recovery path in the CLI. The ops that did decode are still the
-// device's history, and every reader drops the same lines from the same bytes,
-// so replay stays in agreement.
-func Parse(data []byte) ([]Op, error) {
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func parseChunk(data []byte) []Op {
+	ops, _ := parseChunkWithOffsets(data, 0)
+	return ops
+}
+
+func parseChunkWithOffsets(data []byte, baseOffset int64) ([]Op, []int64) {
 	var ops []Op
-	for _, raw := range bytes.Split(data, []byte("\n")) {
+	var offsets []int64
+	rem := data
+	lineStart := 0
+	for len(rem) > 0 {
+		start := lineStart
+		var raw []byte
+		if i := bytes.IndexByte(rem, '\n'); i >= 0 {
+			raw, rem = rem[:i], rem[i+1:]
+			lineStart += i + 1
+		} else {
+			raw, rem = rem, nil
+			lineStart += len(raw)
+		}
 		line := bytes.TrimSpace(raw)
 		if len(line) == 0 {
 			continue
 		}
-		// Decoded as pathRaw, not Op: same bytes, same result (see pathRaw.op),
-		// without the second full scan an UnmarshalJSON method forces.
 		var w pathRaw
 		if err := json.Unmarshal(line, &w); err != nil {
 			continue
 		}
 		op := w.op()
-		// `null`, `{}` and any object with no kind decode without error and
-		// are not operations. They must produce no op: op COUNTS are the sync
-		// engine's cursors (pull's fresh[len(prev):], commit's seqBase), so a
-		// line that yields a phantom op shifts every op after it for one
-		// reader and not another — a divergence the writer chooses.
 		if op.Kind != KindPut && op.Kind != KindDelete {
 			continue
 		}
 		ops = append(ops, op)
+		offsets = append(offsets, baseOffset+int64(start))
 	}
+	return ops, offsets
+}
+
+func parseBounds(data []byte, workers int) [][2]int {
+	bounds := make([][2]int, workers)
+	start := 0
+	for i := range workers {
+		target := len(data)
+		if i < workers-1 {
+			target = len(data) * (i + 1) / workers
+			if target < start {
+				target = start
+			}
+			if j := bytes.IndexByte(data[target:], '\n'); j >= 0 {
+				target += j + 1
+			} else {
+				target = len(data)
+			}
+		}
+		bounds[i] = [2]int{start, target}
+		start = target
+	}
+	return bounds
+}
+
+// ParseWithCheckpoints decodes a JSONL journal and records byte offsets for
+// every stride-th valid operation. Invalid and incomplete lines are skipped.
+func ParseWithCheckpoints(data []byte, stride int) ([]Op, [][2]int64) {
+	if stride <= 0 {
+		if len(data) < 2<<20 || runtime.GOMAXPROCS(0) <= 1 {
+			return parseChunk(data), nil
+		}
+		workers := minInt(4, runtime.GOMAXPROCS(0))
+		parts := make([][]Op, workers)
+		bounds := parseBounds(data, workers)
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for i := range workers {
+			go func(i int) {
+				defer wg.Done()
+				b := bounds[i]
+				parts[i] = parseChunk(data[b[0]:b[1]])
+			}(i)
+		}
+		wg.Wait()
+		var out []Op
+		for _, part := range parts {
+			out = append(out, part...)
+		}
+		return out, nil
+	}
+	if len(data) < 2<<20 || runtime.GOMAXPROCS(0) <= 1 {
+		ops, offsets := parseChunkWithOffsets(data, 0)
+		return ops, makeCheckpoints(offsets, stride)
+	}
+	workers := minInt(4, runtime.GOMAXPROCS(0))
+	parts := make([][]Op, workers)
+	offsetParts := make([][]int64, workers)
+	bounds := parseBounds(data, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := range workers {
+		go func(i int) {
+			defer wg.Done()
+			b := bounds[i]
+			parts[i], offsetParts[i] = parseChunkWithOffsets(data[b[0]:b[1]], int64(b[0]))
+		}(i)
+	}
+	wg.Wait()
+	var ops []Op
+	var offsets []int64
+	for i := range parts {
+		ops = append(ops, parts[i]...)
+		offsets = append(offsets, offsetParts[i]...)
+	}
+	return ops, makeCheckpoints(offsets, stride)
+}
+
+func makeCheckpoints(offsets []int64, stride int) [][2]int64 {
+	if len(offsets) == 0 {
+		return nil
+	}
+	cps := make([][2]int64, 0, (len(offsets)+stride-1)/stride)
+	for i, off := range offsets {
+		if i == 0 || i%stride == 0 {
+			cps = append(cps, [2]int64{int64(i), off})
+		}
+	}
+	return cps
+}
+
+// Parse decodes a JSONL journal. Invalid and incomplete lines are skipped.
+func Parse(data []byte) ([]Op, error) {
+	ops, _ := ParseWithCheckpoints(data, 0)
 	return ops, nil
 }
 
@@ -418,14 +529,17 @@ func Append(path string, ops []Op) error {
 	if err != nil {
 		return err
 	}
-	// 0600: a journal is the full path list, authorship and signed-in email
-	// addresses of a private project, and it lives in $BDRIVE_HOME, whose
-	// directories are 0755.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if fi, statErr := f.Stat(); statErr == nil && fi.Size() > 0 {
+		var b [1]byte
+		if _, readErr := f.ReadAt(b[:], fi.Size()-1); readErr == nil && b[0] != '\n' {
+			data = append([]byte{'\n'}, data...)
+		}
+	}
 	_, err = f.Write(data)
 	return err
 }

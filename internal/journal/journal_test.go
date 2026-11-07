@@ -1,8 +1,10 @@
 package journal
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -126,5 +128,54 @@ func TestMtimeIsAdditive(t *testing.T) {
 	}
 	if !got[1].Mtime.IsZero() {
 		t.Fatalf("Mtime should be zero, got %v", got[1].Mtime)
+	}
+}
+
+func TestAppendRepairsTornTail(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "torn.jsonl")
+	if err := os.WriteFile(p, []byte(`{"kind":"put","path":"old"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := op(2, "a", 2, KindPut, "new", "blob")
+	if err := Append(p, []Op{want}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte("\n{\"seq\":2")) {
+		t.Fatalf("append did not separate torn line: %q", raw)
+	}
+	got, err := Parse(raw)
+	if err != nil || len(got) != 1 || got[0].Path != "new" {
+		t.Fatalf("parsed appended op = %#v, %v", got, err)
+	}
+}
+
+func TestParseLargeMatchesSingleChunk(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 40000; i++ {
+		switch i % 5 {
+		case 0:
+			b.WriteString(`{"seq":1,"kind":"put","path":"a","blob":"x"}` + "\r\n")
+		case 1:
+			b.WriteString("\n")
+		case 2:
+			b.WriteString("{corrupt}\n")
+		case 3:
+			b.WriteString(`{"seq":2,"kind":"delete","path":"a"}` + "\n")
+		default:
+			b.WriteString(`{"seq":3,"kind":"put","path":"last","blob":"z"}`)
+		}
+	}
+	data := []byte(b.String())
+	if len(data) < 2<<20 {
+		data = bytes.Repeat(data, (2<<20/len(data))+1)
+	}
+	want := parseChunk(data)
+	got, err := Parse(data)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("parallel parse differs: got %d want %d err=%v", len(got), len(want), err)
 	}
 }

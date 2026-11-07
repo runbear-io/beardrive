@@ -246,6 +246,7 @@ func (s *Session) forgetPeerJournals() {
 	dir := filepath.Join(s.Store.Dir(), "journal")
 	ents, err := os.ReadDir(dir)
 	if err != nil {
+		s.Store.EvictPeerJournals(s.Device.ID)
 		return // nothing cached yet, or unreadable: the next pull rebuilds it
 	}
 	own := s.Store.JournalPath(s.Device.ID)
@@ -264,6 +265,7 @@ func (s *Session) forgetPeerJournals() {
 			log.Printf("beardrive: could not drop a stale peer journal: %v", err)
 		}
 	}
+	s.Store.EvictPeerJournals(s.Device.ID)
 }
 
 // sanePrefixes drops read-only prefixes this device will not act on. The
@@ -297,6 +299,21 @@ func (s *Session) mountID() string {
 	sum := sha256.Sum256([]byte(s.Folder))
 	return hex.EncodeToString(sum[:])[:12]
 }
+func computeIgnoreFingerprint(raw string, include []string, accepted, pulled string) [32]byte {
+	h := sha256.New()
+	h.Write([]byte(raw))
+	h.Write([]byte{0})
+	for _, item := range include {
+		h.Write([]byte(item))
+		h.Write([]byte{0})
+	}
+	h.Write([]byte(accepted))
+	h.Write([]byte{0})
+	h.Write([]byte(pulled))
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
 
 // Result summarizes one sync cycle.
 //
@@ -323,6 +340,8 @@ type Result struct {
 	Pruned       int  // paths removed from the hub by --prune (kept on disk)
 	Materialized int  // files written/removed in the working folder
 	Pushed       bool // own journal/blobs uploaded
+	ScanDuration time.Duration
+	ScanFull     bool
 	// Backfilling reports that this cycle's backfill landed content and left
 	// more waiting for a later batch, so the next remote pass should come
 	// soon. It stays false while the backfill lands nothing, which is what
@@ -330,7 +349,7 @@ type Result struct {
 	Backfilling bool
 	// Inbound names the paths this cycle materialized on a peer's behalf —
 	// the same events the inbound spool queues, carried out of the cycle that
-	// made them so the post_sync hook can hand them to a local command. It
+	// did the work so the post_sync hook can hand them to a local command. It
 	// does NOT replace the spool: see the comment in internal/store/inbound.go
 	// for why the two coexist.
 	Inbound []store.InboundEvent
@@ -409,7 +428,7 @@ func ignoredDir(name string) bool { return config.ReservedDir(name) }
 // large is not a clock reading, so it is ignored rather than absorbed. Pulled
 // ops are never rewritten: replay must agree between a device and its remote
 // copy.
-const maxLamport = int64(1) << 62
+const maxLamport = journal.MaxValidLamport
 
 // absorbLamport advances the local clock to a peer's reading, ignoring absurd
 // ones. tickLamport is the local increment, which stops at the ceiling rather
@@ -477,15 +496,23 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	if err != nil {
 		return nil, fmt.Errorf("load sync state: %w", err)
 	}
+	loadedSync := store.CloneSyncState(st)
 	// Advisory telemetry about files this cycle will journal and push anyway,
 	// so an unreadable record starts the cycle empty rather than failing it.
 	sec := &secretLog{found: map[string][]secrets.Finding{}}
 	if found, err := s.Store.LoadSecrets(s.mountID()); err == nil {
 		sec.found = found
 	}
-	myOps, err := s.Store.DeviceOps(s.Device.ID)
+	myOpCount, err := s.Store.OwnOpCount(s.Device.ID)
 	if err != nil {
 		return nil, fmt.Errorf("read own journal: %w", err)
+	}
+	fold, err := s.Store.ReplayFold()
+	opsErr := err
+	var existingState map[string]journal.FileState
+	existingIgnoreLive := false
+	if opsErr != nil {
+		log.Printf("beardrive: could not re-derive the sync clock: %v", opsErr)
 	}
 	proj, ok, err := config.LoadProject(s.Folder)
 	if err != nil {
@@ -546,16 +573,8 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	// materialization below. A remote cycle refreshes it only when pull or
 	// scope filtering could have changed peer journals on disk.
 	_, hadCachedIgnore := cache[IgnoreFile]
-	ops, err := s.Store.AllOps()
-	opsErr := err
-	var existingState map[string]journal.FileState
-	existingIgnoreLive := false
-	if err != nil {
-		// Never break sync: a journal we cannot read must not stop the scan
-		// from capturing local edits. The stored clock stands for this cycle.
-		log.Printf("beardrive: could not re-derive the sync clock: %v", err)
-	} else {
-		if len(ops) > 0 {
+	if opsErr == nil {
+		if fold.TotalOps > 0 {
 			deviceJoining = false
 			if !hadCache && s.MountID != "" {
 				mountJoining = true
@@ -563,7 +582,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			}
 		}
 		if mountJoining {
-			existingState = journal.Replay(ops)
+			existingState = fold.Target
 			_, existingIgnoreLive = existingState[IgnoreFile]
 			if want, ok := existingState[IgnoreFile]; ok {
 				wrote, _ := s.materializeFile(IgnoreFile, want, cache)
@@ -571,30 +590,15 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 					res.Materialized++
 				}
 			}
-		} else if hadCachedIgnore {
-			var winning journal.Op
-			found := false
-			for _, op := range ops {
-				if op.Path != IgnoreFile || !journal.SafePath(op.Path) ||
-					(op.Kind != journal.KindPut && op.Kind != journal.KindDelete) {
-					continue
-				}
-				if !found || journal.Less(winning, op) {
-					winning, found = op, true
-				}
-			}
-			if found && winning.Kind == journal.KindPut {
-				existingIgnoreLive = true
-				want := journal.FileState{Blob: winning.Blob, Size: winning.Size, Mode: winning.Mode, Link: winning.Link}
-				wrote, _ := s.materializeFile(IgnoreFile, want, cache)
-				if wrote {
-					res.Materialized++
-				}
+		} else if hadCachedIgnore && fold.HasIgnoreWinner && fold.IgnoreWinner.Kind == journal.KindPut {
+			existingIgnoreLive = true
+			want := journal.FileState{Blob: fold.IgnoreWinner.Blob, Size: fold.IgnoreWinner.Size, Mode: fold.IgnoreWinner.Mode, Link: fold.IgnoreWinner.Link}
+			wrote, _ := s.materializeFile(IgnoreFile, want, cache)
+			if wrote {
+				res.Materialized++
 			}
 		}
-		for _, op := range ops {
-			st.Lamport = absorbLamport(st.Lamport, op.Lamport)
-		}
+		st.Lamport = absorbLamport(st.Lamport, fold.MaxLamport)
 	}
 	filter, err := loadFilter(s.Folder, proj.Include)
 	if err != nil {
@@ -625,14 +629,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 					synced = append(synced, rel)
 				}
 			}
-			var prior journal.Op
-			found := false
-			for _, op := range ops {
-				if op.Path == IgnoreFile && op.Kind == journal.KindPut &&
-					(!found || journal.Less(prior, op)) {
-					prior, found = op, true
-				}
-			}
+			prior, found := fold.LatestIgnorePut, fold.HasIgnorePut
 			if (!mountJoining && text != "") || (mountJoining && !found && text != "") {
 				st.IgnoreAccepted, st.IgnorePulled = vouchedFloor(text, synced), text
 			} else if found {
@@ -672,15 +669,21 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 		s.forgetPeerJournals()
 	}
 
-	fullScan := hint == nil || joining || scopeMoved ||
+	fullScan := hint == nil || hint.Full || joining || scopeMoved ||
 		st.IgnoreAccepted != oldAccepted || st.IgnorePulled != oldPulled ||
 		s.Prune || scanHintTouchesIgnore(hint)
 	if fullScan {
 		hint = &ScanHint{Full: true}
 	}
-
+	preScanIgnoreFP := computeIgnoreFingerprint(filter.RawIgnoreText(), proj.Include, st.IgnoreAccepted, st.IgnorePulled)
+	canUseFastScan := !s.Prune && !mountJoining &&
+		(filter.RawIgnoreText() == st.IgnoreAccepted || !filter.HasUpGuard()) &&
+		s.Store.IgnoreFingerprintMatches(s.mountID(), preScanIgnoreFP)
+	res.ScanFull = hint.Full
 	// 1. Scan the working folder and journal any local changes.
-	localOps, retryPaths, err := s.scan(cache, &st, int64(len(myOps)), filter, sec, hint)
+	scanStart := time.Now()
+	localOps, retryPaths, err := s.scan(cache, &st, int64(myOpCount), filter, sec, hint, canUseFastScan)
+	res.ScanDuration = time.Since(scanStart)
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
@@ -698,10 +701,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 		if err := s.Store.AppendOps(s.Device.ID, localOps); err != nil {
 			return fmt.Errorf("append journal: %w", err)
 		}
-		myOps = append(myOps, localOps...)
-		if opsErr == nil {
-			ops = append(ops, localOps...)
-		}
+		myOpCount += len(localOps)
 		res.LocalOps = len(localOps)
 		localOps = nil
 		return nil
@@ -725,10 +725,8 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	// peer produces at will by understating Op.Size on one journal line.
 	blocked := false
 	var pulled, gone []journal.Op
-	var pullErr error
 	if s.Backend != nil {
 		pulled, gone, err = s.pull(ctx, cache)
-		pullErr = err
 		// Before the switch, not after it: pull WRITES each peer journal to
 		// disk as it goes, and the ErrForbidden arm returns without ever
 		// reaching an absorb that sat below it — so a pull that died partway
@@ -760,7 +758,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			if cerr := commitLocal(); cerr != nil {
 				return nil, cerr
 			}
-			return res, s.finish(cache, st, sec, s.cacheDirty)
+			return res, s.finish(cache, st, loadedSync, sec, s.cacheDirty)
 		case errors.Is(err, errBlobContent):
 			// Reported — it is the only signal a device ever gets that its hub
 			// is serving bytes that are not what they are addressed as — but
@@ -794,7 +792,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	// History and `bdrive restore` brings it back — it just never materializes.
 	if joining && len(localOps) > 0 {
 		candidateOps := append([]journal.Op(nil), pulled...)
-		if mountJoining {
+		if mountJoining && opsErr == nil {
 			existing, err := s.Store.AllOps()
 			if err != nil {
 				return nil, fmt.Errorf("read journals for adoption: %w", err)
@@ -826,7 +824,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			localOps = kept
 			if mountJoining {
 				for i := range localOps {
-					localOps[i].Seq = int64(len(myOps) + i + 1)
+					localOps[i].Seq = int64(myOpCount + i + 1)
 				}
 			}
 		}
@@ -835,29 +833,19 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 		return nil, err
 	}
 
-	// The initial AllOps result already includes local commits. A remote cycle
-	// may have changed peer journals on disk, so refresh only when that can
-	// actually have happened.
-	all := ops
-	if opsErr != nil || (s.Backend != nil &&
-		(len(pulled) > 0 || len(gone) > 0 || scopeMoved || pullErr != nil)) {
-		all, err = s.Store.AllOps()
-		if err != nil {
-			return nil, fmt.Errorf("read journals: %w", err)
-		}
+	fold, err = s.Store.ReplayFold()
+	if err != nil {
+		return nil, fmt.Errorf("read journals: %w", err)
 	}
-	target := journal.Replay(all)
+	target := fold.Target
 
 	// 3. Preserve losing local edits as conflict copies.
-	//
-	// Not gated on `len(pulled) > 0` any more. A local op can lose replay to an
-	// op that is ALREADY on this disk — a peer op above maxLamport, which
-	// absorbLamport refuses by design — and a settled peer journal yields
-	// nothing on every later cycle, so the gate meant that loss was reverted
-	// with no copy and no message, forever (BEA-196). Unpushed ops are the
-	// candidate set now; with none there is nothing that could lose.
-	if len(pulled) > 0 || st.PushedOps < int64(len(myOps)) {
-		conflictOps, err := s.conflictCopiesWithState(myOps, st.PushedOps, pulled, &st, all, target)
+	if len(pulled) > 0 || st.PushedOps < int64(myOpCount) {
+		unpushedOps, err := s.Store.OwnOpsFrom(s.Device.ID, st.PushedOps)
+		if err != nil {
+			return nil, fmt.Errorf("read own journal: %w", err)
+		}
+		conflictOps, err := s.conflictCopiesWithState(unpushedOps, int64(myOpCount), pulled, &st, nil, target)
 		if err != nil {
 			return nil, err
 		}
@@ -865,9 +853,12 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			if err := s.Store.AppendOps(s.Device.ID, conflictOps); err != nil {
 				return nil, fmt.Errorf("append conflict ops: %w", err)
 			}
-			myOps = append(myOps, conflictOps...)
-			all = append(all, conflictOps...)
-			target = journal.Replay(all)
+			myOpCount += len(conflictOps)
+			fold, err = s.Store.ReplayFold()
+			if err != nil {
+				return nil, fmt.Errorf("read journals: %w", err)
+			}
+			target = fold.Target
 			for _, op := range conflictOps {
 				if op.Note == mergeNote {
 					res.Merged++
@@ -908,7 +899,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 				continue
 			}
 			op.Device, op.DeviceName, op.Author = s.Device.ID, s.Device.Name, s.Device.Author
-			op.Seq = int64(len(myOps)) + int64(len(readopt)) + 1
+			op.Seq = int64(myOpCount) + int64(len(readopt)) + 1
 			op.Note = reassertNote
 			readopt = append(readopt, op)
 		}
@@ -916,9 +907,12 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			if err := s.Store.AppendOps(s.Device.ID, readopt); err != nil {
 				return nil, fmt.Errorf("append re-asserted ops: %w", err)
 			}
-			myOps = append(myOps, readopt...)
-			all = append(all, readopt...)
-			target = journal.Replay(all)
+			myOpCount += len(readopt)
+			fold, err = s.Store.ReplayFold()
+			if err != nil {
+				return nil, fmt.Errorf("read journals: %w", err)
+			}
+			target = fold.Target
 			res.LocalOps += len(readopt)
 		}
 	}
@@ -953,20 +947,10 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	// runs against stale rules, its filter guard never fires, and it unlinks
 	// files that merely left sync scope.
 	ignoreFromPeer := false
-	if want, ok := target[IgnoreFile]; ok {
-		var latest journal.Op
-		found := false
-		for _, op := range all {
-			if op.Path != IgnoreFile || op.Kind != journal.KindPut ||
-				op.Blob != want.Blob || op.Link != want.Link ||
-				op.Size != want.Size || op.Mode != want.Mode {
-				continue
-			}
-			if !found || journal.Less(latest, op) {
-				latest, found = op, true
-			}
-		}
-		ignoreFromPeer = found && latest.Device != s.Device.ID
+	if _, ok := target[IgnoreFile]; ok {
+		ignoreFromPeer = fold.HasIgnoreWinner &&
+			fold.IgnoreWinner.Kind == journal.KindPut &&
+			fold.IgnoreWinner.Device != s.Device.ID
 	}
 	if want, ok := target[IgnoreFile]; !ok {
 		// A peer DELETED the shared rules — the maximal widening there is, and
@@ -1015,7 +999,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 
 	// 4b. Prune: remove from the hub what the shared rules now exclude.
 	if s.Prune {
-		pruneOps, err := s.pruneOps(target, &st, int64(len(myOps)))
+		pruneOps, err := s.pruneOps(target, &st, int64(myOpCount))
 		if err != nil {
 			return nil, err
 		}
@@ -1023,7 +1007,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			if err := s.Store.AppendOps(s.Device.ID, pruneOps); err != nil {
 				return nil, fmt.Errorf("append prune ops: %w", err)
 			}
-			myOps = append(myOps, pruneOps...)
+			myOpCount += len(pruneOps)
 			res.Pruned = len(pruneOps)
 		}
 	}
@@ -1037,7 +1021,11 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	res.Reverted = s.reverted
 
 	// 5. Push our blobs and journal.
-	if s.Backend != nil && !blocked && int64(len(myOps)) > st.PushedOps {
+	if s.Backend != nil && !blocked && int64(myOpCount) > st.PushedOps {
+		myOps, err := s.Store.DeviceOps(s.Device.ID)
+		if err != nil {
+			return nil, fmt.Errorf("read own journal: %w", err)
+		}
 		switch err := s.push(ctx, myOps, &st); {
 		case err == nil:
 			res.Pushed = true
@@ -1082,8 +1070,14 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	// so a device the hub was refusing alternated between the two log lines
 	// forever and `bdrive status` reported healthy sync moments after the push
 	// it had just refused.
-	if err := s.finish(cache, st, sec, s.cacheDirty); err != nil {
+	if err := s.finish(cache, st, loadedSync, sec, s.cacheDirty); err != nil {
 		return nil, err
+	}
+	postIgnoreFP := computeIgnoreFingerprint(filter.RawIgnoreText(), proj.Include, st.IgnoreAccepted, st.IgnorePulled)
+	if hint.Full && postIgnoreFP == preScanIgnoreFP {
+		s.Store.SetIgnoreFingerprint(s.mountID(), postIgnoreFP)
+	} else if postIgnoreFP != preScanIgnoreFP {
+		s.Store.ClearIgnoreFingerprint(s.mountID())
 	}
 	return res, nil
 }
@@ -1091,12 +1085,15 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 // finish persists the two pieces of state a cycle mutates. Saving the cache
 // matters even on a cut-short cycle: the scan already journaled local edits,
 // and dropping the cache would make the next scan journal them all again.
-func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, sec *secretLog, cacheDirty bool) error {
+func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, loadedSync store.SyncState, sec *secretLog, cacheDirty bool) error {
 	if cacheDirty || !s.Store.HasCache(s.mountID()) {
 		if err := s.Store.SaveCache(s.mountID(), cache); err != nil {
 			return err
 		}
 	}
+	// Fold caches are in-memory write-back state. Persist them while the
+	// volume lock is still held, alongside the cache and sync state.
+	s.Store.SaveChangedFoldsLocked()
 	// Written only when the cycle changed it, so a quiet daemon tick every 3s
 	// still writes nothing — and an error is logged, never returned: this is
 	// advisory telemetry about ops that are already journaled and pushed, and
@@ -1107,7 +1104,13 @@ func (s *Session) finish(cache map[string]store.CachedFile, st store.SyncState, 
 			log.Printf("beardrive: could not record credential findings: %v", err)
 		}
 	}
-	return s.Store.SaveSync(st)
+	if !store.SyncStateEqual(st, loadedSync) {
+		return s.Store.SaveSync(st)
+	}
+	if _, err := os.Stat(filepath.Join(s.Store.Dir(), "sync.json")); err != nil {
+		return s.Store.SaveSync(st)
+	}
+	return nil
 }
 
 // scan diffs the working folder against the state cache and returns ops for
@@ -1132,7 +1135,7 @@ func scanHintTouchesIgnore(hint *ScanHint) bool {
 // are neither journaled nor deleted: a path that becomes ignored is dropped
 // from the cache without a delete op, so opting out locally never removes
 // the file from other devices.
-func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter, sec *secretLog, hint *ScanHint) ([]journal.Op, []string, error) {
+func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, seqBase int64, filter *Filter, sec *secretLog, hint *ScanHint, canUseFastScan bool) ([]journal.Op, []string, error) {
 	fullDiscovery := hint == nil || hint.Full
 	var roots []string
 	deleteScopes := map[string]bool{}
@@ -1194,10 +1197,28 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		}
 	}
 
+	var fastUnchanged func(rel string, d fs.DirEntry) bool
+	if canUseFastScan {
+		fastUnchanged = func(rel string, d fs.DirEntry) bool {
+			c, ok := cache[rel]
+			if !ok || c.Link != "" || s.readOnlyPath(rel) {
+				return false
+			}
+			info, err := d.Info()
+			if err != nil || !info.Mode().IsRegular() {
+				return false
+			}
+			if c.Size == info.Size() && c.MTimeNS == info.ModTime().UnixNano() {
+				seen[rel] = true
+				return true
+			}
+			return false
+		}
+	}
 	var walk func(string, *Filter, func(string, string, fs.DirEntry, verdict) error) error
 	if fullDiscovery {
 		walk = func(folder string, filter *Filter, fn func(string, string, fs.DirEntry, verdict) error) error {
-			return walkFolderPathsWithErr(folder, filter, nil, onWalkErr, fn)
+			return walkFolderPathsFast(folder, filter, nil, fastUnchanged, onWalkErr, fn)
 		}
 	} else {
 		walk = func(folder string, filter *Filter, fn func(string, string, fs.DirEntry, verdict) error) error {
@@ -1366,16 +1387,26 @@ func redefinesApplied(have, applied []journal.Op) bool {
 	if len(applied) == 0 {
 		return false
 	}
-	ids := make(map[string]bool, len(have))
-	slots := make(map[string]bool, len(have))
-	for _, op := range have {
-		ids[opID(op)] = true
-		slots[opSlot(op)] = true
-	}
+	appliedBySlot := make(map[string]string, len(applied))
 	for _, op := range applied {
-		if slots[opSlot(op)] && !ids[opID(op)] {
+		slot := opSlot(op)
+		id := opID(op)
+		if prev, ok := appliedBySlot[slot]; ok && prev != id {
 			return true
 		}
+		appliedBySlot[slot] = id
+	}
+	seenInHave := make(map[string]string, len(have))
+	for _, op := range have {
+		slot := opSlot(op)
+		id := opID(op)
+		if want, ok := appliedBySlot[slot]; ok && want != id {
+			return true
+		}
+		if prev, ok := seenInHave[slot]; ok && prev != id {
+			return true
+		}
+		seenInHave[slot] = id
 	}
 	return false
 }
@@ -1383,9 +1414,9 @@ func redefinesApplied(have, applied []journal.Op) bool {
 func opSlot(op journal.Op) string { return fmt.Sprintf("%s\x00%d", op.Device, op.Seq) }
 
 func opID(op journal.Op) string {
-	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d",
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s",
 		opSlot(op), op.Lamport, op.Time.UTC().Format(time.RFC3339Nano),
-		op.Kind, op.Path, op.Blob, op.Size, op.Mode)
+		op.Kind, op.Path, op.Blob, op.Size, op.Mode, op.Link)
 }
 
 // sizeGrowth is the headroom a bound gets over the size an object was
@@ -1618,6 +1649,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		// to; if it does not, the peer rewrote its log and every op in it is
 		// treated as new. Re-applying ops is idempotent (Replay is a fold), so
 		// the rewritten case is only ever slow, never divergent.
+		prevFi, _ := os.Stat(lp)
 		local, err := os.ReadFile(lp)
 		if err != nil && !os.IsNotExist(err) {
 			// One unreadable local copy is one peer's problem, not every
@@ -1629,6 +1661,22 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		}
 		if bytes.Equal(local, data) {
 			continue
+		}
+		if len(local) > 0 && local[len(local)-1] == '\n' && bytes.HasPrefix(data, local) {
+			tail := data[len(local):]
+			fresh, err := journal.Parse(tail)
+			if err == nil && s.Store.CanFastAppendPeer(dev, prevFi, local, fresh) {
+				if err := store.WriteFileAtomic(lp, data, 0o600); err != nil {
+					return newOps, gone, err
+				}
+				if newFi, stErr := os.Stat(lp); stErr == nil {
+					s.Store.FoldPeerAppend(dev, prevFi, local, data, fresh, newFi)
+				} else {
+					s.Store.InvalidateJournal(dev)
+				}
+				newOps = append(newOps, fresh...)
+				continue
+			}
 		}
 		// Resume only at a COMPLETE LINE. "Append-only" is the peer's claim
 		// about its own object: publish a stage cut mid-line and both the size
@@ -1679,9 +1727,10 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		if err != nil {
 			continue // corrupt remote journal; ignore rather than break sync
 		}
-		if err := store.WriteFileAtomic(lp, data, 0o644); err != nil {
+		if err := store.WriteFileAtomic(lp, data, 0o600); err != nil {
 			return newOps, gone, err
 		}
+		s.Store.InvalidateJournal(dev)
 		gone = append(gone, withdrawn(all, applied)...)
 		newOps = append(newOps, fresh...)
 	}
@@ -1893,15 +1942,19 @@ func (s *Session) conflictCopies(myOps []journal.Op, pushed int64, pulled []jour
 	if err != nil {
 		return nil, err
 	}
-	return s.conflictCopiesWithState(myOps, pushed, pulled, st, all, journal.Replay(all))
-}
-
-func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pulled []journal.Op, st *store.SyncState, all []journal.Op, state map[string]journal.FileState) ([]journal.Op, error) {
+	if pushed < 0 {
+		pushed = 0
+	}
 	if pushed > int64(len(myOps)) {
 		pushed = int64(len(myOps))
 	}
+	unpushed := myOps[pushed:]
+	return s.conflictCopiesWithState(unpushed, int64(len(myOps)), pulled, st, all, journal.Replay(all))
+}
+
+func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int64, pulled []journal.Op, st *store.SyncState, all []journal.Op, state map[string]journal.FileState) ([]journal.Op, error) {
 	unpushed := map[string]journal.Op{}
-	for _, op := range myOps[pushed:] {
+	for _, op := range unpushedOps {
 		// adoptNote: the same reasoning one step removed — an adopted op was
 		// demoted precisely because the project's version wins, so it is a
 		// losing unpushed local op by construction and would conflict-copy
@@ -1935,7 +1988,6 @@ func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pull
 	if len(unpushed) == 0 {
 		return nil, nil
 	}
-	seqBase := int64(len(myOps))
 	var out []journal.Op
 	// Every unpushed local op, not just the paths a pulled op touched: what
 	// makes an edit need preserving is that replay did not resolve to it, and
@@ -1987,6 +2039,13 @@ func (s *Session) conflictCopiesWithState(myOps []journal.Op, pushed int64, pull
 		// and without a collision there is no such op to merge with.
 		merged, canMerge := mergedBlob{}, false
 		if collided {
+			if all == nil {
+				var err error
+				all, err = s.Store.AllOps()
+				if err != nil {
+					return nil, err
+				}
+			}
 			merged, canMerge = s.tryMerge(p, mine, theirs, all)
 		}
 		if canMerge {
