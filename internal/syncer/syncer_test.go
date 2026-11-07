@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -228,6 +229,176 @@ func TestIgnoreEditForcesFullScan(t *testing.T) {
 	}
 	if _, ok := cache["ignored/secret.txt"]; ok {
 		t.Fatalf("ignored path remained in cache after full policy scan: %v", cache)
+	}
+}
+
+func TestIgnoreFingerprintFastScanAndPeerNarrowing(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	a.MountID = "creator"
+	if _, err := config.SaveProject(a.Folder, config.Project{ID: a.MountID}); err != nil {
+		t.Fatal(err)
+	}
+	const rules = "drop/\n"
+	write(t, a.Folder, IgnoreFile, rules)
+	write(t, a.Folder, "keep.txt", "keep")
+	write(t, a.Folder, "drop/secret.txt", "secret")
+	cycle(t, a)
+	cycle(t, a)
+	st, err := a.Store.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.IgnoreAccepted != rules {
+		t.Fatalf("creator IgnoreAccepted = %q, want %q", st.IgnoreAccepted, rules)
+	}
+	res, err := a.CycleWithScanHint(context.Background(), &ScanHint{Full: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.ScanFull {
+		t.Fatal("CycleWithScanHint(&ScanHint{Full: true}) did not set ScanFull")
+	}
+	if !a.Store.IgnoreFingerprintMatches(a.mountID(), computeIgnoreFingerprint(rules, nil, st.IgnoreAccepted, st.IgnorePulled)) {
+		t.Fatal("second full scan did not record the ignore fingerprint")
+	}
+
+	filter, err := loadFilter(a.Folder, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keepWalked := false
+	if err := walkFolderPathsFast(a.Folder, filter, nil, func(rel string, _ fs.DirEntry) bool {
+		return rel == "keep.txt"
+	}, nil, func(_, rel string, _ fs.DirEntry, _ verdict) error {
+		if rel == "keep.txt" {
+			keepWalked = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if keepWalked {
+		t.Fatal("walkFolderPathsFast visited a verified unchanged regular file")
+	}
+	be2 := sharedRemote(t)
+	c := newDevice(t, "devc", be2)
+	d := newDevice(t, "devd", be2)
+	write(t, c.Folder, "drop/secret.txt", "secret")
+	cycle(t, c)
+	cycle(t, d)
+	if _, ok := mustCache(t, d)["drop/secret.txt"]; !ok {
+		t.Fatal("peer did not materialize the initially shared file")
+	}
+	// A peer-authored narrowed rule must force the slow path and drop the
+	// newly ignored path from the receiver's cache without journaling a delete.
+	write(t, c.Folder, IgnoreFile, "drop/\n")
+	cycle(t, c)
+	cycle(t, d)
+	cycle(t, d)
+	if _, ok := mustCache(t, d)["drop/secret.txt"]; ok {
+		t.Fatal("peer-narrowed ignore left the newly ignored path in cache")
+	}
+}
+
+func mustCache(t *testing.T, s *Session) map[string]store.CachedFile {
+	t.Helper()
+	cache, err := s.Store.LoadCache(s.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cache
+}
+
+func TestUnreadablePeerJournalLeavesStateUntouched(t *testing.T) {
+	s := newDevice(t, "local", nil)
+	write(t, s.Folder, IgnoreFile, "private/\n")
+	st, err := s.Store.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Lamport = 41
+	st.IgnoreAccepted = "private/\n"
+	st.IgnorePulled = "private/\n"
+	if err := s.Store.SaveSync(st); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.Store.Dir(), "journal", "peer.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Cycle(context.Background())
+	if err == nil {
+		t.Fatal("cycle with unreadable peer journal unexpectedly succeeded")
+	}
+	if got := read(t, s.Folder, IgnoreFile); got != "private/\n" {
+		t.Fatalf("ignore file changed after unreadable peer journal: %q", got)
+	}
+	after, err := s.Store.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Lamport != st.Lamport {
+		t.Fatalf("persisted Lamport = %d, want %d", after.Lamport, st.Lamport)
+	}
+}
+
+func TestPullPrefixAppendAndRewritePaths(t *testing.T) {
+	be := sharedRemote(t)
+	s := newDevice(t, "local", be)
+	ctx := context.Background()
+	op1 := journal.Op{Seq: 1, Lamport: 1, Device: "peer", Kind: journal.KindDelete, Path: "one.txt", Time: time.Now().UTC()}
+	op2 := journal.Op{Seq: 2, Lamport: 2, Device: "peer", Kind: journal.KindDelete, Path: strings.Repeat("two", 100), Time: time.Now().UTC()}
+	line := func(op journal.Op) []byte {
+		b, err := json.Marshal(op)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(b, '\n')
+	}
+	first := line(op1)
+	if err := be.Put(ctx, "journal/peer.jsonl", strings.NewReader(string(first)), int64(len(first))); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.pull(ctx, map[string]store.CachedFile{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("initial pull ops = %d, want 1", len(got))
+	}
+	appended := append(append([]byte(nil), first...), line(op2)...)
+	if err := be.Put(ctx, "journal/peer.jsonl", strings.NewReader(string(appended)), int64(len(appended))); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = s.pull(ctx, map[string]store.CachedFile{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Seq != op2.Seq {
+		t.Fatalf("prefix append pull = %+v, want op2", got)
+	}
+	op1Rewritten := op1
+	op1Rewritten.Seq = 3
+	op1Rewritten.Lamport = 3
+	op1Rewritten.Path = strings.Repeat("rewritten", 100)
+	op3 := journal.Op{Seq: 4, Lamport: 4, Device: "peer", Kind: journal.KindDelete, Path: "three.txt", Time: time.Now().UTC()}
+	rewrite := append(append(line(op1Rewritten), line(op2)...), line(op3)...)
+	if err := be.Put(ctx, "journal/peer.jsonl", strings.NewReader(string(rewrite)), int64(len(rewrite))); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = s.pull(ctx, map[string]store.CachedFile{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("rewrite pull = %+v, want 3 ops", got)
+	}
+	fi, err := os.Stat(s.Store.JournalPath("peer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("peer journal mode = %o, want 600", fi.Mode().Perm())
 	}
 }
 

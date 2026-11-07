@@ -61,6 +61,8 @@ classDiagram
     class Result {
         +LocalOps +PulledOps
         +Conflicts +Adopted +Pruned +Materialized
+        +ScanDuration time.Duration
+        +ScanFull bool
         +Reverted []string
         +RetryPaths []string
         +Inbound []store.InboundEvent
@@ -79,6 +81,8 @@ classDiagram
         +SkipUp(rel) bool
         +PruneDir(rel) bool
         +AcceptRules(text) scope floor
+        +RawIgnoreText() string
+        +HasUpGuard() bool
     }
     note for Filter "ignore.go — .bdriveignore rules (incl. the managed `# bdrive scope` negation block written by init --only / bdrive scope) + a legacy .bdrive include list; Negated() is what makes sync --prune refuse on a scoped project. NOT the whole predicate: walkFolder adds reserved-dir pruning, non-regular and reserved-name skips, and nested-mount handoff"
     note for Filter "Folder permissions are NOT part of Filter and deliberately so: they are the hub's answer about this account, not the project's shared rules, and they are asymmetric in the other direction — a read-only folder is materialized normally and never journaled. scan returns early for such a path (marking it seen, so the delete pass mints nothing) and materializeFile reverts it, which is the one place a dirty file is clobbered"
@@ -131,9 +135,10 @@ classDiagram
 
     class walkFolder {
         +walkFolder(folder, filter, fn)
+        +walkFolderPathsFast(folder, filter, roots, fastUnchanged, onWalkErr, fn)
         verdict: vSync vSymlink vSkipFile vDescend vPruneDir vNested
     }
-    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure, SyncedFiles and Drift all go through it, so what --explain reports, what init warns about, what bdrive grep searches and what status calls unscanned cannot drift from what leaves"
+    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure, SyncedFiles and Drift all go through it, so what --explain reports, what init warns about, what bdrive grep searches and what status calls unscanned cannot drift from what leaves. walkFolderPathsFast adds an opt-in unchanged-cache shortcut for scan when the mount's ignore fingerprint matches the last completed full scan"
 
     class Measure {
         +Measure(folder, include) files, bytes
@@ -166,9 +171,13 @@ classDiagram
         -dir volume dir
         +PutBlob / OpenBlob / HasBlob
         +AppendOps / DeviceOps / AllOps
-        +LoadCache / SaveCache mountID
+        +ReplayFold() FoldResult
+        +OwnOpCount / OwnOpsFrom
+        +FoldPeerAppend / EvictPeerJournals
+        +IgnoreFingerprintMatches / SetIgnoreFingerprint
+        +LoadCache / LoadCacheReadOnly / SaveCache mountID
         +HasCache mountID
-        +LoadSync / SaveSync
+        +LoadSync / SaveSync / SyncStateEqual
         +SaveNote / LoadNote
         +LogRead(rel, session) read spool
         +PendingReads dedup on path+session
@@ -180,6 +189,7 @@ classDiagram
     note for Store "secrets-mount-id.json is the credential-finding record: what `bdrive status` prints and what the agent hook appends a sentence about. Like the inbound spool it outlives the cycle that wrote it — the daemon scans the write seconds before the turn starts — but unlike it, it is STATE and is never drained: a finding stands until the file changes without it"
     note for Store "internal/store: ~/.bdrive/volumes/volume-id holds shared content-addressed blobs, per-device journal copies, and sync.json; state-mount-id.json, paused-mount-id, note-mount-id.json, secrets-mount-id.json, and inbound-mount-id.jsonl are per-mount (free funcs Paused/SetPaused and PausedMount/SetPausedMount, no flock)"
     note for Store "inbound-mount-id.jsonl (with legacy inbound.jsonl fallback) is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle. Result.Inbound now carries the SAME events for the post_sync hook and is not a duplicate to delete: that consumer fires from the cycle itself, and a second drainer would silently empty the agent hook's context"
+    note for Store "The fold-cache keeps the replayed target, op count, lamport high-water mark, and ignore winner together; ReplayFold reuses unchanged journal folds instead of re-reading and sorting every device on every cycle. LoadCacheReadOnly supplies the immutable map used by echo suppression without cloning large mount caches."
 
     class secretLog {
         <<syncer/secrets.go>>
@@ -200,7 +210,7 @@ classDiagram
         +Session agent session, hook-set
         +Mtime when the file was written
     }
-    note for Op "internal/journal — Less orders by (lamport, time, device, seq); Replay folds to LWW-per-path state; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay. Session holds the same standing: set only by `bdrive sync --hook` (never by --note, which any member can spell), display/join-only, and the key History run cards group on — a note is forgeable, a session id is not"
+    note for Op "internal/journal — Less orders by (lamport, time, device, seq), capped at MaxValidLamport; Replay folds to LWW-per-path state in a single O(N) pass; ParseWithCheckpoints decodes large journals in parallel across newline-aligned chunks and records sparse byte offsets; each device writes only its own journal. Mtime is display-only (bdrive log shows it, falling back to Time) and never feeds Less or Replay. Session holds the same standing: set only by `bdrive sync --hook` (never by --note, which any member can spell), display/join-only, and the key History run cards group on — a note is forgeable, a session id is not"
     note for Op "Link (put only) marks a symbolic link: the target string verbatim and NO blob — the scan uses Readlink, never Open, so a link to ~/.ssh/id_rsa journals eleven characters and not one byte of the key. Replay carries it into FileState.Link; materializeSymlink recreates the link entry on peers and never resolves it; a link pointing outside the mount is an ordinary op that only the user's own filesystem ever follows. walkFolder answers vSymlink for it, so Explain, Measure and Drift see the same thing scan does"
     note for Op "Op now owns its own JSON: a Path that is not valid UTF-8 rides as a base64 `path_raw` sidecar and is restored only when the lossy form still matches, so one line can never name two different files on two readers. Less falls through to Kind/Path/Blob/Size/Mode, making the order TOTAL — two ops can no longer tie and replay differently per device. Parse skips an undecodable line and drops an unknown Kind instead of failing the whole journal"
 
@@ -253,12 +263,13 @@ classDiagram
         +fence() sequence
         +suppress(root, fence, keep)
     }
-    note for localFolderWatcher "The watcher accumulates bounded per-mount events, coalesces paths, prunes reserved/nested/ignored directories, and evaluates echo suppression outside pendingMu without loading the state cache when no pre-fence events are pending. Child ENOENT during recursive setup triggers candidate rebuild (releasing the prior watcher first on EMFILE/ENFILE) and full-scan fallback when roots still exist; missing roots, closed channels, overflow and other backend errors remain fatal."
+    note for localFolderWatcher "The watcher accumulates bounded per-mount events, coalesces paths, prunes reserved/nested/ignored directories, and evaluates echo suppression outside pendingMu without loading the state cache when no pre-fence events are pending. Child ENOENT during recursive setup triggers candidate rebuild (releasing the prior watcher first on EMFILE/ENFILE/ENOSPC) and full-scan fallback when roots still exist; ENOSPC watcher exhaustion is retried with 1m/2m/5m/10m backoff and duplicate errors are logged once. Missing roots, closed channels, overflow and other backend errors remain fatal."
     volumeWorker --> ScanHint : routes per-mount event batches
     ScanHint ..> localFolderWatcher : batch source
     note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back"
 
-    note for volumeWorker "remote.Watcher wakes a remote cycle when a peer pushes, reducing arrival latency from about 10s to 1s. A live stream stretches polling to remoteInterval x watchedPollFactor (5m by default); losing it restores remoteInterval on the next tick. Token changes and offline cycles drop the stream. Failed or ended dials back off for watchRetry (1m), including an older hub's 404. Periodic polling still bounds silent stream failure"
+    note for volumeWorker "remote.Watcher wakes a remote cycle when a peer pushes, reducing arrival latency from about 10s to 1s. A live stream stretches polling to remoteInterval x watchedPollFactor (5m by default); losing it restores remoteInterval on the next tick. Token changes and offline cycles drop the stream. Failed or ended dials back off for watchRetry (1m), including an older hub's 404. Periodic polling still bounds silent stream failure."
+    note for volumeWorker "A healthy local watcher gets a 5m safety scan. When it is unavailable, fallback polling adapts to the last full scan duration (up to 1m, with a 15x multiplier), coalesces SSE wakes until the next fallback deadline, and combines the due full scan with remote pull/push so one interval performs at most one full scan. Changes to Include or .bdriveignore rebuild the watcher before the next wait."
     volumeWorker --> localFolderWatcher : local filesystem wake and safety fallback
     localFolderWatcher ..> Filter : PruneDir on watched trees
 
