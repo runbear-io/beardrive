@@ -1387,16 +1387,26 @@ func redefinesApplied(have, applied []journal.Op) bool {
 	if len(applied) == 0 {
 		return false
 	}
-	ids := make(map[string]bool, len(have))
-	slots := make(map[string]bool, len(have))
-	for _, op := range have {
-		ids[opID(op)] = true
-		slots[opSlot(op)] = true
-	}
+	appliedBySlot := make(map[string]string, len(applied))
 	for _, op := range applied {
-		if slots[opSlot(op)] && !ids[opID(op)] {
+		slot := opSlot(op)
+		id := opID(op)
+		if prev, ok := appliedBySlot[slot]; ok && prev != id {
 			return true
 		}
+		appliedBySlot[slot] = id
+	}
+	seenInHave := make(map[string]string, len(have))
+	for _, op := range have {
+		slot := opSlot(op)
+		id := opID(op)
+		if want, ok := appliedBySlot[slot]; ok && want != id {
+			return true
+		}
+		if prev, ok := seenInHave[slot]; ok && prev != id {
+			return true
+		}
+		seenInHave[slot] = id
 	}
 	return false
 }
@@ -1655,19 +1665,18 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		if len(local) > 0 && local[len(local)-1] == '\n' && bytes.HasPrefix(data, local) {
 			tail := data[len(local):]
 			fresh, err := journal.Parse(tail)
-			if err != nil {
+			if err == nil && s.Store.CanFastAppendPeer(dev, prevFi, local, fresh) {
+				if err := store.WriteFileAtomic(lp, data, 0o600); err != nil {
+					return newOps, gone, err
+				}
+				if newFi, stErr := os.Stat(lp); stErr == nil {
+					s.Store.FoldPeerAppend(dev, prevFi, local, data, fresh, newFi)
+				} else {
+					s.Store.InvalidateJournal(dev)
+				}
+				newOps = append(newOps, fresh...)
 				continue
 			}
-			if err := store.WriteFileAtomic(lp, data, 0o600); err != nil {
-				return newOps, gone, err
-			}
-			if newFi, stErr := os.Stat(lp); stErr == nil {
-				s.Store.FoldPeerAppend(dev, prevFi, local, data, fresh, newFi)
-			} else {
-				s.Store.InvalidateJournal(dev)
-			}
-			newOps = append(newOps, fresh...)
-			continue
 		}
 		// Resume only at a COMPLETE LINE. "Append-only" is the peer's claim
 		// about its own object: publish a stage cut mid-line and both the size

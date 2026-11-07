@@ -88,6 +88,8 @@ type deviceFold struct {
 	HashState       []byte
 	OpCount         int
 	MaxValidLamport int64
+	MaxSeq          int64
+	MonotonicDevice string
 	HasIgnorePut    bool
 	MaxIgnorePut    journal.Op
 	Checkpoints     []opCheckpoint
@@ -116,6 +118,20 @@ func foldOpsInto(f *deviceFold, ops []journal.Op) {
 	for _, op := range ops {
 		if op.Kind != journal.KindPut && op.Kind != journal.KindDelete {
 			continue
+		}
+		if f.OpCount == 0 {
+			if op.Device == "" {
+				f.MonotonicDevice = "*"
+			} else {
+				f.MonotonicDevice = op.Device
+				f.MaxSeq = op.Seq
+			}
+		} else if f.MonotonicDevice != "*" {
+			if op.Device != f.MonotonicDevice || op.Seq <= f.MaxSeq {
+				f.MonotonicDevice = "*"
+			} else {
+				f.MaxSeq = op.Seq
+			}
 		}
 		f.OpCount++
 		if op.Lamport > 0 && op.Lamport <= journal.MaxValidLamport && op.Lamport > f.MaxValidLamport {
@@ -221,6 +237,8 @@ type foldSidecar struct {
 	ContentSHA256   [32]byte
 	HashState       []byte
 	OpCount         int
+	MaxSeq          int64
+	MonotonicDevice string
 	MaxValidLamport int64
 	HasIgnorePut    bool
 	MaxIgnorePut    journal.Op
@@ -229,10 +247,10 @@ type foldSidecar struct {
 }
 
 func sidecarFrom(f *deviceFold) foldSidecar {
-	return foldSidecar{1, encodeFileID(f.ID), f.ReadAtNS, f.Racy, f.TailCheck, f.TailCheckLen, f.ContentSHA256, f.HashState, f.OpCount, f.MaxValidLamport, f.HasIgnorePut, f.MaxIgnorePut, f.Checkpoints, f.Winners}
+	return foldSidecar{2, encodeFileID(f.ID), f.ReadAtNS, f.Racy, f.TailCheck, f.TailCheckLen, f.ContentSHA256, f.HashState, f.OpCount, f.MaxSeq, f.MonotonicDevice, f.MaxValidLamport, f.HasIgnorePut, f.MaxIgnorePut, f.Checkpoints, f.Winners}
 }
 func (s foldSidecar) fold() *deviceFold {
-	return &deviceFold{ID: decodeFileID(s.ID), ReadAtNS: s.ReadAtNS, Racy: s.Racy, TailCheck: s.TailCheck, TailCheckLen: s.TailCheckLen, ContentSHA256: s.ContentSHA256, HashState: s.HashState, OpCount: s.OpCount, MaxValidLamport: s.MaxValidLamport, HasIgnorePut: s.HasIgnorePut, MaxIgnorePut: s.MaxIgnorePut, Checkpoints: s.Checkpoints, Winners: s.Winners}
+	return &deviceFold{ID: decodeFileID(s.ID), ReadAtNS: s.ReadAtNS, Racy: s.Racy, TailCheck: s.TailCheck, TailCheckLen: s.TailCheckLen, ContentSHA256: s.ContentSHA256, HashState: s.HashState, OpCount: s.OpCount, MaxSeq: s.MaxSeq, MonotonicDevice: s.MonotonicDevice, MaxValidLamport: s.MaxValidLamport, HasIgnorePut: s.HasIgnorePut, MaxIgnorePut: s.MaxIgnorePut, Checkpoints: s.Checkpoints, Winners: s.Winners}
 }
 
 func hashFile(f *os.File) ([32]byte, error) {
@@ -312,7 +330,7 @@ func (s *Store) getOrLoadDeviceFold(dev string) (*deviceFold, error) {
 					defer func() { _ = recover() }()
 					return gob.NewDecoder(bytes.NewReader(raw)).Decode(&sc) == nil
 				}()
-				if valid && sc.Version == 1 && sc.ID.Ino == id.ino && sc.ID.Size == id.size && sc.ID.MTimeNS == id.mtimeNS && sc.TailCheckLen == n && bytes.Equal(sc.TailCheck[:n], tail[:n]) && len(sc.Winners) <= maxCachedWinnersTotal {
+				if valid && sc.Version == 2 && sc.ID.Ino == id.ino && sc.ID.Size == id.size && sc.ID.MTimeNS == id.mtimeNS && sc.TailCheckLen == n && bytes.Equal(sc.TailCheck[:n], tail[:n]) && len(sc.Winners) <= maxCachedWinnersTotal {
 					e := sc.fold()
 					if sc.ReadAtNS-id.mtimeNS >= int64(2*time.Second) {
 						s.mu.Lock()
@@ -603,6 +621,55 @@ func (s *Store) OwnOpsFrom(device string, startIdx int64) ([]journal.Op, error) 
 		return nil, nil
 	}
 	return ops[startIdx:], nil
+}
+
+func (s *Store) CanFastAppendPeer(device string, prevStat os.FileInfo, localBytes []byte, fresh []journal.Op) bool {
+	if prevStat == nil || int64(len(localBytes)) != prevStat.Size() {
+		return false
+	}
+	localTail, localTailLen := tailBytes(localBytes)
+	s.mu.Lock()
+	entry, ok := s.folds[device]
+	matches := ok && (!entry.Racy || entry.VerifiedInCycle) &&
+		entry.ID.size == int64(len(localBytes)) && entry.ID.mtimeNS == prevStat.ModTime().UnixNano() &&
+		entry.TailCheckLen == localTailLen && bytes.Equal(entry.TailCheck[:localTailLen], localTail[:localTailLen])
+	s.mu.Unlock()
+	if !matches {
+		loaded, err := s.getOrLoadDeviceFold(device)
+		if err != nil {
+			return false
+		}
+		entry = loaded
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry == nil || entry.ID.size != int64(len(localBytes)) ||
+		entry.TailCheckLen != localTailLen || !bytes.Equal(entry.TailCheck[:localTailLen], localTail[:localTailLen]) ||
+		entry.MonotonicDevice == "*" {
+		return false
+	}
+	dev := entry.MonotonicDevice
+	maxSeq := entry.MaxSeq
+	hasOps := entry.OpCount > 0
+	for _, op := range fresh {
+		if op.Kind != journal.KindPut && op.Kind != journal.KindDelete {
+			continue
+		}
+		if op.Device == "" {
+			return false
+		}
+		if !hasOps {
+			dev = op.Device
+			maxSeq = op.Seq
+			hasOps = true
+			continue
+		}
+		if op.Device != dev || op.Seq <= maxSeq {
+			return false
+		}
+		maxSeq = op.Seq
+	}
+	return true
 }
 
 func (s *Store) FoldPeerAppend(device string, prevStat os.FileInfo, localBytes, newData []byte, fresh []journal.Op, newStat os.FileInfo) {

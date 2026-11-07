@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1551,5 +1552,56 @@ func TestPullRejectsSymlinkTargetOnlySlotRedefinition(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("pull accepted symlink target-only slot redefinition: %+v", got)
+	}
+}
+
+func TestPullPrefixAppendRejectsSlotRedefinition(t *testing.T) {
+	be := sharedRemote(t)
+	s := newDevice(t, "local", be)
+	ctx := context.Background()
+	ts := time.Unix(1767225600, 0).UTC()
+	line := func(op journal.Op) []byte {
+		b, err := json.Marshal(op)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(b, '\n')
+	}
+	op1 := journal.Op{
+		Seq: 1, Lamport: 1, Time: ts, Device: "peer",
+		Kind: journal.KindPut, Path: "a.md", Blob: strings.Repeat("a", 64), Size: 1,
+	}
+	first := line(op1)
+	if err := be.Put(ctx, "journal/peer.jsonl", strings.NewReader(string(first)), int64(len(first))); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.pull(ctx, map[string]store.CachedFile{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("initial pull = %d ops, want 1", len(got))
+	}
+	reusedSlot := journal.Op{
+		Seq: 1, Lamport: 2, Time: ts.Add(time.Second), Device: "peer",
+		Kind: journal.KindDelete, Path: "a.md",
+	}
+	appended := append(append([]byte(nil), first...), line(reusedSlot)...)
+	if err := be.Put(ctx, "journal/peer.jsonl", strings.NewReader(string(appended)), int64(len(appended))); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = s.pull(ctx, map[string]store.CachedFile{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("prefix append accepted redefined (device, seq) slot: %+v", got)
+	}
+	onDisk, err := os.ReadFile(s.Store.JournalPath("peer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(onDisk, first) {
+		t.Fatalf("local peer journal was overwritten by rejected append")
 	}
 }
