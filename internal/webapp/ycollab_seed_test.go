@@ -570,3 +570,19 @@ func TestDelayedFinalSnapshotLeavesANewRoomAlone(t *testing.T) {
 		t.Fatalf("the new room's base moved to %q", b)
 	}
 }
+
+// A room opened between a delayed write's check and its rebase keeps the
+// base it seeded: the check and the move are one step.
+func TestRebaseUnheldLeavesAnOpenRoomsBase(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	room := p.ID + "/notes.md"
+	if !srv.rooms().rebaseUnheld(room, "first") || srv.rooms().base(room) != "first" {
+		t.Fatal("no room holds the file, so the base should move")
+	}
+	srv.rooms().load(room, crdt.New())
+	srv.rooms().rebase(room, "seeded")
+	t.Cleanup(func() { srv.rooms().drop(room); srv.rooms().settle() })
+	if srv.rooms().rebaseUnheld(room, "delayed") || srv.rooms().base(room) != "seeded" {
+		t.Fatalf("an open room's base moved to %q", srv.rooms().base(room))
+	}
+}

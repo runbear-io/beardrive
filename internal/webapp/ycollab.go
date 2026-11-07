@@ -1062,11 +1062,12 @@ func (s *Server) finishLater(room string, who User, text, base string, state []b
 	project, path, _ := strings.Cut(room, "/")
 	// The file now spells exactly the room's text, so the room's state is
 	// its history: a browser reconnecting with that state then replays onto
-	// it instead of beside it.
+	// it instead of beside it. That stays true if a room opened meanwhile,
+	// since the state spells the file; the base does not, and is left to it.
 	settled := func(ctx context.Context, sha string) {
 		if sha != "" {
 			s.storeRoomHistory(ctx, project, path, sha, state)
-			s.rooms().rebase(room, sha)
+			s.rooms().rebaseUnheld(room, sha)
 		}
 	}
 	try := func(ctx context.Context) bool {
@@ -1255,6 +1256,18 @@ func (r *roomRegistry) rebase(room, sha string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.bases[room] = sha
+}
+
+// rebaseUnheld moves the base only while no room holds the file, checked and
+// set under one lock: a room opened in between keeps the base it seeded.
+func (r *roomRegistry) rebaseUnheld(room, sha string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, held := r.docs[room]; held {
+		return false
+	}
+	r.bases[room] = sha
+	return true
 }
 
 func (r *roomRegistry) isParked(room, text string) bool {
