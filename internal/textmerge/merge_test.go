@@ -61,3 +61,24 @@ func TestMergeIsCommutative(t *testing.T) {
 		}
 	}
 }
+
+// The final newline and a blank line are edits like any other.
+func TestMergeKeepsNewlineEdits(t *testing.T) {
+	for _, c := range []struct{ base, a, b, want string }{
+		{"a\n", "a", "a\n", "a"},
+		{"a\n", "a\n", "a", "a"},
+		{"", "\n", "", "\n"},
+		{"a", "a\n", "a", "a\n"},
+	} {
+		for _, swap := range []bool{false, true} {
+			x, y := c.a, c.b
+			if swap {
+				x, y = y, x
+			}
+			got, ok := Merge([]byte(c.base), []byte(x), []byte(y))
+			if !ok || string(got) != c.want {
+				t.Errorf("Merge(%q, %q, %q) = %q, %v; want %q", c.base, x, y, got, ok, c.want)
+			}
+		}
+	}
+}

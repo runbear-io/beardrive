@@ -76,7 +76,13 @@ func Merge(base, a, b []byte) ([]byte, bool) {
 	for ; at < len(ls); at++ {
 		out = append(out, ls[at])
 	}
-	return joinLines(out, trailingNewline(a) || trailingNewline(b)), true
+	// The final newline is one more thing a side may change: whichever side
+	// changed it from the base wins, and both can only change it one way.
+	trailing := trailingNewline(a)
+	if trailing == trailingNewline(base) {
+		trailing = trailingNewline(b)
+	}
+	return joinLines(out, trailing), true
 }
 
 // region is a half-open span of BASE lines one side replaced, plus where the
@@ -145,7 +151,7 @@ func splitLines(b []byte) [][]byte {
 
 func joinLines(lines [][]byte, trailing bool) []byte {
 	out := bytes.Join(lines, []byte("\n"))
-	if trailing && len(out) > 0 {
+	if trailing && len(lines) > 0 {
 		out = append(out, '\n')
 	}
 	return out

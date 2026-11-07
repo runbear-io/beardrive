@@ -1074,6 +1074,15 @@ func (s *Server) finishLater(room string, who User, text, base string, state []b
 		if err != nil {
 			return false
 		}
+		if _, _, live := s.rooms().get(room); live {
+			// The file was opened again in the meantime. That room holds the
+			// pen and its own base; this text must not move either, so it is
+			// kept beside the file unless the file already says it.
+			if !have || len(cur) > maxSeedBytes || !fileHolds(string(cur), text) {
+				s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
+			}
+			return true
+		}
 		switch {
 		case have && len(cur) <= maxSeedBytes && string(cur) == text:
 			settled(ctx, curSha)

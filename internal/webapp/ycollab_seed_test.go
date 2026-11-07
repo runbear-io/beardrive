@@ -525,3 +525,48 @@ func TestRoomDoesNotBringBackADeletedFile(t *testing.T) {
 		t.Fatalf("conflict copies = %d, want the room's text parked once", n)
 	}
 }
+
+// A delayed final write finds the file opened again: the new room keeps its
+// base and pen, and the old room's text is kept beside the file.
+func TestDelayedFinalSnapshotLeavesANewRoomAlone(t *testing.T) {
+	old := parkBackoff
+	parkBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { parkBackoff = old })
+	fastRoom(t, time.Hour, time.Hour)
+	var flaky *flakyBlobs
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		flaky = &flakyBlobs{Backend: be}
+		return flaky
+	})
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "a\nb\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+	typeInto(doc, "typed in the first room\n")
+
+	flaky.broken.Store(true)
+	srv.finalSnapshot(context.Background(), room)
+	srv.rooms().drop(room)
+	srv.rooms().settle()
+	second := crdt.New()
+	srv.rooms().load(room, second)
+	srv.rooms().writer(room, User{Email: "editor@example.com", Name: "An Editor"})
+	srv.rooms().rebase(room, shaOf("a\nb\n"))
+	t.Cleanup(func() { srv.rooms().drop(room); srv.rooms().settle() })
+	flaky.broken.Store(false)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for conflictCopies(t, h, p.ID) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the first room's text was never kept")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := get(t, h, url).Body.String(); got != "a\nb\n" {
+		t.Fatalf("file = %q, want it left to the room now holding it", got)
+	}
+	if b := srv.rooms().base(room); b != shaOf("a\nb\n") {
+		t.Fatalf("the new room's base moved to %q", b)
+	}
+}
