@@ -303,8 +303,14 @@ classDiagram
         +Authorize per connection, ReadOnly for a reader
         +OnLoadDocument lease (no relay), seed from the newest stored state
         +OnLastPeer / OnUnloadDocument snapshot to the file
+        +reconcile 409 or blind base: merge, keep, append, or park
         +AttachRelay cluster.Relay, one per process
     }
+    class textmerge {
+        &lt;&lt;internal/textmerge&gt;&gt;
+        +Merge(base, a, b) out, ok
+    }
+    note for textmerge "Seeding and snapshotting a room. seedDoc tells a missing file from an unreadable one: a path absent from the current snapshot opens empty, but a read that fails REFUSES the room, because an empty document with no base wrote unconditionally — past both the stale-write and the shrink guard, which only look at If-Match writes — and every editor who opened the file in that window emptied it. An empty file is still a file: the room's base is the empty blob and its writes stay conditional. When a snapshot is refused (409) or has no base to send, reconcile reads their version and picks, in order: the line merge of base, room and theirs; theirs alone when the room adds no line theirs lacks (or a conflict copy already holds that text); theirs followed by the room's new lines when the base was empty; and only then a conflict copy. A merged result is spliced into the live document (only if nobody typed since the snapshot read it) so editors see it, and the room rebases onto theirs. Empty text is never parked"
     class CollabConfig {
         &lt;&lt;internal/webapp, collab_relay.go&gt;&gt;
         +Redis string
@@ -895,6 +901,7 @@ classDiagram
     Server *-- roomLease : one per live room, holdLease / keepLease / releaseLease
     roomLease ..> ConditionalPutter : one lease object per path in the project storage
     ydocs ..> roomLease : OnLoadDocument without a relay, every snapshot with one
+    ydocs ..> textmerge : reconcile an outside write into the room
     ydocs ..> ConditionalPutter : claimRoomHistory stores a seed once across processes
     QuotaProvider <|.. UnlimitedQuota
 ```

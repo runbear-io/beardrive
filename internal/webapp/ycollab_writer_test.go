@@ -127,37 +127,62 @@ An outside writer is never silently overwritten.
 	With the hub holding the pen, an If-Match refusal cannot come from a
 	co-editor — everyone in the room shares this document. It can only be an
 	agent, the CLI, or another device writing the file underneath the room.
-	Their write stays the file; the room's version is parked beside it under
-	the conflict name the sync path has always used; and the room rebases so
-	it is not refused for the same reason forever.
+	Edits to different lines merge into one file. Edits to the same line
+	cannot: their write stays the file, the room's version is parked beside it
+	under the conflict name the sync path has always used, and the room
+	rebases so it is not refused for the same reason forever.
 */
+func TestRoomMergesAroundAnOutsideRewrite(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "before\n", "")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
+
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "REWRITTEN BY AN AGENT\n", ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d %s", rec.Code, rec.Body.String())
+	}
+	typeInto(doc, "typed in the room\n")
+
+	if !waitFile(t, h, url, "REWRITTEN BY AN AGENT\ntyped in the room\n", 2*time.Second) {
+		t.Fatalf("file = %q, want the agent's line and the room's", get(t, h, url).Body.String())
+	}
+	if n := conflictCopies(t, h, p.ID); n != 0 {
+		t.Fatalf("%d conflict copies for edits to different lines", n)
+	}
+}
+
 func TestRoomParksItsVersionWhenSomeoneOutsideWrote(t *testing.T) {
 	fastRoom(t, 100*time.Millisecond, time.Second)
 	srv, p, _ := newHub(t, true, nil)
 	h := srv.Handler()
 	url := "/api/p/" + p.ID + "/file?path=notes.md"
 	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "before\n", "")
-	doc := openRoom(t, srv, p.ID+"/notes.md")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
 
-	// An agent rewrites the file. The room knows nothing of it.
+	// An agent rewrites the line the room is rewriting too.
 	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "REWRITTEN BY AN AGENT\n", ""); rec.Code != http.StatusOK {
 		t.Fatalf("outside write: %d %s", rec.Code, rec.Body.String())
 	}
-	typeInto(doc, "typed in the room\n")
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) {
+		txt.Delete(txn, 0, txt.Len())
+		txt.Insert(txn, 0, "typed in the room\n", nil)
+	})
 
-	// The agent's text must survive — and the room's must not vanish.
 	time.Sleep(600 * time.Millisecond)
 	if got := get(t, h, url).Body.String(); got != "REWRITTEN BY AN AGENT\n" {
 		t.Fatalf("the room's snapshot overwrote an outside write: file is %q", got)
 	}
 	tree := get(t, h, "/api/p/"+p.ID+"/tree?slim=1").Body.String()
-	if !strings.Contains(tree, "notes.md.bdrive-conflict-An-Editor-") {
+	if !strings.Contains(tree, "notes.md.bdrive-conflict-") {
 		t.Fatal("the room's version was refused and then dropped: no conflict copy beside the file")
 	}
 
 	// Rebased: the next snapshot is not refused for the same stale base.
 	typeInto(doc, "more\n")
-	if !waitFile(t, h, url, "before\ntyped in the room\nmore\n", 2*time.Second) {
+	if !waitFile(t, h, url, "typed in the room\nmore\n", 2*time.Second) {
 		t.Fatalf("after parking, the room never recovered the pen: file is %q", get(t, h, url).Body.String())
 	}
 }
