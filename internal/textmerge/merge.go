@@ -9,7 +9,17 @@
 // overlapping is left to the caller's conflict path.
 package textmerge
 
-import "bytes"
+import (
+	"bytes"
+	"unicode/utf8"
+)
+
+// IsText reports whether b is something a line merge may touch: valid UTF-8
+// with no NUL. Merging bytes that are not lines produces a file that is
+// neither side's, and for a binary format that means a corrupt one.
+func IsText(b []byte) bool {
+	return !bytes.ContainsRune(b, 0) && utf8.Valid(b)
+}
 
 // Merge merges two edits of the same base. ok is false when the two sides
 // changed the same region, which is a real conflict and stays one.

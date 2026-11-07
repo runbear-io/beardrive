@@ -17,7 +17,6 @@ package syncer
 import (
 	"bytes"
 	"io"
-	"unicode/utf8"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/textmerge"
@@ -79,7 +78,7 @@ func (s *Session) tryMerge(path string, mine, theirs journal.Op, all []journal.O
 	}
 	// Text only. Merging bytes that are not lines produces a file that is
 	// neither side's, and for a binary format that means a corrupt one.
-	if !isMergeableText(baseBytes) || !isMergeableText(mineBytes) || !isMergeableText(theirsBytes) {
+	if !textmerge.IsText(baseBytes) || !textmerge.IsText(mineBytes) || !textmerge.IsText(theirsBytes) {
 		return mergedBlob{}, false
 	}
 	out, ok := mergeText(baseBytes, mineBytes, theirsBytes)
@@ -111,13 +110,6 @@ func commonAncestor(path string, mine, theirs journal.Op, all []journal.Op) (jou
 		}
 	}
 	return best, found
-}
-
-// isMergeableText refuses anything with a NUL and anything that is not valid
-// UTF-8 — the same "is this text" question the viewer asks, kept local so the
-// merge cannot be handed bytes it will mangle.
-func isMergeableText(b []byte) bool {
-	return !bytes.ContainsRune(b, 0) && utf8.Valid(b)
 }
 
 // readBlob reads a stored blob, refusing anything past the cap.

@@ -677,7 +677,7 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 		// file can be read.
 		log.Printf("bdrive: not snapshotting %s: reading the file: %v", path, err)
 		if final && strings.TrimSpace(text) != "" {
-			s.finishLater(room, who, text, s.rooms().base(room))
+			s.finishLater(room, who, text, base, state)
 		}
 		return
 	}
@@ -786,6 +786,9 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 	// whole file would be merged and written back over its tail, so a file
 	// that large is only ever parked beside.
 	whole := len(theirs) < maxSeedBytes && len(baseText) < maxSeedBytes
+	// Only text is merged or appended: a binary outside write mixed with the
+	// room's lines would be a file that is neither.
+	whole = whole && textmerge.IsText([]byte(theirs)) && textmerge.IsText([]byte(baseText)) && textmerge.IsText([]byte(text))
 	var merged []byte
 	canMerge := false
 	if whole && haveBase {
@@ -1020,8 +1023,17 @@ func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, te
 // like parkCopy, and settled the way the snapshot would have settled it once
 // the file can be read. Every write it makes is conditional on base, or on
 // the version it then reads.
-func (s *Server) finishLater(room string, who User, text, base string) {
+func (s *Server) finishLater(room string, who User, text, base string, state []byte) {
 	project, path, _ := strings.Cut(room, "/")
+	// The file now spells exactly the room's text, so the room's state is
+	// its history: a browser reconnecting with that state then replays onto
+	// it instead of beside it.
+	settled := func(ctx context.Context, sha string) {
+		if sha != "" {
+			s.storeRoomHistory(ctx, project, path, sha, state)
+			s.rooms().rebase(room, sha)
+		}
+	}
 	try := func(ctx context.Context) bool {
 		cur, curSha, have, err := s.roomBytes(ctx, room)
 		if err != nil {
@@ -1029,13 +1041,25 @@ func (s *Server) finishLater(room string, who User, text, base string) {
 		}
 		switch {
 		case have && string(cur) == text:
+			settled(ctx, curSha)
+			return true
+		case !have && base != "":
+			// The room wrote this file and somebody deleted it since. The
+			// deletion is theirs; the room's text goes beside it.
+			s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
 			return true
 		case !have:
-			return s.putAs(ctx, who, project, path, text, "").code == http.StatusOK
+			w := s.putAs(ctx, who, project, path, text, "")
+			if w.code != http.StatusOK {
+				return false
+			}
+			settled(ctx, reportedSha(w))
+			return true
 		case curSha == base:
 			w := s.putAs(ctx, who, project, path, text, base)
 			switch w.code {
 			case http.StatusOK:
+				settled(ctx, reportedSha(w))
 				return true
 			case http.StatusUnprocessableEntity:
 				if !fileHolds(string(cur), text) {

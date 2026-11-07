@@ -293,11 +293,84 @@ func TestFinalSnapshotThatCannotReadIsFinishedLater(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	flaky.broken.Store(false)
 
-	if !waitFile(t, h, url, "a\nb\ntyped before the outage\n", 3*time.Second) {
+	want := "a\nb\ntyped before the outage\n"
+	if !waitFile(t, h, url, want, 3*time.Second) {
 		t.Fatalf("the room's text was dropped with the room: file is %q", get(t, h, url).Body.String())
 	}
 	if n := conflictCopies(t, h, p.ID); n != 0 {
 		t.Fatalf("%d conflict copies for a write nobody else made", n)
+	}
+	// The write is filed with the room's state, so a browser reconnecting
+	// with that state replays onto it rather than beside it.
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.roomHead(context.Background(), p.ID, "notes.md") != shaOf(want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("room head = %q, want the delayed write's sha", srv.roomHead(context.Background(), p.ID, "notes.md"))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A file deleted while the room could not read it stays deleted: the room's
+// text goes beside it rather than bringing it back.
+func TestDelayedFinalSnapshotDoesNotUndoADelete(t *testing.T) {
+	old := parkBackoff
+	parkBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { parkBackoff = old })
+	fastRoom(t, time.Hour, time.Hour)
+	var flaky *flakyBlobs
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		flaky = &flakyBlobs{Backend: be}
+		return flaky
+	})
+	h := srv.Handler()
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "a\nb\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+	typeInto(doc, "typed before the outage\n")
+
+	flaky.broken.Store(true)
+	srv.finalSnapshot(context.Background(), room)
+	srv.rooms().drop(room)
+	if rec := do(t, h, "POST", "/api/p/"+p.ID+"/remove", map[string]string{"path": "notes.md"}); rec.Code != http.StatusOK {
+		t.Fatalf("remove: %d %s", rec.Code, rec.Body)
+	}
+	flaky.broken.Store(false)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for conflictCopies(t, h, p.ID) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the room's text was never parked")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if rec := get(t, h, "/api/p/"+p.ID+"/file?path=notes.md"); rec.Code == http.StatusOK {
+		t.Fatalf("a deleted file came back: %q", rec.Body.String())
+	}
+}
+
+// Binary content is never merged with a room's lines.
+func TestBinaryOutsideWriteIsNeverMerged(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, up, "a\nb\nc\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+
+	bin := "a\nb\nc\n\x00\x01binary tail\n"
+	putContent(t, h, up, bin, "")
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "typed at the top\n", nil) })
+	srv.finalSnapshot(context.Background(), room)
+
+	if got := get(t, h, url).Body.String(); got != bin {
+		t.Fatalf("file = %q, want the outside binary write untouched", got)
+	}
+	if n := conflictCopies(t, h, p.ID); n != 1 {
+		t.Fatalf("conflict copies = %d, want the room's text parked once", n)
 	}
 }
 
