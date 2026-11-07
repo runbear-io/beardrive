@@ -289,6 +289,7 @@ func (s *Store) getOrLoadDeviceFold(dev string) (*deviceFold, error) {
 			s.mu.Unlock()
 			return entry, nil
 		}
+		s.mu.Unlock()
 		sum, herr := hashFile(f)
 		post, serr := statFileID(lp)
 		s.mu.Lock()
