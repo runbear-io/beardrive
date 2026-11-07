@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -194,5 +195,69 @@ func TestFileHoldsCountsAndOrdersLines(t *testing.T) {
 		if got := appendNew(c.file, c.text); got != c.appended {
 			t.Errorf("appendNew(%q, %q) = %q, want %q", c.file, c.text, got, c.appended)
 		}
+	}
+}
+
+// A file past the seed bound is read only up to it. Merged as if that prefix
+// were the file, the room would write it back over the tail; it parks instead.
+func TestOutsideWritePastTheSeedBoundIsNeverMergedFromAPrefix(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, up, "a\nb\nc\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+
+	big := "a\nb\nc\n" + strings.Repeat("an agent's appended line\n", maxSeedBytes/24+1000) + "THE TAIL\n"
+	if rec := putContent(t, h, up, big, ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d", rec.Code)
+	}
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "typed at the top\n", nil) })
+	srv.finalSnapshot(context.Background(), room)
+
+	if got := get(t, h, url).Body.String(); got != big {
+		t.Fatalf("file is %d bytes ending %q, want the agent's %d bytes intact", len(got), got[max(0, len(got)-20):], len(big))
+	}
+	if n := conflictCopies(t, h, p.ID); n != 1 {
+		t.Fatalf("conflict copies = %d, want the room's text parked once", n)
+	}
+}
+
+// A copy the store refuses is retried, not given up on: the room has already
+// moved onto their version, so the copy is the only place its text lives.
+func TestARefusedConflictCopyIsRetried(t *testing.T) {
+	old := parkBackoff
+	parkBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { parkBackoff = old })
+	fastRoom(t, time.Hour, time.Hour)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	up := "/api/p/" + p.ID + "/upload/content?path=notes.md"
+	putContent(t, h, up, "one\ntwo\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+
+	putContent(t, h, up, "one\nOUTSIDE\n", "")
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) {
+		txt.Delete(txn, 0, txt.Len())
+		txt.Insert(txn, 0, "one\nROOM\n", nil)
+	})
+	// The snapshot reaches its 409; the copy after it fails three times.
+	srv.Quota = &failingQuota{skip: 1, n: 3}
+	srv.finalSnapshot(context.Background(), room)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for conflictCopies(t, h, p.ID) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the refused conflict copy was never written")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := get(t, h, "/api/p/"+p.ID+"/file?path=notes.md").Body.String(); got != "one\nOUTSIDE\n" {
+		t.Fatalf("file = %q, want the outside write", got)
 	}
 }

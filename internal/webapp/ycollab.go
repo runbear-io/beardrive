@@ -773,22 +773,38 @@ wrote: an agent appending to the notes, a device syncing, the CLI.
 */
 func (s *Server) reconcile(ctx context.Context, room string, who User, text, baseText string, haveBase bool, theirs, theirSha string, final bool) {
 	project, path, _ := strings.Cut(room, "/")
+	// roomBytes and blobText stop at maxSeedBytes. A prefix taken for the
+	// whole file would be merged and written back over its tail, so a file
+	// that large is only ever parked beside.
+	whole := len(theirs) < maxSeedBytes && len(baseText) < maxSeedBytes
+	var merged []byte
+	canMerge := false
+	if whole && haveBase {
+		merged, canMerge = textmerge.Merge([]byte(baseText), []byte(text), []byte(theirs))
+	}
 	target, ok := "", false
-	if merged, can := textmerge.Merge([]byte(baseText), []byte(text), []byte(theirs)); haveBase && can {
+	switch {
+	case !whole:
+		// parked below
+	case canMerge:
 		target, ok = string(merged), true
-	} else if fileHolds(theirs, text) || s.copyHolds(ctx, project, path, text) {
+	case fileHolds(theirs, text) || s.copyHolds(ctx, project, path, text):
 		target, ok = theirs, true
-	} else if haveBase && strings.TrimSpace(baseText) == "" {
+	case haveBase && strings.TrimSpace(baseText) == "":
 		// Both sides wrote into an empty file — a template arriving while
 		// somebody already typed. There is no ancestor to order them by, and
 		// neither is a revision of the other: keep both, theirs first.
 		target, ok = appendNew(theirs, text), true
 	}
 	park := func() {
-		copy := conflictPath(path, who, time.Now())
-		s.putAs(ctx, who, project, copy, text, "")
+		// parkCopy owns the text from here and retries a failing store, so
+		// the room can move onto their version without it being the only
+		// place the text lives.
+		if !s.rooms().isParked(room, text) {
+			s.rooms().park(room, text)
+			s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
+		}
 		s.rooms().rebase(room, theirSha)
-		log.Printf("bdrive: %s was written outside its co-editing room; the room's version is beside it as %s", path, copy)
 	}
 	if !ok {
 		park()
@@ -943,7 +959,7 @@ func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, te
 	try := func(ctx context.Context) bool {
 		cw := s.putAs(ctx, who, project, copy, text, "")
 		if cw.code == http.StatusOK {
-			log.Printf("bdrive: %s: the room's text would empty or sharply shrink it; parked beside it as %s", path, copy)
+			log.Printf("bdrive: %s: the room's text could not be written to it; parked beside it as %s", path, copy)
 			return true
 		}
 		log.Printf("bdrive: %s: could not park the room's refused text (%d bytes) as %s (%d); retrying", path, len(text), copy, cw.code)
