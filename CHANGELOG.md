@@ -5,8 +5,31 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
-- **Synced HTML pages show their relative images again.** A page's `src="shot.png"` resolved against `/api/p/<id>/` instead of the page's folder, and the sandboxed frame sends no session cookie for it anyway, so every relative image broke. The frame now loads from a path-shaped URL (`/api/p/<id>/raw/<token>/<path>`) carrying a short-lived, folder-scoped credential minted at `/api/p/<id>/frame`. The hub stores its signing key at `hub/frame-key` in the storage root on first use.
+## v0.18.4 — 2026-11-08
 
+**Update your devices.** Running sync daemons switch over automatically the first
+time the updated `bdrive` runs (`bdrive resume`, `bdrive sync`,
+`bdrive status <folder>`, or an agent turn). Update self-hosted hubs if you view
+synced HTML pages with relative assets.
+
+### Measured Resource Savings
+
+Measured on a project volume with `12,952`–`13,036` directories, `77,200`–`77,679`
+files, and `349,938` journal operations across `49`–`52` device journals
+(`v0.18.3` vs `v0.18.4` incorporating #340 and #341):
+
+| Environment | Metric | `v0.18.3` | `v0.18.4` | Change |
+|---|---|---|---|---|
+| **macOS** (`FSEvents` vs `kqueue`, `12,952` dirs / `77,278` files) | Open file descriptors (`lsof`) | `90,647` (`O_EVTONLY` per dir & file, `65.6%` of `kern.maxfilesperproc`, `34.4%` of `kern.maxvnodes`) | **`25`** (`1` `FSEvents` stream, `0` watched file/dir FDs) | **-99.97% (`-90,622` FDs)** |
+| **macOS** (`bdrive daemon`) | Process memory (RSS) & idle CPU | `1,045–1,499 MB` RSS, `+3.2–4.0 CPU s` spike every 60s | **`187 MB` steady-state RSS** (`45 MB` at startup; `311–539 MB` after #340 on `kqueue`), **`0.00%` idle CPU** | **-82–88% steady RSS (`-95%` at startup), 0 idle spikes** |
+| **Linux containers** (`fanotify` vs `inotify`, `12,960–13,036` dirs, `max_user_watches=12,288`) | Watcher slots & kernel slab | `12,288 / 12,288` `inotify` watches exhausted (`ENOSPC` → `0` watches, 3s full-tree `lstat` polling) | **`0` `inotify` watches**, **`12,960–13,036` `fanotify` dir marks** (`1` FD, `87.9 B/dir` = `~1.14 MB` `slab_unreclaimable`) | **100% `inotify` headroom, 0 `ENOSPC`** |
+| **Linux containers** (`bdrive daemon`) | Process memory (RSS) & idle CPU | `597–823 MB` RSS, `48.6–63.0%` avg CPU (`100%+` single-core spikes) | **`191–399 MB` RSS** (`280–291 MB` under fallback polling), **`0.00–0.03%` idle CPU** | **-33–77% RSS, ~100% idle CPU reduction** |
+
+### Changes
+
+- **Native macOS `FSEvents` and Linux unprivileged `fanotify` local watchers.** On macOS (`darwin/arm64`, `darwin/amd64`), the daemon now watches each mounted root through a single recursive `FSEvents` stream (`CGO_ENABLED=0`) instead of opening a `kqueue` file descriptor for every directory and file, falling back to `fsnotify`/`kqueue` if `FSEvents` initialization fails. On Linux (`5.17+`), the daemon now prefers unprivileged `fanotify` (`FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME` with `name_to_handle_at(..., AT_HANDLE_FID)`) on directories before falling back to `inotify` (e.g., on older kernels, filesystems that do not export decodable file handles, or when `fanotify` is blocked), avoiding `fs.inotify.max_user_watches` exhaustion on shared container hosts while keeping `.git`, `.bdrive`, nested mounts, and `.bdriveignore` directories pruned. (#341)
+- **In-memory journal, fold, and state caching with adaptive fallback polling.** `store.Store` caches parsed device journals in memory (parsing only newly appended byte ranges), persists a fold sidecar (`fold-cache/<device>.fold`) validated against each journal file's `(ino, size, mtime_ns)` and raw tail bytes (or full SHA-256 when recently modified), and caches `state-<mount>.json` keyed by `(size, mtime_ns)`. `syncer.pull` skips full-file re-reads when a peer journal only appended bytes, and `syncer.scan` skips loading the full journal fold when a targeted local scan finds zero dirty files. When a local filesystem watcher is active, the full-scan safety interval increases from `60s` to `5m` (so an unwatched external mutation can wait up to `5m`); when the watcher is unavailable, fallback polling backs off to `15×` the last full-scan duration (floored at `--scan-interval`, `3s` by default, and capped at `60s`) while keeping remote polling on `--remote-interval`. (#340)
+- **Synced HTML pages show their relative images again.** A page's `src="shot.png"` resolved against `/api/p/<id>/` instead of the page's folder, and the sandboxed frame sends no session cookie for it anyway, so every relative image broke. The frame now loads from a path-shaped URL (`/api/p/<id>/raw/<token>/<path>`) carrying a short-lived (4-hour), folder-scoped read credential minted at `/api/p/<id>/frame`. The hub stores its signing key at `hub/frame-key` in the storage root on first use when the storage backend supports atomic create (`PutIf` / `PutIfAbsent`); backends without atomic create keep using `/file`. (#338)
 ## v0.18.3 — 2026-11-05
 
 **Update your devices.** Everything here is in the client and sync daemon; the
