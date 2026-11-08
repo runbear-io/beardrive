@@ -31,11 +31,16 @@ Three hooks, three jobs:
 - **Pull**, before the agent answers, so it never reads a stale file. This one
   blocks — it is the only place BearDrive makes you wait, and it is why the
   whole thing works.
-- **Push**, after an edit, so teammates see the change within seconds rather
-  than whenever a daemon tick lands.
+- **Push**, after an edit, so teammates see the change within seconds even
+  when no daemon is running.
 - **Read tracking**, on the agent's read-shaped tools, queued locally and sent
   on the next sync. This is what fills the [Dashboard](/guides/what-agents-read/).
   Listing tools are deliberately excluded: seeing a filename is not reading it.
+
+When the sync daemon is running, the pull and push hooks leave the syncing to
+it: the daemon already watches the folder and the hub, so the hooks only record
+the session and report what changed, and return in milliseconds. Without a
+daemon they run a full sync themselves.
 
 Every platform pipes hook JSON with a session id, so one hook command serves all
 four, and changes are stamped with `<agent> session <id>` — visible in

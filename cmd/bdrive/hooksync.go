@@ -12,14 +12,16 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/runbear-io/beardrive/internal/daemon"
 	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
 // `bdrive sync --hook <label>` is the agent-hook flavor of sync, run by the
 // Claude Code UserPromptSubmit hook at every turn start. It does three
-// things: pulls (a normal cycle), stamps the session note so every change
-// this turn is attributed to the agent session, and — the part that keeps
+// things: pulls (a normal cycle, or nothing when the mount's daemon is
+// running and already keeping it current), stamps the session note so every
+// change this turn is attributed to the agent session, and — the part that keeps
 // agents current no matter how stale their skill copy is — emits the
 // project's gated-link formula as additionalContext, so the agent can
 // append a hub link to any synced file path it mentions.
@@ -76,6 +78,13 @@ func eventSessionID(data []byte) string {
 	return event.SessionID
 }
 
+// daemonSyncs reports whether a daemon holds this volume's lock, so a hook
+// can leave the sync to it.
+func daemonSyncs(vdir string) bool {
+	_, running := daemon.Running(vdir)
+	return running
+}
+
 // hookSync is one mount's contribution to the turn: where its files live on
 // the hub, and which of them moved since the last turn.
 type hookSync struct {
@@ -87,7 +96,7 @@ type hookSync struct {
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
 // plus the peer changes waiting for this turn.
 func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync, bool) {
-	sess, proj, err := openSession(cmd.Context(), target, true)
+	sess, proj, err := openSession(cmd.Context(), target, false)
 	if err != nil {
 		return hookSync{}, false // not a mount / no session: fast no-op
 	}
@@ -106,10 +115,17 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 		sess.SessionID = sessionID
 	}
 
-	// The pull. Offline is fine — the link formula below is still valid
-	// for teammates who are online.
-	if _, err := sess.Cycle(cmd.Context()); err != nil {
-		return hookSync{}, false // never break the turn
+	// The pull — unless this mount's daemon is running, in which case it has
+	// already journaled the tree and pulled the hub, and a cycle here would
+	// only walk every file again on every turn. What the turn needs from that
+	// work (the inbound spool, the secret findings, the note it stamps) is
+	// all in the store. Offline is fine — the link formula below is still
+	// valid for teammates who are online.
+	if !daemonSyncs(sess.Store.Dir()) {
+		attachRemote(cmd.Context(), sess, proj)
+		if _, err := sess.Cycle(cmd.Context()); err != nil {
+			return hookSync{}, false // never break the turn
+		}
 	}
 	// Drained after the cycle, not from its Result: in the ordinary case the
 	// daemon materialized the peer's change seconds ago, so this cycle saw

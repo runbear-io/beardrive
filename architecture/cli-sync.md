@@ -420,10 +420,11 @@ classDiagram
         Detect / Install / Uninstall / Registered
         ConfigPath = USER config
         turn-start: sync --hook
-        post-edit: sync --note
+        post-edit: sync --defer --note
         post-read: read-log
     }
     note for AgentHooks "internal/agenthooks — registers per-platform hook commands (claude, codex, gemini, hermes) in each platform's USER config, once per machine; they fire in every folder, every turn, and no-op outside mounts"
+    note for AgentHooks "Beside a running daemon (it holds the volume lock) neither sync hook cycles: sync --hook reads the inbound spool and secret findings the daemon left in the store, and sync --defer only saves the note. A cycle there would walk the whole tree again on every turn and every edit. Without a daemon both still run a full cycle"
     note for AgentHooks "config.AgentHookConfig is the OTHER half of this story and deliberately NOT this package: it names the files an agent READS hooks from, so sync refuses to carry them. A teammate must never be able to push .claude/settings.json into your mount and have your next turn run their command. The two lists are kept apart on purpose — one is what we write, one is what the agent executes — and internal/config imports nothing to say it"
 
     class PausedMarker {
