@@ -270,7 +270,24 @@ classDiagram
 
     note for volumeWorker "remote.Watcher wakes a remote cycle when a peer pushes, reducing arrival latency from about 10s to 1s. A live stream stretches polling to remoteInterval x watchedPollFactor (5m by default); losing it restores remoteInterval on the next tick. Token changes and offline cycles drop the stream. Failed or ended dials back off for watchRetry (1m), including an older hub's 404. Periodic polling still bounds silent stream failure."
     note for volumeWorker "A healthy local watcher gets a 5m safety scan. When it is unavailable, local fallback polling adapts to the last full scan duration (up to 1m, with a 15x multiplier) while remote polling and SSE wakes remain on their independent cadence. Changes to Include or .bdriveignore rebuild the watcher before the next wait."
+    class rawWatcher {
+        <<interface>>
+        +Add(dir) error
+        +ForgetPrefix(prefix)
+        +Recursive() bool
+        +Events() chan Event
+        +Errors() chan error
+        +Close() error
+    }
+    class fanotifyRaw
+    class fseventsRaw
+    class fsnotifyRaw
     volumeWorker --> localFolderWatcher : local filesystem wake and safety fallback
+    localFolderWatcher *-- rawWatcher : active backend
+    fanotifyRaw ..|> rawWatcher : Linux primary
+    fseventsRaw ..|> rawWatcher : macOS primary
+    fsnotifyRaw ..|> rawWatcher : fallback / default
+    note for localFolderWatcher "Platform backends prefer unprivileged fanotify (FAN_REPORT_DFID_NAME) on Linux with fsnotify/inotify fallback, FSEvents on macOS with fsnotify/kqueue fallback, and fsnotify on other platforms. Unsupported or resource-exhausted backends fall through the chain; a healthy backend is still only an accelerator over safety polling."
     localFolderWatcher ..> Filter : PruneDir on watched trees
 
     Session --> merge : before a conflict copy
