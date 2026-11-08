@@ -49,10 +49,11 @@ type fanotifyRaw struct {
 	readerDone chan struct{}
 	closeOnce  sync.Once
 
-	mu       sync.RWMutex
-	byHandle map[string]string
-	byPath   map[string]string
-	rootSet  map[string]bool
+	mu            sync.RWMutex
+	byHandle      map[string]string
+	byPath        map[string]string
+	unremovedKeys map[string]bool
+	rootSet       map[string]bool
 
 	orphanCount    atomic.Uint64
 	orphanReported atomic.Bool
@@ -74,16 +75,17 @@ func newFanotifyRawWatcher(roots []string) (rawWatcher, error) {
 	}
 
 	w := &fanotifyRaw{
-		fd:         fd,
-		stopR:      p[0],
-		stopW:      p[1],
-		stopCh:     make(chan struct{}),
-		events:     make(chan fsnotify.Event, 256),
-		errors:     make(chan error, 16),
-		readerDone: make(chan struct{}),
-		byHandle:   make(map[string]string),
-		byPath:     make(map[string]string),
-		rootSet:    make(map[string]bool, len(roots)),
+		fd:            fd,
+		stopR:         p[0],
+		stopW:         p[1],
+		stopCh:        make(chan struct{}),
+		events:        make(chan fsnotify.Event, 256),
+		errors:        make(chan error, 16),
+		readerDone:    make(chan struct{}),
+		byHandle:      make(map[string]string),
+		byPath:        make(map[string]string),
+		unremovedKeys: make(map[string]bool),
+		rootSet:       make(map[string]bool, len(roots)),
 	}
 	for _, root := range roots {
 		w.rootSet[filepath.Clean(root)] = true
@@ -150,10 +152,11 @@ func (w *fanotifyRaw) Add(dir string) error {
 	if hadPrevHandle && prevPath != dir {
 		delete(w.byPath, prevPath)
 	}
+	wasUnremoved := w.unremovedKeys[key]
+	delete(w.unremovedKeys, key)
 	w.byHandle[key] = dir
 	w.byPath[dir] = key
 	w.mu.Unlock()
-
 	if err := unix.FanotifyMark(w.fd, unix.FAN_MARK_ADD|unix.FAN_MARK_ONLYDIR, fanotifyMask, dfd, ""); err != nil {
 		err = fanotifyNotExist(err)
 		w.mu.Lock()
@@ -177,6 +180,9 @@ func (w *fanotifyRaw) Add(dir string) error {
 		if hadPrevHandle && prevPath != dir {
 			w.byPath[prevPath] = key
 		}
+		if wasUnremoved {
+			w.unremovedKeys[key] = true
+		}
 		w.mu.Unlock()
 		return err
 	}
@@ -185,6 +191,11 @@ func (w *fanotifyRaw) Add(dir string) error {
 
 func (w *fanotifyRaw) ForgetPrefix(prefix string) {
 	prefix = filepath.Clean(prefix)
+	type forgotten struct {
+		path string
+		key  string
+	}
+	var removed []forgotten
 	w.mu.Lock()
 	for p, k := range w.byPath {
 		if p != prefix && !strings.HasPrefix(p, prefix+string(filepath.Separator)) {
@@ -193,9 +204,37 @@ func (w *fanotifyRaw) ForgetPrefix(prefix string) {
 		delete(w.byPath, p)
 		if w.byHandle[k] == p {
 			delete(w.byHandle, k)
+			removed = append(removed, forgotten{path: p, key: k})
 		}
 	}
 	w.mu.Unlock()
+	if len(removed) == 0 {
+		return
+	}
+	var unremoved []string
+	for _, item := range removed {
+		if err := unix.FanotifyMark(w.fd, unix.FAN_MARK_REMOVE|unix.FAN_MARK_ONLYDIR, fanotifyMask, unix.AT_FDCWD, item.path); err != nil {
+			if !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.EINVAL) {
+				unremoved = append(unremoved, item.key)
+			} else if _, serr := os.Lstat(item.path); serr != nil {
+				unremoved = append(unremoved, item.key)
+			}
+		}
+	}
+	if len(unremoved) == 0 {
+		return
+	}
+	w.mu.Lock()
+	for _, k := range unremoved {
+		if _, active := w.byHandle[k]; !active {
+			w.unremovedKeys[k] = true
+		}
+	}
+	needReclaim := len(w.unremovedKeys) >= 256
+	w.mu.Unlock()
+	if needReclaim && w.orphanReported.CompareAndSwap(false, true) {
+		w.sendError(fmt.Errorf("%w: fanotify mark reclamation threshold", fs.ErrNotExist))
+	}
 }
 
 func (w *fanotifyRaw) Recursive() bool { return false }
@@ -383,13 +422,13 @@ func (w *fanotifyRaw) emitInfo(key, name string, mask uint64) bool {
 	}
 
 	var op fsnotify.Op
-	if mask&unix.FAN_CREATE != 0 {
+	if mask&(unix.FAN_CREATE|unix.FAN_MOVED_TO) != 0 {
 		op |= fsnotify.Create
 	}
 	if mask&(unix.FAN_DELETE|unix.FAN_DELETE_SELF) != 0 {
 		op |= fsnotify.Remove
 	}
-	if mask&(unix.FAN_MOVED_FROM|unix.FAN_MOVED_TO|unix.FAN_MOVE_SELF) != 0 {
+	if mask&(unix.FAN_MOVED_FROM|unix.FAN_MOVE_SELF) != 0 {
 		op |= fsnotify.Rename
 	}
 	if mask&(unix.FAN_MODIFY|unix.FAN_CLOSE_WRITE) != 0 {

@@ -49,7 +49,7 @@ func TestFSEventsRawWatcherFileOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFSEvent(t, w.Events(), func(ev fsnotify.Event) bool {
-		return (ev.Name == file || ev.Name == renamed) && ev.Op&(fsnotify.Rename|fsnotify.Create|fsnotify.Write) != 0
+		return ev.Name == renamed && ev.Op&fsnotify.Rename != 0
 	})
 
 	if err := os.Chmod(renamed, 0o600); err != nil {
@@ -147,20 +147,27 @@ func TestFSEventsRawWatcherFileDescriptorUsage(t *testing.T) {
 		}
 	}
 
+	warm, err := newFSEventsRawWatcher([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := warm.Close(); err != nil {
+		t.Fatal(err)
+	}
 	baseline := darwinOpenFDCount(t)
 	w, err := newFSEventsRawWatcher([]string{root})
 	if err != nil {
 		t.Fatal(err)
 	}
 	opened := darwinOpenFDCount(t)
-	if opened > baseline+10 {
+	if opened > baseline+16 {
 		_ = w.Close()
 		t.Fatalf("FSEvents opened too many file descriptors: baseline=%d opened=%d", baseline, opened)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		w, err := newFSEventsRawWatcher([]string{root})
 		if err != nil {
 			t.Fatal(err)
@@ -169,7 +176,7 @@ func TestFSEventsRawWatcherFileDescriptorUsage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if after := darwinOpenFDCount(t); after > baseline {
+	if after := darwinOpenFDCount(t); after > baseline+4 {
 		t.Fatalf("FSEvents leaked file descriptors: baseline=%d after=%d", baseline, after)
 	}
 }

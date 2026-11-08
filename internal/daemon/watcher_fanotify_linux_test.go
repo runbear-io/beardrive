@@ -91,11 +91,19 @@ func TestFanotifyRawDirectoryRenameKeepsReaderAlive(t *testing.T) {
 	if err := os.Rename(dirA, dirB); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dirB, "sub", "after-move"), []byte("x"), 0o644); err != nil {
+	waitFanotifyEvent(t, watcher, dirA, fsnotify.Rename)
+	waitFanotifyEvent(t, watcher, dirB, fsnotify.Create)
+	if err := watcher.Add(dirB); err != nil {
 		t.Fatal(err)
 	}
-	waitFanotifyEvent(t, watcher, dirA, fsnotify.Rename)
-
+	if err := watcher.Add(filepath.Join(dirB, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	afterMove := filepath.Join(dirB, "sub", "after-move")
+	if err := os.WriteFile(afterMove, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFanotifyEvent(t, watcher, afterMove, fsnotify.Create)
 	sentinel := filepath.Join(root, "sentinel")
 	if err := os.WriteFile(sentinel, []byte("still alive"), 0o644); err != nil {
 		t.Fatal(err)

@@ -458,6 +458,9 @@ func (w *fseventsRaw) emitFSEvent(rawPath string, flags uint32) {
 	var op fsnotify.Op
 	if err == nil {
 		op = fsnotify.Create | fsnotify.Write
+		if flags&kFSEventStreamEventFlagItemRenamed != 0 {
+			op |= fsnotify.Rename
+		}
 		if flags&fseventsMetaFlags != 0 {
 			op |= fsnotify.Chmod
 		}
