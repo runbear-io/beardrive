@@ -85,6 +85,18 @@ func daemonSyncs(vdir string) bool {
 	return running
 }
 
+// hookPullFresh is how recent the daemon's last pass against the hub must be
+// for the turn-start hook to read the files on disk instead of pulling. The
+// daemon passes every 10 s and on every peer push, so this is three missed
+// passes.
+const hookPullFresh = 30 * time.Second
+
+// daemonCurrent reports whether this volume's daemon is running and has
+// pulled from the hub recently enough to stand in for the hook's own pull.
+func daemonCurrent(vdir string) bool {
+	return daemonSyncs(vdir) && time.Since(store.PulledAt(vdir)) < hookPullFresh
+}
+
 // hookSync is one mount's contribution to the turn: where its files live on
 // the hub, and which of them moved since the last turn.
 type hookSync struct {
@@ -115,13 +127,14 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 		sess.SessionID = sessionID
 	}
 
-	// The pull — unless this mount's daemon is running, in which case it has
-	// already journaled the tree and pulled the hub, and a cycle here would
-	// only walk every file again on every turn. What the turn needs from that
+	// The pull — unless this mount's daemon is running and pulled from the
+	// hub moments ago, in which case it has already journaled the tree and
+	// the files on disk are current, and a cycle here would only walk every
+	// file again on every turn. What the turn needs from that
 	// work (the inbound spool, the secret findings, the note it stamps) is
 	// all in the store. Offline is fine — the link formula below is still
 	// valid for teammates who are online.
-	if !daemonSyncs(sess.Store.Dir()) {
+	if !daemonCurrent(sess.Store.Dir()) {
 		attachRemote(cmd.Context(), sess, proj)
 		if _, err := sess.Cycle(cmd.Context()); err != nil {
 			return hookSync{}, false // never break the turn

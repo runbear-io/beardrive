@@ -125,6 +125,7 @@ func TestHookLatencyBenchmark(t *testing.T) {
 		rows = append(rows, row{n[0], "no daemon", p50, p95})
 	}
 	holdDaemonLock(t, proj)
+	markPulled(t, proj, 0)
 	for _, n := range named {
 		p50, p95 := measure(n[1])
 		rows = append(rows, row{n[0], "daemon running", p50, p95})

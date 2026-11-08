@@ -2294,6 +2294,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				lastAccess = store.AccessReadOnly
 			}
 			lastRemote = time.Now()
+			_ = store.MarkPulled(volDir)
 		case res.Offline:
 			logger.Printf("offline, will retry: %v", res.OfflineErr)
 			if be != nil {
@@ -2318,6 +2319,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 			if doRemote {
 				lastRemote = time.Now()
+				_ = store.MarkPulled(volDir)
 			}
 			if res.LocalOps > 0 && !doRemote && !remoteFailed && proj.Remote != "" {
 				lastRemote = time.Time{} // push local edits on the next cycle

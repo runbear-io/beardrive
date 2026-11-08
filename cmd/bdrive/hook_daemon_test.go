@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/daemon"
@@ -38,6 +39,22 @@ func holdDaemonLock(t *testing.T, proj config.Project) {
 	})
 	if !daemonSyncs(vdir) {
 		t.Fatal("the held lock does not read as a running daemon")
+	}
+}
+
+// markPulled records a daemon pass against the hub, at the given age.
+func markPulled(t *testing.T, proj config.Project, age time.Duration) {
+	t.Helper()
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkPulled(vdir); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-age)
+	if err := os.Chtimes(filepath.Join(vdir, "pulled"), at, at); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -82,6 +99,7 @@ func storedNote(t *testing.T, proj config.Project) string {
 func TestHookLeavesTheSyncToARunningDaemon(t *testing.T) {
 	folder, proj := stampFixture(t)
 	holdDaemonLock(t, proj)
+	markPulled(t, proj, 0)
 	seedInbound(t, proj, "notes/readme.md")
 
 	got := runHook(t, folder)
@@ -99,6 +117,30 @@ func TestHookLeavesTheSyncToARunningDaemon(t *testing.T) {
 	}
 	if note := storedNote(t, proj); note != "claude-code session sess-42" {
 		t.Errorf("note = %q, want the session stamped for the daemon's scans", note)
+	}
+}
+
+// A daemon that holds its lock but has not reached the hub lately (offline,
+// reconnecting, wedged) cannot vouch for the files on disk, so the hook pulls
+// itself.
+func TestHookPullsWhenTheDaemonHasNotPulledLately(t *testing.T) {
+	for name, mark := range map[string]func(*testing.T, config.Project){
+		"never pulled": func(*testing.T, config.Project) {},
+		"pulled long ago": func(t *testing.T, proj config.Project) {
+			markPulled(t, proj, 2*hookPullFresh)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			folder, proj := stampFixture(t)
+			holdDaemonLock(t, proj)
+			mark(t, proj)
+
+			runHook(t, folder)
+
+			if ops := committed(t, proj); len(ops) == 0 {
+				t.Error("the hook trusted a daemon that has not pulled lately")
+			}
+		})
 	}
 }
 
@@ -154,5 +196,20 @@ func TestDeferredSyncCyclesWhenNoDaemonRuns(t *testing.T) {
 	}
 	if ops[0].Note != "claude-code session sess-42" {
 		t.Errorf("Note = %q, want the session note", ops[0].Note)
+	}
+}
+
+// Pruning needs a cycle, which --defer may skip, so the two are refused
+// together rather than reporting a prune that never ran.
+func TestDeferredSyncRefusesPrune(t *testing.T) {
+	folder, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+
+	c := syncCmd()
+	c.SetOut(&bytes.Buffer{})
+	c.SetErr(&bytes.Buffer{})
+	c.SetArgs([]string{folder, "--defer", "--prune"})
+	if err := c.Execute(); err == nil {
+		t.Fatal("sync --defer --prune succeeded")
 	}
 }

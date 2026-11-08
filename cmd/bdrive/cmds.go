@@ -52,6 +52,9 @@ list in .bdrive/config.json is never pruned against either.`,
 			// mounts below it — a repo root with wiki/ and docs/ mounted syncs
 			// both, and a session inside a mount syncs its root.
 			targets := syncTargets(folder)
+			if deferToDaemon && prune {
+				return fmt.Errorf("--defer cannot be combined with --prune: pruning needs a cycle of its own")
+			}
 
 			// A refused push is the one failure that never self-heals: the
 			// hub said no and will keep saying no until somebody acts. Exiting
