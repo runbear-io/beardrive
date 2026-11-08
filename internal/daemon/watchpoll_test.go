@@ -19,17 +19,29 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
-func setLocalWatcherCreatedHook(t *testing.T, hook func(*fsnotify.Watcher)) {
+func setLocalWatcherCreatedHook(t *testing.T, hook func(rawWatcher)) {
 	t.Helper()
 	setLocalWatchCreatedHook(hook)
 	t.Cleanup(func() { setLocalWatchCreatedHook(nil) })
+}
+
+func setLocalWatchBackendForTest(t *testing.T, backend string) {
+	t.Helper()
+	localWatchHooksMu.Lock()
+	old := localWatchBackendPin
+	localWatchBackendPin = backend
+	localWatchHooksMu.Unlock()
+	t.Cleanup(func() {
+		localWatchHooksMu.Lock()
+		localWatchBackendPin = old
+		localWatchHooksMu.Unlock()
+	})
 }
 
 /* The poll that ran beside a healthy push channel.
@@ -112,6 +124,7 @@ func TestLocalFolderWatcherWakesAndAddsDirectories(t *testing.T) {
 }
 
 func TestLocalFolderWatcherAddsOnlyCreatedDirectorySubtree(t *testing.T) {
+	setLocalWatchBackendForTest(t, "fsnotify")
 	root := t.TempDir()
 	unrelated := filepath.Join(root, "unrelated")
 	if err := os.Mkdir(unrelated, 0o755); err != nil {
@@ -204,6 +217,7 @@ func TestLocalFolderWatcherReaddsRecreatedDirectoryTree(t *testing.T) {
 }
 
 func TestLocalFolderWatcherBatchesPerMount(t *testing.T) {
+	setLocalWatchBackendForTest(t, "fsnotify")
 	rootA, rootB := t.TempDir(), t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -265,6 +279,8 @@ func TestLocalWatchNotExist(t *testing.T) {
 }
 
 func TestWatcherRebuildsOnChildENOENT(t *testing.T) {
+	setLocalWatchBackendForTest(t, "fsnotify")
+
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -473,6 +489,7 @@ func TestLocalWatchFallbackInterval(t *testing.T) {
 }
 
 func TestWatcherKeepsPriorWatcherAfterRepeatedChildENOENT(t *testing.T) {
+	setLocalWatchBackendForTest(t, "fsnotify")
 
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -527,8 +544,8 @@ func TestWatcherClosesReplacementDuringShutdown(t *testing.T) {
 
 	asyncErrors := make(chan error, 1)
 	setLocalWatcherTestHooks(t, nil, func() <-chan error { return asyncErrors }, nil)
-	created := make(chan *fsnotify.Watcher, 2)
-	setLocalWatcherCreatedHook(t, func(w *fsnotify.Watcher) { created <- w })
+	created := make(chan rawWatcher, 2)
+	setLocalWatcherCreatedHook(t, func(w rawWatcher) { created <- w })
 
 	lw, err := startLocalFolderWatcher(ctx, []string{root})
 	if err != nil {
@@ -556,7 +573,7 @@ func TestWatcherClosesReplacementDuringShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("watcher did not enter replacement build")
 	}
-	var replacement *fsnotify.Watcher
+	var replacement rawWatcher
 	select {
 	case replacement = <-created:
 	case <-time.After(time.Second):
@@ -581,7 +598,7 @@ func TestWatcherClosesReplacementDuringShutdown(t *testing.T) {
 		t.Fatal("watcher did not stop after replacement build shutdown")
 	}
 	select {
-	case _, ok := <-replacement.Events:
+	case _, ok := <-replacement.Events():
 		if ok {
 			t.Fatal("replacement watcher remained open after shutdown")
 		}
@@ -591,6 +608,7 @@ func TestWatcherClosesReplacementDuringShutdown(t *testing.T) {
 }
 
 func TestWatcherRoutesNestedRootToMostSpecificBatch(t *testing.T) {
+	setLocalWatchBackendForTest(t, "fsnotify")
 	parent := t.TempDir()
 	nested := filepath.Join(parent, "nested")
 	if err := os.Mkdir(nested, 0o755); err != nil {
@@ -625,6 +643,7 @@ func TestWatcherRoutesNestedRootToMostSpecificBatch(t *testing.T) {
 }
 
 func TestEventsDuringScanAreFenced(t *testing.T) {
+	setLocalWatchBackendForTest(t, "fsnotify")
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -720,6 +739,7 @@ func TestEventsDuringScanAreFenced(t *testing.T) {
 }
 
 func TestMaterializationEchoSuppressionKeepsChangedEvents(t *testing.T) {
+	setLocalWatchBackendForTest(t, "fsnotify")
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -790,6 +810,7 @@ func TestMaterializationEchoSuppressionKeepsChangedEvents(t *testing.T) {
 }
 
 func TestSuppressMaterializationEchoesSkipsCacheLoadWhenNoPendingEvents(t *testing.T) {
+	setLocalWatchBackendForTest(t, "fsnotify")
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

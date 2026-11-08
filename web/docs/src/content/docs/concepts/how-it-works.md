@@ -72,11 +72,12 @@ worker goroutine, with its own `daemon.lock`, `daemon.pid`, and `daemon.log`
 under `~/.bdrive/volumes/<volume-id>/`. These two lock levels are the
 Dual-Lock scheme. `$BDRIVE_HOME` relocates both sets of files.
 
-Each worker watches its enrolled worktree folders on macOS and Linux and
-uses a five-minute safety scan when remote polling does not require an earlier
-cycle. If the filesystem watcher is unavailable, the worker falls back to
-adaptive polling based on the duration of its last full scan while keeping
-remote polling on `--remote-interval`. Other platforms use polling directly.
+Each worker watches its enrolled worktree folders with a platform-native backend:
+unprivileged **fanotify** on Linux, falling back to fsnotify's **inotify** watches;
+**FSEvents** on macOS, falling back to fsnotify's **kqueue** watches; and
+**fsnotify** on other platforms. If a backend is unsupported or runs out of
+watcher resources, the daemon tries the next backend and retains adaptive
+polling as its safety net.
 Local edits wake a scan, and remote exchange still follows `--remote-interval`
 unless a local edit or remote event brings it forward.
 
