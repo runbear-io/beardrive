@@ -458,6 +458,9 @@ func (w *fseventsRaw) emitFSEvent(rawPath string, flags uint32) {
 	var op fsnotify.Op
 	if err == nil {
 		op = fsnotify.Create | fsnotify.Write
+		if flags&kFSEventStreamEventFlagItemRemoved != 0 {
+			op |= fsnotify.Remove
+		}
 		if flags&kFSEventStreamEventFlagItemRenamed != 0 {
 			op |= fsnotify.Rename
 		}
@@ -465,7 +468,7 @@ func (w *fseventsRaw) emitFSEvent(rawPath string, flags uint32) {
 			op |= fsnotify.Chmod
 		}
 	} else {
-		if flags&kFSEventStreamEventFlagItemRenamed != 0 {
+		if flags&kFSEventStreamEventFlagItemRenamed != 0 && flags&kFSEventStreamEventFlagItemRemoved == 0 {
 			op = fsnotify.Rename
 		} else {
 			op = fsnotify.Remove

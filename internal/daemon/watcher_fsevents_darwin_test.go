@@ -76,8 +76,11 @@ func TestFSEventsRawWatcherFileOperations(t *testing.T) {
 	if err := os.Remove(dir); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(dir, []byte("replaced-by-file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	waitFSEvent(t, w.Events(), func(ev fsnotify.Event) bool {
-		return ev.Name == dir && ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0
+		return ev.Name == dir && ev.Op&fsnotify.Remove != 0
 	})
 }
 
