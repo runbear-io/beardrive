@@ -78,23 +78,28 @@ func eventSessionID(data []byte) string {
 	return event.SessionID
 }
 
-// daemonSyncs reports whether a daemon holds this volume's lock, so a hook
-// can leave the sync to it.
-func daemonSyncs(vdir string) bool {
-	_, running := daemon.Running(vdir)
-	return running
-}
-
 // hookPullFresh is how recent the daemon's last pass against the hub must be
-// for the turn-start hook to read the files on disk instead of pulling. The
-// daemon passes every 10 s and on every peer push, so this is three missed
-// passes.
+// for a hook to leave the sync to it. The daemon passes every 10 s and on
+// every peer push, so this is three missed passes.
 const hookPullFresh = 30 * time.Second
 
-// daemonCurrent reports whether this volume's daemon is running and has
-// pulled from the hub recently enough to stand in for the hook's own pull.
-func daemonCurrent(vdir string) bool {
-	return daemonSyncs(vdir) && time.Since(store.PulledAt(vdir)) < hookPullFresh
+// hookCycleWait bounds how long a hook waits for a daemon cycle in flight.
+// The hook's own cycle would wait on the same lock with no bound at all.
+const hookCycleWait = 5 * time.Second
+
+// daemonCurrent reports whether this volume's daemon can stand in for a
+// hook's own cycle: it is running, any cycle it has in flight has finished,
+// and that same process completed a pass against the hub within
+// hookPullFresh. Waiting out the cycle in flight is what makes the files and
+// the inbound spool the hook reads afterward the pass's finished result.
+func daemonCurrent(st *store.Store) bool {
+	pid, running := daemon.Running(st.Dir())
+	if !running || pid <= 0 {
+		return false
+	}
+	st.WaitUnlocked(hookCycleWait)
+	at, by := store.PulledAt(st.Dir())
+	return by == pid && time.Since(at) < hookPullFresh
 }
 
 // hookSync is one mount's contribution to the turn: where its files live on
@@ -134,7 +139,7 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// work (the inbound spool, the secret findings, the note it stamps) is
 	// all in the store. Offline is fine — the link formula below is still
 	// valid for teammates who are online.
-	if !daemonCurrent(sess.Store.Dir()) {
+	if !daemonCurrent(sess.Store) {
 		attachRemote(cmd.Context(), sess, proj)
 		if _, err := sess.Cycle(cmd.Context()); err != nil {
 			return hookSync{}, false // never break the turn

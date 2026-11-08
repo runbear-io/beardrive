@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,8 +38,12 @@ func holdDaemonLock(t *testing.T, proj config.Project) {
 		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 	})
-	if !daemonSyncs(vdir) {
-		t.Fatal("the held lock does not read as a running daemon")
+	// Announce this process inside the lock, as a daemon does.
+	if _, err := f.WriteAt([]byte(fmt.Sprintf("%d\n", os.Getpid())), 0); err != nil {
+		t.Fatal(err)
+	}
+	if pid, running := daemon.Running(vdir); !running || pid != os.Getpid() {
+		t.Fatalf("the held lock reads as pid %d running=%v", pid, running)
 	}
 }
 
@@ -144,6 +149,76 @@ func TestHookPullsWhenTheDaemonHasNotPulledLately(t *testing.T) {
 	}
 }
 
+// A daemon restarted inside the freshness window has not passed yet: the
+// marker its predecessor left must not vouch for it.
+func TestHookPullsBesideARestartedDaemon(t *testing.T) {
+	folder, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vdir, "pulled"), []byte(fmt.Sprintf("%d\n", os.Getpid()+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runHook(t, folder)
+
+	if ops := committed(t, proj); len(ops) == 0 {
+		t.Error("the hook trusted a pass another daemon process recorded")
+	}
+}
+
+// A daemon cycle in flight when the turn starts is waited out, so the hook
+// reads that pass's finished result: what it materialized is in the turn's
+// changed list, not deferred to the next turn.
+func TestHookWaitsForTheDaemonCycleInFlight(t *testing.T) {
+	folder, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+	markPulled(t, proj, 0)
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := st.Lock() // the daemon's cycle
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(chan string, 1)
+	go func() { out <- runHook(t, folder) }()
+	time.Sleep(200 * time.Millisecond)
+	if err := st.LogInboundForMount(proj.ID, "notes/pulled-in.md", false); err != nil {
+		t.Fatal(err)
+	}
+	markPulled(t, proj, 0)
+	unlock()
+
+	if got := <-out; !strings.Contains(got, "`notes/pulled-in.md`") {
+		t.Errorf("the hook read before the daemon's cycle finished:\n%s", got)
+	}
+	if ops := committed(t, proj); len(ops) != 0 {
+		t.Errorf("the hook cycled beside a current daemon: committed %d ops", len(ops))
+	}
+}
+
+// The after-edit hook beside a daemon that has stopped reaching the hub must
+// sync the edit itself.
+func TestDeferredSyncCyclesBesideAStaleDaemon(t *testing.T) {
+	folder, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+	markPulled(t, proj, 2*hookPullFresh)
+
+	runDeferredSync(t, folder)
+
+	if ops := committed(t, proj); len(ops) == 0 {
+		t.Error("sync --defer trusted a daemon that has not reached the hub lately")
+	}
+}
+
 // Without a daemon, the hook is the only thing that syncs, so it cycles.
 func TestHookSyncsWhenNoDaemonRuns(t *testing.T) {
 	folder, proj := stampFixture(t)
@@ -174,6 +249,7 @@ func runDeferredSync(t *testing.T, folder string) {
 func TestDeferredSyncOnlyRecordsTheNoteBesideADaemon(t *testing.T) {
 	folder, proj := stampFixture(t)
 	holdDaemonLock(t, proj)
+	markPulled(t, proj, 0)
 
 	runDeferredSync(t, folder)
 

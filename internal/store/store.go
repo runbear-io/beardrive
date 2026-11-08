@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type Store struct {
@@ -300,6 +301,29 @@ func (s *Store) Lock() (func() error, error) {
 		defer f.Close()
 		return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	}, nil
+}
+
+// WaitUnlocked blocks until no sync cycle holds the volume lock, or until
+// limit passes, reporting whether it saw the lock free. It takes the lock only
+// to observe it and releases it at once: a caller that wants a cycle in
+// flight to finish before it reads, without running one, waits here.
+func (s *Store) WaitUnlocked(limit time.Duration) bool {
+	f, err := os.OpenFile(filepath.Join(s.dir, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	deadline := time.Now().Add(limit)
+	for {
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // ---- small JSON helpers ----

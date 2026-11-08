@@ -40,8 +40,9 @@ Three hooks, three jobs:
 When the sync daemon is running and has reached the hub in the last 30
 seconds, the pull and push hooks leave the syncing to it: the daemon already
 watches the folder and the hub, so the hooks only record the session and report
-what changed, and return in milliseconds. Without a daemon, or when the daemon
-has not reached the hub lately, they run a full sync themselves.
+what changed, and return in milliseconds (after waiting for a daemon sync
+already in progress to finish). Without a daemon, or when the daemon has not
+reached the hub lately, they run a full sync themselves.
 
 Every platform pipes hook JSON with a session id, so one hook command serves all
 four, and changes are stamped with `<agent> session <id>` — visible in

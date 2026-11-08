@@ -3,6 +3,7 @@ package daemon
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,10 +18,15 @@ func TestWorkerRecordsEachPassAgainstTheHub(t *testing.T) {
 	m := watchMountWithRemote(t, strings.TrimSuffix(hub.URL, "/")+"/p/p-test")
 	w := startWatchSafetyWorker(t, m, time.Hour, nil, nil)
 	w.wait("a recorded pass against the hub", func() bool {
-		return !store.PulledAt(m.volDir).IsZero()
+		at, _ := store.PulledAt(m.volDir)
+		return !at.IsZero()
 	})
-	if age := time.Since(store.PulledAt(m.volDir)); age > time.Minute {
+	at, by := store.PulledAt(m.volDir)
+	if age := time.Since(at); age > time.Minute {
 		t.Errorf("recorded pass is %s old", age)
+	}
+	if by != os.Getpid() {
+		t.Errorf("pass recorded by pid %d, want the daemon's own %d", by, os.Getpid())
 	}
 }
 
@@ -33,7 +39,7 @@ func TestWorkerOfflineRecordsNoPass(t *testing.T) {
 	m := watchMountWithRemote(t, down.URL+"/p/p-test")
 	w := startWatchSafetyWorker(t, m, 50*time.Millisecond, nil, nil)
 	w.wait("a few offline cycles", func() bool { return w.cycles.Load() >= 3 })
-	if at := store.PulledAt(m.volDir); !at.IsZero() {
+	if at, _ := store.PulledAt(m.volDir); !at.IsZero() {
 		t.Errorf("an offline daemon recorded a pass at %s", at)
 	}
 }

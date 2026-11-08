@@ -88,11 +88,11 @@ list in .bdrive/config.json is never pruned against either.`,
 					if err != nil {
 						return err
 					}
-					if daemonSyncs(vdir) {
-						st, err := store.Open(vdir)
-						if err != nil {
-							return err
-						}
+					st, err := store.Open(vdir)
+					if err != nil {
+						return err
+					}
+					if daemonCurrent(st) {
 						return st.SaveNoteForMount(proj.ID, note, noteTTL)
 					}
 				}
