@@ -1300,11 +1300,23 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid journal prefix size", http.StatusBadRequest)
 		return
 	}
+	if r.ContentLength > maxInflatedPut {
+		http.Error(w, "journal append body exceeds this hub's limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	project := r.PathValue("project")
+	org := s.orgOf(project)
+	if r.ContentLength > 0 {
+		if err := s.quota().CheckWrite(org, r.ContentLength+s.reservedBytes(org)); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+	}
 	body, inflated, ok := storePutBody(w, r)
 	if !ok {
 		return
 	}
-	tmp, size, _, err := spool(body)
+	tmp, size, _, err := spool(io.LimitReader(body, maxInflatedPut+1))
 	if err != nil {
 		if inflated {
 			http.Error(w, "could not decompress the body", http.StatusBadRequest)
@@ -1315,8 +1327,8 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
-	if inflated && size > maxInflatedPut {
-		http.Error(w, "compressed body inflates past this hub's limit", http.StatusRequestEntityTooLarge)
+	if size > maxInflatedPut {
+		http.Error(w, "journal append body exceeds this hub's limit", http.StatusRequestEntityTooLarge)
 		return
 	}
 	tailOps, err := journalOps(key, tmp)
@@ -1336,35 +1348,20 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 		storageErr(w, http.StatusBadGateway, "could not read the journal tail", err)
 		return
 	}
-	project := r.PathValue("project")
-	org := s.orgOf(project)
-	s.reconcileGrants(r.Context(), project, rs.Backend)
-	cp, conditional := rs.Backend.(remote.ConditionalPutter)
-	attempts := 1
-	if conditional {
-		attempts = 5
+	cp, ok := rs.Backend.(remote.ConditionalPutter)
+	if !ok {
+		http.Error(w, "journal append requires conditional storage", http.StatusNotImplemented)
+		return
 	}
+	defer s.lockPath(project, key)()
+	s.reconcileGrants(r.Context(), project, rs.Backend)
+	const attempts = 5
 	var storedMax int64
 	written := false
 	for range attempts {
-		var existing []byte
-		var ver remote.Version
-		if conditional {
-			existing, ver, err = readVersioned(r.Context(), cp, key)
-		} else {
-			if exists, eerr := rs.Backend.Exists(r.Context(), key); eerr != nil {
-				err = eerr
-			} else if exists {
-				rc, eerr := rs.Backend.Get(r.Context(), key)
-				err = eerr
-				if err == nil {
-					existing, err = io.ReadAll(rc)
-					rc.Close()
-				}
-			}
-		}
-		if err != nil {
-			storageErr(w, http.StatusBadGateway, "could not read the stored journal", err)
+		existing, ver, rerr := readVersioned(r.Context(), cp, key)
+		if rerr != nil {
+			storageErr(w, http.StatusBadGateway, "could not read the stored journal", rerr)
 			return
 		}
 		// A response can be lost after the conditional write landed. Recognize
@@ -1423,13 +1420,9 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 			newJournal = append(newJournal, '\n')
 		}
 		newJournal = append(newJournal, tailBytes...)
-		if conditional {
-			_, err = cp.PutIf(r.Context(), key, bytes.NewReader(newJournal), int64(len(newJournal)), ver)
-			if errors.Is(err, remote.ErrVersionMismatch) {
-				continue
-			}
-		} else {
-			err = rs.Backend.Put(r.Context(), key, bytes.NewReader(newJournal), int64(len(newJournal)))
+		_, err = cp.PutIf(r.Context(), key, bytes.NewReader(newJournal), int64(len(newJournal)), ver)
+		if errors.Is(err, remote.ErrVersionMismatch) {
+			continue
 		}
 		if err != nil {
 			storageErr(w, http.StatusBadGateway, "could not store the object", err)

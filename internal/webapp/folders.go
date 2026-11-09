@@ -10,6 +10,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -583,7 +584,7 @@ func (r *RemoteSource) filterObject(ctx context.Context, o remote.Object) (remot
 			return current, nil
 		}
 	}
-	return remote.Object{}, fmt.Errorf("journal %s not found", o.Key)
+	return remote.Object{}, fmt.Errorf("journal %s: %w", o.Key, os.ErrNotExist)
 }
 
 func (r *RemoteSource) cachedFilter(o remote.Object, tag string) ([]byte, bool) {
