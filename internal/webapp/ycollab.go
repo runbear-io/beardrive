@@ -1160,9 +1160,10 @@ func (s *Server) finishLater(ctx context.Context, room string, who User, text, b
 			s.rooms().rebaseUnheld(room, sha)
 		}
 	}
-	try := func(ctx context.Context) bool {
-		unlock := s.rooms().lockSnapshots(room)
-		defer unlock()
+	// attempt runs under the room's snapshot lock. The caller, a snapshot,
+	// holds it while this function runs; a retry after it returns takes it
+	// again (try).
+	attempt := func(ctx context.Context) bool {
 		cur, curSha, have, err := s.roomBytes(ctx, room)
 		if err != nil {
 			return false
@@ -1227,6 +1228,11 @@ func (s *Server) finishLater(ctx context.Context, room string, who User, text, b
 		s.reconcile(ctx, room, who, text, baseText, haveBase, string(cur), curSha, true)
 		return true
 	}
+	try := func(ctx context.Context) bool {
+		unlock := s.rooms().lockSnapshots(room)
+		defer unlock()
+		return attempt(ctx)
+	}
 	bg := s.collabContext()
 	if bg.Err() != nil {
 		// Shutting down: Close cancels the collab context before its final
@@ -1234,7 +1240,7 @@ func (s *Server) finishLater(ctx context.Context, room string, who User, text, b
 		// caller's context has left, up to finishOnClose, is the last chance.
 		ctx, cancel := context.WithTimeout(ctx, finishOnClose)
 		defer cancel()
-		for wait := parkBackoff; ctx.Err() == nil && !try(ctx); wait = min(wait*2, parkBackoffMax) {
+		for wait := parkBackoff; ctx.Err() == nil && !attempt(ctx); wait = min(wait*2, parkBackoffMax) {
 			select {
 			case <-ctx.Done():
 			case <-time.After(wait):
