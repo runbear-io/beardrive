@@ -6,29 +6,42 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/store"
 	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
-// The turn hook trusts the files on disk only while the daemon's last pass
-// against the hub is recent, so a completed pass must record itself.
+func projectIDOf(t *testing.T, m watchFixture) string {
+	t.Helper()
+	proj, ok, err := config.LoadProject(m.folder)
+	if err != nil || !ok {
+		t.Fatalf("load project: ok=%v err=%v", ok, err)
+	}
+	return proj.ID
+}
+
+// The turn hook trusts the files on disk only while the daemon vouches for
+// them, so a complete pass must record itself, its pid and its mounts.
 func TestWorkerRecordsEachPassAgainstTheHub(t *testing.T) {
 	hub := newFakeHub(t)
 	m := watchMountWithRemote(t, strings.TrimSuffix(hub.URL, "/")+"/p/p-test")
 	w := startWatchSafetyWorker(t, m, time.Hour, nil, nil)
 	w.wait("a recorded pass against the hub", func() bool {
-		at, _ := store.PulledAt(m.volDir)
-		return !at.IsZero()
+		return !store.LoadPulled(m.volDir).At.IsZero()
 	})
-	at, by := store.PulledAt(m.volDir)
-	if age := time.Since(at); age > time.Minute {
+	p := store.LoadPulled(m.volDir)
+	if age := time.Since(p.At); age > time.Minute {
 		t.Errorf("recorded pass is %s old", age)
 	}
-	if by != os.Getpid() {
-		t.Errorf("pass recorded by pid %d, want the daemon's own %d", by, os.Getpid())
+	if p.PID != os.Getpid() {
+		t.Errorf("pass recorded by pid %d, want the daemon's own %d", p.PID, os.Getpid())
+	}
+	if id := projectIDOf(t, m); !p.Covers(id) {
+		t.Errorf("marker mounts = %v, want %s", p.Mounts, id)
 	}
 }
 
@@ -41,9 +54,50 @@ func TestWorkerOfflineRecordsNoPass(t *testing.T) {
 	m := watchMountWithRemote(t, down.URL+"/p/p-test")
 	w := startWatchSafetyWorker(t, m, 50*time.Millisecond, nil, nil)
 	w.wait("a few offline cycles", func() bool { return w.cycles.Load() >= 3 })
-	if at, _ := store.PulledAt(m.volDir); !at.IsZero() {
-		t.Errorf("an offline daemon recorded a pass at %s", at)
+	if p := store.LoadPulled(m.volDir); !p.At.IsZero() {
+		t.Errorf("an offline daemon recorded a pass at %s", p.At)
 	}
+}
+
+// With the change stream open the hub is polled minutes apart, so a quiet,
+// live stream must keep the marker fresh in between, and a peer's
+// announcement must withdraw it before the cycle that pulls the push starts.
+func TestWorkerVouchesWhileTheStreamIsAliveAndWithdrawsOnAnnouncement(t *testing.T) {
+	oldRefresh := vouchRefresh
+	vouchRefresh = 20 * time.Millisecond
+	t.Cleanup(func() { vouchRefresh = oldRefresh })
+	hub := newFakeHub(t)
+	proxy := newRemoteWakeProxy(t, hub)
+	m := watchMountWithRemote(t, strings.TrimSuffix(proxy.URL, "/")+"/p/p-test")
+	var armed atomic.Bool
+	sawWithdrawn := make(chan bool, 1)
+	w := startWatchSafetyWorker(t, m, time.Hour, nil, func() {
+		if armed.CompareAndSwap(true, false) {
+			sawWithdrawn <- store.LoadPulled(m.volDir).At.IsZero()
+		}
+	})
+	select {
+	case <-proxy.connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote watcher did not connect")
+	}
+	w.wait("a recorded pass", func() bool { return !store.LoadPulled(m.volDir).At.IsZero() })
+	first := store.LoadPulled(m.volDir).At
+	w.wait("a renewal with no poll", func() bool { return store.LoadPulled(m.volDir).At.After(first) })
+
+	armed.Store(true)
+	proxy.wake <- struct{}{}
+	select {
+	case withdrawn := <-sawWithdrawn:
+		if !withdrawn {
+			t.Error("the marker still vouched when the announcement's cycle started")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no cycle after the announcement")
+	}
+	w.wait("a pass recorded after the announcement", func() bool {
+		return !store.LoadPulled(m.volDir).At.IsZero()
+	})
 }
 
 // The marker must only follow a tick that pulled every mount: the merged
@@ -69,5 +123,48 @@ func TestPassPulledNeedsEveryMountPulled(t *testing.T) {
 		if got := passPulled(c.doRemote, c.connected, c.err, c.res); got != c.want {
 			t.Errorf("%s: passPulled = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+type fakeStream struct{ last time.Time }
+
+func (f *fakeStream) StreamFrame() time.Time { return f.last }
+
+// renew only extends a standing pass over a live stream.
+func TestVouchRenewsOnlyOverALiveStream(t *testing.T) {
+	dir := t.TempDir()
+	v := &pulledVouch{volDir: dir}
+	stream := &fakeStream{last: time.Now()}
+
+	v.renew()
+	if !store.LoadPulled(dir).At.IsZero() {
+		t.Fatal("renewed with no pass to stand on")
+	}
+	v.passed([]string{"p-a"})
+	v.streaming(stream)
+	old := time.Now().Add(-time.Minute)
+	os.Chtimes(dir+"/pulled", old, old)
+
+	stream.last = time.Now().Add(-2 * streamAliveFor)
+	v.renew()
+	if at := store.LoadPulled(dir).At; at.After(old.Add(time.Second)) {
+		t.Error("renewed over a stream that has gone quiet")
+	}
+	stream.last = time.Now()
+	v.renew()
+	if at := store.LoadPulled(dir).At; !at.After(old.Add(time.Second)) {
+		t.Error("did not renew over a live stream")
+	}
+	v.streaming(nil)
+	os.Chtimes(dir+"/pulled", old, old)
+	v.renew()
+	if at := store.LoadPulled(dir).At; at.After(old.Add(time.Second)) {
+		t.Error("renewed with the stream closed")
+	}
+	v.streaming(stream)
+	v.withdraw()
+	v.renew()
+	if !store.LoadPulled(dir).At.IsZero() {
+		t.Error("renewed after a withdrawal")
 	}
 }

@@ -54,7 +54,7 @@ func markPulled(t *testing.T, proj config.Project, age time.Duration) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkPulled(vdir); err != nil {
+	if err := store.MarkPulled(vdir, []string{proj.ID}); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Now().Add(-age)
@@ -158,7 +158,7 @@ func TestHookPullsBesideARestartedDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(vdir, "pulled"), []byte(fmt.Sprintf("%d\n", os.Getpid()+1)), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(vdir, "pulled"), []byte(fmt.Sprintf("%d\n%s\n", os.Getpid()+1, proj.ID)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -166,6 +166,26 @@ func TestHookPullsBesideARestartedDaemon(t *testing.T) {
 
 	if ops := committed(t, proj); len(ops) == 0 {
 		t.Error("the hook trusted a pass another daemon process recorded")
+	}
+}
+
+// A marker from a pass that did not include this mount (it was paused, or
+// joined the volume since) vouches for its siblings only.
+func TestHookPullsWhenTheMarkerDoesNotCoverTheMount(t *testing.T) {
+	folder, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkPulled(vdir, []string{"p-sibling"}); err != nil {
+		t.Fatal(err)
+	}
+
+	runHook(t, folder)
+
+	if ops := committed(t, proj); len(ops) == 0 {
+		t.Error("the hook trusted a pass that did not pull its mount")
 	}
 }
 
@@ -251,7 +271,7 @@ func TestDaemonCurrentHoldsTheVolumeLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	release, ok := daemonCurrent(st)
+	release, ok := daemonCurrent(st, proj.ID)
 	if !ok {
 		t.Fatal("daemonCurrent = false beside a current daemon")
 	}

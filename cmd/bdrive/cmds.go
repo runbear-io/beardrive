@@ -92,7 +92,7 @@ list in .bdrive/config.json is never pruned against either.`,
 					if err != nil {
 						return err
 					}
-					if release, ok := daemonCurrent(st); ok {
+					if release, ok := daemonCurrent(st, proj.ID); ok {
 						defer release()
 						return st.SaveNoteForMount(proj.ID, note, noteTTL)
 					}

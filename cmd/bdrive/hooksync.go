@@ -78,23 +78,23 @@ func eventSessionID(data []byte) string {
 	return event.SessionID
 }
 
-// hookPullFresh is how recent the daemon's last pass against the hub must be
-// for a hook to leave the sync to it. The daemon passes every 10 s and on
-// every peer push, so this is three missed passes.
-const hookPullFresh = 30 * time.Second
+// hookPullFresh is how recent the daemon's pulled marker must be for a hook
+// to leave the sync to it. The daemon renews the marker every 5 s while its
+// change stream is alive (daemon.vouchRefresh), so this is two missed renewals.
+const hookPullFresh = 15 * time.Second
 
 // hookCycleWait bounds how long a hook waits for a daemon cycle in flight
 // before running its own cycle, which waits on the same lock unbounded.
 var hookCycleWait = 5 * time.Second
 
 // daemonCurrent reports whether this volume's daemon can stand in for a
-// hook's own cycle: it is running, and that same process completed a pass
-// against the hub within hookPullFresh. The check runs under the volume lock,
-// taken once any cycle in flight has finished, and on true the caller keeps
-// holding it (release) while it reads the store: no daemon cycle can then
-// start between the check and the read, so the files, the inbound spool and
-// the marker the hook sees are one finished pass's result.
-func daemonCurrent(st *store.Store) (release func(), ok bool) {
+// hook's own cycle on mountID: the daemon holding the lock now is the one
+// whose pulled marker lists the mount, renewed within hookPullFresh. The check
+// runs under the volume lock, taken once any cycle in flight has finished, and
+// on true the caller keeps holding it (release) while it reads the store: no
+// daemon cycle can start between the check and the read, so the files, the
+// inbound spool and the marker the hook sees are one finished pass's result.
+func daemonCurrent(st *store.Store, mountID string) (release func(), ok bool) {
 	if _, running := daemon.Running(st.Dir()); !running {
 		return nil, false
 	}
@@ -103,8 +103,8 @@ func daemonCurrent(st *store.Store) (release func(), ok bool) {
 		return nil, false
 	}
 	pid, running := daemon.Running(st.Dir())
-	at, by := store.PulledAt(st.Dir())
-	if !running || pid <= 0 || by != pid || time.Since(at) >= hookPullFresh {
+	p := store.LoadPulled(st.Dir())
+	if !running || pid <= 0 || p.PID != pid || !p.Covers(mountID) || time.Since(p.At) >= hookPullFresh {
 		unlock()
 		return nil, false
 	}
@@ -148,7 +148,7 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// work (the inbound spool, the secret findings, the note it stamps) is
 	// all in the store. Offline is fine — the link formula below is still
 	// valid for teammates who are online.
-	if release, ok := daemonCurrent(sess.Store); ok {
+	if release, ok := daemonCurrent(sess.Store, sess.MountID); ok {
 		defer release()
 	} else {
 		attachRemote(cmd.Context(), sess, proj)

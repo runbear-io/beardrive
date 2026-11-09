@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -66,6 +67,9 @@ type httpBackend struct {
 	token   string // device token from `bdrive login`; empty on open servers
 	device  config.Device
 	hc      *http.Client
+	// lastFrame is when the open change stream last delivered anything,
+	// keepalives included (unix nanoseconds, zero when none is open).
+	lastFrame atomic.Int64
 }
 
 // The id is whatever the hub minted (a UUID today, `p-xxxxxxxx` on older
@@ -609,12 +613,15 @@ func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
 		return nil, httpError(resp)
 	}
 	ch := make(chan struct{}, 1)
+	b.lastFrame.Store(time.Now().UnixNano())
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
+		defer b.lastFrame.Store(0)
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 0, 4096), maxEventLine)
 		for sc.Scan() {
+			b.lastFrame.Store(time.Now().UnixNano())
 			// Only data frames are news. Blank separators and ": keepalive"
 			// comments are how the stream stays open, not something happening.
 			if !bytes.HasPrefix(sc.Bytes(), []byte("data: ")) {
@@ -630,6 +637,15 @@ func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
 		}
 	}()
 	return ch, nil
+}
+
+// StreamFrame reports when the open change stream last delivered a frame,
+// keepalives included; zero when no stream is open. See remote.StreamLiveness.
+func (b *httpBackend) StreamFrame() time.Time {
+	if n := b.lastFrame.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
 }
 
 // Scope asks the hub what this account may write in this project. A hub that

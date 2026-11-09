@@ -1873,6 +1873,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	lastAccess := store.AccessOK
 	var watch <-chan struct{}
 	var watchCancel context.CancelFunc
+	vouch := &pulledVouch{volDir: volDir}
+	vouchCtx, stopVouch := context.WithCancel(ctx)
+	defer stopVouch()
+	go vouch.run(vouchCtx)
 	var nextWatch, watchOpened time.Time
 	var localWatch *localFolderWatcher
 	var localWatchWake <-chan struct{}
@@ -1931,6 +1935,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			watchCancel = nil
 		}
 		watch = nil
+		vouch.streaming(nil)
 	}
 	defer stopWatch()
 	defer stopLocalWatch()
@@ -2082,6 +2087,9 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 					nextWatch = time.Now().Add(watchRetry)
 				} else {
 					watch, watchCancel, watchOpened = ch, cancel, time.Now()
+					if live, ok := be.(remote.StreamLiveness); ok {
+						vouch.streaming(live)
+					}
 				}
 			} else {
 				nextWatch = time.Now().Add(time.Hour) // not a hub; stop asking
@@ -2277,8 +2285,18 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			waitFor = min(waitFor, scanInterval)
 		}
 		lastCycle = time.Now()
-		if ctx.Err() == nil && passPulled(doRemote, be != nil, cycleErr, res) {
-			_ = store.MarkPulled(volDir)
+		if ctx.Err() == nil {
+			// An announcement still queued arrived after this pass pulled, so
+			// the pass does not cover it.
+			if passPulled(doRemote, be != nil, cycleErr, res) && len(watch) == 0 {
+				ids := make([]string, len(targets))
+				for i, t := range targets {
+					ids[i] = t.proj.ID
+				}
+				vouch.passed(ids)
+			} else if doRemote {
+				vouch.withdraw()
+			}
 		}
 
 		switch {
@@ -2379,6 +2397,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 			// A peer pushed. Clear the remote deadline; the common cycle path
 			// drains local events before starting the bounded scan.
+			vouch.withdraw()
 			if hook := workerRemoteWakeHook; hook != nil {
 				hook(volDir)
 			}
@@ -2431,6 +2450,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 								nextWatch = time.Now().Add(watchRetry)
 							}
 						} else {
+							vouch.withdraw()
 							if hook := workerRemoteWakeHook; hook != nil {
 								hook(volDir)
 							}

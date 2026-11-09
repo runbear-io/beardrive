@@ -214,6 +214,13 @@ type Watcher interface {
 	Watch(ctx context.Context) (<-chan struct{}, error)
 }
 
+// StreamLiveness is a Watcher that can tell a quiet stream from a dead one:
+// the hub sends keepalives on an idle stream, so a recent frame of any kind
+// means announcements would still be getting through.
+type StreamLiveness interface {
+	StreamFrame() time.Time
+}
+
 // Open creates a backend from a remote URL.
 func Open(ctx context.Context, raw string) (Backend, error) {
 	u, err := url.Parse(raw)
