@@ -205,6 +205,69 @@ func TestHookWaitsForTheDaemonCycleInFlight(t *testing.T) {
 	}
 }
 
+// A daemon cycle that outlasts the wait cannot vouch for anything yet, so the
+// hook runs its own cycle (which waits for the lock like any cycle).
+func TestHookCyclesWhenTheDaemonCycleOutlastsTheWait(t *testing.T) {
+	folder, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+	markPulled(t, proj, 0)
+	old := hookCycleWait
+	hookCycleWait = 100 * time.Millisecond
+	t.Cleanup(func() { hookCycleWait = old })
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := st.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { runHook(t, folder); close(done) }()
+	time.Sleep(400 * time.Millisecond)
+	unlock()
+	<-done
+
+	if ops := committed(t, proj); len(ops) == 0 {
+		t.Error("the hook trusted the marker while the daemon's cycle was still running")
+	}
+}
+
+// Between the freshness check and the hook's reads no daemon cycle may run:
+// the volume lock stays held until the caller releases it.
+func TestDaemonCurrentHoldsTheVolumeLock(t *testing.T) {
+	_, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+	markPulled(t, proj, 0)
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, ok := daemonCurrent(st)
+	if !ok {
+		t.Fatal("daemonCurrent = false beside a current daemon")
+	}
+	other, _ := store.Open(vdir)
+	if unlock, locked := other.LockWithin(50 * time.Millisecond); locked {
+		unlock()
+		t.Fatal("a cycle could take the volume lock while the hook was reading")
+	}
+	release()
+	unlock, locked := other.LockWithin(time.Second)
+	if !locked {
+		t.Fatal("the volume lock stayed held after release")
+	}
+	unlock()
+}
+
 // The after-edit hook beside a daemon that has stopped reaching the hub must
 // sync the edit itself.
 func TestDeferredSyncCyclesBesideAStaleDaemon(t *testing.T) {

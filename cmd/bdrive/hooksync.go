@@ -83,23 +83,32 @@ func eventSessionID(data []byte) string {
 // every peer push, so this is three missed passes.
 const hookPullFresh = 30 * time.Second
 
-// hookCycleWait bounds how long a hook waits for a daemon cycle in flight.
-// The hook's own cycle would wait on the same lock with no bound at all.
-const hookCycleWait = 5 * time.Second
+// hookCycleWait bounds how long a hook waits for a daemon cycle in flight
+// before running its own cycle, which waits on the same lock unbounded.
+var hookCycleWait = 5 * time.Second
 
 // daemonCurrent reports whether this volume's daemon can stand in for a
-// hook's own cycle: it is running, any cycle it has in flight has finished,
-// and that same process completed a pass against the hub within
-// hookPullFresh. Waiting out the cycle in flight is what makes the files and
-// the inbound spool the hook reads afterward the pass's finished result.
-func daemonCurrent(st *store.Store) bool {
-	pid, running := daemon.Running(st.Dir())
-	if !running || pid <= 0 {
-		return false
+// hook's own cycle: it is running, and that same process completed a pass
+// against the hub within hookPullFresh. The check runs under the volume lock,
+// taken once any cycle in flight has finished, and on true the caller keeps
+// holding it (release) while it reads the store: no daemon cycle can then
+// start between the check and the read, so the files, the inbound spool and
+// the marker the hook sees are one finished pass's result.
+func daemonCurrent(st *store.Store) (release func(), ok bool) {
+	if _, running := daemon.Running(st.Dir()); !running {
+		return nil, false
 	}
-	st.WaitUnlocked(hookCycleWait)
+	unlock, locked := st.LockWithin(hookCycleWait)
+	if !locked {
+		return nil, false
+	}
+	pid, running := daemon.Running(st.Dir())
 	at, by := store.PulledAt(st.Dir())
-	return by == pid && time.Since(at) < hookPullFresh
+	if !running || pid <= 0 || by != pid || time.Since(at) >= hookPullFresh {
+		unlock()
+		return nil, false
+	}
+	return unlock, true
 }
 
 // hookSync is one mount's contribution to the turn: where its files live on
@@ -139,7 +148,9 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// work (the inbound spool, the secret findings, the note it stamps) is
 	// all in the store. Offline is fine — the link formula below is still
 	// valid for teammates who are online.
-	if !daemonCurrent(sess.Store) {
+	if release, ok := daemonCurrent(sess.Store); ok {
+		defer release()
+	} else {
 		attachRemote(cmd.Context(), sess, proj)
 		if _, err := sess.Cycle(cmd.Context()); err != nil {
 			return hookSync{}, false // never break the turn
