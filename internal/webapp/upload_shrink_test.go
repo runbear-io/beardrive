@@ -101,10 +101,11 @@ func TestSharpShrink(t *testing.T) {
 }
 
 /*
-A room cleared on purpose cannot confirm it — nobody in a live room writes
+A room cut down on purpose cannot confirm it — nobody in a live room writes
 
-	for themselves — so when the room empties, its text is parked beside the
-	file rather than dropped with the room.
+	for themselves — so when the room empties, what is left in it is parked
+	beside the file rather than dropped with the room. A room cleared to
+	nothing has nothing to park; see TestRoomNeverParksEmptyText.
 */
 func TestFinalSnapshotParksARefusedShrink(t *testing.T) {
 	srv, p, _ := newHub(t, true, nil)
@@ -121,7 +122,10 @@ func TestFinalSnapshotParksARefusedShrink(t *testing.T) {
 	srv.rooms().load(room, doc)
 	srv.rooms().writer(room, User{Email: "editor@example.com", Name: "An Editor"})
 	txt := doc.GetText("body")
-	doc.Transact(func(txn *crdt.Transaction) { txt.Delete(txn, 0, txt.Len()) })
+	doc.Transact(func(txn *crdt.Transaction) {
+		txt.Delete(txn, 0, txt.Len())
+		txt.Insert(txn, 0, "one line typed after clearing the rest\n", nil)
+	})
 
 	conflicts := func() int {
 		var out struct {
@@ -199,7 +203,10 @@ func TestRefusedShrinkCopyIsRetriedAfterTheRoomCloses(t *testing.T) {
 	srv.rooms().load(room, doc)
 	srv.rooms().writer(room, User{Email: "editor@example.com", Name: "An Editor"})
 	txt := doc.GetText("body")
-	doc.Transact(func(txn *crdt.Transaction) { txt.Delete(txn, 0, txt.Len()) })
+	doc.Transact(func(txn *crdt.Transaction) {
+		txt.Delete(txn, 0, txt.Len())
+		txt.Insert(txn, 0, "one line typed after clearing the rest\n", nil)
+	})
 
 	// The snapshot itself gets through to its 422; every write after it fails
 	// until the copy has been refused more than once.
