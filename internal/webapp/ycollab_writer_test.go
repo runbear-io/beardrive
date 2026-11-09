@@ -153,6 +153,34 @@ func TestRoomMergesAroundAnOutsideRewrite(t *testing.T) {
 	}
 }
 
+// A daily note gets appended to from both sides at once: an agent adds a line
+// at the end while someone types one at the end. Neither replaced anything,
+// so both lines stay and nothing is parked.
+func TestRoomKeepsBothAppendsWhenAnAgentAppendsToo(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "# daily\n- first\n", "")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
+
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "# daily\n- first\n- agent line\n", ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d %s", rec.Code, rec.Body.String())
+	}
+	typeInto(doc, "- typed line\n")
+
+	if !waitFile(t, h, url, "# daily\n- first\n- agent line\n- typed line\n", 2*time.Second) {
+		t.Fatalf("file = %q, want both appended lines", get(t, h, url).Body.String())
+	}
+	if n := conflictCopies(t, h, p.ID); n != 0 {
+		t.Fatalf("%d conflict copies for two appends", n)
+	}
+	typeInto(doc, "- more\n")
+	if !waitFile(t, h, url, "# daily\n- first\n- agent line\n- typed line\n- more\n", 2*time.Second) {
+		t.Fatalf("the agent's line did not survive the next snapshot: file is %q", get(t, h, url).Body.String())
+	}
+}
+
 func TestRoomParksItsVersionWhenSomeoneOutsideWrote(t *testing.T) {
 	fastRoom(t, 100*time.Millisecond, time.Second)
 	srv, p, _ := newHub(t, true, nil)
@@ -180,9 +208,13 @@ func TestRoomParksItsVersionWhenSomeoneOutsideWrote(t *testing.T) {
 		t.Fatal("the room's version was refused and then dropped: no conflict copy beside the file")
 	}
 
-	// Rebased: the next snapshot is not refused for the same stale base.
+	// The room now holds their version, so the next snapshot builds on it
+	// instead of writing the parked text back over it.
+	if got := txt.ToString(); got != "REWRITTEN BY AN AGENT\n" {
+		t.Fatalf("after parking, the room holds %q, not the file", got)
+	}
 	typeInto(doc, "more\n")
-	if !waitFile(t, h, url, "typed in the room\nmore\n", 2*time.Second) {
+	if !waitFile(t, h, url, "REWRITTEN BY AN AGENT\nmore\n", 2*time.Second) {
 		t.Fatalf("after parking, the room never recovered the pen: file is %q", get(t, h, url).Body.String())
 	}
 }

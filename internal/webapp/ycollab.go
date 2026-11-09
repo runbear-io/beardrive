@@ -847,19 +847,10 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		}
 	}
 	park := func() {
-		if strings.TrimSpace(text) == "" {
-			// Nothing to keep; the room still steps off their version.
-			if whole {
-				s.rooms().rebase(room, theirSha)
-			} else {
-				s.rooms().yield(room, theirSha)
-			}
-			return
-		}
 		// parkCopy owns the text from here and retries a failing store, so
 		// the room can move onto their version without it being the only
 		// place the text lives.
-		if !s.rooms().isParked(room, text) {
+		if strings.TrimSpace(text) != "" && !s.rooms().isParked(room, text) {
 			s.rooms().park(room, text)
 			s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
 		}
@@ -869,7 +860,11 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 			s.rooms().yield(room, theirSha)
 			return
 		}
-		s.rooms().rebase(room, theirSha)
+		// The document takes their version, not just the base: built on
+		// their version while still holding the room's text, the next pause
+		// would write the room's text over theirs, conditional on it and so
+		// accepted.
+		s.moveDoc(ctx, room, text, theirs, theirSha, final)
 	}
 	if !ok {
 		park()
@@ -887,40 +882,47 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 				theirSha = sha
 			}
 		}
-		// The document moves with the base, or a room reopened before it
-		// unloads would write its old text over this version. Nobody is
-		// connected to a room in its final snapshot, and ydocs().Apply
-		// would open the room again, so the held document is spliced
-		// directly. Typed into since, it keeps its base and is settled
-		// against this version on its next snapshot.
+		s.moveDoc(ctx, room, text, target, theirSha, true)
+		return
+	}
+	if s.moveDoc(ctx, room, text, target, theirSha, false) && target == text {
+		s.snapshotRoom(ctx, room)
+	}
+}
+
+// moveDoc brings a room's document from text to the version sha holds, as one
+// edit, and rebases the room onto sha, reporting whether it did. A document
+// typed into since it read text is left alone with its base: that typing is
+// in neither version, and the next pause settles it against sha again.
+//
+// The document has to move with the base, or a room reopened before it
+// unloads would write its old text over this version. Nobody is connected to
+// a room in its final snapshot, and ydocs().Apply would open the room again,
+// so a final move splices the held document directly.
+func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, final bool) bool {
+	moved := false
+	if final {
 		if doc, _, held := s.rooms().get(room); held {
 			txt := doc.GetText("body")
 			if txt.ToString() == text {
-				spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, text, target)
-				s.rooms().rebase(room, theirSha)
+				spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, text, to)
+				moved = true
 			}
 		}
-		return
+	} else {
+		_ = s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := doc.GetText("body")
+			if txt.ToString() != text {
+				return
+			}
+			spliceVia(transact, txt, text, to)
+			moved = true
+		})
 	}
-	applied := false
-	_ = s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		txt := doc.GetText("body")
-		// Typing since the snapshot read the document is not in the merge;
-		// leave the document alone and merge again on the next pause.
-		if txt.ToString() != text {
-			return
-		}
-		spliceVia(transact, txt, text, target)
-		applied = true
-	})
-	if applied || target == text {
-		// The document is now built on their version; the next pause
-		// writes it there, conditional on it.
-		s.rooms().rebase(room, theirSha)
-		if target == text {
-			s.snapshotRoom(ctx, room)
-		}
+	if moved {
+		s.rooms().rebase(room, sha)
 	}
+	return moved
 }
 
 // appendNew is file followed by the lines of text the file does not already
