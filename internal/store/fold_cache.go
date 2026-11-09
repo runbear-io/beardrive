@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding"
@@ -630,36 +631,197 @@ func (s *Store) JournalPrefixAt(device string, opCount int64) (byteOffset int64,
 	if opCount < 0 {
 		return 0, "", false
 	}
-	raw, err := os.ReadFile(s.JournalPath(device))
+	f, err := os.Open(s.JournalPath(device))
 	if err != nil {
 		return 0, "", false
 	}
+	defer f.Close()
 	if opCount == 0 {
 		sum := sha256.Sum256(nil)
 		return 0, hex.EncodeToString(sum[:]), true
 	}
-	var found int64
-	var lineStart int64
-	for i, b := range raw {
-		if b != '\n' {
-			continue
+	r := bufio.NewReader(f)
+	h := sha256.New()
+	var found, offset int64
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if len(line) == 0 || line[len(line)-1] != '\n' {
+			break
 		}
-		line := bytes.TrimSpace(raw[lineStart:int64(i)])
-		lineStart = int64(i + 1)
-		if len(line) == 0 {
-			continue
+		_, _ = h.Write(line)
+		offset += int64(len(line))
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) > 0 {
+			var op journal.Op
+			if json.Unmarshal(trimmed, &op) == nil && (op.Kind == journal.KindPut || op.Kind == journal.KindDelete) {
+				found++
+				if found == opCount {
+					return offset, hex.EncodeToString(h.Sum(nil)), true
+				}
+			}
 		}
-		var op journal.Op
-		if json.Unmarshal(line, &op) != nil || (op.Kind != journal.KindPut && op.Kind != journal.KindDelete) {
-			continue
-		}
-		found++
-		if found == opCount {
-			sum := sha256.Sum256(raw[:lineStart])
-			return lineStart, hex.EncodeToString(sum[:]), true
+		if rerr != nil {
+			break
 		}
 	}
 	return 0, "", false
+}
+
+func (s *Store) JournalPrefixStat(device string) (size int64, shaHex string, endsNewline bool, ok bool) {
+	lp := s.JournalPath(device)
+	id, err := statFileID(lp)
+	if err != nil || id.size <= 0 {
+		return 0, "", false, false
+	}
+	s.mu.Lock()
+	entry, has := s.folds[device]
+	if has && (!entry.Racy || entry.VerifiedInCycle) && entry.ID == id {
+		sum := entry.ContentSHA256
+		endsNL := entry.TailCheckLen > 0 && entry.TailCheck[entry.TailCheckLen-1] == '\n'
+		s.mu.Unlock()
+		return id.size, hex.EncodeToString(sum[:]), endsNL, true
+	}
+	s.mu.Unlock()
+	f, err := os.Open(lp)
+	if err != nil {
+		return 0, "", false, false
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, id.size))
+	if err != nil || n != id.size {
+		return 0, "", false, false
+	}
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], id.size-1); err != nil {
+		return 0, "", false, false
+	}
+	return id.size, hex.EncodeToString(h.Sum(nil)), last[0] == '\n', true
+}
+
+func (s *Store) AppendValidatedPeerTail(device string, prevStat os.FileInfo, localSize int64, tailData []byte, fresh []journal.Op) bool {
+	if prevStat == nil || prevStat.Size() != localSize || localSize <= 0 || len(tailData) == 0 {
+		return false
+	}
+	entry, err := s.getOrLoadDeviceFold(device)
+	if err != nil || entry == nil {
+		return false
+	}
+	s.mu.Lock()
+	if entry.ID.size != localSize || entry.ID.mtimeNS != prevStat.ModTime().UnixNano() ||
+		entry.TailCheckLen == 0 || entry.TailCheck[entry.TailCheckLen-1] != '\n' ||
+		entry.MonotonicDevice == "*" {
+		s.mu.Unlock()
+		return false
+	}
+	dev := entry.MonotonicDevice
+	maxSeq := entry.MaxSeq
+	hasOps := entry.OpCount > 0
+	for _, op := range fresh {
+		if op.Kind != journal.KindPut && op.Kind != journal.KindDelete {
+			continue
+		}
+		if op.Device == "" {
+			s.mu.Unlock()
+			return false
+		}
+		if dev == "" {
+			dev = op.Device
+		} else if dev != op.Device {
+			s.mu.Unlock()
+			return false
+		}
+		if op.Seq <= 0 || (hasOps && op.Seq <= maxSeq) {
+			s.mu.Unlock()
+			return false
+		}
+		hasOps = true
+		maxSeq = op.Seq
+	}
+	s.mu.Unlock()
+
+	lp := s.JournalPath(device)
+	src, err := os.Open(lp)
+	if err != nil {
+		return false
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(lp), ".bdrive-tmp-")
+	if err != nil {
+		src.Close()
+		return false
+	}
+	tmpName := tmp.Name()
+	copied, cerr := io.Copy(tmp, io.LimitReader(src, localSize))
+	src.Close()
+	if cerr != nil || copied != localSize {
+		tmp.Close()
+		_ = os.Remove(tmpName)
+		return false
+	}
+	if _, werr := tmp.Write(tailData); werr != nil {
+		tmp.Close()
+		_ = os.Remove(tmpName)
+		return false
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpName)
+		return false
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return false
+	}
+	if err := os.Rename(tmpName, lp); err != nil {
+		_ = os.Remove(tmpName)
+		return false
+	}
+	postID, postErr := statFileID(lp)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cachedFoldOK = false
+	if postErr != nil || postID.size != localSize+int64(len(tailData)) {
+		delete(s.folds, device)
+		_ = os.Remove(s.foldPath(device))
+		return true
+	}
+	cur, ok := s.folds[device]
+	if !ok || cur != entry || len(entry.HashState) == 0 {
+		delete(s.folds, device)
+		_ = os.Remove(s.foldPath(device))
+		return true
+	}
+	h := sha256.New()
+	if um, ok := h.(encoding.BinaryUnmarshaler); !ok || um.UnmarshalBinary(entry.HashState) != nil {
+		delete(s.folds, device)
+		_ = os.Remove(s.foldPath(device))
+		return true
+	}
+	_, _ = h.Write(tailData)
+	copy(entry.ContentSHA256[:], h.Sum(nil))
+	if tailData[len(tailData)-1] == '\n' {
+		if bm, ok := h.(encoding.BinaryMarshaler); ok {
+			entry.HashState, _ = bm.MarshalBinary()
+		} else {
+			entry.HashState = nil
+		}
+	} else {
+		entry.HashState = nil
+	}
+	_, cps := journal.ParseWithCheckpoints(tailData, 1)
+	_ = appendCheckpoints(entry, localSize, fresh, cps)
+	foldOpsInto(entry, fresh)
+	if len(entry.Winners) > maxCachedWinnersTotal {
+		delete(s.folds, device)
+		_ = os.Remove(s.foldPath(device))
+		return true
+	}
+	entry.ID = postID
+	entry.TailCheck, entry.TailCheckLen = tailBytesFromEnd(entry, tailData)
+	entry.DirtySidecar = true
+	entry.VerifiedInCycle = true
+	entry.gen = s.bumpGenLocked()
+	return true
 }
 
 func (s *Store) CanFastAppendPeer(device string, prevStat os.FileInfo, localBytes []byte, fresh []journal.Op) bool {

@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -1358,72 +1359,149 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 	}
 	defer s.lockPath(project, key)()
 	s.reconcileGrants(r.Context(), project, rs.Backend)
+	tailSeqs := make(map[int64]bool, len(tailOps))
+	for _, op := range tailOps {
+		if op.Seq <= 0 || tailSeqs[op.Seq] {
+			http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
+			return
+		}
+		tailSeqs[op.Seq] = true
+	}
 	const attempts = 5
 	var storedMax int64
 	written := false
 	for range attempts {
-		existing, ver, rerr := readVersioned(r.Context(), cp, key)
+		rc, ver, rerr := cp.GetVersioned(r.Context(), key)
+		absent := false
 		if rerr != nil {
-			storageErr(w, http.StatusBadGateway, "could not read the stored journal", rerr)
-			return
-		}
-		// A response can be lost after the conditional write landed. Recognize
-		// its exact tail before checking the prefix or charging another write.
-		if prevSize <= int64(len(existing)) && int64(len(existing))-prevSize == size &&
-			bytes.Equal(existing[prevSize:], tailBytes) {
-			prefixOK := true
-			if prevSHA != "" {
-				sum := sha256.Sum256(existing[:prevSize])
-				prefixOK = hex.EncodeToString(sum[:]) == prevSHA
-			}
-			if prefixOK {
-				writeJSON(w, map[string]any{"ok": true})
+			if remote.IsNotExist(rerr) {
+				absent = true
+				ver = remote.VersionAbsent
+			} else {
+				storageErr(w, http.StatusBadGateway, "could not read the stored journal", rerr)
 				return
 			}
 		}
-		if int64(len(existing)) != prevSize {
+		outTmp, terr := os.CreateTemp("", "bdrive-append-*")
+		if terr != nil {
+			if rc != nil {
+				rc.Close()
+			}
+			storageErr(w, http.StatusBadGateway, "could not store the object", terr)
+			return
+		}
+		cleanupTmp := func() {
+			outTmp.Close()
+			os.Remove(outTmp.Name())
+		}
+		h := sha256.New()
+		var prefixRead int64
+		var lastByte byte = '\n'
+		var rem []byte
+		seqCollision := false
+		var parseErr error
+		storedMax = 0
+		if !absent {
+			br := bufio.NewReader(io.LimitReader(rc, prevSize))
+			for {
+				line, lerr := br.ReadBytes('\n')
+				if len(line) > 0 {
+					prefixRead += int64(len(line))
+					lastByte = line[len(line)-1]
+					_, _ = h.Write(line)
+					if _, werr := outTmp.Write(line); werr != nil {
+						rc.Close()
+						cleanupTmp()
+						storageErr(w, http.StatusBadGateway, "could not store the object", werr)
+						return
+					}
+					trimmed := bytes.TrimSpace(line)
+					if len(trimmed) > 0 {
+						var op journal.Op
+						if err := json.Unmarshal(trimmed, &op); err != nil {
+							if parseErr == nil {
+								parseErr = err
+							}
+						} else {
+							if op.Seq > storedMax {
+								storedMax = op.Seq
+							}
+							if tailSeqs[op.Seq] {
+								seqCollision = true
+							}
+						}
+					}
+				}
+				if lerr != nil {
+					if !errors.Is(lerr, io.EOF) {
+						rc.Close()
+						cleanupTmp()
+						storageErr(w, http.StatusBadGateway, "could not read the stored journal", lerr)
+						return
+					}
+					break
+				}
+			}
+			var remErr error
+			rem, remErr = io.ReadAll(io.LimitReader(rc, size+1))
+			rc.Close()
+			if remErr != nil {
+				cleanupTmp()
+				storageErr(w, http.StatusBadGateway, "could not read the stored journal", remErr)
+				return
+			}
+		}
+		prefixHashOK := prevSHA == "" || hex.EncodeToString(h.Sum(nil)) == prevSHA
+		if prefixRead == prevSize && int64(len(rem)) == size && bytes.Equal(rem, tailBytes) && prefixHashOK {
+			cleanupTmp()
+			writeJSON(w, map[string]any{"ok": true})
+			return
+		}
+		if prefixRead != prevSize || len(rem) != 0 || !prefixHashOK {
+			cleanupTmp()
 			http.Error(w, "journal prefix mismatch", http.StatusConflict)
 			return
 		}
-		if prevSHA != "" {
-			sum := sha256.Sum256(existing)
-			if hex.EncodeToString(sum[:]) != prevSHA {
-				http.Error(w, "journal prefix mismatch", http.StatusConflict)
-				return
-			}
+		if parseErr != nil {
+			cleanupTmp()
+			storageErr(w, http.StatusBadGateway, "could not parse the stored journal", parseErr)
+			return
 		}
-		var storedOps []journal.Op
-		if len(existing) > 0 {
-			storedOps, err = journal.Parse(existing)
-			if err != nil {
-				storageErr(w, http.StatusBadGateway, "could not parse the stored journal", err)
-				return
-			}
-		}
-		allOps := append(append([]journal.Op(nil), storedOps...), tailOps...)
-		ok, maxSeq, held := journalKeepsOps(storedOps, allOps)
-		if !ok {
+		if seqCollision {
+			cleanupTmp()
 			http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
 			return
 		}
-		storedMax = maxSeq
-		if !s.opsWithinScope(w, r, allOps, held) {
-			return
-		}
-		if !storedKeepsReplayIdentity(storedOps, allOps) {
-			http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
+		if !s.opsWithinScope(w, r, tailOps, nil) {
+			cleanupTmp()
 			return
 		}
 		if err := s.quota().CheckWrite(org, size+s.reservedBytes(org)); err != nil {
+			cleanupTmp()
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-		newJournal := append([]byte(nil), existing...)
-		if len(newJournal) > 0 && newJournal[len(newJournal)-1] != '\n' {
-			newJournal = append(newJournal, '\n')
+		totalLen := prevSize + size
+		if prevSize > 0 && lastByte != '\n' {
+			if _, werr := outTmp.Write([]byte{'\n'}); werr != nil {
+				cleanupTmp()
+				storageErr(w, http.StatusBadGateway, "could not store the object", werr)
+				return
+			}
+			totalLen++
 		}
-		newJournal = append(newJournal, tailBytes...)
-		_, err = cp.PutIf(r.Context(), key, bytes.NewReader(newJournal), int64(len(newJournal)), ver)
+		if _, werr := outTmp.Write(tailBytes); werr != nil {
+			cleanupTmp()
+			storageErr(w, http.StatusBadGateway, "could not store the object", werr)
+			return
+		}
+		if _, serr := outTmp.Seek(0, io.SeekStart); serr != nil {
+			cleanupTmp()
+			storageErr(w, http.StatusBadGateway, "could not store the object", serr)
+			return
+		}
+		_, err = cp.PutIf(r.Context(), key, outTmp, totalLen, ver)
+		cleanupTmp()
 		if errors.Is(err, remote.ErrVersionMismatch) {
 			continue
 		}

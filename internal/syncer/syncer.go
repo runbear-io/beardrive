@@ -891,7 +891,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			if !s.stillHold(op, cache) {
 				continue // we cannot stand behind what this folder does not hold
 			}
-			if filter.Skip(op.Path) || neverSync(op.Path) || unsafeRel(op.Path) {
+			if filter.Skip(op.Path) || neverSync(op.Path) || unsafeRel(op.Path) || s.readOnlyPath(op.Path) || s.deniedPath(op.Path) {
 				// The filter is applied symmetrically in scan and materialize
 				// precisely so a path this device refuses to write is also one
 				// it never publishes. This is a third publishing site and owes
@@ -1634,33 +1634,43 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		var data []byte
 		haveData := false
 		prevFi, _ := os.Stat(lp)
-		local, readErr := os.ReadFile(lp)
-		if readErr != nil && !os.IsNotExist(readErr) {
-			log.Printf("beardrive: skipping journal %s this cycle: %v", dev, readErr)
-			continue
-		}
-		if int64(len(local)) == localSize && localSize > 0 {
+		if localSize > 0 {
 			if tg, ok := s.Backend.(remote.JournalTailGetter); ok {
-				sum := sha256.Sum256(local)
-				rc, appended, tailErr := tg.GetJournalTail(ctx, o.Key, localSize, hex.EncodeToString(sum[:]))
-				if tailErr == nil {
-					limit := pullBound(o.Size)
-					if appended {
-						limit = pullBound(o.Size - localSize)
-					}
-					data, err = io.ReadAll(io.LimitReader(rc, limit))
-					rc.Close()
-					if err != nil {
-						return newOps, gone, err
-					}
-					if err == nil {
-						haveData = true
+				if statSize, prefixSHA, endsNL, statOK := s.Store.JournalPrefixStat(dev); statOK && statSize == localSize {
+					rc, appended, tailErr := tg.GetJournalTail(ctx, o.Key, localSize, prefixSHA)
+					if tailErr == nil {
+						limit := pullBound(o.Size)
 						if appended {
-							data = append(append([]byte(nil), local...), data...)
+							limit = pullBound(max(int64(0), o.Size-localSize))
+						}
+						fetched, rerr := io.ReadAll(io.LimitReader(rc, limit))
+						rc.Close()
+						if rerr != nil {
+							return newOps, gone, rerr
+						}
+						if appended {
+							if len(fetched) == 0 {
+								continue
+							}
+							if endsNL {
+								fresh, perr := journal.Parse(fetched)
+								if perr == nil && s.Store.AppendValidatedPeerTail(dev, prevFi, localSize, fetched, fresh) {
+									newOps = append(newOps, fresh...)
+									continue
+								}
+							}
+						} else {
+							data = fetched
+							haveData = true
 						}
 					}
 				}
 			}
+		}
+		local, readErr := os.ReadFile(lp)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			log.Printf("beardrive: skipping journal %s this cycle: %v", dev, readErr)
+			continue
 		}
 		if !haveData {
 			rc, getErr := s.Backend.Get(ctx, o.Key)
@@ -2789,14 +2799,23 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 
 	if st.PushedOps > 0 && st.PushedOps < int64(len(myOps)) {
 		if ap, ok := s.Backend.(remote.JournalAppender); ok {
-			if off, prevSHA, ok := s.Store.JournalPrefixAt(s.Device.ID, st.PushedOps); ok {
-				raw, err := os.ReadFile(s.Store.JournalPath(s.Device.ID))
+			if off, prevSHA, ok := s.Store.JournalPrefixAt(s.Device.ID, st.PushedOps); ok && off >= 0 {
+				jf, err := os.Open(s.Store.JournalPath(s.Device.ID))
 				if err != nil {
 					return err
 				}
-				if off >= 0 && int64(len(raw)) > off {
+				_, serr := jf.Seek(off, io.SeekStart)
+				tailData, rerr := io.ReadAll(jf)
+				jf.Close()
+				if serr != nil {
+					return serr
+				}
+				if rerr != nil {
+					return rerr
+				}
+				if len(tailData) > 0 {
 					err := ap.AppendJournal(ctx, remote.JournalAppendRequest{
-						Device: s.Device.ID, PrevSize: off, PrevSHA256: prevSHA, Data: raw[off:],
+						Device: s.Device.ID, PrevSize: off, PrevSHA256: prevSHA, Data: tailData,
 					})
 					if err == nil {
 						st.PushedOps = int64(len(myOps))

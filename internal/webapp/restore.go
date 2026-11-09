@@ -96,7 +96,9 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	var cb *commitBase
 	if cur, ok := files[p]; ok {
-		cb = &commitBase{path: p, sha: cur.Blob, link: cur.Link, blob: req.SHA}
+		cb = &commitBase{path: p, sha: cur.Blob, link: cur.Link, mustExist: true, blob: req.SHA}
+	} else {
+		cb = &commitBase{path: p, mustBeAbsent: true, blob: req.SHA}
 	}
 	// The blob is already stored, so a restore adds no bytes — but an org
 	// whose plan is blocked must still be blocked from writing.

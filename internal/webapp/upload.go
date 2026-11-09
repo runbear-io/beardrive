@@ -218,12 +218,14 @@ func (r *RemoteSource) commitIfBase(ctx context.Context, p, blob string, size in
 // snapshot that another hub process's write can postdate: both pass, both
 // append, and the later lamport silently replaces the other's content.
 type commitBase struct {
-	path      string
-	sha       string // the blob version the writer read (empty for symlink)
-	link      string // the symlink target the writer read (empty for regular file)
-	blob      string // what it writes: finding that already there is no conflict
-	writeLink string // symlink target it writes: finding that already there is no conflict
-	extra     []commitBase
+	path         string
+	sha          string // the blob version the writer read (empty for symlink)
+	link         string // the symlink target the writer read (empty for regular file)
+	mustExist    bool   // when true, a missing/deleted path (!ok) is a staleWriteError
+	mustBeAbsent bool   // when true, the path was absent when read and must remain absent (or match target)
+	blob         string // what it writes: finding that already there is no conflict
+	writeLink    string // symlink target it writes: finding that already there is no conflict
+	extra        []commitBase
 }
 
 // staleWriteError is a write whose base no longer holds. head is the version
@@ -233,8 +235,7 @@ type staleWriteError struct{ head string }
 func (e *staleWriteError) Error() string { return "this file changed since you last read it" }
 
 // holds reports whether the path still resolves to the base in the fold of
-// all, through the same replay the tree uses. A path that no longer resolves
-// holds, as it always has at the handler: a base binds a file that exists.
+// all, through the same replay the tree uses.
 func (b *commitBase) holds(all []journal.Op) error {
 	bases := append([]commitBase{*b}, b.extra...)
 	for _, base := range bases {
@@ -246,9 +247,25 @@ func (b *commitBase) holds(all []journal.Op) error {
 		}
 		journal.Sort(ops)
 		fi, ok := foldFiles(ops)[base.path]
-		matchesBase := fi.Blob == base.sha && fi.Link == base.link
 		matchesTarget := (base.blob != "" || base.writeLink != "") && fi.Blob == base.blob && fi.Link == base.writeLink
-		if !ok || matchesBase || matchesTarget {
+		if !ok {
+			if base.mustExist {
+				return &staleWriteError{head: ""}
+			}
+			continue
+		}
+		if base.mustBeAbsent {
+			if matchesTarget {
+				continue
+			}
+			head := fi.Blob
+			if head == "" {
+				head = fi.Link
+			}
+			return &staleWriteError{head: head}
+		}
+		matchesBase := fi.Blob == base.sha && fi.Link == base.link
+		if matchesBase || matchesTarget {
 			continue
 		}
 		head := fi.Blob

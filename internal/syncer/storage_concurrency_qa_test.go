@@ -557,4 +557,31 @@ func TestQA_RedefinesAppliedDetectsBaseMutation(t *testing.T) {
 	if string(storedBefore) != lineA {
 		t.Fatalf("local peer journal was overwritten by same-size rewrite: %q", string(storedBefore))
 	}
+
+	// A peer withdrawing an applied op under a read-only path must not cause a
+	// read-only / folder-restricted client to re-assert the op into its own journal.
+	roLine1 := secfx7Op(t, "peer-ro", 1, journal.KindPut, "ro/doc.txt", shaA, len(contentA)) + "\n"
+	roLine2 := secfx7Op(t, "peer-ro", 2, journal.KindPut, "other.txt", shaB, len(contentB)) + "\n"
+	secfx4Journal(t, remoteStore, "peer-ro", roLine1+roLine2)
+	cycle(t, victim)
+	stRO, err := victim.Store.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stRO.ReadOnly = []string{"ro/"}
+	if err := victim.Store.SaveSync(stRO); err != nil {
+		t.Fatal(err)
+	}
+	roLine3 := secfx7Op(t, "peer-ro", 3, journal.KindPut, "other2.txt", shaB, len(contentB)) + "\n"
+	secfx4Journal(t, remoteStore, "peer-ro", "{corrupt-line\n"+roLine2+roLine3)
+	cycle(t, victim)
+	ownOps, err := victim.Store.DeviceOps(victim.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ownOps {
+		if strings.HasPrefix(op.Path, "ro/") {
+			t.Fatalf("victim re-asserted read-only path into own journal: %+v", op)
+		}
+	}
 }

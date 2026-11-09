@@ -284,6 +284,9 @@ func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request
 		if cur, ok := files[op.Path]; ok {
 			cb.sha = cur.Blob
 			cb.link = cur.Link
+			cb.mustExist = op.Kind == journal.KindPut
+		} else {
+			cb.mustBeAbsent = true
 		}
 		if first {
 			*base = cb

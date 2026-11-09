@@ -314,6 +314,35 @@ func TestQA_C14_RestoreRemoveUndoStaleBaseConflict(t *testing.T) {
 			t.Fatalf("symlink restore conflict error = %v, want staleWriteError", err)
 		}
 	}
+
+	// Restore CAS must also reject transitions to/from an absent/deleted path:
+	// 1. Existing path concurrently deleted before restore commits (mustExist).
+	if err := rs.appendOp(context.Background(), journal.Op{Kind: journal.KindPut, Path: "vanish-race.md", Blob: qaHexSHA(raceCurrent), Size: int64(len(raceCurrent))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.appendOp(context.Background(), journal.Op{Kind: journal.KindDelete, Path: "vanish-race.md"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rs.commitIfBase(context.Background(), "vanish-race.md", qaHexSHA(raceOld), int64(len(raceOld)), User{}, "restore over concurrent delete", &commitBase{path: "vanish-race.md", sha: qaHexSHA(raceCurrent), mustExist: true, blob: qaHexSHA(raceOld)}); err == nil {
+		t.Fatal("commitIfBase resurrected a file that was concurrently deleted")
+	} else {
+		var stale *staleWriteError
+		if !errors.As(err, &stale) {
+			t.Fatalf("concurrent-delete restore conflict error = %v, want staleWriteError", err)
+		}
+	}
+	// 2. Absent path concurrently created before restore commits (mustBeAbsent).
+	if err := peer.appendOp(context.Background(), journal.Op{Kind: journal.KindPut, Path: "created-race.md", Blob: externalSHA, Size: int64(len(external))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rs.commitIfBase(context.Background(), "created-race.md", qaHexSHA(raceOld), int64(len(raceOld)), User{}, "restore over concurrent create", &commitBase{path: "created-race.md", mustBeAbsent: true, blob: qaHexSHA(raceOld)}); err == nil {
+		t.Fatal("commitIfBase overwrote a file that was concurrently created on an absent path")
+	} else {
+		var stale *staleWriteError
+		if !errors.As(err, &stale) {
+			t.Fatalf("concurrent-create restore conflict error = %v, want staleWriteError", err)
+		}
+	}
 }
 
 func TestQA_C15_C16_C17_FilteredCacheLRUEvictionAndDataIndexFallback(t *testing.T) {
