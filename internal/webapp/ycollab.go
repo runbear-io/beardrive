@@ -845,6 +845,15 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		if both := appendNew(theirs, text); len(both) < maxSeedBytes {
 			target, ok = both, true
 		}
+	case haveBase && strings.HasSuffix(baseText, "\n") &&
+		strings.HasPrefix(theirs, baseText) && strings.HasPrefix(text, baseText):
+		// Both sides only added to the end: an agent appending to a daily
+		// note while somebody types at its foot. The line merge has no order
+		// for two insertions at one point; this room is the file's only
+		// writer, so it picks one: theirs, then what the room added.
+		if both := appendNew(theirs, text); len(both) < maxSeedBytes {
+			target, ok = both, true
+		}
 	}
 	park := func() {
 		// parkCopy owns the text from here and retries a failing store, so

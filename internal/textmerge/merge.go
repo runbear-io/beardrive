@@ -34,12 +34,6 @@ func Merge(base, a, b []byte) ([]byte, bool) {
 	if overlaps(ca, cb) {
 		return nil, false
 	}
-	// Two whole files written from nothing are not two edits of one: neither
-	// is a revision of the other, and one appended to the other is not a file
-	// either side wrote (two JSON documents, say).
-	if len(ls) == 0 && len(ca) > 0 && len(cb) > 0 {
-		return nil, false
-	}
 
 	// Walk the base once, emitting whichever side replaced each region.
 	type edit struct {
@@ -58,7 +52,6 @@ func Merge(base, a, b []byte) ([]byte, bool) {
 	// The insertion goes first, whichever side made it — taken the other
 	// way round the walk would step back to k and re-emit the replaced
 	// lines, and merge(base, a, b) would differ from merge(base, b, a).
-	//
 	before := func(x, y region) bool {
 		if x.from != y.from {
 			return x.from < y.from
@@ -69,16 +62,6 @@ func Merge(base, a, b []byte) ([]byte, bool) {
 		for j := i; j > 0 && before(edits[j].r, edits[j-1].r); j-- {
 			edits[j], edits[j-1] = edits[j-1], edits[j]
 		}
-	}
-	// Each side changed at most one region, so two edits sharing a span are
-	// both insertions at one point: both sides appending to the end of the
-	// notes, the commonest concurrency there is. Both are kept as one edit.
-	if len(edits) == 2 && edits[0].r.from == edits[1].r.from && edits[0].r.to == edits[1].r.to {
-		with, ok := bothInserted(edits[0].with, edits[1].with)
-		if !ok {
-			return nil, false
-		}
-		edits = []edit{{edits[0].r, with}}
 	}
 
 	var out [][]byte
@@ -145,50 +128,15 @@ func overlaps(a, b []region) bool {
 			if x.from < y.to && y.from < x.to {
 				return true
 			}
+			// A pure insertion is an empty base span; two insertions at the
+			// same point are ordered by nothing and must not be merged.
+			if x.from == x.to && y.from == y.to && x.from == y.from {
+				return true
+			}
 		}
 	}
 	return false
 }
-
-// bothInserted is what two insertions at one point become: lines they begin
-// or end with in common once, and the lines between, where they differ, in
-// byte order, which is arbitrary but the same from either side.
-//
-// Where the lines between share a line, it declines: that line is in both
-// insertions in different places, most often because each side already
-// merged in the same third edit, and no ordering keeps it once and keeps
-// both sides' order. Blank lines do not count; one repeated is harmless.
-func bothInserted(x, y [][]byte) ([][]byte, bool) {
-	p := 0
-	for p < len(x) && p < len(y) && bytes.Equal(x[p], y[p]) {
-		p++
-	}
-	s := 0
-	for s < len(x)-p && s < len(y)-p && bytes.Equal(x[len(x)-1-s], y[len(y)-1-s]) {
-		s++
-	}
-	mx, my := x[p:len(x)-s], y[p:len(y)-s]
-	seen := make(map[string]bool, len(mx))
-	for _, l := range mx {
-		if len(bytes.TrimSpace(l)) > 0 {
-			seen[string(l)] = true
-		}
-	}
-	for _, l := range my {
-		if seen[string(l)] {
-			return nil, false
-		}
-	}
-	if bytes.Compare(bytes.Join(my, nl), bytes.Join(mx, nl)) < 0 {
-		mx, my = my, mx
-	}
-	out := append([][]byte{}, x[:p]...)
-	out = append(out, mx...)
-	out = append(out, my...)
-	return append(out, x[len(x)-s:]...), true
-}
-
-var nl = []byte("\n")
 
 func splitLines(b []byte) [][]byte {
 	if len(b) == 0 {
