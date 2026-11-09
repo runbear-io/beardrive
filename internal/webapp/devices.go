@@ -106,6 +106,12 @@ func (r *fileDeviceRepo) putDevice(d DeviceInfo, claim bool) error {
 				}
 			}
 		}
+		d.ID = canonDeviceID(d.ID)
+		for k := range r.rows {
+			if normEmail(k.User) == normEmail(d.User) && canonDeviceID(k.ID) == d.ID && k != (devKey{d.User, d.ID}) {
+				delete(r.rows, k)
+			}
+		}
 		r.rows[devKey{d.User, d.ID}] = d
 		return r.write()
 	})
@@ -113,7 +119,13 @@ func (r *fileDeviceRepo) putDevice(d DeviceInfo, claim bool) error {
 
 func (r *fileDeviceRepo) deleteDevice(user, id string) error {
 	return r.withDeviceLock(func(_ []DeviceInfo) error {
-		delete(r.rows, devKey{user, id})
+		cid := canonDeviceID(id)
+		u := normEmail(user)
+		for k := range r.rows {
+			if normEmail(k.User) == u && canonDeviceID(k.ID) == cid {
+				delete(r.rows, k)
+			}
+		}
 		return r.write()
 	})
 }

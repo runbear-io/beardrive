@@ -61,11 +61,7 @@ func newCLIEnvBin(t *testing.T, hub *httptest.Server, bin string) cliEnv {
 		t.Skip("builds and execs the bdrive binary; skipped with -short")
 	}
 	if bin == "" {
-		bin = filepath.Join(t.TempDir(), "bdrive")
-		build := exec.Command("go", "build", "-o", bin, "github.com/runbear-io/beardrive/cmd/bdrive")
-		if out, err := build.CombinedOutput(); err != nil {
-			t.Fatalf("go build: %v\n%s", err, out)
-		}
+		bin = seccfgBinary(t)
 	}
 
 	if hub == nil {

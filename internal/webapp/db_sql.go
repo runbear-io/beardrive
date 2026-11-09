@@ -1485,6 +1485,7 @@ func (r *sqlDeviceRepo) putDevice(d DeviceInfo, claim bool) error {
 				return err
 			}
 		}
+		d.ID = canonDeviceID(d.ID)
 		_, err := tx.Exec(r.s.q(`INSERT INTO device_rows (user_email,id,name,os,ip,first_seen,last_seen) VALUES (?,?,?,?,?,?,?)
 			ON CONFLICT(user_email,id) DO UPDATE SET name=excluded.name, os=excluded.os,
 			ip=excluded.ip, last_seen=excluded.last_seen`),
@@ -1507,7 +1508,7 @@ func (r *sqlDeviceRepo) Delete(user, id string) error {
 		if err := r.lock(tx); err != nil {
 			return err
 		}
-		_, err := tx.Exec(r.s.q(`DELETE FROM device_rows WHERE user_email = ? AND id = ?`), user, id)
+		_, err := tx.Exec(r.s.q(`DELETE FROM device_rows WHERE LOWER(user_email) = ? AND LOWER(id) = ?`), normEmail(user), canonDeviceID(id))
 		return err
 	})
 }

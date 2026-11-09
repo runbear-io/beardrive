@@ -424,6 +424,11 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	// serve content that does not hash to the key it is stored under.
 	var rc io.ReadCloser
 	var err error
+	type combinedReadCloser struct {
+		io.Reader
+		io.Closer
+	}
+
 	switch f := s.visibility(r); {
 	case strings.HasPrefix(key, "journal/") && f.hides():
 		// The whole confidentiality claim on the sync wire: a device converges
@@ -471,28 +476,25 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		q := r.URL.Query()
 		offsetStr, prefixSHA := q.Get("offset"), strings.ToLower(q.Get("prefix_sha256"))
 		offset, perr := strconv.ParseInt(offsetStr, 10, 64)
-		if offsetStr != "" && prefixSHA != "" && perr == nil && offset > 0 {
-			fullBytes, rerr := io.ReadAll(rc)
-			rc.Close()
+		if offsetStr != "" && prefixSHA != "" && perr == nil && offset > 0 && offset <= maxInflatedPut {
+			origRC := rc
+			prefix, rerr := io.ReadAll(io.LimitReader(origRC, offset))
 			if rerr != nil {
+				origRC.Close()
 				storageErr(w, http.StatusBadGateway, "could not read the journal", rerr)
 				return
 			}
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-			out := fullBytes
-			if int64(len(fullBytes)) >= offset {
-				sum := sha256.Sum256(fullBytes[:offset])
+			if int64(len(prefix)) == offset {
+				sum := sha256.Sum256(prefix)
 				if hex.EncodeToString(sum[:]) == prefixSHA {
 					w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
-					out = fullBytes[offset:]
+					rc = origRC
+				} else {
+					rc = &combinedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix), origRC), Closer: origRC}
 				}
+			} else {
+				rc = &combinedReadCloser{Reader: bytes.NewReader(prefix), Closer: origRC}
 			}
-			_, _ = w.Write(out)
-			if m, ok := s.quota().(SyncEgressRecorder); ok {
-				m.RecordSyncEgress(s.orgOf(r.PathValue("project")), int64(len(out)))
-			}
-			return
 		}
 	}
 	defer rc.Close()
