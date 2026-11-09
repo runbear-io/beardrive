@@ -29,6 +29,7 @@ type pulledVouch struct {
 	mu     sync.Mutex
 	mounts []string              // what the last complete pass pulled; nil = not vouching
 	stream remote.StreamLiveness // the open change stream, nil when none
+	heard  uint64                // announcements heard so far
 }
 
 // newPulledVouch starts a worker's vouch with no marker: one left by an
@@ -39,25 +40,44 @@ func newPulledVouch(volDir string) *pulledVouch {
 	return &pulledVouch{volDir: volDir}
 }
 
-// passed records a tick that pulled mounts from the hub, unless an
-// announcement is still queued (queued reports it), which the pass predates.
-// It shares the lock with announced, so a pass and an announcement order one
-// way or the other, never interleave.
-func (v *pulledVouch) passed(mounts []string, queued func() bool) {
+// heardSoFar is the count a cycle takes before it pulls and hands to passed.
+func (v *pulledVouch) heardSoFar() uint64 {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if queued() {
+	return v.heard
+}
+
+// passed records a tick that pulled mounts from the hub, unless an
+// announcement was heard since the tick took heardSoFar: the pull may have
+// started before that push landed.
+func (v *pulledVouch) passed(mounts []string, since uint64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.heard != since {
 		return
 	}
 	v.mounts = mounts
-	_ = store.MarkPulled(v.volDir, mounts)
+	_ = store.MarkPulledUntil(v.volDir, mounts, v.deadline())
 }
 
-// announced withdraws the vouch for a peer's announcement and, still holding
-// the lock, queues it for the worker (enqueue).
+// hear withdraws the vouch for a peer's announcement. The change stream calls
+// it as it reads one (remote.AnnounceNotifier), before the worker is woken,
+// so no hook can take the volume lock between the two and still see it.
+func (v *pulledVouch) hear() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.heard++
+	v.mounts = nil
+	store.ClearPulled(v.volDir)
+}
+
+// announced is hear for a stream that cannot report announcements as it
+// reads them: it withdraws and, still holding the lock, queues the
+// announcement for the worker (enqueue).
 func (v *pulledVouch) announced(enqueue func()) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.heard++
 	v.mounts = nil
 	store.ClearPulled(v.volDir)
 	enqueue()
@@ -84,9 +104,24 @@ func (v *pulledVouch) streaming(s remote.StreamLiveness) {
 	}
 }
 
+// deadline is when the stream would stop counting as alive if it delivered
+// nothing more, which is as long as any marker written now may stand; zero
+// with no stream to judge by. Callers hold mu.
+func (v *pulledVouch) deadline() time.Time {
+	if v.stream == nil {
+		return time.Time{}
+	}
+	if last := v.stream.StreamFrame(); !last.IsZero() {
+		return last.Add(streamAliveFor)
+	}
+	return time.Time{}
+}
+
 // renew rewrites the marker if the last complete pass still stands and the
 // stream is alive, which is what lets the files on disk stay vouched for. A
-// stream that has delivered no frame yet has not shown it is alive.
+// stream that has delivered no frame yet has not shown it is alive; one that
+// has gone quiet past streamAliveFor withdraws the vouch, since it may be
+// dead with announcements lost in it.
 func (v *pulledVouch) renew() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -94,10 +129,15 @@ func (v *pulledVouch) renew() {
 		return
 	}
 	last := v.stream.StreamFrame()
-	if last.IsZero() || time.Since(last) >= streamAliveFor {
+	if last.IsZero() {
 		return
 	}
-	_ = store.MarkPulled(v.volDir, v.mounts)
+	if time.Since(last) >= streamAliveFor {
+		v.mounts = nil
+		store.ClearPulled(v.volDir)
+		return
+	}
+	_ = store.MarkPulledUntil(v.volDir, v.mounts, v.deadline())
 }
 
 // run renews the marker until ctx ends, then withdraws it: a stopped daemon

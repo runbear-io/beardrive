@@ -22,7 +22,18 @@ func pulledPath(dir string) string { return filepath.Join(dir, "pulled") }
 
 // MarkPulled records that this process vouches for mounts as of now.
 func MarkPulled(dir string, mounts []string) error {
-	body := strconv.Itoa(os.Getpid()) + "\n" + strings.Join(mounts, "\n") + "\n"
+	return MarkPulledUntil(dir, mounts, time.Time{})
+}
+
+// MarkPulledUntil is MarkPulled with a deadline past which the vouch stands
+// for nothing however recently it was written: the moment the daemon would
+// stop believing its change stream is alive. Zero means no deadline.
+func MarkPulledUntil(dir string, mounts []string, until time.Time) error {
+	head := strconv.Itoa(os.Getpid())
+	if !until.IsZero() {
+		head += " " + strconv.FormatInt(until.UnixNano(), 10)
+	}
+	body := head + "\n" + strings.Join(mounts, "\n") + "\n"
 	return os.WriteFile(pulledPath(dir), []byte(body), 0o600)
 }
 
@@ -34,8 +45,16 @@ func ClearPulled(dir string) {
 // Pulled is what the marker vouches for.
 type Pulled struct {
 	At     time.Time
+	Until  time.Time // zero when the marker carries no deadline
 	PID    int
 	Mounts []string
+}
+
+// FreshWithin reports whether the marker was written within window and has
+// not passed its deadline.
+func (p Pulled) FreshWithin(window time.Duration) bool {
+	now := time.Now()
+	return !p.At.IsZero() && now.Sub(p.At) < window && (p.Until.IsZero() || now.Before(p.Until))
 }
 
 // Covers reports whether the marker lists mountID.
@@ -57,6 +76,16 @@ func LoadPulled(dir string) Pulled {
 	data := make([]byte, min(fi.Size(), 1<<16))
 	n, _ := f.Read(data)
 	lines := strings.Split(strings.TrimSpace(string(data[:n])), "\n")
-	pid, _ := strconv.Atoi(lines[0])
-	return Pulled{At: fi.ModTime(), PID: pid, Mounts: lines[1:]}
+	head := strings.Fields(lines[0])
+	var p Pulled
+	if len(head) > 0 {
+		p.PID, _ = strconv.Atoi(head[0])
+	}
+	if len(head) > 1 {
+		if n, err := strconv.ParseInt(head[1], 10, 64); err == nil {
+			p.Until = time.Unix(0, n)
+		}
+	}
+	p.At, p.Mounts = fi.ModTime(), lines[1:]
+	return p
 }

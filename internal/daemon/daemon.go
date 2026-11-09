@@ -2077,6 +2077,9 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		// the type assertion failing is the normal case, not an error.
 		if be != nil && watch == nil && time.Now().After(nextWatch) {
 			if wr, ok := be.(remote.Watcher); ok {
+				if n, ok := be.(remote.AnnounceNotifier); ok {
+					n.OnAnnounce(vouch.hear)
+				}
 				wctx, cancel := context.WithCancel(ctx)
 				announced, err := wr.Watch(wctx)
 				if err != nil {
@@ -2086,19 +2089,27 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 					// is otherwise working perfectly.
 					nextWatch = time.Now().Add(watchRetry)
 				} else {
-					// The vouch is withdrawn here, as each announcement is read,
-					// not when the loop below gets to it: a hook taking the
-					// volume lock in between must already see it gone.
+					// The vouch is withdrawn as each announcement is read, not when
+					// the loop below gets to it: a hook taking the volume lock in
+					// between must already see it gone. A stream that reports
+					// announcements as it reads them (hear, above) has withdrawn
+					// it already; any other is withdrawn as the wakeup is taken.
 					ch := make(chan struct{}, 1)
+					_, notifies := be.(remote.AnnounceNotifier)
 					go func() {
 						defer close(ch)
 						for range announced {
-							vouch.announced(func() {
+							enqueue := func() {
 								select {
 								case ch <- struct{}{}:
 								default:
 								}
-							})
+							}
+							if notifies {
+								enqueue()
+							} else {
+								vouch.announced(enqueue)
+							}
 						}
 					}()
 					watch, watchCancel, watchOpened = ch, cancel, time.Now()
@@ -2115,6 +2126,9 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 		}
 
+		// Taken before anything is pulled: an announcement heard after this
+		// may name a push the pull below started too early to see.
+		heard := vouch.heardSoFar()
 		var res syncer.Result
 		var cycleErr error
 		haveResult := false
@@ -2310,10 +2324,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				for i, t := range targets {
 					ids[i] = t.proj.ID
 				}
-				// An announcement still queued arrived after this pass
-				// pulled, so the pass does not cover it.
-				pending := watch
-				vouch.passed(ids, func() bool { return len(pending) > 0 })
+				vouch.passed(ids, heard)
 			} else if doRemote {
 				vouch.withdraw()
 			}

@@ -221,6 +221,14 @@ type StreamLiveness interface {
 	StreamFrame() time.Time
 }
 
+// AnnounceNotifier is a Watcher that reports each announcement as it reads it,
+// on the stream's own goroutine and before the wakeup is queued, so whatever
+// the announcement invalidates is invalidated before anything can act on the
+// wakeup or miss it.
+type AnnounceNotifier interface {
+	OnAnnounce(func())
+}
+
 // Open creates a backend from a remote URL.
 func Open(ctx context.Context, raw string) (Backend, error) {
 	u, err := url.Parse(raw)

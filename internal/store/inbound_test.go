@@ -3,8 +3,8 @@ package store
 import (
 	"fmt"
 	"os"
-	"sync"
 	"strings"
+	"sync"
 	"testing"
 )
 

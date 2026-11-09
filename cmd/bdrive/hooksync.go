@@ -104,7 +104,7 @@ func daemonCurrent(st *store.Store, mountID string) (release func(), ok bool) {
 	}
 	pid, running := daemon.Running(st.Dir())
 	p := store.LoadPulled(st.Dir())
-	if !running || pid <= 0 || p.PID != pid || !p.Covers(mountID) || time.Since(p.At) >= hookPullFresh {
+	if !running || pid <= 0 || p.PID != pid || !p.Covers(mountID) || !p.FreshWithin(hookPullFresh) {
 		unlock()
 		return nil, false
 	}

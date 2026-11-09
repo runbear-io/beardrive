@@ -134,6 +134,15 @@ func TestHookPullsWhenTheDaemonHasNotPulledLately(t *testing.T) {
 		"pulled long ago": func(t *testing.T, proj config.Project) {
 			markPulled(t, proj, 2*hookPullFresh)
 		},
+		"pulled just now over a stream past its liveness": func(t *testing.T, proj config.Project) {
+			vdir, err := config.VolumeDir(proj.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.MarkPulledUntil(vdir, []string{proj.ID}, time.Now().Add(-time.Second)); err != nil {
+				t.Fatal(err)
+			}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			folder, proj := stampFixture(t)

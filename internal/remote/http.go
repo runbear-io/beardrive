@@ -70,6 +70,8 @@ type httpBackend struct {
 	// lastFrame is when the open change stream last delivered anything,
 	// keepalives included (unix nanoseconds, zero when none is open).
 	lastFrame atomic.Int64
+	// onAnnounce is called for each announcement read; see OnAnnounce.
+	onAnnounce atomic.Pointer[func()]
 }
 
 // The id is whatever the hub minted (a UUID today, `p-xxxxxxxx` on older
@@ -626,6 +628,9 @@ func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
 			if !bytes.HasPrefix(sc.Bytes(), []byte("data: ")) {
 				continue
 			}
+			if f := b.onAnnounce.Load(); f != nil {
+				(*f)()
+			}
 			// Coalesce: a buffer of one means a burst of pushes costs one
 			// cycle, and a daemon busy syncing never makes the hub's writer
 			// block behind it.
@@ -636,6 +641,12 @@ func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
 		}
 	}()
 	return ch, nil
+}
+
+// OnAnnounce sets the function called for each announcement the change stream
+// reads. See remote.AnnounceNotifier.
+func (b *httpBackend) OnAnnounce(f func()) {
+	b.onAnnounce.Store(&f)
 }
 
 // StreamFrame reports when the open change stream last delivered a frame,

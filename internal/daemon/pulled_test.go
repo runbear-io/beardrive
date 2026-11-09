@@ -140,16 +140,11 @@ func TestVouchRenewsOnlyOverALiveStream(t *testing.T) {
 	if !store.LoadPulled(dir).At.IsZero() {
 		t.Fatal("renewed with no pass to stand on")
 	}
-	v.passed([]string{"p-a"}, func() bool { return false })
+	v.passed([]string{"p-a"}, v.heardSoFar())
 	v.streaming(stream)
 	old := time.Now().Add(-time.Minute)
 	os.Chtimes(dir+"/pulled", old, old)
 
-	stream.last = time.Now().Add(-2 * streamAliveFor)
-	v.renew()
-	if at := store.LoadPulled(dir).At; at.After(old.Add(time.Second)) {
-		t.Error("renewed over a stream that has gone quiet")
-	}
 	stream.last = time.Now()
 	v.renew()
 	if at := store.LoadPulled(dir).At; !at.After(old.Add(time.Second)) {
@@ -167,7 +162,7 @@ func TestVouchRenewsOnlyOverALiveStream(t *testing.T) {
 func TestVouchDoesNotSurviveAStreamReconnect(t *testing.T) {
 	dir := t.TempDir()
 	v := newPulledVouch(dir)
-	v.passed([]string{"p-a"}, func() bool { return false })
+	v.passed([]string{"p-a"}, v.heardSoFar())
 	v.streaming(&fakeStream{last: time.Now()})
 	v.streaming(nil)
 	if !store.LoadPulled(dir).At.IsZero() {
@@ -184,7 +179,7 @@ func TestVouchDoesNotSurviveAStreamReconnect(t *testing.T) {
 func TestVouchDoesNotRenewOverASilentNewStream(t *testing.T) {
 	dir := t.TempDir()
 	v := newPulledVouch(dir)
-	v.passed([]string{"p-a"}, func() bool { return false })
+	v.passed([]string{"p-a"}, v.heardSoFar())
 	v.streaming(&fakeStream{})
 	old := time.Now().Add(-time.Minute)
 	os.Chtimes(dir+"/pulled", old, old)
@@ -208,23 +203,63 @@ func TestANewWorkerVouchStartsWithNoMarker(t *testing.T) {
 }
 
 // A pass and an announcement order one way or the other: an announcement
-// queued before the pass is recorded keeps the pass from marking.
-func TestVouchPassDoesNotCoverAQueuedAnnouncement(t *testing.T) {
+// heard after the cycle took its count may name a push the pull missed.
+func TestVouchPassDoesNotCoverAnAnnouncementHeardSince(t *testing.T) {
 	dir := t.TempDir()
 	v := newPulledVouch(dir)
-	queue := make(chan struct{}, 1)
-	v.announced(func() { queue <- struct{}{} })
-	v.passed([]string{"p-a"}, func() bool { return len(queue) > 0 })
+	since := v.heardSoFar()
+	v.hear()
+	v.passed([]string{"p-a"}, since)
 	if !store.LoadPulled(dir).At.IsZero() {
-		t.Error("a pass marked with an announcement still queued")
+		t.Error("a pass marked over an announcement heard while it pulled")
 	}
-	<-queue
-	v.passed([]string{"p-a"}, func() bool { return len(queue) > 0 })
+	v.passed([]string{"p-a"}, v.heardSoFar())
 	if store.LoadPulled(dir).At.IsZero() {
-		t.Error("the pass after the announcement was taken did not mark")
+		t.Error("a pass begun after the announcement did not mark")
 	}
 	v.announced(func() {})
 	if !store.LoadPulled(dir).At.IsZero() {
 		t.Error("an announcement left the marker in place")
+	}
+}
+
+// A stream that goes quiet past streamAliveFor may be dead with announcements
+// lost in it: the vouch is withdrawn, not merely left to age.
+func TestVouchWithdrawsWhenTheStreamGoesQuiet(t *testing.T) {
+	dir := t.TempDir()
+	v := newPulledVouch(dir)
+	stream := &fakeStream{last: time.Now()}
+	v.streaming(stream)
+	v.passed([]string{"p-a"}, v.heardSoFar())
+	stream.last = time.Now().Add(-2 * streamAliveFor)
+	v.renew()
+	if !store.LoadPulled(dir).At.IsZero() {
+		t.Error("the marker outlived a stream gone quiet")
+	}
+	stream.last = time.Now()
+	v.renew()
+	if !store.LoadPulled(dir).At.IsZero() {
+		t.Error("a frame after the withdrawal renewed a pass that no longer stands")
+	}
+}
+
+// No marker stands past the moment its stream would stop counting as alive,
+// however recently it was written.
+func TestVouchMarkerEndsWithTheStreamsLiveness(t *testing.T) {
+	dir := t.TempDir()
+	v := newPulledVouch(dir)
+	last := time.Now().Add(-streamAliveFor + time.Second)
+	v.streaming(&fakeStream{last: last})
+	v.passed([]string{"p-a"}, v.heardSoFar())
+	p := store.LoadPulled(dir)
+	if want := last.Add(streamAliveFor); !p.Until.Equal(want) {
+		t.Fatalf("marker until = %s, want %s", p.Until, want)
+	}
+	if !p.FreshWithin(time.Minute) {
+		t.Fatal("marker not fresh before its deadline")
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if store.LoadPulled(dir).FreshWithin(time.Minute) {
+		t.Error("marker still fresh past its stream's liveness")
 	}
 }
