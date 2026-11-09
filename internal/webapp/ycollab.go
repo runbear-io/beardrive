@@ -875,7 +875,7 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		// their version while still holding the room's text, the next pause
 		// would write the room's text over theirs, conditional on it and so
 		// accepted.
-		s.moveDoc(ctx, room, text, theirs, theirSha, final)
+		s.moveDoc(ctx, room, text, theirs, theirSha, true, final)
 	}
 	if !ok {
 		park()
@@ -889,35 +889,44 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 				park()
 				return
 			}
-			if sha := reportedSha(w); sha != "" {
-				theirSha = sha
+			sha := reportedSha(w)
+			if sha == "" {
+				s.moveDoc(ctx, room, text, target, theirSha, false, true)
+				return
 			}
+			theirSha = sha
 		}
-		s.moveDoc(ctx, room, text, target, theirSha, true)
+		s.moveDoc(ctx, room, text, target, theirSha, true, true)
 		return
 	}
-	if s.moveDoc(ctx, room, text, target, theirSha, false) && target == text {
+	if s.moveDoc(ctx, room, text, target, theirSha, target == theirs, false) && target == text {
 		s.snapshotRoom(ctx, room)
 	}
 }
 
-// moveDoc brings a room's document from text to the version sha holds, as one
-// edit, and rebases the room onto sha, reporting whether it did. A document
-// typed into since it read text is left alone with its base: that typing is
-// in neither version, and the next pause settles it against sha again.
+// moveDoc brings a room's document from text to to, as one edit, and rebases
+// the room onto sha, reporting whether it did. A document typed into since it
+// read text is left alone with its base: that typing is in neither version,
+// and the next pause settles it against sha again.
 //
 // The document has to move with the base, or a room reopened before it
 // unloads would write its old text over this version. Nobody is connected to
 // a room in its final snapshot, and ydocs().Apply would open the room again,
 // so a final move splices the held document directly.
-func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, final bool) bool {
+//
+// filed says to is exactly what sha holds. The moved state is then stored
+// under sha, as a snapshot stores what it writes: the next room for the file
+// replays the same items, and a returning browser that typed some of them
+// merges once instead of beside a second copy spliced in from the bytes.
+func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, filed, final bool) bool {
+	var state []byte
 	moved := false
 	if final {
 		if doc, _, held := s.rooms().get(room); held {
 			txt := doc.GetText("body")
 			if txt.ToString() == text {
 				spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, text, to)
-				moved = true
+				state, moved = doc.EncodeStateAsUpdate(), true
 			}
 		}
 	} else {
@@ -927,13 +936,20 @@ func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, final 
 				return
 			}
 			spliceVia(transact, txt, text, to)
-			moved = true
+			state, moved = doc.EncodeStateAsUpdate(), true
 		})
 	}
-	if moved {
-		s.rooms().rebase(room, sha)
+	if !moved {
+		return false
 	}
-	return moved
+	if filed {
+		if spelled, ok := replayed(state); ok && spelled == to {
+			project, path, _ := strings.Cut(room, "/")
+			s.storeRoomHistory(ctx, project, path, sha, state)
+		}
+	}
+	s.rooms().rebase(room, sha)
+	return true
 }
 
 // appendedBoth reports whether theirs and text each extend base, which ends a
