@@ -642,7 +642,24 @@ func (s *Server) snapshotRoom(ctx context.Context, room string) { s.snapshot(ctx
 // the document, so a version the file refuses is parked beside it instead.
 func (s *Server) finalSnapshot(ctx context.Context, room string) { s.snapshot(ctx, room, true) }
 
+// snapshotSeam, when set by a test, runs inside a snapshot once it has read
+// the document and before it reads the file.
+var snapshotSeam func(room string)
+
+// snapshot runs one room's snapshots one at a time. Each pause fires on its own
+// timer goroutine and the room's last peer leaving fires another, so without
+// this two could write and file history in either order: the slower one would
+// name an older version as the room's head and base after a newer one, and the
+// next room would be built from it.
 func (s *Server) snapshot(ctx context.Context, room string, final bool) {
+	unlock := s.rooms().lockSnapshots(room)
+	defer unlock()
+	s.snapshotLocked(ctx, room, final)
+}
+
+// snapshotLocked is snapshot for a caller already holding the room's
+// snapshot lock.
+func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -667,6 +684,9 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	text, ok := replayed(state)
 	if !ok {
 		return
+	}
+	if snapshotSeam != nil {
+		snapshotSeam(room)
 	}
 	cur, curSha, have, err := s.roomBytes(ctx, room)
 	if ctx.Err() != nil {
@@ -900,7 +920,7 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		return
 	}
 	if s.moveDoc(ctx, room, text, target, theirSha, target == theirs, false) && target == text {
-		s.snapshotRoom(ctx, room)
+		s.snapshotLocked(ctx, room, false)
 	}
 }
 
@@ -1141,6 +1161,8 @@ func (s *Server) finishLater(ctx context.Context, room string, who User, text, b
 		}
 	}
 	try := func(ctx context.Context) bool {
+		unlock := s.rooms().lockSnapshots(room)
+		defer unlock()
 		cur, curSha, have, err := s.roomBytes(ctx, room)
 		if err != nil {
 			return false
@@ -1325,6 +1347,39 @@ type roomRegistry struct {
 	// waits counts how many times a room on a process that does not write
 	// it has looked for the writer's write since the last edit.
 	waits map[string]int
+	// snapLocks serializes each room's snapshots (lockSnapshots).
+	snapLocks map[string]*roomSnapLock
+}
+
+// roomSnapLock is one room's snapshot lock, kept only while someone holds or
+// waits for it.
+type roomSnapLock struct {
+	sync.Mutex
+	users int
+}
+
+// lockSnapshots takes room's snapshot lock and returns its release.
+func (r *roomRegistry) lockSnapshots(room string) (unlock func()) {
+	r.mu.Lock()
+	if r.snapLocks == nil {
+		r.snapLocks = map[string]*roomSnapLock{}
+	}
+	l := r.snapLocks[room]
+	if l == nil {
+		l = &roomSnapLock{}
+		r.snapLocks[room] = l
+	}
+	l.users++
+	r.mu.Unlock()
+	l.Lock()
+	return func() {
+		l.Unlock()
+		r.mu.Lock()
+		if l.users--; l.users == 0 {
+			delete(r.snapLocks, room)
+		}
+		r.mu.Unlock()
+	}
 }
 
 type roomFlush struct {

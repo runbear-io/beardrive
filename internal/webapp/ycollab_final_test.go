@@ -3,7 +3,9 @@ package webapp
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 )
@@ -60,5 +62,46 @@ func TestYCollabFinalReconcileStoresTheStateItWrote(t *testing.T) {
 		if n := strings.Count(got, want); n != 1 {
 			t.Errorf("%q appears %d times in %q, want once", want, n, got)
 		}
+	}
+}
+
+// One room's snapshots run one at a time: a pause and the last peer leaving
+// fire on different goroutines, and two in flight could store history and
+// rebase the room in either order, the slower naming an older version.
+func TestYCollabSnapshotsOfOneRoomDoNotOverlap(t *testing.T) {
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	room := p.ID + "/notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "before\n", "")
+	doc := liveRoom(t, srv, room, true)
+	typeInto(doc, "typed\n")
+
+	var inside atomic.Int32
+	release := make(chan struct{})
+	snapshotSeam = func(string) {
+		inside.Add(1)
+		<-release
+	}
+	t.Cleanup(func() { snapshotSeam = nil })
+	done := make(chan struct{}, 2)
+	for range 2 {
+		go func() {
+			srv.snapshotRoom(context.Background(), room)
+			done <- struct{}{}
+		}()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for inside.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := inside.Load(); n != 1 {
+		t.Fatalf("%d snapshots of one room ran at once", n)
+	}
+	close(release)
+	<-done
+	<-done
+	if n := inside.Load(); n != 2 {
+		t.Fatalf("the second snapshot never ran: %d", n)
 	}
 }
