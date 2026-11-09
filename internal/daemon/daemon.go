@@ -1820,6 +1820,15 @@ func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logge
 	return
 }
 
+// passPulled reports whether a tick just pulled every mount of the volume from
+// the hub, which is what the pulled marker vouches for to the agent hooks.
+// res merges every mount's result, so one offline or refused mount fails the
+// whole tick even when another reports read-only; a local-only tick (no
+// remote leg, or no backend to run it on) never counts.
+func passPulled(doRemote, connected bool, cycleErr error, res syncer.Result) bool {
+	return doRemote && connected && cycleErr == nil && !res.Offline && !res.NoAccess
+}
+
 func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInterval, remoteInterval time.Duration, wakeCh <-chan struct{}) error {
 	if workerInitHook != nil {
 		workerInitHook(volDir)
@@ -2268,6 +2277,9 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			waitFor = min(waitFor, scanInterval)
 		}
 		lastCycle = time.Now()
+		if ctx.Err() == nil && passPulled(doRemote, be != nil, cycleErr, res) {
+			_ = store.MarkPulled(volDir)
+		}
 
 		switch {
 		case ctx.Err() != nil:
@@ -2294,7 +2306,6 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 				lastAccess = store.AccessReadOnly
 			}
 			lastRemote = time.Now()
-			_ = store.MarkPulled(volDir)
 		case res.Offline:
 			logger.Printf("offline, will retry: %v", res.OfflineErr)
 			if be != nil {
@@ -2319,7 +2330,6 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			}
 			if doRemote {
 				lastRemote = time.Now()
-				_ = store.MarkPulled(volDir)
 			}
 			if res.LocalOps > 0 && !doRemote && !remoteFailed && proj.Remote != "" {
 				lastRemote = time.Time{} // push local edits on the next cycle

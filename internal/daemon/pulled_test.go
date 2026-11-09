@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/store"
+	"github.com/runbear-io/beardrive/internal/syncer"
 )
 
 // The turn hook trusts the files on disk only while the daemon's last pass
@@ -41,5 +43,31 @@ func TestWorkerOfflineRecordsNoPass(t *testing.T) {
 	w.wait("a few offline cycles", func() bool { return w.cycles.Load() >= 3 })
 	if at, _ := store.PulledAt(m.volDir); !at.IsZero() {
 		t.Errorf("an offline daemon recorded a pass at %s", at)
+	}
+}
+
+// The marker must only follow a tick that pulled every mount: the merged
+// result of a multi-mount volume can be read-only and offline at once.
+func TestPassPulledNeedsEveryMountPulled(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		doRemote  bool
+		connected bool
+		err       error
+		res       syncer.Result
+		want      bool
+	}{
+		{"remote pass", true, true, nil, syncer.Result{}, true},
+		{"read-only pass", true, true, nil, syncer.Result{ReadOnly: true}, true},
+		{"read-only beside an offline mount", true, true, nil, syncer.Result{ReadOnly: true, Offline: true}, false},
+		{"offline", true, true, nil, syncer.Result{Offline: true}, false},
+		{"access revoked", true, true, nil, syncer.Result{NoAccess: true}, false},
+		{"cycle error", true, true, errors.New("boom"), syncer.Result{}, false},
+		{"local-only tick", false, true, nil, syncer.Result{}, false},
+		{"no backend", true, false, nil, syncer.Result{}, false},
+	} {
+		if got := passPulled(c.doRemote, c.connected, c.err, c.res); got != c.want {
+			t.Errorf("%s: passPulled = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
