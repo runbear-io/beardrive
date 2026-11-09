@@ -627,48 +627,43 @@ func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string, s
 	if !ok {
 		return
 	}
-	s.collabMu.Lock()
-	closing := s.collabClosing != nil
-	s.collabMu.Unlock()
-	if !closing {
-		if cp, ok := be.(remote.ConditionalPutter); ok {
-			const maxHeadAttempts = 8
-			for range maxHeadAttempts {
-				existing, version, err := readVersioned(ctx, cp, headKey(path))
-				if err != nil {
-					log.Printf("bdrive: reading room head %s/%s: %v", project, path, err)
-					return
-				}
-				prevSHA := strings.TrimSpace(string(existing))
-				if prevSHA == sha {
-					return
-				}
-				if prevSHA != "" && len(state) > 0 {
-					if prevState := s.roomHistory(ctx, project, prevSHA); prevState != nil {
-						stateHasPrev := knows(state, prevState)
-						prevHasState := knows(prevState, state)
-						if prevHasState && !stateHasPrev {
+	if cp, ok := be.(remote.ConditionalPutter); ok {
+		const maxHeadAttempts = 8
+		for range maxHeadAttempts {
+			existing, version, err := readVersioned(ctx, cp, headKey(path))
+			if err != nil {
+				log.Printf("bdrive: reading room head %s/%s: %v", project, path, err)
+				return
+			}
+			prevSHA := strings.TrimSpace(string(existing))
+			if prevSHA == sha {
+				return
+			}
+			if prevSHA != "" && len(state) > 0 {
+				if prevState := s.roomHistory(ctx, project, prevSHA); prevState != nil {
+					stateHasPrev := knows(state, prevState)
+					prevHasState := knows(prevState, state)
+					if prevHasState && !stateHasPrev {
+						return
+					}
+					if !stateHasPrev || prevHasState {
+						if _, curSHA, found, ferr := s.roomBytes(ctx, project+"/"+path); ferr == nil && found && curSHA == prevSHA {
 							return
-						}
-						if !stateHasPrev || prevHasState {
-							if _, curSHA, found, ferr := s.roomBytes(ctx, project+"/"+path); ferr == nil && found && curSHA == prevSHA {
-								return
-							}
 						}
 					}
 				}
-				_, err = cp.PutIf(ctx, headKey(path), strings.NewReader(sha), int64(len(sha)), version)
-				if err == nil {
-					return
-				}
-				if !errors.Is(err, remote.ErrVersionMismatch) {
-					log.Printf("bdrive: storing room head %s/%s: %v", project, path, err)
-					return
-				}
 			}
-			log.Printf("bdrive: storing room head %s/%s: concurrent head contention", project, path)
-			return
+			_, err = cp.PutIf(ctx, headKey(path), strings.NewReader(sha), int64(len(sha)), version)
+			if err == nil {
+				return
+			}
+			if !errors.Is(err, remote.ErrVersionMismatch) {
+				log.Printf("bdrive: storing room head %s/%s: %v", project, path, err)
+				return
+			}
 		}
+		log.Printf("bdrive: storing room head %s/%s: concurrent head contention", project, path)
+		return
 	}
 	if err := be.Put(ctx, headKey(path), strings.NewReader(sha), int64(len(sha))); err != nil {
 		log.Printf("bdrive: storing room head %s/%s: %v", project, path, err)

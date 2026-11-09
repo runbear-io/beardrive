@@ -308,6 +308,13 @@ func (b *shutdownIOBackend) Put(ctx context.Context, key string, r io.Reader, si
 	return b.Backend.Put(ctx, key, r, size)
 }
 
+func (b *shutdownIOBackend) PutIf(ctx context.Context, key string, r io.Reader, size int64, expect remote.Version) (remote.Version, error) {
+	if err := b.wait(ctx, "PUT", key); err != nil {
+		return remote.VersionAbsent, err
+	}
+	return b.shutdownCASBackend.PutIf(ctx, key, r, size, expect)
+}
+
 func TestCollabClosePropagatesContextToRoomStorage(t *testing.T) {
 	for _, step := range []string{"room_bytes", "room_history", "room_head"} {
 		t.Run(step, func(t *testing.T) {

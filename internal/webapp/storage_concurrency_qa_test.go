@@ -671,10 +671,16 @@ func TestQA_StoreRoomHeadReconcilesOrderAndRetriesCAS(t *testing.T) {
 		t.Fatalf("roomHead after newer state2 = %q, want %q", got, sha2)
 	}
 
-	// A late/stale storeRoomHead for state1 must NOT overwrite the newer state2 head.
+	// A late/stale storeRoomHead for state1 must NOT overwrite the newer state2 head,
+	// including while the server is closing (collabClosing set by Close).
 	srv.storeRoomHead(ctx, p.ID, "notes.md", sha1, state1)
 	if got := srv.roomHead(ctx, p.ID, "notes.md"); got != sha2 {
 		t.Fatalf("roomHead after stale state1 = %q, want newer %q preserved", got, sha2)
+	}
+	_ = srv.Close(ctx)
+	srv.storeRoomHead(ctx, p.ID, "notes.md", sha1, state1)
+	if got := srv.roomHead(ctx, p.ID, "notes.md"); got != sha2 {
+		t.Fatalf("roomHead after closing stale state1 = %q, want newer %q preserved", got, sha2)
 	}
 }
 
