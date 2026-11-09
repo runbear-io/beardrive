@@ -778,10 +778,11 @@ const (
 // reassembledBlob owns one in-flight or actively-read spool. refs counts both
 // callers awaiting ready and returned readers, all guarded by RemoteSource.rmu.
 type reassembledBlob struct {
-	ready chan struct{}
-	keep  *verifiedSpool
-	err   error
-	refs  int
+	ready  chan struct{}
+	cancel context.CancelFunc
+	keep   *verifiedSpool
+	err    error
+	refs   int
 }
 
 type reassembledReader struct {
@@ -804,8 +805,31 @@ func (r *RemoteSource) reassemble(ctx context.Context, sha string) (io.ReadClose
 	}
 	b, exists := r.reassembling[sha]
 	if !exists {
-		b = &reassembledBlob{ready: make(chan struct{})}
+		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+		b = &reassembledBlob{ready: make(chan struct{}), cancel: cancel}
 		r.reassembling[sha] = b
+		go func() {
+			defer cancel()
+			keep, err := r.assembleBlob(pctx, sha)
+			r.rmu.Lock()
+			if b.refs == 0 {
+				if r.reassembling[sha] == b {
+					delete(r.reassembling, sha)
+				}
+				r.rmu.Unlock()
+				if keep != nil {
+					keep.discard()
+				}
+				close(b.ready)
+				return
+			}
+			if err != nil && r.reassembling[sha] == b {
+				delete(r.reassembling, sha)
+			}
+			b.keep, b.err = keep, err
+			close(b.ready)
+			r.rmu.Unlock()
+		}()
 	}
 	b.refs++
 	r.rmu.Unlock()
@@ -814,22 +838,22 @@ func (r *RemoteSource) reassemble(ctx context.Context, sha string) (io.ReadClose
 		defer r.rmu.Unlock()
 		b.refs--
 		if b.refs == 0 {
-			delete(r.reassembling, sha)
+			if r.reassembling[sha] == b {
+				delete(r.reassembling, sha)
+			}
+			if b.cancel != nil {
+				b.cancel()
+			}
 			if b.keep != nil {
 				b.keep.discard()
 			}
 		}
 	}
-	if !exists {
-		b.keep, b.err = r.assembleBlob(ctx, sha)
-		close(b.ready)
-	} else {
-		select {
-		case <-b.ready:
-		case <-ctx.Done():
-			release()
-			return nil, ctx.Err()
-		}
+	select {
+	case <-b.ready:
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
 	}
 	if b.err != nil {
 		release()
@@ -1248,13 +1272,21 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 			g.Go(func() error {
 				o := keep[i]
 				for {
-					value, err, _ := r.jflight.Do(o.Key, func() (any, error) {
-						return r.fetchJournal(gctx, o)
+					ch := r.jflight.DoChan(o.Key, func() (any, error) {
+						fctx, cancel := context.WithTimeout(context.WithoutCancel(gctx), 2*time.Minute)
+						defer cancel()
+						return r.fetchJournal(fctx, o)
 					})
-					if err != nil {
-						return err
+					var res singleflight.Result
+					select {
+					case res = <-ch:
+					case <-gctx.Done():
+						return gctx.Err()
 					}
-					c := value.(cachedJournal)
+					if res.Err != nil {
+						return res.Err
+					}
+					c := res.Val.(cachedJournal)
 					if c.size != o.Size || !c.mod.Equal(o.Modified) {
 						// The shared fetch belonged to a different listing.
 						// Retry under this request's metadata, not its old parse.

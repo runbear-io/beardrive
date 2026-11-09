@@ -344,7 +344,7 @@ func (s *Server) claimRoomHistory(ctx context.Context, project, path, sha string
 			}
 		}
 		if _, err = cond.PutIf(ctx, key, bytes.NewReader(state), int64(len(state)), v); err == nil {
-			s.storeRoomHead(ctx, project, path, sha)
+			s.storeRoomHead(ctx, project, path, sha, state)
 			return state
 		}
 		if !errors.Is(err, remote.ErrVersionMismatch) {
@@ -598,7 +598,7 @@ func (s *Server) storeRoomHistory(ctx context.Context, project, path, sha string
 		log.Printf("bdrive: storing room history %s/%s: %v", project, sha, err)
 		return
 	}
-	s.storeRoomHead(ctx, project, path, sha)
+	s.storeRoomHead(ctx, project, path, sha, state)
 }
 
 // ydoc/head/<path> names the newest state stored for a path — what the next
@@ -619,7 +619,7 @@ func (s *Server) roomHead(ctx context.Context, project, path string) string {
 	return strings.TrimSpace(string(sha))
 }
 
-func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string) {
+func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string, state []byte) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -632,16 +632,41 @@ func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string) {
 	s.collabMu.Unlock()
 	if !closing {
 		if cp, ok := be.(remote.ConditionalPutter); ok {
-			existing, version, err := readVersioned(ctx, cp, headKey(path))
-			if err == nil && strings.TrimSpace(string(existing)) == sha {
-				return
-			}
-			if err == nil {
+			const maxHeadAttempts = 8
+			for range maxHeadAttempts {
+				existing, version, err := readVersioned(ctx, cp, headKey(path))
+				if err != nil {
+					log.Printf("bdrive: reading room head %s/%s: %v", project, path, err)
+					return
+				}
+				prevSHA := strings.TrimSpace(string(existing))
+				if prevSHA == sha {
+					return
+				}
+				if prevSHA != "" && len(state) > 0 {
+					if prevState := s.roomHistory(ctx, project, prevSHA); prevState != nil {
+						stateHasPrev := knows(state, prevState)
+						prevHasState := knows(prevState, state)
+						if prevHasState && !stateHasPrev {
+							return
+						}
+						if !stateHasPrev || prevHasState {
+							if _, curSHA, found, ferr := s.roomBytes(ctx, project+"/"+path); ferr == nil && found && curSHA == prevSHA {
+								return
+							}
+						}
+					}
+				}
 				_, err = cp.PutIf(ctx, headKey(path), strings.NewReader(sha), int64(len(sha)), version)
+				if err == nil {
+					return
+				}
+				if !errors.Is(err, remote.ErrVersionMismatch) {
+					log.Printf("bdrive: storing room head %s/%s: %v", project, path, err)
+					return
+				}
 			}
-			if err != nil && !errors.Is(err, remote.ErrVersionMismatch) {
-				log.Printf("bdrive: storing room head %s/%s: %v", project, path, err)
-			}
+			log.Printf("bdrive: storing room head %s/%s: concurrent head contention", project, path)
 			return
 		}
 	}

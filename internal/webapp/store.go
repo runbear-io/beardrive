@@ -1306,8 +1306,8 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 	}
 	prevSize, perr := strconv.ParseInt(r.URL.Query().Get("prev_size"), 10, 64)
 	prevSHA := strings.ToLower(r.URL.Query().Get("prev_sha256"))
-	if perr != nil || prevSize < 0 {
-		http.Error(w, "invalid journal prefix size", http.StatusBadRequest)
+	if perr != nil || prevSize < 0 || (prevSize > 0 && !blobRe.MatchString(prevSHA)) || (prevSHA != "" && !blobRe.MatchString(prevSHA)) {
+		http.Error(w, "invalid journal prefix", http.StatusBadRequest)
 		return
 	}
 	if r.ContentLength > maxInflatedPut {
@@ -1443,7 +1443,7 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 				}
 			}
 			var remErr error
-			rem, remErr = io.ReadAll(io.LimitReader(rc, size+1))
+			rem, remErr = io.ReadAll(io.LimitReader(rc, size+2))
 			rc.Close()
 			if remErr != nil {
 				cleanupTmp()
@@ -1451,8 +1451,12 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 				return
 			}
 		}
-		prefixHashOK := prevSHA == "" || hex.EncodeToString(h.Sum(nil)) == prevSHA
-		if prefixRead == prevSize && int64(len(rem)) == size && bytes.Equal(rem, tailBytes) && prefixHashOK {
+		prefixHashOK := (prevSize == 0 && prevSHA == "") || hex.EncodeToString(h.Sum(nil)) == prevSHA
+		remMatch := int64(len(rem)) == size && bytes.Equal(rem, tailBytes)
+		if prevSize > 0 && lastByte != '\n' {
+			remMatch = int64(len(rem)) == size+1 && rem[0] == '\n' && bytes.Equal(rem[1:], tailBytes)
+		}
+		if prefixRead == prevSize && remMatch && prefixHashOK {
 			cleanupTmp()
 			writeJSON(w, map[string]any{"ok": true})
 			return

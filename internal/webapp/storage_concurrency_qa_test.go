@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reearth/ygo/crdt"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
 )
@@ -125,6 +126,33 @@ func TestQA_C11_V2StoreAppendAndTailGetAndIdempotentRetry(t *testing.T) {
 	if got := fallback.Header().Get("X-Bdrive-Tail-Offset"); got != "" {
 		t.Fatalf("fallback unexpectedly advertised tail offset %q", got)
 	}
+
+	// Missing prev_sha256 when prev_size > 0 must be rejected (400 Bad Request).
+	noSHAURL := base + "append?key=" + key + "&prev_size=" + fmt.Sprint(len(want))
+	if rec := qaRequest(t, h, http.MethodPost, noSHAURL, qaJournalLine(3, "third.md"), headers); rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing prev_sha256 with prev_size > 0: got %d %s, want 400", rec.Code, rec.Body)
+	}
+
+	// Unterminated prefix append + idempotent retry: the hub inserts '\n' on
+	// the first append and must still recognize a retry of the same tail.
+	untermKey := "journal/qa-c11-unterm.jsonl"
+	untermFirst := bytes.TrimSuffix(qaJournalLine(1, "unterm-first.md"), []byte("\n"))
+	untermPath := filepath.Join(journalDir, "qa-c11-unterm.jsonl")
+	if err := os.WriteFile(untermPath, untermFirst, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	untermSHA := qaHexSHA(untermFirst)
+	untermURL := base + "append?key=" + untermKey + "&prev_size=" + fmt.Sprint(len(untermFirst)) + "&prev_sha256=" + untermSHA
+	untermHeaders := http.Header{"X-Bdrive-Device": []string{"qa-c11-unterm"}}
+	untermTail := qaJournalLine(2, "unterm-second.md")
+	if rec := qaRequest(t, h, http.MethodPost, untermURL, untermTail, untermHeaders); rec.Code != http.StatusOK {
+		t.Fatalf("initial append on unterminated prefix: %d %s", rec.Code, rec.Body)
+	}
+	q.denyW = true
+	if rec := qaRequest(t, h, http.MethodPost, untermURL, untermTail, untermHeaders); rec.Code != http.StatusOK {
+		t.Fatalf("idempotent retry on unterminated prefix: %d %s", rec.Code, rec.Body)
+	}
+	q.denyW = false
 }
 
 func TestQA_C12_C13_ManifestWriteOnceAndHubSeqAcrossInstances(t *testing.T) {
@@ -564,5 +592,209 @@ func TestQA_JournalPutRejectsRewritingStoredOpIdentityAndReadOnlyBypass(t *testi
 	rewrittenKind.Blob = ""
 	if rec := push([]journal.Op{rewrittenKind}); rec.Code != http.StatusForbidden {
 		t.Fatalf("rewriting stored Seq 1 Kind after read-only transition: got %d %s, want 403", rec.Code, rec.Body)
+	}
+}
+
+type onceMismatchBackend struct {
+	remote.Backend
+	cp       remote.ConditionalPutter
+	mu       sync.Mutex
+	mismatch map[string]bool
+}
+
+func (b *onceMismatchBackend) GetVersioned(ctx context.Context, key string) (io.ReadCloser, remote.Version, error) {
+	return b.cp.GetVersioned(ctx, key)
+}
+
+func (b *onceMismatchBackend) PutIf(ctx context.Context, key string, r io.Reader, size int64, expect remote.Version) (remote.Version, error) {
+	b.mu.Lock()
+	fail := b.mismatch[key]
+	if fail {
+		delete(b.mismatch, key)
+	}
+	b.mu.Unlock()
+	if fail {
+		return remote.VersionAbsent, remote.ErrVersionMismatch
+	}
+	return b.cp.PutIf(ctx, key, r, size, expect)
+}
+
+func TestQA_StoreRoomHeadReconcilesOrderAndRetriesCAS(t *testing.T) {
+	var wrapper *onceMismatchBackend
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		cp := be.(remote.ConditionalPutter)
+		wrapper = &onceMismatchBackend{
+			Backend:  be,
+			cp:       cp,
+			mismatch: map[string]bool{},
+		}
+		return wrapper
+	})
+	// Note: p.ID is known after newHub returns, so set the mismatch key now.
+	wrapper.mu.Lock()
+	wrapper.mismatch = map[string]bool{p.ID + "/" + headKey("notes.md"): true}
+	wrapper.mu.Unlock()
+
+	doc := crdt.New()
+	txt := doc.GetText("body")
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, 0, "v1\n", nil) })
+	state1 := doc.EncodeStateAsUpdate()
+	sha1 := qaHexSHA([]byte("v1\n"))
+
+	doc.Transact(func(txn *crdt.Transaction) { txt.Insert(txn, txt.Len(), "v2\n", nil) })
+	state2 := doc.EncodeStateAsUpdate()
+	sha2 := qaHexSHA([]byte("v2\n"))
+
+	ctx := context.Background()
+	srv.storeRoomHistory(ctx, p.ID, "notes.md", sha1, state1)
+	if got := srv.roomHead(ctx, p.ID, "notes.md"); got != sha1 {
+		t.Fatalf("roomHead after state1 (with transient CAS mismatch) = %q, want %q", got, sha1)
+	}
+
+	// Inject another transient CAS mismatch when storing newer state2: it must retry and advance to sha2.
+	wrapper.mu.Lock()
+	wrapper.mismatch[p.ID+"/"+headKey("notes.md")] = true
+	wrapper.mu.Unlock()
+	srv.storeRoomHistory(ctx, p.ID, "notes.md", sha2, state2)
+	if got := srv.roomHead(ctx, p.ID, "notes.md"); got != sha2 {
+		t.Fatalf("roomHead after newer state2 = %q, want %q", got, sha2)
+	}
+
+	// A late/stale storeRoomHead for state1 must NOT overwrite the newer state2 head.
+	srv.storeRoomHead(ctx, p.ID, "notes.md", sha1, state1)
+	if got := srv.roomHead(ctx, p.ID, "notes.md"); got != sha2 {
+		t.Fatalf("roomHead after stale state1 = %q, want newer %q preserved", got, sha2)
+	}
+}
+
+type blockingGetBackend struct {
+	remote.Backend
+	target  string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingGetBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == b.target {
+		b.once.Do(func() { close(b.entered) })
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return b.Backend.Get(ctx, key)
+}
+
+func TestQA_SharedJournalFetchAndReassembleIsolateCallerCancel(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	be, err := remote.Open(ctx, "file://"+dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.Close()
+
+	// 1. Shared journal fetch (jflight) survives first caller cancellation.
+	jKey := "journal/dev-cancel.jsonl"
+	op := journal.Op{Seq: 1, Lamport: 1, Kind: journal.KindPut, Path: "doc.md", Blob: strings.Repeat("a", 64), Size: 4}
+	jBytes, err := journal.Marshal([]journal.Op{op})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := be.Put(ctx, jKey, bytes.NewReader(jBytes), int64(len(jBytes))); err != nil {
+		t.Fatal(err)
+	}
+	jb := &blockingGetBackend{
+		Backend: be,
+		target:  jKey,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	rsJ := &RemoteSource{Backend: jb}
+	objs, err := rsJ.listJournals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx1, cancel1 := context.WithCancel(ctx)
+	err1Ch := make(chan error, 1)
+	go func() {
+		_, err := rsJ.parsedJournals(ctx1, objs)
+		err1Ch <- err
+	}()
+	<-jb.entered
+
+	err2Ch := make(chan error, 1)
+	go func() {
+		_, err := rsJ.parsedJournals(ctx, objs)
+		err2Ch <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel1()
+	if err := <-err1Ch; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled caller 1 = %v, want context.Canceled", err)
+	}
+	close(jb.release)
+	if err := <-err2Ch; err != nil {
+		t.Fatalf("healthy caller 2 failed after caller 1 canceled: %v", err)
+	}
+
+	// 2. Shared chunked blob reassembly survives first caller cancellation.
+	chunkData := []byte("shared-reassemble-chunk-payload")
+	chunkSHA := qaHexSHA(chunkData)
+	if err := be.Put(ctx, "chunks/"+chunkSHA, bytes.NewReader(chunkData), int64(len(chunkData))); err != nil {
+		t.Fatal(err)
+	}
+	manifestJSON := fmt.Sprintf(`{"v":1,"size":%d,"chunks":[{"h":%q,"n":%d}]}`, len(chunkData), chunkSHA, len(chunkData))
+	fileSHA := chunkSHA
+	if err := be.Put(ctx, "manifests/"+fileSHA, strings.NewReader(manifestJSON), int64(len(manifestJSON))); err != nil {
+		t.Fatal(err)
+	}
+	rb := &blockingGetBackend{
+		Backend: be,
+		target:  "chunks/" + chunkSHA,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	rsR := &RemoteSource{Backend: rb}
+	rctx1, rcancel1 := context.WithCancel(ctx)
+	rerr1Ch := make(chan error, 1)
+	go func() {
+		rc, err := rsR.reassemble(rctx1, fileSHA)
+		if rc != nil {
+			rc.Close()
+		}
+		rerr1Ch <- err
+	}()
+	<-rb.entered
+
+	rerr2Ch := make(chan error, 1)
+	go func() {
+		rc, err := rsR.reassemble(ctx, fileSHA)
+		if err != nil {
+			rerr2Ch <- err
+			return
+		}
+		defer rc.Close()
+		got, rerr := io.ReadAll(rc)
+		if rerr != nil {
+			rerr2Ch <- rerr
+			return
+		}
+		if !bytes.Equal(got, chunkData) {
+			rerr2Ch <- fmt.Errorf("reassembled bytes = %q, want %q", got, chunkData)
+			return
+		}
+		rerr2Ch <- nil
+	}()
+	time.Sleep(10 * time.Millisecond)
+	rcancel1()
+	if err := <-rerr1Ch; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reassemble caller 1 = %v, want context.Canceled", err)
+	}
+	close(rb.release)
+	if err := <-rerr2Ch; err != nil {
+		t.Fatalf("healthy reassemble caller 2 failed after caller 1 canceled: %v", err)
 	}
 }
