@@ -461,8 +461,9 @@ func TestQA_C19_C20_QuotaJournalDeltaChunkDedupAndConcurrentDeviceBind(t *testin
 }
 
 func TestQA_JournalPutRejectsRewritingStoredOpIdentityAndReadOnlyBypass(t *testing.T) {
-	h, _, c, p := folderHub(t) // "locked/" is read-only for bob, "notes/" is writable
-	dev := "bobdev01"
+	h, srv, c, p := folderHub(t) // "locked/" is read-only for bob, "notes/" is writable
+	const dev = "bobdev01"
+	secRegisterDevice(t, h, p.ID, c["bob"], dev, dev, "darwin")
 	push := func(ops []journal.Op) *httptest.ResponseRecorder {
 		t.Helper()
 		data, err := journal.Marshal(ops)
@@ -493,10 +494,15 @@ func TestQA_JournalPutRejectsRewritingStoredOpIdentityAndReadOnlyBypass(t *testi
 	if rec := push([]journal.Op{rewrittenBlob}); rec.Code != http.StatusConflict {
 		t.Fatalf("rewriting stored Seq 1 Blob: got %d %s, want 409", rec.Code, rec.Body)
 	}
+	// After "notes/" becomes read-only for bob, rewriting Seq 1's Kind or Blob on
+	// "notes/a.md" must not bypass opsWithinScope (must be refused with 403).
+	if err := srv.Projects.SetFolder(p.ID, FolderRule{Prefix: "notes/", Default: PermRead}); err != nil {
+		t.Fatal(err)
+	}
 	rewrittenKind := op1
 	rewrittenKind.Kind = journal.KindDelete
 	rewrittenKind.Blob = ""
-	if rec := push([]journal.Op{rewrittenKind}); rec.Code != http.StatusConflict {
-		t.Fatalf("rewriting stored Seq 1 Kind to delete: got %d %s, want 409", rec.Code, rec.Body)
+	if rec := push([]journal.Op{rewrittenKind}); rec.Code != http.StatusForbidden {
+		t.Fatalf("rewriting stored Seq 1 Kind after read-only transition: got %d %s, want 403", rec.Code, rec.Body)
 	}
 }
