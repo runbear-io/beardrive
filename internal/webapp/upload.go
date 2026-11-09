@@ -110,7 +110,7 @@ func (r *RemoteSource) blobStat(ctx context.Context, blob string) (remote.Object
 		var m struct {
 			Size int64 `json:"size"`
 		}
-		decErr := json.NewDecoder(rc).Decode(&m)
+		decErr := json.NewDecoder(io.LimitReader(rc, 4<<20)).Decode(&m)
 		rc.Close()
 		if decErr != nil {
 			return remote.Object{}, false, decErr
@@ -184,6 +184,14 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, w
 }
 
 func (r *RemoteSource) commitIf(ctx context.Context, p, blob string, size int64, who User, note, base string) error {
+	var cb *commitBase
+	if base != "" {
+		cb = &commitBase{path: p, sha: base, blob: blob}
+	}
+	return r.commitIfBase(ctx, p, blob, size, who, note, cb)
+}
+
+func (r *RemoteSource) commitIfBase(ctx context.Context, p, blob string, size int64, who User, note string, cb *commitBase) error {
 	if r.Device.ID == "" {
 		return fmt.Errorf("no device identity configured for uploads")
 	}
@@ -193,10 +201,6 @@ func (r *RemoteSource) commitIf(ctx context.Context, p, blob string, size int64,
 	}
 	if !ok {
 		return errBlobMissing
-	}
-	var cb *commitBase
-	if base != "" {
-		cb = &commitBase{path: p, sha: base, blob: blob}
 	}
 	return r.appendOpsIf(ctx, []journal.Op{{
 		Kind: journal.KindPut, Path: p, Blob: blob, Size: size, Mode: 0o644,
@@ -214,10 +218,12 @@ func (r *RemoteSource) commitIf(ctx context.Context, p, blob string, size int64,
 // snapshot that another hub process's write can postdate: both pass, both
 // append, and the later lamport silently replaces the other's content.
 type commitBase struct {
-	path  string
-	sha   string // the version the writer read
-	blob  string // what it writes: finding that already there is no conflict
-	extra []commitBase
+	path      string
+	sha       string // the blob version the writer read (empty for symlink)
+	link      string // the symlink target the writer read (empty for regular file)
+	blob      string // what it writes: finding that already there is no conflict
+	writeLink string // symlink target it writes: finding that already there is no conflict
+	extra     []commitBase
 }
 
 // staleWriteError is a write whose base no longer holds. head is the version
@@ -240,10 +246,16 @@ func (b *commitBase) holds(all []journal.Op) error {
 		}
 		journal.Sort(ops)
 		fi, ok := foldFiles(ops)[base.path]
-		if !ok || fi.Blob == base.sha || fi.Blob == base.blob {
+		matchesBase := fi.Blob == base.sha && fi.Link == base.link
+		matchesTarget := (base.blob != "" || base.writeLink != "") && fi.Blob == base.blob && fi.Link == base.writeLink
+		if !ok || matchesBase || matchesTarget {
 			continue
 		}
-		return &staleWriteError{head: fi.Blob}
+		head := fi.Blob
+		if head == "" {
+			head = fi.Link
+		}
+		return &staleWriteError{head: head}
 	}
 	return nil
 }
@@ -328,21 +340,7 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 	if cp, ok := r.Backend.(remote.ConditionalPutter); ok {
 		return r.appendConditionalExisting(ctx, cp, key, next)
 	}
-	var existing []byte
-	if exists, err := r.Backend.Exists(ctx, key); err != nil {
-		return err
-	} else if exists {
-		rc, err := r.Backend.Get(ctx, key)
-		if err != nil {
-			return err
-		}
-		existing, err = io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return err
-		}
-	}
-	line, err := next(existing)
+	line, err := next(nil)
 	if err != nil {
 		return err
 	}

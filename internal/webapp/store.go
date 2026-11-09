@@ -424,10 +424,6 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	// serve content that does not hash to the key it is stored under.
 	var rc io.ReadCloser
 	var err error
-	type combinedReadCloser struct {
-		io.Reader
-		io.Closer
-	}
 
 	switch f := s.visibility(r); {
 	case strings.HasPrefix(key, "journal/") && f.hides():
@@ -476,24 +472,35 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		q := r.URL.Query()
 		offsetStr, prefixSHA := q.Get("offset"), strings.ToLower(q.Get("prefix_sha256"))
 		offset, perr := strconv.ParseInt(offsetStr, 10, 64)
-		if offsetStr != "" && prefixSHA != "" && perr == nil && offset > 0 && offset <= maxInflatedPut {
+		if offsetStr != "" && prefixSHA != "" && perr == nil && offset > 0 {
 			origRC := rc
-			prefix, rerr := io.ReadAll(io.LimitReader(origRC, offset))
-			if rerr != nil {
+			h := sha256.New()
+			n, rerr := io.CopyN(h, origRC, offset)
+			if rerr != nil && !errors.Is(rerr, io.EOF) {
 				origRC.Close()
 				storageErr(w, http.StatusBadGateway, "could not read the journal", rerr)
 				return
 			}
-			if int64(len(prefix)) == offset {
-				sum := sha256.Sum256(prefix)
-				if hex.EncodeToString(sum[:]) == prefixSHA {
-					w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
-					rc = origRC
-				} else {
-					rc = &combinedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix), origRC), Closer: origRC}
-				}
+			if n == offset && hex.EncodeToString(h.Sum(nil)) == prefixSHA {
+				w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
+				rc = origRC
 			} else {
-				rc = &combinedReadCloser{Reader: bytes.NewReader(prefix), Closer: origRC}
+				origRC.Close()
+				f := s.visibility(r)
+				if f.hides() {
+					data, ferr := s.filteredJournal(r.Context(), rs, remote.Object{Key: key}, f)
+					if ferr != nil {
+						storageErr(w, http.StatusBadGateway, "could not read the journal", ferr)
+						return
+					}
+					rc = io.NopCloser(bytes.NewReader(data))
+				} else {
+					rc, err = rs.Backend.Get(r.Context(), key)
+					if err != nil {
+						storageErr(w, http.StatusBadGateway, "could not read the journal", err)
+						return
+					}
+				}
 			}
 		}
 	}

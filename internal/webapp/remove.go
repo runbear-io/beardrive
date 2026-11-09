@@ -28,12 +28,16 @@ func (r *RemoteSource) Remove(ctx context.Context, p string, who User, note stri
 }
 
 func (r *RemoteSource) removeIf(ctx context.Context, p, base string, who User, note string) error {
-	if r.Device.ID == "" {
-		return fmt.Errorf("no device identity configured for uploads")
-	}
 	var cb *commitBase
 	if base != "" {
 		cb = &commitBase{path: p, sha: base}
+	}
+	return r.removeIfBase(ctx, p, cb, who, note)
+}
+
+func (r *RemoteSource) removeIfBase(ctx context.Context, p string, cb *commitBase, who User, note string) error {
+	if r.Device.ID == "" {
+		return fmt.Errorf("no device identity configured for uploads")
 	}
 	return r.appendOpsIf(ctx, []journal.Op{{
 		Kind: journal.KindDelete, Path: p,
@@ -87,7 +91,7 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 		return
 	}
-	if err := rs.removeIf(r.Context(), p, fi.Blob, s.requestUser(r), "remove "+p); err != nil {
+	if err := rs.removeIfBase(r.Context(), p, &commitBase{path: p, sha: fi.Blob, link: fi.Link}, s.requestUser(r), "remove "+p); err != nil {
 		var stale *staleWriteError
 		code := http.StatusBadGateway
 		if errors.As(err, &stale) {

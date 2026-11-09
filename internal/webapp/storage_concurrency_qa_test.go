@@ -287,6 +287,31 @@ func TestQA_C14_RestoreRemoveUndoStaleBaseConflict(t *testing.T) {
 			t.Fatalf("remove conflict error = %v, want staleWriteError", err)
 		}
 	}
+
+	// Symlinks have Blob == "" and carry identity in Link; stale remove/restore
+	// against an older Link target must fail with staleWriteError.
+	if err := rs.appendOp(context.Background(), journal.Op{Kind: journal.KindPut, Path: "link-race", Link: "target-a", Mode: 0o777}); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.appendOp(context.Background(), journal.Op{Kind: journal.KindPut, Path: "link-race", Link: "target-b", Mode: 0o777}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rs.removeIfBase(context.Background(), "link-race", &commitBase{path: "link-race", link: "target-a"}, User{}, "remove stale symlink"); err == nil {
+		t.Fatal("removeIfBase ignored concurrent symlink target change")
+	} else {
+		var stale *staleWriteError
+		if !errors.As(err, &stale) {
+			t.Fatalf("symlink remove conflict error = %v, want staleWriteError", err)
+		}
+	}
+	if err := rs.commitIfBase(context.Background(), "link-race", qaHexSHA(raceOld), int64(len(raceOld)), User{}, "restore over stale symlink", &commitBase{path: "link-race", link: "target-a", blob: qaHexSHA(raceOld)}); err == nil {
+		t.Fatal("commitIfBase ignored concurrent symlink target change")
+	} else {
+		var stale *staleWriteError
+		if !errors.As(err, &stale) {
+			t.Fatalf("symlink restore conflict error = %v, want staleWriteError", err)
+		}
+	}
 }
 
 func TestQA_C15_C16_C17_FilteredCacheLRUEvictionAndDataIndexFallback(t *testing.T) {

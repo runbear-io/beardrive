@@ -501,3 +501,23 @@ func (b *qaJournalBackend) GetJournalTail(_ context.Context, key string, offset 
 	}
 	return io.NopCloser(bytes.NewReader(d[offset:])), true, nil
 }
+
+func TestQA_RedefinesAppliedDetectsBaseMutation(t *testing.T) {
+	ts := time.Date(2026, 11, 9, 15, 0, 0, 0, time.UTC)
+	baseA := strings.Repeat("a", 64)
+	baseB := strings.Repeat("b", 64)
+	blob := strings.Repeat("c", 64)
+	applied := []journal.Op{{
+		Device: "peer-dev", Seq: 1, Lamport: 10, Time: ts,
+		Kind: journal.KindPut, Path: "notes/doc.md", Blob: blob, Base: baseA, Size: 42, Mode: 0o644,
+	}}
+	same := []journal.Op{applied[0]}
+	if redefinesApplied(same, applied) {
+		t.Fatal("identical op was flagged as redefinition")
+	}
+	mutatedBase := []journal.Op{applied[0]}
+	mutatedBase[0].Base = baseB
+	if !redefinesApplied(mutatedBase, applied) {
+		t.Fatal("redefinesApplied failed to detect Base mutation on applied (Device, Seq)")
+	}
+}

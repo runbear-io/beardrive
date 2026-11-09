@@ -130,7 +130,7 @@ func planUndo(sourced []sourcedOp, sel undoSel) undoPlan {
 		case before == nil || before.Kind == journal.KindDelete:
 			// The run created the file (or re-created a deleted one): undoing
 			// it means taking it away. Already gone → nothing to write.
-			if now.Blob == "" {
+			if now.Blob == "" && now.Link == "" {
 				plan.Skipped = append(plan.Skipped, p)
 				continue
 			}
@@ -140,13 +140,13 @@ func planUndo(sourced []sourcedOp, sel undoSel) undoPlan {
 			// An earlier version exists. Restoring content that is already the
 			// file's content would put a +0 −0 row in every teammate's history
 			// — the batch form of the 409 restore returns for a no-op version.
-			if now.Blob == before.Blob {
+			if now.Blob == before.Blob && now.Link == before.Link {
 				plan.Skipped = append(plan.Skipped, p)
 				continue
 			}
 			plan.Ops = append(plan.Ops, journal.Op{
 				Kind: journal.KindPut, Path: p,
-				Blob: before.Blob, Size: before.Size, Mode: before.Mode,
+				Blob: before.Blob, Link: before.Link, Size: before.Size, Mode: before.Mode,
 			})
 			plan.Actions = append(plan.Actions, undoAction{Path: p, Action: "restore"})
 		}
@@ -280,9 +280,10 @@ func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request
 	base := &commitBase{}
 	first := true
 	for _, op := range plan.Ops {
-		cb := commitBase{path: op.Path, blob: op.Blob}
+		cb := commitBase{path: op.Path, blob: op.Blob, writeLink: op.Link}
 		if cur, ok := files[op.Path]; ok {
 			cb.sha = cur.Blob
+			cb.link = cur.Link
 		}
 		if first {
 			*base = cb
