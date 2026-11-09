@@ -181,6 +181,30 @@ func TestRoomKeepsBothAppendsWhenAnAgentAppendsToo(t *testing.T) {
 	}
 }
 
+// Each side's addition is kept exactly as written: a line both sides happen
+// to add is two entries, and the blank line that separates a paragraph stays.
+func TestRoomKeepsBothAppendsAsWritten(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "# log\n", "")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
+
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "# log\n- ok\n", ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d %s", rec.Code, rec.Body.String())
+	}
+	typeInto(doc, "\n- ok\n- more\n")
+
+	want := "# log\n- ok\n\n- ok\n- more\n"
+	if !waitFile(t, h, url, want, 2*time.Second) {
+		t.Fatalf("file = %q, want %q", get(t, h, url).Body.String(), want)
+	}
+	if n := conflictCopies(t, h, p.ID); n != 0 {
+		t.Fatalf("%d conflict copies for two appends", n)
+	}
+}
+
 func TestRoomParksItsVersionWhenSomeoneOutsideWrote(t *testing.T) {
 	fastRoom(t, 100*time.Millisecond, time.Second)
 	srv, p, _ := newHub(t, true, nil)

@@ -836,21 +836,19 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		// Two sides under the bound can insert past it together, and a
 		// merge no room could open again is parked rather than written.
 		target, ok = string(merged), true
+	case appendedBoth(baseText, haveBase, theirs, text) && len(theirs)+len(text)-len(baseText) < maxSeedBytes:
+		// Both sides only added to the end: an agent appending to a daily
+		// note while somebody types at its foot. The line merge has no order
+		// for two insertions at one point; this room is the file's only
+		// writer, so it picks one: theirs, then what the room added, each
+		// exactly as written, repeated lines and blank lines included.
+		target, ok = theirs+strings.TrimPrefix(text, baseText), true
 	case fileHolds(theirs, text) || s.copyHolds(ctx, project, path, text):
 		target, ok = theirs, true
 	case haveBase && strings.TrimSpace(baseText) == "":
 		// Both sides wrote into an empty file — a template arriving while
 		// somebody already typed. There is no ancestor to order them by, and
 		// neither is a revision of the other: keep both, theirs first.
-		if both := appendNew(theirs, text); len(both) < maxSeedBytes {
-			target, ok = both, true
-		}
-	case haveBase && strings.HasSuffix(baseText, "\n") &&
-		strings.HasPrefix(theirs, baseText) && strings.HasPrefix(text, baseText):
-		// Both sides only added to the end: an agent appending to a daily
-		// note while somebody types at its foot. The line merge has no order
-		// for two insertions at one point; this room is the file's only
-		// writer, so it picks one: theirs, then what the room added.
 		if both := appendNew(theirs, text); len(both) < maxSeedBytes {
 			target, ok = both, true
 		}
@@ -932,6 +930,17 @@ func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, final 
 		s.rooms().rebase(room, sha)
 	}
 	return moved
+}
+
+// appendedBoth reports whether theirs and text each extend base, which ends a
+// line, with lines of their own, and not the same ones.
+func appendedBoth(base string, haveBase bool, theirs, text string) bool {
+	if !haveBase || base == "" || !strings.HasSuffix(base, "\n") ||
+		!strings.HasPrefix(theirs, base) || !strings.HasPrefix(text, base) {
+		return false
+	}
+	x, y := theirs[len(base):], text[len(base):]
+	return x != "" && y != "" && x != y && strings.HasSuffix(theirs, "\n")
 }
 
 // appendNew is file followed by the lines of text the file does not already
