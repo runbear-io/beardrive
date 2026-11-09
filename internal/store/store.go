@@ -548,23 +548,25 @@ func (s *Store) TryLock() (func() error, error) {
 	}, nil
 }
 
-func lockSpool(path string) (func() error, error) {
-	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+// LockWithin takes the volume lock like Lock, giving up after limit. It
+// reports false, holding nothing, when a cycle kept the lock that long.
+func (s *Store) LockWithin(limit time.Duration) (func(), bool) {
+	f, err := os.OpenFile(filepath.Join(s.dir, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return nil, err
+		return nil, false
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return func() error {
-		unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		closeErr := f.Close()
-		if unlockErr != nil {
-			return unlockErr
+	deadline := time.Now().Add(limit)
+	for syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		if time.Now().After(deadline) {
+			f.Close()
+			return nil, false
 		}
-		return closeErr
-	}, nil
+		time.Sleep(20 * time.Millisecond)
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, true
 }
 
 // ---- small JSON helpers ----

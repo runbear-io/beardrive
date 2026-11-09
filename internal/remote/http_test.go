@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -246,5 +247,81 @@ func TestHTTPBackend_SharesTransportAndIsolatesProjectHeadersAndStreams(t *testi
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Watch did not close after cancellation")
+	}
+}
+
+// An announcement reaches OnAnnounce before its wakeup is queued, and a
+// keepalive never does: the daemon withdraws its vouch there, so nothing that
+// acts on the wakeup can run while the vouch still stands.
+func TestHTTPBackend_OnAnnounceRunsBeforeTheWakeup(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	t.Setenv("BDRIVE_TOKEN", "token")
+	send := make(chan string, 2)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+		for frame := range send {
+			w.Write([]byte(frame))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer ts.Close()
+	defer close(send)
+	b, err := newHTTPBackend(ts.URL + "/p/p-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	var heard atomic.Int32
+	b.OnAnnounce(func() { heard.Add(1) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	events, err := b.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send <- ": keepalive\n\n"
+	send <- "data: changed\n\n"
+	select {
+	case <-events:
+	case <-ctx.Done():
+		t.Fatal("no wakeup for the announcement")
+	}
+	if n := heard.Load(); n != 1 {
+		t.Fatalf("OnAnnounce ran %d times by the wakeup, want once for the one announcement", n)
+	}
+}
+
+// The stream ending reaches OnAnnounce before its channel closes: whatever it
+// would have announced next is lost, and a vouch resting on it must go first.
+func TestHTTPBackend_OnAnnounceRunsWhenTheStreamEnds(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	t.Setenv("BDRIVE_TOKEN", "token")
+	end := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(": keepalive\n\n"))
+		w.(http.Flusher).Flush()
+		<-end
+	}))
+	defer ts.Close()
+	b, err := newHTTPBackend(ts.URL + "/p/p-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	var heard atomic.Int32
+	b.OnAnnounce(func() { heard.Add(1) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	events, err := b.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(end)
+	for range events {
+	}
+	if n := heard.Load(); n != 1 {
+		t.Fatalf("OnAnnounce ran %d times by the time the stream closed, want once for its end", n)
 	}
 }

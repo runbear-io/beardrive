@@ -140,14 +140,15 @@ func TestSec_Path_ViewerBlobEscapesProjectPrefix(t *testing.T) {
 		t.Fatalf("control read: %d %q", rec.Code, rec.Body)
 	}
 
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		name, blob, secret string
 	}{
 		{"another project's blob", "../../" + other.ID + "/blobs/" + otherSHA, "OTHER-PROJECT-CONTENT"},
 		{"a file outside the storage root", "../../../hub-secret.txt", "TOP-SECRET-OUTSIDE-ROOT"},
 	} {
 		p := "pwned-" + strings.ReplaceAll(tc.name, " ", "-") + ".txt"
-		if rec := secpathPushOp(t, h, victim.ID, "attacker2", secpathPutOp(p, tc.blob, len(tc.secret)), nil); rec.Code != 200 {
+		dev := "attacker" + string(rune('2'+i))
+		if rec := secpathPushOp(t, h, victim.ID, dev, secpathPutOp(p, tc.blob, len(tc.secret)), nil); rec.Code != 200 {
 			t.Fatalf("%s: journal push refused (%d %s) — attack setup failed", tc.name, rec.Code, rec.Body)
 		}
 		for _, route := range []string{"file", "download", "render"} {

@@ -238,6 +238,22 @@ type Watcher interface {
 	Watch(ctx context.Context) (<-chan struct{}, error)
 }
 
+// StreamLiveness is a Watcher that can tell a quiet stream from a dead one:
+// the hub sends keepalives on an idle stream, so a recent frame of any kind
+// means announcements would still be getting through.
+type StreamLiveness interface {
+	StreamFrame() time.Time
+}
+
+// AnnounceNotifier is a Watcher that reports each announcement as it reads it,
+// on the stream's own goroutine and before the wakeup is queued, so whatever
+// the announcement invalidates is invalidated before anything can act on the
+// wakeup or miss it. The stream ending is reported the same way, before its
+// channel closes: announcements may have been lost with it.
+type AnnounceNotifier interface {
+	OnAnnounce(func())
+}
+
 // Open creates a backend from a remote URL.
 func Open(ctx context.Context, raw string) (Backend, error) {
 	u, err := url.Parse(raw)

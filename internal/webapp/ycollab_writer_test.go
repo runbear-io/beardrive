@@ -153,6 +153,109 @@ func TestRoomMergesAroundAnOutsideRewrite(t *testing.T) {
 	}
 }
 
+// A daily note gets appended to from both sides at once: an agent adds a line
+// at the end while someone types one at the end. Neither replaced anything,
+// so both lines stay and nothing is parked.
+func TestRoomKeepsBothAppendsWhenAnAgentAppendsToo(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "# daily\n- first\n", "")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
+
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "# daily\n- first\n- agent line\n", ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d %s", rec.Code, rec.Body.String())
+	}
+	typeInto(doc, "- typed line\n")
+
+	if !waitFile(t, h, url, "# daily\n- first\n- agent line\n- typed line\n", 2*time.Second) {
+		t.Fatalf("file = %q, want both appended lines", get(t, h, url).Body.String())
+	}
+	if n := conflictCopies(t, h, p.ID); n != 0 {
+		t.Fatalf("%d conflict copies for two appends", n)
+	}
+	typeInto(doc, "- more\n")
+	if !waitFile(t, h, url, "# daily\n- first\n- agent line\n- typed line\n- more\n", 2*time.Second) {
+		t.Fatalf("the agent's line did not survive the next snapshot: file is %q", get(t, h, url).Body.String())
+	}
+}
+
+// Each side's addition is kept exactly as written: a line both sides happen
+// to add is two entries, and the blank line that separates a paragraph stays.
+func TestRoomKeepsBothAppendsAsWritten(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "# log\n", "")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
+
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "# log\n- ok\n", ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d %s", rec.Code, rec.Body.String())
+	}
+	typeInto(doc, "\n- ok\n- more\n")
+
+	want := "# log\n- ok\n\n- ok\n- more\n"
+	if !waitFile(t, h, url, want, 2*time.Second) {
+		t.Fatalf("file = %q, want %q", get(t, h, url).Body.String(), want)
+	}
+	if n := conflictCopies(t, h, p.ID); n != 0 {
+		t.Fatalf("%d conflict copies for two appends", n)
+	}
+}
+
+// An outside append that ends mid-line still keeps the room's addition, even
+// one that is only a blank line, on lines of its own.
+func TestRoomKeepsItsAppendAfterAnOutsideAppendWithNoNewline(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "base\n", "")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
+
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "base\nagent", ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d %s", rec.Code, rec.Body.String())
+	}
+	typeInto(doc, "\n")
+
+	want := "base\nagent\n\n"
+	if !waitFile(t, h, url, want, 2*time.Second) {
+		t.Fatalf("file = %q, want %q", get(t, h, url).Body.String(), want)
+	}
+}
+
+// Two appends too big to write together are parked, not judged by line:
+// the room's repeated lines are not already in the file.
+func TestRoomParksTwoAppendsTooBigToWrite(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "base\n", "")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
+
+	line := "- the same entry, logged again\n"
+	n := maxSeedBytes / 2 / len(line)
+	theirs := "base\n" + strings.Repeat(line, n+1)
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", theirs, ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d", rec.Code)
+	}
+	typeInto(doc, strings.Repeat(line, n))
+
+	deadline := time.Now().Add(3 * time.Second)
+	for conflictCopies(t, h, p.ID) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if conflictCopies(t, h, p.ID) == 0 {
+		t.Fatal("the room's append was dropped: no conflict copy")
+	}
+	if got := get(t, h, url).Body.String(); got != theirs {
+		t.Fatalf("file changed to %d bytes; want their %d", len(got), len(theirs))
+	}
+}
+
 func TestRoomParksItsVersionWhenSomeoneOutsideWrote(t *testing.T) {
 	fastRoom(t, 100*time.Millisecond, time.Second)
 	srv, p, _ := newHub(t, true, nil)
@@ -180,9 +283,13 @@ func TestRoomParksItsVersionWhenSomeoneOutsideWrote(t *testing.T) {
 		t.Fatal("the room's version was refused and then dropped: no conflict copy beside the file")
 	}
 
-	// Rebased: the next snapshot is not refused for the same stale base.
+	// The room now holds their version, so the next snapshot builds on it
+	// instead of writing the parked text back over it.
+	if got := txt.ToString(); got != "REWRITTEN BY AN AGENT\n" {
+		t.Fatalf("after parking, the room holds %q, not the file", got)
+	}
 	typeInto(doc, "more\n")
-	if !waitFile(t, h, url, "typed in the room\nmore\n", 2*time.Second) {
+	if !waitFile(t, h, url, "REWRITTEN BY AN AGENT\nmore\n", 2*time.Second) {
 		t.Fatalf("after parking, the room never recovered the pen: file is %q", get(t, h, url).Body.String())
 	}
 }

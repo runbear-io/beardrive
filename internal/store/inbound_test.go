@@ -1,8 +1,10 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -114,5 +116,51 @@ func TestInboundSpoolUnreadableRecovers(t *testing.T) {
 	evs, err := s.DrainInbound()
 	if err != nil || len(evs) != 1 || evs[0].Path != "a.md" {
 		t.Fatalf("drain after failure = %+v, %v, want a.md", evs, err)
+	}
+}
+
+// A daemon appends while a hook drains, outside the volume lock. Every event
+// must reach exactly one drain: an append into a spool the drain had already
+// renamed and read was removed with the drain file.
+func TestInboundDrainLosesNoConcurrentAppend(t *testing.T) {
+	s := openTestStore(t)
+	const writers, each = 4, 1000
+	var wg sync.WaitGroup
+	for w := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range each {
+				if err := s.LogInboundForMount("m", fmt.Sprintf("w%d/%d.md", w, i), false); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	seen := map[string]bool{}
+	drain := func() {
+		evs, err := s.DrainInboundForMount("m")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range evs {
+			seen[e.Path] = true
+		}
+	}
+	for running := true; running; {
+		select {
+		case <-done:
+			running = false
+		default:
+			drain()
+		}
+	}
+	drain()
+	if len(seen) != writers*each {
+		t.Fatalf("drains saw %d of %d appended events", len(seen), writers*each)
 	}
 }

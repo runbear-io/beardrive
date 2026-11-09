@@ -331,9 +331,10 @@ func TestSec_Folder_ARewrittenSeqCannotSmuggleAHiddenPath(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		return rec
 	}
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	at := func(seq int64, path string) journal.Op {
 		return journal.Op{
-			Seq: seq, Lamport: seq, Time: time.Now().UTC(), Device: dev, User: "bob@x.io",
+			Seq: seq, Lamport: seq, Time: t0.Add(time.Duration(seq) * time.Second), Device: dev, User: "bob@x.io",
 			Kind: journal.KindPut, Path: path, Blob: strings.Repeat("f", 64), Size: 1,
 		}
 	}

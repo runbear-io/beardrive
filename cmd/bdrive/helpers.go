@@ -211,15 +211,24 @@ func openSession(ctx context.Context, folder string, withRemote bool) (*syncer.S
 	}
 	settings, _ := config.LoadSettings()
 	sess := &syncer.Session{Folder: folder, MountID: proj.ID, Store: st, Device: dev, Account: settings}
-	if withRemote && proj.Remote != "" {
-		be, err := remote.Open(ctx, proj.Remote)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: remote unavailable, working offline: %v\n", err)
-		} else {
-			sess.Backend = be
-		}
+	if withRemote {
+		attachRemote(ctx, sess, proj)
 	}
 	return sess, proj, nil
+}
+
+// attachRemote connects a session to the project's remote, leaving it offline
+// with a warning when the remote cannot be opened.
+func attachRemote(ctx context.Context, sess *syncer.Session, proj config.Project) {
+	if proj.Remote == "" {
+		return
+	}
+	be, err := remote.Open(ctx, proj.Remote)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: remote unavailable, working offline: %v\n", err)
+		return
+	}
+	sess.Backend = be
 }
 
 func closeSession(sess *syncer.Session) {

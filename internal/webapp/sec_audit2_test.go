@@ -460,17 +460,20 @@ func TestSec_Row11_AnOpWithABogusBlobDoesNotMaskTheLastGoodVersion(t *testing.T)
 		t.Fatalf("control: the good version is not served: %d %s", rec.Code, rec.Body)
 	}
 
-	for _, bogus := range []struct{ name, blob string }{
+	journalBody := good
+	for i, bogus := range []struct{ name, blob string }{
 		{"traversal", "../../../etc/passwd"},
 		{"another projects prefix", "../otherproject/blobs/" + sha},
 		{"not hex", strings.Repeat("z", 64)},
 		{"empty", ""},
 		{"short", "ab"},
 	} {
+		seq := 2 + i
 		t.Run(bogus.name, func(t *testing.T) {
 			// A LATER op for the same path, so it wins last-writer-wins if it
 			// is folded in at all. The journal keeps the good op ahead of it.
-			push(good + secaudOpLine(2, dev, "put", "notes.md", bogus.blob))
+			journalBody += secaudOpLine(seq, dev, "put", "notes.md", bogus.blob)
+			push(journalBody)
 			rec := doAs(t, h, "GET", "/api/p/"+p.ID+"/file?path=notes.md", nil, c["alice"])
 			if rec.Code != 200 || !strings.Contains(rec.Body.String(), content) {
 				t.Errorf("after an op naming blob %q the viewer no longer serves the last good "+

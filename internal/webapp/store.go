@@ -769,31 +769,39 @@ func (s *Server) opsNameTheirAuthor(w http.ResponseWriter, r *http.Request, ops 
 func sameReplayOp(a, b journal.Op) bool {
 	return a.Seq == b.Seq &&
 		a.Lamport == b.Lamport &&
+		a.Time.Equal(b.Time) &&
 		a.Device == b.Device &&
+		a.DeviceName == b.DeviceName &&
+		a.Author == b.Author &&
 		a.User == b.User &&
+		a.UserName == b.UserName &&
 		a.Kind == b.Kind &&
 		a.Path == b.Path &&
 		a.Blob == b.Blob &&
 		a.Base == b.Base &&
 		a.Link == b.Link &&
 		a.Size == b.Size &&
-		a.Mode == b.Mode
+		a.Mode == b.Mode &&
+		a.Note == b.Note &&
+		a.Session == b.Session &&
+		a.Mtime.Equal(b.Mtime)
 }
 
 func storedKeepsReplayIdentity(stored, incoming []journal.Op) bool {
+	if len(incoming) < len(stored) {
+		return false
+	}
 	bySeq := make(map[int64]journal.Op, len(incoming))
 	for _, op := range incoming {
+		if _, dup := bySeq[op.Seq]; dup {
+			return false
+		}
 		bySeq[op.Seq] = op
 	}
 	for _, op := range stored {
 		inc, ok := bySeq[op.Seq]
-		if !ok {
+		if !ok || !sameReplayOp(op, inc) {
 			return false
-		}
-		if op.Kind == journal.KindDelete || op.Link != "" || blobRe.MatchString(op.Blob) {
-			if !sameReplayOp(op, inc) {
-				return false
-			}
 		}
 	}
 	return true
@@ -1398,6 +1406,10 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 		}
 		storedMax = maxSeq
 		if !s.opsWithinScope(w, r, allOps, held) {
+			return
+		}
+		if !storedKeepsReplayIdentity(storedOps, allOps) {
+			http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
 			return
 		}
 		if err := s.quota().CheckWrite(org, size+s.reservedBytes(org)); err != nil {

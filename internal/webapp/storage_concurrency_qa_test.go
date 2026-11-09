@@ -101,6 +101,10 @@ func TestQA_C11_V2StoreAppendAndTailGetAndIdempotentRetry(t *testing.T) {
 	if rec := qaRequest(t, h, http.MethodPost, badSHA, qaJournalLine(3, "third.md"), headers); rec.Code != http.StatusConflict {
 		t.Fatalf("mismatched prefix hash: %d %s, want 409", rec.Code, rec.Body)
 	}
+	dupSeqURL := base + "append?key=" + key + "&prev_size=" + fmt.Sprint(len(want)) + "&prev_sha256=" + qaHexSHA(want)
+	if rec := qaRequest(t, h, http.MethodPost, dupSeqURL, qaJournalLine(1, "redefined-seq1.md"), headers); rec.Code != http.StatusConflict {
+		t.Fatalf("append redefining existing Seq 1: %d %s, want 409", rec.Code, rec.Body)
+	}
 
 	offsetURL := storedURL + "&offset=" + fmt.Sprint(len(first)) + "&prefix_sha256=" + prefixSHA
 	tailRec := qaRequest(t, h, http.MethodGet, offsetURL, nil, nil)
