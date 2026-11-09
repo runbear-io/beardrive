@@ -613,7 +613,6 @@ func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
 		return nil, httpError(resp)
 	}
 	ch := make(chan struct{}, 1)
-	b.lastFrame.Store(time.Now().UnixNano())
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()

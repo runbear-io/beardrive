@@ -31,15 +31,39 @@ type pulledVouch struct {
 	stream remote.StreamLiveness // the open change stream, nil when none
 }
 
-// passed records a tick that pulled mounts from the hub.
-func (v *pulledVouch) passed(mounts []string) {
+// newPulledVouch starts a worker's vouch with no marker: one left by an
+// earlier worker, even in this same process, does not cover this worker
+// until it has passed itself.
+func newPulledVouch(volDir string) *pulledVouch {
+	store.ClearPulled(volDir)
+	return &pulledVouch{volDir: volDir}
+}
+
+// passed records a tick that pulled mounts from the hub, unless an
+// announcement is still queued (queued reports it), which the pass predates.
+// It shares the lock with announced, so a pass and an announcement order one
+// way or the other, never interleave.
+func (v *pulledVouch) passed(mounts []string, queued func() bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if queued() {
+		return
+	}
 	v.mounts = mounts
 	_ = store.MarkPulled(v.volDir, mounts)
 }
 
-// withdraw stops vouching: a peer announced a push, or a pass failed.
+// announced withdraws the vouch for a peer's announcement and, still holding
+// the lock, queues it for the worker (enqueue).
+func (v *pulledVouch) announced(enqueue func()) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.mounts = nil
+	store.ClearPulled(v.volDir)
+	enqueue()
+}
+
+// withdraw stops vouching: a pass failed, or the worker is stopping.
 func (v *pulledVouch) withdraw() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -47,15 +71,22 @@ func (v *pulledVouch) withdraw() {
 	store.ClearPulled(v.volDir)
 }
 
-// streaming records the change stream now open, or nil once it closes.
+// streaming records the change stream now open, or nil once it closes. A
+// closed stream withdraws the vouch: announcements may have been missed, so
+// only a pass after the next stream opens can stand again.
 func (v *pulledVouch) streaming(s remote.StreamLiveness) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.stream = s
+	if s == nil {
+		v.mounts = nil
+		store.ClearPulled(v.volDir)
+	}
 }
 
 // renew rewrites the marker if the last complete pass still stands and the
-// stream is alive, which is what lets the files on disk stay vouched for.
+// stream is alive, which is what lets the files on disk stay vouched for. A
+// stream that has delivered no frame yet has not shown it is alive.
 func (v *pulledVouch) renew() {
 	v.mu.Lock()
 	defer v.mu.Unlock()

@@ -140,7 +140,7 @@ func TestVouchRenewsOnlyOverALiveStream(t *testing.T) {
 	if !store.LoadPulled(dir).At.IsZero() {
 		t.Fatal("renewed with no pass to stand on")
 	}
-	v.passed([]string{"p-a"})
+	v.passed([]string{"p-a"}, func() bool { return false })
 	v.streaming(stream)
 	old := time.Now().Add(-time.Minute)
 	os.Chtimes(dir+"/pulled", old, old)
@@ -155,16 +155,76 @@ func TestVouchRenewsOnlyOverALiveStream(t *testing.T) {
 	if at := store.LoadPulled(dir).At; !at.After(old.Add(time.Second)) {
 		t.Error("did not renew over a live stream")
 	}
-	v.streaming(nil)
-	os.Chtimes(dir+"/pulled", old, old)
-	v.renew()
-	if at := store.LoadPulled(dir).At; at.After(old.Add(time.Second)) {
-		t.Error("renewed with the stream closed")
-	}
-	v.streaming(stream)
 	v.withdraw()
 	v.renew()
 	if !store.LoadPulled(dir).At.IsZero() {
 		t.Error("renewed after a withdrawal")
+	}
+}
+
+// A stream that closed may have missed announcements: the pass before it
+// cannot be renewed over the stream that replaces it.
+func TestVouchDoesNotSurviveAStreamReconnect(t *testing.T) {
+	dir := t.TempDir()
+	v := newPulledVouch(dir)
+	v.passed([]string{"p-a"}, func() bool { return false })
+	v.streaming(&fakeStream{last: time.Now()})
+	v.streaming(nil)
+	if !store.LoadPulled(dir).At.IsZero() {
+		t.Error("the marker outlived its stream")
+	}
+	v.streaming(&fakeStream{last: time.Now()})
+	v.renew()
+	if !store.LoadPulled(dir).At.IsZero() {
+		t.Error("a new stream renewed the pass from before the reconnect")
+	}
+}
+
+// A stream that has delivered nothing yet has not shown it is alive.
+func TestVouchDoesNotRenewOverASilentNewStream(t *testing.T) {
+	dir := t.TempDir()
+	v := newPulledVouch(dir)
+	v.passed([]string{"p-a"}, func() bool { return false })
+	v.streaming(&fakeStream{})
+	old := time.Now().Add(-time.Minute)
+	os.Chtimes(dir+"/pulled", old, old)
+	v.renew()
+	if at := store.LoadPulled(dir).At; at.After(old.Add(time.Second)) {
+		t.Error("renewed over a stream with no frame yet")
+	}
+}
+
+// A replacement worker in the same process must not inherit the marker its
+// predecessor left: same pid, different worker, no pass yet.
+func TestANewWorkerVouchStartsWithNoMarker(t *testing.T) {
+	dir := t.TempDir()
+	if err := store.MarkPulled(dir, []string{"p-a"}); err != nil {
+		t.Fatal(err)
+	}
+	newPulledVouch(dir)
+	if !store.LoadPulled(dir).At.IsZero() {
+		t.Error("a new worker's vouch kept its predecessor's marker")
+	}
+}
+
+// A pass and an announcement order one way or the other: an announcement
+// queued before the pass is recorded keeps the pass from marking.
+func TestVouchPassDoesNotCoverAQueuedAnnouncement(t *testing.T) {
+	dir := t.TempDir()
+	v := newPulledVouch(dir)
+	queue := make(chan struct{}, 1)
+	v.announced(func() { queue <- struct{}{} })
+	v.passed([]string{"p-a"}, func() bool { return len(queue) > 0 })
+	if !store.LoadPulled(dir).At.IsZero() {
+		t.Error("a pass marked with an announcement still queued")
+	}
+	<-queue
+	v.passed([]string{"p-a"}, func() bool { return len(queue) > 0 })
+	if store.LoadPulled(dir).At.IsZero() {
+		t.Error("the pass after the announcement was taken did not mark")
+	}
+	v.announced(func() {})
+	if !store.LoadPulled(dir).At.IsZero() {
+		t.Error("an announcement left the marker in place")
 	}
 }
