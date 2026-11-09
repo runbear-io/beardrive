@@ -125,8 +125,8 @@ func mountGuard() string {
 func hookCommand(label string) string {
 	return `sh -c '` + mountGuard() +
 		`s=; [ -t 0 ] || s=$(head -c 8192 2>/dev/null | tr -d \" | sed -n "s/.*session_id[[:space:]]*:[[:space:]]*\([a-zA-Z0-9_-]*\).*/\1/p" | head -n 1); ` +
-		`if [ -n "$s" ]; then bdrive sync . --note "` + label + ` session $s" >/dev/null 2>&1 || true; ` +
-		`else bdrive sync . >/dev/null 2>&1 || true; fi'`
+		`if [ -n "$s" ]; then bdrive sync . --defer --note "` + label + ` session $s" >/dev/null 2>&1 || true; ` +
+		`else bdrive sync . --defer >/dev/null 2>&1 || true; fi'`
 }
 
 // hookPullCommand is Claude Code's turn-start hook: `bdrive sync --hook`

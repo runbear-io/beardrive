@@ -23,6 +23,7 @@ func syncCmd() *cobra.Command {
 	var noteTTL time.Duration
 	var hookLabel string
 	var prune bool
+	var deferToDaemon bool
 	c := &cobra.Command{
 		Use:   "sync [folder]",
 		Short: "Sync a mounted folder with its remote now",
@@ -51,6 +52,9 @@ list in .bdrive/config.json is never pruned against either.`,
 			// mounts below it — a repo root with wiki/ and docs/ mounted syncs
 			// both, and a session inside a mount syncs its root.
 			targets := syncTargets(folder)
+			if deferToDaemon && prune {
+				return fmt.Errorf("--defer cannot be combined with --prune: pruning needs a cycle of its own")
+			}
 
 			// A refused push is the one failure that never self-heals: the
 			// hub said no and will keep saying no until somebody acts. Exiting
@@ -78,6 +82,20 @@ list in .bdrive/config.json is never pruned against either.`,
 					return fmt.Errorf("%s is not synced on this device yet (run `bdrive init` there to connect it)", target)
 				case "paused":
 					return fmt.Errorf("syncing is paused for %s (run `bdrive init` there to resume)", target)
+				}
+				if deferToDaemon {
+					vdir, err := config.VolumeDir(proj.ID)
+					if err != nil {
+						return err
+					}
+					st, err := store.Open(vdir)
+					if err != nil {
+						return err
+					}
+					if release, ok := daemonCurrent(st, proj.ID); ok {
+						defer release()
+						return st.SaveNoteForMount(proj.ID, note, noteTTL)
+					}
 				}
 				sess, proj, err := openSession(cmd.Context(), target, true)
 				if err != nil {
@@ -167,6 +185,7 @@ list in .bdrive/config.json is never pruned against either.`,
 	c.Flags().BoolVar(&prune, "prune", false, "also remove from the hub what .bdriveignore now excludes (files stay on disk everywhere)")
 	c.Flags().StringVar(&note, "note", "", "session context stamped onto changes (e.g. an agent session id); shown in history; empty clears")
 	c.Flags().DurationVar(&noteTTL, "note-ttl", 30*time.Minute, "how long the note keeps applying to daemon-committed changes")
+	c.Flags().BoolVar(&deferToDaemon, "defer", false, "when this folder's daemon is running, only record --note and leave the sync to the daemon (what agent hooks run after every edit)")
 	c.Flags().StringVar(&hookLabel, "hook", "", "agent-hook mode: read the platform's hook event JSON from stdin, sync with a session note labeled by this value, and emit the project's link-formula context (Claude Code hook JSON) on stdout")
 	return c
 }

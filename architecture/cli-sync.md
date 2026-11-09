@@ -188,7 +188,7 @@ classDiagram
     }
     note for Store "secrets-mount-id.json is the credential-finding record: what `bdrive status` prints and what the agent hook appends a sentence about. Like the inbound spool it outlives the cycle that wrote it — the daemon scans the write seconds before the turn starts — but unlike it, it is STATE and is never drained: a finding stands until the file changes without it"
     note for Store "internal/store: ~/.bdrive/volumes/volume-id holds shared content-addressed blobs, per-device journal copies, and sync.json; state-mount-id.json, paused-mount-id, note-mount-id.json, secrets-mount-id.json, and inbound-mount-id.jsonl are per-mount (free funcs Paused/SetPaused and PausedMount/SetPausedMount, no flock)"
-    note for Store "inbound-mount-id.jsonl (with legacy inbound.jsonl fallback) is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle. Result.Inbound now carries the SAME events for the post_sync hook and is not a duplicate to delete: that consumer fires from the cycle itself, and a second drainer would silently empty the agent hook's context"
+    note for Store "inbound-mount-id.jsonl (with legacy inbound.jsonl fallback) is the read spool's twin, running the other way: materialize appends every path it wrote or removed for a peer, and `sync --hook` drains it into the turn's context (re-read before editing). Appends and the drain share an flock on the spool's .lock sidecar, since the drain runs outside the volume lock beside a daemon that may be appending. A spool and not a Result field because the daemon usually materializes the change seconds before the turn starts, so the hook's own cycle sees nothing. Capped, best-effort, never fails a cycle. Result.Inbound now carries the SAME events for the post_sync hook and is not a duplicate to delete: that consumer fires from the cycle itself, and a second drainer would silently empty the agent hook's context"
     note for Store "The fold-cache keeps the replayed target, op count, lamport high-water mark, and ignore winner together; ReplayFold reuses unchanged journal folds instead of re-reading and sorting every device on every cycle. LoadCacheReadOnly supplies the immutable map used by echo suppression without cloning large mount caches."
 
     class secretLog {
@@ -273,6 +273,13 @@ classDiagram
     note for Session "Concurrent edits to different parts of one text file MERGE now instead of forking. conflictCopies tries a three-way merge first (merge.go): the common ancestor is the greatest op for that path ordered before BOTH sides, which the journal already holds. It declines far more than it resolves — no ancestor, non-UTF-8 or NUL, over 4 MiB, an unreadable blob, or edits touching the same lines all fall through to exactly the conflict copy that existed before, because a machine guessing between two rewrites of one sentence is how people lose work quietly. Only NON-overlapping regions are ever taken, which makes merge(base,a,b) equal merge(base,b,a) — the property that lets two devices each observe the same concurrency and merge independently without pushing different blobs. Result.Merged is counted apart from Result.Conflicts: a merge is work the machine finished, a conflict is work it handed back. An EMPTY version never forks and never keeps a path: an empty loser is not preserved at all, and content that lost to an empty winner is put back at the real path (keptOverEmptyNote, counted as Merged) — a truncated save or a failed read written back is almost never an edit anyone meant, and a copy beside an empty file leaves the reader the empty one"
 
     note for volumeWorker "remote.Watcher wakes a remote cycle when a peer pushes, reducing arrival latency from about 10s to 1s. A live stream stretches polling to remoteInterval x watchedPollFactor (5m by default); losing it restores remoteInterval on the next tick. Token changes and offline cycles drop the stream. Failed or ended dials back off for watchRetry (1m), including an older hub's 404. Periodic polling still bounds silent stream failure."
+    class pulledVouch {
+        -[]string mounts
+        -remote.StreamLiveness stream
+        passed / withdraw / streaming / renew
+    }
+    note for pulledVouch "Keeps the volume's pulled marker (store.MarkPulled: pid + mounts) honest for the agent hooks: written after a tick that pulled every mount (passPulled, with no announcement queued), renewed every 5 s while the hub's change stream is alive (remote.StreamLiveness: any frame, keepalives included, within 30 s), withdrawn on a peer announcement, a failed remote pass, or worker exit. Renewal is what covers the stream-paced polls, which are minutes apart"
+    volumeWorker *-- pulledVouch : vouches for the agent hooks
     note for volumeWorker "A healthy local watcher gets a 5m safety scan. When it is unavailable, local fallback polling adapts to the last full scan duration (up to 1m, with a 15x multiplier) while remote polling and SSE wakes remain on their independent cadence. Changes to Include or .bdriveignore rebuild the watcher before the next wait."
     class rawWatcher {
         <<interface>>
@@ -425,10 +432,11 @@ classDiagram
         Detect / Install / Uninstall / Registered
         ConfigPath = USER config
         turn-start: sync --hook
-        post-edit: sync --note
+        post-edit: sync --defer --note
         post-read: read-log
     }
     note for AgentHooks "internal/agenthooks — registers per-platform hook commands (claude, codex, gemini, hermes) in each platform's USER config, once per machine; they fire in every folder, every turn, and no-op outside mounts"
+    note for AgentHooks "Beside a daemon that vouches for the mount the sync hooks skip their cycle (a full walk on every turn and edit): sync --hook drains the inbound spool and reads secret findings, sync --defer only saves the note. Vouching = daemonCurrent: the hook takes the volume lock within 5 s (store.LockWithin, so a cycle in flight finishes first) and, holding it through its reads, finds the pulled marker under 15 s old, written by the pid holding the daemon lock, listing its mount. Otherwise both run a full cycle; --defer refuses --prune"
     note for AgentHooks "config.AgentHookConfig is the OTHER half of this story and deliberately NOT this package: it names the files an agent READS hooks from, so sync refuses to carry them. A teammate must never be able to push .claude/settings.json into your mount and have your next turn run their command. The two lists are kept apart on purpose — one is what we write, one is what the agent executes — and internal/config imports nothing to say it"
 
     class PausedMarker {

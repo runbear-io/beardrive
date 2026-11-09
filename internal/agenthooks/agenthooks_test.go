@@ -358,7 +358,7 @@ func TestHookCommandExtraction(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: hook never called bdrive: %v", label, err)
 		}
-		want := "sync . --note " + label + " session "
+		want := "sync . --defer --note " + label + " session "
 		if !strings.Contains(string(got), want) {
 			t.Fatalf("%s: bdrive argv = %q, want it to contain %q", label, got, want)
 		}

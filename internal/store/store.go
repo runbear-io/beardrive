@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type Store struct {
@@ -300,6 +301,27 @@ func (s *Store) Lock() (func() error, error) {
 		defer f.Close()
 		return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	}, nil
+}
+
+// LockWithin takes the volume lock like Lock, giving up after limit. It
+// reports false, holding nothing, when a cycle kept the lock that long.
+func (s *Store) LockWithin(limit time.Duration) (func(), bool) {
+	f, err := os.OpenFile(filepath.Join(s.dir, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, false
+	}
+	deadline := time.Now().Add(limit)
+	for syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		if time.Now().After(deadline) {
+			f.Close()
+			return nil, false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, true
 }
 
 // ---- small JSON helpers ----

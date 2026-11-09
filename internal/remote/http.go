@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -66,6 +67,11 @@ type httpBackend struct {
 	token   string // device token from `bdrive login`; empty on open servers
 	device  config.Device
 	hc      *http.Client
+	// lastFrame is when the open change stream last delivered anything,
+	// keepalives included (unix nanoseconds, zero when none is open).
+	lastFrame atomic.Int64
+	// onAnnounce is called for each announcement read; see OnAnnounce.
+	onAnnounce atomic.Pointer[func()]
 }
 
 // The id is whatever the hub minted (a UUID today, `p-xxxxxxxx` on older
@@ -612,13 +618,25 @@ func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
+		// The stream's end counts as an announcement: whatever it would
+		// have carried next is unknown, so nothing it vouched for stands.
+		defer func() {
+			if f := b.onAnnounce.Load(); f != nil {
+				(*f)()
+			}
+		}()
+		defer b.lastFrame.Store(0)
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 0, 4096), maxEventLine)
 		for sc.Scan() {
+			b.lastFrame.Store(time.Now().UnixNano())
 			// Only data frames are news. Blank separators and ": keepalive"
 			// comments are how the stream stays open, not something happening.
 			if !bytes.HasPrefix(sc.Bytes(), []byte("data: ")) {
 				continue
+			}
+			if f := b.onAnnounce.Load(); f != nil {
+				(*f)()
 			}
 			// Coalesce: a buffer of one means a burst of pushes costs one
 			// cycle, and a daemon busy syncing never makes the hub's writer
@@ -630,6 +648,21 @@ func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
 		}
 	}()
 	return ch, nil
+}
+
+// OnAnnounce sets the function called for each announcement the change stream
+// reads. See remote.AnnounceNotifier.
+func (b *httpBackend) OnAnnounce(f func()) {
+	b.onAnnounce.Store(&f)
+}
+
+// StreamFrame reports when the open change stream last delivered a frame,
+// keepalives included; zero when no stream is open. See remote.StreamLiveness.
+func (b *httpBackend) StreamFrame() time.Time {
+	if n := b.lastFrame.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
 }
 
 // Scope asks the hub what this account may write in this project. A hub that

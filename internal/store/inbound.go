@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -53,6 +54,11 @@ func (s *Store) inboundMountPaths(mountID string) (spool, drain string, err erro
 }
 
 func (s *Store) logInboundPath(spool, rel string, deleted bool) error {
+	unlock, err := lockSpool(spool)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if fi, err := os.Stat(spool); err == nil && fi.Size() > inboundSpoolMax {
 		return nil // spool full: drop, never grow unbounded
 	}
@@ -89,11 +95,34 @@ func (s *Store) LogInboundForMount(mountID, rel string, deleted bool) error {
 	return s.logInboundPath(spool, rel, deleted)
 }
 
+// lockSpool serializes one spool's appends with its drain. The drain runs
+// outside the volume flock while a daemon on the same mount may be appending,
+// and an append that opened the spool before the drain renamed it would
+// otherwise land in the drain file after it was read, and be removed with it.
+func lockSpool(spool string) (func(), error) {
+	f, err := os.OpenFile(spool+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
+}
+
 // drainInboundPaths rotates one spool aside, reads the queued batch, and
-// clears the drain file. Events logged during the drain land in a fresh spool.
-// The drain runs outside the volume flock, and a daemon on the same mount may
-// be appending.
+// clears the drain file. Events logged during the drain wait for it and land
+// in a fresh spool.
 func (s *Store) drainInboundPaths(spool, drain string) ([]InboundEvent, error) {
+	unlock, err := lockSpool(spool)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if _, err := os.Stat(drain); os.IsNotExist(err) {
 		if err := os.Rename(spool, drain); err != nil {
 			if os.IsNotExist(err) {

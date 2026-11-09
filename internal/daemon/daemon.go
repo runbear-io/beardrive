@@ -1820,6 +1820,17 @@ func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logge
 	return
 }
 
+// passPulled reports whether a tick just pulled every mount of the volume from
+// the hub, which is what the pulled marker vouches for to the agent hooks.
+// res merges every mount's result, so one offline or refused mount fails the
+// whole tick even when another reports read-only; a local-only tick (no
+// remote leg, or no backend to run it on) never counts, and neither does a
+// tick whose backfill left content still to land: files it names are not on
+// disk yet.
+func passPulled(doRemote, connected bool, cycleErr error, res syncer.Result) bool {
+	return doRemote && connected && cycleErr == nil && !res.Offline && !res.NoAccess && !res.Backfilling
+}
+
 func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInterval, remoteInterval time.Duration, wakeCh <-chan struct{}) error {
 	if workerInitHook != nil {
 		workerInitHook(volDir)
@@ -1837,6 +1848,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		return err
 	}
 	defer release(lockf)
+	// Before this worker's pid can be read from the lock: a predecessor in
+	// this same process announced the same pid, so its marker would
+	// otherwise vouch for a worker that has not pulled yet.
+	store.ClearPulled(volDir)
 	if err := announce(lockf); err != nil {
 		return err
 	}
@@ -1864,6 +1879,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	lastAccess := store.AccessOK
 	var watch <-chan struct{}
 	var watchCancel context.CancelFunc
+	vouch := newPulledVouch(volDir)
+	vouchCtx, stopVouch := context.WithCancel(ctx)
+	defer stopVouch()
+	go vouch.run(vouchCtx)
 	var nextWatch, watchOpened time.Time
 	var localWatch *localFolderWatcher
 	var localWatchWake <-chan struct{}
@@ -1922,6 +1941,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			watchCancel = nil
 		}
 		watch = nil
+		vouch.streaming(nil)
 	}
 	defer stopWatch()
 	defer stopLocalWatch()
@@ -2063,8 +2083,11 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		// the type assertion failing is the normal case, not an error.
 		if be != nil && watch == nil && time.Now().After(nextWatch) {
 			if wr, ok := be.(remote.Watcher); ok {
+				if n, ok := be.(remote.AnnounceNotifier); ok {
+					n.OnAnnounce(vouch.hear)
+				}
 				wctx, cancel := context.WithCancel(ctx)
-				ch, err := wr.Watch(wctx)
+				announced, err := wr.Watch(wctx)
 				if err != nil {
 					cancel()
 					// Quietly: an older hub answers 404 here forever, and this
@@ -2072,13 +2095,46 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 					// is otherwise working perfectly.
 					nextWatch = time.Now().Add(watchRetry)
 				} else {
+					// The vouch is withdrawn as each announcement is read, not when
+					// the loop below gets to it: a hook taking the volume lock in
+					// between must already see it gone. A stream that reports
+					// announcements as it reads them (hear, above) has withdrawn
+					// it already; any other is withdrawn as the wakeup is taken.
+					ch := make(chan struct{}, 1)
+					_, notifies := be.(remote.AnnounceNotifier)
+					go func() {
+						defer close(ch)
+						for range announced {
+							enqueue := func() {
+								select {
+								case ch <- struct{}{}:
+								default:
+								}
+							}
+							if notifies {
+								enqueue()
+							} else {
+								vouch.announced(enqueue)
+							}
+						}
+					}()
 					watch, watchCancel, watchOpened = ch, cancel, time.Now()
+					if live, ok := be.(remote.StreamLiveness); ok {
+						vouch.streaming(live)
+					}
+					// Pull once the stream is open, so a push from before it
+					// opened is not left for the next stream-paced poll and
+					// the vouch has a pass to stand on.
+					doRemote = proj.Remote != ""
 				}
 			} else {
 				nextWatch = time.Now().Add(time.Hour) // not a hub; stop asking
 			}
 		}
 
+		// Taken before anything is pulled: an announcement heard after this
+		// may name a push the pull below started too early to see.
+		heard := vouch.heardSoFar()
 		var res syncer.Result
 		var cycleErr error
 		haveResult := false
@@ -2268,6 +2324,17 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			waitFor = min(waitFor, scanInterval)
 		}
 		lastCycle = time.Now()
+		if ctx.Err() == nil {
+			if passPulled(doRemote, be != nil, cycleErr, res) {
+				ids := make([]string, len(targets))
+				for i, t := range targets {
+					ids[i] = t.proj.ID
+				}
+				vouch.passed(ids, heard)
+			} else if doRemote {
+				vouch.withdraw()
+			}
+		}
 
 		switch {
 		case ctx.Err() != nil:

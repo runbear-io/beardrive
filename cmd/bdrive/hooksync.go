@@ -12,14 +12,16 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/runbear-io/beardrive/internal/daemon"
 	"github.com/runbear-io/beardrive/internal/secrets"
 	"github.com/runbear-io/beardrive/internal/store"
 )
 
 // `bdrive sync --hook <label>` is the agent-hook flavor of sync, run by the
 // Claude Code UserPromptSubmit hook at every turn start. It does three
-// things: pulls (a normal cycle), stamps the session note so every change
-// this turn is attributed to the agent session, and — the part that keeps
+// things: pulls (a normal cycle, or nothing when the mount's daemon is
+// running and already keeping it current), stamps the session note so every
+// change this turn is attributed to the agent session, and — the part that keeps
 // agents current no matter how stale their skill copy is — emits the
 // project's gated-link formula as additionalContext, so the agent can
 // append a hub link to any synced file path it mentions.
@@ -76,6 +78,51 @@ func eventSessionID(data []byte) string {
 	return event.SessionID
 }
 
+// hookPullFresh is how recent the daemon's pulled marker must be for a hook
+// to leave the sync to it. The daemon renews the marker every 5 s while its
+// change stream is alive (daemon.vouchRefresh), so this is two missed renewals.
+const hookPullFresh = 15 * time.Second
+
+// hookReadSeam, when set by a test, runs between the hook's read of the store
+// and its second look at the marker.
+var hookReadSeam func()
+
+// hookCycleWait bounds how long a hook waits for a daemon cycle in flight
+// before running its own cycle, which waits on the same lock unbounded.
+var hookCycleWait = 5 * time.Second
+
+// daemonCurrent reports whether this volume's daemon can stand in for a
+// hook's own cycle on mountID: the daemon holding the lock now is the one
+// whose pulled marker lists the mount, renewed within hookPullFresh. The check
+// runs under the volume lock, taken once any cycle in flight has finished, and
+// on true the caller keeps holding it (release) while it reads the store: no
+// daemon cycle can start between the check and the read, so the files, the
+// inbound spool and the marker the hook sees are one finished pass's result.
+func daemonCurrent(st *store.Store, mountID string) (release func(), ok bool) {
+	if _, running := daemon.Running(st.Dir()); !running {
+		return nil, false
+	}
+	unlock, locked := st.LockWithin(hookCycleWait)
+	if !locked {
+		return nil, false
+	}
+	if !vouched(st, mountID) {
+		unlock()
+		return nil, false
+	}
+	return unlock, true
+}
+
+// vouched reports whether the daemon holding the lock now vouches for mountID.
+// Asked again by a caller still holding the volume lock from daemonCurrent, it
+// is also whether a peer's announcement arrived since: hearing one clears the
+// marker, and only a daemon cycle, which needs that lock, can write it again.
+func vouched(st *store.Store, mountID string) bool {
+	pid, running := daemon.Running(st.Dir())
+	p := store.LoadPulled(st.Dir())
+	return running && pid > 0 && p.PID == pid && p.Covers(mountID) && p.FreshWithin(hookPullFresh)
+}
+
 // hookSync is one mount's contribution to the turn: where its files live on
 // the hub, and which of them moved since the last turn.
 type hookSync struct {
@@ -87,7 +134,7 @@ type hookSync struct {
 // runHookSync syncs one mount and reports its hub base URL, if it has one,
 // plus the peer changes waiting for this turn.
 func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync, bool) {
-	sess, proj, err := openSession(cmd.Context(), target, true)
+	sess, proj, err := openSession(cmd.Context(), target, false)
 	if err != nil {
 		return hookSync{}, false // not a mount / no session: fast no-op
 	}
@@ -106,19 +153,51 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 		sess.SessionID = sessionID
 	}
 
-	// The pull. Offline is fine — the link formula below is still valid
-	// for teammates who are online.
-	if _, err := sess.Cycle(cmd.Context()); err != nil {
-		return hookSync{}, false // never break the turn
-	}
+	// The pull — unless this mount's daemon is running and pulled from the
+	// hub moments ago, in which case it has already journaled the tree and
+	// the files on disk are current, and a cycle here would only walk every
+	// file again on every turn. What the turn needs from that
+	// work (the inbound spool, the secret findings, the note it stamps) is
+	// all in the store. Offline is fine — the link formula below is still
+	// valid for teammates who are online.
+	//
 	// Drained after the cycle, not from its Result: in the ordinary case the
 	// daemon materialized the peer's change seconds ago, so this cycle saw
 	// nothing and the spool is where the record is. Errors are ignored — the
 	// links matter more than the list.
-	paths, _ := sess.Store.DrainInboundForMount(sess.MountID)
-	// Not drained: findings are state, not events. They stand until the file
-	// changes without them, so every turn sees the ones still true.
-	found, _ := sess.Store.LoadSecrets(sess.MountID)
+	//
+	// Secret findings are not drained: they are state, not events. They stand
+	// until the file changes without them, so every turn sees the ones still
+	// true.
+	var paths []store.InboundEvent
+	var found map[string][]secrets.Finding
+	release, current := daemonCurrent(sess.Store, sess.MountID)
+	if current {
+		paths, _ = sess.Store.DrainInboundForMount(sess.MountID)
+		found, _ = sess.Store.LoadSecrets(sess.MountID)
+		if hookReadSeam != nil {
+			hookReadSeam()
+		}
+		// Asked once every read is done: an announcement heard before then
+		// names a push the files may not hold yet, and the turn pulls it
+		// itself, keeping what it drained. One heard after it is a push that
+		// landed after this turn read, as it would be after a pull here.
+		if vouched(sess.Store, sess.MountID) {
+			defer release()
+		} else {
+			release()
+			current = false
+		}
+	}
+	if !current {
+		attachRemote(cmd.Context(), sess, proj)
+		if _, err := sess.Cycle(cmd.Context()); err != nil {
+			return hookSync{}, false // never break the turn
+		}
+		more, _ := sess.Store.DrainInboundForMount(sess.MountID)
+		paths = append(paths, more...)
+		found, _ = sess.Store.LoadSecrets(sess.MountID)
+	}
 
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {
