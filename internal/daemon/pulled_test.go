@@ -116,6 +116,7 @@ func TestPassPulledNeedsEveryMountPulled(t *testing.T) {
 		{"read-only beside an offline mount", true, true, nil, syncer.Result{ReadOnly: true, Offline: true}, false},
 		{"offline", true, true, nil, syncer.Result{Offline: true}, false},
 		{"access revoked", true, true, nil, syncer.Result{NoAccess: true}, false},
+		{"backfill still landing", true, true, nil, syncer.Result{Backfilling: true}, false},
 		{"cycle error", true, true, errors.New("boom"), syncer.Result{}, false},
 		{"local-only tick", false, true, nil, syncer.Result{}, false},
 		{"no backend", true, false, nil, syncer.Result{}, false},

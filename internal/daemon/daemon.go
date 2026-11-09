@@ -1824,9 +1824,11 @@ func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logge
 // the hub, which is what the pulled marker vouches for to the agent hooks.
 // res merges every mount's result, so one offline or refused mount fails the
 // whole tick even when another reports read-only; a local-only tick (no
-// remote leg, or no backend to run it on) never counts.
+// remote leg, or no backend to run it on) never counts, and neither does a
+// tick whose backfill left content still to land: files it names are not on
+// disk yet.
 func passPulled(doRemote, connected bool, cycleErr error, res syncer.Result) bool {
-	return doRemote && connected && cycleErr == nil && !res.Offline && !res.NoAccess
+	return doRemote && connected && cycleErr == nil && !res.Offline && !res.NoAccess && !res.Backfilling
 }
 
 func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInterval, remoteInterval time.Duration, wakeCh <-chan struct{}) error {

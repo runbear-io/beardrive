@@ -158,6 +158,31 @@ func TestHookPullsWhenTheDaemonHasNotPulledLately(t *testing.T) {
 	}
 }
 
+// An announcement the daemon hears while the hook reads the store withdraws
+// the marker: the hook must notice before it answers, pull the push itself,
+// and still report what it had already drained.
+func TestHookPullsWhenAnAnnouncementArrivesWhileItReads(t *testing.T) {
+	folder, proj := stampFixture(t)
+	holdDaemonLock(t, proj)
+	markPulled(t, proj, 0)
+	seedInbound(t, proj, "notes/readme.md")
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookReadSeam = func() { store.ClearPulled(vdir) }
+	t.Cleanup(func() { hookReadSeam = nil })
+
+	got := runHook(t, folder)
+
+	if ops := committed(t, proj); len(ops) == 0 {
+		t.Error("the hook answered on a vouch withdrawn while it read")
+	}
+	if !strings.Contains(got, "`notes/readme.md`") {
+		t.Errorf("the hook lost what it drained before falling back:\n%s", got)
+	}
+}
+
 // A daemon restarted inside the freshness window has not passed yet: the
 // marker its predecessor left must not vouch for it.
 func TestHookPullsBesideARestartedDaemon(t *testing.T) {

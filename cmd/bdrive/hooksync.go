@@ -83,6 +83,10 @@ func eventSessionID(data []byte) string {
 // change stream is alive (daemon.vouchRefresh), so this is two missed renewals.
 const hookPullFresh = 15 * time.Second
 
+// hookReadSeam, when set by a test, runs between the hook's read of the store
+// and its second look at the marker.
+var hookReadSeam func()
+
 // hookCycleWait bounds how long a hook waits for a daemon cycle in flight
 // before running its own cycle, which waits on the same lock unbounded.
 var hookCycleWait = 5 * time.Second
@@ -102,13 +106,21 @@ func daemonCurrent(st *store.Store, mountID string) (release func(), ok bool) {
 	if !locked {
 		return nil, false
 	}
-	pid, running := daemon.Running(st.Dir())
-	p := store.LoadPulled(st.Dir())
-	if !running || pid <= 0 || p.PID != pid || !p.Covers(mountID) || !p.FreshWithin(hookPullFresh) {
+	if !vouched(st, mountID) {
 		unlock()
 		return nil, false
 	}
 	return unlock, true
+}
+
+// vouched reports whether the daemon holding the lock now vouches for mountID.
+// Asked again by a caller still holding the volume lock from daemonCurrent, it
+// is also whether a peer's announcement arrived since: hearing one clears the
+// marker, and only a daemon cycle, which needs that lock, can write it again.
+func vouched(st *store.Store, mountID string) bool {
+	pid, running := daemon.Running(st.Dir())
+	p := store.LoadPulled(st.Dir())
+	return running && pid > 0 && p.PID == pid && p.Covers(mountID) && p.FreshWithin(hookPullFresh)
 }
 
 // hookSync is one mount's contribution to the turn: where its files live on
@@ -148,19 +160,35 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// work (the inbound spool, the secret findings, the note it stamps) is
 	// all in the store. Offline is fine — the link formula below is still
 	// valid for teammates who are online.
-	if release, ok := daemonCurrent(sess.Store, sess.MountID); ok {
-		defer release()
-	} else {
-		attachRemote(cmd.Context(), sess, proj)
-		if _, err := sess.Cycle(cmd.Context()); err != nil {
-			return hookSync{}, false // never break the turn
-		}
-	}
+	//
 	// Drained after the cycle, not from its Result: in the ordinary case the
 	// daemon materialized the peer's change seconds ago, so this cycle saw
 	// nothing and the spool is where the record is. Errors are ignored — the
 	// links matter more than the list.
-	paths, _ := sess.Store.DrainInboundForMount(sess.MountID)
+	var paths []store.InboundEvent
+	release, current := daemonCurrent(sess.Store, sess.MountID)
+	if current {
+		paths, _ = sess.Store.DrainInboundForMount(sess.MountID)
+		if hookReadSeam != nil {
+			hookReadSeam()
+		}
+		// An announcement heard while the hook read names a push the files
+		// may not hold yet: the turn pulls it itself, keeping what it drained.
+		if vouched(sess.Store, sess.MountID) {
+			defer release()
+		} else {
+			release()
+			current = false
+		}
+	}
+	if !current {
+		attachRemote(cmd.Context(), sess, proj)
+		if _, err := sess.Cycle(cmd.Context()); err != nil {
+			return hookSync{}, false // never break the turn
+		}
+		more, _ := sess.Store.DrainInboundForMount(sess.MountID)
+		paths = append(paths, more...)
+	}
 	// Not drained: findings are state, not events. They stand until the file
 	// changes without them, so every turn sees the ones still true.
 	found, _ := sess.Store.LoadSecrets(sess.MountID)
