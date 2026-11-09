@@ -205,6 +205,57 @@ func TestRoomKeepsBothAppendsAsWritten(t *testing.T) {
 	}
 }
 
+// An outside append that ends mid-line still keeps the room's addition, even
+// one that is only a blank line, on lines of its own.
+func TestRoomKeepsItsAppendAfterAnOutsideAppendWithNoNewline(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "base\n", "")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
+
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "base\nagent", ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d %s", rec.Code, rec.Body.String())
+	}
+	typeInto(doc, "\n")
+
+	want := "base\nagent\n\n"
+	if !waitFile(t, h, url, want, 2*time.Second) {
+		t.Fatalf("file = %q, want %q", get(t, h, url).Body.String(), want)
+	}
+}
+
+// Two appends too big to write together are parked, not judged by line:
+// the room's repeated lines are not already in the file.
+func TestRoomParksTwoAppendsTooBigToWrite(t *testing.T) {
+	fastRoom(t, 100*time.Millisecond, time.Second)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "base\n", "")
+	doc := liveRoom(t, srv, p.ID+"/notes.md", true)
+
+	line := "- the same entry, logged again\n"
+	n := maxSeedBytes / 2 / len(line)
+	theirs := "base\n" + strings.Repeat(line, n+1)
+	if rec := putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", theirs, ""); rec.Code != http.StatusOK {
+		t.Fatalf("outside write: %d", rec.Code)
+	}
+	typeInto(doc, strings.Repeat(line, n))
+
+	deadline := time.Now().Add(3 * time.Second)
+	for conflictCopies(t, h, p.ID) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if conflictCopies(t, h, p.ID) == 0 {
+		t.Fatal("the room's append was dropped: no conflict copy")
+	}
+	if got := get(t, h, url).Body.String(); got != theirs {
+		t.Fatalf("file changed to %d bytes; want their %d", len(got), len(theirs))
+	}
+}
+
 func TestRoomParksItsVersionWhenSomeoneOutsideWrote(t *testing.T) {
 	fastRoom(t, 100*time.Millisecond, time.Second)
 	srv, p, _ := newHub(t, true, nil)

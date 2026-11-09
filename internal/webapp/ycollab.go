@@ -836,13 +836,17 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		// Two sides under the bound can insert past it together, and a
 		// merge no room could open again is parked rather than written.
 		target, ok = string(merged), true
-	case appendedBoth(baseText, haveBase, theirs, text) && len(theirs)+len(text)-len(baseText) < maxSeedBytes:
+	case appendedBoth(baseText, haveBase, theirs, text):
 		// Both sides only added to the end: an agent appending to a daily
 		// note while somebody types at its foot. The line merge has no order
 		// for two insertions at one point; this room is the file's only
 		// writer, so it picks one: theirs, then what the room added, each
-		// exactly as written, repeated lines and blank lines included.
-		target, ok = theirs+strings.TrimPrefix(text, baseText), true
+		// exactly as written, repeated lines and blank lines included. Too
+		// big to write, it is parked: the checks below match lines and would
+		// take a repeated line or a blank one as already in the file.
+		if both := joinAppends(theirs, strings.TrimPrefix(text, baseText)); len(both) < maxSeedBytes {
+			target, ok = both, true
+		}
 	case fileHolds(theirs, text) || s.copyHolds(ctx, project, path, text):
 		target, ok = theirs, true
 	case haveBase && strings.TrimSpace(baseText) == "":
@@ -933,14 +937,22 @@ func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, final 
 }
 
 // appendedBoth reports whether theirs and text each extend base, which ends a
-// line, with lines of their own, and not the same ones.
+// line, with additions of their own, and not the same ones.
 func appendedBoth(base string, haveBase bool, theirs, text string) bool {
 	if !haveBase || base == "" || !strings.HasSuffix(base, "\n") ||
 		!strings.HasPrefix(theirs, base) || !strings.HasPrefix(text, base) {
 		return false
 	}
 	x, y := theirs[len(base):], text[len(base):]
-	return x != "" && y != "" && x != y && strings.HasSuffix(theirs, "\n")
+	return x != "" && y != "" && x != y
+}
+
+// joinAppends is file followed by added, starting it on a line of its own.
+func joinAppends(file, added string) string {
+	if !strings.HasSuffix(file, "\n") {
+		file += "\n"
+	}
+	return file + added
 }
 
 // appendNew is file followed by the lines of text the file does not already
