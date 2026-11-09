@@ -131,6 +131,16 @@ func mergeJSONLAppends(base, a, b []byte, mine, theirs journal.Op) ([]byte, bool
 		}
 		return true
 	}
+	if !valid(base) {
+		return nil, false
+	}
+	if len(base) > 0 && base[len(base)-1] != '\n' {
+		if (len(aa) > 0 && aa[0] != '\n') || (len(bb) > 0 && bb[0] != '\n') {
+			return nil, false
+		}
+		aa = bytes.TrimPrefix(aa, []byte{'\n'})
+		bb = bytes.TrimPrefix(bb, []byte{'\n'})
+	}
 	if !valid(aa) || !valid(bb) {
 		return nil, false
 	}

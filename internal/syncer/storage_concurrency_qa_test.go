@@ -193,6 +193,12 @@ func TestQA_C05_C07_C08_BaseMergeThreePeersAndJSONValidation(t *testing.T) {
 	if got := string(out); got != "{\"base\":1}\n{\"a\":1}\n{\"b\":1}\n" {
 		t.Fatalf("JSONL output = %q", got)
 	}
+	if _, ok := mergeJSONLAppends([]byte("1"), []byte("12"), []byte("13"), jla, jlb); ok {
+		t.Fatal("mergeJSONLAppends accepted in-line mutation on unterminated base")
+	}
+	if mergedUnterm, ok := mergeJSONLAppends([]byte("{\"base\":1}"), []byte("{\"base\":1}\n{\"a\":1}\n"), []byte("{\"base\":1}\n{\"b\":1}\n"), jla, jlb); !ok || string(mergedUnterm) != "{\"base\":1}\n{\"a\":1}\n{\"b\":1}\n" {
+		t.Fatalf("mergeJSONLAppends newline-separated append on unterminated base = (%v, %q)", ok, string(mergedUnterm))
+	}
 
 	// Peer edits from an older ancestor V0 while mine edits from a newer V1:
 	// commonAncestor must select V0, not mine.Base (V1), so V0->V1 additions
