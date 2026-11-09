@@ -836,6 +836,17 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		// Two sides under the bound can insert past it together, and a
 		// merge no room could open again is parked rather than written.
 		target, ok = string(merged), true
+	case appendedBoth(baseText, haveBase, theirs, text):
+		// Both sides only added to the end: an agent appending to a daily
+		// note while somebody types at its foot. The line merge has no order
+		// for two insertions at one point; this room is the file's only
+		// writer, so it picks one: theirs, then what the room added, each
+		// exactly as written, repeated lines and blank lines included. Too
+		// big to write, it is parked: the checks below match lines and would
+		// take a repeated line or a blank one as already in the file.
+		if both := joinAppends(theirs, strings.TrimPrefix(text, baseText)); len(both) < maxSeedBytes {
+			target, ok = both, true
+		}
 	case fileHolds(theirs, text) || s.copyHolds(ctx, project, path, text):
 		target, ok = theirs, true
 	case haveBase && strings.TrimSpace(baseText) == "":
@@ -847,19 +858,10 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		}
 	}
 	park := func() {
-		if strings.TrimSpace(text) == "" {
-			// Nothing to keep; the room still steps off their version.
-			if whole {
-				s.rooms().rebase(room, theirSha)
-			} else {
-				s.rooms().yield(room, theirSha)
-			}
-			return
-		}
 		// parkCopy owns the text from here and retries a failing store, so
 		// the room can move onto their version without it being the only
 		// place the text lives.
-		if !s.rooms().isParked(room, text) {
+		if strings.TrimSpace(text) != "" && !s.rooms().isParked(room, text) {
 			s.rooms().park(room, text)
 			s.parkCopy(ctx, who, project, path, conflictPath(path, who, time.Now()), text)
 		}
@@ -869,7 +871,11 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 			s.rooms().yield(room, theirSha)
 			return
 		}
-		s.rooms().rebase(room, theirSha)
+		// The document takes their version, not just the base: built on
+		// their version while still holding the room's text, the next pause
+		// would write the room's text over theirs, conditional on it and so
+		// accepted.
+		s.moveDoc(ctx, room, text, theirs, theirSha, final)
 	}
 	if !ok {
 		park()
@@ -887,40 +893,66 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 				theirSha = sha
 			}
 		}
-		// The document moves with the base, or a room reopened before it
-		// unloads would write its old text over this version. Nobody is
-		// connected to a room in its final snapshot, and ydocs().Apply
-		// would open the room again, so the held document is spliced
-		// directly. Typed into since, it keeps its base and is settled
-		// against this version on its next snapshot.
+		s.moveDoc(ctx, room, text, target, theirSha, true)
+		return
+	}
+	if s.moveDoc(ctx, room, text, target, theirSha, false) && target == text {
+		s.snapshotRoom(ctx, room)
+	}
+}
+
+// moveDoc brings a room's document from text to the version sha holds, as one
+// edit, and rebases the room onto sha, reporting whether it did. A document
+// typed into since it read text is left alone with its base: that typing is
+// in neither version, and the next pause settles it against sha again.
+//
+// The document has to move with the base, or a room reopened before it
+// unloads would write its old text over this version. Nobody is connected to
+// a room in its final snapshot, and ydocs().Apply would open the room again,
+// so a final move splices the held document directly.
+func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, final bool) bool {
+	moved := false
+	if final {
 		if doc, _, held := s.rooms().get(room); held {
 			txt := doc.GetText("body")
 			if txt.ToString() == text {
-				spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, text, target)
-				s.rooms().rebase(room, theirSha)
+				spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, text, to)
+				moved = true
 			}
 		}
-		return
+	} else {
+		_ = s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			txt := doc.GetText("body")
+			if txt.ToString() != text {
+				return
+			}
+			spliceVia(transact, txt, text, to)
+			moved = true
+		})
 	}
-	applied := false
-	_ = s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		txt := doc.GetText("body")
-		// Typing since the snapshot read the document is not in the merge;
-		// leave the document alone and merge again on the next pause.
-		if txt.ToString() != text {
-			return
-		}
-		spliceVia(transact, txt, text, target)
-		applied = true
-	})
-	if applied || target == text {
-		// The document is now built on their version; the next pause
-		// writes it there, conditional on it.
-		s.rooms().rebase(room, theirSha)
-		if target == text {
-			s.snapshotRoom(ctx, room)
-		}
+	if moved {
+		s.rooms().rebase(room, sha)
 	}
+	return moved
+}
+
+// appendedBoth reports whether theirs and text each extend base, which ends a
+// line, with additions of their own, and not the same ones.
+func appendedBoth(base string, haveBase bool, theirs, text string) bool {
+	if !haveBase || base == "" || !strings.HasSuffix(base, "\n") ||
+		!strings.HasPrefix(theirs, base) || !strings.HasPrefix(text, base) {
+		return false
+	}
+	x, y := theirs[len(base):], text[len(base):]
+	return x != "" && y != "" && x != y
+}
+
+// joinAppends is file followed by added, starting it on a line of its own.
+func joinAppends(file, added string) string {
+	if !strings.HasSuffix(file, "\n") {
+		file += "\n"
+	}
+	return file + added
 }
 
 // appendNew is file followed by the lines of text the file does not already
