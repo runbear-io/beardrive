@@ -43,9 +43,9 @@ func placeChunked(t *testing.T, dir string, parts ...string) string {
 	return sha
 }
 
-// TestDelta_Hub_BackfillOnce (row H1): a blob that exists only as chunks +
-// manifest is served by reassembly, verified, and backfilled to blobs/<sha>
-// so the second read hits the whole blob directly.
+// TestDelta_Hub_BackfillOnce (row H1 / C-18): a blob that exists only as chunks +
+// manifest is served by reassembly and verified without backfilling a duplicate
+// blobs/<sha> copy into storage.
 func TestDelta_Hub_BackfillOnce(t *testing.T) {
 	srv, p, root := newHub(t, true, nil)
 	dir := filepath.Join(root, p.ID)
@@ -62,10 +62,10 @@ func TestDelta_Hub_BackfillOnce(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Body.String() != whole {
 		t.Fatalf("reassembled read: %d %q, want 200 %q", rec.Code, rec.Body, whole)
 	}
-	if _, err := os.Stat(blobPath); err != nil {
-		t.Fatalf("whole blob not backfilled after reassembly: %v", err)
+	if _, err := os.Stat(blobPath); !os.IsNotExist(err) {
+		t.Fatalf("reassembly must not backfill duplicate blobs/<sha> into storage, got err=%v", err)
 	}
-	// Second read is served from the backfilled blob (and still correct).
+	// Second read is also served cleanly from the chunked manifest.
 	if rec := do(t, h, "GET", url, nil); rec.Code != http.StatusOK || rec.Body.String() != whole {
 		t.Fatalf("second read: %d %q", rec.Code, rec.Body)
 	}

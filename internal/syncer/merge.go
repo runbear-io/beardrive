@@ -16,7 +16,9 @@ package syncer
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"strings"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/textmerge"
@@ -79,6 +81,17 @@ func (s *Session) tryMerge(path string, mine, theirs journal.Op, all []journal.O
 	if !ok1 || !ok2 || !ok3 {
 		return mergedBlob{}, false
 	}
+	// JSONL is append-only in practice. Preserve both valid EOF appends,
+	// ordering them by the same total order used by replay.
+	if strings.HasSuffix(strings.ToLower(path), ".jsonl") {
+		if out, ok := mergeJSONLAppends(baseBytes, mineBytes, theirsBytes, mine, theirs); ok && len(out) <= maxMergeBytes {
+			sum, n, err := s.Store.PutBlobReader(bytes.NewReader(out))
+			if err != nil {
+				return mergedBlob{}, false
+			}
+			return mergedBlob{blob: sum, size: n}, true
+		}
+	}
 	// Text only. Merging bytes that are not lines produces a file that is
 	// neither side's, and for a binary format that means a corrupt one.
 	if !textmerge.IsText(baseBytes) || !textmerge.IsText(mineBytes) || !textmerge.IsText(theirsBytes) {
@@ -90,6 +103,9 @@ func (s *Session) tryMerge(path string, mine, theirs journal.Op, all []journal.O
 	if !ok || len(out) > maxMergeBytes {
 		return mergedBlob{}, false
 	}
+	if strings.HasSuffix(strings.ToLower(path), ".json") && !json.Valid(out) {
+		return mergedBlob{}, false
+	}
 	sum, n, err := s.Store.PutBlobReader(bytes.NewReader(out))
 	if err != nil {
 		return mergedBlob{}, false
@@ -97,10 +113,86 @@ func (s *Session) tryMerge(path string, mine, theirs journal.Op, all []journal.O
 	return mergedBlob{blob: sum, size: n}, true
 }
 
+func mergeJSONLAppends(base, a, b []byte, mine, theirs journal.Op) ([]byte, bool) {
+	if !bytes.HasPrefix(a, base) || !bytes.HasPrefix(b, base) {
+		return nil, false
+	}
+	aa, bb := a[len(base):], b[len(base):]
+	valid := func(part []byte) bool {
+		part = bytes.TrimSuffix(part, []byte{'\n'})
+		if len(part) == 0 {
+			return true
+		}
+		for _, line := range bytes.Split(part, []byte{'\n'}) {
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 || !json.Valid(line) {
+				return false
+			}
+		}
+		return true
+	}
+	if !valid(base) {
+		return nil, false
+	}
+	if len(base) > 0 && base[len(base)-1] != '\n' {
+		if (len(aa) > 0 && aa[0] != '\n') || (len(bb) > 0 && bb[0] != '\n') {
+			return nil, false
+		}
+		aa = bytes.TrimPrefix(aa, []byte{'\n'})
+		bb = bytes.TrimPrefix(bb, []byte{'\n'})
+	}
+	if !valid(aa) || !valid(bb) {
+		return nil, false
+	}
+	// The common prefix may not end at a line boundary. A pure append must
+	// preserve the base's line framing and insert one separator when needed.
+	sep := func(left, right []byte) []byte {
+		if len(left) == 0 || len(right) == 0 || left[len(left)-1] == '\n' {
+			return nil
+		}
+		return []byte{'\n'}
+	}
+	first, second := aa, bb
+	if journal.Less(theirs, mine) {
+		first, second = bb, aa
+	}
+	out := append([]byte(nil), base...)
+	out = append(out, sep(out, first)...)
+	out = append(out, first...)
+	out = append(out, sep(out, second)...)
+	out = append(out, second...)
+	return out, true
+}
+
 // commonAncestor is the state both sides edited: the greatest op for this path
 // ordered before both of them. Ops for other paths are irrelevant, and an op
 // that is not Less than BOTH is not something both sides could have seen.
 func commonAncestor(path string, mine, theirs journal.Op, all []journal.Op) (journal.Op, bool) {
+	if mine.Base != "" && mine.Base == theirs.Base {
+		for _, op := range all {
+			if op.Path == path && op.Kind == journal.KindPut && op.Blob == mine.Base {
+				return op, true
+			}
+		}
+		return journal.Op{Kind: journal.KindPut, Path: path, Blob: mine.Base}, true
+	}
+	var mineCeil, theirsCeil journal.Op
+	var hasMineCeil, hasTheirsCeil bool
+	for _, op := range all {
+		if op.Path != path || op.Kind != journal.KindPut || op.Blob == "" {
+			continue
+		}
+		if mine.Base != "" && op.Blob == mine.Base && journal.Less(op, mine) {
+			if !hasMineCeil || journal.Less(mineCeil, op) {
+				mineCeil, hasMineCeil = op, true
+			}
+		}
+		if theirs.Base != "" && op.Blob == theirs.Base && journal.Less(op, theirs) {
+			if !hasTheirsCeil || journal.Less(theirsCeil, op) {
+				theirsCeil, hasTheirsCeil = op, true
+			}
+		}
+	}
 	var best journal.Op
 	found := false
 	for _, op := range all {
@@ -108,6 +200,12 @@ func commonAncestor(path string, mine, theirs journal.Op, all []journal.Op) (jou
 			continue
 		}
 		if !journal.Less(op, mine) || !journal.Less(op, theirs) {
+			continue
+		}
+		if hasMineCeil && journal.Less(mineCeil, op) {
+			continue
+		}
+		if hasTheirsCeil && journal.Less(theirsCeil, op) {
 			continue
 		}
 		if !found || journal.Less(best, op) {

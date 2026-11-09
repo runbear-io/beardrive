@@ -1452,17 +1452,65 @@ func (r *sqlDeviceRepo) Load() ([]DeviceInfo, error) {
 }
 
 func (r *sqlDeviceRepo) Put(d DeviceInfo) error {
+	return r.putDevice(d, false)
+}
+
+func (r *sqlDeviceRepo) putDevice(d DeviceInfo, claim bool) error {
 	if err := checkDevice(d); err != nil {
 		return err
 	}
-	return r.w.exec(`INSERT INTO device_rows (user_email,id,name,os,ip,first_seen,last_seen) VALUES (?,?,?,?,?,?,?)
-		ON CONFLICT(user_email,id) DO UPDATE SET name=excluded.name, os=excluded.os,
-		ip=excluded.ip, last_seen=excluded.last_seen`,
-		d.User, d.ID, d.Name, d.OS, d.IP, tenc(d.FirstSeen), tenc(d.LastSeen))
+	return r.s.inTx(regDevices, func(tx *sql.Tx) error {
+		if err := r.lock(tx); err != nil {
+			return err
+		}
+		if claim {
+			rows, err := tx.Query(r.s.q(`SELECT user_email FROM device_rows WHERE LOWER(id) = ? AND user_email <> ''`), canonDeviceID(d.ID))
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var owner string
+				if err := rows.Scan(&owner); err != nil {
+					rows.Close()
+					return err
+				}
+				if normEmail(owner) != normEmail(d.User) {
+					rows.Close()
+					return &deviceClaimConflict{owner: owner}
+				}
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return err
+			}
+		}
+		d.ID = canonDeviceID(d.ID)
+		_, err := tx.Exec(r.s.q(`INSERT INTO device_rows (user_email,id,name,os,ip,first_seen,last_seen) VALUES (?,?,?,?,?,?,?)
+			ON CONFLICT(user_email,id) DO UPDATE SET name=excluded.name, os=excluded.os,
+			ip=excluded.ip, last_seen=excluded.last_seen`),
+			d.User, d.ID, d.Name, d.OS, d.IP, tenc(d.FirstSeen), tenc(d.LastSeen))
+		return err
+	})
+}
+
+// lock serializes claim/check/write even when an id has no row yet. Locking a
+// missing device row cannot do that; the registry's existing change-token row
+// supplies one portable transaction lock for both SQLite and Postgres.
+func (r *sqlDeviceRepo) lock(tx *sql.Tx) error {
+	_, err := tx.Exec(r.s.q(`INSERT INTO meta_version (name,version) VALUES (?,0)
+		ON CONFLICT(name) DO UPDATE SET version = meta_version.version`), regDevices)
+	return err
 }
 
 func (r *sqlDeviceRepo) Delete(user, id string) error {
-	return r.w.exec(`DELETE FROM device_rows WHERE user_email = ? AND id = ?`, user, id)
+	return r.s.inTx(regDevices, func(tx *sql.Tx) error {
+		if err := r.lock(tx); err != nil {
+			return err
+		}
+		_, err := tx.Exec(r.s.q(`DELETE FROM device_rows WHERE LOWER(user_email) = ? AND LOWER(id) = ?`), normEmail(user), canonDeviceID(id))
+		return err
+	})
 }
 
 // ---- reads ----
@@ -1500,6 +1548,8 @@ func (r *sqlReadRepo) PutBatch(stats []ReadStat) error {
 		}
 	}
 	return r.s.inTx(regReads, func(tx *sql.Tx) error {
+		// These are absolute bucket totals, including Day == "" retention
+		// folds. Adding excluded.count would double-count retries and flushes.
 		for _, st := range stats {
 			if _, err := tx.Exec(r.s.q(`INSERT INTO read_stats (project,path,day,kind,actor,count,last)
 				VALUES (?,?,?,?,?,?,?)

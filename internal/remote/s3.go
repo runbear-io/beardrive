@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -71,6 +72,47 @@ func (b *s3Backend) PutIfAbsent(ctx context.Context, key string, r io.Reader, si
 }
 
 var _ CreateOnlyPutter = (*s3Backend)(nil)
+var _ ConditionalPutter = (*s3Backend)(nil)
+
+func (b *s3Backend) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {
+	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(b.key(key)),
+	})
+	if err != nil {
+		var nsk *types.NoSuchKey
+		var nf *types.NotFound
+		var ae smithy.APIError
+		if errors.As(err, &nsk) || errors.As(err, &nf) || (errors.As(err, &ae) && (ae.ErrorCode() == "NoSuchKey" || ae.ErrorCode() == "NotFound" || ae.ErrorCode() == "404")) {
+			return nil, VersionAbsent, os.ErrNotExist
+		}
+		return nil, VersionAbsent, err
+	}
+	return out.Body, Version(aws.ToString(out.ETag)), nil
+}
+
+func (b *s3Backend) PutIf(ctx context.Context, key string, r io.Reader, size int64, expect Version) (Version, error) {
+	in := &s3.PutObjectInput{
+		Bucket:        aws.String(b.bucket),
+		Key:           aws.String(b.key(key)),
+		Body:          r,
+		ContentLength: aws.Int64(size),
+	}
+	if expect == VersionAbsent {
+		in.IfNoneMatch = aws.String("*")
+	} else {
+		in.IfMatch = aws.String(string(expect))
+	}
+	out, err := b.client.PutObject(ctx, in)
+	if err != nil {
+		var ae smithy.APIError
+		if errors.As(err, &ae) && (ae.ErrorCode() == "PreconditionFailed" || ae.ErrorCode() == "ConditionalRequestConflict") {
+			return VersionAbsent, ErrVersionMismatch
+		}
+		return VersionAbsent, err
+	}
+	return Version(aws.ToString(out.ETag)), nil
+}
 
 // SignPut presigns a PUT of exactly size bytes to the given key. Presigning
 // is a local signature computation — no network round-trip, no credentials in

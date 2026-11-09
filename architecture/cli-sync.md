@@ -169,8 +169,9 @@ classDiagram
 
     class Store {
         -dir volume dir
-        +PutBlob / OpenBlob / HasBlob
-        +AppendOps / DeviceOps / AllOps
+        +PutBlob / PutBlobFileVerified / MaterializeBlobToTemp / OpenBlob / HasBlob
+        +PruneLocalBlobs(extraKeep, minAge)
+        +AppendOps / DeviceOps / AllOps / JournalPrefixAt
         +ReplayFold() FoldResult
         +OwnOpCount / OwnOpsFrom
         +FoldPeerAppend / EvictPeerJournals
@@ -184,7 +185,7 @@ classDiagram
         +LogInbound / DrainInbound
         +LogInboundForMount / DrainInboundForMount
         +LoadSecrets / SaveSecrets mountID
-        +Lock() flock
+        +Lock() / TryLock() flock
     }
     note for Store "secrets-mount-id.json is the credential-finding record: what `bdrive status` prints and what the agent hook appends a sentence about. Like the inbound spool it outlives the cycle that wrote it — the daemon scans the write seconds before the turn starts — but unlike it, it is STATE and is never drained: a finding stands until the file changes without it"
     note for Store "internal/store: ~/.bdrive/volumes/volume-id holds shared content-addressed blobs, per-device journal copies, and sync.json; state-mount-id.json, paused-mount-id, note-mount-id.json, secrets-mount-id.json, and inbound-mount-id.jsonl are per-mount (free funcs Paused/SetPaused and PausedMount/SetPausedMount, no flock)"
@@ -205,7 +206,7 @@ classDiagram
         +Seq +Lamport +Time +Device
         +Author +User +UserName
         +Kind put or delete
-        +Path +Blob +Size +Mode +Note
+        +Path +Blob +Base +Size +Mode +Note
         +Link symlink target, no blob
         +Session agent session, hook-set
         +Mtime when the file was written

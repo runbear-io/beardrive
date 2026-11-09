@@ -131,14 +131,18 @@ func (s *Server) ydocs() *ygows.Server {
 		}
 		srv.OnUnloadDocument = func(_ context.Context, room string) {
 			ctx := s.collabHookContext()
+			r := s.rooms()
+			doc, _, ok := r.get(room)
+			if !ok {
+				return
+			}
 			s.finalSnapshot(ctx, room)
 			// Close owns the final caller-context snapshot after it cancels
 			// an unload already in flight. Keep its document addressable.
 			if ctx.Err() != nil {
 				return
 			}
-			s.rooms().drop(room)
-			s.releaseLease(ctx, room)
+			r.dropIfDoc(room, doc, func() { s.releaseLease(ctx, room) })
 		}
 		/* Authorization runs per CONNECTION, after proj() has already decided
 		   this caller may see this project.
@@ -340,7 +344,7 @@ func (s *Server) claimRoomHistory(ctx context.Context, project, path, sha string
 			}
 		}
 		if _, err = cond.PutIf(ctx, key, bytes.NewReader(state), int64(len(state)), v); err == nil {
-			s.storeRoomHead(ctx, project, path, sha)
+			s.storeRoomHead(ctx, project, path, sha, state)
 			return state
 		}
 		if !errors.Is(err, remote.ErrVersionMismatch) {
@@ -428,6 +432,57 @@ func spliceVia(transact func(func(*crdt.Transaction)), txt *crdt.YText, from, to
 	})
 }
 
+// notifyRoomExternalWrite brings open rooms up to date after a device push.
+// Clean rooms follow the file; dirty rooms use the snapshot's three-way merge.
+func (s *Server) notifyRoomExternalWrite(project string, paths []string) {
+	if project == "" || len(paths) == 0 {
+		return
+	}
+	// Do not initialize either once just because a device wrote a file. The
+	// registry is published under collabMu by rooms().
+	s.collabMu.Lock()
+	r := s.roomReg
+	s.collabMu.Unlock()
+	if r == nil {
+		return
+	}
+	for _, path := range paths {
+		room := project + "/" + path
+		doc, who, ok := r.get(room)
+		if !ok {
+			continue
+		}
+		ctx := s.collabHookContext()
+		base := r.base(room)
+		text, valid := replayed(doc.EncodeStateAsUpdate())
+		if !valid {
+			continue
+		}
+		clean := who.Email == ""
+		if !clean {
+			if base == "" {
+				clean = text == ""
+			} else if baseText, found := s.blobText(ctx, project, base); found {
+				clean = text == baseText
+			}
+		}
+		if clean {
+			_, sha, found, err := s.roomBytes(ctx, room)
+			if err != nil || !found {
+				continue
+			}
+			// A keystroke or a reopened room during the storage reads must
+			// not be overwritten by a decision made about the old document.
+			if s.foldRoomWrite(ctx, project, path, sha, func(current *crdt.Doc) bool {
+				return current == doc && r.base(room) == base && current.GetText("body").ToString() == text
+			}) {
+				continue
+			}
+		}
+		s.snapshotRoom(s.collabContext(), room)
+	}
+}
+
 // foldIntoRoom puts a write the hub itself made to a file — a restore — into
 // that file's live room, as one edit every peer receives, and moves the
 // room's base to it. Without this the room keeps the text from before the
@@ -436,6 +491,12 @@ func spliceVia(transact func(func(*crdt.Transaction)), txt *crdt.YText, from, to
 // no room means no document to keep in step. A version too large for a room
 // to hold ends the room instead.
 func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bool {
+	return s.foldRoomWrite(ctx, project, path, sha, nil)
+}
+
+// foldRoomWrite optionally checks the captured room inside Apply, where a
+// concurrent editor cannot slip a keystroke between the check and the splice.
+func (s *Server) foldRoomWrite(ctx context.Context, project, path, sha string, unchanged func(*crdt.Doc) bool) bool {
 	room := project + "/" + path
 	if _, _, ok := s.rooms().get(room); !ok {
 		return false
@@ -454,6 +515,9 @@ func (s *Server) foldIntoRoom(ctx context.Context, project, path, sha string) bo
 	}
 	folded := false
 	err = s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		if unchanged != nil && !unchanged(doc) {
+			return
+		}
 		txt := doc.GetText("body")
 		spliceVia(transact, txt, txt.ToString(), string(body))
 		folded = true
@@ -534,7 +598,7 @@ func (s *Server) storeRoomHistory(ctx context.Context, project, path, sha string
 		log.Printf("bdrive: storing room history %s/%s: %v", project, sha, err)
 		return
 	}
-	s.storeRoomHead(ctx, project, path, sha)
+	s.storeRoomHead(ctx, project, path, sha, state)
 }
 
 // ydoc/head/<path> names the newest state stored for a path — what the next
@@ -555,12 +619,50 @@ func (s *Server) roomHead(ctx context.Context, project, path string) string {
 	return strings.TrimSpace(string(sha))
 }
 
-func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string) {
+func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string, state []byte) {
 	if ctx.Err() != nil {
 		return
 	}
 	be, ok := s.projectBackend(project)
 	if !ok {
+		return
+	}
+	if cp, ok := be.(remote.ConditionalPutter); ok {
+		const maxHeadAttempts = 8
+		for range maxHeadAttempts {
+			existing, version, err := readVersioned(ctx, cp, headKey(path))
+			if err != nil {
+				log.Printf("bdrive: reading room head %s/%s: %v", project, path, err)
+				return
+			}
+			prevSHA := strings.TrimSpace(string(existing))
+			if prevSHA == sha {
+				return
+			}
+			if prevSHA != "" && len(state) > 0 {
+				if prevState := s.roomHistory(ctx, project, prevSHA); prevState != nil {
+					stateHasPrev := knows(state, prevState)
+					prevHasState := knows(prevState, state)
+					if prevHasState && !stateHasPrev {
+						return
+					}
+					if !stateHasPrev || prevHasState {
+						if _, curSHA, found, ferr := s.roomBytes(ctx, project+"/"+path); ferr == nil && found && curSHA == prevSHA {
+							return
+						}
+					}
+				}
+			}
+			_, err = cp.PutIf(ctx, headKey(path), strings.NewReader(sha), int64(len(sha)), version)
+			if err == nil {
+				return
+			}
+			if !errors.Is(err, remote.ErrVersionMismatch) {
+				log.Printf("bdrive: storing room head %s/%s: %v", project, path, err)
+				return
+			}
+		}
+		log.Printf("bdrive: storing room head %s/%s: concurrent head contention", project, path)
 		return
 	}
 	if err := be.Put(ctx, headKey(path), strings.NewReader(sha), int64(len(sha))); err != nil {
@@ -1328,6 +1430,7 @@ type roomRegistry struct {
 	flushing int
 	renewing int
 	docs     map[string]*crdt.Doc
+	gens     map[string]uint64
 	users    map[string]User
 	// bases is the blob each room last wrote or was seeded from: the If-Match
 	// of its next snapshot. It is what turns "the hub is the only writer" from
@@ -1395,8 +1498,10 @@ type roomFlush struct {
 
 func (s *Server) rooms() *roomRegistry {
 	s.roomOnce.Do(func() {
+		s.collabMu.Lock()
+		defer s.collabMu.Unlock()
 		s.roomReg = &roomRegistry{
-			docs: map[string]*crdt.Doc{}, users: map[string]User{},
+			docs: map[string]*crdt.Doc{}, gens: map[string]uint64{}, users: map[string]User{},
 			bases: map[string]string{}, pending: map[string]*roomFlush{}, unsubs: map[string]func(){},
 			parked: map[string]string{}, yielded: map[string]string{}, leases: map[string]*roomLease{}, renewals: map[string]chan struct{}{},
 			waits: map[string]int{},
@@ -1405,10 +1510,12 @@ func (s *Server) rooms() *roomRegistry {
 	return s.roomReg
 }
 
-func (r *roomRegistry) load(room string, doc *crdt.Doc) {
+func (r *roomRegistry) load(room string, doc *crdt.Doc) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.gens[room]++
 	r.docs[room] = doc
+	return r.gens[room]
 }
 
 func (r *roomRegistry) rebase(room, sha string) {
@@ -1600,6 +1707,24 @@ func (r *roomRegistry) get(room string) (*crdt.Doc, User, bool) {
 func (r *roomRegistry) drop(room string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.dropLocked(room)
+}
+
+// dropIfDoc serializes replacement with both forgetting the old document and
+// releasing its lease. A new load cannot inherit a lease the old unload frees.
+func (r *roomRegistry) dropIfDoc(room string, doc *crdt.Doc, release func()) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.docs[room] != doc {
+		return false
+	}
+	r.dropLocked(room)
+	release()
+	return true
+}
+
+// dropLocked removes room-local state. Caller holds r.mu.
+func (r *roomRegistry) dropLocked(room string) {
 	if p := r.pending[room]; p != nil {
 		p.timer.Stop() // OnUnloadDocument has already snapshotted; nothing left to flush
 		delete(r.pending, room)

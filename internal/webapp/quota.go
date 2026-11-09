@@ -106,14 +106,33 @@ func (s *Server) quota() QuotaProvider {
 // one file charged N times per save for one blob, which is how a room of
 // seven reached a storage limit that a room of one never would.
 //
-// Only blobs: a journal key is appended to, so its rewrite genuinely grows.
-// An Exists failure charges the full size — billing must fail closed.
-func billableBytes(ctx context.Context, be remote.Backend, key string, size int64) int64 {
-	if !strings.HasPrefix(key, "blobs/") {
-		return size
+// Immutable blobs, chunks and manifests are billed only once. Journal rewrites
+// are billed only for their growth. A failed lookup must reject the write:
+// guessing either zero or the full size would make accounting unreliable.
+func billableBytes(ctx context.Context, be remote.Backend, key string, size int64) (int64, error) {
+	if strings.HasPrefix(key, "blobs/") || strings.HasPrefix(key, "chunks/") || strings.HasPrefix(key, "manifests/") {
+		exists, err := be.Exists(ctx, key)
+		if err != nil {
+			return 0, err
+		}
+		if exists {
+			return 0, nil
+		}
+		return size, nil
 	}
-	if ok, err := be.Exists(ctx, key); err == nil && ok {
-		return 0
+	if strings.HasPrefix(key, "journal/") {
+		objs, err := be.List(ctx, key)
+		if err != nil {
+			return 0, err
+		}
+		var oldSize int64
+		for _, obj := range objs {
+			if obj.Key == key {
+				oldSize = obj.Size
+				break
+			}
+		}
+		return max(int64(0), size-oldSize), nil
 	}
-	return size
+	return size, nil
 }

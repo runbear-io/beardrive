@@ -3,6 +3,7 @@ package webapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,13 +24,25 @@ import (
 // Remove appends a delete op for p to this server's own journal. A delete
 // references no content, so there is no blob to push first.
 func (r *RemoteSource) Remove(ctx context.Context, p string, who User, note string) error {
+	return r.removeIf(ctx, p, "", who, note)
+}
+
+func (r *RemoteSource) removeIf(ctx context.Context, p, base string, who User, note string) error {
+	var cb *commitBase
+	if base != "" {
+		cb = &commitBase{path: p, sha: base}
+	}
+	return r.removeIfBase(ctx, p, cb, who, note)
+}
+
+func (r *RemoteSource) removeIfBase(ctx context.Context, p string, cb *commitBase, who User, note string) error {
 	if r.Device.ID == "" {
 		return fmt.Errorf("no device identity configured for uploads")
 	}
-	return r.appendOp(ctx, journal.Op{
+	return r.appendOpsIf(ctx, []journal.Op{{
 		Kind: journal.KindDelete, Path: p,
 		User: who.Email, UserName: who.Name, Note: note,
-	})
+	}}, cb)
 }
 
 // handleRemove serves POST /api/p/<id>/remove {path}.
@@ -66,7 +79,8 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	if _, ok := snap.files[p]; !ok {
+	fi, ok := snap.files[p]
+	if !ok {
 		http.Error(w, "no such file", http.StatusNotFound)
 		return
 	}
@@ -77,8 +91,13 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 		return
 	}
-	if err := rs.Remove(r.Context(), p, s.requestUser(r), "remove "+p); err != nil {
-		http.Error(w, fmt.Sprintf("remove: %v", err), http.StatusBadGateway)
+	if err := rs.removeIfBase(r.Context(), p, &commitBase{path: p, sha: fi.Blob, link: fi.Link}, s.requestUser(r), "remove "+p); err != nil {
+		var stale *staleWriteError
+		code := http.StatusBadGateway
+		if errors.As(err, &stale) {
+			code = http.StatusConflict
+		}
+		http.Error(w, fmt.Sprintf("remove: %v", err), code)
 		return
 	}
 	s.quota().RecordUsage(org, 0)

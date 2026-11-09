@@ -110,10 +110,13 @@ func readLockInfo(path string) (int, string, bool) {
 		return 0, "", unopenableLockIsRunning(path)
 	}
 	defer f.Close()
+	held.Lock()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
 		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		held.Unlock()
 		return 0, "", false
 	}
+	held.Unlock()
 	var buf [8192]byte
 	n, _ := f.ReadAt(buf[:], 0)
 	lines := strings.SplitN(strings.TrimSpace(string(buf[:n])), "\n", 2)
@@ -186,6 +189,8 @@ func locked(path string) bool {
 		return unopenableLockIsRunning(path)
 	}
 	defer f.Close()
+	held.Lock()
+	defer held.Unlock()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return true
 	}
@@ -201,11 +206,17 @@ func holdLock(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	held.Lock()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		held.Unlock()
 		f.Close()
 		return nil, fmt.Errorf("another daemon is already running for this mount: %w", err)
 	}
-	markHeld(path, true)
+	if held.paths == nil {
+		held.paths = map[string]bool{}
+	}
+	held.paths[path] = true
+	held.Unlock()
 	return f, nil
 }
 
@@ -929,9 +940,13 @@ var workerRemoteWakeHook func(string)
 // A healthy local watcher replaces the tight safety scan with this slow poll.
 // The watcher is only an accelerator: losing it immediately restores the
 // existing scanInterval polling path.
+// A successful sync cycle is also an opportunity to reclaim local blobs that
+// are no longer referenced by any mount sharing the volume.
 const (
 	localWatchSafetyInterval = 5 * time.Minute
 	localWatchRetry          = time.Minute
+	localBlobGCInterval      = 10 * time.Minute
+	localBlobGCMinAge        = 10 * time.Minute
 )
 
 func localWatchENOSPCRetry(failures int) time.Duration {
@@ -1820,6 +1835,39 @@ func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logge
 	return
 }
 
+func pruneVolumeBlobsSafely(volDir string) {
+	st, err := store.Open(volDir)
+	if err != nil {
+		return
+	}
+	unlock, err := st.TryLock()
+	if err != nil || unlock == nil {
+		return
+	}
+	defer unlock()
+
+	extraKeep := make(map[string]bool)
+	mounts, err := config.LoadMounts()
+	if err == nil {
+		volID := filepath.Base(volDir)
+		for mountID, m := range mounts {
+			if m.VolumeID != volID && mountID != volID {
+				continue
+			}
+			cache, err := st.LoadCache(mountID)
+			if err != nil {
+				continue
+			}
+			for _, c := range cache {
+				if c.Blob != "" {
+					extraKeep[c.Blob] = true
+				}
+			}
+		}
+	}
+	_, _, _ = st.PruneLocalBlobs(extraKeep, localBlobGCMinAge)
+}
+
 // passPulled reports whether a tick just pulled every mount of the volume from
 // the hub, which is what the pulled marker vouches for to the agent hooks.
 // res merges every mount's result, so one offline or refused mount fails the
@@ -1875,6 +1923,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	}()
 	var lastRemote time.Time
 	var lastCycle time.Time
+	var lastBlobGC time.Time
 	var lastToken string
 	lastAccess := store.AccessOK
 	var watch <-chan struct{}
@@ -2324,6 +2373,11 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			waitFor = min(waitFor, scanInterval)
 		}
 		lastCycle = time.Now()
+		if cycleErr == nil && !res.Offline &&
+			(lastBlobGC.IsZero() || time.Since(lastBlobGC) >= localBlobGCInterval) {
+			lastBlobGC = time.Now()
+			pruneVolumeBlobsSafely(volDir)
+		}
 		if ctx.Err() == nil {
 			if passPulled(doRemote, be != nil, cycleErr, res) {
 				ids := make([]string, len(targets))

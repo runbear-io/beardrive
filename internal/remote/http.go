@@ -13,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -62,11 +63,12 @@ var sharedHTTPTransport = func() *http.Transport {
 // object, exists, sign). Key layout and semantics are identical to any other
 // backend, so the whole sync machinery works unchanged.
 type httpBackend struct {
-	base    string // scheme://host[:port]
-	project string
-	token   string // device token from `bdrive login`; empty on open servers
-	device  config.Device
-	hc      *http.Client
+	base     string // scheme://host[:port]
+	project  string
+	token    string // device token from `bdrive login`; empty on open servers
+	device   config.Device
+	hc       *http.Client
+	noAppend atomic.Bool
 	// lastFrame is when the open change stream last delivered anything,
 	// keepalives included (unix nanoseconds, zero when none is open).
 	lastFrame atomic.Int64
@@ -343,6 +345,80 @@ func (b *httpBackend) Get(ctx context.Context, key string) (io.ReadCloser, error
 		return nil, httpError(resp)
 	}
 	return resp.Body, nil
+}
+
+func (b *httpBackend) GetJournalTail(ctx context.Context, key string, offset int64, prefixSHA256 string) (io.ReadCloser, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		b.endpoint("object", url.Values{
+			"key": {key}, "offset": {strconv.FormatInt(offset, 10)},
+			"prefix_sha256": {prefixSHA256},
+		}), nil)
+	if err != nil {
+		return nil, false, err
+	}
+	resp, err := b.do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		defer resp.Body.Close()
+		return nil, false, httpError(resp)
+	}
+	appended := resp.StatusCode == http.StatusPartialContent ||
+		resp.Header.Get("X-Bdrive-Tail-Offset") == strconv.FormatInt(offset, 10)
+	return resp.Body, appended, nil
+}
+
+func (b *httpBackend) AppendJournal(ctx context.Context, req JournalAppendRequest) error {
+	if b.noAppend.Load() {
+		return ErrJournalAppendUnsupported
+	}
+	key := "journal/" + req.Device + ".jsonl"
+	body, compress, err := Compressible(bytes.NewReader(req.Data))
+	if err != nil {
+		return err
+	}
+	if compress {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		if _, err := io.Copy(gz, body); err != nil {
+			gz.Close()
+			return err
+		}
+		if err := gz.Close(); err != nil {
+			return err
+		}
+		body = bytes.NewReader(buf.Bytes())
+	}
+	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		b.endpoint("append", url.Values{
+			"key": {key}, "prev_size": {strconv.FormatInt(req.PrevSize, 10)},
+			"prev_sha256": {req.PrevSHA256},
+		}), body)
+	if err != nil {
+		return err
+	}
+	reqHTTP.Header.Set("Content-Type", "application/octet-stream")
+	nameJournalDevice(reqHTTP, key)
+	if compress {
+		reqHTTP.Header.Set("Content-Encoding", "gzip")
+	}
+	resp, err := b.do(reqHTTP)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		b.noAppend.Store(true)
+		return ErrJournalAppendUnsupported
+	case http.StatusConflict:
+		return ErrJournalPrefixMismatch
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("append journal: %w", httpError(resp))
+	}
+	return nil
 }
 
 func (b *httpBackend) Exists(ctx context.Context, key string) (bool, error) {

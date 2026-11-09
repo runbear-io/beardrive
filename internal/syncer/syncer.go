@@ -891,7 +891,7 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 			if !s.stillHold(op, cache) {
 				continue // we cannot stand behind what this folder does not hold
 			}
-			if filter.Skip(op.Path) || neverSync(op.Path) || unsafeRel(op.Path) {
+			if filter.Skip(op.Path) || neverSync(op.Path) || unsafeRel(op.Path) || s.readOnlyPath(op.Path) || s.deniedPath(op.Path) {
 				// The filter is applied symmetrically in scan and materialize
 				// precisely so a path this device refuses to write is also one
 				// it never publishes. This is a third publishing site and owes
@@ -1208,7 +1208,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			if err != nil || !info.Mode().IsRegular() {
 				return false
 			}
-			if c.Size == info.Size() && c.MTimeNS == info.ModTime().UnixNano() {
+			if cachedPathMatches("", info, c) {
 				seen[rel] = true
 				return true
 			}
@@ -1254,7 +1254,7 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		size, mt := info.Size(), info.ModTime().UnixNano()
 		mode := uint32(info.Mode().Perm())
 		c, ok := cache[rel]
-		if ok && c.Size == size && c.MTimeNS == mt {
+		if ok && cachedPathMatches(p, info, c) {
 			return nil // unchanged (cheap path)
 		}
 		if v == vSymlink {
@@ -1281,10 +1281,14 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 			cache[rel] = store.CachedFile{Link: target, Size: size, MTimeNS: mt}
 			return nil
 		}
-		sum, n, err := s.Store.PutBlobFile(p)
+		sum, n, mt, dev, ino, err := s.Store.PutBlobFileVerified(p)
 		if err != nil {
-			recordRetry(rel)
-			return nil // file vanished or unreadable; next cycle
+			if errors.Is(err, store.ErrFileChangedDuringRead) || os.IsNotExist(err) {
+				recordRetry(rel)
+			} else {
+				recordRetry(rel)
+			}
+			return nil // file vanished, changed, or unreadable; next cycle
 		}
 		// Below the cheap size+mtime return above, so only a file that actually
 		// changed is ever read for credentials — and covering both branches
@@ -1293,17 +1297,20 @@ func (s *Session) scan(cache map[string]store.CachedFile, st *store.SyncState, s
 		sec.scanBlob(s.Store, rel, sum)
 		if ok && c.Blob == sum {
 			// content unchanged, just touched
-			c.Size, c.MTimeNS, c.Mode = n, mt, mode
+			c.Size, c.MTimeNS, c.Mode, c.Dev, c.Ino = n, mt, mode, dev, ino
 			s.cacheDirty = true
 			cache[rel] = c
 			return nil
 		}
 		op := nextOp(journal.KindPut, rel)
 		op.Blob, op.Size, op.Mode = sum, n, mode
-		op.Mtime = info.ModTime().UTC()
+		if ok && c.Blob != "" {
+			op.Base = c.Blob
+		}
+		op.Mtime = time.Unix(0, mt).UTC()
 		ops = append(ops, op)
 		s.cacheDirty = true
-		cache[rel] = store.CachedFile{Blob: sum, Size: n, Mode: mode, MTimeNS: mt}
+		cache[rel] = store.CachedFile{Blob: sum, Size: n, Mode: mode, MTimeNS: mt, Dev: dev, Ino: ino}
 		return nil
 	})
 	if err != nil {
@@ -1414,9 +1421,9 @@ func redefinesApplied(have, applied []journal.Op) bool {
 func opSlot(op journal.Op) string { return fmt.Sprintf("%s\x00%d", op.Device, op.Seq) }
 
 func opID(op journal.Op) string {
-	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s",
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s",
 		opSlot(op), op.Lamport, op.Time.UTC().Format(time.RFC3339Nano),
-		op.Kind, op.Path, op.Blob, op.Size, op.Mode, op.Link)
+		op.Kind, op.Path, op.Blob, op.Base, op.Size, op.Mode, op.Link)
 }
 
 // sizeGrowth is the headroom a bound gets over the size an object was
@@ -1618,23 +1625,64 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		if fi, err := os.Stat(lp); err == nil {
 			localSize, isNew = fi.Size(), false
 		}
-		if o.Size <= localSize && localSize > 0 {
-			continue
-		}
 		if isNew {
 			if newJournals <= 0 {
 				continue
 			}
 			newJournals--
 		}
-		rc, err := s.Backend.Get(ctx, o.Key)
-		if err != nil {
-			return newOps, gone, err
+		var data []byte
+		haveData := false
+		prevFi, _ := os.Stat(lp)
+		if localSize > 0 {
+			if tg, ok := s.Backend.(remote.JournalTailGetter); ok {
+				if statSize, prefixSHA, endsNL, statOK := s.Store.JournalPrefixStat(dev); statOK && statSize == localSize {
+					rc, appended, tailErr := tg.GetJournalTail(ctx, o.Key, localSize, prefixSHA)
+					if tailErr == nil {
+						limit := pullBound(o.Size)
+						if appended {
+							limit = pullBound(max(int64(0), o.Size-localSize))
+						}
+						fetched, rerr := io.ReadAll(io.LimitReader(rc, limit))
+						rc.Close()
+						if rerr != nil {
+							return newOps, gone, rerr
+						}
+						if appended {
+							if len(fetched) == 0 {
+								continue
+							}
+							if endsNL {
+								fresh, perr := journal.Parse(fetched)
+								if perr == nil && s.Store.AppendValidatedPeerTail(dev, prevFi, localSize, fetched, fresh) {
+									newOps = append(newOps, fresh...)
+									continue
+								}
+							}
+						} else {
+							data = fetched
+							haveData = true
+						}
+					}
+				}
+			}
 		}
-		data, err := io.ReadAll(io.LimitReader(rc, pullBound(o.Size)))
-		rc.Close()
-		if err != nil {
-			return newOps, gone, err
+		local, readErr := os.ReadFile(lp)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			log.Printf("beardrive: skipping journal %s this cycle: %v", dev, readErr)
+			continue
+		}
+		if !haveData {
+			rc, getErr := s.Backend.Get(ctx, o.Key)
+			if getErr != nil {
+				return newOps, gone, getErr
+			}
+			data, err = io.ReadAll(io.LimitReader(rc, pullBound(o.Size)))
+			rc.Close()
+			if err != nil {
+				return newOps, gone, err
+			}
+			haveData = true
 		}
 		// Resume from a BYTE offset, never from an op count. A peer owns its
 		// journal object and can rewrite it, and Parse drops a line it cannot
@@ -1649,16 +1697,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		// to; if it does not, the peer rewrote its log and every op in it is
 		// treated as new. Re-applying ops is idempotent (Replay is a fold), so
 		// the rewritten case is only ever slow, never divergent.
-		prevFi, _ := os.Stat(lp)
-		local, err := os.ReadFile(lp)
-		if err != nil && !os.IsNotExist(err) {
-			// One unreadable local copy is one peer's problem, not every
-			// peer's: returning here abandoned every journal this loop had not
-			// reached yet, in an order the hub chooses, and reported it to the
-			// user as "offline".
-			log.Printf("beardrive: skipping journal %s this cycle: %v", dev, err)
-			continue
-		}
+		// The exact local bytes are retained above for byte-prefix validation.
 		if bytes.Equal(local, data) {
 			continue
 		}
@@ -1735,7 +1774,49 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		newOps = append(newOps, fresh...)
 	}
 
-	_, err = s.fetchBlobs(ctx, newOps, cache)
+	fold, foldErr := s.Store.ReplayFold()
+	if foldErr != nil {
+		return newOps, gone, foldErr
+	}
+	fetchList := make([]journal.Op, 0, len(newOps))
+	touched := map[string]bool{}
+	for _, op := range newOps {
+		touched[op.Path] = true
+	}
+	for p := range touched {
+		if win, ok := fold.Target[p]; ok && win.Blob != "" && !s.Store.HasBlob(win.Blob) {
+			fetchList = append(fetchList, journal.Op{Kind: journal.KindPut, Path: p, Blob: win.Blob, Size: win.Size, Mode: win.Mode})
+		}
+	}
+	myOps, myErr := s.Store.OwnOpsFrom(s.Device.ID, 0)
+	if myErr != nil {
+		return newOps, gone, myErr
+	}
+	pending := map[string]journal.Op{}
+	for _, op := range myOps {
+		pending[op.Path] = op
+	}
+	if len(pending) > 0 {
+		allOps, allErr := s.Store.AllOps()
+		if allErr != nil {
+			return newOps, gone, allErr
+		}
+		for p, mine := range pending {
+			for _, their := range newOps {
+				if their.Path != p || their.Kind != journal.KindPut {
+					continue
+				}
+				fetchList = append(fetchList, their)
+				if mine.Base != "" && !s.Store.HasBlob(mine.Base) {
+					fetchList = append(fetchList, journal.Op{Kind: journal.KindPut, Path: p, Blob: mine.Base})
+				}
+				if anc, ok := commonAncestor(p, mine, their, allOps); ok && anc.Blob != "" && !s.Store.HasBlob(anc.Blob) {
+					fetchList = append(fetchList, anc)
+				}
+			}
+		}
+	}
+	_, err = s.fetchBlobs(ctx, fetchList, cache)
 	return newOps, gone, err
 }
 
@@ -1976,14 +2057,20 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 		}
 		unpushed[op.Path] = op // latest local op per path
 	}
-	pulledLatest := map[string]journal.Op{}
+	pulledByPath := map[string][]journal.Op{}
 	for _, op := range pulled {
+		if op.Kind != journal.KindPut {
+			continue
+		}
 		if _, ok := unpushed[op.Path]; !ok {
 			continue
 		}
-		if prev, ok := pulledLatest[op.Path]; !ok || journal.Less(prev, op) {
-			pulledLatest[op.Path] = op
-		}
+		pulledByPath[op.Path] = append(pulledByPath[op.Path], op)
+	}
+	for p := range pulledByPath {
+		sort.Slice(pulledByPath[p], func(i, j int) bool {
+			return journal.Less(pulledByPath[p][i], pulledByPath[p][j])
+		})
 	}
 	if len(unpushed) == 0 {
 		return nil, nil
@@ -1994,7 +2081,12 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 	// whether the op that beat it arrived THIS cycle or was already on disk
 	// makes no difference to the user whose bytes are about to be overwritten.
 	for p, mine := range unpushed {
-		theirs, collided := pulledLatest[p]
+		theirsList := pulledByPath[p]
+		collided := len(theirsList) > 0
+		var theirs journal.Op
+		if collided {
+			theirs = theirsList[len(theirsList)-1]
+		}
 		cur, exists := state[p]
 		mineWon := (mine.Kind == journal.KindPut && exists && cur.Blob == mine.Blob) ||
 			(mine.Kind == journal.KindDelete && !exists)
@@ -2007,6 +2099,11 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 			// own edits win, and nothing is written.
 			if !collided {
 				continue
+			}
+			for _, candidate := range theirsList {
+				if candidate.Blob != "" && !s.Store.HasBlob(candidate.Blob) {
+					_, _ = s.fetchBlobs(context.Background(), []journal.Op{candidate}, nil)
+				}
 			}
 			loser = theirs
 		}
@@ -2253,13 +2350,13 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 			continue
 		}
 		abs := filepath.Join(s.Folder, filepath.FromSlash(rel))
-		if !store.UnderRoot(s.Folder, abs) {
+		if !store.UnderRoot(s.Folder, filepath.Dir(abs)) {
 			delete(cache, rel)
 			s.cacheDirty = true
 			continue
 		}
-		if fi, err := os.Stat(abs); err == nil {
-			if fi.Size() != c.Size || fi.ModTime().UnixNano() != c.MTimeNS {
+		if fi, err := os.Lstat(abs); err == nil {
+			if !cachedPathMatches(abs, fi, c) {
 				continue // dirty; do not delete fresh local edits
 			}
 			if err := os.Remove(abs); err != nil {
@@ -2351,15 +2448,28 @@ func (s *Session) materializeFile(rel string, want journal.FileState, cache map[
 	if !s.Store.HasBlob(want.Blob) {
 		return false, nil // content not fetched yet; retry next cycle
 	}
-	if err := s.writeFile(abs, want); err != nil {
+	// Cache the snapshot we wrote, not a later local writer's fingerprint.
+	// Otherwise that writer's bytes could be mistaken for want.Blob forever.
+	tmpFi, err := s.writeFileStat(abs, want)
+	if err != nil {
 		return false, fmt.Errorf("write %s: %w", rel, err)
 	}
-	fi, err := os.Stat(abs)
+	postFi, err := os.Lstat(abs)
 	if err != nil {
-		return false, err
+		return true, nil // a local removal belongs to the next scan
+	}
+	tmpDev, tmpIno, tmpOK := store.FileIdentity(tmpFi)
+	postDev, postIno, postOK := store.FileIdentity(postFi)
+	if !postFi.Mode().IsRegular() || postFi.Size() != tmpFi.Size() ||
+		postFi.ModTime().UnixNano() != tmpFi.ModTime().UnixNano() ||
+		(tmpOK && postOK && (tmpDev != postDev || tmpIno != postIno)) {
+		return true, nil
 	}
 	s.cacheDirty = true
-	cache[rel] = store.CachedFile{Blob: want.Blob, Size: fi.Size(), Mode: want.Mode, MTimeNS: fi.ModTime().UnixNano()}
+	cache[rel] = store.CachedFile{
+		Blob: want.Blob, Size: tmpFi.Size(), Mode: want.Mode,
+		MTimeNS: tmpFi.ModTime().UnixNano(), Dev: tmpDev, Ino: tmpIno,
+	}
 	// Spool it for the next agent turn ("changed since your last turn"). Only
 	// peer content reaches here — a local edit is journaled by the scan and
 	// lands in the cache, so the compare above short-circuits before any
@@ -2473,6 +2583,11 @@ func cachedPathMatches(abs string, fi os.FileInfo, c store.CachedFile) bool {
 			fi.Size() == c.Size &&
 			fi.ModTime().UnixNano() == c.MTimeNS
 	}
+	if c.Dev != 0 && c.Ino != 0 {
+		if dev, ino, ok := store.FileIdentity(fi); ok && (dev != c.Dev || ino != c.Ino) {
+			return false
+		}
+	}
 	return fi.Mode().IsRegular() &&
 		fi.Size() == c.Size &&
 		fi.ModTime().UnixNano() == c.MTimeNS
@@ -2565,6 +2680,11 @@ func (s *Session) writeSymlink(abs, target string) error {
 }
 
 func (s *Session) writeFile(abs string, want journal.FileState) error {
+	_, err := s.writeFileStat(abs, want)
+	return err
+}
+
+func (s *Session) writeFileStat(abs string, want journal.FileState) (os.FileInfo, error) {
 	// unsafeRel judged the path's SPELLING; this is the same boundary on disk.
 	// MkdirAll, CreateTemp and Rename all follow symlinks, so a directory
 	// inside the mount that is a symlink makes "docs/x.md" a perfectly clean
@@ -2577,36 +2697,24 @@ func (s *Session) writeFile(abs string, want journal.FileState) error {
 	// state. Checking its parent permits replacing that entry atomically while
 	// still rejecting symlinked ancestor directories.
 	if !store.UnderRoot(s.Folder, filepath.Dir(abs)) {
-		return fmt.Errorf("resolves outside the mount root")
+		return nil, fmt.Errorf("resolves outside the mount root")
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		return err
-	}
-	src, err := s.Store.OpenBlob(want.Blob)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(abs), ".bdrive-tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := io.Copy(tmp, src); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	mode := os.FileMode(want.Mode)
 	if mode == 0 {
 		mode = 0o644
 	}
-	if err := os.Chmod(tmp.Name(), mode); err != nil {
-		return err
+	tmpPath, fi, err := s.Store.MaterializeBlobToTemp(want.Blob, filepath.Dir(abs), mode)
+	if err != nil {
+		return nil, err
 	}
-	return os.Rename(tmp.Name(), abs)
+	defer os.Remove(tmpPath)
+	if err := os.Rename(tmpPath, abs); err != nil {
+		return nil, err
+	}
+	return fi, nil
 }
 
 // push uploads blobs referenced by unpushed ops, then the journal itself.
@@ -2689,6 +2797,38 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 		return err
 	}
 
+	if st.PushedOps > 0 && st.PushedOps < int64(len(myOps)) {
+		if ap, ok := s.Backend.(remote.JournalAppender); ok {
+			if off, prevSHA, ok := s.Store.JournalPrefixAt(s.Device.ID, st.PushedOps); ok && off >= 0 {
+				jf, err := os.Open(s.Store.JournalPath(s.Device.ID))
+				if err != nil {
+					return err
+				}
+				_, serr := jf.Seek(off, io.SeekStart)
+				tailData, rerr := io.ReadAll(jf)
+				jf.Close()
+				if serr != nil {
+					return serr
+				}
+				if rerr != nil {
+					return rerr
+				}
+				if len(tailData) > 0 {
+					err := ap.AppendJournal(ctx, remote.JournalAppendRequest{
+						Device: s.Device.ID, PrevSize: off, PrevSHA256: prevSHA, Data: tailData,
+					})
+					if err == nil {
+						st.PushedOps = int64(len(myOps))
+						return nil
+					}
+					if !errors.Is(err, remote.ErrJournalAppendUnsupported) &&
+						!errors.Is(err, remote.ErrJournalPrefixMismatch) {
+						return err
+					}
+				}
+			}
+		}
+	}
 	jp := s.Store.JournalPath(s.Device.ID)
 	f, err := os.Open(jp)
 	if err != nil {

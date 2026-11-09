@@ -416,22 +416,29 @@ func (v *volume) snapshot(ctx context.Context) (*snapshot, error) {
 // include the first want device pushes. Concurrent callers wait on mu, so one
 // rebuild answers all of those that asked before it started.
 func (v *volume) snapshotCovering(ctx context.Context, want uint64) (*snapshot, error) {
+	snap, _, err := v.snapshotCoveringFresh(ctx, want)
+	return snap, err
+}
+
+// snapshotCoveringFresh reports a stale fallback separately so derived state
+// cannot mistake a storage outage for a successful refresh.
+func (v *volume) snapshotCoveringFresh(ctx context.Context, want uint64) (*snapshot, bool, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.snap != nil && time.Since(v.at) < v.refresh && v.covers >= want {
-		return v.snap, nil
+		return v.snap, false, nil
 	}
 	v.gen++
 	gen, acc := v.gen, v.acceptedNow()
 	files, moves, err := v.load(ctx)
 	if err != nil {
 		if v.snap != nil {
-			return v.snap, nil // serve stale rather than fail
+			return v.snap, true, nil // readers may serve stale; indexes must stay behind
 		}
-		return nil, err
+		return nil, false, err
 	}
 	v.install(files, moves, gen, acc)
-	return v.snap, nil
+	return v.snap, false, nil
 }
 
 func (v *volume) acceptedNow() uint64 {
@@ -670,14 +677,19 @@ type RemoteSource struct {
 	// blobMod is the first Modified seen for a blob not yet sealed. See maybeSeal.
 	blobMod sync.Map // sha (string) → time.Time
 
-	jmu    sync.Mutex               // guards jcache and jbytes
-	jcache map[string]cachedJournal // "journal/<dev>.jsonl" → parsed ops
-	jbytes int64                    // raw journal bytes currently cached
-	jgen   uint64                   // hubCaches generation jcache was charged at
+	jmu     sync.Mutex               // guards jcache and jbytes
+	jcache  map[string]cachedJournal // "journal/<dev>.jsonl" → parsed ops
+	jbytes  int64                    // raw journal bytes currently cached
+	jgen    uint64                   // hubCaches generation jcache was charged at
+	jflight singleflight.Group       // one fetch/parse per journal key
 
 	fmu    sync.Mutex                 // guards fcache and fbytes
 	fcache map[string]filteredJournal // scopeTag+key → journal as one account may read it
 	fbytes int64
+	fseq   uint64
+
+	rmu          sync.Mutex
+	reassembling map[string]*reassembledBlob
 
 	foldMu    sync.Mutex // guards the last fold, reused while the journals are unchanged
 	foldFP    string
@@ -694,10 +706,12 @@ type RemoteSource struct {
 // cachedJournal is one journal's parsed ops plus the (size, modified) that
 // proves the parse is still current. See loadSourcedOps.
 type cachedJournal struct {
-	size  int64
-	mod   time.Time
-	bytes int64 // raw bytes this entry stands for, for the ceiling
-	ops   []journal.Op
+	size          int64
+	mod           time.Time
+	bytes         int64 // raw bytes this entry stands for, for the ceiling
+	ops           []journal.Op
+	rawPrefixHash [32]byte
+	endsInNewline bool // a torn final line must be reparsed when more bytes arrive
 }
 
 // journalFetchConcurrency bounds the parallel journal fetches on a cold load.
@@ -747,113 +761,192 @@ func (r *RemoteSource) OpenBlob(ctx context.Context, sha string) (io.ReadCloser,
 	// No whole blob (or one that fails verification): the content may exist
 	// only as chunks + a manifest (delta sync, docs/delta-sync-prd.md).
 	// Reassembly is hash-verified against the sha requested, so this arm is
-	// exactly as strong as verify — including when blobs/<sha> holds bytes
-	// that do NOT hash to sha, where the backfill below heals it.
+	// exactly as strong as verify, including when blobs/<sha> holds bytes that
+	// do NOT hash to sha. Reading never writes a duplicate whole-file blob.
 	return r.reassemble(ctx, sha)
 }
 
-// maxReassembleBytes caps what one reassembly may spool. It mirrors `bdrive
-// import`'s maxImportBlob (256 << 20): comfortably above the device-side
-// materialization ceiling (syncer's maxPullBytes, 100 MiB), so nothing a
-// device can hold is refused here, while a hostile manifest cannot spool
-// gigabytes through the temp dir per read. The spool lands in os.TempDir —
-// on a tmpfs deployment that is RAM, so this constant is also the per-request
-// memory bound; set TMPDIR to disk if that matters.
+// maxReassembleBytes bounds one verified legacy read. Concurrent readers of
+// the same sha share a spool, which is released when its last reader closes.
 const maxReassembleBytes = 256 << 20
 
-// reassemble serves a blob that exists only as chunks: fetch the manifest
-// keyed by the file's sha, concatenate its chunks into a spool while hashing,
-// refuse the lot unless the result hashes to the sha requested, then backfill
-// blobs/<sha> so the next read is a plain Get. The spool is unavoidable — the
-// promise "bytes hash to the key" cannot be made about a stream whose response
-// has already started — and self-limiting: upgraded clients fetch chunks and
-// verify locally, so only legacy readers ever pay it, once per blob.
+const (
+	maxManifestChunks       = 65536
+	maxReassembleChunkBytes = 4 << 20
+)
+
+// reassembledBlob owns one in-flight or actively-read spool. refs counts both
+// callers awaiting ready and returned readers, all guarded by RemoteSource.rmu.
+type reassembledBlob struct {
+	ready  chan struct{}
+	cancel context.CancelFunc
+	keep   *verifiedSpool
+	err    error
+	refs   int
+}
+
+type reassembledReader struct {
+	io.Reader
+	once    sync.Once
+	release func()
+}
+
+func (r *reassembledReader) Close() error {
+	r.once.Do(r.release)
+	return nil
+}
+
+// reassemble verifies before returning: the HTTP door must still answer 404,
+// rather than start a successful response, for missing or corrupt chunks.
 func (r *RemoteSource) reassemble(ctx context.Context, sha string) (io.ReadCloser, error) {
+	r.rmu.Lock()
+	if r.reassembling == nil {
+		r.reassembling = make(map[string]*reassembledBlob)
+	}
+	b, exists := r.reassembling[sha]
+	if !exists {
+		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+		b = &reassembledBlob{ready: make(chan struct{}), cancel: cancel}
+		r.reassembling[sha] = b
+		go func() {
+			defer cancel()
+			keep, err := r.assembleBlob(pctx, sha)
+			r.rmu.Lock()
+			if b.refs == 0 {
+				if r.reassembling[sha] == b {
+					delete(r.reassembling, sha)
+				}
+				r.rmu.Unlock()
+				if keep != nil {
+					keep.discard()
+				}
+				close(b.ready)
+				return
+			}
+			if err != nil && r.reassembling[sha] == b {
+				delete(r.reassembling, sha)
+			}
+			b.keep, b.err = keep, err
+			close(b.ready)
+			r.rmu.Unlock()
+		}()
+	}
+	b.refs++
+	r.rmu.Unlock()
+	release := func() {
+		r.rmu.Lock()
+		defer r.rmu.Unlock()
+		b.refs--
+		if b.refs == 0 {
+			if r.reassembling[sha] == b {
+				delete(r.reassembling, sha)
+			}
+			if b.cancel != nil {
+				b.cancel()
+			}
+			if b.keep != nil {
+				b.keep.discard()
+			}
+		}
+	}
+	select {
+	case <-b.ready:
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
+	}
+	if b.err != nil {
+		release()
+		return nil, b.err
+	}
+	var reader io.Reader = bytes.NewReader(b.keep.mem.Bytes())
+	if b.keep.file != nil {
+		reader = io.NewSectionReader(b.keep.file, 0, b.keep.n)
+	}
+	return &reassembledReader{Reader: reader, release: release}, nil
+}
+
+// assembleBlob reads each chunk once, checking both its own content address
+// and the file's address. Small files stay in memory; large ones use one
+// unlinked spool, never a new blobs/<sha> object.
+func (r *RemoteSource) assembleBlob(ctx context.Context, sha string) (*verifiedSpool, error) {
 	mrc, err := r.Backend.Get(ctx, "manifests/"+sha)
 	if err != nil {
 		return nil, err // no manifest either: the object genuinely is not there
 	}
 	var man struct {
+		Size   int64 `json:"size"`
 		Chunks []struct {
 			H string `json:"h"`
 			N int64  `json:"n"`
 		} `json:"chunks"`
 	}
-	derr := json.NewDecoder(io.LimitReader(mrc, 8<<20)).Decode(&man)
+	dec := json.NewDecoder(io.LimitReader(mrc, 8<<20))
+	derr := dec.Decode(&man)
+	if derr == nil {
+		var trailing json.RawMessage
+		if err := dec.Decode(&trailing); err != io.EOF {
+			derr = fmt.Errorf("manifest contains trailing or invalid JSON")
+		}
+	}
 	mrc.Close()
 	if derr != nil {
 		return nil, fmt.Errorf("unreadable manifest for %s: %w", sha, derr)
 	}
-	// A manifest is member-written and cannot be hash-checked at ingest, so
-	// its declared total is the one number a hostile member controls: listing
-	// one real 4 MiB chunk 100k times would spool ~400 GB through the temp
-	// dir (RAM, on a tmpfs deployment) per legacy read. The sum is enforced
-	// here and the per-chunk copy below verifies declared == actual, so the
-	// declared total IS the spool bound. An honest manifest past the cap is
-	// refused the same way — the hub will not assemble what a device would
-	// not accept either (the client's own ceiling is maxPullBytes).
+	if man.Size < 0 || man.Size > maxReassembleBytes || len(man.Chunks) > maxManifestChunks {
+		return nil, fmt.Errorf("manifest for %s exceeds reassembly limits", sha)
+	}
 	var declared int64
 	for _, c := range man.Chunks {
-		if c.N < 0 || declared > maxReassembleBytes-c.N {
+		if c.N < 0 || c.N > maxReassembleChunkBytes || declared > maxReassembleBytes-c.N {
 			return nil, fmt.Errorf("manifest for %s declares more than %d bytes", sha, int64(maxReassembleBytes))
+		}
+		if !blobKeyRe.MatchString("blobs/" + c.H) {
+			return nil, fmt.Errorf("manifest for %s names an invalid chunk", sha)
 		}
 		declared += c.N
 	}
-	tmp, err := os.CreateTemp("", ".bdrive-reassemble-*")
-	if err != nil {
-		return nil, err
+	if declared != man.Size {
+		return nil, fmt.Errorf("manifest for %s has inconsistent total size", sha)
 	}
-	os.Remove(tmp.Name()) // serve from the fd; nothing to clean up on any path
-	h := sha256.New()
-	w := io.MultiWriter(tmp, h)
-	for _, c := range man.Chunks {
-		if !blobRe.MatchString(c.H) {
-			tmp.Close()
-			return nil, fmt.Errorf("manifest for %s names an invalid chunk", sha)
+	keep := &verifiedSpool{}
+	ok := false
+	defer func() {
+		if !ok {
+			keep.discard()
 		}
+	}()
+	h := sha256.New()
+	for _, c := range man.Chunks {
+		ch := sha256.New()
 		crc, err := r.Backend.Get(ctx, "chunks/"+c.H)
 		if err != nil {
-			tmp.Close()
 			return nil, err
 		}
 		// Bounded by the DECLARED size, which the cap above already summed —
 		// a stored object longer than its manifest entry (a replayed presign)
 		// must not turn the cap into fiction. Short or long, the mismatch
 		// fails here; equal-but-wrong bytes fail the whole-file hash below.
-		n, cerr := io.Copy(w, io.LimitReader(crc, c.N+1))
+		n, cerr := io.Copy(io.MultiWriter(keep, h, ch), io.LimitReader(crc, c.N+1))
 		crc.Close()
 		if cerr != nil {
-			tmp.Close()
 			return nil, cerr
 		}
 		if n != c.N {
-			tmp.Close()
 			return nil, fmt.Errorf("chunk %s of %s is not its declared size", c.H[:12], sha)
+		}
+		if hex.EncodeToString(ch.Sum(nil)) != c.H {
+			return nil, fmt.Errorf("chunk %s of %s does not hash to its key", c.H[:12], sha)
+		}
+		if keep.err != nil {
+			return nil, keep.err
 		}
 	}
 	if hex.EncodeToString(h.Sum(nil)) != sha {
-		tmp.Close()
 		return nil, fmt.Errorf("manifest for %s does not reassemble to its key", sha)
 	}
-	size, err := tmp.Seek(0, io.SeekEnd)
-	if err == nil {
-		_, err = tmp.Seek(0, io.SeekStart)
-	}
-	if err != nil {
-		tmp.Close()
-		return nil, err
-	}
-	// Backfill so the next read is a plain blobs/ Get. Best-effort: a failed
-	// write must never fail the read that triggered it. The object is fresh,
-	// so verify will re-hash it until it seals — same as any new upload.
-	if err := r.Backend.Put(ctx, "blobs/"+sha, tmp, size); err != nil {
-		log.Printf("beardrive: backfill of reassembled blob %s failed: %v", sha, err)
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		tmp.Close()
-		return nil, err
-	}
-	return tmp, nil
+	ok = true
+	return keep, nil
 }
 
 // verify re-hashes a stored blob, unless this process has already proved that
@@ -1097,8 +1190,7 @@ type sourcedOp struct {
 // window, no time-based expiry, and no new Backend method. The List is the one
 // round trip every request still pays.
 //
-// No singleflight: two requests that miss the same journal at the same moment
-// both fetch it, which is what every request did before this existed.
+// Concurrent cache misses share one fetch and parse for each journal key.
 func (r *RemoteSource) loadSourcedOps(ctx context.Context) ([]sourcedOp, error) {
 	keep, err := r.listJournals(ctx)
 	if err != nil {
@@ -1174,26 +1266,37 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 	r.jmu.Unlock()
 
 	if len(misses) > 0 {
-		sizes := make([]int64, len(keep))
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(journalFetchConcurrency)
 		for _, i := range misses {
 			g.Go(func() error {
-				rc, err := r.Backend.Get(gctx, keep[i].Key)
-				if err != nil {
-					return fmt.Errorf("fetch %s: %w", keep[i].Key, err)
-				}
-				data, err := io.ReadAll(rc)
-				rc.Close()
-				if err != nil {
-					return err
-				}
-				sizes[i] = int64(len(data))
-				// A corrupt journal is ignored rather than breaking the view —
-				// and cached as zero ops, or it is re-downloaded on every
-				// request for as long as it stays corrupt.
-				if ops, err := journal.Parse(data); err == nil {
-					parsed[i] = ops
+				o := keep[i]
+				for {
+					ch := r.jflight.DoChan(o.Key, func() (any, error) {
+						fctx, cancel := context.WithTimeout(context.WithoutCancel(gctx), 2*time.Minute)
+						defer cancel()
+						return r.fetchJournal(fctx, o)
+					})
+					var res singleflight.Result
+					select {
+					case res = <-ch:
+					case <-gctx.Done():
+						return gctx.Err()
+					}
+					if res.Err != nil {
+						return res.Err
+					}
+					c := res.Val.(cachedJournal)
+					if c.size != o.Size || !c.mod.Equal(o.Modified) {
+						// The shared fetch belonged to a different listing.
+						// Retry under this request's metadata, not its old parse.
+						if err := gctx.Err(); err != nil {
+							return err
+						}
+						continue
+					}
+					parsed[i] = c.ops
+					break
 				}
 				return nil
 			})
@@ -1201,7 +1304,6 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 		if err := g.Wait(); err != nil {
 			return nil, err
 		}
-		r.cacheJournals(keep, misses, parsed, sizes)
 	}
 	r.jmu.Lock()
 	gen, evict := hubCaches.charge(r, journalCache, r.jbytes)
@@ -1211,23 +1313,59 @@ func (r *RemoteSource) parsedJournals(ctx context.Context, keep []remote.Object)
 	return parsed, nil
 }
 
-// cacheJournals records what the fetch pass parsed. The memory it holds is
-// bounded across projects by hubCaches.
-func (r *RemoteSource) cacheJournals(keep []remote.Object, misses []int, parsed [][]journal.Op, sizes []int64) {
+// fetchJournal runs under the key's singleflight. Recheck after joining: the
+// request that filled the entry may have finished after our initial lookup.
+func (r *RemoteSource) fetchJournal(ctx context.Context, o remote.Object) (cachedJournal, error) {
+	r.jmu.Lock()
+	prev, hadPrev := r.jcache[o.Key]
+	r.jmu.Unlock()
+	if hadPrev && prev.size == o.Size && prev.mod.Equal(o.Modified) {
+		return prev, nil
+	}
+	rc, err := r.Backend.Get(ctx, o.Key)
+	if err != nil {
+		return cachedJournal{}, fmt.Errorf("fetch %s: %w", o.Key, err)
+	}
+	raw, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return cachedJournal{}, err
+	}
+	c := cachedJournal{
+		size: o.Size, mod: o.Modified, bytes: int64(len(raw)),
+		rawPrefixHash: sha256.Sum256(raw),
+		endsInNewline: len(raw) > 0 && raw[len(raw)-1] == '\n',
+	}
+	if hadPrev && prev.size > 0 && prev.bytes == prev.size && prev.endsInNewline &&
+		o.Size > prev.size && int64(len(raw)) == o.Size &&
+		sha256.Sum256(raw[:prev.size]) == prev.rawPrefixHash {
+		tail, err := journal.Parse(raw[prev.size:])
+		if err == nil {
+			c.ops = make([]journal.Op, len(prev.ops)+len(tail))
+			copy(c.ops, prev.ops)
+			copy(c.ops[len(prev.ops):], tail)
+		}
+	} else {
+		// Keep the existing contract: corrupt input is ignored, not a broken
+		// viewer, and the empty parse is cached until the object changes.
+		c.ops, _ = journal.Parse(raw)
+	}
+	// A push between List and Get makes the listing's identity unsuitable as
+	// a cache key. Serve the fetched ops, but let the next listing cache them.
+	if int64(len(raw)) != o.Size {
+		return c, nil
+	}
 	r.jmu.Lock()
 	defer r.jmu.Unlock()
 	if r.jcache == nil {
-		r.jcache = make(map[string]cachedJournal, len(keep))
+		r.jcache = make(map[string]cachedJournal)
 	}
-	for _, i := range misses {
-		if c, ok := r.jcache[keep[i].Key]; ok {
-			r.jbytes -= c.bytes
-		}
-		r.jcache[keep[i].Key] = cachedJournal{
-			size: keep[i].Size, mod: keep[i].Modified, bytes: sizes[i], ops: parsed[i],
-		}
-		r.jbytes += sizes[i]
+	if old, ok := r.jcache[o.Key]; ok {
+		r.jbytes -= old.bytes
 	}
+	r.jcache[o.Key] = c
+	r.jbytes += c.bytes
+	return c, nil
 }
 
 func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
@@ -1618,6 +1756,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/p/{project}/store/exists", proj(PermRead, s.handleStoreExists))
 	mux.HandleFunc("POST /api/p/{project}/store/sign", proj(PermWrite, s.handleStoreSign))
 	mux.HandleFunc("PUT /api/p/{project}/store/object", proj(PermWrite, s.handleStorePut))
+	mux.HandleFunc("POST /api/p/{project}/store/append", proj(PermWrite, s.handleStoreAppend))
 
 	// The MCP door and its OAuth endpoints. Registered before the SPA catch-all
 	// for the same reason every other route is, and only when configured: a hub

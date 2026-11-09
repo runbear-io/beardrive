@@ -10,6 +10,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -554,43 +555,49 @@ func filterJournal(data []byte, f pathFilter) []byte {
 
 // ---- filtered-journal cache ----
 
-// A filtered journal is fetched by the LIST (to size it) and again by the GET
-// (to serve it) within one sync cycle, per device, per peer. This keeps the
-// two from being two round trips to the object store, and — more importantly —
-// guarantees they are the SAME bytes: a size computed from one fetch and a
-// body from another would let a journal that grew in between desynchronize the
-// client's byte-offset resume.
-//
-// Keyed by the object's identity AND the scope that filtered it, so two
-// accounts with different views never read each other's entry.
-//
-// ponytail: one flat map with all-or-nothing eviction at a byte ceiling,
-// exactly like jcache above it, and for the same reason — a real budget shared
-// across scopes with LRU is a bigger change than this feature.
+// Filter entries are scoped to both the caller's permissions and the listed
+// object's identity. Unknown metadata must be resolved before a cache lookup.
+// The byte budget evicts least-recently-used entries, not every scope at once.
 type filteredJournal struct {
 	size int64
 	mod  time.Time
 	data []byte
+	seq  uint64
 }
 
 const maxFilteredJournalBytes = 32 << 20
 
 func filterKey(key, tag string) string { return tag + "\x00" + key }
 
+// filterObject resolves GET's key-only Object against storage, not jcache:
+// a parsed journal may itself predate the append this request must observe.
+func (r *RemoteSource) filterObject(ctx context.Context, o remote.Object) (remote.Object, error) {
+	if o.Size != 0 || !o.Modified.IsZero() {
+		return o, nil
+	}
+	objs, err := r.Backend.List(ctx, o.Key)
+	if err != nil {
+		return remote.Object{}, err
+	}
+	for _, current := range objs {
+		if current.Key == o.Key {
+			return current, nil
+		}
+	}
+	return remote.Object{}, fmt.Errorf("journal %s: %w", o.Key, os.ErrNotExist)
+}
+
 func (r *RemoteSource) cachedFilter(o remote.Object, tag string) ([]byte, bool) {
 	r.fmu.Lock()
 	defer r.fmu.Unlock()
-	c, ok := r.fcache[filterKey(o.Key, tag)]
-	if !ok {
+	key := filterKey(o.Key, tag)
+	c, ok := r.fcache[key]
+	if !ok || c.size != o.Size || !c.mod.Equal(o.Modified) {
 		return nil, false
 	}
-	// A zero-valued Object (the GET path, which knows only the key) cannot
-	// prove freshness, so it takes whatever the LIST in the same cycle stored.
-	// That is the point: the two must agree, and the LIST is the one that saw
-	// the object.
-	if o.Size != 0 && (c.size != o.Size || !c.mod.Equal(o.Modified)) {
-		return nil, false
-	}
+	r.fseq++
+	c.seq = r.fseq
+	r.fcache[key] = c
 	return c.data, true
 }
 
@@ -600,10 +607,27 @@ func (r *RemoteSource) putFilter(o remote.Object, tag string, data []byte) {
 	if r.fcache == nil {
 		r.fcache = map[string]filteredJournal{}
 	}
-	if r.fbytes+int64(len(data)) > maxFilteredJournalBytes {
-		r.fcache, r.fbytes = map[string]filteredJournal{}, 0
+	key := filterKey(o.Key, tag)
+	if prev, ok := r.fcache[key]; ok {
+		r.fbytes -= int64(len(prev.data))
+		delete(r.fcache, key)
 	}
-	r.fcache[filterKey(o.Key, tag)] = filteredJournal{size: o.Size, mod: o.Modified, data: data}
+	if int64(len(data)) > maxFilteredJournalBytes {
+		return // one oversized journal must not flush every other scope
+	}
+	for r.fbytes+int64(len(data)) > maxFilteredJournalBytes {
+		var oldest string
+		var seq uint64
+		for k, entry := range r.fcache {
+			if oldest == "" || entry.seq < seq {
+				oldest, seq = k, entry.seq
+			}
+		}
+		r.fbytes -= int64(len(r.fcache[oldest].data))
+		delete(r.fcache, oldest)
+	}
+	r.fseq++
+	r.fcache[key] = filteredJournal{size: o.Size, mod: o.Modified, data: data, seq: r.fseq}
 	r.fbytes += int64(len(data))
 }
 

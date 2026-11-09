@@ -65,6 +65,30 @@ type Backend interface {
 	Close() error
 }
 
+var (
+	ErrJournalAppendUnsupported = errors.New("journal append not supported by remote")
+	ErrJournalPrefixMismatch    = errors.New("journal prefix mismatch")
+)
+
+// JournalAppendRequest extends one device's journal only if its stored prefix
+// still matches the bytes that device previously pushed.
+type JournalAppendRequest struct {
+	Device     string
+	PrevSize   int64
+	PrevSHA256 string
+	Data       []byte
+}
+
+type JournalAppender interface {
+	AppendJournal(ctx context.Context, req JournalAppendRequest) error
+}
+
+// JournalTailGetter returns either a verified extension or the complete object.
+// appended is true only when the supplied prefix matched.
+type JournalTailGetter interface {
+	GetJournalTail(ctx context.Context, key string, offset int64, prefixSHA256 string) (rc io.ReadCloser, appended bool, err error)
+}
+
 /*
 Version identifies one stored revision of an object.
 

@@ -92,6 +92,31 @@ func (r *RemoteSource) blobStat(ctx context.Context, blob string) (remote.Object
 			return o, true, nil
 		}
 	}
+	// Chunked files have no blobs/<sha> object; their manifest carries the
+	// logical file size while retaining the blob-shaped address used by ops.
+	mkey := "manifests/" + blob
+	mobjs, err := r.Backend.List(ctx, mkey)
+	if err != nil {
+		return remote.Object{}, false, err
+	}
+	for _, o := range mobjs {
+		if o.Key != mkey {
+			continue
+		}
+		rc, err := r.Backend.Get(ctx, mkey)
+		if err != nil {
+			return remote.Object{}, false, err
+		}
+		var m struct {
+			Size int64 `json:"size"`
+		}
+		decErr := json.NewDecoder(io.LimitReader(rc, 4<<20)).Decode(&m)
+		rc.Close()
+		if decErr != nil {
+			return remote.Object{}, false, decErr
+		}
+		return remote.Object{Key: key, Size: m.Size, Modified: o.Modified}, true, nil
+	}
 	return remote.Object{}, false, nil
 }
 
@@ -159,6 +184,14 @@ func (r *RemoteSource) Commit(ctx context.Context, p, blob string, size int64, w
 }
 
 func (r *RemoteSource) commitIf(ctx context.Context, p, blob string, size int64, who User, note, base string) error {
+	var cb *commitBase
+	if base != "" {
+		cb = &commitBase{path: p, sha: base, blob: blob}
+	}
+	return r.commitIfBase(ctx, p, blob, size, who, note, cb)
+}
+
+func (r *RemoteSource) commitIfBase(ctx context.Context, p, blob string, size int64, who User, note string, cb *commitBase) error {
 	if r.Device.ID == "" {
 		return fmt.Errorf("no device identity configured for uploads")
 	}
@@ -168,10 +201,6 @@ func (r *RemoteSource) commitIf(ctx context.Context, p, blob string, size int64,
 	}
 	if !ok {
 		return errBlobMissing
-	}
-	var cb *commitBase
-	if base != "" {
-		cb = &commitBase{path: p, sha: base, blob: blob}
 	}
 	return r.appendOpsIf(ctx, []journal.Op{{
 		Kind: journal.KindPut, Path: p, Blob: blob, Size: size, Mode: 0o644,
@@ -189,9 +218,14 @@ func (r *RemoteSource) commitIf(ctx context.Context, p, blob string, size int64,
 // snapshot that another hub process's write can postdate: both pass, both
 // append, and the later lamport silently replaces the other's content.
 type commitBase struct {
-	path string
-	sha  string // the version the writer read
-	blob string // what it writes: finding that already there is no conflict
+	path         string
+	sha          string // the blob version the writer read (empty for symlink)
+	link         string // the symlink target the writer read (empty for regular file)
+	mustExist    bool   // when true, a missing/deleted path (!ok) is a staleWriteError
+	mustBeAbsent bool   // when true, the path was absent when read and must remain absent (or match target)
+	blob         string // what it writes: finding that already there is no conflict
+	writeLink    string // symlink target it writes: finding that already there is no conflict
+	extra        []commitBase
 }
 
 // staleWriteError is a write whose base no longer holds. head is the version
@@ -201,21 +235,46 @@ type staleWriteError struct{ head string }
 func (e *staleWriteError) Error() string { return "this file changed since you last read it" }
 
 // holds reports whether the path still resolves to the base in the fold of
-// all, through the same replay the tree uses. A path that no longer resolves
-// holds, as it always has at the handler: a base binds a file that exists.
+// all, through the same replay the tree uses.
 func (b *commitBase) holds(all []journal.Op) error {
-	var ops []journal.Op
-	for _, op := range all {
-		if op.Path == b.path {
-			ops = append(ops, op)
+	bases := append([]commitBase{*b}, b.extra...)
+	for _, base := range bases {
+		var ops []journal.Op
+		for _, op := range all {
+			if op.Path == base.path {
+				ops = append(ops, op)
+			}
 		}
+		journal.Sort(ops)
+		fi, ok := foldFiles(ops)[base.path]
+		matchesTarget := (base.blob != "" || base.writeLink != "") && fi.Blob == base.blob && fi.Link == base.writeLink
+		if !ok {
+			if base.mustExist {
+				return &staleWriteError{head: ""}
+			}
+			continue
+		}
+		if base.mustBeAbsent {
+			if matchesTarget {
+				continue
+			}
+			head := fi.Blob
+			if head == "" {
+				head = fi.Link
+			}
+			return &staleWriteError{head: head}
+		}
+		matchesBase := fi.Blob == base.sha && fi.Link == base.link
+		if matchesBase || matchesTarget {
+			continue
+		}
+		head := fi.Blob
+		if head == "" {
+			head = fi.Link
+		}
+		return &staleWriteError{head: head}
 	}
-	journal.Sort(ops)
-	fi, ok := foldFiles(ops)[b.path]
-	if !ok || fi.Blob == b.sha || fi.Blob == b.blob {
-		return nil
-	}
-	return &staleWriteError{head: fi.Blob}
+	return nil
 }
 
 // nextLamport is maxLamport+1 without the wrap.
@@ -263,10 +322,27 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 	r.upmu.Lock()
 	defer r.upmu.Unlock()
 
-	next := func() ([]byte, error) {
-		sourced, err := r.loadSourcedOps(ctx)
+	next := func(existing []byte) ([]byte, error) {
+		keep, err := r.listJournals(ctx)
 		if err != nil {
 			return nil, err
+		}
+		keepFP := journalFingerprint(keep)
+		sourced, err := r.sourcedOpsOf(ctx, keep)
+		if err != nil {
+			return nil, err
+		}
+		// A second hub process may have appended after jcache was populated.
+		// Include the version we are about to CAS so sequence and lamport
+		// allocation never collides with that unseen tail.
+		if len(existing) > 0 {
+			existingOps, err := journal.Parse(existing)
+			if err != nil {
+				return nil, fmt.Errorf("parse current journal: %w", err)
+			}
+			for _, op := range existingOps {
+				sourced = append(sourced, sourcedOp{From: r.Device.ID, Op: op})
+			}
 		}
 		if base != nil {
 			all := make([]journal.Op, len(sourced))
@@ -280,13 +356,33 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 		if err := r.stamp(sourced, ops); err != nil {
 			return nil, err
 		}
+		if base != nil {
+			keepAfter, err := r.listJournals(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if journalFingerprint(keepAfter) != keepFP {
+				sourcedAfter, err := r.sourcedOpsOf(ctx, keepAfter)
+				if err != nil {
+					return nil, err
+				}
+				allAfter := make([]journal.Op, len(sourcedAfter))
+				for i, so := range sourcedAfter {
+					allAfter[i] = so.Op
+				}
+				if err := base.holds(allAfter); err != nil {
+					return nil, err
+				}
+				return nil, remote.ErrVersionMismatch
+			}
+		}
 		return journal.Marshal(ops)
 	}
 	key := "journal/" + r.Device.ID + ".jsonl"
 	if cp, ok := r.Backend.(remote.ConditionalPutter); ok {
-		return r.appendConditional(ctx, cp, key, next)
+		return r.appendConditionalExisting(ctx, cp, key, next)
 	}
-	line, err := next()
+	line, err := next(nil)
 	if err != nil {
 		return err
 	}
@@ -657,7 +753,12 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	billed := size
 	if rs, ok := v.source.(*RemoteSource); ok {
 		s.reconcileGrants(r.Context(), project, rs.Backend)
-		billed = billableBytes(r.Context(), rs.Backend, "blobs/"+blob, size)
+		var billErr error
+		billed, billErr = billableBytes(r.Context(), rs.Backend, "blobs/"+blob, size)
+		if billErr != nil {
+			storageErr(w, http.StatusBadGateway, "could not check the stored object", billErr)
+			return
+		}
 	}
 	org := s.orgOf(project)
 	if err := s.quota().CheckWrite(org, billed+s.reservedBytes(org)); err != nil {
@@ -873,15 +974,28 @@ appendConditional is the journal append when the store can compare and swap.
 	times running is more likely a store misbehaving than a busy one, and
 	failing it is how the caller learns to retry instead of the hub spinning.
 */
-func (r *RemoteSource) appendConditional(ctx context.Context, cp remote.ConditionalPutter, key string, next func() ([]byte, error)) error {
+func (r *RemoteSource) appendConditional(ctx context.Context, cp remote.ConditionalPutter, key string, next any) error {
+	return r.appendConditionalExisting(ctx, cp, key, func(existing []byte) ([]byte, error) {
+		switch fn := next.(type) {
+		case func([]byte) ([]byte, error):
+			return fn(existing)
+		case func() ([]byte, error):
+			return fn()
+		default:
+			return nil, fmt.Errorf("invalid journal append callback")
+		}
+	})
+}
+
+func (r *RemoteSource) appendConditionalExisting(ctx context.Context, cp remote.ConditionalPutter, key string, next func([]byte) ([]byte, error)) error {
 	const attempts = 5
 	var lastErr error
-	for i := 0; i < attempts; i++ {
+	for range attempts {
 		existing, version, err := readVersioned(ctx, cp, key)
 		if err != nil {
 			return fmt.Errorf("fetch journal: %w", err)
 		}
-		line, err := next()
+		line, err := next(existing)
 		if err != nil {
 			return err
 		}

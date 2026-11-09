@@ -180,7 +180,7 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 	if !ok {
 		return nil
 	}
-	snap, err := v.snapshot(ctx)
+	snap, staleFallback, err := v.snapshotCoveringFresh(ctx, v.acceptedNow())
 	if err != nil {
 		return err
 	}
@@ -216,7 +216,9 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 
 	// Fetched, decoded and written a slice at a time, so a first build of a
 	// large project holds one slice of documents in memory, not all of them.
-	complete := true
+	// A stale read is useful to the viewer, but cannot certify this index's
+	// generation complete when storage failed to refresh its source fold.
+	complete := !staleFallback
 	for len(puts) > 0 {
 		n, bytes := 0, int64(0)
 		for n < len(puts) && n < dataApplyChunkFiles && bytes < dataApplyChunkBytes {
