@@ -69,8 +69,8 @@ func TestQA_C04_CoWBlobModeAndWorktreeWritable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o444 {
-		t.Fatalf("blob mode = %o, want 0444", fi.Mode().Perm())
+	if fi.Mode().Perm() != 0o400 {
+		t.Fatalf("blob mode = %o, want 0400", fi.Mode().Perm())
 	}
 	tmp, fi, err := s.MaterializeBlobToTemp(sha, t.TempDir(), 0)
 	if err != nil {

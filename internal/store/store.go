@@ -189,7 +189,7 @@ func (s *Store) PutBlobFileVerified(srcPath string) (sha string, size int64, mti
 		return "", 0, 0, 0, 0, ErrFileChangedDuringRead
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
+	if err := os.Chmod(tmpPath, 0o400); err != nil {
 		return "", 0, 0, 0, 0, err
 	}
 	dst := s.BlobPath(sum)
