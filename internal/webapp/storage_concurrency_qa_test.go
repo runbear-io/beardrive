@@ -79,9 +79,11 @@ func TestQA_C11_V2StoreAppendAndTailGetAndIdempotentRetry(t *testing.T) {
 	if rec := qaRequest(t, h, http.MethodPost, url, tail, headers); rec.Code != http.StatusOK {
 		t.Fatalf("initial append: %d %s", rec.Code, rec.Body)
 	}
+	q.denyW = true
 	if rec := qaRequest(t, h, http.MethodPost, url, tail, headers); rec.Code != http.StatusOK {
-		t.Fatalf("idempotent retry: %d %s", rec.Code, rec.Body)
+		t.Fatalf("idempotent retry under full quota: %d %s", rec.Code, rec.Body)
 	}
+	q.denyW = false
 
 	storedURL := base + "object?key=" + key
 	stored := qaRequest(t, h, http.MethodGet, storedURL, nil, nil)

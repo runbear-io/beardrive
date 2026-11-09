@@ -1625,9 +1625,6 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		if fi, err := os.Stat(lp); err == nil {
 			localSize, isNew = fi.Size(), false
 		}
-		if o.Size <= localSize && localSize > 0 {
-			continue
-		}
 		if isNew {
 			if newJournals <= 0 {
 				continue

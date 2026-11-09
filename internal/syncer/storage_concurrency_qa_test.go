@@ -520,4 +520,35 @@ func TestQA_RedefinesAppliedDetectsBaseMutation(t *testing.T) {
 	if !redefinesApplied(mutatedBase, applied) {
 		t.Fatal("redefinesApplied failed to detect Base mutation on applied (Device, Seq)")
 	}
+
+	// End-to-end pull check: a same-size journal rewrite on remote must not be
+	// skipped by a size-only gate before redefinesApplied.
+	remoteStore := sharedRemote(t)
+	victim := newDevice(t, "victim-dev", remoteStore)
+	contentA := "same-size-body-A"
+	contentB := "same-size-body-B"
+	shaA := secfx4Blob(t, remoteStore, contentA)
+	shaB := secfx4Blob(t, remoteStore, contentB)
+	lineA := secfx7Op(t, "peer-same", 1, journal.KindPut, "a.txt", shaA, len(contentA)) + "\n"
+	lineB := secfx7Op(t, "peer-same", 1, journal.KindPut, "b.txt", shaB, len(contentB)) + "\n"
+	if len(lineA) != len(lineB) {
+		t.Fatalf("line lengths differ: %d vs %d", len(lineA), len(lineB))
+	}
+	secfx4Journal(t, remoteStore, "peer-same", lineA)
+	cycle(t, victim)
+	if got := read(t, victim.Folder, "a.txt"); got != contentA {
+		t.Fatalf("victim did not apply initial peer op: %q", got)
+	}
+	secfx4Journal(t, remoteStore, "peer-same", lineB)
+	cycle(t, victim)
+	if _, err := os.Stat(filepath.Join(victim.Folder, "b.txt")); !os.IsNotExist(err) {
+		t.Fatalf("same-size redefined journal op was accepted: err=%v", err)
+	}
+	storedBefore, err := os.ReadFile(victim.Store.JournalPath("peer-same"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(storedBefore) != lineA {
+		t.Fatalf("local peer journal was overwritten by same-size rewrite: %q", string(storedBefore))
+	}
 }

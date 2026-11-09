@@ -1313,12 +1313,6 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 	}
 	project := r.PathValue("project")
 	org := s.orgOf(project)
-	if r.ContentLength > 0 {
-		if err := s.quota().CheckWrite(org, r.ContentLength+s.reservedBytes(org)); err != nil {
-			http.Error(w, err.Error(), http.StatusForbidden)
-			return
-		}
-	}
 	body, inflated, ok := storePutBody(w, r)
 	if !ok {
 		return
