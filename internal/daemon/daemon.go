@@ -110,10 +110,13 @@ func readLockInfo(path string) (int, string, bool) {
 		return 0, "", unopenableLockIsRunning(path)
 	}
 	defer f.Close()
+	held.Lock()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
 		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		held.Unlock()
 		return 0, "", false
 	}
+	held.Unlock()
 	var buf [8192]byte
 	n, _ := f.ReadAt(buf[:], 0)
 	lines := strings.SplitN(strings.TrimSpace(string(buf[:n])), "\n", 2)
@@ -186,6 +189,8 @@ func locked(path string) bool {
 		return unopenableLockIsRunning(path)
 	}
 	defer f.Close()
+	held.Lock()
+	defer held.Unlock()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return true
 	}
@@ -201,11 +206,17 @@ func holdLock(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	held.Lock()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		held.Unlock()
 		f.Close()
 		return nil, fmt.Errorf("another daemon is already running for this mount: %w", err)
 	}
-	markHeld(path, true)
+	if held.paths == nil {
+		held.paths = map[string]bool{}
+	}
+	held.paths[path] = true
+	held.Unlock()
 	return f, nil
 }
 
