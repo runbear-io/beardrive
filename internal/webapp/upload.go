@@ -323,7 +323,12 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 	defer r.upmu.Unlock()
 
 	next := func(existing []byte) ([]byte, error) {
-		sourced, err := r.loadSourcedOps(ctx)
+		keep, err := r.listJournals(ctx)
+		if err != nil {
+			return nil, err
+		}
+		keepFP := journalFingerprint(keep)
+		sourced, err := r.sourcedOpsOf(ctx, keep)
 		if err != nil {
 			return nil, err
 		}
@@ -350,6 +355,26 @@ func (r *RemoteSource) appendOpsIf(ctx context.Context, ops []journal.Op, base *
 		}
 		if err := r.stamp(sourced, ops); err != nil {
 			return nil, err
+		}
+		if base != nil {
+			keepAfter, err := r.listJournals(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if journalFingerprint(keepAfter) != keepFP {
+				sourcedAfter, err := r.sourcedOpsOf(ctx, keepAfter)
+				if err != nil {
+					return nil, err
+				}
+				allAfter := make([]journal.Op, len(sourcedAfter))
+				for i, so := range sourcedAfter {
+					allAfter[i] = so.Op
+				}
+				if err := base.holds(allAfter); err != nil {
+					return nil, err
+				}
+				return nil, remote.ErrVersionMismatch
+			}
 		}
 		return journal.Marshal(ops)
 	}

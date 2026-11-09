@@ -97,16 +97,27 @@ func TestQA_C11_V2StoreAppendAndTailGetAndIdempotentRetry(t *testing.T) {
 	}
 
 	badSize := base + "append?key=" + key + "&prev_size=" + fmt.Sprint(len(first)+1) + "&prev_sha256=" + prefixSHA
-	if rec := qaRequest(t, h, http.MethodPost, badSize, []byte("not-a-new-op"), headers); rec.Code != http.StatusConflict {
+	if rec := qaRequest(t, h, http.MethodPost, badSize, qaJournalLine(3, "third.md"), headers); rec.Code != http.StatusConflict {
 		t.Fatalf("mismatched prefix size: %d %s, want 409", rec.Code, rec.Body)
 	}
 	badSHA := base + "append?key=" + key + "&prev_size=" + fmt.Sprint(len(first)) + "&prev_sha256=" + strings.Repeat("0", 64)
 	if rec := qaRequest(t, h, http.MethodPost, badSHA, qaJournalLine(3, "third.md"), headers); rec.Code != http.StatusConflict {
 		t.Fatalf("mismatched prefix hash: %d %s, want 409", rec.Code, rec.Body)
 	}
-	dupSeqURL := base + "append?key=" + key + "&prev_size=" + fmt.Sprint(len(want)) + "&prev_sha256=" + qaHexSHA(want)
-	if rec := qaRequest(t, h, http.MethodPost, dupSeqURL, qaJournalLine(1, "redefined-seq1.md"), headers); rec.Code != http.StatusConflict {
+	nextURL := base + "append?key=" + key + "&prev_size=" + fmt.Sprint(len(want)) + "&prev_sha256=" + qaHexSHA(want)
+	if rec := qaRequest(t, h, http.MethodPost, nextURL, []byte("not-json\n"), headers); rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed JSONL tail: %d %s, want 400", rec.Code, rec.Body)
+	}
+	mixedBad := append(qaJournalLine(3, "third.md"), []byte("not-json\n")...)
+	if rec := qaRequest(t, h, http.MethodPost, nextURL, mixedBad, headers); rec.Code != http.StatusBadRequest {
+		t.Fatalf("valid line followed by malformed JSONL: %d %s, want 400", rec.Code, rec.Body)
+	}
+	if rec := qaRequest(t, h, http.MethodPost, nextURL, qaJournalLine(1, "redefined-seq1.md"), headers); rec.Code != http.StatusConflict {
 		t.Fatalf("append redefining existing Seq 1: %d %s, want 409", rec.Code, rec.Body)
+	}
+	outOfOrderTail := append(qaJournalLine(5, "five.md"), qaJournalLine(4, "four.md")...)
+	if rec := qaRequest(t, h, http.MethodPost, nextURL, outOfOrderTail, headers); rec.Code != http.StatusConflict {
+		t.Fatalf("non-monotonic tail Seq (5 then 4): %d %s, want 409", rec.Code, rec.Body)
 	}
 
 	offsetURL := storedURL + "&offset=" + fmt.Sprint(len(first)) + "&prefix_sha256=" + prefixSHA

@@ -1059,7 +1059,20 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	org := s.orgOf(project)
 	// A device re-pushing a blob this hub already holds adds no bytes, so it
 	// must not be charged for them — same rule the browser door follows.
-	if strings.HasPrefix(key, "journal/") || manifestKeyRe.MatchString(key) {
+	unlockJournal := func() {}
+	if strings.HasPrefix(key, "journal/") {
+		rs.upmu.Lock()
+		unlockPath := s.lockPath(project, key)
+		unlocked := false
+		unlockJournal = func() {
+			if !unlocked {
+				unlocked = true
+				unlockPath()
+				rs.upmu.Unlock()
+			}
+		}
+		defer unlockJournal()
+	} else if manifestKeyRe.MatchString(key) {
 		defer s.lockPath(project, key)()
 	}
 	billed, billErr := billableBytes(r.Context(), rs.Backend, key, size)
@@ -1258,6 +1271,7 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		storageErr(w, http.StatusBadGateway, "could not store the object", err)
 		return
 	}
+	unlockJournal()
 	if strings.HasPrefix(key, "journal/") {
 		// Pending from here on, before anything else runs: current() — and so
 		// the If-Match head check — folds this push in.
@@ -1336,7 +1350,29 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 		return
 	}
 	tailOps, err := journalOps(key, tmp)
+	if err != nil || len(tailOps) == 0 {
+		http.Error(w, "invalid journal body", http.StatusBadRequest)
+		return
+	}
+	tailBytes, err := io.ReadAll(tmp)
 	if err != nil {
+		storageErr(w, http.StatusBadGateway, "could not read the journal tail", err)
+		return
+	}
+	nonBlank := 0
+	for _, rawLine := range bytes.Split(tailBytes, []byte{'\n'}) {
+		trimmed := bytes.TrimSpace(rawLine)
+		if len(trimmed) == 0 {
+			continue
+		}
+		nonBlank++
+		var op journal.Op
+		if err := json.Unmarshal(trimmed, &op); err != nil || (op.Kind != journal.KindPut && op.Kind != journal.KindDelete) {
+			http.Error(w, "invalid journal body", http.StatusBadRequest)
+			return
+		}
+	}
+	if nonBlank != len(tailOps) {
 		http.Error(w, "invalid journal body", http.StatusBadRequest)
 		return
 	}
@@ -1347,26 +1383,34 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 	if !s.opsNameTheirAuthor(w, r, tailOps) {
 		return
 	}
-	tailBytes, err := io.ReadAll(tmp)
-	if err != nil {
-		storageErr(w, http.StatusBadGateway, "could not read the journal tail", err)
-		return
-	}
 	cp, ok := rs.Backend.(remote.ConditionalPutter)
 	if !ok {
 		http.Error(w, "journal append requires conditional storage", http.StatusNotImplemented)
 		return
 	}
-	defer s.lockPath(project, key)()
+	rs.upmu.Lock()
+	unlockPath := s.lockPath(project, key)
+	unlocked := false
+	unlockJournal := func() {
+		if !unlocked {
+			unlocked = true
+			unlockPath()
+			rs.upmu.Unlock()
+		}
+	}
+	defer unlockJournal()
 	s.reconcileGrants(r.Context(), project, rs.Backend)
 	tailSeqs := make(map[int64]bool, len(tailOps))
+	var prevTailSeq int64
 	for _, op := range tailOps {
-		if op.Seq <= 0 || tailSeqs[op.Seq] {
+		if op.Seq <= 0 || op.Seq <= prevTailSeq || tailSeqs[op.Seq] {
 			http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
 			return
 		}
 		tailSeqs[op.Seq] = true
+		prevTailSeq = op.Seq
 	}
+	minTailSeq := tailOps[0].Seq
 	const attempts = 5
 	var storedMax int64
 	written := false
@@ -1426,7 +1470,7 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 							if op.Seq > storedMax {
 								storedMax = op.Seq
 							}
-							if tailSeqs[op.Seq] {
+							if tailSeqs[op.Seq] || op.Seq >= minTailSeq {
 								seqCollision = true
 							}
 						}
@@ -1471,7 +1515,7 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 			storageErr(w, http.StatusBadGateway, "could not parse the stored journal", parseErr)
 			return
 		}
-		if seqCollision {
+		if seqCollision || minTailSeq <= storedMax {
 			cleanupTmp()
 			http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
 			return
@@ -1516,6 +1560,7 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 		written = true
 		break
 	}
+	unlockJournal()
 	if !written {
 		http.Error(w, "concurrent journal update; please retry", http.StatusConflict)
 		return
