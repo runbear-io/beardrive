@@ -71,17 +71,11 @@ func (s *Session) tryMerge(path string, mine, theirs journal.Op, all []journal.O
 	if mine.Size > maxMergeBytes || theirs.Size > maxMergeBytes {
 		return mergedBlob{}, false
 	}
-	baseBlob := mine.Base
-	var base journal.Op
-	var ok bool
-	if baseBlob == "" || !s.Store.HasBlob(baseBlob) {
-		base, ok = commonAncestor(path, mine, theirs, all)
-		if !ok {
-			return mergedBlob{}, false
-		}
-		baseBlob = base.Blob
+	base, ok := commonAncestor(path, mine, theirs, all)
+	if !ok {
+		return mergedBlob{}, false
 	}
-	baseBytes, ok1 := s.readBlob(baseBlob, maxMergeBytes)
+	baseBytes, ok1 := s.readBlob(base.Blob, maxMergeBytes)
 	mineBytes, ok2 := s.readBlob(mine.Blob, maxMergeBytes)
 	theirsBytes, ok3 := s.readBlob(theirs.Blob, maxMergeBytes)
 	if !ok1 || !ok2 || !ok3 {
@@ -164,6 +158,31 @@ func mergeJSONLAppends(base, a, b []byte, mine, theirs journal.Op) ([]byte, bool
 // ordered before both of them. Ops for other paths are irrelevant, and an op
 // that is not Less than BOTH is not something both sides could have seen.
 func commonAncestor(path string, mine, theirs journal.Op, all []journal.Op) (journal.Op, bool) {
+	if mine.Base != "" && mine.Base == theirs.Base {
+		for _, op := range all {
+			if op.Path == path && op.Kind == journal.KindPut && op.Blob == mine.Base {
+				return op, true
+			}
+		}
+		return journal.Op{Kind: journal.KindPut, Path: path, Blob: mine.Base}, true
+	}
+	var mineCeil, theirsCeil journal.Op
+	var hasMineCeil, hasTheirsCeil bool
+	for _, op := range all {
+		if op.Path != path || op.Kind != journal.KindPut || op.Blob == "" {
+			continue
+		}
+		if mine.Base != "" && op.Blob == mine.Base && journal.Less(op, mine) {
+			if !hasMineCeil || journal.Less(mineCeil, op) {
+				mineCeil, hasMineCeil = op, true
+			}
+		}
+		if theirs.Base != "" && op.Blob == theirs.Base && journal.Less(op, theirs) {
+			if !hasTheirsCeil || journal.Less(theirsCeil, op) {
+				theirsCeil, hasTheirsCeil = op, true
+			}
+		}
+	}
 	var best journal.Op
 	found := false
 	for _, op := range all {
@@ -171,6 +190,12 @@ func commonAncestor(path string, mine, theirs journal.Op, all []journal.Op) (jou
 			continue
 		}
 		if !journal.Less(op, mine) || !journal.Less(op, theirs) {
+			continue
+		}
+		if hasMineCeil && journal.Less(mineCeil, op) {
+			continue
+		}
+		if hasTheirsCeil && journal.Less(theirsCeil, op) {
 			continue
 		}
 		if !found || journal.Less(best, op) {

@@ -193,6 +193,29 @@ func TestQA_C05_C07_C08_BaseMergeThreePeersAndJSONValidation(t *testing.T) {
 	if got := string(out); got != "{\"base\":1}\n{\"a\":1}\n{\"b\":1}\n" {
 		t.Fatalf("JSONL output = %q", got)
 	}
+
+	// Peer edits from an older ancestor V0 while mine edits from a newer V1:
+	// commonAncestor must select V0, not mine.Base (V1), so V0->V1 additions
+	// are preserved instead of treated as deleted by the peer.
+	v0Blob := qaBlob(t, a.Store, "line1\nline2\nline3\n")
+	v1Blob := qaBlob(t, a.Store, "line1\nline2\nline3\nadded-in-v1\n")
+	mineV2Blob := qaBlob(t, a.Store, "line1\nline2\nline3\nadded-in-v1\nadded-in-v2\n")
+	theirFromV0Blob := qaBlob(t, a.Store, "LINE1-THEIRS\nline2\nline3\n")
+	v0Op := qaOp("anc.txt", "z", journal.KindPut, v0Blob, "", 1)
+	v1Op := qaOp("anc.txt", "z", journal.KindPut, v1Blob, v0Blob, 3)
+	theirFromV0 := qaOp("anc.txt", "b", journal.KindPut, theirFromV0Blob, v0Blob, 2)
+	mineFromV1 := qaOp("anc.txt", "a", journal.KindPut, mineV2Blob, v1Blob, 4)
+	mergedAnc, ok := a.tryMerge("anc.txt", mineFromV1, theirFromV0, []journal.Op{v0Op, theirFromV0, v1Op, mineFromV1})
+	if !ok {
+		t.Fatal("merge across older peer base V0 and newer mine.Base V1 failed")
+	}
+	mergedAncBytes, err := os.ReadFile(a.Store.BlobPath(mergedAnc.blob))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(mergedAncBytes); got != "LINE1-THEIRS\nline2\nline3\nadded-in-v1\nadded-in-v2\n" {
+		t.Fatalf("merged content = %q, want V0-based merge preserving added-in-v1 and added-in-v2", got)
+	}
 }
 
 func TestQA_C06_LazyBlobPullSkipsHistoricalOverwrittenBlobs(t *testing.T) {

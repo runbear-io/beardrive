@@ -459,3 +459,44 @@ func TestQA_C19_C20_QuotaJournalDeltaChunkDedupAndConcurrentDeviceBind(t *testin
 		t.Fatalf("device owner = %q known=%v, want winner %q", owner, known, winner)
 	}
 }
+
+func TestQA_JournalPutRejectsRewritingStoredOpIdentityAndReadOnlyBypass(t *testing.T) {
+	h, _, c, p := folderHub(t) // "locked/" is read-only for bob, "notes/" is writable
+	dev := "bobdev01"
+	push := func(ops []journal.Op) *httptest.ResponseRecorder {
+		t.Helper()
+		data, err := journal.Marshal(ops)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPut, "/api/p/"+p.ID+"/store/object?key=journal/"+dev+".jsonl", bytes.NewReader(data))
+		req.AddCookie(c["bob"])
+		req.Header.Set("X-Bdrive-Device", dev)
+		req.Header.Set("X-Bdrive-Perms", "1")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	sha1 := strings.Repeat("a", 64)
+	sha2 := strings.Repeat("b", 64)
+	op1 := journal.Op{
+		Seq: 1, Lamport: 1, Time: time.Now().UTC(), Device: dev, User: "bob@x.io",
+		Kind: journal.KindPut, Path: "notes/a.md", Blob: sha1, Size: 10, Mode: 0o644,
+	}
+	if rec := push([]journal.Op{op1}); rec.Code != http.StatusOK {
+		t.Fatalf("initial push: %d %s", rec.Code, rec.Body)
+	}
+	// Rewriting Seq 1's Blob or Kind on a writable path must be rejected as an
+	// append-only violation (409 Conflict).
+	rewrittenBlob := op1
+	rewrittenBlob.Blob = sha2
+	if rec := push([]journal.Op{rewrittenBlob}); rec.Code != http.StatusConflict {
+		t.Fatalf("rewriting stored Seq 1 Blob: got %d %s, want 409", rec.Code, rec.Body)
+	}
+	rewrittenKind := op1
+	rewrittenKind.Kind = journal.KindDelete
+	rewrittenKind.Blob = ""
+	if rec := push([]journal.Op{rewrittenKind}); rec.Code != http.StatusConflict {
+		t.Fatalf("rewriting stored Seq 1 Kind to delete: got %d %s, want 409", rec.Code, rec.Body)
+	}
+}
