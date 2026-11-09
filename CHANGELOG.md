@@ -5,6 +5,18 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+## v0.18.5 — 2026-11-09
+
+**Update your devices** for the faster agent hooks; running daemons switch over
+the first time the updated `bdrive` runs. **Update self-hosted hubs** for the
+co-editing fixes; on-disk and storage formats are unchanged.
+
+- **Agent hooks no longer walk the whole tree when the daemon is current.** The turn-start hook (`bdrive sync --hook`) skips its sync cycle when the mount's daemon vouches that it has pulled everything the hub announced: it reads what the daemon already recorded (inbound changes, secret findings) and saves the session note. On a 78,685-file tree, hook latency went from `644 ms` to `16 ms` at p50 and from `715 ms` to `18 ms` at p95. The post-edit hook now runs `bdrive sync --defer`, which only saves the note under the same condition. The daemon writes `<volume>/pulled` after a tick that pulled every mount and renews it while the hub's change stream is alive; a peer announcement, a failed pass, the stream ending, or the worker exiting withdraws it. Without a daemon, or beside one that cannot vouch, both hooks run a full cycle as before. Existing installs pick up the post-edit hook change on the next `bdrive init` or `bdrive hooks install`. (#343)
+- **Inbound changes are no longer dropped when the daemon appends while a hook drains them.** Appends and the drain of the inbound spool share a lock, so an event written during a drain is kept for the next one. (#343)
+- **The hub no longer empties files or forks conflict copies of co-edited files.** A co-editing room that could not read its file opened as if the file were new and could write empty text past the stale-write and shrink guards; a read error now refuses the room, and every room write is conditional. A refused snapshot merges line by line against the outside write instead of always parking a conflict copy, and parks one only when both sides changed the same lines. In the sync engine, an empty version never forks and never keeps a path. (#339)
+- **An agent appending to a file that people are editing in the browser keeps both appends.** The room writes the outside version followed by its own new lines instead of forking a copy, and a room that parks a copy now takes the outside version first, so its next snapshot no longer overwrites the outside write. (#344)
+- **Rejoining a co-edited file after such a merge no longer duplicates lines.** The room stores the document state that spells the file it wrote, so the next room starts from it. One room's snapshots now run one at a time, and a final snapshot that fails during shutdown is retried without blocking shutdown. (#345)
+
 ## v0.18.4 — 2026-11-08
 
 **Update your devices.** Running sync daemons switch over automatically the first
