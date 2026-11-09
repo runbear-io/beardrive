@@ -618,6 +618,13 @@ func (b *httpBackend) Watch(ctx context.Context) (<-chan struct{}, error) {
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
+		// The stream's end counts as an announcement: whatever it would
+		// have carried next is unknown, so nothing it vouched for stands.
+		defer func() {
+			if f := b.onAnnounce.Load(); f != nil {
+				(*f)()
+			}
+		}()
 		defer b.lastFrame.Store(0)
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 0, 4096), maxEventLine)

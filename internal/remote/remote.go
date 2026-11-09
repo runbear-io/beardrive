@@ -224,7 +224,8 @@ type StreamLiveness interface {
 // AnnounceNotifier is a Watcher that reports each announcement as it reads it,
 // on the stream's own goroutine and before the wakeup is queued, so whatever
 // the announcement invalidates is invalidated before anything can act on the
-// wakeup or miss it.
+// wakeup or miss it. The stream ending is reported the same way, before its
+// channel closes: announcements may have been lost with it.
 type AnnounceNotifier interface {
 	OnAnnounce(func())
 }

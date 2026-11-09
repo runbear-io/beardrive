@@ -1,6 +1,7 @@
 package store
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -34,7 +35,30 @@ func MarkPulledUntil(dir string, mounts []string, until time.Time) error {
 		head += " " + strconv.FormatInt(until.UnixNano(), 10)
 	}
 	body := head + "\n" + strings.Join(mounts, "\n") + "\n"
-	return os.WriteFile(pulledPath(dir), []byte(body), 0o600)
+	// Replaced whole, never rewritten in place: a hook reading while the
+	// daemon renews must see the old marker or the new one, not a prefix.
+	tmp, err := os.CreateTemp(dir, ".pulled-*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.WriteString(body); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), pulledPath(dir)); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return nil
 }
 
 // ClearPulled withdraws the marker.
@@ -62,7 +86,9 @@ func (p Pulled) Covers(mountID string) bool {
 	return slices.Contains(p.Mounts, mountID)
 }
 
-// LoadPulled reads the marker; the zero value when there is none.
+// LoadPulled reads the marker; the zero value when there is none, or when what
+// is there is not a whole marker (no final newline, no pid), which vouches for
+// nothing.
 func LoadPulled(dir string) Pulled {
 	f, err := os.Open(pulledPath(dir))
 	if err != nil {
@@ -74,7 +100,10 @@ func LoadPulled(dir string) Pulled {
 		return Pulled{}
 	}
 	data := make([]byte, min(fi.Size(), 1<<16))
-	n, _ := f.Read(data)
+	n, _ := io.ReadFull(f, data)
+	if n == 0 || int64(n) != fi.Size() || data[n-1] != '\n' {
+		return Pulled{}
+	}
 	lines := strings.Split(strings.TrimSpace(string(data[:n])), "\n")
 	head := strings.Fields(lines[0])
 	var p Pulled
@@ -85,6 +114,9 @@ func LoadPulled(dir string) Pulled {
 		if n, err := strconv.ParseInt(head[1], 10, 64); err == nil {
 			p.Until = time.Unix(0, n)
 		}
+	}
+	if p.PID <= 0 {
+		return Pulled{}
 	}
 	p.At, p.Mounts = fi.ModTime(), lines[1:]
 	return p
