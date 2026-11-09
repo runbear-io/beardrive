@@ -82,3 +82,32 @@ func TestMergeKeepsNewlineEdits(t *testing.T) {
 		}
 	}
 }
+
+// Two sides that each merged the same third insertion hold its line in
+// different places; keeping both insertions would repeat it, so the merge
+// declines and the conflict path keeps both versions whole.
+func TestSamePointInsertionsSharingALineDecline(t *testing.T) {
+	base := "root\n"
+	ab, ok := Merge([]byte(base), []byte("root\nA\n"), []byte("root\nB\n"))
+	if !ok || string(ab) != "root\nA\nB\n" {
+		t.Fatalf("A and B: %q %v", ab, ok)
+	}
+	bc, ok := Merge([]byte(base), []byte("root\nB\n"), []byte("root\nC\n"))
+	if !ok || string(bc) != "root\nB\nC\n" {
+		t.Fatalf("B and C: %q %v", bc, ok)
+	}
+	for _, pair := range [][2][]byte{{ab, bc}, {bc, ab}} {
+		if got, ok := Merge([]byte(base), pair[0], pair[1]); ok {
+			t.Fatalf("merged two results sharing B into %q", got)
+		}
+	}
+	// A blank line between appended paragraphs is not shared content.
+	got, ok := Merge([]byte(base), []byte("root\n\nA\n"), []byte("root\n\nB\n"))
+	if !ok || string(got) != "root\n\nA\nB\n" {
+		t.Fatalf("blank-led appends: %q %v", got, ok)
+	}
+	got, ok = Merge([]byte(base), []byte("root\nA\n\n"), []byte("root\nB\n\n"))
+	if !ok || string(got) != "root\nA\nB\n\n" {
+		t.Fatalf("blank-ended appends: %q %v", got, ok)
+	}
+}

@@ -74,7 +74,11 @@ func Merge(base, a, b []byte) ([]byte, bool) {
 	// both insertions at one point: both sides appending to the end of the
 	// notes, the commonest concurrency there is. Both are kept as one edit.
 	if len(edits) == 2 && edits[0].r.from == edits[1].r.from && edits[0].r.to == edits[1].r.to {
-		edits = []edit{{edits[0].r, bothInserted(edits[0].with, edits[1].with)}}
+		with, ok := bothInserted(edits[0].with, edits[1].with)
+		if !ok {
+			return nil, false
+		}
+		edits = []edit{{edits[0].r, with}}
 	}
 
 	var out [][]byte
@@ -149,7 +153,12 @@ func overlaps(a, b []region) bool {
 // bothInserted is what two insertions at one point become: lines they begin
 // or end with in common once, and the lines between, where they differ, in
 // byte order, which is arbitrary but the same from either side.
-func bothInserted(x, y [][]byte) [][]byte {
+//
+// Where the lines between share a line, it declines: that line is in both
+// insertions in different places, most often because each side already
+// merged in the same third edit, and no ordering keeps it once and keeps
+// both sides' order. Blank lines do not count; one repeated is harmless.
+func bothInserted(x, y [][]byte) ([][]byte, bool) {
 	p := 0
 	for p < len(x) && p < len(y) && bytes.Equal(x[p], y[p]) {
 		p++
@@ -159,13 +168,24 @@ func bothInserted(x, y [][]byte) [][]byte {
 		s++
 	}
 	mx, my := x[p:len(x)-s], y[p:len(y)-s]
+	seen := make(map[string]bool, len(mx))
+	for _, l := range mx {
+		if len(bytes.TrimSpace(l)) > 0 {
+			seen[string(l)] = true
+		}
+	}
+	for _, l := range my {
+		if seen[string(l)] {
+			return nil, false
+		}
+	}
 	if bytes.Compare(bytes.Join(my, nl), bytes.Join(mx, nl)) < 0 {
 		mx, my = my, mx
 	}
 	out := append([][]byte{}, x[:p]...)
 	out = append(out, mx...)
 	out = append(out, my...)
-	return append(out, x[len(x)-s:]...)
+	return append(out, x[len(x)-s:]...), true
 }
 
 var nl = []byte("\n")
