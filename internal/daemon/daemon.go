@@ -1848,6 +1848,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 		return err
 	}
 	defer release(lockf)
+	// Before this worker's pid can be read from the lock: a predecessor in
+	// this same process announced the same pid, so its marker would
+	// otherwise vouch for a worker that has not pulled yet.
+	store.ClearPulled(volDir)
 	if err := announce(lockf); err != nil {
 		return err
 	}

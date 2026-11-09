@@ -165,15 +165,23 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 	// daemon materialized the peer's change seconds ago, so this cycle saw
 	// nothing and the spool is where the record is. Errors are ignored — the
 	// links matter more than the list.
+	//
+	// Secret findings are not drained: they are state, not events. They stand
+	// until the file changes without them, so every turn sees the ones still
+	// true.
 	var paths []store.InboundEvent
+	var found map[string][]secrets.Finding
 	release, current := daemonCurrent(sess.Store, sess.MountID)
 	if current {
 		paths, _ = sess.Store.DrainInboundForMount(sess.MountID)
+		found, _ = sess.Store.LoadSecrets(sess.MountID)
 		if hookReadSeam != nil {
 			hookReadSeam()
 		}
-		// An announcement heard while the hook read names a push the files
-		// may not hold yet: the turn pulls it itself, keeping what it drained.
+		// Asked once every read is done: an announcement heard before then
+		// names a push the files may not hold yet, and the turn pulls it
+		// itself, keeping what it drained. One heard after it is a push that
+		// landed after this turn read, as it would be after a pull here.
 		if vouched(sess.Store, sess.MountID) {
 			defer release()
 		} else {
@@ -188,10 +196,8 @@ func runHookSync(cmd *cobra.Command, target, sessionID, label string) (hookSync,
 		}
 		more, _ := sess.Store.DrainInboundForMount(sess.MountID)
 		paths = append(paths, more...)
+		found, _ = sess.Store.LoadSecrets(sess.MountID)
 	}
-	// Not drained: findings are state, not events. They stand until the file
-	// changes without them, so every turn sees the ones still true.
-	found, _ := sess.Store.LoadSecrets(sess.MountID)
 
 	server, projectID, err := splitHubRemote(proj.Remote)
 	if err != nil {

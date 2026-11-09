@@ -264,3 +264,35 @@ func TestVouchMarkerEndsWithTheStreamsLiveness(t *testing.T) {
 		t.Error("marker still fresh past its stream's liveness")
 	}
 }
+
+// A worker replacing another in the same process announces the same pid, so
+// the marker its predecessor left must be gone before that pid can be read.
+func TestAReplacementWorkerIsNotVouchedForByItsPredecessor(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusBadGateway)
+	}))
+	down.Close()
+	m := watchMountWithRemote(t, down.URL+"/p/p-test")
+	if err := store.MarkPulled(m.volDir, []string{projectIDOf(t, m)}); err != nil {
+		t.Fatal(err)
+	}
+	vouchedOnArrival := make(chan bool, 1)
+	go func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if pid, running := Running(m.volDir); running && pid == os.Getpid() {
+				vouchedOnArrival <- !store.LoadPulled(m.volDir).At.IsZero()
+				return
+			}
+		}
+		close(vouchedOnArrival)
+	}()
+	startWatchSafetyWorker(t, m, time.Hour, nil, nil)
+	stale, ok := <-vouchedOnArrival
+	if !ok {
+		t.Fatal("the worker never announced itself")
+	}
+	if stale {
+		t.Error("the new worker's pid was readable while its predecessor's marker still stood")
+	}
+}
