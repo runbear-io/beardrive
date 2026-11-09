@@ -689,3 +689,49 @@ func TestFinishLaterTriesWithinCloseTime(t *testing.T) {
 		t.Fatalf("file = %q, want the final text written before Close returned", got)
 	}
 }
+
+// The same, while the hub shuts down: the retries run inside the final
+// snapshot, which already holds the room's snapshot lock, and must not wait
+// on it again or shutdown hangs. The text still lands, in the file or beside
+// it.
+func TestFinalSnapshotThatCannotReadDuringShutdownIsFinished(t *testing.T) {
+	old := parkBackoff
+	parkBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { parkBackoff = old })
+	fastRoom(t, time.Hour, time.Hour)
+	var flaky *flakyBlobs
+	srv, p, _ := newHub(t, true, func(be remote.Backend) remote.Backend {
+		flaky = &flakyBlobs{Backend: be}
+		return flaky
+	})
+	h := srv.Handler()
+	url := "/api/p/" + p.ID + "/file?path=notes.md"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path=notes.md", "a\nb\n", "")
+	room := p.ID + "/notes.md"
+	doc := openRoom(t, srv, room)
+	typeInto(doc, "typed before shutdown\n")
+
+	_ = srv.collabContext()
+	srv.collabCancel()
+	flaky.broken.Store(true)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		flaky.broken.Store(false)
+	}()
+	done := make(chan struct{})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.finalSnapshot(ctx, room)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the final snapshot hung on its own room's lock")
+	}
+	// The room is still registered, so the text is kept beside the file.
+	if got := get(t, h, url).Body.String(); got != "a\nb\ntyped before shutdown\n" && conflictCopies(t, h, p.ID) != 1 {
+		t.Fatalf("file = %q and no conflict copy: the room's text was dropped at shutdown", got)
+	}
+}

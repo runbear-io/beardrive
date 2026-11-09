@@ -642,7 +642,24 @@ func (s *Server) snapshotRoom(ctx context.Context, room string) { s.snapshot(ctx
 // the document, so a version the file refuses is parked beside it instead.
 func (s *Server) finalSnapshot(ctx context.Context, room string) { s.snapshot(ctx, room, true) }
 
+// snapshotSeam, when set by a test, runs inside a snapshot once it has read
+// the document and before it reads the file.
+var snapshotSeam func(room string)
+
+// snapshot runs one room's snapshots one at a time. Each pause fires on its own
+// timer goroutine and the room's last peer leaving fires another, so without
+// this two could write and file history in either order: the slower one would
+// name an older version as the room's head and base after a newer one, and the
+// next room would be built from it.
 func (s *Server) snapshot(ctx context.Context, room string, final bool) {
+	unlock := s.rooms().lockSnapshots(room)
+	defer unlock()
+	s.snapshotLocked(ctx, room, final)
+}
+
+// snapshotLocked is snapshot for a caller already holding the room's
+// snapshot lock.
+func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -667,6 +684,9 @@ func (s *Server) snapshot(ctx context.Context, room string, final bool) {
 	text, ok := replayed(state)
 	if !ok {
 		return
+	}
+	if snapshotSeam != nil {
+		snapshotSeam(room)
 	}
 	cur, curSha, have, err := s.roomBytes(ctx, room)
 	if ctx.Err() != nil {
@@ -875,7 +895,7 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		// their version while still holding the room's text, the next pause
 		// would write the room's text over theirs, conditional on it and so
 		// accepted.
-		s.moveDoc(ctx, room, text, theirs, theirSha, final)
+		s.moveDoc(ctx, room, text, theirs, theirSha, true, final)
 	}
 	if !ok {
 		park()
@@ -889,35 +909,44 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 				park()
 				return
 			}
-			if sha := reportedSha(w); sha != "" {
-				theirSha = sha
+			sha := reportedSha(w)
+			if sha == "" {
+				s.moveDoc(ctx, room, text, target, theirSha, false, true)
+				return
 			}
+			theirSha = sha
 		}
-		s.moveDoc(ctx, room, text, target, theirSha, true)
+		s.moveDoc(ctx, room, text, target, theirSha, true, true)
 		return
 	}
-	if s.moveDoc(ctx, room, text, target, theirSha, false) && target == text {
-		s.snapshotRoom(ctx, room)
+	if s.moveDoc(ctx, room, text, target, theirSha, target == theirs, false) && target == text {
+		s.snapshotLocked(ctx, room, false)
 	}
 }
 
-// moveDoc brings a room's document from text to the version sha holds, as one
-// edit, and rebases the room onto sha, reporting whether it did. A document
-// typed into since it read text is left alone with its base: that typing is
-// in neither version, and the next pause settles it against sha again.
+// moveDoc brings a room's document from text to to, as one edit, and rebases
+// the room onto sha, reporting whether it did. A document typed into since it
+// read text is left alone with its base: that typing is in neither version,
+// and the next pause settles it against sha again.
 //
 // The document has to move with the base, or a room reopened before it
 // unloads would write its old text over this version. Nobody is connected to
 // a room in its final snapshot, and ydocs().Apply would open the room again,
 // so a final move splices the held document directly.
-func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, final bool) bool {
+//
+// filed says to is exactly what sha holds. The moved state is then stored
+// under sha, as a snapshot stores what it writes: the next room for the file
+// replays the same items, and a returning browser that typed some of them
+// merges once instead of beside a second copy spliced in from the bytes.
+func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, filed, final bool) bool {
+	var state []byte
 	moved := false
 	if final {
 		if doc, _, held := s.rooms().get(room); held {
 			txt := doc.GetText("body")
 			if txt.ToString() == text {
 				spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, text, to)
-				moved = true
+				state, moved = doc.EncodeStateAsUpdate(), true
 			}
 		}
 	} else {
@@ -927,13 +956,20 @@ func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, final 
 				return
 			}
 			spliceVia(transact, txt, text, to)
-			moved = true
+			state, moved = doc.EncodeStateAsUpdate(), true
 		})
 	}
-	if moved {
-		s.rooms().rebase(room, sha)
+	if !moved {
+		return false
 	}
-	return moved
+	if filed {
+		if spelled, ok := replayed(state); ok && spelled == to {
+			project, path, _ := strings.Cut(room, "/")
+			s.storeRoomHistory(ctx, project, path, sha, state)
+		}
+	}
+	s.rooms().rebase(room, sha)
+	return true
 }
 
 // appendedBoth reports whether theirs and text each extend base, which ends a
@@ -1124,7 +1160,10 @@ func (s *Server) finishLater(ctx context.Context, room string, who User, text, b
 			s.rooms().rebaseUnheld(room, sha)
 		}
 	}
-	try := func(ctx context.Context) bool {
+	// attempt runs under the room's snapshot lock. The caller, a snapshot,
+	// holds it while this function runs; a retry after it returns takes it
+	// again (try).
+	attempt := func(ctx context.Context) bool {
 		cur, curSha, have, err := s.roomBytes(ctx, room)
 		if err != nil {
 			return false
@@ -1189,6 +1228,11 @@ func (s *Server) finishLater(ctx context.Context, room string, who User, text, b
 		s.reconcile(ctx, room, who, text, baseText, haveBase, string(cur), curSha, true)
 		return true
 	}
+	try := func(ctx context.Context) bool {
+		unlock := s.rooms().lockSnapshots(room)
+		defer unlock()
+		return attempt(ctx)
+	}
 	bg := s.collabContext()
 	if bg.Err() != nil {
 		// Shutting down: Close cancels the collab context before its final
@@ -1196,7 +1240,7 @@ func (s *Server) finishLater(ctx context.Context, room string, who User, text, b
 		// caller's context has left, up to finishOnClose, is the last chance.
 		ctx, cancel := context.WithTimeout(ctx, finishOnClose)
 		defer cancel()
-		for wait := parkBackoff; ctx.Err() == nil && !try(ctx); wait = min(wait*2, parkBackoffMax) {
+		for wait := parkBackoff; ctx.Err() == nil && !attempt(ctx); wait = min(wait*2, parkBackoffMax) {
 			select {
 			case <-ctx.Done():
 			case <-time.After(wait):
@@ -1309,6 +1353,39 @@ type roomRegistry struct {
 	// waits counts how many times a room on a process that does not write
 	// it has looked for the writer's write since the last edit.
 	waits map[string]int
+	// snapLocks serializes each room's snapshots (lockSnapshots).
+	snapLocks map[string]*roomSnapLock
+}
+
+// roomSnapLock is one room's snapshot lock, kept only while someone holds or
+// waits for it.
+type roomSnapLock struct {
+	sync.Mutex
+	users int
+}
+
+// lockSnapshots takes room's snapshot lock and returns its release.
+func (r *roomRegistry) lockSnapshots(room string) (unlock func()) {
+	r.mu.Lock()
+	if r.snapLocks == nil {
+		r.snapLocks = map[string]*roomSnapLock{}
+	}
+	l := r.snapLocks[room]
+	if l == nil {
+		l = &roomSnapLock{}
+		r.snapLocks[room] = l
+	}
+	l.users++
+	r.mu.Unlock()
+	l.Lock()
+	return func() {
+		l.Unlock()
+		r.mu.Lock()
+		if l.users--; l.users == 0 {
+			delete(r.snapLocks, room)
+		}
+		r.mu.Unlock()
+	}
 }
 
 type roomFlush struct {
