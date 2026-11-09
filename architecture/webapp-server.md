@@ -126,7 +126,7 @@ classDiagram
         -parsedJournals(ctx, keep) [][]journal.Op
         -cacheJournals(keep, misses, parsed, sizes)
         -foldFP/foldFiles/foldMoves last fold
-        -flight singleflight.Group one fold / history build per journal state
+        -flight / jflight singleflight.Group fold, history, and per-journal parse
         -jgen hubCaches generation of jcache
         -dropJournals(gen) when hubCaches evicts that generation
         +FilesWithMoves(ctx) files, moves
@@ -236,6 +236,7 @@ classDiagram
         journalOps(key, spooled) parse + validate
         opsNameTheirAuthor(ops) whose name
         journalKeepsItsOps(ctx, be, key, ops) ok + storedMax
+        handleStoreAppend(v, w, r) v2 tail append with prefix + PutIf CAS
     }
     note for journalDoor "store.go — the invariant &quot;each device writes only its own journal&quot; is now ENFORCED here, not assumed. The key must be journal/&lt;canonical device id&gt;.jsonl for the device in the request header, that device must already be owned by the caller (DeviceRegistry.OwnerOf) or the caller must be a project admin (the recovery arm) — the old first-writer-claims arm is gone. Every op must pass journal.SafePath + config.ReservedPath on its Path and journal.SafeText on Note/Author/UserName, must name its own owner's account, and the upload must keep every Seq the stored journal already had: append-only, 409 on truncation. Bodies are spooled first, and a blob PUT must hash to the key it claims. A Content-Encoding: gzip body is inflated ABOVE the spool — the sha, the op count and the billed size are all properties of the plaintext, so nothing below that line knows compression happened — and the inflate is bounded (maxInflatedPut, 256 MiB, only when an encoding was declared), because compression severs the one-wire-byte-one-disk-byte relationship that made spool safe unbounded"
     note for journalDoor "Delta sync grew the key space: validStoreKey also accepts chunks/&lt;sha256&gt; (content-addressed, PUT must hash to its key, presigned like blobs incl. refuse-existing) and manifests/&lt;sha256&gt; (keyed by the whole FILE's sha — not its own content hash — so it is never presigned and gets two ingest gates instead: every chunk it names must already EXIST in the store, and the key is WRITE-ONCE — an identical re-put is a 200 no-op so an interrupted push can retry, a different body 409s. Together these make &quot;a manifest exists ⟹ its chunks exist&quot; an invariant every consumer can lean on: the client's push skip-proof, reassemble, and bdrive import)"
@@ -256,6 +257,14 @@ classDiagram
         <<interface>>
         +GetVersioned(ctx, key) body, Version
         +PutIf(ctx, key, r, size, expect) Version
+    }
+    class JournalAppender {
+        <<interface>>
+        +AppendJournal(ctx, req) error
+    }
+    class JournalTailGetter {
+        <<interface>>
+        +GetJournalTail(ctx, key, offset, prefixSHA256) rc, appended, error
     }
     note for ConditionalPutter "internal/remote — optional, same mold again: gcsBackend implements it over object generations, and localBackend under an exclusive flock on the directory with the object's content hash as its version (local_cas.go — local filesystems only; it is what lets two bdrive serve processes, or two Servers in a test, share one directory). It exists because a journal append is a READ-MODIFY-WRITE and Put is last-writer-wins: two hub processes both read one journal, both append their own ops, and whichever writes second silently erases the other's with no error anywhere, because both writes succeeded. That is the lost update the &quot;each device writes only its own journal&quot; invariant prevents BETWEEN devices, reappearing inside ONE device id as soon as the hub runs twice. The precondition has to be evaluated by the STORE because that is the only party the two processes share — nothing either of them holds can serialise the other. Version is OPAQUE (a generation, an ETag, a fingerprint share nothing but equality) and VersionAbsent means &quot;create, and fail if somebody beat me&quot;. appendOps retries a bounded five times, and every attempt reads the journals again AFTER reading the version it is conditioned on, re-checks the write's commitBase and re-stamps seq and lamport — so a retry can neither reuse a seq the other process has just taken nor land on a version it was not built on. remote.Prefixed forwards it (as it forwards PutSigner): it used to drop it, so every hub project appended last-writer-wins even on GCS. upmu is kept — it stops N goroutines in one process taking the slow path, which is a different job. S3 deliberately does NOT implement it: conditional PutObject is unevenly supported"
     note for ConditionalPutter "file:// CAS opens one descriptor, tries LOCK_EX|LOCK_NB immediately and creates a reusable timer only under contention. Cancellation closes an unacquired descriptor without unlocking the external holder. A successful acquisition is checked for cancellation and released once by its owner."
@@ -846,6 +855,8 @@ classDiagram
     RemoteSource ..> commitBase : appendOpsIf, every attempt
     Backend <|-- PutSigner : optional capability
     Backend <|-- Watcher : optional capability
+    Backend <|-- JournalAppender : optional capability (https:// v2 append)
+    Backend <|-- JournalTailGetter : optional capability (https:// v2 tail pull)
     Server *-- eventHub : live change fan-out
     Server *-- presenceHub : who is looking at what
     eventHub *-- subscriber

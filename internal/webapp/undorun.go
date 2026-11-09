@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -271,8 +272,36 @@ func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request
 	for i := range plan.Ops {
 		plan.Ops[i].User, plan.Ops[i].UserName, plan.Ops[i].Note = who.Email, who.Name, note
 	}
-	if err := rs.appendOps(r.Context(), plan.Ops); err != nil {
-		http.Error(w, fmt.Sprintf("undo run: %v", err), http.StatusBadGateway)
+	allOps := make([]journal.Op, len(sourced))
+	for i, so := range sourced {
+		allOps[i] = so.Op
+	}
+	files := journal.Replay(allOps)
+	base := &commitBase{}
+	first := true
+	for _, op := range plan.Ops {
+		cb := commitBase{path: op.Path, blob: op.Blob}
+		if cur, ok := files[op.Path]; ok {
+			cb.sha = cur.Blob
+		}
+		if first {
+			*base = cb
+			first = false
+		} else {
+			base.extra = append(base.extra, cb)
+		}
+	}
+	var appendBase *commitBase
+	if !first {
+		appendBase = base
+	}
+	if err := rs.appendOpsIf(r.Context(), plan.Ops, appendBase); err != nil {
+		var stale *staleWriteError
+		code := http.StatusBadGateway
+		if errors.As(err, &stale) {
+			code = http.StatusConflict
+		}
+		http.Error(w, fmt.Sprintf("undo run: %v", err), code)
 		return
 	}
 	s.quota().RecordUsage(org, 0)

@@ -16,7 +16,9 @@ package syncer
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"strings"
 
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/textmerge"
@@ -69,15 +71,32 @@ func (s *Session) tryMerge(path string, mine, theirs journal.Op, all []journal.O
 	if mine.Size > maxMergeBytes || theirs.Size > maxMergeBytes {
 		return mergedBlob{}, false
 	}
-	base, ok := commonAncestor(path, mine, theirs, all)
-	if !ok {
-		return mergedBlob{}, false
+	baseBlob := mine.Base
+	var base journal.Op
+	var ok bool
+	if baseBlob == "" || !s.Store.HasBlob(baseBlob) {
+		base, ok = commonAncestor(path, mine, theirs, all)
+		if !ok {
+			return mergedBlob{}, false
+		}
+		baseBlob = base.Blob
 	}
-	baseBytes, ok1 := s.readBlob(base.Blob, maxMergeBytes)
+	baseBytes, ok1 := s.readBlob(baseBlob, maxMergeBytes)
 	mineBytes, ok2 := s.readBlob(mine.Blob, maxMergeBytes)
 	theirsBytes, ok3 := s.readBlob(theirs.Blob, maxMergeBytes)
 	if !ok1 || !ok2 || !ok3 {
 		return mergedBlob{}, false
+	}
+	// JSONL is append-only in practice. Preserve both valid EOF appends,
+	// ordering them by the same total order used by replay.
+	if strings.HasSuffix(strings.ToLower(path), ".jsonl") {
+		if out, ok := mergeJSONLAppends(baseBytes, mineBytes, theirsBytes, mine, theirs); ok && len(out) <= maxMergeBytes {
+			sum, n, err := s.Store.PutBlobReader(bytes.NewReader(out))
+			if err != nil {
+				return mergedBlob{}, false
+			}
+			return mergedBlob{blob: sum, size: n}, true
+		}
 	}
 	// Text only. Merging bytes that are not lines produces a file that is
 	// neither side's, and for a binary format that means a corrupt one.
@@ -90,11 +109,55 @@ func (s *Session) tryMerge(path string, mine, theirs journal.Op, all []journal.O
 	if !ok || len(out) > maxMergeBytes {
 		return mergedBlob{}, false
 	}
+	if strings.HasSuffix(strings.ToLower(path), ".json") && !json.Valid(out) {
+		return mergedBlob{}, false
+	}
 	sum, n, err := s.Store.PutBlobReader(bytes.NewReader(out))
 	if err != nil {
 		return mergedBlob{}, false
 	}
 	return mergedBlob{blob: sum, size: n}, true
+}
+
+func mergeJSONLAppends(base, a, b []byte, mine, theirs journal.Op) ([]byte, bool) {
+	if !bytes.HasPrefix(a, base) || !bytes.HasPrefix(b, base) {
+		return nil, false
+	}
+	aa, bb := a[len(base):], b[len(base):]
+	valid := func(part []byte) bool {
+		part = bytes.TrimSuffix(part, []byte{'\n'})
+		if len(part) == 0 {
+			return true
+		}
+		for _, line := range bytes.Split(part, []byte{'\n'}) {
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 || !json.Valid(line) {
+				return false
+			}
+		}
+		return true
+	}
+	if !valid(aa) || !valid(bb) {
+		return nil, false
+	}
+	// The common prefix may not end at a line boundary. A pure append must
+	// preserve the base's line framing and insert one separator when needed.
+	sep := func(left, right []byte) []byte {
+		if len(left) == 0 || len(right) == 0 || left[len(left)-1] == '\n' {
+			return nil
+		}
+		return []byte{'\n'}
+	}
+	first, second := aa, bb
+	if journal.Less(theirs, mine) {
+		first, second = bb, aa
+	}
+	out := append([]byte(nil), base...)
+	out = append(out, sep(out, first)...)
+	out = append(out, first...)
+	out = append(out, sep(out, second)...)
+	out = append(out, second...)
+	return out, true
 }
 
 // commonAncestor is the state both sides edited: the greatest op for this path

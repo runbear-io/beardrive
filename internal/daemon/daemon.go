@@ -929,9 +929,13 @@ var workerRemoteWakeHook func(string)
 // A healthy local watcher replaces the tight safety scan with this slow poll.
 // The watcher is only an accelerator: losing it immediately restores the
 // existing scanInterval polling path.
+// A successful sync cycle is also an opportunity to reclaim local blobs that
+// are no longer referenced by any mount sharing the volume.
 const (
 	localWatchSafetyInterval = 5 * time.Minute
 	localWatchRetry          = time.Minute
+	localBlobGCInterval      = 10 * time.Minute
+	localBlobGCMinAge        = 10 * time.Minute
 )
 
 func localWatchENOSPCRetry(failures int) time.Duration {
@@ -1820,6 +1824,39 @@ func cycleSafely(ctx context.Context, sess *syncer.Session, volDir string, logge
 	return
 }
 
+func pruneVolumeBlobsSafely(volDir string) {
+	st, err := store.Open(volDir)
+	if err != nil {
+		return
+	}
+	unlock, err := st.TryLock()
+	if err != nil || unlock == nil {
+		return
+	}
+	defer unlock()
+
+	extraKeep := make(map[string]bool)
+	mounts, err := config.LoadMounts()
+	if err == nil {
+		volID := filepath.Base(volDir)
+		for mountID, m := range mounts {
+			if m.VolumeID != volID && mountID != volID {
+				continue
+			}
+			cache, err := st.LoadCache(mountID)
+			if err != nil {
+				continue
+			}
+			for _, c := range cache {
+				if c.Blob != "" {
+					extraKeep[c.Blob] = true
+				}
+			}
+		}
+	}
+	_, _, _ = st.PruneLocalBlobs(extraKeep, localBlobGCMinAge)
+}
+
 func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInterval, remoteInterval time.Duration, wakeCh <-chan struct{}) error {
 	if workerInitHook != nil {
 		workerInitHook(volDir)
@@ -1860,6 +1897,7 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 	}()
 	var lastRemote time.Time
 	var lastCycle time.Time
+	var lastBlobGC time.Time
 	var lastToken string
 	lastAccess := store.AccessOK
 	var watch <-chan struct{}
@@ -2268,6 +2306,11 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			waitFor = min(waitFor, scanInterval)
 		}
 		lastCycle = time.Now()
+		if cycleErr == nil && !res.Offline &&
+			(lastBlobGC.IsZero() || time.Since(lastBlobGC) >= localBlobGCInterval) {
+			lastBlobGC = time.Now()
+			pruneVolumeBlobsSafely(volDir)
+		}
 
 		switch {
 		case ctx.Err() != nil:

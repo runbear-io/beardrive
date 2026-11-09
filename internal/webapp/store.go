@@ -4,20 +4,22 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/journal"
+	"github.com/runbear-io/beardrive/internal/remote"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
-
-	"github.com/runbear-io/beardrive/internal/config"
-	"github.com/runbear-io/beardrive/internal/journal"
-	"github.com/runbear-io/beardrive/internal/remote"
 )
 
 // The store API (/api/store/*) lets other devices sync through this server
@@ -383,6 +385,11 @@ func (s *Server) visibleObjects(r *http.Request, rs *RemoteSource, objs []remote
 // scope that filtered it, so the LIST and the GET of one sync cycle do not
 // fetch and re-filter the same object twice.
 func (s *Server) filteredJournal(ctx context.Context, rs *RemoteSource, o remote.Object, f pathFilter) ([]byte, error) {
+	var err error
+	o, err = rs.filterObject(ctx, o)
+	if err != nil {
+		return nil, err
+	}
 	if data, ok := rs.cachedFilter(o, f.tag); ok {
 		return data, nil
 	}
@@ -459,6 +466,34 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		// path, and S3's names the bucket and key.
 		storageErr(w, http.StatusNotFound, "no such object", err)
 		return
+	}
+	if journalKeyRe.MatchString(key) {
+		q := r.URL.Query()
+		offsetStr, prefixSHA := q.Get("offset"), strings.ToLower(q.Get("prefix_sha256"))
+		offset, perr := strconv.ParseInt(offsetStr, 10, 64)
+		if offsetStr != "" && prefixSHA != "" && perr == nil && offset > 0 {
+			fullBytes, rerr := io.ReadAll(rc)
+			rc.Close()
+			if rerr != nil {
+				storageErr(w, http.StatusBadGateway, "could not read the journal", rerr)
+				return
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			out := fullBytes
+			if int64(len(fullBytes)) >= offset {
+				sum := sha256.Sum256(fullBytes[:offset])
+				if hex.EncodeToString(sum[:]) == prefixSHA {
+					w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
+					out = fullBytes[offset:]
+				}
+			}
+			_, _ = w.Write(out)
+			if m, ok := s.quota().(SyncEgressRecorder); ok {
+				m.RecordSyncEgress(s.orgOf(r.PathValue("project")), int64(len(out)))
+			}
+			return
+		}
 	}
 	defer rc.Close()
 	// Compression is decided before a single header is written, because
@@ -864,6 +899,24 @@ func journalKeepsItsOps(ctx context.Context, be remote.Backend, key string, ops 
 	}
 	return true, storedMax, held, nil
 }
+func journalKeepsOps(stored, incoming []journal.Op) (bool, int64, map[int64]string) {
+	seen := make(map[int64]bool, len(incoming))
+	for _, op := range incoming {
+		seen[op.Seq] = true
+	}
+	var storedMax int64
+	held := make(map[int64]string, len(stored))
+	for _, op := range stored {
+		if !seen[op.Seq] {
+			return false, 0, nil
+		}
+		if op.Seq > storedMax {
+			storedMax = op.Seq
+		}
+		held[op.Seq] = op.Path
+	}
+	return true, storedMax, held
+}
 
 // storePutBody hands back the plaintext of a PUT body, inflating it when the
 // client declared an encoding, and reports whether it did. The reader it
@@ -982,7 +1035,11 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	// A device re-pushing a blob this hub already holds adds no bytes, so it
 	// must not be charged for them — same rule the browser door follows.
 	// Journals are exempt: they are appended to, so a rewrite really grows.
-	billed := billableBytes(r.Context(), rs.Backend, key, size)
+	billed, billErr := billableBytes(r.Context(), rs.Backend, key, size)
+	if billErr != nil {
+		storageErr(w, http.StatusBadGateway, "could not check the stored object", billErr)
+		return
+	}
 	if err := s.quota().CheckWrite(org, billed+s.reservedBytes(org)); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
@@ -1099,7 +1156,86 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	if err := rs.Backend.Put(r.Context(), key, tmp, size); err != nil {
+	if strings.HasPrefix(key, "journal/") {
+		if cp, ok := rs.Backend.(remote.ConditionalPutter); ok {
+			uploaded, rerr := io.ReadAll(tmp)
+			if rerr != nil {
+				storageErr(w, http.StatusBadGateway, "could not read the journal", rerr)
+				return
+			}
+			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+				storageErr(w, http.StatusBadGateway, "could not read the journal", err)
+				return
+			}
+			existing, ver, rerr := readVersioned(r.Context(), cp, key)
+			if rerr != nil {
+				storageErr(w, http.StatusBadGateway, "could not read the stored journal", rerr)
+				return
+			}
+			if bytes.Equal(existing, uploaded) {
+				writeJSON(w, map[string]any{"ok": true})
+				return
+			}
+			if len(existing) > 0 {
+				if storedOps, perr := journal.Parse(existing); perr == nil {
+					ok, maxSeq, held := journalKeepsOps(storedOps, ops)
+					if !ok {
+						http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
+						return
+					}
+					if !s.opsWithinScope(w, r, ops, held) {
+						return
+					}
+					storedMax = maxSeq
+				}
+				billed = max(int64(0), size-int64(len(existing)))
+			}
+			if _, err := cp.PutIf(r.Context(), key, bytes.NewReader(uploaded), int64(len(uploaded)), ver); err != nil {
+				if errors.Is(err, remote.ErrVersionMismatch) {
+					http.Error(w, "concurrent journal update; please retry", http.StatusConflict)
+				} else {
+					storageErr(w, http.StatusBadGateway, "could not store the object", err)
+				}
+				return
+			}
+		} else if err := rs.Backend.Put(r.Context(), key, tmp, size); err != nil {
+			storageErr(w, http.StatusBadGateway, "could not store the object", err)
+			return
+		}
+	} else if manifestKeyRe.MatchString(key) {
+		if cp, ok := rs.Backend.(remote.ConditionalPutter); ok {
+			_, err := cp.PutIf(r.Context(), key, tmp, size, remote.VersionAbsent)
+			if err == nil {
+				// continue with common post-write handling
+			} else if errors.Is(err, remote.ErrVersionMismatch) {
+				rc, gerr := rs.Backend.Get(r.Context(), key)
+				if gerr != nil {
+					storageErr(w, http.StatusBadGateway, "could not read the stored manifest", gerr)
+					return
+				}
+				stored, rerr := io.ReadAll(rc)
+				rc.Close()
+				_, serr := tmp.Seek(0, io.SeekStart)
+				fresh, ferr := io.ReadAll(tmp)
+				if rerr != nil || serr != nil || ferr != nil {
+					storageErr(w, http.StatusBadGateway, "could not compare the stored manifest", errors.Join(rerr, serr, ferr))
+					return
+				}
+				if bytes.Equal(stored, fresh) {
+					writeJSON(w, map[string]any{"ok": true})
+				} else {
+					http.Error(w, "a manifest is write-once; a different manifest already exists at "+key, http.StatusConflict)
+				}
+				return
+			} else {
+				storageErr(w, http.StatusBadGateway, "could not store the object", err)
+				return
+			}
+		} else if err := rs.Backend.Put(r.Context(), key, tmp, size); err != nil {
+			storageErr(w, http.StatusBadGateway, "could not store the object", err)
+			return
+		}
+	} else if err := rs.Backend.Put(r.Context(), key, tmp, size); err != nil {
 		storageErr(w, http.StatusBadGateway, "could not store the object", err)
 		return
 	}
@@ -1119,6 +1255,7 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 			refreshThen(func() {
 				s.events().publish(project, ev)
 				s.dataApplyAsync(project)
+				s.notifyRoomExternalWrite(project, ev.Paths)
 			})
 		} else {
 			refreshThen(func() {})
@@ -1131,5 +1268,182 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	if billed > 0 {
 		s.quota().RecordUsage(org, billed)
 	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Request) {
+	rs := storeSource(v, w)
+	if rs == nil {
+		return
+	}
+	if !s.Upload.Enabled {
+		http.Error(w, "uploads are disabled on this server", http.StatusForbidden)
+		return
+	}
+	key := r.URL.Query().Get("key")
+	if !journalKeyRe.MatchString(key) {
+		http.Error(w, "invalid journal key", http.StatusBadRequest)
+		return
+	}
+	prevSize, perr := strconv.ParseInt(r.URL.Query().Get("prev_size"), 10, 64)
+	prevSHA := strings.ToLower(r.URL.Query().Get("prev_sha256"))
+	if perr != nil || prevSize < 0 {
+		http.Error(w, "invalid journal prefix size", http.StatusBadRequest)
+		return
+	}
+	body, inflated, ok := storePutBody(w, r)
+	if !ok {
+		return
+	}
+	tmp, size, _, err := spool(body)
+	if err != nil {
+		if inflated {
+			http.Error(w, "could not decompress the body", http.StatusBadRequest)
+		} else {
+			storageErr(w, http.StatusBadGateway, "could not store the object", err)
+		}
+		return
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	if inflated && size > maxInflatedPut {
+		http.Error(w, "compressed body inflates past this hub's limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	tailOps, err := journalOps(key, tmp)
+	if err != nil {
+		http.Error(w, "invalid journal body", http.StatusBadRequest)
+		return
+	}
+	if !s.ownJournal(w, r, key) {
+		return
+	}
+	s.refreshDevice(r)
+	if !s.opsNameTheirAuthor(w, r, tailOps) {
+		return
+	}
+	tailBytes, err := io.ReadAll(tmp)
+	if err != nil {
+		storageErr(w, http.StatusBadGateway, "could not read the journal tail", err)
+		return
+	}
+	project := r.PathValue("project")
+	org := s.orgOf(project)
+	s.reconcileGrants(r.Context(), project, rs.Backend)
+	cp, conditional := rs.Backend.(remote.ConditionalPutter)
+	attempts := 1
+	if conditional {
+		attempts = 5
+	}
+	var storedMax int64
+	written := false
+	for range attempts {
+		var existing []byte
+		var ver remote.Version
+		if conditional {
+			existing, ver, err = readVersioned(r.Context(), cp, key)
+		} else {
+			if exists, eerr := rs.Backend.Exists(r.Context(), key); eerr != nil {
+				err = eerr
+			} else if exists {
+				rc, eerr := rs.Backend.Get(r.Context(), key)
+				err = eerr
+				if err == nil {
+					existing, err = io.ReadAll(rc)
+					rc.Close()
+				}
+			}
+		}
+		if err != nil {
+			storageErr(w, http.StatusBadGateway, "could not read the stored journal", err)
+			return
+		}
+		// A response can be lost after the conditional write landed. Recognize
+		// its exact tail before checking the prefix or charging another write.
+		if prevSize <= int64(len(existing)) && int64(len(existing))-prevSize == size &&
+			bytes.Equal(existing[prevSize:], tailBytes) {
+			prefixOK := true
+			if prevSHA != "" {
+				sum := sha256.Sum256(existing[:prevSize])
+				prefixOK = hex.EncodeToString(sum[:]) == prevSHA
+			}
+			if prefixOK {
+				writeJSON(w, map[string]any{"ok": true})
+				return
+			}
+		}
+		if int64(len(existing)) != prevSize {
+			http.Error(w, "journal prefix mismatch", http.StatusConflict)
+			return
+		}
+		if prevSHA != "" {
+			sum := sha256.Sum256(existing)
+			if hex.EncodeToString(sum[:]) != prevSHA {
+				http.Error(w, "journal prefix mismatch", http.StatusConflict)
+				return
+			}
+		}
+		var storedOps []journal.Op
+		if len(existing) > 0 {
+			storedOps, err = journal.Parse(existing)
+			if err != nil {
+				storageErr(w, http.StatusBadGateway, "could not parse the stored journal", err)
+				return
+			}
+		}
+		allOps := append(append([]journal.Op(nil), storedOps...), tailOps...)
+		ok, maxSeq, held := journalKeepsOps(storedOps, allOps)
+		if !ok {
+			http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
+			return
+		}
+		storedMax = maxSeq
+		if !s.opsWithinScope(w, r, allOps, held) {
+			return
+		}
+		if err := s.quota().CheckWrite(org, size+s.reservedBytes(org)); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		newJournal := append([]byte(nil), existing...)
+		if len(newJournal) > 0 && newJournal[len(newJournal)-1] != '\n' {
+			newJournal = append(newJournal, '\n')
+		}
+		newJournal = append(newJournal, tailBytes...)
+		if conditional {
+			_, err = cp.PutIf(r.Context(), key, bytes.NewReader(newJournal), int64(len(newJournal)), ver)
+			if errors.Is(err, remote.ErrVersionMismatch) {
+				continue
+			}
+		} else {
+			err = rs.Backend.Put(r.Context(), key, bytes.NewReader(newJournal), int64(len(newJournal)))
+		}
+		if err != nil {
+			storageErr(w, http.StatusBadGateway, "could not store the object", err)
+			return
+		}
+		written = true
+		break
+	}
+	if !written {
+		http.Error(w, "concurrent journal update; please retry", http.StatusConflict)
+		return
+	}
+	refreshThen := v.beginRefresh()
+	defer refreshThen(func() {})
+	puts, deletes := countOps(tailOps, storedMax)
+	if ev, ok := changeEventFor(r, "sync", newOpPaths(tailOps, storedMax), puts, deletes); ok {
+		projectID := projectID(r)
+		refreshThen(func() {
+			s.events().publish(projectID, ev)
+			s.dataApplyAsync(projectID)
+			s.notifyRoomExternalWrite(projectID, ev.Paths)
+		})
+	} else {
+		refreshThen(func() {})
+	}
+	s.captureChange(r, "sync", puts, deletes)
+	s.claimGrant(project, key)
+	s.quota().RecordUsage(org, size)
 	writeJSON(w, map[string]any{"ok": true})
 }

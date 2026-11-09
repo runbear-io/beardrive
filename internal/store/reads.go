@@ -37,6 +37,11 @@ func (s *Store) readFlushPath() string { return filepath.Join(s.dir, "reads-flus
 // LogRead appends one read event to the spool. Single-line O_APPEND writes
 // keep concurrent hook invocations from interleaving.
 func (s *Store) LogRead(rel, session string) error {
+	unlock, err := lockSpool(s.readSpoolPath())
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if fi, err := os.Stat(s.readSpoolPath()); err == nil && fi.Size() > readSpoolMax {
 		return nil // spool full: drop, never grow unbounded
 	}
@@ -63,6 +68,11 @@ func (s *Store) LogRead(rel, session string) error {
 // a fresh spool; the batch survives until ClearPendingReads — a failed report
 // is simply retried next cycle.
 func (s *Store) PendingReads() ([]ReadEvent, error) {
+	unlock, err := lockSpool(s.readSpoolPath())
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if _, err := os.Stat(s.readFlushPath()); os.IsNotExist(err) {
 		if err := os.Rename(s.readSpoolPath(), s.readFlushPath()); err != nil {
 			if os.IsNotExist(err) {
@@ -110,7 +120,12 @@ func (s *Store) PendingReads() ([]ReadEvent, error) {
 // ClearPendingReads drops the batch PendingReads returned, after a
 // successful report.
 func (s *Store) ClearPendingReads() error {
-	err := os.Remove(s.readFlushPath())
+	unlock, err := lockSpool(s.readSpoolPath())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	err = os.Remove(s.readFlushPath())
 	if os.IsNotExist(err) {
 		return nil
 	}

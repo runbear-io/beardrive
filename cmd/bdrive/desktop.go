@@ -122,6 +122,7 @@ var desktopRoutes = []struct {
 	// its real permission; the local RemoteSource picks the change up on
 	// refresh like any other peer edit.
 	{"PUT /api/p/{project}/store/object", routeLocal, "refused, deliberately: the daemon is the volume store's only writer"},
+	{"POST /api/p/{project}/store/append", routeLocal, "refused, deliberately: the daemon is the volume store's only writer"},
 	{"POST /api/p/{project}/store/sign", routeLocal, "refused: the local backend presigns nothing, and a device syncing this Mac talks to its hub directly"},
 	{"POST /api/p/{project}/restore", routeProxy, ""},
 	{"POST /api/p/{project}/remove", routeProxy, ""},

@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"io"
@@ -27,7 +28,10 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
+
+var ErrFileChangedDuringRead = errors.New("file changed during read")
 
 type Store struct {
 	dir                string
@@ -120,6 +124,226 @@ func (s *Store) PutBlobFile(path string) (string, int64, error) {
 	return s.PutBlobReader(f)
 }
 
+// PutBlobFileVerified captures a regular file without caching a mixed or stale read.
+func (s *Store) PutBlobFileVerified(srcPath string) (sha string, size int64, mtimeNS int64, dev uint64, ino uint64, err error) {
+	preFi, err := os.Lstat(srcPath)
+	if err != nil {
+		return "", 0, 0, 0, 0, err
+	}
+	if !preFi.Mode().IsRegular() {
+		return "", 0, 0, 0, 0, fmt.Errorf("%s is not a regular file", srcPath)
+	}
+	preDev, preIno, _ := FileIdentity(preFi)
+	preSize, preMtime := preFi.Size(), preFi.ModTime().UnixNano()
+	blobDir := filepath.Join(s.dir, "blobs")
+	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+		return "", 0, 0, 0, 0, err
+	}
+	tmp, err := os.CreateTemp(blobDir, ".bdrive-tmp-*")
+	if err != nil {
+		return "", 0, 0, 0, 0, err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Close(); err != nil {
+		return "", 0, 0, 0, 0, err
+	}
+	var n int64
+	h := sha256.New()
+	if cloneErr := tryCloneFile(srcPath, tmpPath); cloneErr == nil {
+		f, openErr := os.Open(tmpPath)
+		if openErr != nil {
+			return "", 0, 0, 0, 0, openErr
+		}
+		n, err = io.Copy(h, f)
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	} else {
+		src, openErr := os.Open(srcPath)
+		if openErr != nil {
+			return "", 0, 0, 0, 0, openErr
+		}
+		dst, createErr := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if createErr != nil {
+			_ = src.Close()
+			return "", 0, 0, 0, 0, createErr
+		}
+		n, err = io.Copy(io.MultiWriter(dst, h), src)
+		if closeErr := dst.Close(); err == nil {
+			err = closeErr
+		}
+		if closeErr := src.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		return "", 0, 0, 0, 0, err
+	}
+	postFi, postErr := os.Lstat(srcPath)
+	if postErr != nil || !postFi.Mode().IsRegular() || n != preSize || postFi.Size() != preSize || postFi.ModTime().UnixNano() != preMtime {
+		return "", 0, 0, 0, 0, ErrFileChangedDuringRead
+	}
+	postDev, postIno, postOK := FileIdentity(postFi)
+	if (preDev != 0 || preIno != 0) && (!postOK || postDev != preDev || postIno != preIno) {
+		return "", 0, 0, 0, 0, ErrFileChangedDuringRead
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	_ = os.Chmod(tmpPath, 0o444)
+	dst := s.BlobPath(sum)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return "", 0, 0, 0, 0, err
+	}
+	if _, statErr := os.Stat(dst); statErr == nil {
+		return sum, preSize, preMtime, preDev, preIno, nil
+	} else if !os.IsNotExist(statErr) {
+		return "", 0, 0, 0, 0, statErr
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return "", 0, 0, 0, 0, err
+	}
+	return sum, preSize, preMtime, preDev, preIno, nil
+}
+
+// MaterializeBlobToTemp creates a writable working-tree temporary from a blob.
+func (s *Store) MaterializeBlobToTemp(sha, dstDir string, mode os.FileMode) (tmpPath string, fi os.FileInfo, err error) {
+	if !s.HasBlob(sha) {
+		return "", nil, fmt.Errorf("blob %q not found", sha)
+	}
+	tmp, err := os.CreateTemp(dstDir, ".bdrive-tmp-*")
+	if err != nil {
+		return "", nil, err
+	}
+	name := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(name)
+		}
+	}()
+	if err := tmp.Close(); err != nil {
+		return "", nil, err
+	}
+	if cloneErr := tryCloneFile(s.BlobPath(sha), name); cloneErr != nil {
+		src, openErr := s.OpenBlob(sha)
+		if openErr != nil {
+			return "", nil, openErr
+		}
+		dst, createErr := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if createErr != nil {
+			_ = src.Close()
+			return "", nil, createErr
+		}
+		_, copyErr := io.Copy(dst, src)
+		if closeErr := dst.Close(); copyErr == nil {
+			copyErr = closeErr
+		}
+		if closeErr := src.Close(); copyErr == nil {
+			copyErr = closeErr
+		}
+		if copyErr != nil {
+			return "", nil, copyErr
+		}
+	}
+	if mode == 0 {
+		mode = 0o644
+	}
+	if err := os.Chmod(name, mode); err != nil {
+		return "", nil, err
+	}
+	fi, err = os.Lstat(name)
+	return name, fi, err
+}
+
+func (s *Store) collectCachedBlobs(keep map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, entry := range s.stateCaches {
+		for _, cached := range entry.data {
+			if cached.Blob != "" {
+				keep[cached.Blob] = true
+			}
+		}
+	}
+}
+
+// PruneLocalBlobs removes blobs not reachable from current state or journal history.
+func (s *Store) PruneLocalBlobs(extraKeep map[string]bool, minAge time.Duration) (removed int, freedBytes int64, err error) {
+	keep := make(map[string]bool, len(extraKeep))
+	for blob := range extraKeep {
+		keep[blob] = true
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name != "state.json" && !(strings.HasPrefix(name, "state-") && strings.HasSuffix(name, ".json")) {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(s.dir, name))
+		if readErr != nil {
+			return 0, 0, readErr
+		}
+		var cache map[string]CachedFile
+		if json.Unmarshal(raw, &cache) != nil {
+			continue
+		}
+		for _, cached := range cache {
+			if cached.Blob != "" {
+				keep[cached.Blob] = true
+			}
+		}
+	}
+	s.collectCachedBlobs(keep)
+	fold, err := s.ReplayFold()
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, state := range fold.Target {
+		if state.Blob != "" {
+			keep[state.Blob] = true
+		}
+	}
+	ops, err := s.AllOps()
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, op := range ops {
+		if op.Blob != "" {
+			keep[op.Blob] = true
+		}
+		if op.Base != "" {
+			keep[op.Base] = true
+		}
+	}
+	err = filepath.WalkDir(filepath.Join(s.dir, "blobs"), func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".bdrive-tmp-") {
+			return nil
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return statErr
+		}
+		if minAge > 0 && time.Since(info.ModTime()) < minAge {
+			return nil
+		}
+		if keep[entry.Name()] {
+			return nil
+		}
+		if removeErr := os.Remove(path); removeErr != nil {
+			return removeErr
+		}
+		removed++
+		freedBytes += info.Size()
+		return nil
+	})
+	return removed, freedBytes, err
+}
+
 func (s *Store) PutBlobBytes(b []byte) (string, int64, error) {
 	return s.PutBlobReader(strings.NewReader(string(b)))
 }
@@ -181,6 +405,8 @@ type CachedFile struct {
 	Size    int64  `json:"size"`
 	Mode    uint32 `json:"mode"`
 	MTimeNS int64  `json:"mtime_ns"`
+	Dev     uint64 `json:"dev,omitempty"`
+	Ino     uint64 `json:"ino,omitempty"`
 	// Link is the target of a symbolic link. When set, Blob is empty: the
 	// cached entry describes a link, not content, and change detection also
 	// compares this so retargeting a link to a same-length path is still seen.
@@ -299,6 +525,45 @@ func (s *Store) Lock() (func() error, error) {
 	return func() error {
 		defer f.Close()
 		return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	}, nil
+}
+
+// TryLock attempts a non-blocking exclusive flock for the volume.
+// If another process holds the lock, it returns (nil, nil).
+func (s *Store) TryLock() (func() error, error) {
+	f, err := os.OpenFile(filepath.Join(s.dir, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return func() error {
+		defer f.Close()
+		return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	}, nil
+}
+
+func lockSpool(path string) (func() error, error) {
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() error {
+		unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		closeErr := f.Close()
+		if unlockErr != nil {
+			return unlockErr
+		}
+		return closeErr
 	}, nil
 }
 

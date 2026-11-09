@@ -40,11 +40,12 @@ type compactWinner struct {
 	HasRawBlob bool
 	RawBlob    [32]byte
 	BlobStr    string
+	BaseStr    string
 	Link       string
 }
 
 func toCompactWinner(op journal.Op) compactWinner {
-	w := compactWinner{Lamport: op.Lamport, Time: op.Time, Device: op.Device, Seq: op.Seq, Size: op.Size, Mode: op.Mode, IsPut: op.Kind == journal.KindPut, BlobStr: op.Blob, Link: op.Link}
+	w := compactWinner{Lamport: op.Lamport, Time: op.Time, Device: op.Device, Seq: op.Seq, Size: op.Size, Mode: op.Mode, IsPut: op.Kind == journal.KindPut, BlobStr: op.Blob, BaseStr: op.Base, Link: op.Link}
 	if len(op.Blob) == 64 {
 		var raw [32]byte
 		if n, err := hex.Decode(raw[:], []byte(op.Blob)); n == 32 && err == nil && hex.EncodeToString(raw[:]) == op.Blob {
@@ -66,7 +67,7 @@ func (w compactWinner) toOp(path string) journal.Op {
 	if w.IsPut {
 		kind = journal.KindPut
 	}
-	return journal.Op{Lamport: w.Lamport, Time: w.Time, Device: w.Device, Seq: w.Seq, Kind: kind, Path: path, Blob: w.blob(), Size: w.Size, Mode: w.Mode, Link: w.Link}
+	return journal.Op{Lamport: w.Lamport, Time: w.Time, Device: w.Device, Seq: w.Seq, Kind: kind, Path: path, Blob: w.blob(), Base: w.BaseStr, Size: w.Size, Mode: w.Mode, Link: w.Link}
 }
 
 func lessCompact(aPath string, a compactWinner, bPath string, b compactWinner) bool {
@@ -247,7 +248,7 @@ type foldSidecar struct {
 }
 
 func sidecarFrom(f *deviceFold) foldSidecar {
-	return foldSidecar{2, encodeFileID(f.ID), f.ReadAtNS, f.Racy, f.TailCheck, f.TailCheckLen, f.ContentSHA256, f.HashState, f.OpCount, f.MaxSeq, f.MonotonicDevice, f.MaxValidLamport, f.HasIgnorePut, f.MaxIgnorePut, f.Checkpoints, f.Winners}
+	return foldSidecar{3, encodeFileID(f.ID), f.ReadAtNS, f.Racy, f.TailCheck, f.TailCheckLen, f.ContentSHA256, f.HashState, f.OpCount, f.MaxSeq, f.MonotonicDevice, f.MaxValidLamport, f.HasIgnorePut, f.MaxIgnorePut, f.Checkpoints, f.Winners}
 }
 func (s foldSidecar) fold() *deviceFold {
 	return &deviceFold{ID: decodeFileID(s.ID), ReadAtNS: s.ReadAtNS, Racy: s.Racy, TailCheck: s.TailCheck, TailCheckLen: s.TailCheckLen, ContentSHA256: s.ContentSHA256, HashState: s.HashState, OpCount: s.OpCount, MaxSeq: s.MaxSeq, MonotonicDevice: s.MonotonicDevice, MaxValidLamport: s.MaxValidLamport, HasIgnorePut: s.HasIgnorePut, MaxIgnorePut: s.MaxIgnorePut, Checkpoints: s.Checkpoints, Winners: s.Winners}
@@ -330,7 +331,7 @@ func (s *Store) getOrLoadDeviceFold(dev string) (*deviceFold, error) {
 					defer func() { _ = recover() }()
 					return gob.NewDecoder(bytes.NewReader(raw)).Decode(&sc) == nil
 				}()
-				if valid && sc.Version == 2 && sc.ID.Ino == id.ino && sc.ID.Size == id.size && sc.ID.MTimeNS == id.mtimeNS && sc.TailCheckLen == n && bytes.Equal(sc.TailCheck[:n], tail[:n]) && len(sc.Winners) <= maxCachedWinnersTotal {
+				if valid && sc.Version == 3 && sc.ID.Ino == id.ino && sc.ID.Size == id.size && sc.ID.MTimeNS == id.mtimeNS && sc.TailCheckLen == n && bytes.Equal(sc.TailCheck[:n], tail[:n]) && len(sc.Winners) <= maxCachedWinnersTotal {
 					e := sc.fold()
 					if sc.ReadAtNS-id.mtimeNS >= int64(2*time.Second) {
 						s.mu.Lock()
@@ -621,6 +622,44 @@ func (s *Store) OwnOpsFrom(device string, startIdx int64) ([]journal.Op, error) 
 		return nil, nil
 	}
 	return ops[startIdx:], nil
+}
+
+// JournalPrefixAt returns the byte boundary and digest for the first opCount
+// valid journal operations.
+func (s *Store) JournalPrefixAt(device string, opCount int64) (byteOffset int64, prefixSHA256 string, ok bool) {
+	if opCount < 0 {
+		return 0, "", false
+	}
+	raw, err := os.ReadFile(s.JournalPath(device))
+	if err != nil {
+		return 0, "", false
+	}
+	if opCount == 0 {
+		sum := sha256.Sum256(nil)
+		return 0, hex.EncodeToString(sum[:]), true
+	}
+	var found int64
+	var lineStart int64
+	for i, b := range raw {
+		if b != '\n' {
+			continue
+		}
+		line := bytes.TrimSpace(raw[lineStart:int64(i)])
+		lineStart = int64(i + 1)
+		if len(line) == 0 {
+			continue
+		}
+		var op journal.Op
+		if json.Unmarshal(line, &op) != nil || (op.Kind != journal.KindPut && op.Kind != journal.KindDelete) {
+			continue
+		}
+		found++
+		if found == opCount {
+			sum := sha256.Sum256(raw[:lineStart])
+			return lineStart, hex.EncodeToString(sum[:]), true
+		}
+	}
+	return 0, "", false
 }
 
 func (s *Store) CanFastAppendPeer(device string, prevStat os.FileInfo, localBytes []byte, fresh []journal.Op) bool {

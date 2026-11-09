@@ -1,13 +1,17 @@
 package webapp
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -75,6 +79,67 @@ func deviceID(r *http.Request) string { return canonDeviceID(r.Header.Get("X-Bdr
 // the same id hold two separate rows and cannot overwrite or lock out each
 // other — which is what makes "first caller owns it" unnecessary.
 type devKey struct{ User, ID string }
+
+// deviceClaimWriter makes the ownership check and persistence one operation.
+// Ordinary observations still keep separate (account, id) rows; a login claim
+// must not race another process into creating a second owner.
+type deviceClaimWriter interface {
+	putDevice(DeviceInfo, bool) error
+}
+
+type deviceClaimConflict struct{ owner string }
+
+func (e *deviceClaimConflict) Error() string {
+	return "device id is already registered to another account"
+}
+
+// putDevice serializes file-backed claims and observations across hub processes.
+func (r *fileDeviceRepo) putDevice(d DeviceInfo, claim bool) error {
+	if err := checkDevice(d); err != nil {
+		return err
+	}
+	return r.withDeviceLock(func(rows []DeviceInfo) error {
+		if claim {
+			for _, row := range rows {
+				if canonDeviceID(row.ID) == canonDeviceID(d.ID) && row.User != "" && normEmail(row.User) != normEmail(d.User) {
+					return &deviceClaimConflict{owner: row.User}
+				}
+			}
+		}
+		r.rows[devKey{d.User, d.ID}] = d
+		return r.write()
+	})
+}
+
+func (r *fileDeviceRepo) deleteDevice(user, id string) error {
+	return r.withDeviceLock(func(_ []DeviceInfo) error {
+		delete(r.rows, devKey{user, id})
+		return r.write()
+	})
+}
+
+// The separate lock file is stable across the registry's atomic renames.
+func (r *fileDeviceRepo) withDeviceLock(write func([]DeviceInfo) error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(r.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	rows, err := r.reload()
+	if err != nil {
+		return err
+	}
+	return write(rows)
+}
 
 // DeviceRegistry is the in-memory device table over a MetaStore DeviceRepo.
 type DeviceRegistry struct {
@@ -209,6 +274,10 @@ func (r *DeviceRegistry) AnyOwned() bool {
 // check and the write to be one critical section. It returns the store's error
 // so a caller for whom persistence is the whole point can refuse.
 func (r *DeviceRegistry) observeLocked(d DeviceInfo) error {
+	return r.recordLocked(d, false)
+}
+
+func (r *DeviceRegistry) recordLocked(d DeviceInfo, claim bool) error {
 	k := devKey{d.User, d.ID}
 	if d.User == "" {
 		// A caller claiming no account asserts no identity (auth-less hub, or
@@ -242,10 +311,18 @@ func (r *DeviceRegistry) observeLocked(d DeviceInfo) error {
 		cur.IP = d.IP
 	}
 	cur.LastSeen = time.Now().UTC()
-	r.byKey[k] = cur
-	r.latest[d.ID] = k
-	if changed || time.Since(r.lastSav[k]) > time.Minute {
-		if err := r.repo.Put(cur); err != nil {
+	if claim || changed || time.Since(r.lastSav[k]) > time.Minute {
+		var err error
+		if writer, ok := r.repo.(deviceClaimWriter); ok {
+			err = writer.putDevice(cur, claim)
+		} else {
+			err = r.repo.Put(cur)
+		}
+		if err != nil {
+			var conflict *deviceClaimConflict
+			if errors.As(err, &conflict) {
+				return err
+			}
 			if !r.warned {
 				// Silently discarded, this made a registry that reports a device
 				// as observed while nothing about it ever reaches disk. Telemetry
@@ -258,6 +335,8 @@ func (r *DeviceRegistry) observeLocked(d DeviceInfo) error {
 		}
 		r.lastSav[k] = time.Now()
 	}
+	r.byKey[k] = cur
+	r.latest[d.ID] = k
 	return nil
 }
 
@@ -410,11 +489,7 @@ func (r *DeviceRegistry) Bind(user string, d DeviceInfo, visible func(owner stri
 		if k.ID != d.ID || k.User == "" || normEmail(k.User) == me {
 			continue
 		}
-		if visible != nil && !visible(k.User) {
-			return nil // binds nothing, tells the caller nothing
-		}
-		return fmt.Errorf("device id %s is already registered to another account on this hub; "+
-			"delete device.json in your BearDrive home and sign in again to mint a new one", d.ID)
+		return deviceBindConflict(d.ID, k.User, visible)
 	}
 	d.User = user
 	// A binding that did not reach the store is not a binding. Observe may log
@@ -422,10 +497,22 @@ func (r *DeviceRegistry) Bind(user string, d DeviceInfo, visible func(owner stri
 	// only evidence that will ever exist for this id, and reporting a claim the
 	// store refused hands back a token whose every push is then refused, with
 	// nothing in the hub to explain why.
-	if err := r.observeLocked(d); err != nil {
+	if err := r.recordLocked(d, true); err != nil {
+		var conflict *deviceClaimConflict
+		if errors.As(err, &conflict) {
+			return deviceBindConflict(d.ID, conflict.owner, visible)
+		}
 		return fmt.Errorf("could not record this device on the hub, so its changes could not be pushed: %w", err)
 	}
 	return nil
+}
+
+func deviceBindConflict(id, owner string, visible func(string) bool) error {
+	if visible != nil && !visible(owner) {
+		return nil // binds nothing, tells the caller nothing
+	}
+	return fmt.Errorf("device id %s is already registered to another account on this hub; "+
+		"delete device.json in your BearDrive home and sign in again to mint a new one", id)
 }
 
 // Release drops every device row an account owns, in memory and on disk. It is
@@ -461,7 +548,13 @@ func (r *DeviceRegistry) Release(user string) {
 		if normEmail(k.User) != e {
 			continue
 		}
-		if err := r.repo.Delete(k.User, k.ID); err != nil {
+		var err error
+		if repo, ok := r.repo.(interface{ deleteDevice(string, string) error }); ok {
+			err = repo.deleteDevice(k.User, k.ID)
+		} else {
+			err = r.repo.Delete(k.User, k.ID)
+		}
+		if err != nil {
 			log.Printf("beardrive: offboard %s: device %s NOT released, the id keeps its claim: %v", e, k.ID, err)
 			continue
 		}

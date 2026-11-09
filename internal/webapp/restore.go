@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -88,13 +89,14 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 		http.Error(w, "no such version of that file", http.StatusNotFound)
 		return
 	}
-	// A version that is already the file's content is not a change: writing it
-	// would put a +0 −0 row in every teammate's history. journal.Replay sorts
-	// internally, so this works on the unsorted slice loadOps returns — and a
-	// deleted path has no state at all, so restoring it back still goes through.
-	if journal.Replay(all)[p].Blob == req.SHA {
+	files := journal.Replay(all)
+	if cur, ok := files[p]; ok && cur.Blob == req.SHA {
 		http.Error(w, "that version is already the current content of "+p, http.StatusConflict)
 		return
+	}
+	var baseSHA string
+	if cur, ok := files[p]; ok {
+		baseSHA = cur.Blob
 	}
 	// The blob is already stored, so a restore adds no bytes — but an org
 	// whose plan is blocked must still be blocked from writing.
@@ -105,9 +107,12 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 	}
 	note := fmt.Sprintf("restore %s@%s", p, req.SHA[:8])
 	// Size comes from the historical op, never from the request body.
-	if err := rs.Commit(r.Context(), p, req.SHA, found.Size, s.requestUser(r), note); err != nil {
+	if err := rs.commitIf(r.Context(), p, req.SHA, found.Size, s.requestUser(r), note, baseSHA); err != nil {
 		code := http.StatusBadGateway
-		if err == errBlobMissing {
+		var stale *staleWriteError
+		if errors.As(err, &stale) {
+			code = http.StatusConflict
+		} else if err == errBlobMissing {
 			code = http.StatusConflict
 		}
 		http.Error(w, fmt.Sprintf("restore: %v", err), code)

@@ -53,6 +53,11 @@ func (s *Store) inboundMountPaths(mountID string) (spool, drain string, err erro
 }
 
 func (s *Store) logInboundPath(spool, rel string, deleted bool) error {
+	unlock, err := lockSpool(spool)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if fi, err := os.Stat(spool); err == nil && fi.Size() > inboundSpoolMax {
 		return nil // spool full: drop, never grow unbounded
 	}
@@ -94,6 +99,11 @@ func (s *Store) LogInboundForMount(mountID, rel string, deleted bool) error {
 // The drain runs outside the volume flock, and a daemon on the same mount may
 // be appending.
 func (s *Store) drainInboundPaths(spool, drain string) ([]InboundEvent, error) {
+	unlock, err := lockSpool(spool)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if _, err := os.Stat(drain); os.IsNotExist(err) {
 		if err := os.Rename(spool, drain); err != nil {
 			if os.IsNotExist(err) {

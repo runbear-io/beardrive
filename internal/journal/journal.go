@@ -44,6 +44,7 @@ type Op struct {
 	Kind       string    `json:"kind"`                // "put" or "delete"
 	Path       string    `json:"path"`                // slash-separated, relative to volume root
 	Blob       string    `json:"blob,omitempty"`      // sha256 hex of content (put only)
+	Base       string    `json:"base,omitempty"`      // previous blob SHA this put edited from
 	Size       int64     `json:"size,omitempty"`
 	Mode       uint32    `json:"mode,omitempty"` // permission bits
 	Note       string    `json:"note,omitempty"` // e.g. "conflict copy of <path>"
@@ -91,10 +92,11 @@ type opWire Op
 type pathRaw struct {
 	opWire
 	PathRaw string `json:"path_raw,omitempty"`
+	Base    string `json:"base,omitempty"`
 }
 
 func (o Op) MarshalJSON() ([]byte, error) {
-	w := pathRaw{opWire: opWire(o)}
+	w := pathRaw{opWire: opWire(o), Base: o.Base}
 	if !utf8.ValidString(o.Path) {
 		w.PathRaw = base64.StdEncoding.EncodeToString([]byte(o.Path))
 	}
@@ -123,6 +125,7 @@ func (o *Op) UnmarshalJSON(data []byte) error {
 // so it lives here and neither caller reimplements it.
 func (w pathRaw) op() Op {
 	o := Op(w.opWire)
+	o.Base = w.Base
 	if w.PathRaw != "" {
 		// path_raw is only ever the byte-exact SOURCE of the path field, so it
 		// is applied only when it re-encodes to the path the line already
