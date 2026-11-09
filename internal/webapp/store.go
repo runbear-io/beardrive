@@ -1058,7 +1058,9 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	org := s.orgOf(project)
 	// A device re-pushing a blob this hub already holds adds no bytes, so it
 	// must not be charged for them — same rule the browser door follows.
-	// Journals are exempt: they are appended to, so a rewrite really grows.
+	if strings.HasPrefix(key, "journal/") || manifestKeyRe.MatchString(key) {
+		defer s.lockPath(project, key)()
+	}
 	billed, billErr := billableBytes(r.Context(), rs.Backend, key, size)
 	if billErr != nil {
 		storageErr(w, http.StatusBadGateway, "could not check the stored object", billErr)
@@ -1169,53 +1171,53 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if strings.HasPrefix(key, "journal/") {
-		if cp, ok := rs.Backend.(remote.ConditionalPutter); ok {
-			uploaded, rerr := io.ReadAll(tmp)
-			if rerr != nil {
-				storageErr(w, http.StatusBadGateway, "could not read the journal", rerr)
-				return
-			}
-			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-				storageErr(w, http.StatusBadGateway, "could not read the journal", err)
-				return
-			}
-			existing, ver, rerr := readVersioned(r.Context(), cp, key)
-			if rerr != nil {
-				storageErr(w, http.StatusBadGateway, "could not read the stored journal", rerr)
-				return
-			}
-			if bytes.Equal(existing, uploaded) {
-				writeJSON(w, map[string]any{"ok": true})
-				return
-			}
-			if len(existing) > 0 {
-				if storedOps, perr := journal.Parse(existing); perr == nil {
-					ok, maxSeq, held := journalKeepsOps(storedOps, ops)
-					if !ok {
-						http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
-						return
-					}
-					if !s.opsWithinScope(w, r, ops, held) {
-						return
-					}
-					if !storedKeepsReplayIdentity(storedOps, ops) {
-						http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
-						return
-					}
-					storedMax = maxSeq
+		cp, ok := rs.Backend.(remote.ConditionalPutter)
+		if !ok {
+			http.Error(w, "journal writes require conditional storage", http.StatusNotImplemented)
+			return
+		}
+		uploaded, rerr := io.ReadAll(tmp)
+		if rerr != nil {
+			storageErr(w, http.StatusBadGateway, "could not read the journal", rerr)
+			return
+		}
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			storageErr(w, http.StatusBadGateway, "could not read the journal", err)
+			return
+		}
+		existing, ver, rerr := readVersioned(r.Context(), cp, key)
+		if rerr != nil {
+			storageErr(w, http.StatusBadGateway, "could not read the stored journal", rerr)
+			return
+		}
+		if bytes.Equal(existing, uploaded) {
+			writeJSON(w, map[string]any{"ok": true})
+			return
+		}
+		if len(existing) > 0 {
+			if storedOps, perr := journal.Parse(existing); perr == nil {
+				ok, maxSeq, held := journalKeepsOps(storedOps, ops)
+				if !ok {
+					http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
+					return
 				}
-				billed = max(int64(0), size-int64(len(existing)))
-			}
-			if _, err := cp.PutIf(r.Context(), key, bytes.NewReader(uploaded), int64(len(uploaded)), ver); err != nil {
-				if errors.Is(err, remote.ErrVersionMismatch) {
-					http.Error(w, "concurrent journal update; please retry", http.StatusConflict)
-				} else {
-					storageErr(w, http.StatusBadGateway, "could not store the object", err)
+				if !s.opsWithinScope(w, r, ops, held) {
+					return
 				}
-				return
+				if !storedKeepsReplayIdentity(storedOps, ops) {
+					http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
+					return
+				}
+				storedMax = maxSeq
 			}
-		} else if err := rs.Backend.Put(r.Context(), key, tmp, size); err != nil {
-			storageErr(w, http.StatusBadGateway, "could not store the object", err)
+			billed = max(int64(0), size-int64(len(existing)))
+		}
+		if _, err := cp.PutIf(r.Context(), key, bytes.NewReader(uploaded), int64(len(uploaded)), ver); err != nil {
+			if errors.Is(err, remote.ErrVersionMismatch) {
+				http.Error(w, "concurrent journal update; please retry", http.StatusConflict)
+			} else {
+				storageErr(w, http.StatusBadGateway, "could not store the object", err)
+			}
 			return
 		}
 	} else if manifestKeyRe.MatchString(key) {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -53,6 +54,14 @@ func (b *secsignBackend) SignPut(_ context.Context, key string, size int64, ttl 
 		Headers: map[string]string{"Content-Length": strconv.FormatInt(size, 10)},
 		Expires: time.Now().Add(ttl),
 	}, nil
+}
+
+func (b *secsignBackend) GetVersioned(ctx context.Context, key string) (io.ReadCloser, remote.Version, error) {
+	return b.Backend.(remote.ConditionalPutter).GetVersioned(ctx, key)
+}
+
+func (b *secsignBackend) PutIf(ctx context.Context, key string, r io.Reader, size int64, expect remote.Version) (remote.Version, error) {
+	return b.Backend.(remote.ConditionalPutter).PutIf(ctx, key, r, size, expect)
 }
 
 func (b *secsignBackend) calls() []secsignPut {

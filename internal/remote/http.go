@@ -409,7 +409,7 @@ func (b *httpBackend) AppendJournal(ctx context.Context, req JournalAppendReques
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
-	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
 		b.noAppend.Store(true)
 		return ErrJournalAppendUnsupported
 	case http.StatusConflict:
