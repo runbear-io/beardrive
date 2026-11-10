@@ -331,7 +331,10 @@ type volume struct {
 	gen, snapGen, staleThrough uint64
 	// covers is how many device pushes (accepted) had been counted when the
 	// listing in snap started loading: snap includes all of them.
-	covers uint64
+	covers    uint64
+	treeMu    sync.Mutex
+	treeCache map[treeCacheKey]*treeCacheEntry
+	treeTick  uint64
 
 	// Background rebuilds requested by refreshThen. bgDone holds the callbacks
 	// waiting for a rebuild that starts after they were queued.
@@ -342,7 +345,19 @@ type volume struct {
 	accepted uint64
 }
 
+type treeCacheKey struct {
+	gen  uint64
+	tag  string
+	slim bool
+}
+
+type treeCacheEntry struct {
+	enc  *encodedJSON
+	used uint64
+}
+
 type snapshot struct {
+	gen   uint64
 	files map[string]FileInfo
 	// moves is the derived rename index (see moves.go), cached with the
 	// listing it was replayed alongside. Nil for a source that has no
@@ -472,7 +487,7 @@ func (v *volume) install(files map[string]FileInfo, moves moveIndex, gen, acc ui
 		v.at = at
 		return
 	}
-	v.snap, v.at = &snapshot{files: files, moves: moves}, at
+	v.snap, v.at = &snapshot{gen: gen, files: files, moves: moves}, at
 }
 
 // backgroundRebuildTimeout bounds one rebuild that no request is waiting on.
@@ -673,7 +688,8 @@ type RemoteSource struct {
 	upmu sync.Mutex // serializes read-modify-write of our own journal
 	// sealed holds the blobs this process has verified AND proved immutable.
 	// See verify.
-	sealed sync.Map // sha (string) → struct{}
+	sealed      sync.Map // sha (string) → struct{}
+	verifiedGen sync.Map // sha (string) → remote.Version
 	// blobMod is the first Modified seen for a blob not yet sealed. See maybeSeal.
 	blobMod sync.Map // sha (string) → time.Time
 
@@ -691,16 +707,25 @@ type RemoteSource struct {
 	rmu          sync.Mutex
 	reassembling map[string]*reassembledBlob
 
-	foldMu    sync.Mutex // guards the last fold, reused while the journals are unchanged
-	foldFP    string
-	foldFiles map[string]FileInfo
-	foldMoves moveIndex
+	foldMu         sync.Mutex // guards the last fold, reused while the journals are unchanged
+	foldFP         string
+	foldFiles      map[string]FileInfo
+	foldTombstones map[string]winOp
+	foldJournals   map[string]ckptJournalMeta
+	foldMoves      moveIndex
+
+	ckptMu      sync.Mutex
+	ckptWriting bool
+	ckptFP      string
 
 	// flight joins requests for the same derived state of the same journal
 	// listing (a fold, a history index) into one computation. Each copy is
 	// every op in the project, so a team opening one page at once would
 	// otherwise multiply the hub's memory by the number of people.
 	flight singleflight.Group
+}
+type versionedBlobBackend interface {
+	GetVersioned(context.Context, string) (io.ReadCloser, remote.Version, error)
 }
 
 // cachedJournal is one journal's parsed ops plus the (size, modified) that
@@ -989,7 +1014,21 @@ func (r *RemoteSource) verify(ctx context.Context, sha string) (io.ReadCloser, e
 	if _, ok := r.sealed.Load(sha); ok {
 		return nil, nil
 	}
-	rc, err := r.Backend.Get(ctx, "blobs/"+sha)
+	var (
+		rc      io.ReadCloser
+		err     error
+		version remote.Version
+	)
+	if vb, ok := r.Backend.(versionedBlobBackend); ok {
+		rc, version, err = vb.GetVersioned(ctx, "blobs/"+sha)
+		if err == nil && version != remote.VersionAbsent {
+			if v, verified := r.verifiedGen.Load(sha); verified && v.(remote.Version) == version {
+				return rc, nil
+			}
+		}
+	} else {
+		rc, err = r.Backend.Get(ctx, "blobs/"+sha)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1007,6 +1046,9 @@ func (r *RemoteSource) verify(ctx context.Context, sha string) (io.ReadCloser, e
 	if hex.EncodeToString(h.Sum(nil)) != sha {
 		keep.discard()
 		return nil, fmt.Errorf("stored content does not hash to its key")
+	}
+	if version != remote.VersionAbsent {
+		r.verifiedGen.Store(sha, version)
 	}
 	r.maybeSeal(ctx, sha)
 	if keep.over {
@@ -1398,21 +1440,29 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 
 	type fold struct {
 		files map[string]FileInfo
+		tombs map[string]winOp
 		moves moveIndex
 	}
-	// Detached from the caller: the fold is shared, so one waiter giving up
-	// must not fail the others.
 	res, err, _ := r.flight.Do("fold\x00"+fp, func() (any, error) {
+		if files, tombs, moves, ok := r.restoreFoldCheckpoint(context.WithoutCancel(ctx), keep, fp); ok {
+			return fold{files: files, tombs: tombs, moves: moves}, nil
+		}
+		if files, tombs, moves, ok := r.tryIncrementalFold(context.WithoutCancel(ctx), keep, fp); ok {
+			return fold{files: files, tombs: tombs, moves: moves}, nil
+		}
 		parsed, err := r.parsedJournals(context.WithoutCancel(ctx), keep)
 		if err != nil {
 			return nil, err
 		}
 		all := byPathOrder(parsed...)
-		f := fold{foldFiles(all), buildMoveIndex(all)}
+		files, tombs := foldFilesAndTombstones(all)
+		moves := buildMoveIndex(all)
 		r.foldMu.Lock()
-		r.foldFP, r.foldFiles, r.foldMoves = fp, f.files, f.moves
+		r.foldFP, r.foldFiles, r.foldTombstones, r.foldMoves = fp, files, tombs, moves
+		r.foldJournals = checkpointMeta(keep)
 		r.foldMu.Unlock()
-		return f, nil
+		r.scheduleFoldCheckpoint(ctx, fp, keep, files, tombs, moves)
+		return fold{files: files, tombs: tombs, moves: moves}, nil
 	})
 	if err != nil {
 		return nil, nil, err
@@ -1493,41 +1543,7 @@ func filesWithMoves(all []journal.Op) (map[string]FileInfo, moveIndex) {
 // foldFiles replays ops (in journal.Less order within each path) into the
 // listing: last writer wins per path.
 func foldFiles(ops []journal.Op) map[string]FileInfo {
-	files := make(map[string]FileInfo)
-	for _, op := range ops {
-		switch op.Kind {
-		case journal.KindPut:
-			// A symlink op carries a target and no blob: record it as a link
-			// (no content) before the blob check below, which an empty Blob
-			// would fail. The target is a string, never resolved here.
-			if op.Link != "" {
-				files[op.Path] = FileInfo{
-					Link: op.Link, Time: op.Time,
-					User: op.User, UserName: op.UserName,
-					Author: op.Author, Device: op.DeviceName,
-					Lamport: op.Lamport, Seq: op.Seq, DeviceID: op.Device, Mode: op.Mode,
-				}
-				continue
-			}
-			// A journal is arbitrary JSONL a device pushed: Blob is a storage
-			// key suffix ("blobs/"+Blob), not a checked field, so anything but
-			// a bare sha256 is a path the writer chose — another project's
-			// prefix, or out of the storage root entirely. Same rule as every
-			// ?sha= route. An op that fails it is ignored (the path keeps its
-			// previous version) rather than treated as a delete.
-			if !isBlobSHA(op.Blob) {
-				continue
-			}
-			files[op.Path] = FileInfo{
-				Blob: op.Blob, Size: op.Size, Time: op.Time,
-				User: op.User, UserName: op.UserName,
-				Author: op.Author, Device: op.DeviceName,
-				Lamport: op.Lamport, Seq: op.Seq, DeviceID: op.Device, Mode: op.Mode,
-			}
-		case journal.KindDelete:
-			delete(files, op.Path)
-		}
-	}
+	files, _ := foldFilesAndTombstones(ops)
 	return files
 }
 
@@ -2214,23 +2230,54 @@ func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
 		writeEncodedJSON(w, r, enc)
 		return
 	}
+	enc, err := v.filteredTree(snap, vis, slim)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeEncodedJSON(w, r, enc)
+}
+
+func (v *volume) filteredTree(snap *snapshot, vis pathFilter, slim bool) (*encodedJSON, error) {
+	key := treeCacheKey{gen: snap.gen, tag: vis.tag, slim: slim}
+	v.treeMu.Lock()
+	if e := v.treeCache[key]; e != nil {
+		v.treeTick++
+		e.used = v.treeTick
+		enc := e.enc
+		v.treeMu.Unlock()
+		return enc, nil
+	}
+	v.treeMu.Unlock()
 	tree := buildTree(visibleFiles(snap.files, vis))
-	/* ?slim=1 drops the one field a client can derive for itself.
-
-	   Every node's `path` is its ancestors' names plus its own, and the
-	   frontend already walks the whole tree to build its lookups — so on a
-	   5,700-node project the hub was spending 480 KB, 29% of the payload and
-	   22% of it even after gzip, re-sending what the walk could reconstruct
-	   for free.
-
-	   Opt-in rather than removed, for the same reason If-Match is: a tab
-	   still running a cached bundle refetches this tree, and a field it reads
-	   vanishing underneath it would break every link on the page until
-	   someone reloaded. A client that can rebuild paths says so. */
 	if slim {
 		stripPaths(tree)
 	}
-	writeJSONCached(w, r, tree)
+	enc, err := encodeJSON(tree)
+	if err != nil {
+		return nil, err
+	}
+	v.treeMu.Lock()
+	if v.treeCache == nil {
+		v.treeCache = make(map[treeCacheKey]*treeCacheEntry)
+	}
+	v.treeTick++
+	v.treeCache[key] = &treeCacheEntry{enc: enc, used: v.treeTick}
+	for len(v.treeCache) > 16 {
+		var victim treeCacheKey
+		var oldest uint64
+		for k, e := range v.treeCache {
+			if k == key {
+				continue
+			}
+			if oldest == 0 || e.used < oldest {
+				victim, oldest = k, e.used
+			}
+		}
+		delete(v.treeCache, victim)
+	}
+	v.treeMu.Unlock()
+	return enc, nil
 }
 
 // stripPaths removes what the children chain already says.

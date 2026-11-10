@@ -668,7 +668,10 @@ func (s *Server) refreshDevice(r *http.Request) {
 		// and lock the real owner out of `bdrive login` forever.
 		return
 	}
-	s.observeDevice(r)
+	if !validDeviceID(deviceID(r)) {
+		return
+	}
+	s.Devices.Observe(s.deviceFromRequest(r, s.requestUser(r).Email))
 }
 
 // observeDevice records the device behind a store-API request, creating the

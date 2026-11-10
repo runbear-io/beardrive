@@ -15,9 +15,10 @@ import (
 // what each history request cost; it is now built once per journal state and
 // shared, read-only, by every request until a journal grows.
 type histIndex struct {
-	all   []sourcedOp
-	kinds []string
-	prevs []string
+	all    []sourcedOp
+	kinds  []string
+	prevs  []string
+	byTime []int32
 
 	movesOnce sync.Once
 	moves     moveIndex
@@ -66,7 +67,14 @@ func buildHistIndex(all []sourcedOp) *histIndex {
 			exists[op.Path] = true
 		}
 	}
-	return &histIndex{all: all, kinds: kinds, prevs: prevs}
+	byTime := make([]int32, len(all))
+	for i := range byTime {
+		byTime[i] = int32(i)
+	}
+	sort.Slice(byTime, func(i, j int) bool {
+		return histLess(all[byTime[i]].Op, all[byTime[j]].Op)
+	})
+	return &histIndex{all: all, kinds: kinds, prevs: prevs, byTime: byTime}
 }
 
 // historyIndex returns the project's history index, rebuilt only when the

@@ -917,7 +917,7 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 	// real, and it is right here. A snapshot the store cannot produce records
 	// nothing this cycle: the client's spool is drained best-effort and retried,
 	// and telemetry must never fail a request (nor invent one).
-	snap, err := v.snapshot(r.Context())
+	files, err := v.source.Files(r.Context())
 	if err != nil {
 		writeJSON(w, map[string]any{"accepted": 0})
 		return
@@ -939,7 +939,7 @@ func (s *Server) handleReadReport(v *volume, w http.ResponseWriter, r *http.Requ
 		if !mine {
 			continue // not this account's device: counted for nobody
 		}
-		if _, real := snap.files[e.Path]; !real {
+		if _, real := files[e.Path]; !real {
 			continue // no such file in this project: a read of nothing is not a read
 		}
 		if !vis.canRead(e.Path) {

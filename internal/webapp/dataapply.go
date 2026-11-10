@@ -44,6 +44,8 @@ type dataProject struct {
 	queued bool
 }
 
+var dataBootSem = make(chan struct{}, 1)
+
 // dataBehind tells the index a change has landed that it must catch up with,
 // before any pass is asked to: it moves the shared generation, so no pass
 // whose fold predates the change (on this process or another) can report the
@@ -120,11 +122,25 @@ func (s *Server) dataBoot() {
 	if s.Data == nil || s.Projects == nil {
 		return
 	}
-	for _, p := range s.Projects.List() {
-		if p.Data {
-			s.dataApplyAsync(p.ID)
+	projects := s.Projects.List()
+	go func() {
+		dataBootSem <- struct{}{}
+		defer func() { <-dataBootSem }()
+		for _, p := range projects {
+			if !p.Data {
+				continue
+			}
+			st := s.dataProjectState(p.ID)
+			st.mu.Lock()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			err := s.dataApplyLocked(ctx, p.ID, st)
+			cancel()
+			st.mu.Unlock()
+			if err != nil {
+				log.Printf("beardrive: data index for %s: %v (retried on the next change)", p.ID, err)
+			}
 		}
-	}
+	}()
 }
 
 // isDataFile says whether a path is indexed: JSON, or Markdown (for its
@@ -293,33 +309,43 @@ func (s *Server) dataPass(ctx context.Context, id string, st *dataProject) error
 		absent = append(absent, path)
 	}
 	if gone = absent; len(gone) > 0 {
-		ops, err := rs.loadSourcedOps(ctx)
-		if err != nil {
-			return err
-		}
 		want := map[string]bool{}
 		for _, path := range gone {
+			if w, ok := rs.tombstoneFor(path); ok {
+				op := w.op(path, journal.KindDelete)
+				write = append(write, dataRow{
+					path: path, win: winKey(op), changedAt: op.Time,
+					deleted: true,
+				})
+				continue
+			}
 			want[path] = true
 		}
-		last := map[string]journal.Op{}
-		for _, so := range ops {
-			op := so.Op
-			if op.Kind != journal.KindDelete || !want[op.Path] {
-				continue
+		if len(want) > 0 {
+			ops, err := rs.loadSourcedOps(ctx)
+			if err != nil {
+				return err
 			}
-			if prev, ok := last[op.Path]; !ok || journal.Less(prev, op) {
-				last[op.Path] = op
+			last := map[string]journal.Op{}
+			for _, so := range ops {
+				op := so.Op
+				if op.Kind != journal.KindDelete || !want[op.Path] {
+					continue
+				}
+				if prev, ok := last[op.Path]; !ok || journal.Less(prev, op) {
+					last[op.Path] = op
+				}
 			}
-		}
-		for _, path := range gone {
-			op, ok := last[path]
-			if !ok {
-				continue
+			for path := range want {
+				op, ok := last[path]
+				if !ok {
+					continue
+				}
+				write = append(write, dataRow{
+					path: path, win: winKey(op), changedAt: op.Time,
+					changedBy: firstNonEmpty(op.User, op.Author), deleted: true,
+				})
 			}
-			write = append(write, dataRow{
-				path: path, win: winKey(op), changedAt: op.Time,
-				changedBy: firstNonEmpty(op.User, op.Author), deleted: true,
-			})
 		}
 	}
 

@@ -25,6 +25,12 @@ type gcsBackend struct {
 	prefix string
 }
 
+// RangeGetter is the optional tail-read capability offered by backends that
+// can seek without downloading the prefix first.
+type RangeGetter interface {
+	GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
+}
+
 func newGCS(ctx context.Context, bucket, prefix string) (*gcsBackend, error) {
 	if bucket == "" {
 		return nil, fmt.Errorf("gs remote needs a bucket: gs://bucket/prefix")
@@ -80,6 +86,12 @@ func (b *gcsBackend) SignPut(_ context.Context, key string, size int64, ttl time
 
 func (b *gcsBackend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	return b.bucket.Object(b.key(key)).NewReader(ctx)
+}
+
+// GetRange returns the bytes beginning at offset. A negative length means the
+// remainder of the object, matching storage.Reader's NewRangeReader contract.
+func (b *gcsBackend) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	return b.bucket.Object(b.key(key)).NewRangeReader(ctx, offset, length)
 }
 
 func (b *gcsBackend) List(ctx context.Context, prefix string) ([]Object, error) {

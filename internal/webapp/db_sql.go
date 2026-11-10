@@ -214,7 +214,10 @@ func (s *sqlMetaStore) inTx(reg string, fn func(*sql.Tx) error) error {
 		ON CONFLICT(name) DO UPDATE SET version = meta_version.version + 1`), reg); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // regWriter is one registry's write handle: sqlMetaStore.exec plus that
@@ -244,8 +247,9 @@ func (s *sqlMetaStore) version(reg string) (string, error) {
 		return "0", nil
 	case err != nil:
 		return "", err
+	default:
+		return strconv.FormatInt(v, 10), nil
 	}
-	return strconv.FormatInt(v, 10), nil
 }
 
 // tenc / tdec store times as RFC3339 text (empty string for the zero time),

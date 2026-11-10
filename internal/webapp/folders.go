@@ -14,6 +14,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/runbear-io/beardrive/internal/config"
@@ -352,6 +353,14 @@ type pathFilter struct {
 	on      bool   // false: nothing to filter, every test is a constant true
 }
 
+type visibleSHACacheKey struct {
+	source *RemoteSource
+	fp     string
+	tag    string
+}
+
+var visibleSHACache sync.Map // map[visibleSHACacheKey]map[string]struct{}
+
 // visibility resolves the caller's read visibility for the project the proj()
 // resolver already resolved. Off — allowing everything — in single-volume mode
 // and on any project with no folder rules, which is every project on a hub
@@ -438,38 +447,55 @@ func (f pathFilter) hides() bool { return f.on }
 //
 // Costs one pass over the project's already-parsed ops, and only when the
 // filter hides something at all.
+func (f pathFilter) visibleSHASet(ctx context.Context, rs *RemoteSource) (map[string]struct{}, error) {
+	keep, err := rs.listJournals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key := visibleSHACacheKey{source: rs, fp: journalFingerprint(keep), tag: f.tag}
+	if cached, ok := visibleSHACache.Load(key); ok {
+		return cached.(map[string]struct{}), nil
+	}
+	ops, err := rs.sourcedOpsOf(ctx, keep)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]struct{}, len(ops))
+	for _, so := range ops {
+		if f.canRead(so.Op.Path) {
+			out[so.Op.Blob] = struct{}{}
+		}
+	}
+	visibleSHACache.Store(key, out)
+	return out, nil
+}
+
 func (f pathFilter) visibleSHA(ctx context.Context, rs *RemoteSource, sha string) bool {
 	if !f.hides() {
 		return true
 	}
-	ops, err := rs.loadSourcedOps(ctx)
+	shas, err := f.visibleSHASet(ctx, rs)
 	if err != nil {
 		// The hub cannot tell whether this is visible. Refusing is the only
-		// safe answer: serving it would make a storage hiccup the way past a
-		// permission.
+		// safe answer: serving it would make a storage hiccup the way past
+		// a permission.
 		return false
 	}
-	for _, so := range ops {
-		if so.Op.Blob == sha && f.canRead(so.Op.Path) {
-			return true
-		}
-	}
-	return false
+	_, ok := shas[sha]
+	return ok
 }
 
 // visibleSHAs is the set of content addresses this account may fetch: every
 // blob named by an op it may read. Built once, for the doors that answer about
 // many shas (the store listing) rather than one.
 func (f pathFilter) visibleSHAs(ctx context.Context, rs *RemoteSource) (map[string]bool, error) {
-	ops, err := rs.loadSourcedOps(ctx)
+	shas, err := f.visibleSHASet(ctx, rs)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]bool, len(ops))
-	for _, so := range ops {
-		if f.canRead(so.Op.Path) {
-			out[so.Op.Blob] = true
-		}
+	out := make(map[string]bool, len(shas))
+	for sha := range shas {
+		out[sha] = true
 	}
 	return out, nil
 }
