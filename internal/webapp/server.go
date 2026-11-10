@@ -719,10 +719,9 @@ type RemoteSource struct {
 	ckptFP      string
 	ckptBytes   int64
 
-	presentMu    sync.Mutex
-	presentBlobs map[string]struct{}
-	presentOrder []string
-
+	jverMu    sync.Mutex
+	jverCache map[string]journalVersionEntry
+	jverOrder []string
 	// flight joins requests for the same derived state of the same journal
 	// listing (a fold, a history index) into one computation. Each copy is
 	// every op in the project, so a team opening one page at once would

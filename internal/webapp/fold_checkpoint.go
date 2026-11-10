@@ -363,7 +363,7 @@ func (r *RemoteSource) verifyAndReadTail(ctx context.Context, o remote.Object, o
 	if o.Size > old.Size {
 		if vrg, ok := r.Backend.(remote.VersionedRangeGetter); ok {
 			if trc, ver, verr := vrg.GetVersionedRange(ctx, o.Key, old.Size, o.Size-old.Size); verr == nil {
-				if fullSHA, ok := lookupAppendedJournalSHA(o.Key, ver, old.Size, old.PrefixSHA256, o.Size); ok {
+				if fullSHA, ok := r.lookupAppendedJournalSHA(o.Key, ver, old.Size, old.PrefixSHA256, o.Size); ok {
 					tailBytes, rerr := io.ReadAll(io.LimitReader(trc, (o.Size-old.Size)+1))
 					_ = trc.Close()
 					if rerr == nil && int64(len(tailBytes)) == o.Size-old.Size {

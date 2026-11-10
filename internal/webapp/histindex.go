@@ -161,46 +161,59 @@ func (r *RemoteSource) tryIncrementalHistIndex(ctx context.Context, keep []remot
 	}, true
 }
 
+type histFlightResult struct {
+	fp string
+	x  *histIndex
+}
+
 func (r *RemoteSource) historyIndex(ctx context.Context) (*histIndex, error) {
 	keep, err := r.listJournals(ctx)
 	if err != nil {
 		return nil, err
 	}
 	fp := journalFingerprint(keep)
-	if x := histCache.get(r, fp); x != nil {
-		return x, nil
-	}
-	x, err, _ := r.flight.Do("hist", func() (any, error) {
-		if cur := histCache.get(r, fp); cur != nil {
-			return cur, nil
+	for {
+		if x := histCache.get(r, fp); x != nil {
+			return x, nil
 		}
-		if inc, ok := r.tryIncrementalHistIndex(context.WithoutCancel(ctx), keep); ok {
-			histCache.put(r, fp, inc)
-			return inc, nil
-		}
-		all, err := r.sourcedOpsOf(context.WithoutCancel(ctx), keep)
+		res, err, _ := r.flight.Do("hist", func() (any, error) {
+			if cur := histCache.get(r, fp); cur != nil {
+				return histFlightResult{fp: fp, x: cur}, nil
+			}
+			if inc, ok := r.tryIncrementalHistIndex(context.WithoutCancel(ctx), keep); ok {
+				histCache.put(r, fp, inc)
+				return histFlightResult{fp: fp, x: inc}, nil
+			}
+			all, err := r.sourcedOpsOf(context.WithoutCancel(ctx), keep)
+			if err != nil {
+				return nil, err
+			}
+			jmeta, _ := r.journalMetaFromCache(keep)
+			if int64(len(all))*histOpBytes+hubCaches.heldJournals(r) > hubCaches.limitBytes() {
+				r.jmu.Lock()
+				jgen := r.jgen
+				r.jmu.Unlock()
+				r.dropJournals(jgen)
+			}
+			// Drop the previous histIndex before allocating the new one so two full
+			// indexes for the same project never coexist in memory.
+			histCache.clearSource(r)
+			x := buildHistIndex(all)
+			x.journals = jmeta
+			histCache.put(r, fp, x)
+			return histFlightResult{fp: fp, x: x}, nil
+		})
 		if err != nil {
 			return nil, err
 		}
-		jmeta, _ := r.journalMetaFromCache(keep)
-		if int64(len(all))*histOpBytes+hubCaches.heldJournals(r) > hubCaches.limitBytes() {
-			r.jmu.Lock()
-			jgen := r.jgen
-			r.jmu.Unlock()
-			r.dropJournals(jgen)
+		hr := res.(histFlightResult)
+		if hr.fp == fp {
+			return hr.x, nil
 		}
-		// Drop the previous histIndex before allocating the new one so two full
-		// indexes for the same project never coexist in memory.
-		histCache.clearSource(r)
-		x := buildHistIndex(all)
-		x.journals = jmeta
-		histCache.put(r, fp, x)
-		return x, nil
-	})
-	if err != nil {
-		return nil, err
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
-	return x.(*histIndex), nil
 }
 
 const histOpBytes = 400
