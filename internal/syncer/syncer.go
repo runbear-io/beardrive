@@ -540,6 +540,9 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	if proj.Remote != "" {
 		st.Remote = proj.Remote
 	}
+	if s.Device.ID != "" {
+		st.Device = s.Device.ID
+	}
 	deviceJoining := st.Lamport == 0 && st.PushedOps == 0
 	mountJoining := !hadCache && s.MountID != "" && (st.Lamport > 0 || st.PushedOps > 0)
 	joining := deviceJoining || mountJoining
@@ -1569,6 +1572,10 @@ func withdrawn(have, applied []journal.Op) []journal.Op {
 	}
 	return out
 }
+func isTransientOrServerTailErr(err error) bool {
+	return err != nil && strings.HasPrefix(err.Error(), "server: ")
+}
+
 
 // pull fetches journals that grew on the remote and any blobs we are missing
 // for the new ops. It returns the ops we had not seen before, and any op a
@@ -1625,6 +1632,9 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		if fi, err := os.Stat(lp); err == nil {
 			localSize, isNew = fi.Size(), false
 		}
+		if s.Store.PeerRemoteUnchanged(dev, localSize, o.Size, o.Modified) {
+			continue
+		}
 		if isNew {
 			if newJournals <= 0 {
 				continue
@@ -1650,11 +1660,13 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 						}
 						if appended {
 							if len(fetched) == 0 {
+								s.Store.RecordPeerRemoteMod(dev, localSize, o.Modified)
 								continue
 							}
 							if endsNL {
 								fresh, perr := journal.Parse(fetched)
 								if perr == nil && s.Store.AppendValidatedPeerTail(dev, prevFi, localSize, fetched, fresh) {
+									s.Store.RecordPeerRemoteMod(dev, localSize+int64(len(fetched)), o.Modified)
 									newOps = append(newOps, fresh...)
 									continue
 								}
@@ -1663,6 +1675,8 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 							data = fetched
 							haveData = true
 						}
+					} else if errors.Is(tailErr, remote.ErrForbidden) || ctx.Err() != nil || isTransientOrServerTailErr(tailErr) {
+						return newOps, gone, tailErr
 					}
 				}
 			}
@@ -1699,6 +1713,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		// the rewritten case is only ever slow, never divergent.
 		// The exact local bytes are retained above for byte-prefix validation.
 		if bytes.Equal(local, data) {
+			s.Store.RecordPeerRemoteMod(dev, int64(len(data)), o.Modified)
 			continue
 		}
 		if len(local) > 0 && local[len(local)-1] == '\n' && bytes.HasPrefix(data, local) {
@@ -1713,6 +1728,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 				} else {
 					s.Store.InvalidateJournal(dev)
 				}
+				s.Store.RecordPeerRemoteMod(dev, int64(len(data)), o.Modified)
 				newOps = append(newOps, fresh...)
 				continue
 			}
@@ -1770,6 +1786,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 			return newOps, gone, err
 		}
 		s.Store.InvalidateJournal(dev)
+		s.Store.RecordPeerRemoteMod(dev, int64(len(data)), o.Modified)
 		gone = append(gone, withdrawn(all, applied)...)
 		newOps = append(newOps, fresh...)
 	}
@@ -1782,13 +1799,20 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 	touched := map[string]bool{}
 	for _, op := range newOps {
 		touched[op.Path] = true
+		if op.Note == adoptNote && op.Kind == journal.KindPut && op.Blob != "" && !s.Store.HasBlob(op.Blob) {
+			fetchList = append(fetchList, op)
+		}
 	}
 	for p := range touched {
 		if win, ok := fold.Target[p]; ok && win.Blob != "" && !s.Store.HasBlob(win.Blob) {
 			fetchList = append(fetchList, journal.Op{Kind: journal.KindPut, Path: p, Blob: win.Blob, Size: win.Size, Mode: win.Mode})
 		}
 	}
-	myOps, myErr := s.Store.OwnOpsFrom(s.Device.ID, 0)
+	var pushedOps int64
+	if st, stErr := s.Store.LoadSync(); stErr == nil {
+		pushedOps = st.PushedOps
+	}
+	myOps, myErr := s.Store.OwnOpsFrom(s.Device.ID, pushedOps)
 	if myErr != nil {
 		return newOps, gone, myErr
 	}

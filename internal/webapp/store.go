@@ -1245,7 +1245,7 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 					storageErr(w, http.StatusBadGateway, "could not read the stored manifest", gerr)
 					return
 				}
-				stored, rerr := io.ReadAll(rc)
+				stored, rerr := io.ReadAll(io.LimitReader(rc, 8<<20))
 				rc.Close()
 				_, serr := tmp.Seek(0, io.SeekStart)
 				fresh, ferr := io.ReadAll(tmp)

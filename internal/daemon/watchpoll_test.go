@@ -793,19 +793,25 @@ func TestMaterializationEchoSuppressionKeepsChangedEvents(t *testing.T) {
 	if err := os.WriteFile(changed, []byte("concurrent"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-lw.wake:
-	case <-time.After(time.Second):
-		t.Fatal("concurrent change did not wake watcher")
-	}
 	if err := st.SaveCache("mount", cache); err != nil {
 		t.Fatal(err)
 	}
-	suppressMaterializationEchoes(lw, root, root, "mount", st, lw.fence())
-
-	batch := lw.take(root)
-	if len(batch.events) != 1 || batch.events[0].path != changed {
-		t.Fatalf("suppressed batch = %+v, want only concurrent change %s", batch.events, changed)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case <-lw.wake:
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("concurrent change did not wake watcher")
+		}
+		suppressMaterializationEchoes(lw, root, root, "mount", st, lw.fence())
+		batch := lw.take(root)
+		if len(batch.events) == 0 {
+			continue
+		}
+		if len(batch.events) != 1 || batch.events[0].path != changed {
+			t.Fatalf("suppressed batch = %+v, want only concurrent change %s", batch.events, changed)
+		}
+		break
 	}
 }
 

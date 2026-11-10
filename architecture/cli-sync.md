@@ -91,6 +91,7 @@ classDiagram
 
     class SyncState {
         +string Remote
+        +string Device
         +Lamport +PushedOps +Access
         +AccessReason
         +IgnoreAccepted +IgnorePulled
@@ -170,7 +171,7 @@ classDiagram
     class Store {
         -dir volume dir
         +PutBlob / PutBlobFileVerified / MaterializeBlobToTemp / OpenBlob / HasBlob
-        +PruneLocalBlobs(extraKeep, minAge)
+        +PruneLocalBlobs / PruneLocalBlobsForDevice
         +AppendOps / DeviceOps / AllOps / JournalPrefixAt
         +ReplayFold() FoldResult
         +OwnOpCount / OwnOpsFrom

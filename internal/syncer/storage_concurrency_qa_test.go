@@ -3,6 +3,9 @@ package syncer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -18,7 +21,6 @@ import (
 	"github.com/runbear-io/beardrive/internal/remote"
 	"github.com/runbear-io/beardrive/internal/store"
 )
-
 func qaBlob(t *testing.T, s *store.Store, text string) string {
 	t.Helper()
 	h, _, err := s.PutBlobReader(strings.NewReader(text))
@@ -440,11 +442,21 @@ func TestQA_V2JournalAppendAndTailPullWithFallback(t *testing.T) {
 type qaJournalBackend struct {
 	mu                                      sync.Mutex
 	objects                                 map[string][]byte
+	modified                                map[string]time.Time
+	modClock                                time.Time
 	appendCalls, tailCalls, putJournalCalls int
+	getCalls                                map[string]int
 	unsupported                             bool
 }
 
-func newQAJournalBackend() *qaJournalBackend { return &qaJournalBackend{objects: map[string][]byte{}} }
+func newQAJournalBackend() *qaJournalBackend {
+	return &qaJournalBackend{
+		objects:  map[string][]byte{},
+		modified: map[string]time.Time{},
+		modClock: time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC),
+		getCalls: map[string]int{},
+	}
+}
 func (b *qaJournalBackend) Put(_ context.Context, key string, r io.Reader, _ int64) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -453,6 +465,8 @@ func (b *qaJournalBackend) Put(_ context.Context, key string, r io.Reader, _ int
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.objects[key] = append([]byte(nil), data...)
+	b.modClock = b.modClock.Add(time.Millisecond)
+	b.modified[key] = b.modClock
 	if strings.HasPrefix(key, "journal/") {
 		b.putJournalCalls++
 	}
@@ -460,6 +474,7 @@ func (b *qaJournalBackend) Put(_ context.Context, key string, r io.Reader, _ int
 }
 func (b *qaJournalBackend) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	b.mu.Lock()
+	b.getCalls[key]++
 	d, ok := b.objects[key]
 	b.mu.Unlock()
 	if !ok {
@@ -467,13 +482,24 @@ func (b *qaJournalBackend) Get(_ context.Context, key string) (io.ReadCloser, er
 	}
 	return io.NopCloser(bytes.NewReader(d)), nil
 }
+func (b *qaJournalBackend) resetPullCounts() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tailCalls = 0
+	b.getCalls = map[string]int{}
+}
+func (b *qaJournalBackend) getCount(key string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.getCalls[key]
+}
 func (b *qaJournalBackend) List(_ context.Context, prefix string) ([]remote.Object, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var out []remote.Object
 	for k, v := range b.objects {
 		if strings.HasPrefix(k, prefix) {
-			out = append(out, remote.Object{Key: k, Size: int64(len(v))})
+			out = append(out, remote.Object{Key: k, Size: int64(len(v)), Modified: b.modified[k]})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
@@ -495,9 +521,11 @@ func (b *qaJournalBackend) AppendJournal(_ context.Context, req remote.JournalAp
 	}
 	key := "journal/" + req.Device + ".jsonl"
 	b.objects[key] = append(b.objects[key], req.Data...)
+	b.modClock = b.modClock.Add(time.Millisecond)
+	b.modified[key] = b.modClock
 	return nil
 }
-func (b *qaJournalBackend) GetJournalTail(_ context.Context, key string, offset int64, _ string) (io.ReadCloser, bool, error) {
+func (b *qaJournalBackend) GetJournalTail(_ context.Context, key string, offset int64, prefixSHA string) (io.ReadCloser, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.tailCalls++
@@ -505,7 +533,17 @@ func (b *qaJournalBackend) GetJournalTail(_ context.Context, key string, offset 
 	if offset > int64(len(d)) {
 		return nil, false, errors.New("offset")
 	}
-	return io.NopCloser(bytes.NewReader(d[offset:])), true, nil
+	appended := false
+	if offset == 0 {
+		appended = true
+	} else {
+		sum := sha256.Sum256(d[:offset])
+		appended = hex.EncodeToString(sum[:]) == prefixSHA
+	}
+	if appended {
+		return io.NopCloser(bytes.NewReader(d[offset:])), true, nil
+	}
+	return io.NopCloser(bytes.NewReader(d)), false, nil
 }
 
 func TestQA_RedefinesAppliedDetectsBaseMutation(t *testing.T) {
@@ -527,35 +565,82 @@ func TestQA_RedefinesAppliedDetectsBaseMutation(t *testing.T) {
 		t.Fatal("redefinesApplied failed to detect Base mutation on applied (Device, Seq)")
 	}
 
-	// End-to-end pull check: a same-size journal rewrite on remote must not be
-	// skipped by a size-only gate before redefinesApplied.
-	remoteStore := sharedRemote(t)
+	// End-to-end pull check: a larger journal rewrite must be fetched rather
+	// than skipped by the size gate, then rejected by redefinesApplied when it
+	// mutates Base on an applied (Device, Seq) slot.
+	remoteStore := newQAJournalBackend()
 	victim := newDevice(t, "victim-dev", remoteStore)
 	contentA := "same-size-body-A"
 	contentB := "same-size-body-B"
 	shaA := secfx4Blob(t, remoteStore, contentA)
 	shaB := secfx4Blob(t, remoteStore, contentB)
-	lineA := secfx7Op(t, "peer-same", 1, journal.KindPut, "a.txt", shaA, len(contentA)) + "\n"
-	lineB := secfx7Op(t, "peer-same", 1, journal.KindPut, "b.txt", shaB, len(contentB)) + "\n"
-	if len(lineA) != len(lineB) {
-		t.Fatalf("line lengths differ: %d vs %d", len(lineA), len(lineB))
+	baseRemoteA := secfx4Blob(t, remoteStore, strings.Repeat("base-a", 16))
+	baseRemoteB := secfx4Blob(t, remoteStore, strings.Repeat("base-b", 16))
+	initial := journal.Op{
+		Device: "peer-large", Seq: 1, Lamport: 1, Time: ts,
+		Kind: journal.KindPut, Path: "a.txt", Blob: shaA, Base: baseRemoteA,
+		Size: int64(len(contentA)), Mode: 0o644,
 	}
-	secfx4Journal(t, remoteStore, "peer-same", lineA)
+	initialBytes, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineA := string(initialBytes) + "\n"
+	secfx4Journal(t, remoteStore, "peer-large", lineA)
 	cycle(t, victim)
 	if got := read(t, victim.Folder, "a.txt"); got != contentA {
 		t.Fatalf("victim did not apply initial peer op: %q", got)
 	}
-	secfx4Journal(t, remoteStore, "peer-same", lineB)
-	cycle(t, victim)
-	if _, err := os.Stat(filepath.Join(victim.Folder, "b.txt")); !os.IsNotExist(err) {
-		t.Fatalf("same-size redefined journal op was accepted: err=%v", err)
+	remoteStore.resetPullCounts()
+	mutated := initial
+	mutated.Base = baseRemoteB
+	mutatedBytes, err := json.Marshal(mutated)
+	if err != nil {
+		t.Fatal(err)
 	}
-	storedBefore, err := os.ReadFile(victim.Store.JournalPath("peer-same"))
+	lineB := string(mutatedBytes) + "\n"
+	if len(lineB) != len(lineA) {
+		t.Fatalf("same-size rewrite length changed: old=%d new=%d", len(lineA), len(lineB))
+	}
+	secfx4Journal(t, remoteStore, "peer-large", lineB)
+	cycle(t, victim)
+	if remoteStore.tailCalls != 1 {
+		t.Fatalf("same-size rewrite tail calls = %d, want 1", remoteStore.tailCalls)
+	}
+	if got := read(t, victim.Folder, "a.txt"); got != contentA {
+		t.Fatalf("same-size Base-mutating rewrite was accepted: %q", got)
+	}
+	storedBefore, err := os.ReadFile(victim.Store.JournalPath("peer-large"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(storedBefore) != lineA {
 		t.Fatalf("local peer journal was overwritten by same-size rewrite: %q", string(storedBefore))
+	}
+
+	remoteStore.resetPullCounts()
+	rewritten := lineB +
+		secfx7Op(t, "peer-large", 2, journal.KindPut, "c.txt", shaB, len(contentB)) + "\n"
+	if len(rewritten) <= len(lineA) {
+		t.Fatalf("larger rewrite is not larger: old=%d new=%d", len(lineA), len(rewritten))
+	}
+	secfx4Journal(t, remoteStore, "peer-large", rewritten)
+	cycle(t, victim)
+	if remoteStore.tailCalls != 1 {
+		t.Fatalf("larger rewrite tail calls = %d, want 1", remoteStore.tailCalls)
+	}
+	if got := read(t, victim.Folder, "a.txt"); got != contentA {
+		t.Fatalf("larger Base-mutating rewrite was accepted: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(victim.Folder, "c.txt")); !os.IsNotExist(err) {
+		t.Fatalf("larger rewrite appended op was accepted: err=%v", err)
+	}
+	storedBefore, err = os.ReadFile(victim.Store.JournalPath("peer-large"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(storedBefore) != lineA {
+		t.Fatalf("local peer journal was overwritten by larger rewrite: %q", string(storedBefore))
 	}
 
 	// A peer withdrawing an applied op under a read-only path must not cause a
@@ -583,5 +668,142 @@ func TestQA_RedefinesAppliedDetectsBaseMutation(t *testing.T) {
 		if strings.HasPrefix(op.Path, "ro/") {
 			t.Fatalf("victim re-asserted read-only path into own journal: %+v", op)
 		}
+	}
+}
+func TestQA_PruneLocalBlobsReclaimsPushedHistoryAndPullSkipsUnchanged(t *testing.T) {
+	be := newQAJournalBackend()
+	devA, devB := qaSession(t, "devA", be), qaSession(t, "devB", be)
+
+	for _, content := range []string{"v1", "v2", "v3"} {
+		write(t, devA.Folder, "doc.txt", content)
+		cycle(t, devA)
+	}
+	ops, err := devA.Store.DeviceOps(devA.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 3 {
+		t.Fatalf("devA ops = %d, want 3", len(ops))
+	}
+	v1, v2, v3 := ops[0].Blob, ops[1].Blob, ops[2].Blob
+	st, err := devA.Store.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PushedOps != 3 {
+		t.Fatalf("PushedOps = %d, want 3", st.PushedOps)
+	}
+	write(t, devB.Folder, "peer-seed.txt", "seed")
+	cycle(t, devB)
+	cycle(t, devA)
+	fold, err := devA.Store.ReplayFold()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fold.Target["doc.txt"].Blob; got != v3 {
+		t.Fatalf("live fold blob = %s, want %s", got, v3)
+	}
+	cache, err := devA.Store.LoadCache(devA.mountID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cache["doc.txt"].Blob; got != v3 {
+		t.Fatalf("live cache blob = %s, want %s", got, v3)
+	}
+
+	minAge := time.Minute
+	old := time.Now().Add(-2 * time.Hour)
+	for _, blob := range []string{v1, v2} {
+		if err := os.Chtimes(devA.Store.BlobPath(blob), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, _, err := devA.Store.PruneLocalBlobs(nil, minAge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed < 2 || devA.Store.HasBlob(v1) || devA.Store.HasBlob(v2) || !devA.Store.HasBlob(v3) {
+		t.Fatalf("generic prune removed=%d, v1=%v, v2=%v, v3=%v",
+			removed, devA.Store.HasBlob(v1), devA.Store.HasBlob(v2), devA.Store.HasBlob(v3))
+	}
+	if _, _, err := devA.Store.PruneLocalBlobsForDevice(devA.Device.ID, nil, minAge); err != nil {
+		t.Fatal(err)
+	}
+	if !devA.Store.HasBlob(v3) {
+		t.Fatal("device prune removed the live v3 blob")
+	}
+
+	write(t, devA.Folder, "doc.txt", "v4")
+	devA.Backend = nil
+	cycle(t, devA)
+	devA.Backend = be
+	ops, err = devA.Store.DeviceOps(devA.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v4op := ops[len(ops)-1]
+	if v4op.Blob == "" || v4op.Base != v3 {
+		t.Fatalf("v4 op = %+v, want Base=%s", v4op, v3)
+	}
+	st, err = devA.Store.LoadSync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PushedOps != 3 {
+		t.Fatalf("unpushed v4 changed PushedOps to %d", st.PushedOps)
+	}
+	for _, blob := range []string{v3, v4op.Blob} {
+		if err := os.Chtimes(devA.Store.BlobPath(blob), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, _, err = devA.Store.PruneLocalBlobsForDevice(devA.Device.ID, nil, minAge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !devA.Store.HasBlob(v3) || !devA.Store.HasBlob(v4op.Blob) {
+		t.Fatalf("unpushed prune removed Base/blob: removed=%d, base=%v, blob=%v",
+			removed, devA.Store.HasBlob(v3), devA.Store.HasBlob(v4op.Blob))
+	}
+
+	devA.Backend = be
+	be.resetPullCounts()
+	cycle(t, devA)
+	if be.tailCalls != 0 {
+		t.Fatalf("unchanged peer journal tail calls = %d, want 0", be.tailCalls)
+	}
+
+	write(t, devB.Folder, "peer.txt", "peer")
+	cycle(t, devB)
+	bOps, err := devB.Store.DeviceOps(devB.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var peerBlob string
+	for _, op := range bOps {
+		if op.Path == "peer.txt" && op.Kind == journal.KindPut {
+			peerBlob = op.Blob
+		}
+	}
+	if peerBlob == "" {
+		t.Fatal("devB peer op was not recorded")
+	}
+
+	be.resetPullCounts()
+	cycle(t, devA)
+	if be.tailCalls != 1 {
+		t.Fatalf("grown peer journal tail calls = %d, want 1", be.tailCalls)
+	}
+	for _, blob := range []string{v1, v2, v3} {
+		if be.getCount("blobs/" + blob) != 0 {
+			t.Fatalf("historical devA blob %s was re-fetched %d times", blob, be.getCount("blobs/"+blob))
+		}
+	}
+	info, err := os.Stat(devA.Store.BlobPath(peerBlob))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o400 {
+		t.Fatalf("pulled blob mode = %o, want 0400", info.Mode().Perm())
 	}
 }
