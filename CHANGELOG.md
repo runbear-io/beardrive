@@ -5,6 +5,22 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+## v0.18.6 — 2026-11-10
+
+**Update your devices** for incremental journal append/tail sync, lazy blob
+downloads, Copy-on-Write local blob storage, and automatic local blob garbage
+collection; running daemons switch over the first time the updated `bdrive`
+runs. **Update self-hosted hubs** for `POST /api/p/<id>/store/append`,
+prefix-verified journal tail reads, chunked-file streaming without duplicate
+whole-blob backfill, and net-delta journal quota accounting. Older clients and
+hubs keep syncing through the existing full-journal `PUT`/`GET` fallback; update
+both sides before relying on chunked sync for files larger than 4 MiB.
+
+- **Incremental journal append and prefix-verified tail sync.** Devices push only newly committed journal lines to `POST /api/p/<id>/store/append` (with `prev_size` and `prev_sha256` verification, torn-tail newline repair, strict JSONL and monotonic sequence validation, and conditional storage CAS) and pull only appended bytes via `GET /api/p/<id>/store/object?offset=&prefix_sha256=` (`X-Bdrive-Tail-Offset`), falling back to full-object `PUT`/`GET` against older peers or on prefix mismatch. The S3 backend now implements conditional writes (`If-Match` / `If-None-Match`) alongside GCS and `file://`. (#346)
+- **Lazy blob pulls, Copy-on-Write local storage, and local orphan-blob garbage collection.** Sync cycles download only blobs needed for the current live file tree, concurrent conflict copies, and 3-way merge bases instead of every historical version ever written to the project. On macOS (APFS `clonefile`) and Linux (`FICLONE`), local blob capture and materialization use Copy-on-Write clones with `0400` read-only blob permissions, and the daemon periodically prunes unreferenced local blobs while preserving all blobs referenced by active worktrees, local journals, and state caches. (#346)
+- **Base-aware 3-way merge and chunked-file deduplication on the hub.** Local edits record the prior blob digest in `Op.Base` (`base,omitempty`) so concurrent edits merge against their true common ancestor, with line-boundary-safe merging for `.json` and `.jsonl` files. On the hub, reading a chunked file (`manifests/<sha>`) streams reassembled chunks through a reference-counted spool without writing a second full `blobs/<sha>` copy back to object storage, and quota accounting bills only net journal growth and once per manifest. (#346)
+- **Cross-journal and co-editing concurrency hardening.** Browser writes (`upload`, `restore`, `remove`, `undorun`) serialize journal updates under `rs.upmu` and re-verify cross-journal state and target base conditions (existence, absence, and symlink targets) before committing. Shared journal fetches and chunk reassembly detach from individual request cancellation, and co-editing room shutdown snapshots retain conditional CAS on `ydoc/head/<path>`. (#346)
+
 ## v0.18.5 — 2026-11-09
 
 **Update your devices** for the faster agent hooks; running daemons switch over
