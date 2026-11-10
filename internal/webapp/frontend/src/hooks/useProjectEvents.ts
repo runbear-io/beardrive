@@ -54,6 +54,7 @@ type ChangeEvent = {
   device_name?: string;
   people?: { name: string; path?: string }[];
 };
+
 const historyFromDelta = (ev: ChangeEvent, d: ChangeFileDelta): HistoryEntry => ({
   time: d.time || new Date().toISOString(),
   kind: d.op === "delete" ? "delete" : "edit",
@@ -68,7 +69,6 @@ const historyFromDelta = (ev: ChangeEvent, d: ChangeFileDelta): HistoryEntry => 
   },
   session: ev.agent ? "live" : undefined,
 });
-
 
 export function useProjectEvents(
   apiBase: string,
@@ -108,18 +108,23 @@ export function useProjectEvents(
      Per-path bodies are NOT delayed: an open file updating is the thing a
      reader actually notices, and one body is small. */
     const COALESCE_MS = 2_000;
-    let coalesce: ReturnType<typeof setTimeout> | null = null;
-    const invalidateProject = () => {
-      if (coalesce) return;
-      coalesce = setTimeout(() => {
-        coalesce = null;
-        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
-        qc.invalidateQueries({ queryKey: ["history", apiBase] });
-        // Mounted only on the Insights view, so other pages pay nothing.
+    let coalesce: number | null = null;
+    let historyCoalesce: number | null = null;
+    const invalidateHistory = (includeSince: boolean) => {
+      if (historyCoalesce) return;
+      historyCoalesce = window.setTimeout(() => {
+        historyCoalesce = null;
+        qc.invalidateQueries({
+          queryKey: ["history", apiBase],
+          predicate: includeSince ? undefined : (q) => q.queryKey[2] !== "since",
+        });
+        if (includeSince) {
+          qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
+        }
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
       }, COALESCE_MS);
     };
-    const patchHistoryCaches = (ev: ChangeEvent) => {
+    const patchSinceHistoryCaches = (ev: ChangeEvent) => {
       if (!ev.files?.length) return;
       const additions = ev.files.map((d) => historyFromDelta(ev, d));
       const merge = (key: readonly unknown[], data: { entries: HistoryEntry[] } | undefined, cap: number) => {
@@ -142,7 +147,17 @@ export function useProjectEvents(
         merge(key, data, 200);
       }
     };
-
+    const invalidateProject = () => {
+      if (coalesce) return;
+      coalesce = window.setTimeout(() => {
+        coalesce = null;
+        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        qc.invalidateQueries({ queryKey: ["history", apiBase] });
+        qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
+        // Mounted only on the Insights view, so other pages pay nothing.
+        qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
+      }, COALESCE_MS);
+    };
     // One frame, from the socket this tab owns or from the tab that owns it.
     // Identical either way — which is the point, and why the relay ships the
     // raw `data` string rather than anything it has already interpreted.
@@ -205,8 +220,12 @@ export function useProjectEvents(
       const canPatchTree = ev.type === "change" && !ev.more && changes > 0 && !!ev.files?.length && !!oldTree;
       if (canPatchTree) {
         qc.setQueryData<Node>(["tree", apiBase], (old) => (old ? applyTreeDeltas(old, ev.files!) : old));
-        patchHistoryCaches(ev);
-        qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
+        if (changes === ev.files!.length) {
+          patchSinceHistoryCaches(ev);
+          invalidateHistory(false);
+        } else {
+          invalidateHistory(true);
+        }
       } else {
         invalidateProject();
       }

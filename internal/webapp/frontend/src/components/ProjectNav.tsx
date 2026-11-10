@@ -474,7 +474,7 @@ export function SidebarSearch() {
 
 /* The project's nav as icon-only rail buttons, badges kept. */
 export function ProjectRailNav({ pid, menu }: { pid: string; menu: ProjectMenu }) {
-  const fresh = useActivityCount(pid);
+  const fresh = useActivityCount(menu.active === "home" ? pid : undefined);
   return (
     <>
       {NAV.map(([key, label, icon]) => (
