@@ -61,15 +61,6 @@ type appendCacheValue struct {
 
 var journalAppendCache sync.Map // map[appendCacheKey]appendCacheValue
 
-type journalPrefixCacheKey struct {
-	project string
-	key     string
-	offset  int64
-	sha256  string
-}
-
-var journalPrefixCache sync.Map // map[journalPrefixCacheKey]struct{}
-
 // fileShaKey reports whether a store key is addressed by the FILE's sha256 —
 // blobs/ and manifests/ both are, and both must therefore answer the same
 // question about the same content. chunks/ is not: its key is the chunk's own
@@ -459,59 +450,41 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 	offsetStr, prefixSHA := q.Get("offset"), strings.ToLower(q.Get("prefix_sha256"))
 	offset, perr := strconv.ParseInt(offsetStr, 10, 64)
 	hasOff := offsetStr != "" && prefixSHA != "" && perr == nil && offset > 0
-	tailReady := false
-	if journalKeyRe.MatchString(key) && hasOff && !f.hides() {
-		if _, ok := journalPrefixCache.Load(journalPrefixCacheKey{
-			project: r.PathValue("project"), key: key, offset: offset, sha256: prefixSHA,
-		}); ok {
-			if rg, ok := rs.Backend.(remote.RangeGetter); ok {
-				rc, err = rg.GetRange(r.Context(), key, offset, -1)
-				if err == nil {
-					w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
-					tailReady = true
-				} else if rc != nil {
-					rc.Close()
-				}
-			}
+	switch {
+	case strings.HasPrefix(key, "journal/") && f.hides():
+		// The whole confidentiality claim on the sync wire: a device converges
+		// from the ops it is given, so the ops it may not see never leave here.
+		// Served from the same filter the listing sized, or the client resumes
+		// at an offset that means nothing.
+		data, ferr := s.filteredJournal(r.Context(), rs, remote.Object{Key: key}, f)
+		if ferr != nil {
+			storageErr(w, http.StatusNotFound, "no such object", ferr)
+			return
 		}
-	}
-	if !tailReady {
-		switch {
-		case strings.HasPrefix(key, "journal/") && f.hides():
-			// The whole confidentiality claim on the sync wire: a device converges
-			// from the ops it is given, so the ops it may not see never leave here.
-			// Served from the same filter the listing sized, or the client resumes
-			// at an offset that means nothing.
-			data, ferr := s.filteredJournal(r.Context(), rs, remote.Object{Key: key}, f)
-			if ferr != nil {
-				storageErr(w, http.StatusNotFound, "no such object", ferr)
-				return
-			}
-			rc, err = io.NopCloser(bytes.NewReader(data)), nil
-		default:
-			// blobs/ AND manifests/ are both keyed by the FILE's sha, so both are
-			// gated on the same set. Missing the manifest was a full disclosure of
-			// any hidden file over the chunking threshold: the manifest names its
-			// chunks, and the chunks are the content.
-			//
-			// chunks/ is NOT gated, and cannot be: a chunk's key is its own hash,
-			// never an Op.Blob, so it is not in any visible-sha set and gating it
-			// would make every large file unfetchable for a filtered account. It
-			// is safe because a chunk sha is reachable only through a manifest —
-			// which is gated — and chunks are kept out of the listing above, so
-			// there is nothing to enumerate.
-			if sha, keyed := fileShaKey(key); keyed && !f.visibleSHA(r.Context(), rs, sha) {
-				// Defence in depth: a filtered journal means an honest client
-				// never asks for this. Answering it anyway would make content
-				// addressing the way around a folder rule.
-				http.Error(w, "no such object", http.StatusNotFound)
-				return
-			}
-			if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
-				rc, err = rs.OpenBlob(r.Context(), blob)
-			} else {
-				rc, err = rs.Backend.Get(r.Context(), key)
-			}
+		rc, err = io.NopCloser(bytes.NewReader(data)), nil
+	default:
+		// blobs/ AND manifests/ are both keyed by the FILE's sha, so both are
+		// gated on the same set. Missing the manifest was a full disclosure of
+		// any hidden file over the chunking threshold: the manifest names its
+		// chunks, and the chunks are the content.
+		//
+		// chunks/ is NOT gated, and cannot be: a chunk's key is its own hash,
+		// never an Op.Blob, so it is not in any visible-sha set and gating it
+		// would make every large file unfetchable for a filtered account. It
+		// is safe because a chunk sha is reachable only through a manifest —
+		// which is gated — and chunks are kept out of the listing above, so
+		// there is nothing to enumerate.
+		if sha, keyed := fileShaKey(key); keyed && !f.visibleSHA(r.Context(), rs, sha) {
+			// Defence in depth: a filtered journal means an honest client
+			// never asks for this. Answering it anyway would make content
+			// addressing the way around a folder rule.
+			http.Error(w, "no such object", http.StatusNotFound)
+			return
+		}
+		if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
+			rc, err = rs.OpenBlob(r.Context(), blob)
+		} else {
+			rc, err = rs.Backend.Get(r.Context(), key)
 		}
 	}
 	if err != nil {
@@ -520,7 +493,7 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		storageErr(w, http.StatusNotFound, "no such object", err)
 		return
 	}
-	if journalKeyRe.MatchString(key) && hasOff && !tailReady {
+	if journalKeyRe.MatchString(key) && hasOff {
 		origRC := rc
 		h := sha256.New()
 		n, rerr := io.CopyN(h, origRC, offset)
@@ -530,9 +503,6 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if n == offset && hex.EncodeToString(h.Sum(nil)) == prefixSHA {
-			journalPrefixCache.Store(journalPrefixCacheKey{
-				project: r.PathValue("project"), key: key, offset: offset, sha256: prefixSHA,
-			}, struct{}{})
 			w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
 			rc = origRC
 		} else {
