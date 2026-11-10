@@ -110,15 +110,19 @@ export function useProjectEvents(
     const COALESCE_MS = 2_000;
     let coalesce: number | null = null;
     let historyCoalesce: number | null = null;
+    let historyIncludeSince = false;
     const invalidateHistory = (includeSince: boolean) => {
+      if (includeSince) historyIncludeSince = true;
       if (historyCoalesce) return;
       historyCoalesce = window.setTimeout(() => {
+        const since = historyIncludeSince;
         historyCoalesce = null;
+        historyIncludeSince = false;
         qc.invalidateQueries({
           queryKey: ["history", apiBase],
-          predicate: includeSince ? undefined : (q) => q.queryKey[2] !== "since",
+          predicate: since ? undefined : (q) => q.queryKey[2] !== "since",
         });
-        if (includeSince) {
+        if (since) {
           qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
         }
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
