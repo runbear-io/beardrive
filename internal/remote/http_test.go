@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -323,5 +324,72 @@ func TestHTTPBackend_OnAnnounceRunsWhenTheStreamEnds(t *testing.T) {
 	}
 	if n := heard.Load(); n != 1 {
 		t.Fatalf("OnAnnounce ran %d times by the time the stream closed, want once for its end", n)
+	}
+}
+
+func TestHTTPBackend_VerifiedBlobsSkipRepeatedSignAndExists(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	t.Setenv("BDRIVE_TOKEN", "token")
+	var signCalls, existsCalls atomic.Int32
+	shaOK := strings.Repeat("a", 64)
+	shaBlocked := strings.Repeat("b", 64)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/store/sign"):
+			signCalls.Add(1)
+			var req struct {
+				Key string `json:"key"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Key == "blobs/"+shaBlocked {
+				http.Error(w, "quota exceeded", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mode":"direct","exists":true}`))
+		case strings.HasSuffix(r.URL.Path, "/store/exists"):
+			existsCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"exists":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	b, err := newHTTPBackend(ts.URL + "/p/p-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	ctx := context.Background()
+
+	// Cycle 1: shaOK is confirmed via sign + exists (1 call each), shaBlocked fails with 403.
+	if err := b.Put(ctx, "blobs/"+shaOK, strings.NewReader("hello"), 5); err != nil {
+		t.Fatalf("first Put(shaOK): %v", err)
+	}
+	if err := b.Put(ctx, "blobs/"+shaBlocked, strings.NewReader("world"), 5); err == nil {
+		t.Fatal("expected Put(shaBlocked) to fail with 403")
+	}
+	if gotS, gotE := signCalls.Load(), existsCalls.Load(); gotS != 2 || gotE != 1 {
+		t.Fatalf("cycle 1 sign=%d exists=%d, want sign=2 exists=1", gotS, gotE)
+	}
+
+	// Cycle 2 retry: shaOK is already verified on this backend instance, so neither sign nor exists is called again.
+	if !b.IsVerified("blobs/" + shaOK) {
+		t.Fatal("expected blobs/shaOK to be marked verified after cycle 1")
+	}
+	if b.IsVerified("blobs/" + shaBlocked) {
+		t.Fatal("did not expect failed blobs/shaBlocked to be marked verified")
+	}
+	if err := b.Put(ctx, "blobs/"+shaOK, strings.NewReader("hello"), 5); err != nil {
+		t.Fatalf("second Put(shaOK): %v", err)
+	}
+	if ok, err := b.Exists(ctx, "blobs/"+shaOK); err != nil || !ok {
+		t.Fatalf("Exists(shaOK) = %v, %v", ok, err)
+	}
+	if gotS, gotE := signCalls.Load(), existsCalls.Load(); gotS != 2 || gotE != 1 {
+		t.Fatalf("retry cycle made extra network calls for verified blob: sign=%d exists=%d, want 2 and 1", gotS, gotE)
 	}
 }

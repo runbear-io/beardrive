@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -63,17 +64,45 @@ var sharedHTTPTransport = func() *http.Transport {
 // object, exists, sign). Key layout and semantics are identical to any other
 // backend, so the whole sync machinery works unchanged.
 type httpBackend struct {
-	base     string // scheme://host[:port]
-	project  string
-	token    string // device token from `bdrive login`; empty on open servers
-	device   config.Device
-	hc       *http.Client
-	noAppend atomic.Bool
+	base    string // scheme://host[:port]
+	project string
+	token   string // device token from `bdrive login`; empty on open servers
+	device  config.Device
+	hc      *http.Client
+	// verifiedBlobs remembers immutable content-addressed objects confirmed
+	// present by this backend instance. It is deliberately scoped to the
+	// server/project represented by this client, so a new backend cannot
+	// inherit a stale presence claim from another remote.
+	verifiedBlobs sync.Map // map[string]struct{}
+	noAppend      atomic.Bool
 	// lastFrame is when the open change stream last delivered anything,
 	// keepalives included (unix nanoseconds, zero when none is open).
 	lastFrame atomic.Int64
 	// onAnnounce is called for each announcement read; see OnAnnounce.
 	onAnnounce atomic.Pointer[func()]
+}
+
+// isContentAddressedKey identifies immutable objects whose presence can be
+// remembered safely for the life of this backend.
+func isContentAddressedKey(key string) bool {
+	return strings.HasPrefix(key, "blobs/") || strings.HasPrefix(key, "chunks/")
+}
+
+// IsVerified reports whether this backend has already confirmed an immutable
+// content-addressed object at the hub. The syncer uses this to avoid opening a
+// local blob before a cached remote-presence answer short-circuits Put.
+func (b *httpBackend) IsVerified(key string) bool {
+	if !isContentAddressedKey(key) {
+		return false
+	}
+	_, ok := b.verifiedBlobs.Load(key)
+	return ok
+}
+
+func (b *httpBackend) markVerified(key string) {
+	if isContentAddressedKey(key) {
+		b.verifiedBlobs.Store(key, struct{}{})
+	}
 }
 
 // The id is whatever the hub minted (a UUID today, `p-xxxxxxxx` on older
@@ -422,6 +451,9 @@ func (b *httpBackend) AppendJournal(ctx context.Context, req JournalAppendReques
 }
 
 func (b *httpBackend) Exists(ctx context.Context, key string) (bool, error) {
+	if b.IsVerified(key) {
+		return true, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		b.endpoint("exists", url.Values{"key": {key}}), nil)
 	if err != nil {
@@ -441,6 +473,9 @@ func (b *httpBackend) Exists(ctx context.Context, key string) (bool, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBytes)).Decode(&out); err != nil {
 		return false, err
 	}
+	if out.Exists {
+		b.markVerified(key)
+	}
 	return out.Exists, nil
 }
 
@@ -448,6 +483,9 @@ func (b *httpBackend) Exists(ctx context.Context, key string) (bool, error) {
 // presigned URL and the bytes bypass the server entirely; "server" relays
 // them through it. The reader is only consumed once the destination is known.
 func (b *httpBackend) Put(ctx context.Context, key string, r io.Reader, size int64) error {
+	if b.IsVerified(key) {
+		return nil
+	}
 	plan, err := b.sign(ctx, key, size)
 	if err != nil {
 		return err
@@ -467,12 +505,20 @@ func (b *httpBackend) Put(ctx context.Context, key string, r io.Reader, size int
 			}
 		}
 		if plan.URL != "" && directTargetOK(b.base, plan.URL) {
-			return b.putDirect(ctx, plan, r, size)
+			if err := b.putDirect(ctx, plan, r, size); err != nil {
+				return err
+			}
+			b.markVerified(key)
+			return nil
 		}
 		// No usable destination: relay through the hub, which already holds
 		// this device's credential and is the party it chose to trust.
 	}
-	return b.putViaServer(ctx, plan, key, r, size)
+	if err := b.putViaServer(ctx, plan, key, r, size); err != nil {
+		return err
+	}
+	b.markVerified(key)
+	return nil
 }
 
 // directTargetOK decides whether this device will hand a file's bytes to the

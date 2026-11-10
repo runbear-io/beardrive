@@ -10,6 +10,8 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -57,6 +59,128 @@ func TestPushProgress(t *testing.T) {
 	}
 	if toBytes == 0 {
 		t.Fatal("progress ToBytes should be > 0")
+	}
+}
+
+// TestPushCachesVerifiedHTTPBlobsAfterPartialFailure covers the retry shape
+// where most immutable blobs are already present but a later sign is refused.
+// The second attempt must not repeat either sign or exists for the confirmed
+// blobs, even though the failed push leaves the journal cursor unchanged.
+func TestPushCachesVerifiedHTTPBlobsAfterPartialFailure(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	const n = 10
+	ctx := context.Background()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "volume"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := make([]journal.Op, 0, n)
+	existing := make(map[string]bool, n-1)
+	var failedKey string
+	for i := range n {
+		sum, size, err := st.PutBlobBytes([]byte(fmt.Sprintf("cache-test-blob-%02d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := "blobs/" + sum
+		if i == n-1 {
+			failedKey = key
+		} else {
+			existing[key] = true
+		}
+		ops = append(ops, journal.Op{
+			Seq: int64(i + 1), Lamport: int64(i + 1), Device: "deva",
+			Kind: journal.KindPut, Path: fmt.Sprintf("file-%02d", i),
+			Blob: sum, Size: size, Time: time.Now().UTC(),
+		})
+	}
+
+	var mu sync.Mutex
+	signs := make(map[string]int, n)
+	exists := make(map[string]int, n)
+	var existingSigns, existingExists int
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	maybeReady := func() {
+		if existingSigns == n-1 && existingExists == n-1 {
+			readyOnce.Do(func() { close(ready) })
+		}
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/store/sign"):
+			var in struct {
+				Key string `json:"key"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			signs[in.Key]++
+			if existing[in.Key] {
+				existingSigns++
+				maybeReady()
+			}
+			mu.Unlock()
+			if in.Key == failedKey {
+				<-ready
+				http.Error(w, "quota exceeded", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"mode":"direct","exists":true}`)
+		case strings.HasSuffix(r.URL.Path, "/store/exists"):
+			key := r.URL.Query().Get("key")
+			mu.Lock()
+			exists[key]++
+			if existing[key] {
+				existingExists++
+				maybeReady()
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"exists":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	be, err := remote.Open(ctx, ts.URL+"/p/p-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.Close()
+	s := &Session{Store: st, Device: config.Device{ID: "deva"}, Backend: be}
+	state := store.SyncState{Device: "deva"}
+
+	if err := s.push(ctx, ops, &state); err == nil {
+		t.Fatal("first push unexpectedly succeeded despite quota refusal")
+	}
+	if state.PushedOps != 0 {
+		t.Fatalf("failed push advanced PushedOps to %d", state.PushedOps)
+	}
+	if err := s.push(ctx, ops, &state); err == nil {
+		t.Fatal("second push unexpectedly succeeded despite quota refusal")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for key := range existing {
+		if got := signs[key]; got != 1 {
+			t.Fatalf("sign requests for verified %s = %d, want 1", key, got)
+		}
+		if got := exists[key]; got != 1 {
+			t.Fatalf("exists requests for verified %s = %d, want 1", key, got)
+		}
+	}
+	if got := signs[failedKey]; got != 2 {
+		t.Fatalf("sign requests for failed %s = %d, want 2", failedKey, got)
+	}
+	if got := exists[failedKey]; got != 0 {
+		t.Fatalf("exists requests for failed %s = %d, want 0", failedKey, got)
 	}
 }
 
