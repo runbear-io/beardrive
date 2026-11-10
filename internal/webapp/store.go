@@ -1244,23 +1244,28 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 			writeJSON(w, map[string]any{"ok": true})
 			return
 		}
+		var heldOps map[int64]journal.Op
+		var storedOps []journal.Op
 		if len(existing) > 0 {
-			if storedOps, perr := journal.Parse(existing); perr == nil {
-				ok, maxSeq, held := journalKeepsOps(storedOps, ops)
+			if parsed, perr := journal.Parse(existing); perr == nil {
+				var ok bool
+				ok, storedMax, heldOps = journalKeepsOps(parsed, ops)
 				if !ok {
 					http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
 					return
 				}
-				if !s.opsWithinScope(w, r, ops, held) {
-					return
-				}
-				if !storedKeepsReplayIdentity(storedOps, ops) {
-					http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
-					return
-				}
-				storedMax = maxSeq
+				storedOps = parsed
+			} else {
+				log.Printf("beardrive: %s is not parseable, its ops cannot be protected from a rewrite: %v", key, perr)
 			}
 			billed = max(int64(0), size-int64(len(existing)))
+		}
+		if !s.opsWithinScope(w, r, ops, heldOps) {
+			return
+		}
+		if !storedKeepsReplayIdentity(storedOps, ops) {
+			http.Error(w, "a journal is append-only; this body drops ops the hub already holds", http.StatusConflict)
+			return
 		}
 		if _, err := cp.PutIf(r.Context(), key, bytes.NewReader(uploaded), int64(len(uploaded)), ver); err != nil {
 			if errors.Is(err, remote.ErrVersionMismatch) {
