@@ -78,7 +78,6 @@ type httpBackend struct {
 	verifiedBlobs map[string]struct{}
 	verifiedOrder []string
 	noAppend      atomic.Bool
-	hadJournals   atomic.Bool
 	// lastFrame is when the open change stream last delivered anything,
 	// keepalives included (unix nanoseconds, zero when none is open).
 	lastFrame atomic.Int64
@@ -126,22 +125,6 @@ func (b *httpBackend) markVerified(key string) {
 	}
 	b.verifiedBlobs[key] = struct{}{}
 	b.verifiedOrder = append(b.verifiedOrder, key)
-}
-
-func (b *httpBackend) unmarkVerified(key string) {
-	if !isContentAddressedKey(key) {
-		return
-	}
-	b.verifiedMu.Lock()
-	defer b.verifiedMu.Unlock()
-	delete(b.verifiedBlobs, key)
-}
-
-func (b *httpBackend) clearVerified() {
-	b.verifiedMu.Lock()
-	defer b.verifiedMu.Unlock()
-	clear(b.verifiedBlobs)
-	b.verifiedOrder = b.verifiedOrder[:0]
 }
 
 // The id is whatever the hub minted (a UUID today, `p-xxxxxxxx` on older
@@ -379,13 +362,6 @@ func (b *httpBackend) List(ctx context.Context, prefix string) ([]Object, error)
 		}
 		kept = append(kept, o)
 	}
-	if prefix == "journal/" {
-		if len(kept) > 0 {
-			b.hadJournals.Store(true)
-		} else if b.hadJournals.Swap(false) {
-			b.clearVerified()
-		}
-	}
 	return kept, nil
 }
 
@@ -416,9 +392,6 @@ func (b *httpBackend) Get(ctx context.Context, key string) (io.ReadCloser, error
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusNotFound {
-			b.unmarkVerified(key)
-		}
 		defer resp.Body.Close()
 		return nil, httpError(resp)
 	}

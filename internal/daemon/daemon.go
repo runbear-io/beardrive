@@ -2421,6 +2421,10 @@ func runVolumeWorker(ctx context.Context, volDir, expectedRemote string, scanInt
 			lastRemote = time.Now()
 		case res.Offline:
 			logger.Printf("offline, will retry: %v", res.OfflineErr)
+			if be != nil {
+				be.Close()
+				be = nil
+			}
 			stopWatch() // its connection is to the host we just failed to reach
 			lastRemote = time.Now()
 		default:
