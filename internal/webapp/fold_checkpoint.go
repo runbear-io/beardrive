@@ -267,28 +267,40 @@ func (r *RemoteSource) scheduleFoldCheckpoint(_ context.Context, fp string, keep
 	}()
 }
 
-func sameCheckpointJournals(cp map[string]ckptJournalMeta, keep []remote.Object) (bool, bool) {
-	current := make(map[string]remote.Object, len(keep))
+func sameCheckpointJournals(cp map[string]ckptJournalMeta, keep []remote.Object) bool {
+	if len(keep) != len(cp) {
+		return false
+	}
 	for _, o := range keep {
-		current[o.Key] = o
-	}
-	if len(current) != len(cp) {
-		return false, false
-	}
-	grown := false
-	for key, old := range cp {
-		o, ok := current[key]
-		if !ok || o.Size < old.Size {
-			return false, false
-		}
-		if o.Size > old.Size {
-			grown = true
-		}
-		if o.Size == old.Size && !o.Modified.Equal(old.ModTime) {
-			return false, false
+		old, ok := cp[o.Key]
+		if !ok || o.Size != old.Size || old.PrefixSHA256 == "" || (!o.Modified.IsZero() && !old.ModTime.IsZero() && !o.Modified.Equal(old.ModTime)) {
+			return false
 		}
 	}
-	return true, grown
+	return true
+}
+
+func (r *RemoteSource) verifyJournalSHA256(ctx context.Context, o remote.Object, wantHex string) bool {
+	if wantHex == "" {
+		return false
+	}
+	r.jmu.Lock()
+	c, ok := r.jcache[o.Key]
+	r.jmu.Unlock()
+	if ok && c.size == o.Size && !o.Modified.IsZero() && c.mod.Equal(o.Modified) {
+		return hex.EncodeToString(c.rawPrefixHash[:]) == wantHex
+	}
+	rc, err := r.Backend.Get(ctx, o.Key)
+	if err != nil {
+		return false
+	}
+	h := sha256.New()
+	n, copyErr := io.Copy(h, io.LimitReader(rc, o.Size+1))
+	closeErr := rc.Close()
+	if copyErr != nil || closeErr != nil || n != o.Size {
+		return false
+	}
+	return hex.EncodeToString(h.Sum(nil)) == wantHex
 }
 
 func (r *RemoteSource) restoreFoldCheckpoint(ctx context.Context, keep []remote.Object, fp string) (map[string]FileInfo, map[string]winOp, moveIndex, bool) {
@@ -312,57 +324,17 @@ func (r *RemoteSource) restoreFoldCheckpoint(ctx context.Context, keep []remote.
 	if err != nil {
 		return nil, nil, nil, false
 	}
-	ok, grown := sameCheckpointJournals(cp.Journals, keep)
-	if !ok {
+	if !sameCheckpointJournals(cp.Journals, keep) {
 		return nil, nil, nil, false
 	}
-	files, tombs, moves := cloneFiles(cp.Files), cloneTombstones(cp.Tombstones), cloneMoves(cp.Moves)
-	if grown {
-		for _, o := range keep {
-			old := cp.Journals[o.Key]
-			if o.Size == old.Size || old.PrefixSHA256 == "" || old.Size < 0 || old.Size > o.Size {
-				continue
-			}
-			rc, err := r.Backend.Get(ctx, o.Key)
-			if err != nil {
-				return nil, nil, nil, false
-			}
-			raw, err := io.ReadAll(rc)
-			rc.Close()
-			if err != nil || int64(len(raw)) != o.Size {
-				return nil, nil, nil, false
-			}
-			h := sha256.Sum256(raw[:old.Size])
-			if hex.EncodeToString(h[:]) != old.PrefixSHA256 {
-				return nil, nil, nil, false
-			}
-			tail, err := journal.Parse(raw[old.Size:])
-			if err != nil {
-				return nil, nil, nil, false
-			}
-			for _, op := range tail {
-				if op.Kind == journal.KindDelete {
-					return nil, nil, nil, false
-				}
-				if op.Kind == journal.KindPut {
-					if _, ok := files[op.Path]; !ok || !applyFoldOp(files, tombs, op) {
-						return nil, nil, nil, false
-					}
-				}
-			}
-		}
-	}
-	updatedMeta := cloneJournalMetas(cp.Journals)
-	r.jmu.Lock()
 	for _, o := range keep {
-		if c, ok := r.jcache[o.Key]; ok {
-			updatedMeta[o.Key] = ckptJournalMeta{
-				Size: o.Size, ModTime: o.Modified, Ops: len(c.ops),
-				PrefixSHA256: hex.EncodeToString(c.rawPrefixHash[:]),
-			}
+		old := cp.Journals[o.Key]
+		if !r.verifyJournalSHA256(ctx, o, old.PrefixSHA256) {
+			return nil, nil, nil, false
 		}
 	}
-	r.jmu.Unlock()
+	files, tombs, moves := cloneFiles(cp.Files), cloneTombstones(cp.Tombstones), cloneMoves(cp.Moves)
+	updatedMeta := cloneJournalMetas(cp.Journals)
 	r.foldMu.Lock()
 	r.foldFP, r.foldFiles, r.foldTombstones, r.foldMoves, r.foldJournals = fp, files, tombs, moves, updatedMeta
 	r.foldMu.Unlock()
@@ -397,7 +369,8 @@ func (r *RemoteSource) tryIncrementalFold(ctx context.Context, keep []remote.Obj
 	counts := make(map[string]int, len(keep))
 	for _, o := range keep {
 		c, ok := r.jcache[o.Key]
-		if !ok || c.size != prevMeta[o.Key].Size || !c.mod.Equal(prevMeta[o.Key].ModTime) {
+		if !ok || c.size != prevMeta[o.Key].Size || !c.mod.Equal(prevMeta[o.Key].ModTime) ||
+			(prevMeta[o.Key].PrefixSHA256 != "" && hex.EncodeToString(c.rawPrefixHash[:]) != prevMeta[o.Key].PrefixSHA256) {
 			r.jmu.Unlock()
 			return nil, nil, nil, false
 		}
@@ -419,6 +392,9 @@ func (r *RemoteSource) tryIncrementalFold(ctx context.Context, keep []remote.Obj
 				return nil, nil, nil, false
 			}
 			if op.Kind == journal.KindPut {
+				if _, hadTomb := tombs[op.Path]; hadTomb {
+					return nil, nil, nil, false
+				}
 				if _, ok := files[op.Path]; !ok || !applyFoldOp(files, tombs, op) {
 					return nil, nil, nil, false
 				}
