@@ -330,7 +330,7 @@ func (s *Store) PruneLocalBlobsForDevice(ownDevice string, extraKeep map[string]
 		keep[fold.IgnoreWinner.Blob] = true
 	}
 	st, err := s.LoadSync()
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return 0, 0, err
 	}
 	if ownDevice == "" && st.Device != "" {

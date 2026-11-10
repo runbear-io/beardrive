@@ -1632,7 +1632,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		if fi, err := os.Stat(lp); err == nil {
 			localSize, isNew = fi.Size(), false
 		}
-		if o.Size <= localSize && localSize > 0 {
+		if s.Store.PeerRemoteUnchanged(dev, localSize, o.Size, o.Modified) {
 			continue
 		}
 		if isNew {
@@ -1660,11 +1660,13 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 						}
 						if appended {
 							if len(fetched) == 0 {
+								s.Store.RecordPeerRemoteMod(dev, localSize, o.Modified)
 								continue
 							}
 							if endsNL {
 								fresh, perr := journal.Parse(fetched)
 								if perr == nil && s.Store.AppendValidatedPeerTail(dev, prevFi, localSize, fetched, fresh) {
+									s.Store.RecordPeerRemoteMod(dev, localSize+int64(len(fetched)), o.Modified)
 									newOps = append(newOps, fresh...)
 									continue
 								}
@@ -1711,6 +1713,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		// the rewritten case is only ever slow, never divergent.
 		// The exact local bytes are retained above for byte-prefix validation.
 		if bytes.Equal(local, data) {
+			s.Store.RecordPeerRemoteMod(dev, int64(len(data)), o.Modified)
 			continue
 		}
 		if len(local) > 0 && local[len(local)-1] == '\n' && bytes.HasPrefix(data, local) {
@@ -1725,6 +1728,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 				} else {
 					s.Store.InvalidateJournal(dev)
 				}
+				s.Store.RecordPeerRemoteMod(dev, int64(len(data)), o.Modified)
 				newOps = append(newOps, fresh...)
 				continue
 			}
@@ -1782,6 +1786,7 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 			return newOps, gone, err
 		}
 		s.Store.InvalidateJournal(dev)
+		s.Store.RecordPeerRemoteMod(dev, int64(len(data)), o.Modified)
 		gone = append(gone, withdrawn(all, applied)...)
 		newOps = append(newOps, fresh...)
 	}

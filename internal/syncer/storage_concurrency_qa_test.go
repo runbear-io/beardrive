@@ -442,13 +442,20 @@ func TestQA_V2JournalAppendAndTailPullWithFallback(t *testing.T) {
 type qaJournalBackend struct {
 	mu                                      sync.Mutex
 	objects                                 map[string][]byte
+	modified                                map[string]time.Time
+	modClock                                time.Time
 	appendCalls, tailCalls, putJournalCalls int
 	getCalls                                map[string]int
 	unsupported                             bool
 }
 
 func newQAJournalBackend() *qaJournalBackend {
-	return &qaJournalBackend{objects: map[string][]byte{}, getCalls: map[string]int{}}
+	return &qaJournalBackend{
+		objects:  map[string][]byte{},
+		modified: map[string]time.Time{},
+		modClock: time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC),
+		getCalls: map[string]int{},
+	}
 }
 func (b *qaJournalBackend) Put(_ context.Context, key string, r io.Reader, _ int64) error {
 	data, err := io.ReadAll(r)
@@ -458,6 +465,8 @@ func (b *qaJournalBackend) Put(_ context.Context, key string, r io.Reader, _ int
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.objects[key] = append([]byte(nil), data...)
+	b.modClock = b.modClock.Add(time.Millisecond)
+	b.modified[key] = b.modClock
 	if strings.HasPrefix(key, "journal/") {
 		b.putJournalCalls++
 	}
@@ -490,7 +499,7 @@ func (b *qaJournalBackend) List(_ context.Context, prefix string) ([]remote.Obje
 	var out []remote.Object
 	for k, v := range b.objects {
 		if strings.HasPrefix(k, prefix) {
-			out = append(out, remote.Object{Key: k, Size: int64(len(v))})
+			out = append(out, remote.Object{Key: k, Size: int64(len(v)), Modified: b.modified[k]})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
@@ -512,6 +521,8 @@ func (b *qaJournalBackend) AppendJournal(_ context.Context, req remote.JournalAp
 	}
 	key := "journal/" + req.Device + ".jsonl"
 	b.objects[key] = append(b.objects[key], req.Data...)
+	b.modClock = b.modClock.Add(time.Millisecond)
+	b.modified[key] = b.modClock
 	return nil
 }
 func (b *qaJournalBackend) GetJournalTail(_ context.Context, key string, offset int64, prefixSHA string) (io.ReadCloser, bool, error) {
@@ -587,7 +598,28 @@ func TestQA_RedefinesAppliedDetectsBaseMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rewritten := string(mutatedBytes) + "\n" +
+	lineB := string(mutatedBytes) + "\n"
+	if len(lineB) != len(lineA) {
+		t.Fatalf("same-size rewrite length changed: old=%d new=%d", len(lineA), len(lineB))
+	}
+	secfx4Journal(t, remoteStore, "peer-large", lineB)
+	cycle(t, victim)
+	if remoteStore.tailCalls != 1 {
+		t.Fatalf("same-size rewrite tail calls = %d, want 1", remoteStore.tailCalls)
+	}
+	if got := read(t, victim.Folder, "a.txt"); got != contentA {
+		t.Fatalf("same-size Base-mutating rewrite was accepted: %q", got)
+	}
+	storedBefore, err := os.ReadFile(victim.Store.JournalPath("peer-large"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(storedBefore) != lineA {
+		t.Fatalf("local peer journal was overwritten by same-size rewrite: %q", string(storedBefore))
+	}
+
+	remoteStore.resetPullCounts()
+	rewritten := lineB +
 		secfx7Op(t, "peer-large", 2, journal.KindPut, "c.txt", shaB, len(contentB)) + "\n"
 	if len(rewritten) <= len(lineA) {
 		t.Fatalf("larger rewrite is not larger: old=%d new=%d", len(lineA), len(rewritten))
@@ -603,7 +635,7 @@ func TestQA_RedefinesAppliedDetectsBaseMutation(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(victim.Folder, "c.txt")); !os.IsNotExist(err) {
 		t.Fatalf("larger rewrite appended op was accepted: err=%v", err)
 	}
-	storedBefore, err := os.ReadFile(victim.Store.JournalPath("peer-large"))
+	storedBefore, err = os.ReadFile(victim.Store.JournalPath("peer-large"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -106,6 +106,7 @@ type deviceFold struct {
 	Winners         map[string]compactWinner
 	DirtySidecar    bool
 	VerifiedInCycle bool
+	RemoteModNS     int64
 	gen             uint64
 }
 
@@ -254,13 +255,14 @@ type foldSidecar struct {
 	MaxIgnorePut    journal.Op
 	Checkpoints     []opCheckpoint
 	Winners         map[string]compactWinner
+	RemoteModNS     int64
 }
 
 func sidecarFrom(f *deviceFold) foldSidecar {
-	return foldSidecar{3, encodeFileID(f.ID), f.ReadAtNS, f.Racy, f.TailCheck, f.TailCheckLen, f.ContentSHA256, f.HashState, f.OpCount, f.MaxSeq, f.MonotonicDevice, f.MaxValidLamport, f.HasIgnorePut, f.MaxIgnorePut, f.Checkpoints, f.Winners}
+	return foldSidecar{4, encodeFileID(f.ID), f.ReadAtNS, f.Racy, f.TailCheck, f.TailCheckLen, f.ContentSHA256, f.HashState, f.OpCount, f.MaxSeq, f.MonotonicDevice, f.MaxValidLamport, f.HasIgnorePut, f.MaxIgnorePut, f.Checkpoints, f.Winners, f.RemoteModNS}
 }
 func (s foldSidecar) fold() *deviceFold {
-	return &deviceFold{ID: decodeFileID(s.ID), ReadAtNS: s.ReadAtNS, Racy: s.Racy, TailCheck: s.TailCheck, TailCheckLen: s.TailCheckLen, ContentSHA256: s.ContentSHA256, HashState: s.HashState, OpCount: s.OpCount, MaxSeq: s.MaxSeq, MonotonicDevice: s.MonotonicDevice, MaxValidLamport: s.MaxValidLamport, HasIgnorePut: s.HasIgnorePut, MaxIgnorePut: s.MaxIgnorePut, Checkpoints: s.Checkpoints, Winners: s.Winners}
+	return &deviceFold{ID: decodeFileID(s.ID), ReadAtNS: s.ReadAtNS, Racy: s.Racy, TailCheck: s.TailCheck, TailCheckLen: s.TailCheckLen, ContentSHA256: s.ContentSHA256, HashState: s.HashState, OpCount: s.OpCount, MaxSeq: s.MaxSeq, MonotonicDevice: s.MonotonicDevice, MaxValidLamport: s.MaxValidLamport, HasIgnorePut: s.HasIgnorePut, MaxIgnorePut: s.MaxIgnorePut, Checkpoints: s.Checkpoints, Winners: s.Winners, RemoteModNS: s.RemoteModNS}
 }
 
 func hashFile(f *os.File) ([32]byte, error) {
@@ -340,7 +342,7 @@ func (s *Store) getOrLoadDeviceFold(dev string) (*deviceFold, error) {
 					defer func() { _ = recover() }()
 					return gob.NewDecoder(bytes.NewReader(raw)).Decode(&sc) == nil
 				}()
-				if valid && sc.Version == 3 && sc.ID.Ino == id.ino && sc.ID.Size == id.size && sc.ID.MTimeNS == id.mtimeNS && sc.TailCheckLen == n && bytes.Equal(sc.TailCheck[:n], tail[:n]) && len(sc.Winners) <= maxCachedWinnersTotal {
+				if valid && (sc.Version == 3 || sc.Version == 4) && sc.ID.Ino == id.ino && sc.ID.Size == id.size && sc.ID.MTimeNS == id.mtimeNS && sc.TailCheckLen == n && bytes.Equal(sc.TailCheck[:n], tail[:n]) && len(sc.Winners) <= maxCachedWinnersTotal {
 					e := sc.fold()
 					if sc.ReadAtNS-id.mtimeNS >= int64(2*time.Second) {
 						s.mu.Lock()
@@ -768,6 +770,45 @@ func (s *Store) JournalPrefixStat(device string) (size int64, shaHex string, end
 		return 0, "", false, false
 	}
 	return id.size, hex.EncodeToString(h.Sum(nil)), last[0] == '\n', true
+}
+
+// PeerRemoteUnchanged reports whether device's local journal already validated
+// against the exact remote (size, modified) reported by a store listing.
+// It never skips a shrinking object (remoteSize < localSize) or an object whose
+// remote modification timestamp changed or has not yet been validated.
+func (s *Store) PeerRemoteUnchanged(device string, localSize, remoteSize int64, remoteMod time.Time) bool {
+	if localSize <= 0 || remoteSize != localSize || remoteMod.IsZero() {
+		return false
+	}
+	id, err := statFileID(s.JournalPath(device))
+	if err != nil || id.size != localSize {
+		return false
+	}
+	entry, err := s.getOrLoadDeviceFold(device)
+	if err != nil || entry == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return entry.ID == id && entry.RemoteModNS != 0 && entry.RemoteModNS == remoteMod.UnixNano()
+}
+
+// RecordPeerRemoteMod records the remote Modified timestamp for device's
+// journal after its prefix or full content at localSize has been validated.
+func (s *Store) RecordPeerRemoteMod(device string, localSize int64, remoteMod time.Time) {
+	if localSize <= 0 || remoteMod.IsZero() {
+		return
+	}
+	entry, err := s.getOrLoadDeviceFold(device)
+	if err != nil || entry == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry.ID.size == localSize && entry.RemoteModNS != remoteMod.UnixNano() {
+		entry.RemoteModNS = remoteMod.UnixNano()
+		entry.DirtySidecar = true
+	}
 }
 
 func (s *Store) AppendValidatedPeerTail(device string, prevStat os.FileInfo, localSize int64, tailData []byte, fresh []journal.Op) bool {
