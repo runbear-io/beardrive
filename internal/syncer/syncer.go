@@ -1576,7 +1576,6 @@ func isTransientOrServerTailErr(err error) bool {
 	return err != nil && strings.HasPrefix(err.Error(), "server: ")
 }
 
-
 // pull fetches journals that grew on the remote and any blobs we are missing
 // for the new ops. It returns the ops we had not seen before, and any op a
 // peer withdrew from a journal we had already applied (see withdrawn).
@@ -2794,6 +2793,13 @@ func (s *Session) push(ctx context.Context, myOps []journal.Op, st *store.SyncSt
 				}
 				atomic.AddInt64(&done, 1)
 				atomic.AddInt64(&bytesDone, n)
+				report()
+				return nil
+			}
+			key := "blobs/" + j.blob
+			if v, ok := s.Backend.(interface{ IsVerified(string) bool }); ok && v.IsVerified(key) {
+				atomic.AddInt64(&done, 1)
+				atomic.AddInt64(&bytesDone, j.size)
 				report()
 				return nil
 			}
