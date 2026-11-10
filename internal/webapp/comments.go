@@ -726,6 +726,10 @@ func (s *Server) handleCommentList(v *volume, w http.ResponseWriter, r *http.Req
 		commentsErr(w, err)
 		return
 	}
+	if len(threads) == 0 {
+		writeJSON(w, map[string]any{"comments": []*CommentThread{}})
+		return
+	}
 	snap, err := v.snapshot(r.Context())
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)

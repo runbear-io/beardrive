@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	// Pure-Go drivers only, so static (CGO-free) builds keep working.
@@ -40,6 +41,10 @@ type sqlMetaStore struct {
 	sessions *sqlSessionReadRepo
 	pending  *sqlPendingRepo
 	apps     *sqlAppRepo
+
+	versionsMu sync.Mutex
+	versionsAt time.Time
+	versions   map[string]string
 }
 
 // pgMaxOpenConns bounds this store's share of a Postgres server's connection
@@ -214,7 +219,14 @@ func (s *sqlMetaStore) inTx(reg string, fn func(*sql.Tx) error) error {
 		ON CONFLICT(name) DO UPDATE SET version = meta_version.version + 1`), reg); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.versionsMu.Lock()
+	s.versions = nil
+	s.versionsAt = time.Time{}
+	s.versionsMu.Unlock()
+	return nil
 }
 
 // regWriter is one registry's write handle: sqlMetaStore.exec plus that
@@ -238,14 +250,46 @@ func (w regWriter) exec(query string, args ...any) error {
 // no row for it, which is version zero — correct, since no write has happened
 // through a binary that counts.
 func (s *sqlMetaStore) version(reg string) (string, error) {
-	var v int64
-	switch err := s.db.QueryRow(s.q(`SELECT version FROM meta_version WHERE name = ?`), reg).Scan(&v); {
-	case err == sql.ErrNoRows:
-		return "0", nil
-	case err != nil:
+	const versionCacheWindow = 2 * time.Millisecond
+	now := time.Now()
+	s.versionsMu.Lock()
+	if s.versions != nil && now.Sub(s.versionsAt) < versionCacheWindow {
+		v := s.versions[reg]
+		s.versionsMu.Unlock()
+		if v == "" {
+			return "0", nil
+		}
+		return v, nil
+	}
+	s.versionsMu.Unlock()
+
+	rows, err := s.db.Query(s.q(`SELECT name, version FROM meta_version`))
+	if err != nil {
 		return "", err
 	}
-	return strconv.FormatInt(v, 10), nil
+	versions := make(map[string]string)
+	for rows.Next() {
+		var name string
+		var version int64
+		if err := rows.Scan(&name, &version); err != nil {
+			rows.Close()
+			return "", err
+		}
+		versions[name] = strconv.FormatInt(version, 10)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	rows.Close()
+	s.versionsMu.Lock()
+	s.versions, s.versionsAt = versions, now
+	v := versions[reg]
+	s.versionsMu.Unlock()
+	if v == "" {
+		return "0", nil
+	}
+	return v, nil
 }
 
 // tenc / tdec store times as RFC3339 text (empty string for the zero time),

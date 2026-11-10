@@ -205,11 +205,26 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 	if path != "" {
 		chain = chainSegments(idx.moveIndex(), path)
 	}
+	var cur journal.Op
+	haveCur := false
+	if raw := q.Get("cursor"); raw != "" {
+		cur, err = decodeCursor(raw)
+		if err != nil {
+			http.Error(w, "invalid cursor", http.StatusBadRequest)
+			return
+		}
+		haveCur = true
+	}
 	// Resolved once, not per op: history walks every op in the project.
 	vis := s.visibility(r)
-	matched := make([]timed, 0, len(all))
-	for i, sop := range all {
+	matched := make([]timed, 0, min(n+1, 256))
+	for _, rawIndex := range idx.byTime {
+		i := int(rawIndex)
+		sop := all[i]
 		op := sop.Op
+		if haveCur && !histLess(cur, op) {
+			continue
+		}
 		switch {
 		// Before every other filter. History is a per-path audit feed, so an
 		// unfiltered row leaks the path, who changed it and when — the same
@@ -224,21 +239,9 @@ func (s *Server) handleHistory(v *volume, w http.ResponseWriter, r *http.Request
 			continue
 		}
 		matched = append(matched, timed{i, op})
-	}
-	// Truncation happens AFTER the sort: cutting during the walk above would
-	// pick the n highest-Lamport entries and merely display them in time order.
-	sort.Slice(matched, func(a, b int) bool { return histLess(matched[a].op, matched[b].op) })
-	if raw := q.Get("cursor"); raw != "" {
-		cur, err := decodeCursor(raw)
-		if err != nil {
-			http.Error(w, "invalid cursor", http.StatusBadRequest)
-			return
+		if len(matched) > n {
+			break
 		}
-		i := 0
-		for i < len(matched) && !histLess(cur, matched[i].op) { // skip to just past it
-			i++
-		}
-		matched = matched[i:]
 	}
 	// Exact, with no over-fetch probe: every op is already in memory, so
 	// "there is more" is a length check and the last page simply omits the key.

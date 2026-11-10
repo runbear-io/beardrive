@@ -123,11 +123,30 @@ func (b *cacheBudget) charge(src *RemoteSource, kind cacheKind, bytes int64) (ui
 	e.bytes, e.used, e.gen = bytes, b.tick, b.tick
 	var drop []evicted
 	for b.total > b.limit {
+		// Keep one most-recently-used journal cache warm. A tiny request from
+		// another project should not evict the active large project's parsed
+		// journals; if it is the only possible victim, the second pass below
+		// still allows the budget to make progress.
+		var protected budgetKey
+		var protectedUsed uint64
+		for k, x := range b.entries {
+			if k.src != src && k.kind == journalCache && x.bytes > 0 && x.used > protectedUsed {
+				protected, protectedUsed = k, x.used
+			}
+		}
 		var victim budgetKey
 		var oldest *budgetEntry
-		for k, x := range b.entries {
-			if k.src != src && x.bytes > 0 && (oldest == nil || x.used < oldest.used) {
-				victim, oldest = k, x
+		for pass := 0; pass < 2 && oldest == nil; pass++ {
+			for k, x := range b.entries {
+				if k.src == src || x.bytes <= 0 {
+					continue
+				}
+				if pass == 0 && k == protected {
+					continue
+				}
+				if oldest == nil || x.used < oldest.used {
+					victim, oldest = k, x
+				}
 			}
 		}
 		if oldest == nil {
