@@ -5,6 +5,17 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+## v0.18.7 — 2026-11-10
+
+**Update your devices** to reclaim superseded local blobs and skip redundant
+peer-journal tail requests on idle sync cycles; running daemons switch over the
+first time the updated `bdrive` runs. On-disk and storage formats remain
+backward-compatible.
+
+- **Local blob garbage collection reclaims superseded and deleted history.** `PruneLocalBlobsForDevice` retains blobs referenced by the current replayed volume state, all mount materialization caches, `.bdriveignore` history, and unpushed local operations (along with historical blobs on unpushed paths for offline 3-way merges), while pruning already-pushed historical blobs that have been overwritten or deleted. (#349)
+- **Idle sync cycles skip validated unchanged peer journals and prefetch only unpushed conflict bases.** `pull` records each peer journal's remote `(Size, Modified)` timestamp once its prefix or content is validated in the local fold sidecar and skips subsequent tail requests while that remote state is unchanged, while still validating shrinking or rewritten objects. Conflict and common-ancestor blob prefetching in `pull` now scopes to unpushed local operations (`OwnOpsFrom(device, PushedOps)`) plus adopted join operations. (#349)
+- **Read-only pulled blobs, verified prefix caching, and Copy-on-Write peer-tail appends.** Blobs written via `PutBlobReader` now receive `0400` permissions matching `PutBlobFileVerified`. `JournalPrefixAt` caches verified `(dev, ino, byteOffset, prefixSHA256, tailCheck)` boundaries per `(device, opCount)`, `AppendValidatedPeerTail` clones peer journals via Copy-on-Write (`tryCloneFile`) before appending new lines, and `handleStorePut` bounds manifest conflict comparisons to `8 MiB`. (#349)
+
 ## v0.18.6 — 2026-11-10
 
 **Update your devices** for incremental journal append/tail sync, lazy blob
