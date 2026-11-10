@@ -133,6 +133,11 @@ func TestPushCachesVerifiedHTTPBlobsAfterPartialFailure(t *testing.T) {
 			_, _ = io.WriteString(w, `{"mode":"direct","exists":true}`)
 		case strings.HasSuffix(r.URL.Path, "/store/exists"):
 			key := r.URL.Query().Get("key")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"exists":true}`)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
 			mu.Lock()
 			exists[key]++
 			if existing[key] {
@@ -140,8 +145,6 @@ func TestPushCachesVerifiedHTTPBlobsAfterPartialFailure(t *testing.T) {
 				maybeReady()
 			}
 			mu.Unlock()
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"exists":true}`)
 		default:
 			http.NotFound(w, r)
 		}

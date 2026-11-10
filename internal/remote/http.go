@@ -522,7 +522,10 @@ func (b *httpBackend) Put(ctx context.Context, key string, r io.Reader, size int
 		// and the honest failure (a storage race, a half-deleted object) is
 		// caught outright. Unconfirmed means upload, never skip.
 		if plan.Exists {
-			if ok, err := b.Exists(ctx, key); err == nil && ok {
+			vctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			ok, err := b.Exists(vctx, key)
+			cancel()
+			if err == nil && ok {
 				return nil
 			}
 		}
