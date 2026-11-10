@@ -15,7 +15,6 @@ export function useComments(apiBase: string, path: string, enabled: boolean) {
       ),
     enabled: enabled && !!path,
     select: (d) => d.comments || [],
-    refetchInterval: 30_000,
   });
 }
 

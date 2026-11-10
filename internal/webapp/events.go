@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -61,18 +62,36 @@ const (
 	streamMaxAge = time.Hour
 )
 
+// changeFileDelta is the current metadata for one path named by a change
+// frame. It lets a browser patch its already-loaded tree without asking for
+// the whole listing again.
+type changeFileDelta struct {
+	Path     string    `json:"path"`
+	Op       string    `json:"op"` // "put" | "delete"
+	Size     int64     `json:"size,omitempty"`
+	Time     time.Time `json:"time,omitzero"`
+	User     string    `json:"user,omitempty"`
+	UserName string    `json:"user_name,omitempty"`
+	Author   string    `json:"author,omitempty"`
+	Device   string    `json:"device,omitempty"`
+	Link     string    `json:"link,omitempty"`
+}
+
 // changeEvent is one "something changed" frame. Paths are relative to the
 // project root, exactly as the journal spells them.
 type changeEvent struct {
 	Type string `json:"type"` // "change" | "resync" | "presence"
 	// People is the project's roster, on a "presence" frame only. Display
 	// names and paths — never the account key they are stored under.
-	People  []person `json:"people,omitempty"`
-	Paths   []string `json:"paths,omitempty"`
-	More    bool     `json:"more,omitempty"` // paths were truncated; refetch everything
-	Puts    int      `json:"puts,omitempty"`
-	Deletes int      `json:"deletes,omitempty"`
-	Source  string   `json:"source,omitempty"` // "sync" | "browser"
+	People     []person          `json:"people,omitempty"`
+	Paths      []string          `json:"paths,omitempty"`
+	Files      []changeFileDelta `json:"files,omitempty"`
+	More       bool              `json:"more,omitempty"` // paths were truncated; refetch everything
+	Puts       int               `json:"puts,omitempty"`
+	Deletes    int               `json:"deletes,omitempty"`
+	Source     string            `json:"source,omitempty"` // "sync" | "browser"
+	Agent      bool              `json:"agent,omitempty"`
+	DeviceName string            `json:"device_name,omitempty"`
 	// Device is the device that pushed the change, so a client can tell its
 	// own writes from a peer's. It is the id the pusher named in its own
 	// header — display-grade, exactly like the one History already shows
@@ -102,6 +121,9 @@ type eventHub struct {
 	mu    sync.Mutex
 	subs  map[string]map[*subscriber]struct{} // project id ("" in single-volume mode)
 	total int
+	// enrich fills small local change frames with the current file metadata.
+	// It is nil on hand-built test hubs and on servers without a volume.
+	enrich func(project string, ev *changeEvent)
 	// relay carries frames to the hub's OTHER processes, and delivers theirs
 	// back into fanout. Nil on a single-instance hub, which is the default
 	// and costs nothing (relay.go).
@@ -113,9 +135,54 @@ type eventHub struct {
 // constructor to do this in.
 func (s *Server) events() *eventHub {
 	s.evOnce.Do(func() {
-		s.ev = &eventHub{subs: map[string]map[*subscriber]struct{}{}}
+		s.ev = &eventHub{
+			subs: map[string]map[*subscriber]struct{}{},
+			enrich: func(project string, ev *changeEvent) {
+				s.enrichChange(project, ev)
+			},
+		}
 	})
 	return s.ev
+}
+
+// enrichChange adds the current snapshot metadata only to small, complete
+// change frames. A large frame is still a resync candidate and must stay small
+// enough for every relay transport.
+func (s *Server) enrichChange(project string, ev *changeEvent) {
+	if ev.Type != "change" || ev.More || len(ev.Paths) == 0 || len(ev.Paths) > 16 || len(ev.Files) != 0 {
+		return
+	}
+	if s.Root == nil && s.vol == nil {
+		return
+	}
+	var v *volume
+	if project == "" {
+		v = s.vol
+	} else {
+		_, v, _ = s.projectVolume(project)
+	}
+	if v == nil {
+		return
+	}
+	snap, err := v.current(context.Background())
+	if err != nil {
+		return
+	}
+	ev.Files = make([]changeFileDelta, 0, len(ev.Paths))
+	for _, p := range ev.Paths {
+		if fi, ok := snap.files[p]; ok {
+			ev.Files = append(ev.Files, changeFileDelta{
+				Path: p, Op: "put", Size: fi.Size, Time: fi.Time,
+				User: fi.User, UserName: fi.UserName, Author: fi.Author,
+				Device: fi.Device, Link: fi.Link,
+			})
+		} else {
+			ev.Files = append(ev.Files, changeFileDelta{Path: p, Op: "delete"})
+		}
+	}
+	if frame, err := json.Marshal(ev); err != nil || len(frame) > maxRelayFrame {
+		ev.Files = nil
+	}
 }
 
 // subscribe registers a listener for one project, or reports that the hub is
@@ -170,6 +237,9 @@ func (h *eventHub) unsubscribe(project string, sub *subscriber) {
 // never returns an error: it is called from write handlers, and a client that
 // has stopped reading is not a reason to fail somebody's sync push.
 func (h *eventHub) publish(project string, ev changeEvent) {
+	if h.enrich != nil {
+		h.enrich(project, &ev)
+	}
 	frame, err := json.Marshal(ev)
 	if err != nil {
 		return // a struct of strings and ints; unreachable, and not worth a log
@@ -235,7 +305,8 @@ func changeEventFor(r *http.Request, source string, paths []string, puts, delete
 	}
 	ev := changeEvent{
 		Type: "change", Puts: puts, Deletes: deletes,
-		Source: source, Device: deviceID(r),
+		Source: source, Agent: source == "sync",
+		Device: deviceID(r), DeviceName: r.Header.Get("X-Bdrive-Device-Name"),
 	}
 	if len(paths) > eventPathLimit {
 		paths, ev.More = paths[:eventPathLimit], true
@@ -340,15 +411,27 @@ func frameFor(frame []byte, vis pathFilter) ([]byte, bool) {
 				kept = append(kept, p)
 			}
 		}
+		hidden := len(kept) != len(ev.Paths)
 		// A truncated frame (More) loses its counts even when every path it
 		// names is visible: the paths it does not name may not be.
-		if len(kept) == len(ev.Paths) && !ev.More {
+		if !hidden && !ev.More {
 			return frame, true
 		}
 		if len(kept) == 0 && !ev.More {
 			return nil, false
 		}
+		files := make([]changeFileDelta, 0, len(ev.Files))
+		for _, f := range ev.Files {
+			if vis.canRead(f.Path) {
+				files = append(files, f)
+			}
+		}
 		ev.Paths, ev.Puts, ev.Deletes = kept, 0, 0
+		if hidden {
+			ev.Files = nil
+		} else {
+			ev.Files = files
+		}
 	case "comments":
 		for _, p := range ev.Paths {
 			if !vis.canRead(p) {
