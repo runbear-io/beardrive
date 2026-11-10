@@ -180,6 +180,19 @@ export interface Node {
   children?: Node[];
 }
 
+// One path's current state carried by a complete, small SSE change frame.
+export interface ChangeFileDelta {
+  path: string;
+  op: "put" | "delete";
+  size?: number;
+  time?: string;
+  user?: string;
+  user_name?: string;
+  author?: string;
+  device?: string;
+  link?: string;
+}
+
 // One key/value row of a document's YAML frontmatter, in author order.
 // `value` is plain text, never markup — the panel renders it as a text node,
 // so escaping is React's job and not a rule anyone has to remember. `code`

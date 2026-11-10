@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { fileURLFor } from "./useBlob";
+import { applyTreeDeltas } from "./useBrowse";
+import type { ChangeFileDelta, HistoryEntry, Node } from "../api/types";
 
 /* Live change notification.
    The hub streams "these paths changed" over server-sent events, so a
@@ -44,8 +46,29 @@ type ChangeEvent = {
   type: "change" | "resync" | "presence" | "scope" | "comments";
   paths?: string[];
   more?: boolean;
+  puts?: number;
+  deletes?: number;
+  files?: ChangeFileDelta[];
+  agent?: boolean;
+  device?: string;
+  device_name?: string;
   people?: { name: string; path?: string }[];
 };
+const historyFromDelta = (ev: ChangeEvent, d: ChangeFileDelta): HistoryEntry => ({
+  time: d.time || new Date().toISOString(),
+  kind: d.op === "delete" ? "delete" : "edit",
+  path: d.path,
+  ...(d.size === undefined ? {} : { size: d.size }),
+  user: d.user,
+  user_name: d.user_name,
+  author: d.author,
+  device: {
+    id: ev.device || d.device,
+    name: ev.device_name || d.device,
+  },
+  session: ev.agent ? "live" : undefined,
+});
+
 
 export function useProjectEvents(
   apiBase: string,
@@ -95,6 +118,29 @@ export function useProjectEvents(
         // Mounted only on the Insights view, so other pages pay nothing.
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
       }, COALESCE_MS);
+    };
+    const patchHistoryCaches = (ev: ChangeEvent) => {
+      if (!ev.files?.length) return;
+      const additions = ev.files.map((d) => historyFromDelta(ev, d));
+      const merge = (key: readonly unknown[], data: { entries: HistoryEntry[] } | undefined, cap: number) => {
+        if (!data) return;
+        const seen = new Set(
+          data.entries.map((e) => `${e.device?.id || e.device?.name || ""}\0${e.time}\0${e.path}\0${e.kind}`),
+        );
+        const fresh = additions.filter((e) => {
+          const k = `${e.device?.id || e.device?.name || ""}\0${e.time}\0${e.path}\0${e.kind}`;
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+        if (fresh.length) qc.setQueryData(key, { ...data, entries: [...fresh, ...data.entries].slice(0, cap) });
+      };
+      for (const [key, data] of qc.getQueriesData<{ entries: HistoryEntry[] }>({ queryKey: ["history", apiBase] })) {
+        if (key[2] === "since") merge(key, data, 100);
+      }
+      for (const [key, data] of qc.getQueriesData<{ entries: HistoryEntry[] }>({ queryKey: ["homeHistory", apiBase] })) {
+        merge(key, data, 200);
+      }
     };
 
     // One frame, from the socket this tab owns or from the tab that owns it.
@@ -154,11 +200,21 @@ export function useProjectEvents(
       window.dispatchEvent(
         new CustomEvent("bdrive:changed", { detail: ev.paths ?? [] }),
       );
-      invalidateProject();
+      const changes = (ev.puts || 0) + (ev.deletes || 0);
+      const oldTree = qc.getQueryData<Node>(["tree", apiBase]);
+      const canPatchTree = ev.type === "change" && !ev.more && changes > 0 && !!ev.files?.length && !!oldTree;
+      if (canPatchTree) {
+        qc.setQueryData<Node>(["tree", apiBase], (old) => (old ? applyTreeDeltas(old, ev.files!) : old));
+        patchHistoryCaches(ev);
+        qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
+      } else {
+        invalidateProject();
+      }
       // "resync" means frames were dropped and what was missed is unknowable,
       // and "more" means the frame was truncated. Either way the only honest
       // move is to drop every cached body rather than guess at a path list.
       if (ev.type === "resync" || ev.more || !ev.paths?.length) {
+        if (ev.type === "resync") qc.invalidateQueries({ queryKey: ["comments", apiBase] });
         qc.invalidateQueries({ queryKey: ["render", apiBase] });
         qc.invalidateQueries({ queryKey: ["text"] });
         return;
@@ -186,9 +242,18 @@ export function useProjectEvents(
     let release: (() => void) | null = null;
     const giveUp = new AbortController();
     let done = false;
+    let opened = false;
 
-    const connect = () => {
+    const connect = (resyncOnOpen = false) => {
       es = new EventSource(apiBase + "events");
+      es.onopen = () => {
+        if (opened || resyncOnOpen) {
+          const frame = JSON.stringify({ type: "resync" });
+          chan?.postMessage(frame);
+          handle(frame);
+        }
+        opened = true;
+      };
       es.onmessage = (e) => {
         // Followers first: a tab that is mid-render should not delay the
         // others. BroadcastChannel never echoes to its own sender, so the
@@ -202,19 +267,34 @@ export function useProjectEvents(
       es.onerror = () => {};
     };
 
+    const cleanup = () => {
+      done = true;
+      giveUp.abort(); // drop a still-pending request to lead
+      release?.(); // or, if we are leading, pass it to the next tab
+      es?.close();
+      chan?.close();
+    };
+    window.addEventListener("pagehide", cleanup);
+
     if (typeof BroadcastChannel === "undefined" || !navigator.locks) {
       connect(); // no way to share; behave exactly as this hook always did
     } else {
       chan = new BroadcastChannel(key);
       chan.onmessage = (e: MessageEvent<string>) => handle(e.data);
+      const holdLeadership = (promoted: boolean) =>
+        new Promise<void>((resolve) => {
+          if (done) return resolve(); // unmounted while the lock was pending
+          release = resolve;
+          connect(promoted);
+        });
       navigator.locks
-        .request(`${key}:leader`, { signal: giveUp.signal }, () => {
-          // Held until this promise settles, so it resolves only on cleanup.
-          return new Promise<void>((resolve) => {
-            if (done) return resolve(); // unmounted while the lock was pending
-            release = resolve;
-            connect();
-          });
+        .request(`${key}:leader`, { ifAvailable: true }, (lock) => {
+          if (lock) return holdLeadership(false);
+          return navigator.locks.request(
+            `${key}:leader`,
+            { signal: giveUp.signal },
+            () => holdLeadership(true),
+          );
         })
         // AbortError is the ordinary path for a follower that closes before
         // ever leading. Nothing here is load-bearing enough to report.
@@ -222,11 +302,8 @@ export function useProjectEvents(
     }
 
     return () => {
-      done = true;
-      giveUp.abort(); // drop a still-pending request to lead
-      release?.(); // or, if we are leading, pass it to the next tab
-      es?.close();
-      chan?.close();
+      window.removeEventListener("pagehide", cleanup);
+      cleanup();
     };
   }, [apiBase, enabled, qc]);
 }

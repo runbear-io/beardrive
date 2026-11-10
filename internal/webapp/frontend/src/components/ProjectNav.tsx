@@ -89,7 +89,7 @@ export function ProjectNav({
   onNew: () => void;
 }) {
   const current = projects.find((p) => p.id === currentId);
-  const fresh = useActivityCount(menu ? currentId : undefined);
+  const fresh = useActivityCount(menu?.active === "home" ? currentId : undefined);
 
   return (
     <nav id="projects" aria-label="Projects">

@@ -18,7 +18,7 @@ const apiOf = (pid: string) => "/api/p/" + pid + "/";
 
 // Changes since this reader's last visit, capped at what one page returns.
 export const ACTIVITY_CAP = 100;
-export function useSinceHistory(pid: string | undefined) {
+export function useSinceHistory(pid: string | undefined, enabled = true) {
   const since = useVisitBaseline(pid);
   const apiBase = pid ? apiOf(pid) : "";
   return useQuery({
@@ -27,14 +27,14 @@ export function useSinceHistory(pid: string | undefined) {
       getJSON<{ entries: HistoryEntry[] }>(
         apiBase + "history?n=" + ACTIVITY_CAP + "&since=" + encodeURIComponent(new Date(since).toISOString()),
       ),
-    enabled: !!pid && since > 0,
+    enabled: enabled && !!pid && since > 0,
     retry: false,
     staleTime: 15_000,
   });
 }
-export function useActivityCount(pid: string | undefined): number | null {
-  const q = useSinceHistory(pid);
-  return q.data ? (q.data.entries || []).length : null;
+export function useActivityCount(pid: string | undefined, enabled = true): number | null {
+  const q = useSinceHistory(pid, enabled);
+  return enabled && q.data ? (q.data.entries || []).length : null;
 }
 
 // "N devices · synced Xm ago": agent devices seen reading in the last 30 days
@@ -65,7 +65,6 @@ export function useOpenCommentCounts(apiBase: string, enabled: boolean): Map<str
     queryFn: () => getJSON<{ comments: CommentThread[] }>(apiBase + "comments?status=open"),
     enabled,
     retry: false,
-    refetchInterval: 60_000,
   });
   return useMemo(() => {
     const m = new Map<string, number>();
