@@ -21,7 +21,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 // The store API (/api/store/*) lets other devices sync through this server
