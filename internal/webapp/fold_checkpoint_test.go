@@ -174,3 +174,142 @@ func TestHandleStoreSignAllowsExistingBlobWhenQuotaExceeded(t *testing.T) {
 		t.Fatalf("missing blob sign under full quota status = %d (%s), want 403", rec2.Code, rec2.Body.String())
 	}
 }
+
+func TestFoldCheckpointRestoresWithGrownTailAndSurvivesHistoricalTombstone(t *testing.T) {
+	dir := t.TempDir()
+	be, err := remote.Open(context.Background(), "file://"+dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.Close()
+
+	shaA := strings.Repeat("a", 64)
+	shaB := strings.Repeat("b", 64)
+	shaC := strings.Repeat("c", 64)
+	shaD := strings.Repeat("d", 64)
+	t0 := time.Date(2026, 11, 10, 1, 0, 0, 0, time.UTC)
+
+	// Build a journal > minFoldCheckpointBytes (1 MiB) where log.md is put, deleted, and recreated.
+	var ops []journal.Op
+	for i := 1; i <= 6500; i++ {
+		ops = append(ops, journal.Op{
+			Seq: int64(i), Lamport: int64(i), Time: t0.Add(time.Duration(i) * time.Second),
+			Device: "dev1", Kind: journal.KindPut,
+			Path: "notes/pad-" + strings.Repeat("x", 80) + ".md",
+			Blob: shaA, Size: 10,
+		})
+	}
+	ops = append(ops,
+		journal.Op{Seq: 6501, Lamport: 6501, Time: t0.Add(6501 * time.Second), Device: "dev1", Kind: journal.KindPut, Path: "log.md", Blob: shaA, Size: 10},
+		journal.Op{Seq: 6502, Lamport: 6502, Time: t0.Add(6502 * time.Second), Device: "dev1", Kind: journal.KindDelete, Path: "log.md"},
+		journal.Op{Seq: 6503, Lamport: 6503, Time: t0.Add(6503 * time.Second), Device: "dev1", Kind: journal.KindPut, Path: "log.md", Blob: shaB, Size: 20},
+	)
+	raw, err := journal.Marshal(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) < minFoldCheckpointBytes {
+		t.Fatalf("journal size %d < %d", len(raw), minFoldCheckpointBytes)
+	}
+	if err := be.Put(context.Background(), "journal/dev1.jsonl", bytes.NewReader(raw), int64(len(raw))); err != nil {
+		t.Fatal(err)
+	}
+
+	rs1 := &RemoteSource{Backend: be}
+	files1, _, err := rs1.FilesWithMoves(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := files1["log.md"].Blob; got != shaB {
+		t.Fatalf("initial log.md blob = %q, want %q", got, shaB)
+	}
+	for range 100 {
+		if ok, _ := be.Exists(context.Background(), hubFoldCheckpointKey); ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ok, _ := be.Exists(context.Background(), hubFoldCheckpointKey); !ok {
+		t.Fatal("expected fold checkpoint to be written")
+	}
+
+	// Append seq 6504 editing log.md AFTER the checkpoint was written.
+	tail1, err := journal.Marshal([]journal.Op{
+		{Seq: 6504, Lamport: 6504, Time: t0.Add(6504 * time.Second), Device: "dev1", Kind: journal.KindPut, Path: "log.md", Blob: shaC, Size: 30},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw1 := append(append([]byte(nil), raw...), tail1...)
+	if err := be.Put(context.Background(), "journal/dev1.jsonl", bytes.NewReader(raw1), int64(len(raw1))); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cold start a fresh RemoteSource: restoreFoldCheckpoint must apply the grown tail without populating jcache.
+	rs2 := &RemoteSource{Backend: be}
+	files2, _, err := rs2.FilesWithMoves(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := files2["log.md"].Blob; got != shaC {
+		t.Fatalf("cold restore with grown tail log.md blob = %q, want %q", got, shaC)
+	}
+	rs2.jmu.Lock()
+	jcacheLen := len(rs2.jcache)
+	rs2.jmu.Unlock()
+	if jcacheLen != 0 {
+		t.Fatalf("expected cold checkpoint+tail restore to leave jcache empty, got %d entries", jcacheLen)
+	}
+
+	// Append seq 6505 editing log.md: tryIncrementalFold must succeed even with empty jcache and historical tombstone on log.md.
+	tail2, err := journal.Marshal([]journal.Op{
+		{Seq: 6505, Lamport: 6505, Time: t0.Add(6505 * time.Second), Device: "dev1", Kind: journal.KindPut, Path: "log.md", Blob: shaD, Size: 40},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw2 := append(append([]byte(nil), raw1...), tail2...)
+	if err := be.Put(context.Background(), "journal/dev1.jsonl", bytes.NewReader(raw2), int64(len(raw2))); err != nil {
+		t.Fatal(err)
+	}
+	files3, _, err := rs2.FilesWithMoves(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := files3["log.md"].Blob; got != shaD {
+		t.Fatalf("incremental fold after checkpoint restore log.md blob = %q, want %q", got, shaD)
+	}
+	rs2.jmu.Lock()
+	jcacheLen2 := len(rs2.jcache)
+	rs2.jmu.Unlock()
+	if jcacheLen2 != 0 {
+		t.Fatalf("expected incremental fold to leave jcache empty, got %d entries", jcacheLen2)
+	}
+}
+
+func TestIncrementalHistIndexAppendsWithoutReReadingUnchangedJournals(t *testing.T) {
+	rs, cb, f := countedProject(t)
+	ctx := context.Background()
+	x1, err := rs.historyIndex(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n1 := len(x1.all)
+	g1, g3 := cb.getsFor("dev1"), cb.getsFor("dev3")
+
+	f.putAs("dev2", "bob@x.io", "Bob", "notes/other.md", "bob v2")
+	x2, err := rs.historyIndex(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(x2.all) != n1+1 {
+		t.Fatalf("len(x2.all) = %d, want %d", len(x2.all), n1+1)
+	}
+	if cb.getsFor("dev1") != g1 || cb.getsFor("dev3") != g3 {
+		t.Fatalf("incremental history index re-read unchanged journals: dev1=%d (was %d), dev3=%d (was %d)", cb.getsFor("dev1"), g1, cb.getsFor("dev3"), g3)
+	}
+	newestIdx := x2.byTime[0]
+	if x2.all[newestIdx].Op.Path != "notes/other.md" || x2.kinds[newestIdx] != "edit" {
+		t.Fatalf("newest entry = (%q, %q), want (notes/other.md, edit)", x2.all[newestIdx].Op.Path, x2.kinds[newestIdx])
+	}
+}

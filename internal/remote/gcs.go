@@ -31,6 +31,12 @@ type RangeGetter interface {
 	GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 }
 
+// VersionedRangeGetter reads a byte range pinned to the object's current
+// version and returns that version alongside the reader.
+type VersionedRangeGetter interface {
+	GetVersionedRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, Version, error)
+}
+
 func newGCS(ctx context.Context, bucket, prefix string) (*gcsBackend, error) {
 	if bucket == "" {
 		return nil, fmt.Errorf("gs remote needs a bucket: gs://bucket/prefix")
@@ -141,6 +147,22 @@ var _ ConditionalPutter = (*gcsBackend)(nil)
 
    DoesNotExist is the VersionAbsent case rather than GenerationMatch(0),
    which GCS would read as "match generation zero" and refuse everything. */
+
+func (b *gcsBackend) GetVersionedRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, Version, error) {
+	obj := b.bucket.Object(b.key(key))
+	attrs, err := obj.Attrs(ctx)
+	if err != nil {
+		return nil, VersionAbsent, err
+	}
+	if offset < 0 || offset > attrs.Size {
+		return nil, VersionAbsent, fmt.Errorf("range offset %d out of bounds for size %d", offset, attrs.Size)
+	}
+	rc, err := obj.Generation(attrs.Generation).NewRangeReader(ctx, offset, length)
+	if err != nil {
+		return nil, VersionAbsent, err
+	}
+	return rc, gcsVersion(attrs.Generation), nil
+}
 
 func (b *gcsBackend) GetVersioned(ctx context.Context, key string) (io.ReadCloser, Version, error) {
 	obj := b.bucket.Object(b.key(key))

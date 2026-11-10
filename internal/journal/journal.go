@@ -366,13 +366,34 @@ func minInt(a, b int) int {
 }
 
 func parseChunk(data []byte) []Op {
-	ops, _ := parseChunkWithOffsets(data, 0)
+	ops, _ := parseChunkWithOffsets(data, -1)
 	return ops
 }
 
+func internStr(m map[string]string, s string) string {
+	if s == "" {
+		return ""
+	}
+	if v, ok := m[s]; ok {
+		return v
+	}
+	if len(m) < 32768 {
+		m[s] = s
+	}
+	return s
+}
+
 func parseChunkWithOffsets(data []byte, baseOffset int64) ([]Op, []int64) {
-	var ops []Op
+	est := len(data) / 380
+	if est < 16 {
+		est = 16
+	}
+	ops := make([]Op, 0, est)
 	var offsets []int64
+	if baseOffset >= 0 {
+		offsets = make([]int64, 0, est)
+	}
+	intern := make(map[string]string, 1024)
 	rem := data
 	lineStart := 0
 	for len(rem) > 0 {
@@ -394,11 +415,24 @@ func parseChunkWithOffsets(data []byte, baseOffset int64) ([]Op, []int64) {
 			continue
 		}
 		op := w.op()
-		if op.Kind != KindPut && op.Kind != KindDelete {
+		if op.Kind == KindPut {
+			op.Kind = KindPut
+		} else if op.Kind == KindDelete {
+			op.Kind = KindDelete
+		} else {
 			continue
 		}
+		op.Device = internStr(intern, op.Device)
+		op.DeviceName = internStr(intern, op.DeviceName)
+		op.Author = internStr(intern, op.Author)
+		op.User = internStr(intern, op.User)
+		op.UserName = internStr(intern, op.UserName)
+		op.Path = internStr(intern, op.Path)
+		op.Note = internStr(intern, op.Note)
 		ops = append(ops, op)
-		offsets = append(offsets, baseOffset+int64(start))
+		if baseOffset >= 0 {
+			offsets = append(offsets, baseOffset+int64(start))
+		}
 	}
 	return ops, offsets
 }
@@ -445,7 +479,11 @@ func ParseWithCheckpoints(data []byte, stride int) ([]Op, [][2]int64) {
 			}(i)
 		}
 		wg.Wait()
-		var out []Op
+		total := 0
+		for _, part := range parts {
+			total += len(part)
+		}
+		out := make([]Op, 0, total)
 		for _, part := range parts {
 			out = append(out, part...)
 		}
@@ -469,8 +507,12 @@ func ParseWithCheckpoints(data []byte, stride int) ([]Op, [][2]int64) {
 		}(i)
 	}
 	wg.Wait()
-	var ops []Op
-	var offsets []int64
+	total := 0
+	for _, part := range parts {
+		total += len(part)
+	}
+	ops := make([]Op, 0, total)
+	offsets := make([]int64, 0, total)
 	for i := range parts {
 		ops = append(ops, parts[i]...)
 		offsets = append(offsets, offsetParts[i]...)

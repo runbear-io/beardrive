@@ -61,6 +61,81 @@ type appendCacheValue struct {
 
 var journalAppendCache sync.Map // map[appendCacheKey]appendCacheValue
 
+type prefixCacheKey struct {
+	project string
+	key     string
+	version remote.Version
+	offset  int64
+}
+
+var journalPrefixCache sync.Map // map[prefixCacheKey]string
+
+type appendDeltaKey struct {
+	key      string
+	version  remote.Version
+	prevSize int64
+	prevSHA  string
+	newSize  int64
+}
+
+var appendDeltaCache sync.Map // map[appendDeltaKey]string
+
+func lookupAppendedJournalSHA(key string, ver remote.Version, prevSize int64, prevSHA string, newSize int64) (string, bool) {
+	if ver == remote.VersionAbsent || prevSHA == "" {
+		return "", false
+	}
+	v, ok := appendDeltaCache.Load(appendDeltaKey{
+		key: key, version: ver, prevSize: prevSize, prevSHA: strings.ToLower(prevSHA), newSize: newSize,
+	})
+	if !ok {
+		return "", false
+	}
+	return v.(string), true
+}
+
+const maxPresentBlobs = 131072
+
+func isImmutableBlobOrChunkKey(key string) bool {
+	return blobKeyRe.MatchString(key) || chunkKeyRe.MatchString(key)
+}
+
+func (r *RemoteSource) markBlobOrChunkPresent(key string) {
+	if !isImmutableBlobOrChunkKey(key) {
+		return
+	}
+	r.presentMu.Lock()
+	defer r.presentMu.Unlock()
+	if r.presentBlobs == nil {
+		r.presentBlobs = make(map[string]struct{})
+	}
+	if _, ok := r.presentBlobs[key]; ok {
+		return
+	}
+	if len(r.presentOrder) >= maxPresentBlobs {
+		oldest := r.presentOrder[0]
+		r.presentOrder = r.presentOrder[1:]
+		delete(r.presentBlobs, oldest)
+	}
+	r.presentBlobs[key] = struct{}{}
+	r.presentOrder = append(r.presentOrder, key)
+}
+
+func (r *RemoteSource) blobOrChunkExists(ctx context.Context, key string) (bool, error) {
+	if isImmutableBlobOrChunkKey(key) {
+		r.presentMu.Lock()
+		_, ok := r.presentBlobs[key]
+		r.presentMu.Unlock()
+		if ok {
+			return true, nil
+		}
+	}
+	exists, err := r.Backend.Exists(ctx, key)
+	if err == nil && exists {
+		r.markBlobOrChunkPresent(key)
+	}
+	return exists, err
+}
+
 // fileShaKey reports whether a store key is addressed by the FILE's sha256 —
 // blobs/ and manifests/ both are, and both must therefore answer the same
 // question about the same content. chunks/ is not: its key is the chunk's own
@@ -483,6 +558,51 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		}
 		if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
 			rc, err = rs.OpenBlob(r.Context(), blob)
+		} else if journalKeyRe.MatchString(key) && hasOff {
+			project := r.PathValue("project")
+			if vrg, ok := rs.Backend.(remote.VersionedRangeGetter); ok {
+				if tailRC, ver, verr := vrg.GetVersionedRange(r.Context(), key, offset, -1); verr == nil {
+					if ver != remote.VersionAbsent {
+						if cached, hit := journalPrefixCache.Load(prefixCacheKey{project: project, key: key, version: ver, offset: offset}); hit && cached.(string) == prefixSHA {
+							w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
+							rc = tailRC
+							hasOff = false
+						}
+					}
+					if rc == nil {
+						_ = tailRC.Close()
+					}
+				}
+			}
+			if rc == nil {
+				if cp, ok := rs.Backend.(remote.ConditionalPutter); ok {
+					var ver remote.Version
+					rc, ver, err = cp.GetVersioned(r.Context(), key)
+					if err == nil {
+						origRC := rc
+						h := sha256.New()
+						n, rerr := io.CopyN(h, origRC, offset)
+						if rerr != nil && !errors.Is(rerr, io.EOF) {
+							origRC.Close()
+							storageErr(w, http.StatusBadGateway, "could not read the journal", rerr)
+							return
+						}
+						if n == offset && hex.EncodeToString(h.Sum(nil)) == prefixSHA {
+							if ver != remote.VersionAbsent {
+								journalPrefixCache.Store(prefixCacheKey{project: project, key: key, version: ver, offset: offset}, prefixSHA)
+							}
+							w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
+							rc = origRC
+						} else {
+							origRC.Close()
+							rc, err = rs.Backend.Get(r.Context(), key)
+						}
+						hasOff = false
+					}
+				} else {
+					rc, err = rs.Backend.Get(r.Context(), key)
+				}
+			}
 		} else {
 			rc, err = rs.Backend.Get(r.Context(), key)
 		}
@@ -587,7 +707,7 @@ func (s *Server) handleStoreExists(v *volume, w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	exists, err := rs.Backend.Exists(r.Context(), key)
+	exists, err := rs.blobOrChunkExists(r.Context(), key)
 	if err != nil {
 		storageErr(w, http.StatusBadGateway, "storage is temporarily unavailable", err)
 		return
@@ -656,7 +776,14 @@ func (s *Server) handleStoreSign(v *volume, w http.ResponseWriter, r *http.Reque
 			http.Error(w, "declared size does not match the content address", http.StatusForbidden)
 			return
 		}
-		if exists, err := rs.Backend.Exists(r.Context(), req.Key); err == nil && exists {
+		var exists bool
+		var err error
+		if !s.visibility(r).hides() {
+			exists, err = rs.blobOrChunkExists(r.Context(), req.Key)
+		} else {
+			exists, err = rs.Backend.Exists(r.Context(), req.Key)
+		}
+		if err == nil && exists {
 			writeJSON(w, map[string]any{"mode": "direct", "exists": true, "accept_encoding": storeAcceptEncoding})
 			return
 		}
@@ -1281,6 +1408,8 @@ func (s *Server) handleStorePut(v *volume, w http.ResponseWriter, r *http.Reques
 	} else if err := rs.Backend.Put(r.Context(), key, tmp, size); err != nil {
 		storageErr(w, http.StatusBadGateway, "could not store the object", err)
 		return
+	} else {
+		rs.markBlobOrChunkPresent(key)
 	}
 	unlockJournal()
 	if strings.HasPrefix(key, "journal/") {
@@ -1607,12 +1736,20 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 			} else if needNewline {
 				endsWithNL = true
 			}
+			fullSHA := hex.EncodeToString(fullHash.Sum(nil))
 			journalAppendCache.Store(appendCacheKey{
 				project: project, key: key, version: newVer,
 			}, appendCacheValue{
-				size: totalLen, sha256: hex.EncodeToString(fullHash.Sum(nil)),
+				size: totalLen, sha256: fullSHA,
 				storedMax: tailOps[len(tailOps)-1].Seq, endsWithNL: endsWithNL,
 			})
+			if newVer != remote.VersionAbsent {
+				if prevSize > 0 && prevSHA != "" {
+					journalPrefixCache.Store(prefixCacheKey{project: project, key: key, version: newVer, offset: prevSize}, prevSHA)
+					appendDeltaCache.Store(appendDeltaKey{key: key, version: newVer, prevSize: prevSize, prevSHA: prevSHA, newSize: totalLen}, fullSHA)
+				}
+				journalPrefixCache.Store(prefixCacheKey{project: project, key: key, version: newVer, offset: totalLen}, fullSHA)
+			}
 		}
 		cleanupTmp()
 		if errors.Is(err, remote.ErrVersionMismatch) {

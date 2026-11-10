@@ -123,3 +123,25 @@ func (b *localBackend) Exists(_ context.Context, key string) (bool, error) {
 }
 
 func (b *localBackend) Close() error { return nil }
+
+func (b *localBackend) GetRange(_ context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	p, err := b.path(key)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if length >= 0 {
+		return struct {
+			io.Reader
+			io.Closer
+		}{io.LimitReader(f, length), f}, nil
+	}
+	return f, nil
+}
