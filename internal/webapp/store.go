@@ -1564,13 +1564,13 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 			if !cacheHit {
 				needNewline = prevSize > 0 && lastByte != '\n'
 			}
-			if ver != remote.VersionAbsent && parseErr == nil && len(rem) == 0 {
+			if !cacheHit && ver != remote.VersionAbsent && parseErr == nil && len(rem) == 0 {
 				journalAppendCache.Store(appendCacheKey{
 					project: project, key: key, version: ver,
 				}, appendCacheValue{
 					size:      prefixRead + int64(len(rem)),
 					sha256:    hex.EncodeToString(fullHash.Sum(nil)),
-					storedMax: storedMax, endsWithNL: lastByte == '\n',
+					storedMax: storedMax, endsWithNL: !needNewline,
 				})
 			}
 		}
