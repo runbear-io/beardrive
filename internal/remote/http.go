@@ -70,10 +70,13 @@ type httpBackend struct {
 	device  config.Device
 	hc      *http.Client
 	// verifiedBlobs remembers immutable content-addressed objects confirmed
-	// present by this backend instance. It is deliberately scoped to the
-	// server/project represented by this client, so a new backend cannot
-	// inherit a stale presence claim from another remote.
-	verifiedBlobs sync.Map // map[string]struct{}
+	// present by this backend instance so retry cycles after a partial push
+	// failure do not re-query /store/sign and /store/exists for every already
+	// verified blob. Bounded by maxVerifiedBlobs so long-lived daemons cannot
+	// accumulate unbounded keys.
+	verifiedMu    sync.Mutex
+	verifiedBlobs map[string]struct{}
+	verifiedOrder []string
 	noAppend      atomic.Bool
 	// lastFrame is when the open change stream last delivered anything,
 	// keepalives included (unix nanoseconds, zero when none is open).
@@ -81,6 +84,8 @@ type httpBackend struct {
 	// onAnnounce is called for each announcement read; see OnAnnounce.
 	onAnnounce atomic.Pointer[func()]
 }
+
+const maxVerifiedBlobs = 16384
 
 // isContentAddressedKey identifies immutable objects whose presence can be
 // remembered safely for the life of this backend.
@@ -95,14 +100,31 @@ func (b *httpBackend) IsVerified(key string) bool {
 	if !isContentAddressedKey(key) {
 		return false
 	}
-	_, ok := b.verifiedBlobs.Load(key)
+	b.verifiedMu.Lock()
+	defer b.verifiedMu.Unlock()
+	_, ok := b.verifiedBlobs[key]
 	return ok
 }
 
 func (b *httpBackend) markVerified(key string) {
-	if isContentAddressedKey(key) {
-		b.verifiedBlobs.Store(key, struct{}{})
+	if !isContentAddressedKey(key) {
+		return
 	}
+	b.verifiedMu.Lock()
+	defer b.verifiedMu.Unlock()
+	if b.verifiedBlobs == nil {
+		b.verifiedBlobs = make(map[string]struct{})
+	}
+	if _, exists := b.verifiedBlobs[key]; exists {
+		return
+	}
+	if len(b.verifiedOrder) >= maxVerifiedBlobs {
+		oldest := b.verifiedOrder[0]
+		b.verifiedOrder = b.verifiedOrder[1:]
+		delete(b.verifiedBlobs, oldest)
+	}
+	b.verifiedBlobs[key] = struct{}{}
+	b.verifiedOrder = append(b.verifiedOrder, key)
 }
 
 // The id is whatever the hub minted (a UUID today, `p-xxxxxxxx` on older
