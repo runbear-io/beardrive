@@ -39,11 +39,12 @@ type Store struct {
 	stateCaches        map[string]cacheEntry
 	folds              map[string]*deviceFold
 	ignoreFingerprints map[string][32]byte
-	nextFoldGen        uint64
+	prefixCache        map[string]map[int64]cachedJournalPrefix
 	cachedFold         FoldResult
 	cachedFoldDevs     []string
 	cachedFoldGens     []uint64
 	cachedFoldOK       bool
+	nextFoldGen        uint64
 }
 
 func Open(dir string) (*Store, error) {
@@ -52,7 +53,7 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 	}
-	return &Store{dir: dir, stateCaches: make(map[string]cacheEntry), folds: make(map[string]*deviceFold), ignoreFingerprints: make(map[string][32]byte)}, nil
+	return &Store{dir: dir, stateCaches: make(map[string]cacheEntry), folds: make(map[string]*deviceFold), ignoreFingerprints: make(map[string][32]byte), prefixCache: make(map[string]map[int64]cachedJournalPrefix)}, nil
 }
 
 func (s *Store) Dir() string    { return s.dir }
@@ -105,11 +106,17 @@ func (s *Store) PutBlobReader(r io.Reader) (string, int64, error) {
 	if s.HasBlob(sum) {
 		return sum, n, nil
 	}
+	if err := os.Chmod(tmp.Name(), 0o400); err != nil {
+		return "", 0, err
+	}
 	dst := s.BlobPath(sum)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return "", 0, err
 	}
 	if err := os.Rename(tmp.Name(), dst); err != nil {
+		if s.HasBlob(sum) {
+			return sum, n, nil
+		}
 		return "", 0, err
 	}
 	return sum, n, nil
@@ -202,6 +209,9 @@ func (s *Store) PutBlobFileVerified(srcPath string) (sha string, size int64, mti
 		return "", 0, 0, 0, 0, statErr
 	}
 	if err := os.Rename(tmpPath, dst); err != nil {
+		if s.HasBlob(sum) {
+			return sum, preSize, preMtime, preDev, preIno, nil
+		}
 		return "", 0, 0, 0, 0, err
 	}
 	return sum, preSize, preMtime, preDev, preIno, nil
@@ -270,6 +280,12 @@ func (s *Store) collectCachedBlobs(keep map[string]bool) {
 
 // PruneLocalBlobs removes blobs not reachable from current state or journal history.
 func (s *Store) PruneLocalBlobs(extraKeep map[string]bool, minAge time.Duration) (removed int, freedBytes int64, err error) {
+	return s.PruneLocalBlobsForDevice("", extraKeep, minAge)
+}
+
+// PruneLocalBlobsForDevice removes unreferenced old blobs, retaining the
+// current fold and journal history that may still be needed by this device.
+func (s *Store) PruneLocalBlobsForDevice(ownDevice string, extraKeep map[string]bool, minAge time.Duration) (removed int, freedBytes int64, err error) {
 	keep := make(map[string]bool, len(extraKeep))
 	for blob := range extraKeep {
 		keep[blob] = true
@@ -288,8 +304,8 @@ func (s *Store) PruneLocalBlobs(extraKeep map[string]bool, minAge time.Duration)
 			return 0, 0, readErr
 		}
 		var cache map[string]CachedFile
-		if json.Unmarshal(raw, &cache) != nil {
-			continue
+		if err := json.Unmarshal(raw, &cache); err != nil {
+			return 0, 0, err
 		}
 		for _, cached := range cache {
 			if cached.Blob != "" {
@@ -307,16 +323,65 @@ func (s *Store) PruneLocalBlobs(extraKeep map[string]bool, minAge time.Duration)
 			keep[state.Blob] = true
 		}
 	}
-	ops, err := s.AllOps()
+	if fold.HasIgnorePut && fold.LatestIgnorePut.Blob != "" {
+		keep[fold.LatestIgnorePut.Blob] = true
+	}
+	if fold.HasIgnoreWinner && fold.IgnoreWinner.Blob != "" {
+		keep[fold.IgnoreWinner.Blob] = true
+	}
+	st, err := s.LoadSync()
 	if err != nil {
 		return 0, 0, err
 	}
-	for _, op := range ops {
-		if op.Blob != "" {
-			keep[op.Blob] = true
+	if ownDevice == "" && st.Device != "" {
+		ownDevice = st.Device
+	}
+	if ownDevice == "" || (st.Lamport == 0 && st.PushedOps == 0) {
+		ops, err := s.AllOps()
+		if err != nil {
+			return 0, 0, err
 		}
-		if op.Base != "" {
-			keep[op.Base] = true
+		for _, op := range ops {
+			if op.Blob != "" {
+				keep[op.Blob] = true
+			}
+			if op.Base != "" {
+				keep[op.Base] = true
+			}
+		}
+	} else {
+		unpushed, err := s.OwnOpsFrom(ownDevice, st.PushedOps)
+		if err != nil && !os.IsNotExist(err) {
+			return 0, 0, err
+		}
+		unpushedPaths := make(map[string]bool, len(unpushed))
+		for _, op := range unpushed {
+			if op.Blob != "" {
+				keep[op.Blob] = true
+			}
+			if op.Base != "" {
+				keep[op.Base] = true
+			}
+			if op.Path != "" {
+				unpushedPaths[op.Path] = true
+			}
+		}
+		if len(unpushedPaths) > 0 {
+			ops, err := s.AllOps()
+			if err != nil {
+				return 0, 0, err
+			}
+			for _, op := range ops {
+				if !unpushedPaths[op.Path] {
+					continue
+				}
+				if op.Blob != "" {
+					keep[op.Blob] = true
+				}
+				if op.Base != "" {
+					keep[op.Base] = true
+				}
+			}
 		}
 	}
 	err = filepath.WalkDir(filepath.Join(s.dir, "blobs"), func(path string, entry os.DirEntry, walkErr error) error {
@@ -465,9 +530,10 @@ const (
 )
 
 type SyncState struct {
-	Remote    string `json:"remote,omitempty"`
-	Lamport   int64  `json:"lamport"`
-	PushedOps int64  `json:"pushed_ops"`       // how many of our own ops the remote has
+	Device     string `json:"device,omitempty"`
+	Remote     string `json:"remote,omitempty"`
+	Lamport    int64  `json:"lamport"`
+	PushedOps  int64  `json:"pushed_ops"`       // how many of our own ops the remote has
 	Access    string `json:"access,omitempty"` // "", "read-only", or "no-access"
 	// AccessReason is the hub's own words for the last refusal. Without it every
 	// 403 renders as the same "read-only (pull only)" line, and the hub's most
@@ -506,10 +572,10 @@ func (s *Store) LoadSync() (SyncState, error) {
 	}
 	return st, nil
 }
-
 func (s *Store) SaveSync(st SyncState) error {
 	return WriteJSONAtomic(filepath.Join(s.dir, "sync.json"), st)
 }
+
 
 // ---- locking ----
 

@@ -1865,7 +1865,11 @@ func pruneVolumeBlobsSafely(volDir string) {
 			}
 		}
 	}
-	_, _, _ = st.PruneLocalBlobs(extraKeep, localBlobGCMinAge)
+	var ownDevice string
+	if dev, err := config.LoadDevice(); err == nil {
+		ownDevice = dev.ID
+	}
+	_, _, _ = st.PruneLocalBlobsForDevice(ownDevice, extraKeep, localBlobGCMinAge)
 }
 
 // passPulled reports whether a tick just pulled every mount of the volume from

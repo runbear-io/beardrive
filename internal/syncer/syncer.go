@@ -540,6 +540,9 @@ func (s *Session) cycleLocked(ctx context.Context, hint *ScanHint) (*Result, err
 	if proj.Remote != "" {
 		st.Remote = proj.Remote
 	}
+	if s.Device.ID != "" {
+		st.Device = s.Device.ID
+	}
 	deviceJoining := st.Lamport == 0 && st.PushedOps == 0
 	mountJoining := !hadCache && s.MountID != "" && (st.Lamport > 0 || st.PushedOps > 0)
 	joining := deviceJoining || mountJoining
@@ -1569,6 +1572,10 @@ func withdrawn(have, applied []journal.Op) []journal.Op {
 	}
 	return out
 }
+func isTransientOrServerTailErr(err error) bool {
+	return err != nil && strings.HasPrefix(err.Error(), "server: ")
+}
+
 
 // pull fetches journals that grew on the remote and any blobs we are missing
 // for the new ops. It returns the ops we had not seen before, and any op a
@@ -1625,6 +1632,9 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 		if fi, err := os.Stat(lp); err == nil {
 			localSize, isNew = fi.Size(), false
 		}
+		if o.Size <= localSize && localSize > 0 {
+			continue
+		}
 		if isNew {
 			if newJournals <= 0 {
 				continue
@@ -1663,6 +1673,8 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 							data = fetched
 							haveData = true
 						}
+					} else if errors.Is(tailErr, remote.ErrForbidden) || ctx.Err() != nil || isTransientOrServerTailErr(tailErr) {
+						return newOps, gone, tailErr
 					}
 				}
 			}
@@ -1782,13 +1794,20 @@ func (s *Session) pull(ctx context.Context, cache map[string]store.CachedFile) (
 	touched := map[string]bool{}
 	for _, op := range newOps {
 		touched[op.Path] = true
+		if op.Note == adoptNote && op.Kind == journal.KindPut && op.Blob != "" && !s.Store.HasBlob(op.Blob) {
+			fetchList = append(fetchList, op)
+		}
 	}
 	for p := range touched {
 		if win, ok := fold.Target[p]; ok && win.Blob != "" && !s.Store.HasBlob(win.Blob) {
 			fetchList = append(fetchList, journal.Op{Kind: journal.KindPut, Path: p, Blob: win.Blob, Size: win.Size, Mode: win.Mode})
 		}
 	}
-	myOps, myErr := s.Store.OwnOpsFrom(s.Device.ID, 0)
+	var pushedOps int64
+	if st, stErr := s.Store.LoadSync(); stErr == nil {
+		pushedOps = st.PushedOps
+	}
+	myOps, myErr := s.Store.OwnOpsFrom(s.Device.ID, pushedOps)
 	if myErr != nil {
 		return newOps, gone, myErr
 	}

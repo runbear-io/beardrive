@@ -29,6 +29,14 @@ type cacheEntry struct {
 	racy bool
 	data map[string]CachedFile
 }
+type cachedJournalPrefix struct {
+	dev          uint64
+	ino          uint64
+	byteOffset   int64
+	prefixSHA256 string
+	tailCheck    [64]byte
+	tailCheckLen int
+}
 
 type compactWinner struct {
 	Lamport    int64
@@ -394,6 +402,31 @@ func (s *Store) AppendOps(device string, ops []journal.Op) error {
 		return err
 	}
 	preID, preIDErr := statFileID(path)
+	if preIDErr == nil {
+		s.mu.Lock()
+		entry, ok := s.folds[device]
+		valid := ok && (!entry.Racy || entry.VerifiedInCycle) &&
+			entry.ContentSHA256 != [32]byte{} &&
+			entry.TailCheckLen > 0 && entry.TailCheck[entry.TailCheckLen-1] == '\n' &&
+			entry.ID == preID
+		if valid {
+			if s.prefixCache == nil {
+				s.prefixCache = make(map[string]map[int64]cachedJournalPrefix)
+			}
+			if s.prefixCache[device] == nil {
+				s.prefixCache[device] = make(map[int64]cachedJournalPrefix)
+			}
+			s.prefixCache[device][int64(entry.OpCount)] = cachedJournalPrefix{
+				dev:          preID.dev,
+				ino:          preID.ino,
+				byteOffset:   entry.ID.size,
+				prefixSHA256: hex.EncodeToString(entry.ContentSHA256[:]),
+				tailCheck:    entry.TailCheck,
+				tailCheckLen: entry.TailCheckLen,
+			}
+		}
+		s.mu.Unlock()
+	}
 	if pre.Size() > 0 {
 		var b [1]byte
 		if _, e := f.ReadAt(b[:], pre.Size()-1); e == nil && b[0] != '\n' {
@@ -444,6 +477,7 @@ func (s *Store) AppendOps(device string, ops []journal.Op) error {
 	}
 	if !fast {
 		delete(s.folds, device)
+		delete(s.prefixCache, device)
 		s.cachedFoldOK = false
 		_ = os.Remove(s.foldPath(device))
 	}
@@ -640,6 +674,20 @@ func (s *Store) JournalPrefixAt(device string, opCount int64) (byteOffset int64,
 		sum := sha256.Sum256(nil)
 		return 0, hex.EncodeToString(sum[:]), true
 	}
+	lp := s.JournalPath(device)
+	curID, curIDErr := statFileID(lp)
+	s.mu.Lock()
+	cp, cached := s.prefixCache[device][opCount]
+	s.mu.Unlock()
+	if cached && curIDErr == nil && curID.dev == cp.dev && curID.ino == cp.ino && curID.size >= cp.byteOffset && cp.tailCheckLen > 0 && cp.byteOffset >= int64(cp.tailCheckLen) {
+		var tailBuf [64]byte
+		if _, rerr := f.ReadAt(tailBuf[:cp.tailCheckLen], cp.byteOffset-int64(cp.tailCheckLen)); rerr == nil && bytes.Equal(tailBuf[:cp.tailCheckLen], cp.tailCheck[:cp.tailCheckLen]) {
+			return cp.byteOffset, cp.prefixSHA256, true
+		}
+		s.mu.Lock()
+		delete(s.prefixCache, device)
+		s.mu.Unlock()
+	}
 	r := bufio.NewReader(f)
 	h := sha256.New()
 	var found, offset int64
@@ -656,7 +704,30 @@ func (s *Store) JournalPrefixAt(device string, opCount int64) (byteOffset int64,
 			if json.Unmarshal(trimmed, &op) == nil && (op.Kind == journal.KindPut || op.Kind == journal.KindDelete) {
 				found++
 				if found == opCount {
-					return offset, hex.EncodeToString(h.Sum(nil)), true
+					resultOffset, resultSHA := offset, hex.EncodeToString(h.Sum(nil))
+					if curIDErr == nil && resultOffset > 0 {
+						tLen := int(min(int64(64), resultOffset))
+						var tBuf [64]byte
+						if _, terr := f.ReadAt(tBuf[:tLen], resultOffset-int64(tLen)); terr == nil {
+							s.mu.Lock()
+							if s.prefixCache == nil {
+								s.prefixCache = make(map[string]map[int64]cachedJournalPrefix)
+							}
+							if s.prefixCache[device] == nil {
+								s.prefixCache[device] = make(map[int64]cachedJournalPrefix)
+							}
+							s.prefixCache[device][opCount] = cachedJournalPrefix{
+								dev:          curID.dev,
+								ino:          curID.ino,
+								byteOffset:   resultOffset,
+								prefixSHA256: resultSHA,
+								tailCheck:    tBuf,
+								tailCheckLen: tLen,
+							}
+							s.mu.Unlock()
+						}
+					}
+					return resultOffset, resultSHA, true
 				}
 			}
 		}
@@ -741,36 +812,58 @@ func (s *Store) AppendValidatedPeerTail(device string, prevStat os.FileInfo, loc
 	s.mu.Unlock()
 
 	lp := s.JournalPath(device)
-	src, err := os.Open(lp)
-	if err != nil {
-		return false
-	}
 	tmp, err := os.CreateTemp(filepath.Dir(lp), ".bdrive-tmp-")
 	if err != nil {
-		src.Close()
 		return false
 	}
 	tmpName := tmp.Name()
-	copied, cerr := io.Copy(tmp, io.LimitReader(src, localSize))
-	src.Close()
-	if cerr != nil || copied != localSize {
-		tmp.Close()
-		_ = os.Remove(tmpName)
-		return false
-	}
-	if _, werr := tmp.Write(tailData); werr != nil {
-		tmp.Close()
-		_ = os.Remove(tmpName)
-		return false
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		_ = os.Remove(tmpName)
-		return false
-	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return false
+	}
+
+	prepared := false
+	if cloneErr := tryCloneFile(lp, tmpName); cloneErr == nil {
+		f, openErr := os.OpenFile(tmpName, os.O_WRONLY, 0o600)
+		if openErr == nil {
+			valid := false
+			if fi, statErr := f.Stat(); statErr == nil && fi.Size() == localSize {
+				if _, seekErr := f.Seek(localSize, io.SeekStart); seekErr == nil {
+					if _, writeErr := f.Write(tailData); writeErr == nil {
+						valid = f.Chmod(0o600) == nil
+					}
+				}
+			}
+			closeErr := f.Close()
+			prepared = valid && closeErr == nil
+		}
+	}
+	if !prepared {
+		src, openErr := os.Open(lp)
+		if openErr != nil {
+			_ = os.Remove(tmpName)
+			return false
+		}
+		dst, createErr := os.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if createErr != nil {
+			_ = src.Close()
+			_ = os.Remove(tmpName)
+			return false
+		}
+		copied, copyErr := io.Copy(dst, io.LimitReader(src, localSize))
+		var writeErr, chmodErr error
+		if copyErr == nil && copied == localSize {
+			_, writeErr = dst.Write(tailData)
+			if writeErr == nil {
+				chmodErr = dst.Chmod(0o600)
+			}
+		}
+		closeDstErr := dst.Close()
+		closeSrcErr := src.Close()
+		if copyErr != nil || copied != localSize || writeErr != nil || chmodErr != nil || closeDstErr != nil || closeSrcErr != nil {
+			_ = os.Remove(tmpName)
+			return false
+		}
 	}
 	if err := os.Rename(tmpName, lp); err != nil {
 		_ = os.Remove(tmpName)
@@ -938,6 +1031,7 @@ func (s *Store) FoldPeerAppend(device string, prevStat os.FileInfo, localBytes, 
 func (s *Store) InvalidateJournal(device string) {
 	s.mu.Lock()
 	delete(s.folds, device)
+	delete(s.prefixCache, device)
 	s.cachedFoldOK = false
 	_ = os.Remove(s.foldPath(device))
 	s.mu.Unlock()
@@ -950,6 +1044,7 @@ func (s *Store) EvictPeerJournals(ownDevice string) {
 	for d := range s.folds {
 		if d != ownDevice {
 			delete(s.folds, d)
+			delete(s.prefixCache, d)
 			_ = os.Remove(s.foldPath(d))
 		}
 	}
@@ -987,7 +1082,7 @@ func (s *Store) SaveChangedFoldsLocked() {
 }
 
 func SyncStateEqual(a, b SyncState) bool {
-	return a.Remote == b.Remote && a.Lamport == b.Lamport && a.PushedOps == b.PushedOps && a.Access == b.Access && a.AccessReason == b.AccessReason && a.IgnoreAccepted == b.IgnoreAccepted && a.IgnorePulled == b.IgnorePulled && a.ScopeTag == b.ScopeTag && slices.Equal(a.ReadOnly, b.ReadOnly) && slices.Equal(a.Denied, b.Denied)
+	return a.Remote == b.Remote && a.Device == b.Device && a.Lamport == b.Lamport && a.PushedOps == b.PushedOps && a.Access == b.Access && a.AccessReason == b.AccessReason && a.IgnoreAccepted == b.IgnoreAccepted && a.IgnorePulled == b.IgnorePulled && a.ScopeTag == b.ScopeTag && slices.Equal(a.ReadOnly, b.ReadOnly) && slices.Equal(a.Denied, b.Denied)
 }
 func CloneSyncState(st SyncState) SyncState {
 	st.ReadOnly = slices.Clone(st.ReadOnly)
