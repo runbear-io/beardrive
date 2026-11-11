@@ -1703,6 +1703,9 @@ func (s *Server) Handler() http.Handler {
 		// overwrites it with the name the hub derives — but the route has to
 		// match for the request to reach the place that overwrites it.
 		mux.HandleFunc("GET "+prefix+"ycollab/{room...}", resolve(PermRead, s.handleYCollab))
+		// A client's state merged into the live room over plain HTTP (no
+		// socket, or a shrink to confirm). It writes, so it needs write.
+		mux.HandleFunc("POST "+prefix+"ycollab/sync", resolve(PermWrite, s.handleYCollabSync))
 		mux.HandleFunc("POST "+prefix+"upload/init", resolve(PermWrite, s.handleUploadInit))
 		mux.HandleFunc("PUT "+prefix+"upload/content", resolve(PermWrite, s.handleUploadContent))
 		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(PermWrite, s.handleUploadCommit))

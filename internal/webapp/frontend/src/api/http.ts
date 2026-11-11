@@ -243,18 +243,83 @@ export async function putText(
   // The user confirmed a save the hub refused for emptying or sharply
   // shrinking the file (422, upload.go sharpShrink).
   confirmShrink = false,
-): Promise<{ sha?: string }> {
+  // Outlive the page (a closing tab parking its buffer). Past the browser's
+  // keepalive cap the request goes as an ordinary one, as syncCollab's does.
+  keepalive = false,
+  // Leaving for good: a body the hub cannot merge is parked beside the file
+  // in this same request (`parked` names the copy), since a closing page
+  // never gets to send a second one.
+  parkOnConflict = false,
+  // Create only: a path that already holds other bytes is refused 409 (a
+  // conflict copy another tab named in the same second), the same bytes are
+  // answered 200 unchanged (a retry whose first answer was lost).
+  ifNoneMatch = false,
+  // `merged`: the hub found the file had moved past `base` and folded this
+  // body into it three ways (upload.go) — the file is NOT exactly `text`.
+): Promise<{ sha?: string; merged?: boolean; parked?: string; path?: string; unchanged?: boolean }> {
   const r = await fetch(url, {
     method: "PUT",
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       ...(base ? { "If-Match": base } : {}),
+      ...(ifNoneMatch ? { "If-None-Match": "*" } : {}),
       ...(confirmShrink ? { "X-Bdrive-Confirm-Shrink": "1" } : {}),
+      ...(parkOnConflict ? { "X-Bdrive-Park-On-Conflict": "1" } : {}),
     },
     body: text,
+    keepalive: Boolean(keepalive && new TextEncoder().encode(text).byteLength <= KEEPALIVE_MAX_BYTES),
   });
-  if (r.status === 401) toLogin();
+  // A page being torn down must not navigate.
+  if (r.status === 401 && !keepalive) toLogin();
   if (!r.ok) await fail(r);
   trackWrite("PUT", url);
-  return (await r.json().catch(() => ({}))) as { sha?: string };
+  return (await r.json().catch(() => ({}))) as {
+    sha?: string;
+    merged?: boolean;
+    parked?: string;
+    path?: string;
+    unchanged?: boolean;
+  };
+}
+
+/* Write into a file's co-editing room over plain HTTP, for a client that is
+   not (or not yet) on the room's websocket: either a Yjs update this client's
+   document holds (queued offline edits), or a text the hub merges three ways
+   against the room — `base_text` is what the client started from, `text` what
+   it has now. The hub answers with the room's text and the sha it wrote.
+
+   `keepalive` lets the request outlive the page: it is what a closing tab
+   uses to hand over edits the socket never got to carry. Browsers cap the
+   keepalive bodies in flight at 64 KiB and REJECT the fetch outright past it
+   (a TypeError, so nothing is sent at all), which is why a larger body goes
+   as an ordinary request instead: it may still finish before the page does.
+   Deliberately no login bounce — a page being torn down must not navigate. */
+const KEEPALIVE_MAX_BYTES = 60_000;
+
+export async function syncCollab(
+  url: string,
+  payload: {
+    update?: string;
+    base?: string;
+    base_text?: string;
+    text?: string;
+    confirm_shrink?: boolean;
+    peek?: boolean;
+    prior_sent?: string[];
+    // A text that clashes with the room is parked beside the file by the hub
+    // in this same request, answered with `parked` (a closing page's flush).
+    park_on_conflict?: boolean;
+  },
+  keepalive = false,
+): Promise<{ sha: string; text: string; merged?: boolean; update?: string; parked?: string }> {
+  const body = JSON.stringify(payload);
+  const bodyBytes = new TextEncoder().encode(body).byteLength;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: Boolean(keepalive && bodyBytes <= KEEPALIVE_MAX_BYTES),
+  });
+  if (!r.ok) await fail(r);
+  return (await r.json()) as { sha: string; text: string; merged?: boolean; update?: string; parked?: string };
 }

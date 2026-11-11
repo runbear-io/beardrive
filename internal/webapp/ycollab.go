@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,8 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf16"
 
+	"github.com/reearth/ygo/cluster"
 	"github.com/reearth/ygo/crdt"
 	ygows "github.com/reearth/ygo/provider/websocket"
 	"github.com/runbear-io/beardrive/internal/remote"
@@ -85,6 +86,11 @@ func (s *Server) collabHookContext() context.Context {
 func (s *Server) ydocs() *ygows.Server {
 	s.yOnce.Do(func() {
 		srv := ygows.NewServer()
+		// A room outlives its last peer by collabRoomIdleTimeout: a reload, a
+		// laptop lid or a proxy dropping an idle socket comes back to the
+		// same warm document instead of a reseed from storage, and the
+		// unload (the final snapshot) runs only once the room is truly idle.
+		srv.RoomIdleTimeout = collabRoomIdleTimeout
 		// Seeding, remembering and snapshotting, in the three places ygo
 		// offers: the document is built from the file before anyone attaches,
 		// kept addressable while the room lives, and written back when the
@@ -127,7 +133,10 @@ func (s *Server) ydocs() *ygows.Server {
 			return nil
 		}
 		srv.OnLastPeer = func(_ context.Context, room string) {
-			s.finalSnapshot(s.collabHookContext(), room)
+			// The last peer leaving writes the document promptly, but the
+			// room stays resident (RoomIdleTimeout) so this is not final:
+			// OnUnloadDocument owns the final snapshot.
+			s.snapshot(s.collabHookContext(), room, false)
 		}
 		srv.OnUnloadDocument = func(_ context.Context, room string) {
 			ctx := s.collabHookContext()
@@ -210,8 +219,492 @@ func (s *Server) handleYCollab(v *volume, w http.ResponseWriter, r *http.Request
 		http.NotFound(w, r)
 		return
 	}
-	r.SetPathValue("room", projectID(r)+"/"+path)
+	room := projectID(r) + "/" + path
+	r.SetPathValue("room", room)
+	// Held for the whole connection: an HTTP sync closing a room it opened
+	// must not delete it from under this socket's join (enter).
+	defer s.rooms().enter(room)()
 	s.ydocs().ServeHTTP(w, r)
+}
+
+// collabRoomIdleTimeout is how long an empty room stays resident before ygo
+// unloads it. A var so a test need not wait it out.
+var collabRoomIdleTimeout = 2 * time.Minute
+
+// ycollabSyncOrigin marks the updates /ycollab/sync applies to a room. The
+// relay forwards every origin but its own, so a pushed update still reaches
+// other processes; local peers get it by broadcast.
+var ycollabSyncOrigin = &struct{ name string }{"ycollab/sync"}
+
+// maxYCollabSyncBody bounds a /ycollab/sync request: a base64 update up to
+// maxHistoryBytes plus a text and a base text up to maxSeedBytes each.
+const maxYCollabSyncBody = maxHistoryBytes*4/3 + 3*maxSeedBytes + 4096
+
+type ycollabSyncReq struct {
+	Update        string  `json:"update,omitempty"`
+	Base          string  `json:"base,omitempty"`
+	BaseText      *string `json:"base_text,omitempty"`
+	Text          *string `json:"text,omitempty"`
+	ConfirmShrink bool    `json:"confirm_shrink,omitempty"`
+	// Peek reads the room without writing anything: its sha, text and
+	// state as a Yjs update. A client whose earlier sync failed after the
+	// room may already have applied it learns from this what landed.
+	Peek      bool     `json:"peek,omitempty"`
+	PriorSent []string `json:"prior_sent,omitempty"`
+	// ParkOnConflict asks a text checkpoint that clashes with the live room
+	// to be kept beside the file as a conflict copy, in this request: a tab
+	// closing sends one keepalive request and runs no code after it, so it
+	// cannot answer a 409 with a second request parking its text itself.
+	ParkOnConflict bool `json:"park_on_conflict,omitempty"`
+}
+
+/*
+handleYCollabSync puts one client's state into a file's live room over plain
+HTTP — the path a browser takes when its socket is down, or to confirm a
+shrink the room would otherwise refuse.
+
+	update is a Yjs V1 update from a synced document: applied as is, so a
+	returning browser's typing merges by item identity like any peer's.
+	Without one, text is three-way merged against the room's current text
+	(base_text, or the blob named by base, as the ancestor) and the merge is
+	spliced in hunk by hunk. A same-line clash is a 409 carrying the sha the
+	room stands on.
+
+The room then snapshots through the ordinary upload door, so every write rule
+still applies; the answer is the sha the room now stands on and its text. A
+room this request had to open is closed again once written.
+*/
+func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Request) {
+	_ = v
+	path, err := cleanUploadPath(r.URL.Query().Get("path"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.writablePath(w, r, path) {
+		return
+	}
+	var req ycollabSyncReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxYCollabSyncBody)).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	var update []byte
+	if req.Update != "" {
+		if update, err = base64.StdEncoding.DecodeString(req.Update); err != nil {
+			http.Error(w, "update is not base64", http.StatusBadRequest)
+			return
+		}
+		if len(update) > maxHistoryBytes {
+			http.Error(w, "update too large to co-edit", http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
+	if req.Text != nil && len(*req.Text) >= maxSeedBytes {
+		http.Error(w, "file too large to co-edit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	ctx := r.Context()
+	project := projectID(r)
+	room := project + "/" + path
+	baseText := ""
+	if len(update) == 0 && req.Text != nil {
+		switch {
+		case req.BaseText != nil:
+			// Present, even empty: "" is a real ancestor (a file that
+			// was blank), never "absent, read the blob instead".
+			baseText = *req.BaseText
+		case req.Base != "":
+			got, ok := s.blobText(ctx, project, req.Base)
+			if !ok || len(got) > maxSeedBytes {
+				writeJSONStatus(w, http.StatusConflict, map[string]any{
+					"error": "the base version cannot be read", "sha": s.rooms().base(room), "path": path,
+				})
+				return
+			}
+			baseText = got
+		}
+	}
+
+	/* A room this request had to open — or an idle one it touched, which
+	   ygo will no longer reap (Apply clears the idle stamp) — is closed again
+	   on the way out, unless a socket is in it or joining it by then. */
+	leave := s.rooms().enter(room)
+	closeRoom := func() { _ = s.ydocs().CloseRoom(room, false) } // unload: final snapshot, lease released
+	release := func() {
+		leave()
+		s.rooms().closeIfUnused(room, closeRoom)
+	}
+
+	if req.Peek && len(update) == 0 && req.Text == nil && !req.ConfirmShrink {
+		/* Read-only: no splice, no snapshot, no syncDurable. A peek answers
+		   even while storage refuses writes, because it promises nothing
+		   about storage — only what the live room holds right now. */
+		var peekUpdate []byte
+		var peekText string
+		/* A room already held may carry a write that just failed — an
+		   unconfirmed shrink above all, which a close's final snapshot
+		   would park as a conflict copy. Only a room this peek opened is
+		   closed now; a held one gets the failed write's idle window. */
+		_, _, wasHeld := s.rooms().get(room)
+		done := release
+		if wasHeld {
+			done = func() {
+				leave()
+				time.AfterFunc(collabRoomIdleTimeout, func() { s.rooms().closeIfUnused(room, closeRoom) })
+			}
+		}
+		err := s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			peekUpdate, peekText = doc.EncodeStateAsUpdate(), doc.GetText("body").ToString()
+		})
+		if err != nil && !errors.Is(err, ygows.ErrNoChanges) {
+			if errors.Is(err, errRoomElsewhere) {
+				leave()
+				writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error(), "retry": true})
+				return
+			}
+			done()
+			http.Error(w, fmt.Sprintf("co-editing: %v", err), http.StatusBadGateway)
+			return
+		}
+		sha := s.rooms().base(room)
+		done()
+		resp := map[string]any{"ok": true, "path": path, "sha": sha, "text": peekText}
+		if len(peekUpdate) > 0 {
+			resp["update"] = base64.StdEncoding.EncodeToString(peekUpdate)
+		}
+		writeJSON(w, resp)
+		return
+	}
+
+	var (
+		conflict, merged, tooLarge, pendingBusy, shrinkRefused bool
+		cur                                                    string
+		applyErr                                               error
+		// wantUpdate and wantText are the room's document with this request
+		// in it, captured inside Apply: the version that must be on storage
+		// before the answer may say ok. Read after Apply returns, a keystroke
+		// landing in between would be folded into what this request promises.
+		wantUpdate []byte
+		wantText   string
+		captured   bool
+	)
+	err = s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		txt := doc.GetText("body")
+		cur = txt.ToString()
+		defer func() {
+			if applyErr == nil && !conflict && !tooLarge && !pendingBusy {
+				wantUpdate, wantText, captured = doc.EncodeStateAsUpdate(), txt.ToString(), true
+			}
+		}()
+		switch {
+		case len(update) > 0:
+			/* Measured on a scratch copy first: a live room that took an
+			   update past maxSeedBytes could neither be snapshotted whole nor
+			   seeded again, and an applied update cannot be taken back. */
+			if doc.PendingStats().Items > 0 {
+				pendingBusy = true
+				return
+			}
+			probe := crdt.New()
+			if applyErr = probe.ApplyUpdate(doc.EncodeStateAsUpdate()); applyErr != nil {
+				return
+			}
+			if applyErr = crdt.ApplyUpdateV1(probe, update, nil); applyErr != nil {
+				return
+			}
+			if probe.PendingStats().Items > 0 {
+				applyErr = errors.New("update has unintegrated pending items")
+				return
+			}
+			if len(probe.GetText("body").ToString()) >= maxSeedBytes {
+				tooLarge = true
+				return
+			}
+			applyErr = crdt.ApplyUpdateV1(doc, update, ycollabSyncOrigin)
+		case req.Text != nil:
+			want := *req.Text
+			anc := baseText
+			for _, sent := range req.PriorSent {
+				if len(sent) < maxSeedBytes && sent != anc && textmerge.RetainsChanges([]byte(anc), []byte(sent), []byte(cur)) {
+					anc = sent
+					break
+				}
+			}
+			if cur != anc && cur != want {
+				const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+				if anc == "" && req.Base != "" && req.Base != emptySHA256 && sharpShrink(int64(len(cur)), int64(len(want))) {
+					if !req.ConfirmShrink {
+						shrinkRefused = true
+						return
+					}
+					if req.Base != s.rooms().base(room) {
+						conflict = true
+						return
+					}
+				} else {
+					out, ok := textmerge.Merge([]byte(anc), []byte(cur), []byte(want))
+					if !ok || !validMergedText(path, out) {
+						conflict = true
+						return
+					}
+					want, merged = string(out), true
+				}
+			}
+			if len(want) >= maxSeedBytes {
+				tooLarge = true
+				return
+			}
+			spliceVia(transact, txt, cur, want)
+		}
+	})
+	closeIfOpened := release
+	if err != nil && !errors.Is(err, ygows.ErrNoChanges) {
+		if errors.Is(err, errRoomElsewhere) {
+			leave()
+			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error(), "retry": true})
+			return
+		}
+		closeIfOpened()
+		http.Error(w, fmt.Sprintf("co-editing: %v", err), http.StatusBadGateway)
+		return
+	}
+	if applyErr != nil {
+		closeIfOpened()
+		http.Error(w, "update does not apply: "+applyErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if pendingBusy {
+		closeIfOpened()
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"error": "room has unintegrated updates; retry", "retry": true})
+		return
+	}
+	if len(update) > 0 && !tooLarge {
+		// Applied outside Apply's capture, so the room's own peers on this
+		// process are told here; the relay already has it.
+		_ = s.ydocs().BroadcastUpdate(ctx, room, update)
+	}
+	if shrinkRefused {
+		closeIfOpened()
+		writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  "this save would empty or sharply shrink the file",
+			"shrink": true,
+			"sha":    s.rooms().base(room),
+			"size":   len(cur),
+		})
+		return
+	}
+	if conflict && !tooLarge && req.ParkOnConflict && req.Text != nil &&
+		strings.TrimSpace(*req.Text) != "" && s.apiMux != nil {
+		// Through the upload door, as every park is: quota, folder rules,
+		// the journal, the data index and change frames all apply. Created
+		// only under a free name: another tab's copy is never replaced.
+		pw, parked := s.parkNewCopy(ctx, s.requestUser(r), project, path, *req.Text)
+		closeIfOpened()
+		if parked == "" {
+			code := pw.code
+			if code < 400 {
+				code = http.StatusBadGateway
+			}
+			if ct := pw.hdr.Get("Content-Type"); ct != "" {
+				w.Header().Set("Content-Type", ct)
+			}
+			w.WriteHeader(code)
+			_, _ = w.Write(pw.body.Bytes())
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "path": path, "sha": s.rooms().base(room), "text": cur, "parked": parked})
+		return
+	}
+	if conflict || tooLarge {
+		closeIfOpened()
+		code, msg := http.StatusConflict, "the same lines changed in the live document"
+		if tooLarge {
+			code, msg = http.StatusRequestEntityTooLarge, "the merge is too large to co-edit"
+			if len(update) > 0 {
+				msg = "the update makes the file too large to co-edit"
+			}
+		}
+		writeJSONStatus(w, code, map[string]any{"error": msg, "sha": s.rooms().base(room), "text": cur, "path": path})
+		return
+	}
+	s.rooms().writer(room, s.requestUser(r))
+	text, synced := wantText, wantUpdate // the room's state with this request in it
+	if !captured {
+		// Apply had nothing to run (no changes): what the room holds now.
+		if doc, _, held := s.rooms().get(room); held {
+			synced = doc.EncodeStateAsUpdate()
+			text, _ = replayed(synced)
+		}
+	}
+	if req.ConfirmShrink {
+		s.rooms().confirmShrink(room, text)
+	}
+	sha := ""
+	if s.apiMux != nil {
+		// ok means durable, and durable is proven on storage, never inferred
+		// from the room: a snapshot that met an outside write merges it into
+		// the live document (reconcile) and leaves writing the merge to the
+		// next pause — or, with a keystroke landing mid-reconcile, moves
+		// nothing at all (moveDoc), and the request's edit lives only in
+		// memory. Until storage holds it the browser keeps its edits.
+		var fail *snapFailure
+		sha, fail = s.syncDurable(ctx, room, text, synced)
+		if fail != nil {
+			/* The room holds the text and the file does not: quota (403), an
+			   unconfirmed sharp shrink (422) or storage (502). Saying ok here
+			   would have the browser drop its dirty state for a write that
+			   never happened, so it gets the door's own refusal and keeps
+			   it — retrying, or asking about the shrink. The room is not
+			   closed now: its final snapshot would park the unconfirmed
+			   shrink as a conflict copy before the editor could confirm it.
+			   It stays for the idle window (the failed write's own retries
+			   run meanwhile) and is closed then if nobody came back. */
+			leave()
+			time.AfterFunc(collabRoomIdleTimeout, func() { s.rooms().closeIfUnused(room, closeRoom) })
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(fail.code)
+			_, _ = w.Write(fail.body)
+			return
+		}
+	}
+	if sha == "" {
+		sha = s.rooms().base(room)
+	}
+	if doc, _, held := s.rooms().get(room); held {
+		text, _ = replayed(doc.EncodeStateAsUpdate())
+	}
+	release()
+	resp := map[string]any{"ok": true, "path": path, "sha": sha, "text": text, "merged": merged}
+	if len(synced) > 0 {
+		/* The room's state with this request in it, as a Yjs update: a
+		   client staging a checkpoint over HTTP while it joins the socket
+		   applies it to learn the exact item IDs the room created for its
+		   text, so the socket's own copy of them merges as a no-op instead
+		   of the client re-inserting the same lines a second time. */
+		resp["update"] = base64.StdEncoding.EncodeToString(synced)
+	}
+	writeJSON(w, resp)
+}
+
+// ycollabSyncDurableWait bounds how long /ycollab/sync on a process that does
+// not hold a room's lease waits for the holder to write the synced text: the
+// relay delivers it at once and the holder writes snapshotIdle later — but
+// only once the room pauses. While several editors type continuously on the
+// holder, every keystroke re-arms the idle timer, so the holder's write can
+// slip all the way to snapshotMax. This wait must therefore exceed
+// snapshotMax, or a non-holder answers a spurious 503 for an edit the holder
+// was always going to write. A var so a test need not wait it out.
+var ycollabSyncDurableWait = 8 * time.Second
+
+/*
+awaitDurable waits for the file to hold a sync this process applied but
+another process writes: the stored file says text, or the document state
+stored with it knows synced. It answers the sha that holds it, or a failure
+for the browser to keep its edits by.
+
+	No relay: the holder never hears this process's update, so nothing will
+	write it — refused at once.
+
+	elsewhere is false for this process's own room after syncDurable's
+	immediate snapshots left the edit off storage: the same wait, without
+	the relay requirement.
+
+	A holder that cannot write (quota, an unconfirmed shrink, storage) looks
+	the same from here as a slow one, so running out of time is a 503, never
+	an ok for text nothing durable holds. A lease that expires meanwhile is
+	this process's to take: each second it snapshots again, and a write it
+	makes itself, or a refusal it gets, ends the wait.
+*/
+func (s *Server) awaitDurable(ctx context.Context, room, text string, synced []byte, elsewhere bool) (string, *snapFailure) {
+	if elsewhere && s.collabRelay == nil {
+		return "", unwrittenSync("another process writes this file and cannot receive this edit")
+	}
+	wait := ycollabSyncDurableWait
+	if dl, ok := ctx.Deadline(); ok {
+		wait = min(wait, time.Until(dl))
+	}
+	deadline := time.Now().Add(wait)
+	nextSnap := time.Now().Add(time.Second)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if sha, ok := s.syncIsDurableOnStorage(ctx, room, text, synced); ok {
+			return sha, nil
+		}
+		now := time.Now()
+		if now.After(deadline) {
+			return "", unwrittenSync("the edit is not written yet")
+		}
+		if now.After(nextSnap) {
+			nextSnap = now.Add(time.Second)
+			if fail := s.snapshot(ctx, room, false); fail != nil && !fail.elsewhere {
+				return "", fail
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return "", unwrittenSync("the edit is not written yet")
+		case <-tick.C:
+		}
+	}
+}
+
+// unwrittenSync is the 503 a /ycollab/sync answers for an edit storage does
+// not hold yet: the browser keeps its edits and retries.
+func unwrittenSync(msg string) *snapFailure {
+	body, _ := json.Marshal(map[string]any{"error": msg, "retry": true})
+	return &snapFailure{code: http.StatusServiceUnavailable, body: body}
+}
+
+// syncDurable writes a /ycollab/sync's edit and answers the sha storage holds
+// it under, or the failure the browser keeps its edits by. A few snapshots
+// back to back settle what one leaves for the next pause (a reconciled merge,
+// a move a keystroke refused); past those it waits, snapshotting each second,
+// up to ycollabSyncDurableWait. Another process holding the lease waits for
+// that process's write the same way.
+func (s *Server) syncDurable(ctx context.Context, room, text string, synced []byte) (string, *snapFailure) {
+	for range 3 {
+		fail := s.snapshot(ctx, room, false)
+		if fail != nil {
+			if fail.elsewhere {
+				return s.awaitDurable(ctx, room, text, synced, true)
+			}
+			return "", fail
+		}
+		if sha, ok := s.syncIsDurableOnStorage(ctx, room, text, synced); ok {
+			return sha, nil
+		}
+	}
+	return s.awaitDurable(ctx, room, text, synced, false)
+}
+
+// syncIsDurableOnStorage is the positive proof a sync's ok rests on: storage,
+// not the room, holds the edit — the current file says text, the document
+// state stored with the current file knows every item and deletion of
+// synced, or text sits in a conflict copy this room wrote beside the file.
+// Anything else, including an edit only the live document holds, is not
+// durable.
+func (s *Server) syncIsDurableOnStorage(ctx context.Context, room, text string, synced []byte) (string, bool) {
+	project, path, _ := strings.Cut(room, "/")
+	body, sha, _, found, err := s.freshRoomFile(ctx, room, s.roomHead(ctx, project, path))
+	if err != nil {
+		return "", false
+	}
+	if found {
+		if string(body) == text {
+			return sha, true
+		}
+		if synced != nil {
+			if h := s.roomHistory(ctx, project, sha); h != nil && knows(h, synced) {
+				return sha, true
+			}
+		}
+	}
+	if s.rooms().parkedDurably(room, text) {
+		return s.rooms().base(room), true
+	}
+	return "", false
 }
 
 // seedDoc is what makes the seed CLAIM unnecessary.
@@ -228,7 +721,9 @@ func (s *Server) seedDoc(ctx context.Context, room string, doc *crdt.Doc) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	body, sha, found, err := s.roomBytes(ctx, room)
+	project, path, _ := strings.Cut(room, "/")
+	head := s.roomHeadRecord(ctx, project, path)
+	body, sha, win, found, err := s.freshRoomFile(ctx, room, head.SHA)
 	if err != nil {
 		// Refused, so the editor retries. Opened empty, its first snapshot
 		// would write that emptiness over a file nobody could read.
@@ -240,7 +735,6 @@ func (s *Server) seedDoc(ctx context.Context, room string, doc *crdt.Doc) error 
 	if len(body) >= maxSeedBytes {
 		return fmt.Errorf("%s is too large to co-edit", room) // a truncated seed would be written back over the rest
 	}
-	project, path, _ := strings.Cut(room, "/")
 	// The base is set for an empty file too: it is what keeps every write
 	// this room makes conditional.
 	s.rooms().rebase(room, sha)
@@ -279,8 +773,23 @@ func (s *Server) seedDoc(ctx context.Context, room string, doc *crdt.Doc) error 
 	   nothing. Only a hub that never saw this file being edited starts from
 	   the bytes. */
 	var newest []byte
-	if head := s.roomHead(ctx, project, path); head != "" && head != sha {
-		newest = s.roomHistory(ctx, project, head)
+	if head.SHA != "" && head.SHA != sha {
+		newest = s.roomHistory(ctx, project, head.SHA)
+		if newest != nil && head.Win != "" && win != "" && win < head.Win {
+			/* The journal fence. The head names a version that comes AFTER
+			   the one this process's fold resolves to, in replay order — the
+			   fold is stale (another process wrote, and even a forced
+			   refresh has not caught up). Splicing the head back to these
+			   older bytes would tombstone the newer edits, and the relay
+			   would carry those deletions to every process holding the room.
+			   So the room is built from the head as it stands; its next
+			   write is held to that version. */
+			if headText, ok := replayed(newest); ok && len(headText) < maxSeedBytes && doc.ApplyUpdate(newest) == nil {
+				s.rooms().rebase(room, head.SHA)
+				return nil
+			}
+			return fmt.Errorf("%s: this process's view of the file is older than the stored document", room)
+		}
 	}
 	if newest == nil {
 		if state := s.roomHistory(ctx, project, sha); state != nil && replayInto(doc, state, text) {
@@ -355,19 +864,48 @@ func (s *Server) claimRoomHistory(ctx context.Context, project, path, sha string
 	return state
 }
 
-// knows reports whether a stored state holds every item of another — the
-// only comparison a CRDT offers: two states that spell the same text are not
-// the same document.
+// knows reports whether a stored state holds every item AND every deletion
+// of another — the only comparison a CRDT offers: two states that spell the
+// same text are not the same document.
+//
+// It merges other into a scratch copy of state and asks whether anything
+// changed. DiffUpdateV1(other, sv) == empty cannot answer that: a V1 update
+// always carries its whole delete set, so any history holding one deletion
+// read as "missing something" even against itself.
 func knows(state, other []byte) bool {
 	if other == nil {
 		return true
 	}
-	have, ok := docFrom(state)
+	probe, ok := docFrom(state)
 	if !ok {
 		return false
 	}
-	missing, err := crdt.DiffUpdateV1(other, have.StateVector())
-	return err == nil && bytes.Equal(missing, emptyUpdate)
+	before := probe.EncodeStateAsUpdate()
+	svBefore := probe.StateVector()
+	txtBefore := probe.GetText("body").ToString()
+	if err := probe.ApplyUpdate(other); err != nil {
+		return false
+	}
+	if !sameVector(svBefore, probe.StateVector()) || probe.GetText("body").ToString() != txtBefore {
+		return false
+	}
+	// No item was added, so the delete set is all that can still differ —
+	// and it is all a diff against the full state vector encodes.
+	dsBefore, err1 := crdt.DiffUpdateV1(before, svBefore)
+	dsAfter, err2 := crdt.DiffUpdateV1(probe.EncodeStateAsUpdate(), svBefore)
+	return err1 == nil && err2 == nil && bytes.Equal(dsBefore, dsAfter)
+}
+
+func sameVector(a, b crdt.StateVector) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for c, n := range a {
+		if m, ok := b[c]; !ok || m != n {
+			return false
+		}
+	}
+	return true
 }
 
 func docFrom(state []byte) (*crdt.Doc, bool) {
@@ -397,9 +935,11 @@ func replayInto(doc *crdt.Doc, state []byte, want string) bool {
 	return doc.ApplyUpdate(state) == nil
 }
 
-// splice turns txt from one text into another with a single edit: the common
-// prefix and suffix are kept, the middle replaced. Offsets are UTF-16 units,
-// which is what Yjs counts in.
+// splice turns txt from one text into another with the minimal set of
+// edits: a line diff, each changed span trimmed to the characters that
+// differ (textmerge.DiffHunks). Everything unchanged between two edits stays
+// the same CRDT items, so a browser's typing inside it is never deleted with
+// it. Offsets are UTF-16 units, which is what Yjs counts in.
 func splice(doc *crdt.Doc, txt *crdt.YText, from, to string) {
 	spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, from, to)
 }
@@ -407,27 +947,20 @@ func splice(doc *crdt.Doc, txt *crdt.YText, from, to string) {
 // spliceVia is splice through a caller's transaction runner — ygo's Apply
 // hands one out, and only edits made through it reach the room's peers.
 func spliceVia(transact func(func(*crdt.Transaction)), txt *crdt.YText, from, to string) {
-	a, b := []rune(from), []rune(to)
-	p := 0
-	for p < len(a) && p < len(b) && a[p] == b[p] {
-		p++
-	}
-	n := 0
-	for n < len(a)-p && n < len(b)-p && a[len(a)-1-n] == b[len(b)-1-n] {
-		n++
-	}
-	at := len(utf16.Encode(a[:p]))
-	del := len(utf16.Encode(a[p : len(a)-n]))
-	ins := string(b[p : len(b)-n])
-	if del == 0 && ins == "" {
+	hunks := textmerge.DiffHunks(from, to)
+	if len(hunks) == 0 {
 		return
 	}
 	transact(func(txn *crdt.Transaction) {
-		if del > 0 {
-			txt.Delete(txn, at, del)
-		}
-		if ins != "" {
-			txt.Insert(txn, at, ins, nil)
+		// Last to first, so each hunk's offsets into `from` still hold.
+		for i := len(hunks) - 1; i >= 0; i-- {
+			h := hunks[i]
+			if h.End > h.Start {
+				txt.Delete(txn, h.Start, h.End-h.Start)
+			}
+			if h.Insert != "" {
+				txt.Insert(txn, h.Start, h.Insert, nil)
+			}
 		}
 	})
 }
@@ -605,18 +1138,62 @@ func (s *Server) storeRoomHistory(ctx context.Context, project, path, sha string
 // room for it builds from, on any process (seedDoc).
 func headKey(path string) string { return "ydoc/head/" + path }
 
+// roomHeadRec is what ydoc/head/<path> holds: the blob of the newest stored
+// state and, when it was known, the replay-order key (winKey, hex) of the
+// journal op that produced that blob. win is the fence a stale fold is held
+// to: hex preserves winKey's byte order, so comparing two of them compares
+// the ops the way journal.Less does. A head written by an older hub is a
+// bare sha, read with win "".
+type roomHeadRec struct {
+	SHA string `json:"sha"`
+	Win string `json:"win,omitempty"`
+}
+
+func parseRoomHead(b []byte) roomHeadRec {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 {
+		return roomHeadRec{}
+	}
+	if b[0] != '{' {
+		return roomHeadRec{SHA: string(b)}
+	}
+	var rec roomHeadRec
+	if json.Unmarshal(b, &rec) != nil {
+		return roomHeadRec{}
+	}
+	rec.SHA = strings.TrimSpace(rec.SHA)
+	return rec
+}
+
+// maxHeadBytes bounds a head record: a sha and a winKey, whose length grows
+// with the device id and the path.
+const maxHeadBytes = 16 << 10
+
 func (s *Server) roomHead(ctx context.Context, project, path string) string {
+	return s.roomHeadRecord(ctx, project, path).SHA
+}
+
+func (s *Server) roomHeadRecord(ctx context.Context, project, path string) roomHeadRec {
 	be, ok := s.projectBackend(project)
 	if !ok {
-		return ""
+		return roomHeadRec{}
 	}
 	rc, err := be.Get(ctx, headKey(path))
 	if err != nil {
-		return ""
+		return roomHeadRec{}
 	}
 	defer rc.Close()
-	sha, _ := io.ReadAll(io.LimitReader(rc, 128))
-	return strings.TrimSpace(string(sha))
+	b, _ := io.ReadAll(io.LimitReader(rc, maxHeadBytes))
+	return parseRoomHead(b)
+}
+
+// fileWin is the hex winKey of the op that produced fi, or "" when the fold
+// did not record one.
+func fileWin(fi FileInfo, path string) string {
+	if fi.DeviceID == "" && fi.Lamport == 0 && fi.Seq == 0 {
+		return ""
+	}
+	return hex.EncodeToString(winKey(fi.winOp(path)))
 }
 
 func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string, state []byte) {
@@ -627,6 +1204,39 @@ func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string, s
 	if !ok {
 		return
 	}
+	// The op that wrote sha, when this process's fold resolves the path to
+	// it — every caller stores a state right after writing or reading it.
+	win := ""
+	if _, fi, found, err := s.roomFileInfo(ctx, project+"/"+path); err == nil && found && fi.Blob == sha {
+		win = fileWin(fi, path)
+	}
+	rec, _ := json.Marshal(roomHeadRec{SHA: sha, Win: win})
+	// newer reports whether rec may replace prev, or that nothing is to do.
+	newer := func(prev roomHeadRec) (write bool) {
+		if prev.SHA == sha {
+			return win != "" && prev.Win != win // learning the fence for the same head
+		}
+		if prev.Win != "" && win != "" {
+			// Both ends of the comparison are journal positions: the head
+			// never moves back in replay order, whatever the states say.
+			return win > prev.Win
+		}
+		if prev.SHA != "" && len(state) > 0 {
+			if prevState := s.roomHistory(ctx, project, prev.SHA); prevState != nil {
+				stateHasPrev := knows(state, prevState)
+				prevHasState := knows(prevState, state)
+				if prevHasState && !stateHasPrev {
+					return false
+				}
+				if !stateHasPrev || prevHasState {
+					if _, curSHA, found, ferr := s.roomBytes(ctx, project+"/"+path); ferr == nil && found && curSHA == prev.SHA {
+						return false
+					}
+				}
+			}
+		}
+		return true
+	}
 	if cp, ok := be.(remote.ConditionalPutter); ok {
 		const maxHeadAttempts = 8
 		for range maxHeadAttempts {
@@ -635,25 +1245,10 @@ func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string, s
 				log.Printf("bdrive: reading room head %s/%s: %v", project, path, err)
 				return
 			}
-			prevSHA := strings.TrimSpace(string(existing))
-			if prevSHA == sha {
+			if !newer(parseRoomHead(existing)) {
 				return
 			}
-			if prevSHA != "" && len(state) > 0 {
-				if prevState := s.roomHistory(ctx, project, prevSHA); prevState != nil {
-					stateHasPrev := knows(state, prevState)
-					prevHasState := knows(prevState, state)
-					if prevHasState && !stateHasPrev {
-						return
-					}
-					if !stateHasPrev || prevHasState {
-						if _, curSHA, found, ferr := s.roomBytes(ctx, project+"/"+path); ferr == nil && found && curSHA == prevSHA {
-							return
-						}
-					}
-				}
-			}
-			_, err = cp.PutIf(ctx, headKey(path), strings.NewReader(sha), int64(len(sha)), version)
+			_, err = cp.PutIf(ctx, headKey(path), bytes.NewReader(rec), int64(len(rec)), version)
 			if err == nil {
 				return
 			}
@@ -665,7 +1260,10 @@ func (s *Server) storeRoomHead(ctx context.Context, project, path, sha string, s
 		log.Printf("bdrive: storing room head %s/%s: concurrent head contention", project, path)
 		return
 	}
-	if err := be.Put(ctx, headKey(path), strings.NewReader(sha), int64(len(sha))); err != nil {
+	if prev := s.roomHeadRecord(ctx, project, path); !newer(prev) {
+		return
+	}
+	if err := be.Put(ctx, headKey(path), bytes.NewReader(rec), int64(len(rec))); err != nil {
 		log.Printf("bdrive: storing room head %s/%s: %v", project, path, err)
 	}
 }
@@ -687,41 +1285,79 @@ func (s *Server) projectBackend(project string) (remote.Backend, bool) {
 // the file is not there; a file that is there but cannot be read right now is
 // an error, never an empty file.
 func (s *Server) roomBytes(ctx context.Context, room string) (body []byte, sha string, found bool, err error) {
+	body, fi, found, err := s.roomFile(ctx, room)
+	return body, fi.Blob, found, err
+}
+
+// roomFileInfo resolves a room's path in the fold that includes every write
+// already accepted (volume.current).
+func (s *Server) roomFileInfo(ctx context.Context, room string) (*volume, FileInfo, bool, error) {
 	project, path, ok := strings.Cut(room, "/")
 	if !ok || !projectIDRe.MatchString(project) {
-		return nil, "", false, nil
+		return nil, FileInfo{}, false, nil
 	}
 	if s.Projects != nil {
 		if _, known := s.Projects.Get(project); !known {
-			return nil, "", false, nil
+			return nil, FileInfo{}, false, nil
 		}
 	}
 	_, v, err := s.projectVolume(project)
 	if err != nil {
-		return nil, "", false, err
+		return nil, FileInfo{}, false, err
 	}
 	// A room is built from what the file IS, not from a snapshot a background
 	// rebuild has not caught up on yet.
 	snap, err := v.current(ctx)
 	if err != nil {
-		return nil, "", false, err
+		return nil, FileInfo{}, false, err
 	}
 	fi, ok := snap.files[path]
 	if !ok {
-		return nil, "", false, nil
+		return v, FileInfo{}, false, nil
 	}
+	return v, fi, true, nil
+}
+
+// roomFile is roomBytes with the whole FileInfo, provenance included.
+func (s *Server) roomFile(ctx context.Context, room string) ([]byte, FileInfo, bool, error) {
+	v, fi, found, err := s.roomFileInfo(ctx, room)
+	if err != nil || !found {
+		return nil, FileInfo{}, false, err
+	}
+	_, path, _ := strings.Cut(room, "/")
 	rc, err := v.source.Open(ctx, path, fi)
 	if err != nil {
-		return nil, "", false, err
+		return nil, FileInfo{}, false, err
 	}
 	defer rc.Close()
 	// One byte past the bound, so a caller can tell a whole file from a
 	// prefix: anything longer than maxSeedBytes is only the start of one.
-	body, err = io.ReadAll(io.LimitReader(rc, maxSeedBytes+1))
+	body, err := io.ReadAll(io.LimitReader(rc, maxSeedBytes+1))
 	if err != nil {
-		return nil, "", false, err
+		return nil, FileInfo{}, false, err
 	}
-	return body, fi.Blob, true, nil
+	return body, fi, true, nil
+}
+
+// freshRoomFile is roomFile for a seed, with the op that produced the file
+// (win, see roomHeadRec). volume.current covers the writes THIS process
+// accepted; another process's are seen only once the cached fold expires.
+// A head naming a different blob says somebody wrote since, so the fold is
+// rebuilt from the journals before the seed trusts it.
+func (s *Server) freshRoomFile(ctx context.Context, room, headSHA string) (body []byte, sha, win string, found bool, err error) {
+	body, fi, found, err := s.roomFile(ctx, room)
+	if err == nil && headSHA != "" && (!found || fi.Blob != headSHA) {
+		project, _, _ := strings.Cut(room, "/")
+		if _, v, verr := s.projectVolume(project); verr == nil {
+			v.invalidate()
+			body, fi, found, err = s.roomFile(ctx, room)
+		}
+	}
+	if err != nil || !found {
+		return nil, "", "", found, err
+	}
+	_, path, _ := strings.Cut(room, "/")
+	return body, fi.Blob, fileWin(fi, path), true, nil
 }
 
 // snapshotRoom writes the document back to the file.
@@ -738,11 +1374,11 @@ func (s *Server) roomBytes(ctx context.Context, room string) (body []byte, sha s
 // and the change frame are then the same code every other write goes through;
 // a second path into the file would be a second set of rules to keep in
 // agreement.
-func (s *Server) snapshotRoom(ctx context.Context, room string) { s.snapshot(ctx, room, false) }
+func (s *Server) snapshotRoom(ctx context.Context, room string) { _ = s.snapshot(ctx, room, false) }
 
 // finalSnapshot is the write made as the room empties: nobody is left to see
 // the document, so a version the file refuses is parked beside it instead.
-func (s *Server) finalSnapshot(ctx context.Context, room string) { s.snapshot(ctx, room, true) }
+func (s *Server) finalSnapshot(ctx context.Context, room string) { _ = s.snapshot(ctx, room, true) }
 
 // snapshotSeam, when set by a test, runs inside a snapshot once it has read
 // the document and before it reads the file.
@@ -753,15 +1389,32 @@ var snapshotSeam func(room string)
 // this two could write and file history in either order: the slower one would
 // name an older version as the room's head and base after a newer one, and the
 // next room would be built from it.
-func (s *Server) snapshot(ctx context.Context, room string, final bool) {
+func (s *Server) snapshot(ctx context.Context, room string, final bool) *snapFailure {
 	unlock := s.rooms().lockSnapshots(room)
 	defer unlock()
-	s.snapshotLocked(ctx, room, final)
+	return s.snapshotLocked(ctx, room, final)
+}
+
+// snapFailure is a snapshot that left the room's text unwritten because the
+// file could not be read or the upload door refused it — quota (403), an
+// unconfirmed sharp shrink (422), storage (502). code and body are what the
+// door answered, so a caller relaying it (/ycollab/sync) hands the browser
+// the same refusal a direct save would have got. Nil for everything else,
+// including a refusal the room settled itself (reconcile) and a room another
+// process writes.
+type snapFailure struct {
+	code int
+	body []byte
+	// elsewhere: another process holds the room's lease, so this one wrote
+	// nothing and cannot say whether the file holds the text. Not a refusal
+	// — the caller has to look at storage for the holder's write
+	// (awaitDurable).
+	elsewhere bool
 }
 
 // snapshotLocked is snapshot for a caller already holding the room's
 // snapshot lock.
-func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) {
+func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) (failed *snapFailure) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -803,7 +1456,7 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) {
 		if final && strings.TrimSpace(text) != "" {
 			s.finishLater(ctx, room, who, text, base, state)
 		}
-		return
+		return storageFailure(err)
 	}
 	if have && curSha == s.rooms().yieldedTo(room) {
 		// Already parked beside this version, which the room cannot hold.
@@ -853,9 +1506,15 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) {
 		// time to, so this process's browsers see the save land.
 		bg := s.collabContext()
 		if ctx.Err() == nil && bg.Err() == nil {
+			// Looked before and the file still does not say this: the
+			// writer is late or wedged, and until somebody writes it the
+			// relay's retained window is all a later process can replay.
+			if s.rooms().waited(room) {
+				s.republishRoom(ctx, room, state)
+			}
 			s.rooms().awaitWriter(room, func() { s.snapshotRoom(bg, room) })
 		}
-		return
+		return &snapFailure{elsewhere: true}
 	}
 	if s.apiMux == nil {
 		return
@@ -880,6 +1539,7 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) {
 			s.storeRoomHistory(ctx, project, path, sha, state)
 			s.rooms().rebase(room, sha)
 		}
+		s.rooms().settled(room)
 	case http.StatusConflict:
 		// Somebody OUTSIDE the room wrote the file — an agent, the CLI, a
 		// device — since the hub last did. Everyone inside the room shares
@@ -890,6 +1550,9 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) {
 			// final snapshot has none, so its text is carried past the room.
 			if final && strings.TrimSpace(text) != "" {
 				s.finishLater(ctx, room, who, text, base, state)
+			}
+			if err != nil {
+				return storageFailure(err)
 			}
 			return
 		}
@@ -905,6 +1568,9 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) {
 		   nothing in it the file does not already hold. */
 		if !final || s.rooms().isParked(room, text) {
 			log.Printf("bdrive: not snapshotting %s: the room's text would empty or sharply shrink it", path)
+			if !final {
+				failed = &snapFailure{code: w.code, body: w.body.Bytes()}
+			}
 			return
 		}
 		if fileHolds(string(cur), text) || s.copyHolds(ctx, project, path, text) {
@@ -918,7 +1584,52 @@ func (s *Server) snapshotLocked(ctx context.Context, room string, final bool) {
 		copy := conflictPath(path, who, time.Now())
 		s.parkCopy(ctx, who, project, path, copy, text)
 		return
+	default:
+		// The door or the storage behind it failed. While editors remain,
+		// look again with backoff: otherwise the room's text waits for the
+		// next keystroke, or for nobody if the typing has stopped. A final
+		// snapshot's text is owned by the unload path.
+		log.Printf("bdrive: snapshotting %s: upload answered %d", path, w.code)
+		if final {
+			return
+		}
+		code := w.code
+		if code < 400 {
+			code = http.StatusBadGateway // a write that never answered is a failed write
+		}
+		failed = &snapFailure{code: code, body: w.body.Bytes()}
+		if bg := s.collabContext(); ctx.Err() == nil && bg.Err() == nil {
+			// Nothing durable holds this text but this process's document
+			// and the relay's retained window — which trims by age. Each
+			// failed attempt re-publishes the whole state, so a process
+			// opening the room later still replays it however long the
+			// outage lasts.
+			s.republishRoom(ctx, room, state)
+			s.rooms().retryLater(room, func() { s.snapshotRoom(bg, room) })
+		}
 	}
+	return
+}
+
+// republishRoom hands a room's whole state to the relay again. Applying it is
+// a no-op for every process that already has it, so it is safe to repeat; its
+// point is the relay's RETAINED window, which is the only place a process
+// opening the room later can learn edits no snapshot has written yet. Without
+// a relay there is no other process to tell.
+func (s *Server) republishRoom(ctx context.Context, room string, state []byte) {
+	if s.collabRelay == nil || len(state) == 0 {
+		return
+	}
+	if err := s.collabRelay.Publish(ctx, cluster.Outbound{Room: room, Kind: cluster.KindSync, Data: state}); err != nil {
+		log.Printf("bdrive: re-publishing %s to the relay: %v", room, err)
+	}
+}
+
+// storageFailure is the snapFailure for a file this process could not read
+// back before writing: a 502, as the upload door answers a storage error.
+func storageFailure(err error) *snapFailure {
+	body, _ := json.Marshal(map[string]any{"error": "reading the file: " + err.Error()})
+	return &snapFailure{code: http.StatusBadGateway, body: body}
 }
 
 /*
@@ -938,47 +1649,9 @@ wrote: an agent appending to the notes, a device syncing, the CLI.
 */
 func (s *Server) reconcile(ctx context.Context, room string, who User, text, baseText string, haveBase bool, theirs, theirSha string, final bool) {
 	project, path, _ := strings.Cut(room, "/")
-	// roomBytes and blobText stop just past maxSeedBytes. A prefix taken for the
-	// whole file would be merged and written back over its tail, so a file
-	// that large is only ever parked beside.
-	whole := len(theirs) < maxSeedBytes && len(baseText) < maxSeedBytes
-	// Only text is merged or appended: a binary outside write mixed with the
-	// room's lines would be a file that is neither.
-	whole = whole && textmerge.IsText([]byte(theirs)) && textmerge.IsText([]byte(baseText)) && textmerge.IsText([]byte(text))
-	var merged []byte
-	canMerge := false
-	if whole && haveBase {
-		merged, canMerge = textmerge.Merge([]byte(baseText), []byte(text), []byte(theirs))
-	}
-	target, ok := "", false
-	switch {
-	case !whole:
-		// parked below
-	case canMerge && len(merged) < maxSeedBytes:
-		// Two sides under the bound can insert past it together, and a
-		// merge no room could open again is parked rather than written.
-		target, ok = string(merged), true
-	case appendedBoth(baseText, haveBase, theirs, text):
-		// Both sides only added to the end: an agent appending to a daily
-		// note while somebody types at its foot. The line merge has no order
-		// for two insertions at one point; this room is the file's only
-		// writer, so it picks one: theirs, then what the room added, each
-		// exactly as written, repeated lines and blank lines included. Too
-		// big to write, it is parked: the checks below match lines and would
-		// take a repeated line or a blank one as already in the file.
-		if both := joinAppends(theirs, strings.TrimPrefix(text, baseText)); len(both) < maxSeedBytes {
-			target, ok = both, true
-		}
-	case fileHolds(theirs, text) || s.copyHolds(ctx, project, path, text):
-		target, ok = theirs, true
-	case haveBase && strings.TrimSpace(baseText) == "":
-		// Both sides wrote into an empty file — a template arriving while
-		// somebody already typed. There is no ancestor to order them by, and
-		// neither is a revision of the other: keep both, theirs first.
-		if both := appendNew(theirs, text); len(both) < maxSeedBytes {
-			target, ok = both, true
-		}
-	}
+	target, ok, whole := reconcileTarget(path, text, baseText, haveBase, theirs, func(t string) bool {
+		return fileHolds(theirs, t) || s.copyHolds(ctx, project, path, t)
+	})
 	park := func() {
 		// parkCopy owns the text from here and retries a failing store, so
 		// the room can move onto their version without it being the only
@@ -1021,9 +1694,77 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 		s.moveDoc(ctx, room, text, target, theirSha, true, true)
 		return
 	}
-	if s.moveDoc(ctx, room, text, target, theirSha, target == theirs, false) && target == text {
+	/* Not against text alone. This read text before the storage round trips
+	   that found their write, and with several editors typing, somebody
+	   always typed in between: a move refused on any keystroke never lands
+	   while the meeting goes on, and their write stays out of the room. So
+	   the document as it stands, inside the same Apply that splices it, is
+	   merged against their version again — microseconds, no I/O, nobody can
+	   type in between. A copy already parked is not consulted here: that is
+	   storage, and a live text it alone would hold waits for the next pause. */
+	recompute := func(cur string) (string, bool, bool) {
+		to, ok, _ := reconcileTarget(path, cur, baseText, haveBase, theirs, func(t string) bool { return fileHolds(theirs, t) })
+		return to, to == theirs, ok
+	}
+	from, landed, moved := s.moveDocLive(ctx, room, text, target, theirSha, target == theirs, recompute)
+	if moved && landed == from {
+		// The document did not change, so nothing re-arms its timer: what it
+		// holds is still unwritten.
 		s.snapshotLocked(ctx, room, false)
 	}
+}
+
+// reconcileTarget is reconcile's decision, with no storage in it but holds:
+// the text the room should move to when the file says theirs, the room says
+// text and both came from baseText — or !ok, when only parking keeps text.
+// whole is false for a side too large or not text, which is never merged.
+func reconcileTarget(path, text, baseText string, haveBase bool, theirs string, holds func(text string) bool) (target string, ok, whole bool) {
+	// roomBytes and blobText stop just past maxSeedBytes. A prefix taken for the
+	// whole file would be merged and written back over its tail, so a file
+	// that large is only ever parked beside.
+	whole = len(theirs) < maxSeedBytes && len(baseText) < maxSeedBytes
+	// Only text is merged or appended: a binary outside write mixed with the
+	// room's lines would be a file that is neither.
+	whole = whole && textmerge.IsText([]byte(theirs)) && textmerge.IsText([]byte(baseText)) && textmerge.IsText([]byte(text))
+	appended := whole && appendedBoth(baseText, haveBase, theirs, text)
+	var merged []byte
+	canMerge := false
+	if whole && haveBase && !appended {
+		merged, canMerge = textmerge.Merge([]byte(baseText), []byte(text), []byte(theirs))
+		canMerge = canMerge && validMergedText(path, merged)
+	}
+	switch {
+	case !whole:
+		// parked by the caller
+	case appended:
+		// Both sides only added to the end: an agent appending to a daily
+		// note while somebody types at its foot. The line merge orders two
+		// insertions at one point by content; this room is the file's only
+		// writer, so it keeps them as they happened: theirs, then what the
+		// room added, each exactly as written, repeated lines and blank lines
+		// included. Too big to write, it is parked — never handed to the
+		// line merge or the checks below, which match lines and would take a
+		// repeated line or a blank one as already in the file.
+		if both := joinAppends(theirs, strings.TrimPrefix(text, baseText)); len(both) < maxSeedBytes {
+			return both, true, whole
+		}
+	case canMerge:
+		// Two sides under the bound can insert past it together, and a
+		// merge no room could open again is parked rather than written.
+		if len(merged) < maxSeedBytes {
+			return string(merged), true, whole
+		}
+	case holds(text):
+		return theirs, true, whole
+	case haveBase && strings.TrimSpace(baseText) == "":
+		// Both sides wrote into an empty file — a template arriving while
+		// somebody already typed. There is no ancestor to order them by, and
+		// neither is a revision of the other: keep both, theirs first.
+		if both := appendNew(theirs, text); len(both) < maxSeedBytes {
+			return both, true, whole
+		}
+	}
+	return "", false, whole
 }
 
 // moveDoc brings a room's document from text to to, as one edit, and rebases
@@ -1041,29 +1782,118 @@ func (s *Server) reconcile(ctx context.Context, room string, who User, text, bas
 // replays the same items, and a returning browser that typed some of them
 // merges once instead of beside a second copy spliced in from the bytes.
 func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, filed, final bool) bool {
+	if !final {
+		_, _, moved := s.moveDocLive(ctx, room, text, to, sha, filed, nil)
+		return moved
+	}
 	var state []byte
 	moved := false
-	if final {
-		if doc, _, held := s.rooms().get(room); held {
-			txt := doc.GetText("body")
-			if txt.ToString() == text {
-				spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, text, to)
-				state, moved = doc.EncodeStateAsUpdate(), true
-			}
-		}
-	} else {
-		_ = s.ydocs().Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-			txt := doc.GetText("body")
-			if txt.ToString() != text {
-				return
-			}
-			spliceVia(transact, txt, text, to)
+	if doc, _, held := s.rooms().get(room); held {
+		txt := doc.GetText("body")
+		if txt.ToString() == text {
+			spliceVia(func(fn func(*crdt.Transaction)) { doc.Transact(fn) }, txt, text, to)
 			state, moved = doc.EncodeStateAsUpdate(), true
-		})
+		}
 	}
-	if !moved {
-		return false
+	if moved {
+		s.settleMove(ctx, room, to, sha, filed, state)
 	}
+	return moved
+}
+
+// moveDocOrigin marks the delta a move applies to a live room. Like
+// ycollabSyncOrigin, the relay forwards it and local peers get it by
+// broadcast.
+var moveDocOrigin = &struct{ name string }{"ycollab/move"}
+
+// moveDocLive is moveDoc on a live room, which a keystroke can reach at any
+// moment: ygo's Apply holds the document's lock only inside transact, and
+// reading the text takes that lock too, so no text read can be pinned to the
+// splice that follows it. The move is therefore never made in character
+// offsets on the live document. It is made on a private copy of one atomic
+// snapshot of it, and only the resulting update — items anchored to the
+// snapshot's items by ID, a delete set by ID — is applied to the room, where
+// it integrates around anything typed meanwhile instead of landing a few
+// characters off.
+//
+// The snapshot spelling something other than text means it was typed into.
+// Without recompute it is left alone (park: typing nobody parked must never
+// be overwritten). With it, recompute answers from the snapshot the text to
+// move to, whether that is exactly what sha holds, and whether there is a
+// move at all. from is the snapshot's text and landed the text moved to.
+func (s *Server) moveDocLive(ctx context.Context, room, text, to, sha string, filed bool, recompute func(cur string) (to string, filed, ok bool)) (from, landed string, moved bool) {
+	yd := s.ydocs()
+	doc := yd.GetDoc(room)
+	if doc == nil {
+		// Not resident: open it as Apply always has, then work on it.
+		if err := yd.Apply(ctx, room, func(*crdt.Doc, func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, ygows.ErrNoChanges) {
+			return "", "", false
+		}
+		if doc = yd.GetDoc(room); doc == nil {
+			return "", "", false
+		}
+	}
+	snap := doc.EncodeStateAsUpdate()
+	scratch := crdt.New()
+	if err := crdt.ApplyUpdateV1(scratch, snap, nil); err != nil || scratch.PendingStats().Items > 0 {
+		return "", "", false // an update still missing its causes: the next pause
+	}
+	txt := scratch.GetText("body")
+	cur := txt.ToString()
+	if cur != text {
+		if recompute == nil {
+			return "", "", false
+		}
+		liveTo, liveFiled, ok := recompute(cur)
+		if !ok {
+			return "", "", false // a true conflict: the next pause settles it
+		}
+		to, filed = liveTo, liveFiled
+	}
+	state := snap
+	if cur != to {
+		var deltas [][]byte
+		unsub := scratch.OnUpdate(func(u []byte, _ any) { deltas = append(deltas, append([]byte(nil), u...)) })
+		spliceVia(func(fn func(*crdt.Transaction)) { scratch.Transact(fn) }, txt, cur, to)
+		unsub()
+		if len(deltas) == 0 {
+			return "", "", false
+		}
+		delta := deltas[0]
+		if len(deltas) > 1 {
+			merged, err := crdt.MergeUpdatesV1(deltas...)
+			if err != nil {
+				return "", "", false
+			}
+			delta = merged
+		}
+		// Applied to the hub's document — which feeds the relay, persistence
+		// and this room's snapshot timer — then broadcast to this process's
+		// sockets, which an update applied outside Apply does not reach.
+		if err := crdt.ApplyUpdateV1(doc, delta, moveDocOrigin); err != nil {
+			return "", "", false
+		}
+		_ = yd.BroadcastUpdate(ctx, room, delta)
+		state = doc.EncodeStateAsUpdate()
+	}
+	/* state may hold a keystroke that landed between snap and the apply.
+	   It is not re-checked, rolled back or held off the rebase: an update
+	   anchored to items merges with it exactly as two peers' keystrokes
+	   merge — its inserts are never in the move's delete set, its deletes
+	   can only name items both already had — so neither edit is lost, even
+	   on one line. The document then holds everything sha holds, so rebasing
+	   onto sha is what makes the next pause write move and keystroke
+	   together on top of it. Left on the old base, that pause would meet sha
+	   again, reconcile text that already carries their write, and park
+	   copies of what the file holds. settleMove files state under sha only
+	   when it spells exactly to. */
+	s.settleMove(ctx, room, to, sha, filed, state)
+	return cur, to, true
+}
+
+// settleMove rebases a room whose document moved to to, storing the moved
+// state under sha when to is exactly what sha holds.
+func (s *Server) settleMove(ctx context.Context, room, to, sha string, filed bool, state []byte) {
 	if filed {
 		if spelled, ok := replayed(state); ok && spelled == to {
 			project, path, _ := strings.Cut(room, "/")
@@ -1071,7 +1901,6 @@ func (s *Server) moveDoc(ctx context.Context, room, text, to, sha string, filed,
 		}
 	}
 	s.rooms().rebase(room, sha)
-	return true
 }
 
 // appendedBoth reports whether theirs and text each extend base, which ends a
@@ -1208,12 +2037,32 @@ var (
 // budget: once the room is evicted this text exists nowhere else, so giving
 // up would be the loss the copy exists to prevent. Held in memory only, so a
 // hub restart before the store recovers still loses it.
+//
+// The copy is only ever created, never written over: a name another copy
+// already holds (another room, or a closing tab, in the same second) moves it
+// a second on. A retry finding its own text under a name it reached before
+// is answered unchanged and counts as written.
 func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, text string) {
 	try := func(ctx context.Context) bool {
-		cw := s.putAs(ctx, who, project, copy, text, "")
-		if cw.code == http.StatusOK {
-			log.Printf("bdrive: %s: the room's text could not be written to it; parked beside it as %s", path, copy)
-			return true
+		var cw *memWriter
+		for i := range maxConflictNameTries {
+			name, ok := shiftConflictName(copy, i)
+			if !ok {
+				if i > 0 {
+					break
+				}
+				name = copy
+			}
+			cw = s.putVia(ctx, who, project, name, text, "", true)
+			if cw.code == http.StatusConflict {
+				continue
+			}
+			if cw.code == http.StatusOK {
+				log.Printf("bdrive: %s: the room's text could not be written to it; parked beside it as %s", path, name)
+				s.rooms().parkedOnStorage(project+"/"+path, text)
+				return true
+			}
+			break
 		}
 		log.Printf("bdrive: %s: could not park the room's refused text (%d bytes) as %s (%d); retrying", path, len(text), copy, cw.code)
 		return false
@@ -1372,15 +2221,54 @@ func (s *Server) finishLater(ctx context.Context, room string, who User, text, b
 // putAs writes one path through the ordinary upload door as a human, with
 // the base the write is conditional on ("" for unconditional).
 func (s *Server) putAs(ctx context.Context, who User, project, path, text, base string) *memWriter {
+	return s.putVia(ctx, who, project, path, text, base, false)
+}
+
+// parkNewCopy writes text as a new conflict copy of path through the upload
+// door, as who. A copy is named to the second, and two tabs of one account
+// can close in the same one: each name is created only if it is free
+// (If-None-Match: *, which a second hub process is held to as well), and a
+// taken one moves the copy a second on, so neither replaces the other.
+// parked is the name it was written under, "" when it was not.
+func (s *Server) parkNewCopy(ctx context.Context, who User, project, path, text string) (pw *memWriter, parked string) {
+	t0 := time.Now()
+	for i := range maxConflictNameTries {
+		name := conflictPath(path, who, t0.Add(time.Duration(i)*time.Second))
+		pw = s.putVia(ctx, who, project, name, text, "", true)
+		if pw.code == http.StatusConflict {
+			continue
+		}
+		if pw.code == http.StatusOK {
+			parked = name
+		}
+		return pw, parked
+	}
+	return pw, ""
+}
+
+// putVia is putAs, or with create a write that only creates path.
+func (s *Server) putVia(ctx context.Context, who User, project, path, text, base string, create bool) *memWriter {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
 		"/api/p/"+url.PathEscape(project)+"/upload/content?path="+url.QueryEscape(path),
 		strings.NewReader(text))
 	if err != nil {
 		return &memWriter{code: 0, hdr: http.Header{}}
 	}
+	if create {
+		req.Header.Set("If-None-Match", "*")
+	}
 	if base != "" {
 		req.Header.Set("If-Match", base)
+		// An editor in the room confirmed this exact text shrinking the
+		// file (/ycollab/sync confirm_shrink).
+		if s.rooms().shrinkConfirmed(project+"/"+path, text) {
+			req.Header.Set(confirmShrinkHeader, "1")
+		}
 	}
+	// The room settles a refusal itself, against its live document
+	// (reconcile); the door merging on its behalf would file the room's
+	// state under a blob that spells something else.
+	req.Header.Set(noMergeHeader, "1")
 	// The human, never the hub: an op authored by "the server" is a
 	// regression in History even when the server is holding the pen.
 	req = withUser(req, who)
@@ -1415,7 +2303,25 @@ func conflictPath(path string, who User, at time.Time) string {
 		}
 		return '-'
 	}, name)
-	return path + ".bdrive-conflict-" + safe + "-" + at.UTC().Format("20060102T150405Z")
+	return path + ".bdrive-conflict-" + safe + "-" + at.UTC().Format(conflictStampLayout)
+}
+
+// conflictStampLayout is the second a conflict copy's name ends in. The sync
+// engine and the browser parse exactly this form.
+const conflictStampLayout = "20060102T150405Z"
+
+// shiftConflictName is a conflict copy's name moved step seconds on, and
+// whether name is one at all.
+func shiftConflictName(name string, step int) (string, bool) {
+	i := strings.LastIndex(name, "-")
+	if i < 0 || !strings.Contains(name[:i], ".bdrive-conflict-") {
+		return "", false
+	}
+	at, err := time.Parse(conflictStampLayout, name[i+1:])
+	if err != nil {
+		return "", false
+	}
+	return name[:i+1] + at.Add(time.Duration(step)*time.Second).UTC().Format(conflictStampLayout), true
 }
 
 // roomRegistry keeps a live room's document addressable, and remembers who may
@@ -1444,10 +2350,20 @@ type roomRegistry struct {
 	// parked is the text a room last set aside as a conflict copy, so the
 	// two final snapshots (last peer, unload) park it once.
 	parked map[string]string
+	// stored is the text of the conflict copy a room last got onto storage:
+	// what lets /ycollab/sync call an edit set aside there durable.
+	stored map[string]string
 	// yielded is a file version this room parked beside and will not write
 	// over: one too large to hold or merge, so the room's text cannot be
 	// settled against it and every later write would erase it.
 	yielded map[string]string
+	// joins counts who is using each room right now — a socket for its whole
+	// connection, a /ycollab/sync for its whole request — and closing holds
+	// the rooms closeIfUnused is closing, each closed once its close returns;
+	// both under joinMu, which is never held across a close (enter).
+	joinMu  sync.Mutex
+	joins   map[string]int
+	closing map[string]chan struct{}
 	// leases is what this process holds for each room, under its own lock
 	// because taking one is a storage round-trip (lease.go).
 	leaseMu  sync.Mutex
@@ -1456,6 +2372,12 @@ type roomRegistry struct {
 	// waits counts how many times a room on a process that does not write
 	// it has looked for the writer's write since the last edit.
 	waits map[string]int
+	// retries counts a room's snapshot attempts the upload door failed, for
+	// backoff (retryLater).
+	retries map[string]int
+	// shrinkOK is the sha256 of a text an editor confirmed may sharply shrink
+	// the file (confirm_shrink on /ycollab/sync).
+	shrinkOK map[string]string
 	// snapLocks serializes each room's snapshots (lockSnapshots).
 	snapLocks map[string]*roomSnapLock
 }
@@ -1503,8 +2425,8 @@ func (s *Server) rooms() *roomRegistry {
 		s.roomReg = &roomRegistry{
 			docs: map[string]*crdt.Doc{}, gens: map[string]uint64{}, users: map[string]User{},
 			bases: map[string]string{}, pending: map[string]*roomFlush{}, unsubs: map[string]func(){},
-			parked: map[string]string{}, yielded: map[string]string{}, leases: map[string]*roomLease{}, renewals: map[string]chan struct{}{},
-			waits: map[string]int{},
+			parked: map[string]string{}, stored: map[string]string{}, yielded: map[string]string{}, leases: map[string]*roomLease{}, renewals: map[string]chan struct{}{},
+			waits: map[string]int{}, retries: map[string]int{}, shrinkOK: map[string]string{},
 		}
 	})
 	return s.roomReg
@@ -1550,6 +2472,26 @@ func (r *roomRegistry) park(room, text string) {
 	r.parked[room] = text
 }
 
+// parkedOnStorage records that room's text is written as a conflict copy,
+// for a room still open: a copy finished after the room is gone has no
+// sync left to answer.
+func (r *roomRegistry) parkedOnStorage(room, text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, open := r.docs[room]; open {
+		r.stored[room] = text
+	}
+}
+
+// parkedDurably reports whether text is what the room last wrote as a
+// conflict copy.
+func (r *roomRegistry) parkedDurably(room, text string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prev, ok := r.stored[room]
+	return ok && prev == text
+}
+
 func (r *roomRegistry) yield(room, sha string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1581,8 +2523,9 @@ The hub is the only writer while a room is live.
 
 	So nobody in the room writes. The hub holds the document, sees every
 	update, and writes ONCE per pause: two seconds after the last change, or
-	ten seconds after the first if the typing never pauses — the numbers
-	Hocuspocus settled on for onStoreDocument, for the same reasons. One
+	six seconds after the first if the typing never pauses — Hocuspocus's
+	onStoreDocument shape, with a deadline short enough that a non-holder's
+	/ycollab/sync (ycollabSyncDurableWait) always outlasts it. One
 	writer means an If-Match refusal can only ever come from someone outside
 	the room, which is exactly the case it should be reserved for.
 
@@ -1592,9 +2535,12 @@ The hub is the only writer while a room is live.
 */
 // Vars, not consts: a test that waits ten real seconds to see a deadline fire
 // is a test nobody runs. Production never sets them.
+// snapshotMax keeps a continuously edited room at no more than one write per
+// six seconds (≈0.167/s, six times under GCS's one-write-per-second limit on
+// a single object) and must stay below ycollabSyncDurableWait.
 var (
 	snapshotIdle = 2 * time.Second
-	snapshotMax  = 10 * time.Second
+	snapshotMax  = 6 * time.Second
 )
 
 func (s *Server) watchRoom(room string, doc *crdt.Doc) {
@@ -1656,12 +2602,102 @@ func (r *roomRegistry) arm(room string, p *roomFlush, wait time.Duration, flush 
 // refused quota) must not keep a timer alive forever.
 const maxWriterWaits = 10
 
+// writerWaitLimit is maxWriterWaits, or enough looks to outlast a lease whose
+// holder died: once it expires the next look takes it (holdLease) and this
+// process writes the room itself.
+func writerWaitLimit() int {
+	n := maxWriterWaits
+	if snapshotIdle > 0 {
+		n = max(n, int(leaseTTL/snapshotIdle)+2)
+	}
+	return n
+}
+
+// waited reports whether a room has already looked once for another
+// process's write since its last edit (awaitWriter).
+func (r *roomRegistry) waited(room string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.waits[room] > 0
+}
+
+// enter marks room as in use until leave is called.
+//
+// A room /ycollab/sync opened is closed again once written, and that close
+// must never take a room out from under a socket that is joining it.
+//
+// ygo cannot do this for us: RoomIdleTimeout reaps only a room a peer LEFT
+// (handleDisconnect stamps idleSince), and Apply clears that stamp — so a
+// room only ever touched over HTTP, or an idle one an HTTP sync touched,
+// would stay resident, leased and never finally written for the life of the
+// process. And CloseRoom(force=false) checks for registered peers only: a
+// socket between ServeHTTP's room lookup and its registration is not one
+// yet, and the close deletes the room it is about to join.
+//
+// So every user of a room — a socket for the whole of its ServeHTTP, a sync
+// request for the whole of its handler — holds a count under joinMu, and
+// the close runs only when that count is zero. The close itself is a final
+// snapshot, a storage round-trip, so it runs with joinMu released: the room
+// is marked closing instead, and only an enter of THAT room waits for it —
+// every other room keeps entering and leaving. A socket that arrives during
+// the close waits for it, then opens a fresh room seeded from the file the
+// close just wrote.
+func (r *roomRegistry) enter(room string) (leave func()) {
+	r.joinMu.Lock()
+	for {
+		ch, busy := r.closing[room]
+		if !busy {
+			break
+		}
+		r.joinMu.Unlock()
+		<-ch
+		r.joinMu.Lock()
+	}
+	if r.joins == nil {
+		r.joins = map[string]int{}
+	}
+	r.joins[room]++
+	r.joinMu.Unlock()
+	return func() {
+		r.joinMu.Lock()
+		if r.joins[room]--; r.joins[room] <= 0 {
+			delete(r.joins, room)
+		}
+		r.joinMu.Unlock()
+	}
+}
+
+// closeIfUnused runs shut while nobody is in the room, holding off every
+// enter of that room — and only that room — until it returns. A close
+// already running for the room is left to finish alone.
+func (r *roomRegistry) closeIfUnused(room string, shut func()) {
+	r.joinMu.Lock()
+	if r.joins[room] > 0 || r.closing[room] != nil {
+		r.joinMu.Unlock()
+		return
+	}
+	if r.closing == nil {
+		r.closing = map[string]chan struct{}{}
+	}
+	ch := make(chan struct{})
+	r.closing[room] = ch
+	delete(r.joins, room)
+	r.joinMu.Unlock()
+	defer func() {
+		r.joinMu.Lock()
+		delete(r.closing, room)
+		close(ch)
+		r.joinMu.Unlock()
+	}()
+	shut()
+}
+
 // awaitWriter looks at the file again after another process has had time to
 // write it, so that this process's browsers see the save land.
 func (r *roomRegistry) awaitWriter(room string, flush func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.pending[room] != nil || r.waits[room] >= maxWriterWaits {
+	if r.pending[room] != nil || r.waits[room] >= writerWaitLimit() {
 		return
 	}
 	r.waits[room]++
@@ -1670,11 +2706,66 @@ func (r *roomRegistry) awaitWriter(room string, flush func()) {
 	r.arm(room, p, snapshotIdle, flush)
 }
 
+// snapshotRetryMax caps the backoff between snapshots the upload door
+// failed. A var so a test need not wait out real backoff.
+var snapshotRetryMax = 30 * time.Second
+
+// retryLater arms another snapshot after a failed one, doubling the wait up
+// to snapshotRetryMax. There is no attempt limit: while the room is live
+// and unwritten its text exists nowhere durable, so giving up would leave it
+// to the relay's age-trimmed window. The chain ends by itself — a write that
+// lands (or a file that already says this) settles the room, and a closed
+// room's flush finds no room and arms nothing. An edit arming its own
+// snapshot meanwhile supersedes it.
+func (r *roomRegistry) retryLater(room string, flush func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.retries == nil {
+		r.retries = map[string]int{}
+	}
+	if r.pending[room] != nil {
+		return
+	}
+	n := r.retries[room]
+	r.retries[room] = n + 1
+	wait := snapshotIdle << min(n, 6) // shift bounded: never overflows
+	if wait <= 0 || wait > snapshotRetryMax {
+		wait = snapshotRetryMax
+	}
+	p := &roomFlush{deadline: time.Now().Add(wait)}
+	r.pending[room] = p
+	r.arm(room, p, wait, flush)
+}
+
+// confirmShrink records that an editor confirmed text may sharply shrink
+// the file; the room's write of exactly that text then says so.
+func (r *roomRegistry) confirmShrink(room, text string) {
+	sum := sha256.Sum256([]byte(text))
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.shrinkOK == nil {
+		r.shrinkOK = map[string]string{}
+	}
+	r.shrinkOK[room] = hex.EncodeToString(sum[:])
+}
+
+func (r *roomRegistry) shrinkConfirmed(room, text string) bool {
+	r.mu.Lock()
+	want, ok := r.shrinkOK[room]
+	r.mu.Unlock()
+	if !ok {
+		return false
+	}
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:]) == want
+}
+
 // settled is the file saying what the room says: nothing left to wait for.
 func (r *roomRegistry) settled(room string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.waits, room)
+	delete(r.retries, room)
 }
 
 // settle waits until no armed or running snapshot is left. Drop the rooms
@@ -1738,9 +2829,12 @@ func (r *roomRegistry) dropLocked(room string) {
 		delete(r.renewals, room)
 	}
 	delete(r.waits, room)
+	delete(r.retries, room)
+	delete(r.shrinkOK, room)
 	delete(r.docs, room)
 	delete(r.users, room)
 	delete(r.parked, room)
+	delete(r.stored, room)
 	delete(r.yielded, room)
 	// bases outlives the room on purpose: it is how the NEXT room for this
 	// file finds the history to rebuild from when somebody wrote the file
@@ -1776,8 +2870,7 @@ func (s *Server) contains(ctx context.Context, doc *crdt.Doc, project, sha strin
 	if state == nil {
 		return false
 	}
-	missing, err := crdt.DiffUpdateV1(state, doc.StateVector())
-	return err == nil && bytes.Equal(missing, emptyUpdate)
+	return knows(doc.EncodeStateAsUpdate(), state)
 }
 
 // emptyUpdate is what DiffUpdateV1 answers when nothing is missing.

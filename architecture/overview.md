@@ -36,7 +36,7 @@ flowchart LR
 
     store["object store (hub-owned)<br/>internal/remote: file:// s3:// gs://<br/>blobs + per-device journals"]
 
-    tm["internal/textmerge<br/>line-level three-way merge,<br/>non-overlapping regions only"]
+    tm["internal/textmerge<br/>Myers multi-hunk diff3 merge + intra-line token merge<br/>Merge, DiffHunks, RetainsChanges, IsText"]
 
     tpl["internal/templates<br/>go:embed'ed starting structures<br/>(docs, wiki, para, skills: skeleton + AGENTS.md)"]
 
@@ -58,7 +58,7 @@ flowchart LR
     srv -->|"share mint: refuse · markdown render: badge"| sec
     cli -->|"init --template: seed locally"| tpl
     eng -->|"concurrent edits from two devices"| tm
-    srv -->|"an outside write under a co-editing room"| tm
+    srv -->|"co-editing room reconciliation, conditional<br/>upload/content, MCP write / edit on a stale sha"| tm
     srv -->|"POST /api/projects template:<br/>seed as ops under the hub's device"| tpl
     fe -->|/api/config, /api/projects, viewer APIs| srv
     cloud -.->|imports OSS packages,<br/>replaces providers| srv

@@ -248,6 +248,13 @@ export default function Browser(props: {
   );
   const downloadRef = useRef<HTMLAnchorElement>(null);
   const printRef = useRef<HTMLAnchorElement>(null);
+  // "Save the open file now", filled by the editor while editing: Done awaits
+  // it (briefly) so leaving never strands the last words in a pending save.
+  // It answers false when the save is waiting on the user (ShrinkDialog).
+  const editFlushRef = useRef<(() => Promise<boolean>) | null>(null);
+  // A Done already saving: a second click waits on the first, never leaves
+  // past it (that would skip the shrink question its answer may open).
+  const leavingFlushRef = useRef<(() => Promise<boolean>) | null>(null);
 
   const panel = props.panel ?? null;
   // Sharing is a write — a read-only member sees no Share button rather than
@@ -1006,6 +1013,7 @@ export default function Browser(props: {
                 editSource={editSource}
                 me={editorIdentity}
                 commentable={commentsOn}
+                flushRef={editFlushRef}
               />
             );
             if (!commentsOn) return file;
@@ -1147,9 +1155,33 @@ export default function Browser(props: {
                 prefetchEditText(qc, apiBase, path);
               }}
               title={editing ? "Stop editing" : "Edit this file"}
-              onClick={() =>
-                navigate(urlForPath(path, project?.id, version, route.full, !editing))
-              }
+              onClick={async () => {
+                if (!editing) {
+                  navigate(urlForPath(path, project?.id, version, route.full, true));
+                  return;
+                }
+                // Save and leave, once the save has settled: an answer that
+                // opens a question (ShrinkDialog) keeps the user here.
+                const flush = editFlushRef.current;
+                if (flush && leavingFlushRef.current === flush) return;
+                leavingFlushRef.current = flush;
+                try {
+                  const herePath = window.location.pathname;
+                  let okToLeave = true;
+                  try {
+                    okToLeave = await (flush?.() ?? Promise.resolve(true));
+                  } catch {
+                    // The editor's own teardown still sends what it holds.
+                  }
+                  if (!okToLeave) return; // unsaved or shrink dialog open: stay here
+                  // Left this edit route already (clicked another file/view): stay there.
+                  if (window.location.pathname !== herePath) return;
+                  const fullNow = new URLSearchParams(window.location.search).get("full") === "1";
+                  navigate(urlForPath(path, project?.id, version, fullNow, false));
+                } finally {
+                  if (leavingFlushRef.current === flush) leavingFlushRef.current = null;
+                }
+              }}
             >
               {!editing && <Icon name="pencil" />} <span className="lbl-keep">{editing ? "Done" : "Edit"}</span>
             </Button>
@@ -1167,7 +1199,10 @@ export default function Browser(props: {
                   ? "Back to editing the page"
                   : "Edit this file's HTML markup"
               }
-              onClick={() => setEditSource((e) => !e)}
+              onClick={() => {
+                if (editFlushRef.current && leavingFlushRef.current === editFlushRef.current) return;
+                setEditSource((e) => !e);
+              }}
             >
               {editSource ? "Edit page" : "Edit source"}
             </Button>

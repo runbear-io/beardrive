@@ -1,6 +1,8 @@
 package syncer
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestMergeText(t *testing.T) {
 	for _, c := range []struct {
@@ -35,11 +37,14 @@ func TestMergeText(t *testing.T) {
 		b:    "a\nY\nc\n",
 		ok:   false,
 	}, {
+		// Two additions at one place are not a conflict: both are kept, in
+		// an order picked by content so either device merges the same blob.
 		name: "both sides inserted at the same point",
 		base: "a\nc\n",
 		a:    "a\nFROM-A\nc\n",
 		b:    "a\nFROM-B\nc\n",
-		ok:   false,
+		want: "a\nFROM-A\nFROM-B\nc\n",
+		ok:   true,
 	}, {
 		name: "one side deleted a region the other left alone",
 		base: "keep\ndrop\nkeep2\n",

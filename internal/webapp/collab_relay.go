@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/reearth/ygo/cluster"
@@ -36,6 +37,19 @@ type CollabConfig struct {
 	Redis string
 }
 
+// How long the relay keeps a room's updates. The retained window is what a
+// process opening the room mid-session replays on top of the last stored
+// state (ydoc/<sha>), so it has to outlast the gap between two snapshots
+// that actually landed — a failed write retried with backoff, a lease holder
+// that died and must expire (leaseTTL) before another process writes, an
+// idle room (collabRoomIdleTimeout). ygo's 60s default is shorter than
+// several of those together; a gap past the window is typing no later
+// joiner can see. Vars so a test can shorten them.
+var (
+	collabStreamRetention       = 30 * time.Minute
+	collabStreamMaxLen    int64 = 32768
+)
+
 // ConnectCollab attaches the configured relay. Called at startup, before
 // any room exists, so a Redis that cannot be reached fails the start
 // instead of silently leaving every process alone with its own copy.
@@ -56,9 +70,11 @@ func (s *Server) ConnectCollab(ctx context.Context) error {
 		return fmt.Errorf("collab redis %s: %w", opt.Addr, err)
 	}
 	relay, err := redisrelay.New(client, redisrelay.Config{
-		Transport:     redisrelay.Streams,
-		ChannelPrefix: "bdrive:collab:",
-		StreamPrefix:  "bdrive:collab:stream:",
+		Transport:       redisrelay.Streams,
+		ChannelPrefix:   "bdrive:collab:",
+		StreamPrefix:    "bdrive:collab:stream:",
+		StreamRetention: collabStreamRetention,
+		StreamMaxLen:    collabStreamMaxLen,
 	})
 	if err != nil {
 		return fmt.Errorf("collab redis: %w", err)

@@ -48,6 +48,11 @@ classDiagram
         +Close(ctx) error
         -collabContext() process-lifetime context
         -collabHookContext() closing caller or process context
+        -handleYCollabSync() POST {prefix}ycollab/sync, PermWrite
+        -syncDurable / awaitDurable(ctx, room, text, synced) sha, snapFailure
+        -mergeStaleUpload(w, r, v, path, base, head, tmp, size) handled, now
+        -moveDocLive(ctx, room, text, to, sha, filed, recompute)
+        -parkStaleUpload / stepConflictCopy(w, r, v, up, path, tmp, size, blob, billed) handled
     }
     class recordingMux {
         <<http.ServeMux wrapper>>
@@ -68,6 +73,9 @@ classDiagram
     note for Server "ReportRead is the desktop's read seam, dead on a hub. The sidecar keeps no ReadLedger and answers the viewer routes locally, so a person reading in the Mac app reached no ledger at all while the same file in the web app counted. The hook hands each viewer read to the sidecar, which forwards it to the project's own hub as HUMAN traffic — routing it through the agent report route instead would have filed a person's browsing as a device's."
     note for Server "Desktop marks the loopback sidecar posture (`bdrive desktop`), NOT a hub: the server fronts this machine's own volume stores. It is set in exactly one production place — cmd/bdrive/desktop.go — so on a deployed hub it stays false and both branches below are dead code, leaving /api/config byte-identical to a hub without it. DesktopMe supplies `me` from the device's saved sign-in (settings.json), a func because the tray can change it at runtime; the desktop has no AuthProvider"
     note for Server "clientIP is a METHOD now, not a package func: X-Forwarded-For is honored when the PEER is loopback/private (the operator's own proxy) or TrustProxy is set, and then only its LAST hop. Every caller that gates on an IP — the auth rate limiter, /s/*, device rows, share telemetry — goes through it, so a client-supplied header cannot forge the identity a limiter counts"
+    note for Server "mergeStaleUpload settles a conditional PUT {prefix}upload/content whose If-Match base lost a race: base, the head that replaced it and the incoming bytes are merged three ways (textmerge.Merge), and the result is written held to that head. Every conditional put now records the version it was held to in Op.Base (commitIfBase), so a device merging against it finds the ancestor without guessing. Text only, under maxUploadMergeBytes (4 MiB), never for a room's own write (X-Bdrive-No-Merge), merged again up to three times if the head moves during the append. A retried write whose bytes already landed (landedAfter) and that the head still carries (textmerge.RetainsChanges) is answered as done instead of merged twice. Only the same lines rewritten two ways still return 409. MCP write and edit reach the same door: a stale sha that names a real older version (staleShaError) becomes the base instead of a refusal."
+    note for Server "POST {prefix}ycollab/sync merges a client's Yjs state (or its text against base_text) into the live room over plain HTTP, for a browser whose socket has not connected yet or a shrink it must confirm. peek reads the room without writing. ok rests on positive proof: syncDurable snapshots a few times back to back, then waits for storage (snapshotting each second, or for the lease holder's write in another process) up to ycollabSyncDurableWait (8s); an edit storage does not hold yet is a 503 the browser keeps its edits by."
+    note for Server "Park on conflict, for a writer that cannot answer a 409 (a closing tab). A conditional PUT {prefix}upload/content carrying X-Bdrive-Park-On-Conflict whose stale base cannot be merged is kept beside the file as a conflict copy (parkStaleUpload) instead of refused; a create-only conflict-copy write (If-None-Match: *) whose name is taken moves to the next free name a second on (stepConflictCopy). A ycollab/sync text checkpoint with park_on_conflict that clashes with the live room is parked the same way. A merged .json or .jsonl result must still parse (validMergedText) or it is not taken as a merge."
 
     class volume {
         -source Source
@@ -310,21 +318,30 @@ classDiagram
         &lt;&lt;reearth/ygo, embedded&gt;&gt;
         +ServeHTTP websocket, behind proj(PermRead)
         +Authorize per connection, ReadOnly for a reader
-        +OnLoadDocument lease (no relay), seed from the newest stored state
+        +OnLoadDocument lease (no relay), seed from the newest stored state behind the ydoc/head fence
         +OnLastPeer / OnUnloadDocument snapshot to the file
         +reconcile 409 or blind base: merge, keep, append, or park
         +AttachRelay cluster.Relay, one per process
+        -collabRoomIdleTimeout 2m warm room after the last peer
+        -snapshotMax 6s
     }
+    note for ydocs "ydoc/head/&lt;path&gt; holds {sha, win}: the blob of the newest stored state and the hex winKey of the journal op that produced it (a bare sha from an older hub still parses). A head write whose win sorts below the stored one is refused, so no older fold in any process can move the head backwards, and a seed whose current file is not the head's blob seeds from the file instead (freshRoomFile). knows() merges the other state into a scratch copy and asks whether anything changed, so a history holding deletions is compared by items AND delete set. A reconcile on a live room goes through moveDocLive: the move is computed on a private copy of one atomic snapshot and only the resulting item delta (anchored by ID) is applied, so it integrates around concurrent typing instead of landing at stale character offsets. A failed snapshot republishes the room's whole state to the relay and retries with backoff (snapshotRetryMax 30s)."
     class textmerge {
         &lt;&lt;internal/textmerge&gt;&gt;
         +Merge(base, a, b) out, ok
+        +DiffHunks(old, new) []CharHunk
+        +RetainsChanges(base, candidate, head) bool
+        +IsText(b) bool
     }
-    note for textmerge "Seeding and snapshotting a room. seedDoc tells a missing file from an unreadable one: a path absent from the current snapshot opens empty, but a read that fails REFUSES the room, because an empty document with no base wrote unconditionally — past both the stale-write and the shrink guard, which only look at If-Match writes — and every editor who opened the file in that window emptied it. An empty file is still a file: the room's base is the empty blob and its writes stay conditional. When a snapshot is refused (409) or has no base to send, reconcile reads their version and picks, in order: the line merge of base, room and theirs; theirs alone when the room adds no line theirs lacks (or a conflict copy already holds that text); theirs followed by the room's new lines when the base was empty, or when both sides only added to its end (the line merge has no order for two insertions at one point, and the room, as the only writer, can pick one); and only then a conflict copy. A merged result is spliced into the live document (only if nobody typed since the snapshot read it) so editors see it, and the room rebases onto theirs. A conflict copy holds the room's text, and the document then takes theirs the same way (moveDoc) before rebasing: a room rebased onto theirs while still holding its own text writes that text over theirs on its next pause, conditional on their sha and so accepted. Typed into since, the document keeps its base and the next pause reconciles again. Empty text is never parked"
+    note for textmerge "Seeding and snapshotting a room. seedDoc tells a missing file from an unreadable one: a path absent from the current snapshot opens empty, but a read that fails REFUSES the room, because an empty document with no base wrote unconditionally — past both the stale-write and the shrink guard, which only look at If-Match writes — and every editor who opened the file in that window emptied it. An empty file is still a file: the room's base is the empty blob and its writes stay conditional. When a snapshot is refused (409) or has no base to send, reconcile (reconcileTarget) reads their version and picks, in order: the multi-hunk merge of base, room and theirs; theirs alone when the room adds no line theirs lacks (or a conflict copy already holds that text); theirs followed by the room's new lines when the base was empty, or when both sides only added to its end; and only then a conflict copy. A merged result reaches the live document through moveDocLive as a CRDT item delta built from one atomic snapshot, so typing that arrives meanwhile is kept around it, and the room rebases onto theirs. A conflict copy holds the room's text, and the document then takes theirs the same way before rebasing: a room rebased onto theirs while still holding its own text writes that text over theirs on its next pause, conditional on their sha and so accepted. Typed into since, recompute re-derives the target from the snapshot or the document keeps its base and the next pause reconciles again. Empty text is never parked"
     class CollabConfig {
         &lt;&lt;internal/webapp, collab_relay.go&gt;&gt;
         +Redis string
+        -collabStreamRetention 30m
+        -collabStreamMaxLen 32768
     }
     note for CollabConfig "How co-editing crosses hub PROCESSES. Set, ConnectCollab attaches ygo's cluster/redis relay on the STREAMS tier (never pub/sub: at-most-once, and one lost update parks every later edit from that client until the room reloads) so every process may host a room and the relay carries each update between them; the relay carries only live edits, so a process opening a room mid-session builds it from the state the writer last stored (ydoc/head/&lt;path&gt;) and the stream replays its retained window on top. Unset, one process holds each document: a second one refuses the room (errRoomElsewhere → 500) and y-websocket's retry carries the browser to the one that does. Required once a hub runs as more than one process; a single process needs none. Server.Close writes every live room back and is what bdrive serve and the cloud binary call on SIGTERM — Cloud Run gives ten seconds"
+    note for CollabConfig "The relay's StreamRetention is 30 minutes (ygo's default is 60s) and StreamMaxLen 32768 entries. The retained window is what a process opening a room mid-session replays on top of the last stored state, so it must outlast the gap between two snapshots that landed: a write retried with backoff, a dead lease holder waiting out leaseTTL, an idle room. republishRoom re-sends a room's whole state after a failed snapshot so the window always holds the edits storage does not."
     class roomLease {
         &lt;&lt;internal/webapp, lease.go&gt;&gt;
         -version remote.Version
@@ -587,10 +604,11 @@ classDiagram
         text/html only, inline only, PermWrite on the path
         stampEditable marks innermost text blocks
         data-bd-src offsets in UTF-16 units
-        appends /inline-edit.js + hash + length
+        injects /inline-edit.js + hash + length + ranges synchronously, before any page script
         own ETag; declines past maxEditableHTML
     }
-    note for editView "Click-to-edit's server half (htmledit.go), shaped like printView and for the same reason: HTML's parser accepts content appended after the stored bytes. It marks the INNERMOST text-bearing block with the byte range of its own inner content, so the browser can send back one element's markup and the app can splice exactly that range — the file keeps its indentation, comments and script blocks, and the history diff is one line instead of a whole-file rewrite. Phrasing content (a, span, strong, sup) is CONTENT, not a region: stamping it instead would make the only editable thing in 'See the &lt;a&gt;notes&lt;/a&gt; for the method' the link text, and real prose almost always contains one. Offsets are UTF-16 code units because the browser resolves them against a Y.Text, which is indexed like every JS string — counting bytes agrees for ASCII and silently splices over a neighbour's markup on the first accented character. A DIFFERENT ETag from the plain render: same blob, different body, and a shared tag lets a cache answer ?edit=1 with unstamped bytes. Never on /s/* or a download, and the sandbox is untouched — editing buys no capability the reading view did not have"
+    note for editView "The bootstrap goes in before the page can run a line of its own: a synchronous script tag (never defer) as the first child of head when the file has one, otherwise just before the first tag that is not html, after the doctype and leading comments. It runs in a realm no page script has touched, so it holds the original MessageChannel, MessagePort and Event.isTrusted before the synced file's scripts could replace them. The tag carries data-src-hash, data-src-len and data-src-ranges (every stamped start,end, semicolon-joined, as the server measured them), so the bootstrap binds only the ranges the server stamped. Only the output moves; every data-bd-src offset is still measured on the source."
+    note for editView "Click-to-edit's server half (htmledit.go). It marks the INNERMOST text-bearing block with the byte range of its own inner content, so the browser can send back one element's markup and the app can splice exactly that range — the file keeps its indentation, comments and script blocks, and the history diff is one line instead of a whole-file rewrite. Phrasing content (a, span, strong, sup) is CONTENT, not a region: stamping it instead would make the only editable thing in 'See the &lt;a&gt;notes&lt;/a&gt; for the method' the link text, and real prose almost always contains one. Offsets are UTF-16 code units because the browser resolves them against a Y.Text, which is indexed like every JS string — counting bytes agrees for ASCII and silently splices over a neighbour's markup on the first accented character. A DIFFERENT ETag from the plain render: same blob, different body, and a shared tag lets a cache answer ?edit=1 with unstamped bytes. Never on /s/* or a download, and the sandbox is untouched — editing buys no capability the reading view did not have"
     class Share {
         +Token +Project +Path +Creator +Expires
     }
@@ -912,7 +930,9 @@ classDiagram
     Server *-- roomLease : one per live room, holdLease / keepLease / releaseLease
     roomLease ..> ConditionalPutter : one lease object per path in the project storage
     ydocs ..> roomLease : OnLoadDocument without a relay, every snapshot with one
-    ydocs ..> textmerge : reconcile an outside write into the room
+    ydocs ..> textmerge : reconcile an outside write (Merge), splice it as minimal hunks (DiffHunks)
+    Server ..> textmerge : mergeStaleUpload (Merge, RetainsChanges), ycollab/sync text against base_text
+    Server ..> ydocs : POST ycollab/sync applies a client state, syncDurable waits for storage
     ydocs ..> ConditionalPutter : claimRoomHistory stores a seed once across processes
     QuotaProvider <|.. UnlimitedQuota
 ```
@@ -986,6 +1006,7 @@ classDiagram
         query describe
     }
     note for mcpTools "mcp.go — list and glob are the ls/tree pair; grep is an on-demand bounded scan (2000 files / 64 MiB / 200 matches), no index to build or invalidate. history and restore are the two BearDrive has that a local filesystem does not, and they are why an agent can undo itself. Bounds are reported in the output, never silent: a truncated grep says so, because a scan that quietly stopped reads to an agent as proof the string is absent"
+    note for mcpTools "write and edit given a sha the file has moved on from are not refused outright: checkStale returns staleShaError carrying the full older sha, edit applies its substitution to that version, and both send it as the If-Match base so the upload door merges it with what landed since (mergeStaleUpload). Only the same lines changed two ways still come back as stale."
 
     class internalClient {
         <<mcp.go>>

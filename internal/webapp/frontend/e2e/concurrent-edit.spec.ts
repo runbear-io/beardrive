@@ -217,10 +217,13 @@ test("a bystander in a shared document does not write the file", async ({ browse
    to refuse and both tests fail on their own "409 was never delivered" guard.
    That is the right outcome for a live room, and it is why these tests must
    run in the other mode: the older-hub / no-websocket-proxy case the retry
-   was kept for. Refusing the upgrade is how a test gets there; the client
-   gives up on the room after UNREACHABLE_MS and mounts solo. */
+   was kept for. An older hub has neither the socket nor the HTTP room route,
+   so both are refused: the editor mounts its buffer once the room stalls
+   (STALLED_MS), its first checkpoint to ycollab/sync is answered 404, and
+   from then on it saves the file itself with If-Match — the solo path. */
 async function forceSolo(page: Page) {
   await page.routeWebSocket(/\/ycollab/, (ws) => ws.close({ code: 1006 }));
+  await page.route("**/ycollab/sync*", (route) => route.fulfill({ status: 404, body: "not found" }));
 }
 
 /* A save refused for a stale base must be retried, not parked.
@@ -257,7 +260,7 @@ test("a save refused for a stale base is retried, not parked beside the file", a
   await forceSolo(page);
   await page.goto(`/${id}/edit/${file}`);
   await page.waitForSelector(".cm-host .cm-content");
-  await page.waitForTimeout(9_500); // past UNREACHABLE_MS: the editor is solo now
+  await page.waitForTimeout(9_500); // well past STALLED_MS: the buffer is mounted and saves itself
 
   // Refuse exactly one save the way a peer winning the race would, then let
   // everything through. The retry must land on the real path.
@@ -335,7 +338,7 @@ test("a save the file has already moved past is dropped, not parked", async ({ p
   await forceSolo(page);
   await page.goto(`/${id}/edit/${file}`);
   await page.waitForSelector(".cm-host .cm-content");
-  await page.waitForTimeout(9_500); // past UNREACHABLE_MS: the editor is solo now
+  await page.waitForTimeout(9_500); // well past STALLED_MS: the buffer is mounted and saves itself
 
   /* Refuse the save, and have the hub's copy be a SUPERSET of what the editor
      is holding — which is what a peer saving a newer state looks like from

@@ -1,4 +1,10 @@
 import { test, expect, Page, FrameLocator } from "@playwright/test";
+import { execFileSync, spawn } from "node:child_process";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { login, ADMIN, READER } from "./helpers";
 
 /* Click-to-edit on a synced HTML file, end to end: the real hub, the real
@@ -472,6 +478,1202 @@ test("two people editing different paragraphs both land", async ({ page, browser
   expect(after).toContain("<li>North America led the quarter. Strongly.</li>");
   expect(after).toContain("<li>EMEA recovered in March.</li>");
   expect(after).toContain('<script>console.log("chart would render here");</script>');
+});
+
+/* Every message the editing iframe receives, recorded inside it, so a spec
+   can prove what the sandbox was handed. Nothing reaches it on window any
+   more — the editor's traffic is on its own MessagePort — so the recorder
+   wraps addEventListener, which an init script replaces before the frame's
+   editor script captures it. Installed in the frame only. */
+async function recordFrameMessages(page: Page) {
+  await page.addInitScript(() => {
+    if (window.top === window) return;
+    const seen: string[] = [];
+    Object.defineProperty(window, "__bdSeen", { value: seen });
+    const add = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (
+      this: EventTarget,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      opts?: boolean | AddEventListenerOptions,
+    ) {
+      if (type === "message" && typeof listener === "function") {
+        const inner = listener;
+        listener = function (this: unknown, e: Event) {
+          try {
+            seen.push(JSON.stringify((e as MessageEvent).data) ?? "");
+          } catch {
+            seen.push("");
+          }
+          return inner.call(this, e);
+        } as EventListener;
+      }
+      return add.call(this, type, listener, opts);
+    };
+  });
+}
+
+/* Patches travel on the frame's MessagePort now, so dropping them means
+   catching them at the app's end: in the parent page, a port's onmessage
+   handler skips every bd-edit:patch while `__dropBdEditPatches` is set, so
+   nothing it carries is spliced, saved or acknowledged by the app. Install
+   before the page loads; switch on with dropPatches. */
+async function installPatchDrop(page: Page) {
+  await page.addInitScript(() => {
+    if (window.top !== window) return;
+    const desc = Object.getOwnPropertyDescriptor(MessagePort.prototype, "onmessage")!;
+    const dropped = (ev: MessageEvent) => {
+      const d: unknown = ev.data;
+      return (
+        "__dropBdEditPatches" in window &&
+        window.__dropBdEditPatches === true &&
+        !!d &&
+        typeof d === "object" &&
+        "type" in d &&
+        d.type === "bd-edit:patch"
+      );
+    };
+    Object.defineProperty(MessagePort.prototype, "onmessage", {
+      configurable: true,
+      get(this: MessagePort) {
+        return desc.get!.call(this);
+      },
+      set(this: MessagePort, fn: ((this: MessagePort, ev: MessageEvent) => unknown) | null) {
+        desc.set!.call(
+          this,
+          typeof fn === "function"
+            ? function (this: MessagePort, ev: MessageEvent) {
+                if (!dropped(ev)) return fn.call(this, ev);
+              }
+            : fn,
+        );
+      },
+    });
+  });
+}
+
+async function dropPatches(page: Page) {
+  await page.evaluate(() => {
+    Object.defineProperty(window, "__dropBdEditPatches", { value: true, configurable: true, writable: true });
+  });
+}
+
+/* A tab closed before the edit's postMessage reached the app. The app never
+   hears the patch, so its own exit flush has nothing to send. The frame hands
+   the edit down its MessagePort to the app's exit worker, which saves it with
+   the app's session as the tab goes — and the frame was never handed a URL,
+   a token or anything else it could write with. */
+test("an edit whose postMessage is not delivered before tab close still lands", async ({ page, browser }) => {
+  await login(page, ADMIN); // the verifier: makes the file and reads it back
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await recordFrameMessages(editor);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Saved across close.");
+
+    // What the sandbox was ever sent: control messages only, no URL, no token.
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+    const seen = await child!.evaluate(() =>
+      "__bdSeen" in window && Array.isArray(window.__bdSeen) ? window.__bdSeen.map(String) : [],
+    );
+    const types = seen.map((s) => {
+      const parsed: unknown = JSON.parse(s);
+      return parsed && typeof parsed === "object" && "type" in parsed && typeof parsed.type === "string"
+        ? parsed.type
+        : undefined;
+    });
+    for (const t of types) expect(["bd-edit:port", "bd-edit:ack", "bd-edit:flush", "bd-edit:unlock"]).toContain(t);
+    for (const s of seen) expect(s).not.toMatch(/https?:|\/api\/|token/i);
+
+    await editor.close({ runBeforeUnload: true }); // the tab goes at once
+
+    // The context (its network) outlives the tab, as the browser does; only
+    // the tab is gone, and the edit must still land.
+    const after = await waitForSource(page, id, file, "Revenue grew steadily across every region. Saved across close.");
+    expect(after.split("<h1>").length - 1).toBe(1);
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+/* The synced file's own scripts — in <head> and in <body> — try everything
+   they can reach: catch a port off window, forge an exit and a patch, post a
+   fake hello/ready to the app, click an element and fake input into it. The
+   editor's script runs before them and talks only on its own port, and only
+   a person's input opens or changes an editor: the reader's edit lands, and
+   nothing the scripts wrote does. */
+const HOSTILE_SCRIPT = `<script>
+(function () {
+  var stolen = [];
+  window.addEventListener("message", function (e) {
+    if (e.ports && e.ports[0]) stolen.push(e.ports[0]);
+  }, true);
+  var forge = function () {
+    stolen.forEach(function (p) {
+      try { p.postMessage({ type: "bd-edit:exit", patches: [{ start: 1, end: 5, html: "PWNED" + "_EXIT" }] }); } catch {}
+    });
+  };
+  window.addEventListener("beforeunload", forge);
+  window.addEventListener("pagehide", forge);
+  try { parent.postMessage({ type: "bd-edit:hello" }, "*", [new MessageChannel().port2]); } catch {}
+  parent.postMessage({ type: "bd-edit:ready", hash: "", len: -1, ranges: [{ start: 1, end: 5 }] }, "*");
+  parent.postMessage({ type: "bd-edit:patch", seq: 1, start: 1, end: 5, html: "PWNED" + "_PATCH" }, "*");
+  setTimeout(function () {
+    var h = document.querySelector("h1");
+    if (h) h.click();
+    var p = document.querySelector("p.lead");
+    if (p) p.dispatchEvent(new InputEvent("input", { bubbles: true, data: "PWNED" + "_INPUT" }));
+  }, 0);
+})();
+</script>`;
+const HOSTILE = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>Hostile report</title>
+    ${HOSTILE_SCRIPT}
+  </head>
+  <body>
+    <h1>Hostile report</h1>
+    <p class="lead">Revenue grew steadily across every region.</p>
+    ${HOSTILE_SCRIPT}
+  </body>
+</html>
+`;
+
+test("hostile scripts inside the HTML file cannot steal editor ports or forge edits on close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = `hostile-${Date.now()}-${n++}.html`;
+  const put = await page.request.put(`/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`, {
+    data: HOSTILE,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+  expect(put.ok()).toBeTruthy();
+  litter.push(async () => {
+    await page.request.post(`/api/p/${id}/remove`, { data: { path: file } }).catch(() => {});
+  });
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor); // only the exit worker can save what follows
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Genuine edit.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(page, id, file, "Revenue grew steadily across every region. Genuine edit.");
+    expect(after).not.toContain("PWNED_EXIT");
+    expect(after).not.toContain("PWNED_PATCH");
+    expect(after).not.toContain("PWNED_INPUT");
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+// A file of the spec's own, removed afterwards.
+async function putHTML(page: Page, id: string, prefix: string, body: string): Promise<string> {
+  const file = `${prefix}-${Date.now()}-${n++}.html`;
+  const put = await page.request.put(`/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`, {
+    data: body,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+  expect(put.ok()).toBeTruthy();
+  litter.push(async () => {
+    await page.request.post(`/api/p/${id}/remove`, { data: { path: file } }).catch(() => {});
+  });
+  return file;
+}
+
+/* A page script's own keydown/beforeinput/input listeners run inside the
+   reader's real keystroke. On "!" they try every way into the open element —
+   innerHTML, a text node's value, append, execCommand. None may land: the
+   editor closes and says so, and the file keeps exactly what was typed
+   before. (The markers are built at run time so the file's own script text
+   never contains them.) */
+const KEYSTROKE_HOSTILE = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>Keystroke hostile</title>
+    <script>
+    (function () {
+      var hit = function (e) {
+        var el = e.target;
+        if (!el || el.nodeType !== 1) return;
+        if (e.key !== "!" && e.data !== "!") return;
+        // 1) Cross-realm bypass attempt via an about:blank child iframe:
+        try {
+          var sub = document.createElement("iframe");
+          document.head.appendChild(sub);
+          var w = sub.contentWindow || window.frames[window.frames.length - 1];
+          var rawSet = Object.getOwnPropertyDescriptor(w.Element.prototype, "innerHTML").set;
+          rawSet.call(el, "PWNED" + "_SUBREALM");
+        } catch {}
+        // 2) Same-realm DOM and attribute/href mutator attempts:
+        var link = el.querySelector && el.querySelector("a");
+        try { if (link) link.attributes.removeNamedItem("href"); } catch {}
+        try { if (link) link.href = "https://evil." + "example/phish"; } catch {}
+        try { if (link) link.setAttribute("href", "https://evil." + "example/attr"); } catch {}
+        try { el.innerHTML = "PWNED" + "_INNER"; } catch {}
+        try { if (el.firstChild) el.firstChild.nodeValue = "PWNED" + "_NODE"; } catch {}
+        try { el.append(" PWNED" + "_APPEND"); } catch {}
+        try { document.execCommand("insertText", false, "PWNED" + "_EXEC"); } catch {}
+      };
+      ["keydown", "beforeinput", "input"].forEach(function (t) {
+        document.addEventListener(t, hit, true);
+        document.addEventListener(t, hit, false);
+      });
+    })();
+    </script>
+  </head>
+  <body>
+    <h1>Keystroke hostile</h1>
+    <p class="lead">Revenue grew <a href="/safe">steadily</a> across every region.</p>
+  </body>
+</html>
+`;
+
+test("malicious DOM mutations inside keydown and input listeners during real typing are rejected", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "keystroke", KEYSTROKE_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Safe");
+    const safe = await waitForSource(
+      page,
+      id,
+      file,
+      'Revenue grew <a href="/safe">steadily</a> across every region. Safe',
+    );
+
+    await editor.keyboard.press("!"); // cross-realm, href/attribute, and DOM mutators fire inside this keystroke
+    await expect(editor.locator("#edit-clobbered")).toBeVisible();
+    await editor.click("#edit-btn"); // Done
+
+    await expectUnchanged(page, id, file, safe);
+    for (const mark of ["evil.example", "PWNED_SUBREALM", "PWNED_INNER", "PWNED_NODE", "PWNED_APPEND", "PWNED_EXEC"]) {
+      expect(safe).not.toContain(mark);
+    }
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+/* Before the editor binds the document (DOMContentLoaded), a page script
+   points the lead paragraph's marker at the <h1>'s range and parses a new
+   element carrying that range too. Neither can redirect an edit: the marker
+   cannot be rewritten, a range two elements claim is bound to neither, and
+   an element whose content is not what the source holds there is never
+   anchored. The lead edit lands; the <h1> is untouched. */
+const MARKER_HOSTILE = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>Hostile markers</title>
+  </head>
+  <body>
+    <h1>Hostile markers</h1>
+    <p class="lead">Revenue grew steadily across every region.</p>
+    <script>
+    (function () {
+      var h1 = document.querySelector("h1");
+      var r = h1 && h1.getAttribute("data-bd-src");
+      if (!r) return;
+      var lead = document.querySelector("p.lead");
+      if (lead) lead.setAttribute("data-bd-src", r);
+      document.body.insertAdjacentHTML("beforeend", '<div id="forged" data-bd-src="' + r + '">Click me</div>');
+    })();
+    </script>
+  </body>
+</html>
+`;
+
+test("tampering with data-bd-src markers before DOMContentLoaded cannot redirect edits to another range", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "markers", MARKER_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    await frame.locator("#forged").click();
+    await editor.keyboard.type(" Overwrite H1?");
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Stays in lead.");
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(page, id, file, "Revenue grew steadily across every region. Stays in lead.");
+    expect(after).toContain("<h1>Hostile markers</h1>");
+    expect(after).not.toContain("Overwrite H1?");
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+/* The editor lives in a closed shadow root inside the element, so a page
+   script holds nothing it edits. Each of the next three tests tries ONE way
+   in, unmixed with any other write that would close the editor first. The
+   evil values are built at run time, so the file's own script text never
+   contains them. */
+const LINKED_LEAD = `<p class="lead">Revenue grew <a href="/safe">steadily</a> across every region.</p>`;
+const linkedPage = (title: string, script: string) => `<!DOCTYPE html>
+<html>
+  <head>
+    <title>${title}</title>
+  </head>
+  <body>
+    <h1>${title}</h1>
+    ${LINKED_LEAD}
+    <script>
+${script}
+    </script>
+  </body>
+</html>
+`;
+
+// 1: only the reflected href setter — on a link saved before editing began,
+// and on whatever the keystroke's target holds.
+const HREF_HOSTILE = linkedPage(
+  "Href hostile",
+  `(function () {
+  var preSavedLink = document.querySelector("p.lead a");
+  var hrefSet = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, "href").set;
+  var evil = "https://evil." + "example/href";
+  var hit = function (e) {
+    try { if (preSavedLink) hrefSet.call(preSavedLink, evil); } catch {}
+    try {
+      var a = e.target && e.target.querySelector && e.target.querySelector("a");
+      if (a) hrefSet.call(a, evil);
+    } catch {}
+  };
+  ["keydown", "beforeinput", "input"].forEach(function (t) { document.addEventListener(t, hit, true); });
+})();`,
+);
+
+test("a reflected href setter on a saved link cannot change the link being edited", async ({ page, browser }) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "href", HREF_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Clean.");
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(
+      page,
+      id,
+      file,
+      'Revenue grew <a href="/safe">steadily</a> across every region. Clean.',
+    );
+    expect(after).not.toContain("evil.example");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+// 2: only another realm's untouched innerHTML setter (an about:blank child
+// frame's), on the element and on the keystroke's target, on "!".
+const CROSSREALM_HOSTILE = linkedPage(
+  "Cross-realm hostile",
+  `(function () {
+  var sub = document.createElement("iframe");
+  sub.style.display = "none";
+  document.body.appendChild(sub);
+  var setInner = null;
+  try { setInner = Object.getOwnPropertyDescriptor(sub.contentWindow.Element.prototype, "innerHTML").set; } catch {}
+  var mark = "PWNED" + "_CROSSREALM";
+  var hit = function (e) {
+    if (e.key !== "!" && e.data !== "!") return;
+    if (!setInner) return;
+    try { setInner.call(document.querySelector("p.lead"), mark); } catch {}
+    try { setInner.call(e.target, mark); } catch {}
+  };
+  ["keydown", "beforeinput", "input"].forEach(function (t) { document.addEventListener(t, hit, true); });
+})();`,
+);
+
+test("another realm's innerHTML setter during real typing never reaches the saved file", async ({ page, browser }) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "crossrealm", CROSSREALM_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Safe");
+    await waitForSource(page, id, file, "across every region. Safe");
+
+    await editor.keyboard.press("!");
+    await editor.click("#edit-btn"); // Done
+
+    // Either the other realm could not be reached (and "!" was typed), or it
+    // detached the editor (which closed, keeping " Safe"): never the mark.
+    await page.waitForTimeout(2500); // both idles, plus room for any write
+    const after = await source(page, id, file);
+    expect(after).toContain("across every region. Safe");
+    expect(after).not.toContain("PWNED_CROSSREALM");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+// 3: a real paste, while the page's paste/beforeinput/input listeners try to
+// repoint the saved link and to swap in their own clipboard markup.
+const PASTE_HOSTILE = linkedPage(
+  "Paste hostile",
+  `(function () {
+  var preSavedLink = document.querySelector("p.lead a");
+  var evil = "https://evil." + "example/paste";
+  var hit = function (e) {
+    try { if (preSavedLink) preSavedLink.href = evil; } catch {}
+    try {
+      if (e.clipboardData) e.clipboardData.setData("text/html", '<a href="https://evil.' + 'example/clip">x</a>');
+    } catch {}
+  };
+  ["paste", "beforeinput", "input"].forEach(function (t) { document.addEventListener(t, hit, true); });
+})();`,
+);
+
+test("a real paste lands while hostile paste listeners try to hijack the link", async ({ page, browser }) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "paste", PASTE_HOSTILE);
+
+  const ctx = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+    await editor.evaluate(() => navigator.clipboard.writeText(" pasted words"));
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.press("ControlOrMeta+v"); // the browser's own paste
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(page, id, file, "pasted words");
+    // A leading space may be kept as a non-breaking one.
+    expect(after).toMatch(
+      /Revenue grew <a href="\/safe">steadily<\/a> across every region\.(?: |&nbsp;)pasted words/,
+    );
+    expect(after).not.toContain("evil.example");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+// 4: replacing Element/Range/HTMLElement prototype methods to steal `this`
+// (`v.dom` / `this.getRootNode()`) on click, then rewriting links inside the
+// stolen root during a real paste.
+const PROTO_THEFT_PASTE_HOSTILE = linkedPage(
+  "Prototype theft paste hostile",
+  `(function () {
+  var stolenRoots = [];
+  window.__stolenShadowCount = 0;
+  var steal = function (node) {
+    if (!node || typeof node.getRootNode !== "function") return;
+    var root = node.getRootNode();
+    if (root && root !== document && stolenRoots.indexOf(root) < 0) {
+      stolenRoots.push(root);
+      window.__stolenShadowCount = stolenRoots.length;
+    }
+  };
+  [
+    [Element.prototype, "getBoundingClientRect"],
+    [Element.prototype, "getClientRects"],
+    [Range.prototype, "getClientRects"],
+    [HTMLElement.prototype, "focus"],
+  ].forEach(function (pair) {
+    try {
+      var orig = pair[0][pair[1]];
+      pair[0][pair[1]] = function () {
+        steal(this);
+        return orig.apply(this, arguments);
+      };
+    } catch {}
+    try {
+      var orig2 = pair[0][pair[1]];
+      Object.defineProperty(pair[0], pair[1], {
+        value: function () {
+          steal(this);
+          return orig2.apply(this, arguments);
+        },
+      });
+    } catch {}
+  });
+  var hrefSet = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, "href").set;
+  var evil = "https://evil." + "example/stolen";
+  var hit = function () {
+    stolenRoots.forEach(function (r) {
+      try {
+        r.querySelectorAll("a").forEach(function (a) { hrefSet.call(a, evil); });
+      } catch {}
+    });
+  };
+  ["paste", "beforeinput", "input"].forEach(function (t) { document.addEventListener(t, hit, true); });
+})();`,
+);
+
+test("replacing prototype methods cannot steal closed shadow nodes or alter links during paste", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "proto-paste", PROTO_THEFT_PASTE_HOSTILE);
+
+  const ctx = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+    await editor.evaluate(() => navigator.clipboard.writeText(" pasted safely"));
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.press("ControlOrMeta+v");
+
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+    const stolen = await child!.evaluate(() =>
+      "__stolenShadowCount" in window && typeof window.__stolenShadowCount === "number" ? window.__stolenShadowCount : -1,
+    );
+    expect(stolen).toBe(0);
+
+    await editor.click("#edit-btn"); // Done
+    const after = await waitForSource(page, id, file, "pasted safely");
+    expect(after).toMatch(
+      /Revenue grew <a href="\/safe">steadily<\/a> across every region\.(?: |&nbsp;)pasted safely/,
+    );
+    expect(after).not.toContain("evil.example");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+// 5: replacing Map/Set/WeakMap/Array/JSON built-in prototypes in the iframe to
+// steal or rewrite exit-patch state before tab close.
+const BUILTIN_PROTO_EXIT_HOSTILE = linkedPage(
+  "Builtin prototype exit hostile",
+  `(function () {
+  var poison = "PWNED" + "_MAP_EXIT";
+  var origValues = Map.prototype.values;
+  Map.prototype.values = function () {
+    var it = origValues.call(this);
+    var arr = Array.from(it);
+    arr.forEach(function (v) {
+      if (v && typeof v === "object" && "html" in v) {
+        v.html = poison;
+        v.acked = false;
+      }
+    });
+    return arr[Symbol.iterator]();
+  };
+  var origSet = Map.prototype.set;
+  Map.prototype.set = function (k, v) {
+    if (v && typeof v === "object" && "html" in v) {
+      v = Object.assign({}, v, { html: poison, acked: false });
+    }
+    return origSet.call(this, k, v);
+  };
+  var origSort = Array.prototype.sort;
+  Array.prototype.sort = function () {
+    for (var i = 0; i < this.length; i++) {
+      if (this[i] && typeof this[i] === "object" && "html" in this[i]) this[i].html = poison;
+    }
+    return origSort.apply(this, arguments);
+  };
+  var origStringify = JSON.stringify;
+  JSON.stringify = function (val) {
+    if (val && typeof val === "object" && Array.isArray(val.patches)) {
+      val.patches.forEach(function (p) { p.html = poison; });
+    }
+    return origStringify.apply(this, arguments);
+  };
+})();`,
+);
+
+test("replacing Map, Array and JSON prototypes in the iframe cannot tamper with exit patches on close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "map-exit", BUILTIN_PROTO_EXIT_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Real exit.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(
+      page,
+      id,
+      file,
+      'Revenue grew <a href="/safe">steadily</a> across every region. Real exit.',
+    );
+    expect(after).not.toContain("PWNED_MAP_EXIT");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+// 6: mutating an element's innerHTML AFTER initDOM (`data-bd-ready`), before
+// the user ever clicks it (`host === null`), so a single real keystroke would
+// otherwise flush the page script's forged markup as the user's edit.
+const POST_INIT_PRE_CLICK_HOSTILE = linkedPage(
+  "Post-init pre-click hostile",
+  `(function () {
+  var poison = "https://evil." + "example/preclick";
+  window.__tamperLeadBeforeClick = function () {
+    var lead = document.querySelector("p.lead");
+    if (lead) {
+      lead.innerHTML = 'Revenue grew <a href="' + poison + '">steadily</a> across every region. PWNED' + '_PRECLICK';
+    }
+  };
+})();`,
+);
+
+test("mutating an element after initialization before the user clicks it refuses editing and never saves tampered DOM", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "preclick", POST_INIT_PRE_CLICK_HOSTILE);
+  const before = await source(page, id, file);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+    // After initialization, while no element is open (`host === null`), the
+    // page's own script rewrites `p.lead` in place.
+    await child!.evaluate(() => {
+      if ("__tamperLeadBeforeClick" in window && typeof window.__tamperLeadBeforeClick === "function") {
+        window.__tamperLeadBeforeClick();
+      }
+    });
+
+    // The user clicks `p.lead` and types: it must refuse to mount, announce
+    // clobbering, and never flush the tampered markup; meanwhile untampered
+    // `h1` still edits cleanly.
+    await frame.locator("p.lead").click();
+    await editor.keyboard.type("x");
+    await expect(editor.locator("#edit-clobbered")).toBeVisible();
+
+    await frame.locator("h1").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Clean H1.");
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(page, id, file, "<h1>Post-init pre-click hostile Clean H1.</h1>");
+    expect(after).toContain('<p class="lead">Revenue grew <a href="/safe">steadily</a> across every region.</p>');
+    expect(after).not.toContain("evil.example");
+    expect(after).not.toContain("PWNED_PRECLICK");
+    expect(after).not.toBe(before);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+// 7: replacing Array.prototype.push / map / slice to intercept ProseMirror's
+// shared `node.marks` array during real typing and mutate `marks[0].attrs.attrs.href`,
+// while also verifying strict-mode polyfills adding NEW methods on Array.prototype still work.
+const ARRAY_PUSH_MARK_HOSTILE = linkedPage(
+  "Array push mark hostile",
+  `(function () {
+  "use strict";
+  var evil = "https://evil." + "example/array-push";
+  // Legitimate strict-mode polyfill adding a brand-new method must keep working:
+  Array.prototype.__bdTestPolyfill = function () { return this.length; };
+  window.__polyfillWorked = [1, 2, 3].__bdTestPolyfill() === 3;
+
+  var corruptMarks = function (val) {
+    if (!val || typeof val !== "object") return;
+    var list = Array.isArray(val) ? val : Array.isArray(val.marks) ? val.marks : null;
+    if (!list) return;
+    for (var i = 0; i < list.length; i++) {
+      var m = list[i];
+      if (m && m.attrs && m.attrs.attrs && m.attrs.attrs.href) {
+        try { m.attrs.attrs.href = evil; } catch {}
+        try { m.attrs.attrs = { href: evil }; } catch {}
+      }
+    }
+  };
+  ["push", "map", "slice", "forEach"].forEach(function (k) {
+    try {
+      var orig = Array.prototype[k];
+      Array.prototype[k] = function () {
+        for (var i = 0; i < arguments.length; i++) corruptMarks(arguments[i]);
+        corruptMarks(this);
+        return orig.apply(this, arguments);
+      };
+    } catch {}
+    try {
+      var orig2 = Array.prototype[k];
+      Object.defineProperty(Array.prototype, k, {
+        value: function () {
+          for (var i = 0; i < arguments.length; i++) corruptMarks(arguments[i]);
+          corruptMarks(this);
+          return orig2.apply(this, arguments);
+        },
+      });
+    } catch {}
+  });
+  try {
+    Object.defineProperty(Object.prototype, "marks", {
+      configurable: true,
+      set: function (v) { corruptMarks(v); },
+    });
+  } catch {}
+})();`,
+);
+
+test("replacing Array.prototype.push cannot steal or mutate RawInline link marks during typing", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "array-push", ARRAY_PUSH_MARK_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+    const polyfillOk = await child!.evaluate(() =>
+      "__polyfillWorked" in window ? window.__polyfillWorked === true : false,
+    );
+    expect(polyfillOk).toBe(true);
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Typed cleanly.");
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(
+      page,
+      id,
+      file,
+      'Revenue grew <a href="/safe">steadily</a> across every region. Typed cleanly.',
+    );
+    expect(after).not.toContain("evil.example");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+/* The page goes into the bfcache (pagehide, persisted) with an edit the app
+   never heard: the exit worker saves it, and that exit's port is spent. The
+   page comes back (pageshow) and is edited again — still unheard — and then
+   really closed. The worker must have been re-armed with a fresh port, or the
+   second edit goes nowhere. Both must land. */
+test("after a bfcache pagehide and pageshow, a second undelivered edit still saves on tab close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" First bfcache.");
+
+    // Into the bfcache, in the browser's order: the parent, then the frame.
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await waitForSource(page, id, file, "Revenue grew steadily across every region. First bfcache.");
+
+    // Back again: the app hands the frame a fresh exit port.
+    await child!.evaluate(() => document.documentElement.removeAttribute("data-bd-exit"));
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+
+    await frame.locator("li").first().click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Second close.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(page, id, file, "North America led the quarter. Second close.");
+    expect(after).toContain("Revenue grew steadily across every region. First bfcache.");
+    expect(after.split("First bfcache.").length - 1).toBe(1);
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+/* If the first bfcache exit save fails (503), its edit was NEVER confirmed on
+   storage and must stay unacknowledged across pageshow — so when the user
+   returns, edits a second element (also undelivered), and closes the tab, the
+   second exit save carries BOTH edits rather than treating the first as
+   already saved and losing it. */
+test("after a failed bfcache exit save, pageshow and a second undelivered edit save both edits on close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  const ctx = await browser.newContext();
+  try {
+    let failFirstExit = true;
+    let sawFailedExit: (() => void) | null = null;
+    const firstExitFailed = new Promise<void>((resolve) => {
+      sawFailedExit = resolve;
+    });
+    await ctx.route("**/ycollab/sync*", async (route) => {
+      if (failFirstExit) {
+        failFirstExit = false;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "temporary outage" }),
+        });
+        sawFailedExit?.();
+        return;
+      }
+      await route.continue();
+    });
+
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" First failed-exit.");
+
+    // First bfcache exit hits 503: nothing lands on the hub yet.
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await firstExitFailed;
+    expect(await source(page, id, file)).not.toContain("First failed-exit.");
+
+    // Restore from bfcache, make a second undelivered edit, and close immediately.
+    await child!.evaluate(() => document.documentElement.removeAttribute("data-bd-exit"));
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+
+    await frame.locator("li").first().click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Second close.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(page, id, file, "North America led the quarter. Second close.");
+    expect(after).toContain("Revenue grew steadily across every region. First failed-exit.");
+    expect(after.split("First failed-exit.").length - 1).toBe(1);
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+/* Out-of-order acks on the same element: an in-flight bfcache exit save for
+   edit #1 finishes AFTER the page has returned, edited the same paragraph
+   again (#2), and received the app's newer ack for #2. That late response
+   must not roll `ackedHtml` back to #1 — or a third undelivered edit (#3)
+   before close would re-merge #2 and duplicate it. */
+test("a late exit-save response arriving after a newer app ack does not duplicate same-element edits on close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  const ctx = await browser.newContext();
+  try {
+    let holdFirstSync = true;
+    let sawFirstSync: (() => void) | null = null;
+    const firstSyncArrived = new Promise<void>((r) => {
+      sawFirstSync = r;
+    });
+    let releaseFirstSync: (() => void) | null = null;
+    const allowFirstSyncFinish = new Promise<void>((r) => {
+      releaseFirstSync = r;
+    });
+    let firstSyncDone: (() => void) | null = null;
+    const firstSyncCompleted = new Promise<void>((r) => {
+      firstSyncDone = r;
+    });
+
+    await ctx.route("**/ycollab/sync*", async (route) => {
+      if (holdFirstSync) {
+        holdFirstSync = false;
+        sawFirstSync?.();
+        await allowFirstSyncFinish;
+        await route.continue();
+        firstSyncDone?.();
+        return;
+      }
+      await route.continue();
+    });
+
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+
+    // 1) Edit #1 (undelivered to app) enters bfcache; its worker sync is held in flight.
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" First.");
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await firstSyncArrived;
+
+    // 2) Page restores from bfcache; re-enable patch delivery so edit #2 on the
+    //    SAME `p.lead` element is applied and acked by the app BEFORE sync #1 finishes!
+    await child!.evaluate(() => document.documentElement.removeAttribute("data-bd-exit"));
+    await editor.evaluate(() => {
+      Object.defineProperty(window, "__dropBdEditPatches", { value: false, configurable: true, writable: true });
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    });
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+
+    await editor.keyboard.type(" Second.");
+    // Give the in-tab MessagePort task one beat so VisualEdit applies #2 and posts ack(#2) to exitWorker.
+    await editor.waitForTimeout(150);
+
+    // 3) Now release the older sync #1 response so confirmSeqs(#1) arrives AFTER ack(#2)!
+    releaseFirstSync!();
+    await firstSyncCompleted;
+    await editor.waitForTimeout(100);
+
+    // 4) Drop patches again, type edit #3 in the SAME `p.lead` element, and close immediately.
+    await dropPatches(editor);
+    await editor.keyboard.type(" Third.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(
+      page,
+      id,
+      file,
+      "Revenue grew steadily across every region. First. Second. Third.",
+    );
+    expect(after.split("First.").length - 1).toBe(1);
+    expect(after.split("Second.").length - 1).toBe(1);
+    expect(after.split("Third.").length - 1).toBe(1);
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      srv.close(() => (addr && typeof addr === "object" ? resolve(addr.port) : reject(new Error("no port"))));
+    });
+  });
+}
+
+/* A plain folder (`bdrive serve --upload --dir`, DirSource): no room, no past
+   versions — a file is named by its mtime and size, so once autosave #1 has
+   rewritten it the version the frame rendered is gone. Edit #2 is then never
+   delivered to the app before the tab closes; the exit worker must build it
+   on the LATEST version (autosave #1's), not the render, or it is refused and
+   lost. Both edits must be on disk. */
+test("plain-folder mode: an auto-saved edit followed by an undelivered edit before tab close keeps both", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000); // includes building the binary
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bdrive-dir-e2e-"));
+  const site = path.join(tmp, "site");
+  fs.mkdirSync(site);
+  const page = path.join(site, "page.html");
+  fs.writeFileSync(page, FIXTURE);
+  const bin = path.join(tmp, "bdrive");
+  execFileSync("go", ["build", "-o", bin, "./cmd/bdrive"], { cwd: REPO, stdio: "inherit" });
+  const port = await freePort();
+  const server = spawn(bin, ["serve", "--upload", "--addr", `127.0.0.1:${port}`, "--dir", site], {
+    env: { ...process.env, BDRIVE_HOME: path.join(tmp, "home") },
+    stdio: "inherit",
+  });
+  const ctx = await browser.newContext();
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    await expect
+      .poll(
+        async () => {
+          try {
+            return (await fetch(base + "/api/config")).status;
+          } catch {
+            return 0;
+          }
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(200);
+    const onDisk = () => fs.readFileSync(page, "utf8");
+
+    const editor = await ctx.newPage();
+    await installPatchDrop(editor);
+    await editor.goto(base + "/page.html");
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+
+    // Edit #1 autosaves: the file on disk (and its ETag) moves on.
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" First autosaved.");
+    await expect.poll(onDisk, { timeout: 15_000 }).toContain("First autosaved.");
+
+    // Edit #2, in another element, never reaches the app; the tab goes.
+    await dropPatches(editor);
+    await frame.locator("h1").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Second across close.");
+    await editor.close({ runBeforeUnload: true });
+
+    await expect.poll(onDisk, { timeout: 15_000 }).toContain("Second across close.");
+    const after = onDisk();
+    expect(after).toContain("Revenue grew steadily across every region. First autosaved.");
+    expect(after).toContain("Quarterly report Second across close.");
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+    server.kill();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 /* A file that is not in English, edited through the whole real stack.

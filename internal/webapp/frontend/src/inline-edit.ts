@@ -4,8 +4,20 @@
    This is a separate bundle from the app, loaded only by the ?edit=1 render
    (server.go's serveEditable). A reader never downloads an editor, and the
    iframe keeps exactly the sandbox it always had — no allow-same-origin — so
-   nothing here can reach the hub's session. It talks to the app by postMessage
-   and accepts nothing back.
+   nothing here can reach the hub's session. It is injected FIRST in the
+   document, before any of the page's own scripts, and hands the app one end
+   of a MessageChannel (`bd-edit:hello`); everything after travels on that
+   port, never on window, so the page's scripts can neither hear nor forge
+   it. Back it takes `bd-edit:flush` (a numeric id, optionally `lock: true`),
+   which posts any edit still held here and answers `bd-edit:flushed` with
+   that id — so the app's Done saves only after every patch before the answer
+   has landed — and, with `lock`, stops accepting edits until
+   `bd-edit:unlock`. It also takes `bd-edit:ack` (each patch's `seq`, once the
+   app has it in the document) and `bd-edit:port` (a MessagePort to the app's
+   exit worker, lib/editexit.worker.ts): a tab closed before a patch was
+   acknowledged posts every edited span down that port on the way out. This
+   frame never holds a URL or credential and makes no request of its own, and
+   only a person's input (Event.isTrusted) opens or changes an editor.
 
    Three things had to be true at once, and they decided the design:
 
@@ -26,12 +38,279 @@ import Text from "@tiptap/extension-text";
 import Bold from "@tiptap/extension-bold";
 import Italic from "@tiptap/extension-italic";
 import Code from "@tiptap/extension-code";
-import { DOMParser as PMParser, DOMSerializer, type Node as PMNode } from "@tiptap/pm/model";
+import { DOMParser as PMParser, DOMSerializer, Mark as PMMark, type Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
 import { keymap } from "@tiptap/pm/keymap";
 import { baseKeymap, toggleMark } from "@tiptap/pm/commands";
 import { history, undo, redo } from "@tiptap/pm/history";
+// Exit span state lives in the app's dedicated worker (lib/editexit.worker.ts).
+
+/* ---- t = 0: before the page's own scripts exist ----
+
+   The server injects this script first in the document, synchronous, so it
+   runs in a realm no page script has touched yet. Everything a page script
+   could later replace to see or forge this editor's traffic is taken now:
+   the channel to the app, the methods that move messages on it, the
+   isTrusted getter that tells a person's input from a script's, and the DOM
+   reads the ranges come from. The app's end of the channel is handed up
+   below (`bd-edit:hello`) before any page script can watch window messages;
+   nothing in this editor ever travels on window again. */
+const uncurry = Function.prototype.bind.bind(Function.prototype.call) as <T extends (...a: never[]) => unknown>(
+  fn: T,
+) => (self: unknown, ...a: unknown[]) => unknown;
+const NativeMessageChannel = window.MessageChannel;
+const portPost = uncurry(MessagePort.prototype.postMessage);
+const portClose = uncurry(MessagePort.prototype.close);
+const portStart = uncurry(MessagePort.prototype.start);
+const targetAddListener = EventTarget.prototype.addEventListener;
+const getIsTrusted = uncurry(Object.getOwnPropertyDescriptor(new Event("x"), "isTrusted")!.get!);
+const getMsgData = uncurry(Object.getOwnPropertyDescriptor(MessageEvent.prototype, "data")!.get!);
+const getMsgPorts = uncurry(Object.getOwnPropertyDescriptor(MessageEvent.prototype, "ports")!.get!);
+const elGetAttribute = uncurry(Element.prototype.getAttribute);
+const elClosest = uncurry(Element.prototype.closest);
+const docQueryAll = uncurry(window.Document.prototype.querySelectorAll);
+const wmGet = uncurry(WeakMap.prototype.get);
+const wmSet = uncurry(WeakMap.prototype.set);
+const wmDelete = uncurry(WeakMap.prototype.delete);
+const mapGet = uncurry(Map.prototype.get);
+const mapSet = uncurry(Map.prototype.set);
+const wsHas = uncurry(WeakSet.prototype.has);
+const wsAdd = uncurry(WeakSet.prototype.add);
+const setHas = uncurry(Set.prototype.has);
+const setAdd = uncurry(Set.prototype.add);
+const setClear = uncurry(Set.prototype.clear);
+const setSizeGet = uncurry(Object.getOwnPropertyDescriptor(Set.prototype, "size")!.get!);
+const jsonStringify = JSON.stringify;
+const objFreeze = Object.freeze;
+const strReplace = uncurry(String.prototype.replace);
+const strIncludes = uncurry(String.prototype.includes);
+const elAttrsGet = Object.getOwnPropertyDescriptor(Element.prototype, "attributes")!.get!;
+const attrValGet = Object.getOwnPropertyDescriptor(Attr.prototype, "value")!.get!;
+const objCreate = Object.create;
+const objAssign = Object.assign;
+const nativeSetTimeout = window.setTimeout.bind(window);
+const nativeClearTimeout = window.clearTimeout.bind(window);
+const postToParent = window.parent.postMessage.bind(window.parent);
+
+/* Who is running. The page's scripts share this realm with the editor, and
+   while the editor is open they must not write into it: a keystroke is a
+   person's, but a page script's own keydown/input listener runs inside that
+   very keystroke. So every callback is marked by who registered it —
+   ProseMirror's (registered while the editor sets itself up or runs) count
+   as the editor's (`inEditorCall` > 0), everyone else's run with it at 0 —
+   and the DOM methods that could write into the open element refuse a caller
+   at 0 (installGuards, below). */
+let inEditorSetup = 0;
+let inEditorCall = 0;
+type AnyFn = (this: unknown, ...args: unknown[]) => unknown;
+function asEditor<F extends (...args: never[]) => unknown>(fn: F): F {
+  const f = fn as unknown as AnyFn;
+  return function (this: unknown, ...a: unknown[]) {
+    inEditorCall++;
+    try {
+      return f.apply(this, a);
+    } finally {
+      inEditorCall--;
+    }
+  } as unknown as F;
+}
+function asPage<F extends (...args: never[]) => unknown>(fn: F): F {
+  const f = fn as unknown as AnyFn;
+  return function (this: unknown, ...a: unknown[]) {
+    const saved = inEditorCall;
+    inEditorCall = 0;
+    try {
+      return f.apply(this, a);
+    } finally {
+      inEditorCall = saved;
+    }
+  } as unknown as F;
+}
+const forCaller = <F extends (...args: never[]) => unknown>(fn: F): F =>
+  inEditorSetup > 0 || inEditorCall > 0 ? asEditor(fn) : asPage(fn);
+// ProseMirror setting itself up: everything it registers is the editor's.
+function editorSetup<T>(make: () => T): T {
+  inEditorSetup++;
+  inEditorCall++;
+  try {
+    return make();
+  } finally {
+    inEditorSetup--;
+    inEditorCall--;
+  }
+}
+// The editor's own listeners, registered on the untouched method.
+const listen = (target: EventTarget, type: string, fn: (e: Event) => void, opts?: boolean | AddEventListenerOptions) =>
+  targetAddListener.call(target, type, asEditor(fn), opts);
+
+// Natives the guards call through, taken before anything can replace them.
+const rawRemoveListener = EventTarget.prototype.removeEventListener;
+const RawMutationObserver = window.MutationObserver;
+const nodeContains = Node.prototype.contains;
+const rangeIntersects = Range.prototype.intersectsNode;
+const selectionContains = Selection.prototype.containsNode;
+const innerHTMLDesc = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")!;
+const elInnerHTMLGet = innerHTMLDesc.get!;
+const elInnerHTMLSet = innerHTMLDesc.set!;
+const elRemoveAttribute = Element.prototype.removeAttribute;
+const attrNameGet = Object.getOwnPropertyDescriptor(Attr.prototype, "name")!.get!;
+const datasetGet = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "dataset")!.get!;
+const nativeExecCommand = window.Document.prototype.execCommand;
+// What the editor is built from: a closed shadow root and the plain DOM calls
+// that fill it, untouched by any guard or by anything a page does later.
+const rawAttachShadow = Element.prototype.attachShadow;
+const docCreateElement = window.Document.prototype.createElement;
+const nodeAppendChild = Node.prototype.appendChild;
+const elSetAttribute = Element.prototype.setAttribute;
+const nodeIsConnectedGet = Object.getOwnPropertyDescriptor(Node.prototype, "isConnected")!.get!;
+const nodeTextContentGet = Object.getOwnPropertyDescriptor(Node.prototype, "textContent")!.get!;
+const nodeTextContentSet = Object.getOwnPropertyDescriptor(Node.prototype, "textContent")!.set!;
+const elTagNameGet = Object.getOwnPropertyDescriptor(Element.prototype, "tagName")!.get!;
+const nodeParentElGet = Object.getOwnPropertyDescriptor(Node.prototype, "parentElement")!.get!;
+const elGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+const tplContentGet = Object.getOwnPropertyDescriptor(window.HTMLTemplateElement.prototype, "content")!.get!;
+const getInputType = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "inputType")?.get;
+const getInputData = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "data")?.get;
+const getInputDT = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "dataTransfer")?.get;
+const getCompData = Object.getOwnPropertyDescriptor(window.CompositionEvent.prototype, "data")?.get;
+const getClipDT = Object.getOwnPropertyDescriptor(window.ClipboardEvent.prototype, "clipboardData")?.get;
+const dtGetData = window.DataTransfer.prototype.getData;
+const attrOwnerGet = Object.getOwnPropertyDescriptor(Attr.prototype, "ownerElement")?.get;
+const mapGetNamed = NamedNodeMap.prototype.getNamedItem;
+const mapGetNamedNS = NamedNodeMap.prototype.getNamedItemNS;
+// The hash the server computed over the STORED bytes, read while this script
+// is still `currentScript`. The app compares it with the document it holds:
+// if they differ, the ranges describe a file that has since moved on, and it
+// reloads rather than splicing by them.
+const self = document.currentScript as HTMLScriptElement | null;
+const hash = self?.dataset.srcHash ?? "";
+// The source length in UTF-16 units, which is the app's fallback check when it
+// cannot compute a hash — crypto.subtle exists only in a secure context, and a
+// LAN hub on plain HTTP is not one.
+const len = Number(self?.dataset.srcLen ?? "-1");
+// Every range the server stamped ("start,end;..."): an element may only ever
+// be bound to one of these. Null on a server that does not send the list.
+const serverRanges =
+  self && self.hasAttribute("data-src-ranges")
+    ? new Set((self.dataset.srcRanges ?? "").split(";").filter(Boolean))
+    : null;
+// Read, then gone: nothing a page script could use is left on the tag.
+if (self) {
+  for (const a of ["data-src-hash", "data-src-len", "data-src-ranges"]) elRemoveAttribute.call(self, a);
+}
+
+// This frame's end of the channel to the app; never on window or the DOM.
+const appChannel = new NativeMessageChannel();
+const appPort = appChannel.port1;
+const send = (msg: Record<string, unknown>) => {
+  portPost(appPort, msg);
+};
+
+/* A person's input, as opposed to a script's. Each trusted input event opens
+   a window that lasts through its own task — the handler and ProseMirror's
+   DOM-observer microtask after it — and closes on the next one. A document
+   change outside such a window was made by a script, not by the reader. */
+let trustedEditOpen = false;
+let composing = false;
+let inKeymapCmd = 0;
+let allowedTextBudget = "";
+let allowRemoval = false;
+const allowedPasteMarks = new Set<string>();
+let trustedTimer: ReturnType<typeof setTimeout> | undefined;
+const addBudget = (s: string | null | undefined) => {
+  if (s) allowedTextBudget += s.replace(/\u00a0/g, " ");
+};
+const addPasteHtmlMarks = (htmlClip: string | null | undefined) => {
+  if (!htmlClip) return;
+  try {
+    parseMarkup(htmlClip).descendants((node) => {
+      for (const m of node.marks) setAdd(allowedPasteMarks, jsonStringify([m.type.name, m.attrs]));
+    });
+  } catch {}
+};
+const recordTrustedText = (name: string, e: Event) => {
+  if (view && !view.state.selection.empty) allowRemoval = true;
+  if (name === "cut" || name === "paste" || name === "drop" || composing) allowRemoval = true;
+  if (e instanceof window.InputEvent) {
+    const it = getInputType?.call(e) ?? "";
+    if (
+      it.startsWith("delete") ||
+      it.startsWith("insertReplacement") ||
+      it.startsWith("insertComposition") ||
+      it.startsWith("insertFrom") ||
+      it.startsWith("history")
+    ) {
+      allowRemoval = true;
+    }
+    addBudget(getInputData?.call(e));
+    const dt = getInputDT?.call(e);
+    if (dt) {
+      addBudget(dtGetData.call(dt, "text/plain"));
+      const htmlClip = dtGetData.call(dt, "text/html");
+      addBudget(htmlClip);
+      if (it === "insertFromPaste" || it === "insertFromDrop") addPasteHtmlMarks(htmlClip);
+    }
+    return;
+  }
+  if (e instanceof window.CompositionEvent) {
+    allowRemoval = true;
+    addBudget(getCompData?.call(e));
+    return;
+  }
+  if (e instanceof window.ClipboardEvent) {
+    const cd = getClipDT?.call(e);
+    if (cd) {
+      addBudget(dtGetData.call(cd, "text/plain"));
+      const htmlClip = dtGetData.call(cd, "text/html");
+      addBudget(htmlClip);
+      if (name === "paste" || name === "drop") addPasteHtmlMarks(htmlClip);
+    }
+    return;
+  }
+  if ("data" in e && typeof e.data === "string") addBudget(e.data);
+};
+const openTrustedWindow = (ms = 0) => {
+  trustedEditOpen = true;
+  nativeClearTimeout(trustedTimer);
+  trustedTimer = nativeSetTimeout(() => {
+    trustedEditOpen = false;
+    if (!composing) {
+      allowedTextBudget = "";
+      allowRemoval = false;
+      setClear(allowedPasteMarks);
+    }
+  }, ms);
+};
+for (const name of [
+  "keydown",
+  "beforeinput",
+  "input",
+  "textInput",
+  "compositionstart",
+  "compositionupdate",
+  "compositionend",
+  "paste",
+  "cut",
+  "drop",
+]) {
+  targetAddListener.call(
+    document,
+    name,
+    (e: Event) => {
+      if (!getIsTrusted(e)) return;
+      if (name === "compositionstart") composing = true;
+      recordTrustedText(name, e);
+      if (name === "compositionend") {
+        composing = false;
+        openTrustedWindow(60);
+        return;
+      }
+      openTrustedWindow(0);
+    },
+    true,
+  );
+}
 
 const SRC_ATTR = "data-bd-src";
 
@@ -83,12 +362,18 @@ const RawInline = Mark.create({
         // it needs to not damage one.
         tag: "a, span, sup, sub, small, abbr, mark, u, s, del, ins, cite, q, var, samp, kbd, time, data, bdi, bdo, big, strike, tt, font, label, ruby, rt, rp, dfn",
         priority: 10,
-        getAttrs: (el: HTMLElement) => ({
-          tag: el.tagName.toLowerCase(),
-          attrs: Object.fromEntries(
-            [...el.attributes].map((a) => [a.name, a.value]),
-          ),
-        }),
+        getAttrs: (el: HTMLElement) => {
+          const raw = objCreate(null) as Record<string, string>;
+          const list = elAttrsGet.call(el) as NamedNodeMap;
+          for (let i = 0; i < list.length; i++) {
+            const a = list.item(i);
+            if (a) raw[attrNameGet.call(a)] = attrValGet.call(a);
+          }
+          return {
+            tag: String(elTagNameGet.call(el)).toLowerCase(),
+            attrs: objFreeze(raw),
+          };
+        },
       },
     ];
   },
@@ -112,41 +397,62 @@ const serializer = DOMSerializer.fromSchema(schema);
 // newlines around them, and dropping those would reflow the source on save.
 const PARSE = { preserveWhitespace: "full" } as const;
 
-function parseInner(el: HTMLElement): PMNode {
-  return parser.parse(el, PARSE);
+function parseMarkup(htmlStr: string): PMNode {
+  const tpl = docCreateElement.call(document, "template") as HTMLTemplateElement;
+  elInnerHTMLSet.call(tpl, htmlStr);
+  const frag = tplContentGet.call(tpl) as DocumentFragment;
+  const box = docCreateElement.call(document, "div");
+  nodeAppendChild.call(box, frag);
+  return parser.parse(box, PARSE);
 }
 
 function serializeInner(doc: PMNode): string {
-  const box = document.createElement("div");
-  box.appendChild(serializer.serializeFragment(doc.content));
-  return box.innerHTML;
+  const box = docCreateElement.call(document, "div");
+  nodeAppendChild.call(box, serializer.serializeFragment(doc.content));
+  return elInnerHTMLGet.call(box) as string;
 }
 
-/* The gate, and the reason this feature cannot quietly eat a teammate's markup.
-
-   ProseMirror normalizes whatever it is given into its schema: hand it a <span
-   class="badge"> with no matching node or mark and it hands back text. That is
-   silent data loss in a file somebody else wrote, and it happens on a click
-   with no typing at all.
-
-   So an element becomes editable only if its content survives the trip. The
-   comparison is against the browser's innerHTML rather than the source bytes,
-   because the browser has already normalized entities and attribute quoting on
-   parse and comparing against the raw source would fail on every document. The
-   consequence — an edited element's inner markup may come back normalized,
-   while everything outside it is untouched — is the documented ceiling. */
 function roundTrips(el: HTMLElement): boolean {
   try {
-    return serializeInner(parseInner(el)) === el.innerHTML;
+    const htmlStr = elInnerHTMLGet.call(el) as string;
+    return serializeInner(parseMarkup(htmlStr)) === htmlStr;
   } catch {
     return false;
   }
 }
 
 type Range = { start: number; end: number };
+type BoundRange = { readonly start: number; readonly end: number; readonly expectedHtml: string };
 
-function rangeOf(el: Element): Range | null {
-  const raw = el.getAttribute(SRC_ATTR);
+const makeBoundRange = (start: number, end: number, expectedHtml: string): BoundRange =>
+  objFreeze(objAssign(objCreate(null) as BoundRange, { start, end, expectedHtml }));
+
+/* Checks that `el` is bound AND still holds the exact markup verified at
+   initDOM (or written back by our own unmount). A page script that rewrites
+   `el.innerHTML` after initDOM, before the user clicks `el`, fails here so
+   the tampered DOM is never ingested into ProseMirror or flushed as a save. */
+const tamperedElements = new WeakSet<Element>();
+function verifiedBound(el: HTMLElement, announceClobber: boolean): BoundRange | null {
+  if (wsHas(tamperedElements, el)) {
+    if (announceClobber) send({ type: "bd-edit:clobbered" });
+    return null;
+  }
+  const b = wmGet(boundRanges, el) as BoundRange | undefined;
+  if (!b) return null;
+  if ((elInnerHTMLGet.call(el) as string) !== b.expectedHtml) {
+    wsAdd(tamperedElements, el);
+    wmDelete(boundRanges, el);
+    wmSet(verdicts, el, false);
+    elSetAttribute.call(el, "data-bd-edit", "no");
+    if (announceClobber) send({ type: "bd-edit:clobbered" });
+    return null;
+  }
+  return b;
+}
+
+// The attribute as served, parsed once (initDOM).
+function parseRange(el: Element): Range | null {
+  const raw = elGetAttribute(el, SRC_ATTR) as string | null;
   if (!raw) return null;
   const [a, b] = raw.split(",");
   const start = Number(a);
@@ -155,19 +461,16 @@ function rangeOf(el: Element): Range | null {
   return { start, end };
 }
 
-const send = (msg: Record<string, unknown>) => parent.postMessage(msg, "*");
-
-/* Whether an element may be edited is settled once and remembered. The check
-   parses, so doing it per mousemove would be the one thing on this page that
-   makes reading a document slow. */
 const verdicts = new WeakMap<HTMLElement, boolean>();
 
-function editable(el: HTMLElement): boolean {
-  let v = verdicts.get(el);
+function editable(el: HTMLElement, announceClobber = false): boolean {
+  const b = verifiedBound(el, announceClobber);
+  if (!b) return false;
+  let v = wmGet(verdicts, el) as boolean | undefined;
   if (v === undefined) {
     v = roundTrips(el);
-    verdicts.set(el, v);
-    el.setAttribute("data-bd-edit", v ? "yes" : "no");
+    wmSet(verdicts, el, v);
+    elSetAttribute.call(el, "data-bd-edit", v ? "yes" : "no");
   }
   return v;
 }
@@ -176,8 +479,398 @@ function editable(el: HTMLElement): boolean {
 
 let view: EditorView | null = null;
 let host: HTMLElement | null = null;
+/* The open element's only light-DOM child while it is being edited. The
+   editor lives in its CLOSED shadow root: no page script, in any realm, can
+   reach the nodes ProseMirror edits — shadowRoot is null, events leave it
+   retargeted to this span, and anything a script held from the element
+   before is detached. All a script can do is remove this span, which closes
+   the editor (initDOM's observer). */
+let shadowHost: HTMLElement | null = null;
 let range: Range | null = null;
 let before = "";
+/* Done's save is on the wire: no edit may start until the app says how it
+   went (`bd-edit:unlock` if the editor stays; a page torn down otherwise). */
+let locked = false;
+/* The exit path (lib/editbeacon.ts): every patch is numbered, the app
+   acknowledges each once it is in the document, and a page that goes with a
+   patch unacknowledged hands every span edited on this render to the app's
+   exit worker, which saves it with the app's own session. */
+let patchSeq = 0;
+let exitPort: MessagePort | null = null;
+type QueuedSpan = { seq: number; start: number; end: number; html: string; next: QueuedSpan | null };
+let queuedHead: QueuedSpan | null = null;
+let queuedTail: QueuedSpan | null = null;
+/* Elements bound to their source ranges, privately: the page can rewrite an
+   attribute, but not this. Filled once, when the document is first read. */
+const boundRanges = new WeakMap<Element, BoundRange>();
+
+/* A page script tried to write into the open element. The write does not
+   happen, the editor closes with the element as it was last saved — never
+   flushed, so the script's markup is never sent — and the element is not
+   offered for editing again on this render: the page's script has its hands
+   on it. */
+function clobberFromScript() {
+  const el = host;
+  const v = view;
+  if (!el) return;
+  view = null;
+  host = null;
+  range = null;
+  shadowHost = null;
+  wmDelete(boundRanges, el);
+  inEditorCall++;
+  try {
+    v?.destroy();
+    elInnerHTMLSet.call(el, before);
+    elRemoveAttribute.call(el, "data-bd-editing");
+    elRemoveAttribute.call(el, "contenteditable");
+  } catch {
+    // a page that broke its own element: the editor is closed either way
+  } finally {
+    inEditorCall--;
+  }
+  send({ type: "bd-edit:clobbered" });
+}
+
+/* The guards, installed before any page script runs and frozen so none can
+   take them back out. Each refuses a caller outside the editor:
+   - writes into the open element (and everything in it): the editor closes
+     (clobberFromScript) and the write never lands;
+   - any change to a data-bd-src marker;
+   - document.execCommand, which edits whatever is focused;
+   and every listener, observer and timer runs as whoever registered it. */
+function installGuards() {
+  const touches = (n: unknown): boolean => {
+    if (host === null) return false;
+    if (n === host) return true;
+    try {
+      return nodeContains.call(host, n as Node);
+    } catch {
+      return false;
+    }
+  };
+  const hostWrite = (self: unknown, args: unknown[]): boolean => {
+    if (inEditorCall > 0 || host === null) return false;
+    if (!touches(self) && !args.some(touches)) return false;
+    clobberFromScript();
+    return true;
+  };
+  const isSrcName = (n: unknown) => typeof n === "string" && n.toLowerCase() === SRC_ATTR;
+  const localOf = (q: unknown) => (typeof q === "string" ? q.slice(q.indexOf(":") + 1) : q);
+  const isSrcAttr = (a: unknown) => {
+    try {
+      return isSrcName(attrNameGet.call(a));
+    } catch {
+      return false;
+    }
+  };
+  const srcWrite = (blocked: boolean) => inEditorCall === 0 && blocked;
+
+  const freeze = (obj: object, name: string, value: unknown) =>
+    Object.defineProperty(obj, name, { value, writable: false, configurable: false, enumerable: false });
+  const methods = (
+    proto: object,
+    names: string[],
+    blocked: (self: unknown, args: unknown[]) => boolean,
+    refused?: unknown,
+  ) => {
+    for (const name of names) {
+      const d = Object.getOwnPropertyDescriptor(proto, name);
+      if (!d || typeof d.value !== "function") continue;
+      const native = d.value as AnyFn;
+      freeze(proto, name, function (this: unknown, ...a: unknown[]) {
+        return blocked(this, a) ? refused : native.apply(this, a);
+      });
+    }
+  };
+  const setters = (proto: object, names: string[], blocked: (self: unknown) => boolean) => {
+    for (const name of names) {
+      const d = Object.getOwnPropertyDescriptor(proto, name);
+      if (!d?.set) continue;
+      const set = d.set;
+      Object.defineProperty(proto, name, {
+        configurable: false,
+        enumerable: d.enumerable,
+        get: d.get,
+        set(this: unknown, v: unknown) {
+          if (!blocked(this)) set.call(this, v);
+        },
+      });
+    }
+  };
+
+  // The open element and everything in it.
+  setters(Element.prototype, ["innerHTML", "outerHTML"], (s) => hostWrite(s, []));
+  setters(HTMLElement.prototype, ["innerText", "outerText"], (s) => hostWrite(s, []));
+  setters(Node.prototype, ["textContent", "nodeValue"], (s) => srcWrite(isSrcAttr(s)) || hostWrite(s, []));
+  setters(CharacterData.prototype, ["data"], (s) => hostWrite(s, []));
+  methods(CharacterData.prototype, ["appendData", "insertData", "deleteData", "replaceData"], hostWrite);
+  methods(CharacterData.prototype, ["before", "after", "replaceWith", "remove"], hostWrite);
+  methods(window.Text.prototype, ["splitText"], hostWrite);
+  methods(Node.prototype, ["appendChild", "insertBefore", "replaceChild", "removeChild", "normalize"], hostWrite);
+  methods(
+    Element.prototype,
+    [
+      "insertAdjacentHTML",
+      "insertAdjacentText",
+      "insertAdjacentElement",
+      "append",
+      "prepend",
+      "replaceChildren",
+      "replaceWith",
+      "remove",
+      "before",
+      "after",
+      "attachShadow",
+    ],
+    hostWrite,
+  );
+  const rangeWrite = (self: unknown, args: unknown[]): boolean => {
+    if (inEditorCall > 0 || host === null) return false;
+    let hits = args.some(touches);
+    try {
+      hits ||= rangeIntersects.call(self as globalThis.Range, host);
+    } catch {
+      // not a Range: leave it to the native method to refuse
+    }
+    if (!hits) return false;
+    clobberFromScript();
+    return true;
+  };
+  methods(window.Range.prototype, ["deleteContents", "extractContents", "insertNode", "surroundContents"], rangeWrite);
+  methods(Selection.prototype, ["deleteFromDocument"], (self) => {
+    if (inEditorCall > 0 || host === null) return false;
+    try {
+      if (!selectionContains.call(self as Selection, host, true)) return false;
+    } catch {
+      return false;
+    }
+    clobberFromScript();
+    return true;
+  });
+  freeze(window.Document.prototype, "execCommand", function (this: unknown, ...a: unknown[]) {
+    if (inEditorCall === 0) return false;
+    return (nativeExecCommand as unknown as AnyFn).apply(this, a);
+  });
+
+  // The range markers.
+  methods(Element.prototype, ["setAttribute", "removeAttribute", "toggleAttribute"], (s, a) =>
+    srcWrite(isSrcName(a[0])) || hostWrite(s, []),
+  );
+  methods(Element.prototype, ["setAttributeNS"], (s, a) => srcWrite(isSrcName(localOf(a[1]))) || hostWrite(s, []));
+  methods(Element.prototype, ["removeAttributeNS"], (s, a) => srcWrite(isSrcName(a[1])) || hostWrite(s, []));
+  methods(Element.prototype, ["setAttributeNode", "setAttributeNodeNS", "removeAttributeNode"], (s, a) =>
+    srcWrite(isSrcAttr(a[0])) || hostWrite(s, []),
+  );
+  methods(NamedNodeMap.prototype, ["setNamedItem", "setNamedItemNS"], (_s, a) => {
+    const owner = a[0] instanceof Attr ? attrOwnerGet?.call(a[0]) : null;
+    return srcWrite(isSrcAttr(a[0])) || (owner ? hostWrite(owner, []) : false);
+  });
+  methods(NamedNodeMap.prototype, ["removeNamedItem"], (s, a) => {
+    let owner: unknown = null;
+    try {
+      const attr = typeof a[0] === "string" ? mapGetNamed.call(s as NamedNodeMap, a[0]) : null;
+      owner = attr ? attrOwnerGet?.call(attr) : null;
+    } catch {}
+    return srcWrite(isSrcName(a[0])) || (owner ? hostWrite(owner, []) : false);
+  });
+  methods(NamedNodeMap.prototype, ["removeNamedItemNS"], (s, a) => {
+    let owner: unknown = null;
+    try {
+      const ns = typeof a[0] === "string" || a[0] === null ? a[0] : null;
+      const attr = typeof a[1] === "string" ? mapGetNamedNS.call(s as NamedNodeMap, ns, a[1]) : null;
+      owner = attr ? attrOwnerGet?.call(attr) : null;
+    } catch {}
+    return srcWrite(isSrcName(a[1])) || (owner ? hostWrite(owner, []) : false);
+  });
+  setters(Attr.prototype, ["value"], (s) => {
+    const owner = s instanceof Attr ? attrOwnerGet?.call(s) : null;
+    return srcWrite(isSrcAttr(s)) || (owner ? hostWrite(owner, []) : false);
+  });
+  Object.defineProperty(HTMLElement.prototype, "dataset", {
+    configurable: false,
+    enumerable: true,
+    get(this: HTMLElement) {
+      const map = datasetGet.call(this) as DOMStringMap;
+      const el = this;
+      const blocked = (p: string | symbol) => (p === "bdSrc" && inEditorCall === 0) || hostWrite(el, []);
+      return new Proxy(map, {
+        get: (t, p) => Reflect.get(t, p),
+        set: (t, p, v) => (blocked(p) ? true : Reflect.set(t, p, v)),
+        deleteProperty: (t, p) => (blocked(p) ? true : Reflect.deleteProperty(t, p)),
+        defineProperty: (t, p, d) => (blocked(p) ? true : Reflect.defineProperty(t, p, d)),
+      });
+    },
+  });
+
+  // Listeners, observers and timers run as whoever registered them.
+  const wrapped = new WeakMap<object, AnyFn>();
+  const wrapListener = (l: unknown): unknown => {
+    if (l === null || (typeof l !== "function" && typeof l !== "object")) return l;
+    let w = wmGet(wrapped, l) as AnyFn | undefined;
+    if (!w) {
+      const call: AnyFn =
+        typeof l === "function"
+          ? (l as AnyFn)
+          : function (this: unknown, ...a: unknown[]) {
+              if ("handleEvent" in l && typeof l.handleEvent === "function") return l.handleEvent(...a);
+              return undefined;
+            };
+      w = forCaller(call);
+      wmSet(wrapped, l, w);
+    }
+    return w;
+  };
+  freeze(EventTarget.prototype, "addEventListener", function (this: EventTarget, type: string, l: unknown, o?: unknown) {
+    return targetAddListener.call(this, type, wrapListener(l) as EventListener, o as AddEventListenerOptions);
+  });
+  freeze(EventTarget.prototype, "removeEventListener", function (this: EventTarget, type: string, l: unknown, o?: unknown) {
+    const w = l !== null && (typeof l === "function" || typeof l === "object") ? (wmGet(wrapped, l) as AnyFn | undefined) : undefined;
+    return rawRemoveListener.call(this, type, (w ?? l) as EventListener, o as EventListenerOptions);
+  });
+  class GuardedMutationObserver extends RawMutationObserver {
+    constructor(cb: MutationCallback) {
+      super(forCaller(cb));
+    }
+  }
+  freeze(window, "MutationObserver", GuardedMutationObserver);
+  for (const name of ["setTimeout", "setInterval", "requestAnimationFrame", "requestIdleCallback", "queueMicrotask"]) {
+    const native: unknown = Reflect.get(window, name);
+    if (typeof native !== "function") continue;
+    freeze(window, name, function (this: unknown, cb: unknown, ...rest: unknown[]) {
+      return (native as AnyFn).call(window, typeof cb === "function" ? forCaller(cb as AnyFn) : cb, ...rest);
+    });
+  }
+  // Seal DOM, Event, Range, Selection and geometry prototypes so a page script
+  // cannot swap a method ProseMirror calls (e.g. Element.prototype.getBoundingClientRect,
+  // Range.prototype.getClientRects, ShadowRoot.prototype.*) to capture `this`
+  // and reach inside the closed shadow root, while leaving JS language built-ins
+  // (Array, Promise, String, Map, ...) extensible for page polyfills.
+  const extraDOMProtos = new Set<unknown>([
+    EventTarget.prototype,
+    Event.prototype,
+    window.AbstractRange?.prototype,
+    window.Range.prototype,
+    window.StaticRange?.prototype,
+    Selection.prototype,
+    window.DOMRectReadOnly?.prototype,
+    window.DOMRect?.prototype,
+    window.DOMRectList?.prototype,
+    NodeList.prototype,
+    HTMLCollection.prototype,
+    NamedNodeMap.prototype,
+    DOMTokenList.prototype,
+    CSSStyleDeclaration.prototype,
+    window.DataTransfer.prototype,
+    window.MutationRecord?.prototype,
+  ]);
+  for (const key of Object.getOwnPropertyNames(window)) {
+    if (key === "window" || key === "self" || key === "top" || key === "parent" || key === "frames" || key === "globalThis" || key === "location") {
+      continue;
+    }
+    const d = Object.getOwnPropertyDescriptor(window, key);
+    if (!d || !("value" in d) || typeof d.value !== "function") continue;
+    const proto: unknown = d.value.prototype;
+    if (!proto || typeof proto !== "object") continue;
+    if (proto instanceof EventTarget || proto instanceof Event || Boolean(setHas(extraDOMProtos, proto))) {
+      try {
+        Object.freeze(proto);
+      } catch {}
+    }
+  }
+  /* Lock every EXISTING method/accessor on JS built-in intrinsics as
+     non-writable and non-configurable so page scripts cannot hijack methods
+     that ProseMirror or this bundle calls (e.g. Array.prototype.push/slice/map,
+     Map.prototype.get/set, String.prototype.replace, RegExp.prototype.exec,
+     Function.prototype.call, JSON.stringify, Object.entries). Prototype objects
+     themselves (other than Object.prototype) stay extensible so strict-mode
+     page polyfills adding NEW methods (`Array.prototype.sum = ...`) continue
+     to work; Object.prototype uses SES-style safe-override accessors and is
+     sealed against new property pollution (`Object.prototype.href = ...`). */
+  const lockExistingProps = (target: object, safeOverride = false) => {
+    for (const k of Reflect.ownKeys(target)) {
+      if (k === "__proto__") continue;
+      const d = Object.getOwnPropertyDescriptor(target, k);
+      if (!d || !d.configurable) continue;
+      try {
+        if ("value" in d) {
+          if (safeOverride && typeof k === "string") {
+            const val = d.value;
+            Object.defineProperty(target, k, {
+              configurable: false,
+              enumerable: d.enumerable,
+              get: () => val,
+              set(this: unknown, v: unknown) {
+                if (this !== target && this !== null && (typeof this === "object" || typeof this === "function")) {
+                  try {
+                    Object.defineProperty(this, k, {
+                      value: v,
+                      writable: true,
+                      enumerable: true,
+                      configurable: true,
+                    });
+                  } catch {}
+                }
+              },
+            });
+          } else {
+            Object.defineProperty(target, k, {
+              value: d.value,
+              writable: false,
+              enumerable: d.enumerable,
+              configurable: false,
+            });
+          }
+        } else {
+          Object.defineProperty(target, k, {
+            get: d.get,
+            set: d.set,
+            enumerable: d.enumerable,
+            configurable: false,
+          });
+        }
+      } catch {}
+    }
+  };
+  lockExistingProps(Object.prototype, true);
+  try {
+    Object.preventExtensions(Object.prototype);
+  } catch {}
+  for (const intr of [
+    Object,
+    Function,
+    Function.prototype,
+    Array,
+    Array.prototype,
+    String,
+    String.prototype,
+    Number,
+    Number.prototype,
+    Boolean,
+    Boolean.prototype,
+    Symbol,
+    Symbol.prototype,
+    RegExp,
+    RegExp.prototype,
+    Map,
+    Map.prototype,
+    Set,
+    Set.prototype,
+    WeakMap,
+    WeakMap.prototype,
+    WeakSet,
+    WeakSet.prototype,
+    Promise,
+    Promise.prototype,
+    JSON,
+    Reflect,
+    Math,
+  ]) {
+    lockExistingProps(intr);
+  }
+}
+installGuards();
+let editorUiStyle: HTMLStyleElement | null = null;
 
 // The document as markup, or null if there is no live editor.
 function currentHTML(): string | null {
@@ -189,7 +882,16 @@ function flush() {
   const html = currentHTML();
   if (html === null || html === before) return;
   before = html;
-  send({ type: "bd-edit:patch", start: range.start, end: range.end, html });
+  const seq = ++patchSeq;
+  if (exitPort) {
+    portPost(exitPort, { type: "bd-edit:span", seq, start: range.start, end: range.end, html });
+  } else {
+    const item: QueuedSpan = { seq, start: range.start, end: range.end, html, next: null };
+    if (queuedTail) queuedTail.next = item;
+    else queuedHead = item;
+    queuedTail = item;
+  }
+  send({ type: "bd-edit:patch", seq, start: range.start, end: range.end, html });
 }
 
 function unmount() {
@@ -212,12 +914,17 @@ function unmount() {
   const html = currentHTML();
   view.destroy();
   view = null;
+  shadowHost = null;
   if (el) {
-    if (html !== null) el.innerHTML = html;
+    const nextHtml = html ?? before;
+    const prevBound = wmGet(boundRanges, el) as BoundRange | undefined;
+    if (prevBound) wmSet(boundRanges, el, makeBoundRange(prevBound.start, prevBound.end, nextHtml));
+    // Replaces the shadow host: the element is plain markup again.
+    elInnerHTMLSet.call(el, nextHtml);
     el.removeAttribute("data-bd-editing");
     // The content is new DOM, so a verdict about the old nodes is stale —
     // and it would be wrong to keep one that was computed before an edit.
-    verdicts.delete(el);
+    wmDelete(verdicts, el);
     el.removeAttribute("data-bd-edit");
   }
   host = null;
@@ -233,24 +940,113 @@ function unmount() {
    first thing typed appears in the wrong place, which is the single most
    noticeable way a click-to-edit surface can feel broken. */
 function caretAt(v: EditorView, x: number, y: number) {
-  const at = v.posAtCoords({ left: x, top: y });
+  const rect = elGetBoundingClientRect.call(v.dom);
+  const clampedX = rect.width > 2 ? Math.max(rect.left + 1, Math.min(x, rect.right - 2)) : x;
+  const at = v.posAtCoords({ left: clampedX, top: y });
   if (!at) return;
   const sel = TextSelection.near(v.state.doc.resolve(at.pos));
   v.dispatch(v.state.tr.setSelection(sel));
 }
 
+function wrapKeymapCmd<C extends (...args: never[]) => boolean>(cmd: C): C {
+  const f = cmd as unknown as AnyFn;
+  return function (this: unknown, ...a: unknown[]) {
+    if (!trustedEditOpen) return false;
+    inKeymapCmd++;
+    try {
+      return Boolean(f.apply(this, a));
+    } finally {
+      inKeymapCmd--;
+    }
+  } as unknown as C;
+}
+
 function mount(el: HTMLElement, x?: number, y?: number) {
   if (host === el) return;
   unmount();
-  const r = rangeOf(el);
-  if (!r) return;
+  const b = verifiedBound(el, true);
+  if (!b) return;
   host = el;
-  range = r;
-  before = el.innerHTML;
-  el.setAttribute("data-bd-editing", "");
+  range = { start: b.start, end: b.end };
+  before = b.expectedHtml;
+  const doc = parseMarkup(b.expectedHtml);
+  elSetAttribute.call(el, "data-bd-editing", "");
+
+  /* The editor is not mounted on the page's element: it is mounted in a
+     closed shadow root inside it, out of reach of the page's scripts (see
+     shadowHost). The element's own content is taken out — ProseMirror holds
+     it now — and written back when editing closes (unmount). */
+  elInnerHTMLSet.call(el, "");
+  const sh = docCreateElement.call(document, "span") as HTMLElement;
+  elSetAttribute.call(sh, "data-bd-shadow", "");
+  nodeAppendChild.call(el, sh);
+  const shadow = rawAttachShadow.call(sh, { mode: "closed" });
+  // Carry the page's own stylesheets into the shadow tree so descendant rules
+  // (`p a`, `.badge`, `code`) keep styling inline markup while it is open.
+  for (const sheet of docQueryAll(document, 'style, link[rel~="stylesheet"]') as NodeListOf<Element>) {
+    if (sheet === editorUiStyle) continue;
+    const tag = String(elTagNameGet.call(sheet)).toLowerCase();
+    if (tag === "style") {
+      const copy = docCreateElement.call(document, "style");
+      nodeTextContentSet.call(copy, (nodeTextContentGet.call(sheet) as string | null) ?? "");
+      nodeAppendChild.call(shadow, copy);
+    } else if (tag === "link") {
+      const href = elGetAttribute(sheet, "href") as string | null;
+      if (href) {
+        const copy = docCreateElement.call(document, "link");
+        elSetAttribute.call(copy, "rel", "stylesheet");
+        elSetAttribute.call(copy, "href", href);
+        const media = elGetAttribute(sheet, "media") as string | null;
+        if (media) elSetAttribute.call(copy, "media", media);
+        nodeAppendChild.call(shadow, copy);
+      }
+    }
+  }
+  const style = docCreateElement.call(document, "style");
+  nodeTextContentSet.call(
+    style,
+    ":host { display: block; } [data-bd-anc] { display: contents !important; } [data-bd-pm] { all: inherit; display: block !important; margin: 0 !important; padding: 0 !important; border: 0 !important; background: none !important; box-shadow: none !important; outline: none !important; list-style: none !important; }",
+  );
+  nodeAppendChild.call(shadow, style);
+  // Mirror the element's ancestor chain (display: contents, so zero layout
+  // boxes) so ancestor-qualified rules like `.article p a` or `table td a`
+  // match inside the closed shadow root too.
+  const chain: Element[] = [];
+  for (let cur = nodeParentElGet.call(el) as Element | null; cur; cur = nodeParentElGet.call(cur) as Element | null) {
+    chain.push(cur);
+  }
+  // Never instantiate a custom element (contains "-") or active container
+  // inside the closed root: a custom element's connectedCallback could read
+  // this.getRootNode() and escape the shadow boundary.
+  const safeMirrorTag = (elNode: Element): string => {
+    const raw = String(elTagNameGet.call(elNode)).toLowerCase();
+    if (!/^[a-z][a-z0-9]*$/.test(raw)) return "div";
+    if (raw === "script" || raw === "iframe" || raw === "object" || raw === "embed" || raw === "applet") return "div";
+    return raw;
+  };
+  let parentNode: Node = shadow;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const a = chain[i];
+    const wrap = docCreateElement.call(document, safeMirrorTag(a));
+    const aCls = elGetAttribute(a, "class") as string | null;
+    if (aCls) elSetAttribute.call(wrap, "class", aCls);
+    const aId = elGetAttribute(a, "id") as string | null;
+    if (aId) elSetAttribute.call(wrap, "id", aId);
+    elSetAttribute.call(wrap, "data-bd-anc", "");
+    nodeAppendChild.call(parentNode, wrap);
+    parentNode = wrap;
+  }
+  const pmMount = docCreateElement.call(document, safeMirrorTag(el)) as HTMLElement;
+  const cls = elGetAttribute(el, "class") as string | null;
+  if (cls) elSetAttribute.call(pmMount, "class", cls);
+  const idAttr = elGetAttribute(el, "id") as string | null;
+  if (idAttr) elSetAttribute.call(pmMount, "id", idAttr);
+  elSetAttribute.call(pmMount, "data-bd-pm", "");
+  nodeAppendChild.call(parentNode, pmMount);
+  shadowHost = sh;
 
   const state = EditorState.create({
-    doc: parseInner(el),
+    doc,
     plugins: [
       history(),
       // Bound BEFORE baseKeymap so these win. Enter and Backspace-at-start are
@@ -258,11 +1054,11 @@ function mount(el: HTMLElement, x?: number, y?: number) {
       // which is not something a single-range splice can express. They are
       // swallowed rather than left to fall through to a browser default.
       keymap({
-        "Mod-b": toggleMark(schema.marks.bold),
-        "Mod-i": toggleMark(schema.marks.italic),
-        "Mod-z": undo,
-        "Mod-y": redo,
-        "Shift-Mod-z": redo,
+        "Mod-b": wrapKeymapCmd(toggleMark(schema.marks.bold)),
+        "Mod-i": wrapKeymapCmd(toggleMark(schema.marks.italic)),
+        "Mod-z": wrapKeymapCmd(undo),
+        "Mod-y": wrapKeymapCmd(redo),
+        "Shift-Mod-z": wrapKeymapCmd(redo),
         Enter: () => true,
         "Shift-Enter": () => true,
         Escape: () => {
@@ -270,31 +1066,120 @@ function mount(el: HTMLElement, x?: number, y?: number) {
           return true;
         },
       }),
-      keymap(baseKeymap),
+      keymap(Object.fromEntries(Object.entries(baseKeymap).map(([k, fn]) => [k, wrapKeymapCmd(fn)]))),
     ],
   });
 
-  view = new EditorView(
-    { mount: el },
-    {
-      state,
-      dispatchTransaction(tr) {
-        view!.updateState(view!.state.apply(tr));
-        /* Reported on EVERY change, with no debounce of its own.
+  // Set up as the editor: every listener and observer ProseMirror registers
+  // here runs as the editor, and only the editor may write into the element.
+  view = editorSetup(
+    () =>
+      new EditorView(
+        { mount: pmMount },
+        {
+          state,
+          editable: () => !locked,
+          // Only a person's paste or drop: one a script dispatched is
+          // swallowed before ProseMirror reads it.
+          handleDOMEvents: {
+            paste: (_v, e) => !getIsTrusted(e),
+            drop: (_v, e) => !getIsTrusted(e),
+          },
+          dispatchTransaction(tr) {
+            if (locked && tr.docChanged) return;
+            const nextState = view!.state.apply(tr);
+            if (tr.docChanged && inKeymapCmd === 0) {
+              if (!trustedEditOpen && !composing) {
+                clobberFromScript();
+                return;
+              }
+              type CharUnit = { readonly ch: string; readonly marks: readonly PMMark[] };
+              const charsWithMarks = (doc: PMNode): CharUnit[] => {
+                const out: CharUnit[] = [];
+                let len = 0;
+                doc.descendants((node) => {
+                  if (!node.isText || !node.text) return;
+                  const t = strReplace(node.text, /\u00a0/g, " ") as string;
+                  for (let i = 0; i < t.length; i++) {
+                    const u = objCreate(null) as { ch: string; marks: readonly PMMark[] };
+                    u.ch = t[i];
+                    u.marks = node.marks;
+                    out[len++] = objFreeze(u);
+                  }
+                });
+                return out;
+              };
+              const prev = charsWithMarks(view!.state.doc);
+              const next = charsWithMarks(nextState.doc);
+              const sameUnit = (a: CharUnit, b: CharUnit) => a.ch === b.ch && PMMark.sameSet(a.marks, b.marks);
+              let p = 0;
+              while (p < prev.length && p < next.length && sameUnit(prev[p], next[p])) p++;
+              let s = 0;
+              while (
+                s < prev.length - p &&
+                s < next.length - p &&
+                sameUnit(prev[prev.length - 1 - s], next[next.length - 1 - s])
+              ) {
+                s++;
+              }
+              let removed = "";
+              for (let i = p; i < prev.length - s; i++) removed += prev[i].ch;
+              let added = "";
+              for (let i = p; i < next.length - s; i++) added += next[i].ch;
+              if (
+                (added && !Boolean(strIncludes(allowedTextBudget, added))) ||
+                (removed && !allowRemoval) ||
+                (!added && !removed && (setSizeGet(allowedPasteMarks) as number) === 0)
+              ) {
+                clobberFromScript();
+                return;
+              }
+              if (p < next.length - s) {
+                const cursorMarks = view!.state.storedMarks ?? view!.state.selection.$from.marks();
+                const adjLeft = p > 0 ? prev[p - 1].marks : cursorMarks;
+                const adjRight = p < prev.length ? prev[p].marks : cursorMarks;
+                for (let i = p; i < next.length - s; i++) {
+                  const u = next[i];
+                  if (
+                    u.marks.length > 0 &&
+                    !PMMark.sameSet(u.marks, cursorMarks) &&
+                    !PMMark.sameSet(u.marks, adjLeft) &&
+                    !PMMark.sameSet(u.marks, adjRight)
+                  ) {
+                    let allWhitelisted = true;
+                    for (let mi = 0; mi < u.marks.length; mi++) {
+                      const m = u.marks[mi];
+                      if (!Boolean(setHas(allowedPasteMarks, jsonStringify([m.type.name, m.attrs])))) {
+                        allWhitelisted = false;
+                        break;
+                      }
+                    }
+                    if (!allWhitelisted) {
+                      clobberFromScript();
+                      return;
+                    }
+                  }
+                }
+              }
+            }
+            view!.updateState(nextState);
+            /* Reported on EVERY change, with no debounce of its own.
 
-           There used to be a 700ms idle here, mirroring the save timer. It
-           meant that for 700ms after the last keystroke the edit existed ONLY
-           inside this iframe — and pressing Done in that window tears the
-           iframe down with the edit still pending, losing it silently. That is
-           not an edge case: typing and immediately clicking Done is what
-           finishing an edit looks like.
+               There used to be a 700ms idle here, mirroring the save timer.
+               It meant that for 700ms after the last keystroke the edit
+               existed ONLY inside this iframe — and pressing Done in that
+               window tears the iframe down with the edit still pending,
+               losing it silently. That is not an edge case: typing and
+               immediately clicking Done is what finishing an edit looks like.
 
-           There is nothing to gain by waiting. A patch is a postMessage into
-           the same tab; the debounce that actually matters is the app's save
-           timer, which still batches the writes that reach the hub. */
-        if (tr.docChanged) flush();
-      },
-    },
+               There is nothing to gain by waiting. A patch is a postMessage
+               into the same tab; the debounce that actually matters is the
+               app's save timer, which still batches the writes that reach
+               the hub. */
+            if (tr.docChanged) flush();
+          },
+        },
+      ),
   );
   view.focus();
   if (x !== undefined && y !== undefined) caretAt(view, x, y);
@@ -303,19 +1188,24 @@ function mount(el: HTMLElement, x?: number, y?: number) {
 // ---- wiring ----
 
 function nearestEditable(target: EventTarget | null): HTMLElement | null {
-  const el = (target as Element | null)?.closest?.(`[${SRC_ATTR}]`);
+  const el = target instanceof Element ? (elClosest(target, `[${SRC_ATTR}]`) as Element | null) : null;
   return el instanceof HTMLElement ? el : null;
 }
 
-document.addEventListener(
+listen(
+  document,
   "click",
-  (e) => {
+  (ev: Event) => {
+    // Only a person's click opens an editor: never el.click() from a script.
+    if (!getIsTrusted(ev)) return;
+    const e = ev as MouseEvent;
+    if (locked) return; // no element opens or closes while Done saves
     const el = nearestEditable(e.target);
     if (!el) {
       unmount(); // clicking away commits, the same as blurring
       return;
     }
-    if (!editable(el)) return;
+    if (!editable(el, true)) return;
     mount(el, e.clientX, e.clientY);
   },
   true,
@@ -324,64 +1214,127 @@ document.addEventListener(
 // Verdicts are computed on approach so the outline only ever appears on
 // something that will actually open. An element that cannot be edited says so
 // on hover instead of refusing a click for no visible reason.
-document.addEventListener(
+listen(
+  document,
   "mouseover",
-  (e) => {
+  (e: Event) => {
     const el = nearestEditable(e.target);
     if (el) editable(el);
   },
   true,
 );
 
-/* A page whose own script rewrites the DOM can replace the element out from
-   under an open editor, and the keystrokes go with it. There is no way to stop
-   that from here — the page's script is the page — so the honest move is to
-   notice and say so. Detaching is the observable form of every version of this:
-   a React re-render, a chart redraw, a template swap. */
-new MutationObserver(() => {
-  if (host && !host.isConnected) {
-    send({ type: "bd-edit:clobbered" });
-    view?.destroy();
-    view = null;
-    host = null;
-    range = null;
-  }
-}).observe(document.documentElement, { childList: true, subtree: true });
+/* The rest needs the document's body, which this script — first in the
+   document — runs ahead of. */
+function initDOM() {
+  /* A page whose own script rewrites the DOM can replace the element out from
+     under an open editor, and the keystrokes go with it. There is no way to
+     stop that from here — the page's script is the page — so the honest move
+     is to notice and say so. Detaching is the observable form of every version
+     of this: a React re-render, a chart redraw, a template swap. */
+  new RawMutationObserver(
+    asEditor(() => {
+      if (host && (!nodeIsConnectedGet.call(host) || (shadowHost && !nodeIsConnectedGet.call(shadowHost)))) {
+        clobberFromScript();
+      }
+    }),
+  ).observe(document.documentElement, { childList: true, subtree: true });
 
-const style = document.createElement("style");
-style.textContent = `
+  const style = document.createElement("style");
+  editorUiStyle = style;
+  style.textContent = `
   [${SRC_ATTR}][data-bd-edit="yes"]:hover { outline: 1px dashed rgba(99,102,241,.7); outline-offset: 2px; cursor: text; }
   [${SRC_ATTR}][data-bd-edit="no"]:hover  { outline: 1px dotted rgba(120,120,120,.5); outline-offset: 2px; cursor: not-allowed; }
   [${SRC_ATTR}][data-bd-editing] { outline: 2px solid rgba(99,102,241,.9); outline-offset: 2px; }
   [${SRC_ATTR}][data-bd-editing]:focus { outline: 2px solid rgba(99,102,241,.9); }
 `;
-document.head.appendChild(style);
+  (document.head ?? document.documentElement).appendChild(style);
 
-// The hash the server computed over the STORED bytes. The app compares it with
-// the document it holds: if they differ, the ranges below describe a file that
-// has since moved on, and it reloads rather than splicing by them.
-const self =
-  (document.currentScript as HTMLScriptElement | null) ??
-  document.querySelector<HTMLScriptElement>("script[data-src-hash]");
-const hash = self?.dataset.srcHash ?? "";
-// The source length in UTF-16 units, which is the app's fallback check when it
-// cannot compute a hash — crypto.subtle exists only in a secure context, and a
-// LAN hub on plain HTTP is not one.
-const len = Number(self?.dataset.srcLen ?? "-1");
+  /* Bind each element to its range, now and once. A range the server did
+     not stamp, or one two elements claim (a page script cloned or forged a
+     marker), is bound to nothing. The element's content goes with its range,
+     so the app can check it is what the source holds there. */
+  const found: Array<{ el: Element; r: Range }> = [];
+  const claims = new Map<string, number>();
+  for (const el of docQueryAll(document, `[${SRC_ATTR}]`) as NodeListOf<Element>) {
+    const r = parseRange(el);
+    if (!r) continue;
+    const k = r.start + "," + r.end;
+    if (serverRanges !== null && !setHas(serverRanges, k)) continue;
+    found.push({ el, r });
+    mapSet(claims, k, ((mapGet(claims, k) as number | undefined) ?? 0) + 1);
+  }
+  const ranges: Array<{ start: number; end: number; html: string }> = [];
+  for (const { el, r } of found) {
+    if (mapGet(claims, r.start + "," + r.end) !== 1) continue;
+    const initialHtml = elInnerHTMLGet.call(el) as string;
+    wmSet(boundRanges, el, makeBoundRange(r.start, r.end, initialHtml));
+    ranges.push({ start: r.start, end: r.end, html: initialHtml });
+  }
+  send({ type: "bd-edit:ready", hash, len, ranges });
 
-send({
-  type: "bd-edit:ready",
-  hash,
-  len,
-  ranges: [...document.querySelectorAll(`[${SRC_ATTR}]`)]
-    .map((el) => rangeOf(el))
-    .filter(Boolean),
+  // The markers are in the served HTML, so their presence says nothing about
+  // whether this script has run. Anything waiting to interact — a test, or a
+  // person — needs to know the listeners are actually installed, and this is
+  // the only observable difference between "rendered" and "editable".
+  document.documentElement.setAttribute("data-bd-ready", "");
+}
+
+/* Leaving with an edit the app never acknowledged: hand it to the exit
+   worker, once per unload. What goes is recorded as acknowledged — the
+   ancestor (`ackedHtml`) for an edit made after the page comes back from the
+   bfcache, so that one neither drops nor repeats this. The worker, not this
+   frame, decides whether and how it is saved. */
+function exitUnacked() {
+  if (!exitPort) return;
+  portPost(exitPort, { type: "bd-edit:exit" });
+}
+
+listen(window, "beforeunload", () => {
+  unmount();
+  exitUnacked();
+});
+// Flush on pagehide too; keep the open element mounted when entering bfcache.
+listen(window, "pagehide", (e: Event) => {
+  if ((e as PageTransitionEvent).persisted) flush();
+  else unmount();
+  exitUnacked();
 });
 
-// The markers are in the served HTML, so their presence says nothing about
-// whether this script has run. Anything waiting to interact — a test, or a
-// person — needs to know the listeners are actually installed, and this is
-// the only observable difference between "rendered" and "editable".
-document.documentElement.setAttribute("data-bd-ready", "");
+listen(appPort, "message", (e: Event) => {
+  const msg = getMsgData(e) as { type?: unknown; id?: unknown; lock?: unknown } | null;
+  if (!msg || typeof msg !== "object") return;
+  if (msg.type === "bd-edit:port") {
+    const next = (getMsgPorts(e) as ReadonlyArray<MessagePort>)[0];
+    if (!next) return;
+    if (exitPort) portClose(exitPort);
+    exitPort = next;
+    for (let q = queuedHead; q !== null; q = q.next) {
+      portPost(exitPort, { type: "bd-edit:span", seq: q.seq, start: q.start, end: q.end, html: q.html });
+    }
+    queuedHead = null;
+    queuedTail = null;
+    elSetAttribute.call(document.documentElement, "data-bd-exit", "ready");
+    return;
+  }
+  if (msg.type === "bd-edit:flush" && typeof msg.id === "number") {
+    flush();
+    if (msg.lock === true) {
+      locked = true;
+      view?.setProps({ editable: () => !locked });
+    }
+    send({ type: "bd-edit:flushed", id: msg.id });
+    return;
+  }
+  if (msg.type === "bd-edit:unlock") {
+    locked = false;
+    view?.setProps({ editable: () => !locked });
+  }
+});
+portStart(appPort);
 
-window.addEventListener("beforeunload", unmount);
+if (document.readyState !== "loading") initDOM();
+else listen(document, "DOMContentLoaded", initDOM, { once: true });
+
+// The app's end of the channel, before any page script can see a message.
+postToParent({ type: "bd-edit:hello" }, "*", [appChannel.port2]);

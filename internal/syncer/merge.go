@@ -228,3 +228,21 @@ func (s *Session) readBlob(sum string, max int64) ([]byte, bool) {
 	}
 	return b, true
 }
+
+// latestPut is the greatest put on path holding blob across lists: the op
+// that produced the version replay resolved to, as far as these lists show.
+func latestPut(path, blob string, lists ...[]journal.Op) (journal.Op, bool) {
+	var best journal.Op
+	found := false
+	for _, ops := range lists {
+		for _, op := range ops {
+			if op.Path != path || op.Kind != journal.KindPut || op.Blob != blob {
+				continue
+			}
+			if !found || journal.Less(best, op) {
+				best, found = op, true
+			}
+		}
+	}
+	return best, found
+}

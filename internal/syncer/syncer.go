@@ -2186,8 +2186,14 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 			})
 			continue
 		}
+		// What the loser is merged against is the op that WON — the version
+		// replay resolved to — so the merge proves by content alone whether
+		// that version already holds the loser's edit. Lineage is never
+		// guessed from Base links: in X → A → X → B, B built on the second X
+		// does not hold A even though a chain of blobs leads back through it.
 		merged, canMerge := mergedBlob{}, false
-		if collided {
+		other, haveOther := theirs, collided
+		if !mineWon && exists && cur.Link == "" && cur.Blob != "" {
 			if all == nil {
 				var err error
 				all, err = s.Store.AllOps()
@@ -2195,19 +2201,45 @@ func (s *Session) conflictCopiesWithState(unpushedOps []journal.Op, seqBase int6
 					return nil, err
 				}
 			}
-			merged, canMerge = s.tryMerge(p, mine, theirs, all)
+			if winner, ok := latestPut(p, cur.Blob, theirsList, unpushedOps, all); ok {
+				other, haveOther = winner, true
+			}
+		}
+		if haveOther {
+			if all == nil {
+				var err error
+				all, err = s.Store.AllOps()
+				if err != nil {
+					return nil, err
+				}
+			}
+			if other.Blob != "" && !s.Store.HasBlob(other.Blob) {
+				_, _ = s.fetchBlobs(context.Background(), []journal.Op{other}, nil)
+			}
+			merged, canMerge = s.tryMerge(p, mine, other, all)
+		}
+		if canMerge && exists && merged.blob == cur.Blob {
+			// Content proof: merging the loser into the winner yields the
+			// winner's exact bytes, so it already holds both sides — another
+			// device (or the hub) computed the merge first. Fast-forward: no
+			// second op for it.
+			continue
 		}
 		if canMerge {
 			st.Lamport = tickLamport(st.Lamport)
 			seqBase++
-			out = append(out, journal.Op{
+			op := journal.Op{
 				Seq: seqBase, Lamport: st.Lamport, Time: time.Now().UTC(),
 				Device: s.Device.ID, DeviceName: s.Device.Name, Author: s.Device.Author,
 				User: s.Account.Email, UserName: s.Account.Name,
 				Kind: journal.KindPut, Path: p,
 				Blob: merged.blob, Size: merged.size, Mode: mine.Mode,
 				Note: mergeNote,
-			})
+			}
+			if exists && cur.Link == "" {
+				op.Base = cur.Blob // built on the version that won
+			}
+			out = append(out, op)
 			continue
 		}
 		st.Lamport = tickLamport(st.Lamport)
