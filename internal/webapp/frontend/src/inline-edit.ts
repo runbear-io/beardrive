@@ -146,6 +146,8 @@ const nodeTextContentGet = Object.getOwnPropertyDescriptor(Node.prototype, "text
 const nodeTextContentSet = Object.getOwnPropertyDescriptor(Node.prototype, "textContent")!.set!;
 const elTagNameGet = Object.getOwnPropertyDescriptor(Element.prototype, "tagName")!.get!;
 const nodeParentElGet = Object.getOwnPropertyDescriptor(Node.prototype, "parentElement")!.get!;
+const elGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+const tplContentGet = Object.getOwnPropertyDescriptor(window.HTMLTemplateElement.prototype, "content")!.get!;
 const getInputType = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "inputType")?.get;
 const getInputData = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "data")?.get;
 const getInputDT = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "dataTransfer")?.get;
@@ -192,15 +194,22 @@ let composing = false;
 let inKeymapCmd = 0;
 let allowedTextBudget = "";
 let allowRemoval = false;
-let allowRichPaste = false;
+const allowedPasteMarks = new Set<string>();
 let trustedTimer: ReturnType<typeof setTimeout> | undefined;
 const addBudget = (s: string | null | undefined) => {
   if (s) allowedTextBudget += s.replace(/\u00a0/g, " ");
 };
+const addPasteHtmlMarks = (htmlClip: string | null | undefined) => {
+  if (!htmlClip) return;
+  try {
+    parseMarkup(htmlClip).descendants((node) => {
+      for (const m of node.marks) allowedPasteMarks.add(JSON.stringify([m.type.name, m.attrs]));
+    });
+  } catch {}
+};
 const recordTrustedText = (name: string, e: Event) => {
   if (view && !view.state.selection.empty) allowRemoval = true;
   if (name === "cut" || name === "paste" || name === "drop" || composing) allowRemoval = true;
-  if (name === "paste" || name === "drop") allowRichPaste = true;
   if (e instanceof window.InputEvent) {
     const it = getInputType?.call(e) ?? "";
     if (
@@ -212,12 +221,13 @@ const recordTrustedText = (name: string, e: Event) => {
     ) {
       allowRemoval = true;
     }
-    if (it === "insertFromPaste" || it === "insertFromDrop") allowRichPaste = true;
     addBudget(getInputData?.call(e));
     const dt = getInputDT?.call(e);
     if (dt) {
       addBudget(dtGetData.call(dt, "text/plain"));
-      addBudget(dtGetData.call(dt, "text/html"));
+      const htmlClip = dtGetData.call(dt, "text/html");
+      addBudget(htmlClip);
+      if (it === "insertFromPaste" || it === "insertFromDrop") addPasteHtmlMarks(htmlClip);
     }
     return;
   }
@@ -230,7 +240,9 @@ const recordTrustedText = (name: string, e: Event) => {
     const cd = getClipDT?.call(e);
     if (cd) {
       addBudget(dtGetData.call(cd, "text/plain"));
-      addBudget(dtGetData.call(cd, "text/html"));
+      const htmlClip = dtGetData.call(cd, "text/html");
+      addBudget(htmlClip);
+      if (name === "paste" || name === "drop") addPasteHtmlMarks(htmlClip);
     }
     return;
   }
@@ -244,7 +256,7 @@ const openTrustedWindow = (ms = 0) => {
     if (!composing) {
       allowedTextBudget = "";
       allowRemoval = false;
-      allowRichPaste = false;
+      allowedPasteMarks.clear();
     }
   }, ms);
 };
@@ -357,32 +369,29 @@ const serializer = DOMSerializer.fromSchema(schema);
 // newlines around them, and dropping those would reflow the source on save.
 const PARSE = { preserveWhitespace: "full" } as const;
 
+function parseMarkup(htmlStr: string): PMNode {
+  const tpl = docCreateElement.call(document, "template") as HTMLTemplateElement;
+  elInnerHTMLSet.call(tpl, htmlStr);
+  const frag = tplContentGet.call(tpl) as DocumentFragment;
+  const box = docCreateElement.call(document, "div");
+  nodeAppendChild.call(box, frag);
+  return parser.parse(box, PARSE);
+}
+
 function parseInner(el: HTMLElement): PMNode {
-  return parser.parse(el, PARSE);
+  return parseMarkup(elInnerHTMLGet.call(el) as string);
 }
 
 function serializeInner(doc: PMNode): string {
-  const box = document.createElement("div");
-  box.appendChild(serializer.serializeFragment(doc.content));
-  return box.innerHTML;
+  const box = docCreateElement.call(document, "div");
+  nodeAppendChild.call(box, serializer.serializeFragment(doc.content));
+  return elInnerHTMLGet.call(box) as string;
 }
 
-/* The gate, and the reason this feature cannot quietly eat a teammate's markup.
-
-   ProseMirror normalizes whatever it is given into its schema: hand it a <span
-   class="badge"> with no matching node or mark and it hands back text. That is
-   silent data loss in a file somebody else wrote, and it happens on a click
-   with no typing at all.
-
-   So an element becomes editable only if its content survives the trip. The
-   comparison is against the browser's innerHTML rather than the source bytes,
-   because the browser has already normalized entities and attribute quoting on
-   parse and comparing against the raw source would fail on every document. The
-   consequence — an edited element's inner markup may come back normalized,
-   while everything outside it is untouched — is the documented ceiling. */
 function roundTrips(el: HTMLElement): boolean {
   try {
-    return serializeInner(parseInner(el)) === el.innerHTML;
+    const htmlStr = elInnerHTMLGet.call(el) as string;
+    return serializeInner(parseMarkup(htmlStr)) === htmlStr;
   } catch {
     return false;
   }
@@ -686,6 +695,43 @@ function installGuards() {
       return (native as AnyFn).call(window, typeof cb === "function" ? forCaller(cb as AnyFn) : cb, ...rest);
     });
   }
+  // Seal DOM, Event, Range, Selection and geometry prototypes so a page script
+  // cannot swap a method ProseMirror calls (e.g. Element.prototype.getBoundingClientRect,
+  // Range.prototype.getClientRects, ShadowRoot.prototype.*) to capture `this`
+  // and reach inside the closed shadow root, while leaving JS language built-ins
+  // (Array, Promise, String, Map, ...) extensible for page polyfills.
+  const extraDOMProtos = new Set<unknown>([
+    EventTarget.prototype,
+    Event.prototype,
+    window.AbstractRange?.prototype,
+    window.Range.prototype,
+    window.StaticRange?.prototype,
+    Selection.prototype,
+    window.DOMRectReadOnly?.prototype,
+    window.DOMRect?.prototype,
+    window.DOMRectList?.prototype,
+    NodeList.prototype,
+    HTMLCollection.prototype,
+    NamedNodeMap.prototype,
+    DOMTokenList.prototype,
+    CSSStyleDeclaration.prototype,
+    window.DataTransfer.prototype,
+    window.MutationRecord?.prototype,
+  ]);
+  for (const key of Object.getOwnPropertyNames(window)) {
+    if (key === "window" || key === "self" || key === "top" || key === "parent" || key === "frames" || key === "globalThis" || key === "location") {
+      continue;
+    }
+    const d = Object.getOwnPropertyDescriptor(window, key);
+    if (!d || !("value" in d) || typeof d.value !== "function") continue;
+    const proto: unknown = d.value.prototype;
+    if (!proto || typeof proto !== "object") continue;
+    if (proto instanceof EventTarget || proto instanceof Event || extraDOMProtos.has(proto)) {
+      try {
+        Object.freeze(proto);
+      } catch {}
+    }
+  }
 }
 installGuards();
 let editorUiStyle: HTMLStyleElement | null = null;
@@ -760,7 +806,7 @@ function unmount() {
    first thing typed appears in the wrong place, which is the single most
    noticeable way a click-to-edit surface can feel broken. */
 function caretAt(v: EditorView, x: number, y: number) {
-  const rect = v.dom.getBoundingClientRect();
+  const rect = elGetBoundingClientRect.call(v.dom);
   const clampedX = rect.width > 2 ? Math.max(rect.left + 1, Math.min(x, rect.right - 2)) : x;
   const at = v.posAtCoords({ left: clampedX, top: y });
   if (!at) return;
@@ -943,12 +989,12 @@ function mount(el: HTMLElement, x?: number, y?: number) {
               if (
                 (added && !allowedTextBudget.includes(added)) ||
                 (removed && !allowRemoval) ||
-                (!added && !removed && !allowRichPaste)
+                (!added && !removed && allowedPasteMarks.size === 0)
               ) {
                 clobberFromScript();
                 return;
               }
-              if (!allowRichPaste && addedUnits.length > 0) {
+              if (addedUnits.length > 0) {
                 const cursorMarks = view!.state.storedMarks ?? view!.state.selection.$from.marks();
                 const adjLeft = p > 0 ? prev[p - 1].marks : cursorMarks;
                 const adjRight = p < prev.length ? prev[p].marks : cursorMarks;
@@ -957,7 +1003,8 @@ function mount(el: HTMLElement, x?: number, y?: number) {
                     u.marks.length > 0 &&
                     !PMMark.sameSet(u.marks, cursorMarks) &&
                     !PMMark.sameSet(u.marks, adjLeft) &&
-                    !PMMark.sameSet(u.marks, adjRight)
+                    !PMMark.sameSet(u.marks, adjRight) &&
+                    !u.marks.every((m) => allowedPasteMarks.has(JSON.stringify([m.type.name, m.attrs])))
                   ) {
                     clobberFromScript();
                     return;

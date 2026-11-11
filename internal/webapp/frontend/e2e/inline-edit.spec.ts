@@ -1033,6 +1033,98 @@ test("a real paste lands while hostile paste listeners try to hijack the link", 
   }
 });
 
+// 4: replacing Element/Range/HTMLElement prototype methods to steal `this`
+// (`v.dom` / `this.getRootNode()`) on click, then rewriting links inside the
+// stolen root during a real paste.
+const PROTO_THEFT_PASTE_HOSTILE = linkedPage(
+  "Prototype theft paste hostile",
+  `(function () {
+  var stolenRoots = [];
+  window.__stolenShadowCount = 0;
+  var steal = function (node) {
+    if (!node || typeof node.getRootNode !== "function") return;
+    var root = node.getRootNode();
+    if (root && root !== document && stolenRoots.indexOf(root) < 0) {
+      stolenRoots.push(root);
+      window.__stolenShadowCount = stolenRoots.length;
+    }
+  };
+  [
+    [Element.prototype, "getBoundingClientRect"],
+    [Element.prototype, "getClientRects"],
+    [Range.prototype, "getClientRects"],
+    [HTMLElement.prototype, "focus"],
+  ].forEach(function (pair) {
+    try {
+      var orig = pair[0][pair[1]];
+      pair[0][pair[1]] = function () {
+        steal(this);
+        return orig.apply(this, arguments);
+      };
+    } catch {}
+    try {
+      var orig2 = pair[0][pair[1]];
+      Object.defineProperty(pair[0], pair[1], {
+        value: function () {
+          steal(this);
+          return orig2.apply(this, arguments);
+        },
+      });
+    } catch {}
+  });
+  var hrefSet = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, "href").set;
+  var evil = "https://evil." + "example/stolen";
+  var hit = function () {
+    stolenRoots.forEach(function (r) {
+      try {
+        r.querySelectorAll("a").forEach(function (a) { hrefSet.call(a, evil); });
+      } catch {}
+    });
+  };
+  ["paste", "beforeinput", "input"].forEach(function (t) { document.addEventListener(t, hit, true); });
+})();`,
+);
+
+test("replacing prototype methods cannot steal closed shadow nodes or alter links during paste", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "proto-paste", PROTO_THEFT_PASTE_HOSTILE);
+
+  const ctx = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+    await editor.evaluate(() => navigator.clipboard.writeText(" pasted safely"));
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.press("ControlOrMeta+v");
+
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+    const stolen = await child!.evaluate(() =>
+      "__stolenShadowCount" in window && typeof window.__stolenShadowCount === "number" ? window.__stolenShadowCount : -1,
+    );
+    expect(stolen).toBe(0);
+
+    await editor.click("#edit-btn"); // Done
+    const after = await waitForSource(page, id, file, "pasted safely");
+    expect(after).toMatch(
+      /Revenue grew <a href="\/safe">steadily<\/a> across every region\.(?: |&nbsp;)pasted safely/,
+    );
+    expect(after).not.toContain("evil.example");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
 /* The page goes into the bfcache (pagehide, persisted) with an edit the app
    never heard: the exit worker saves it, and that exit's port is spent. The
    page comes back (pageshow) and is edited again — still unheard — and then
