@@ -66,6 +66,12 @@ const OFFLINE_FLUSH_MS = 2_000;
 // beside the file. A path contended this hard is not a race any more.
 const MAX_REBASES = 4;
 
+// Conflict-copy names tried past a taken second (another tab of the same
+// account parking in the same seconds) before the park counts as failed. On
+// the way out fewer: the page may be gone before the answers come back.
+const MAX_CONFLICT_TRIES = 64;
+const MAX_EXIT_COPY_TRIES = 8;
+
 // Above this, a staging checkpoint names its ancestor by sha alone when it can
 // (the hub reads the blob) instead of carrying it as text.
 const INLINE_BASE_MAX = 32_000;
@@ -748,33 +754,72 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
      two versions cannot be reconciled — merge3 found the same words changed
      two different ways. So neither version is dropped: theirs is the file,
      ours goes beside it as `<name>.bdrive-conflict-<who>-<utc>`, which the
-     reader already knows how to explain (lib/conflict.ts, ConflictBanner). */
+     reader already knows how to explain (lib/conflict.ts, ConflictBanner).
+
+     The copy is written create-only (If-None-Match: *). Another tab of the
+     same account names its copies on its own clock, so the name may already
+     hold ITS words: that is a 409, and the next second is tried. A failure
+     with no answer keeps the name, because the write may have landed: the
+     retry sends the same bytes to the same name, which the hub answers 200
+     unchanged rather than writing a second copy. */
   const preserve = async (
     text: string,
     theirs: string,
     copy = mintConflictPath(),
   ): Promise<{ err: unknown } | null> => {
     const seq = ++conflictSeq;
-    conflictPuts.set(copy, text);
-    // A newer park started since this one (a join's, over newer typing), or
-    // the room took the buffer: such a landing settles nothing about `saved`.
-    try {
-      await putText(contentURL(copy), text); // unconditional: a new path
-      if (seq === conflictSeq && !hubHoldsIt) {
-        saved = text;
-        savedSha = undefined;
-        if (theirs) base = theirs;
-        setState("clean");
+    let at = copy;
+    for (let tries = 1; ; tries++) {
+      const target = at;
+      conflictPuts.set(target, text);
+      // A newer park started since this one (a join's, over newer typing), or
+      // the room took the buffer: such a landing settles nothing about `saved`.
+      try {
+        await putText(contentURL(target), text, undefined, false, false, false, true);
+        if (seq === conflictSeq && !hubHoldsIt) {
+          saved = text;
+          savedSha = undefined;
+          if (theirs) base = theirs;
+          setState("clean");
+        }
+        opts.onConflictCopy?.(target);
+        return null;
+      } catch (e) {
+        if (e instanceof HttpError && e.status === 409 && tries < MAX_CONFLICT_TRIES) {
+          // Taken by other words. A retry of this text must follow the step.
+          at = mintConflictPath();
+          if (parkedName === target && parkedText === text) parkedName = at;
+          continue;
+        }
+        // Could not even park it. Stay dirty and loud rather than pretend.
+        if (seq === conflictSeq && !hubHoldsIt) setState("error");
+        return { err: e };
+      } finally {
+        if (conflictPuts.get(target) === text) conflictPuts.delete(target);
       }
-      opts.onConflictCopy?.(copy);
-      return null;
-    } catch (e) {
-      // Could not even park it. Stay dirty and loud rather than pretend.
-      if (seq === conflictSeq && !hubHoldsIt) setState("error");
-      return { err: e };
-    } finally {
-      if (conflictPuts.get(copy) === text) conflictPuts.delete(copy);
     }
+  };
+
+  /* A conflict copy written on the way out: keepalive, create-only, and
+     asking the hub to step to the next free second itself — a discarded page
+     never runs the JS that would try again. An older hub answers a taken name
+     409; while the page still lives, the next second is tried from here. */
+  const parkOnExit = (copy: string, text: string, key: string, landed?: (path: string) => void) => {
+    const attempt = (target: string, tries: number) => {
+      void putText(contentURL(target), text, undefined, false, true, true, true).then(
+        (out) => landed?.(out.parked ?? target),
+        (e: unknown) => {
+          if (e instanceof HttpError && e.status === 409 && tries < MAX_EXIT_COPY_TRIES) {
+            const next = mintConflictPath();
+            if (parkedName === target && parkedText === text) parkedName = next;
+            attempt(next, tries + 1);
+            return;
+          }
+          exitFailed(key)();
+        },
+      );
+    };
+    attempt(copy, 1);
   };
 
   /* Park `parked` beside the file after a clash with head `theirSha`. One
@@ -796,8 +841,9 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       return "stop";
     }
     stagingConflict = false;
-    // A newer park (a join's, over newer typing) keeps its own name.
-    if (parkedName === name) {
+    // A newer park (a join's, over newer typing) keeps its own name. This
+    // text's name may have stepped past a taken second: compare the text.
+    if (parkedText === parked) {
       parkedName = null;
       parkedText = null;
       parkedSha = "";
@@ -1265,13 +1311,13 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       const key = "park\u0000" + text;
       if (exitSent === key) return;
       exitSent = key;
-      // The same words as a park already named reuse its name (writing the
-      // same bytes twice is harmless); newer words get a freshly minted
-      // one, so no older park still on the wire can land over them.
+      // The same words as a park already named reuse its name (the same
+      // bytes again are answered unchanged); newer words get a freshly
+      // minted one, so no older park still on the wire can land over them.
       let copy = parkedName !== null && parkedText === text ? parkedName : null;
       for (const [path, held] of conflictPuts) if (copy === null && held === text) copy = path;
       copy ??= mintConflictPath();
-      void putText(contentURL(copy), text, undefined, false, true).catch(exitFailed(key));
+      parkOnExit(copy, text, key);
       return;
     }
     if (!text || text === saved) return;
@@ -1304,11 +1350,10 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       copy ??= mintConflictPath();
       parkedName = copy;
       parkedText = text;
-      const parkedCopy = copy;
-      void putText(contentURL(parkedCopy), text, undefined, false, true).then(() => {
+      parkOnExit(copy, text, key, (path) => {
         stagingConflict = false;
-        opts.onConflictCopy?.(parkedCopy);
-      }, exitFailed(key));
+        opts.onConflictCopy?.(path);
+      });
     };
     const landed = (out: { parked?: string }) => {
       if (out.parked) opts.onConflictCopy?.(out.parked);

@@ -1058,7 +1058,7 @@ for (const hubParks of [true, false]) {
         assert.ok(puts[1].url.includes("notes.md.bdrive-conflict-"));
         assert.equal(puts[1].body, "B\n");
         assert.equal(puts[1].keepalive, true);
-        assert.equal(puts[1].park, undefined);
+        assert.equal(puts[1].park, "1"); // create-only, stepped by the hub if taken
         assert.equal(copies.length, 1);
       }
       const sent = puts.length;
@@ -1070,6 +1070,142 @@ for (const hubParks of [true, false]) {
     }
   });
 }
+
+/* The hub's create-only PUT (If-None-Match: *): other bytes at the name are a
+   409, the same bytes are 200 unchanged. `takenFirst`: another tab of this
+   account already parked its own words at the first name this tab mints.
+   `loseFirst`: the first copy is stored, but its answer never arrives. */
+function copyServer(o: { takenFirst?: boolean; loseFirst?: boolean }) {
+  const store = new Map<string, string>();
+  const log: Array<{ path: string; ifNoneMatch?: string; status: number }> = [];
+  const handle = (url: RequestInfo | URL, init?: RequestInit): Response => {
+    const path = decodeURIComponent(String(url).split("path=")[1]);
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    const body = String(init?.body);
+    const first = log.length === 0;
+    if (first && o.takenFirst) store.set(path, "another tab's words\n");
+    const had = store.get(path);
+    let res: Response;
+    if (headers["If-None-Match"] === "*" && had !== undefined && had !== body) {
+      res = new Response(JSON.stringify({ error: "exists" }), { status: 409 });
+    } else {
+      store.set(path, body);
+      res =
+        first && o.loseFirst
+          ? new Response("unavailable", { status: 503 })
+          : new Response(JSON.stringify({ ok: true, path, sha: "sha-copy", unchanged: had === body }), { status: 200 });
+    }
+    log.push({ path, ifNoneMatch: headers["If-None-Match"], status: res.status });
+    return res;
+  };
+  return { store, log, handle };
+}
+
+for (const scenario of ["taken", "lost"] as const) {
+  test(`solo clash park is create-only (${scenario === "taken" ? "a taken second steps to the next" : "a lost answer retries the same name, unchanged"})`, async () => {
+    fakeTimers();
+    setSystemTime(new Date("2026-11-11T10:20:30.400Z"));
+    try {
+      const server = copyServer(scenario === "taken" ? { takenFirst: true } : { loseFirst: true });
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        if (method === "GET") return new Response("Z\n", { status: 200, headers: { ETag: `"sha-z"` } });
+        if (decodeURIComponent(String(url)).includes("bdrive-conflict")) return server.handle(url, init);
+        return new Response(JSON.stringify({ error: "changed", sha: "sha-z" }), { status: 409 });
+      }) as typeof fetch;
+      let buffer = "A\n";
+      let solo = false;
+      const states: string[] = [];
+      const copies: string[] = [];
+      const file = openSharedFile({
+        apiBase: "/api/",
+        path: "notes.md",
+        seed: "A\n",
+        baseSha: "sha-a",
+        me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+        onReady: () => {},
+        onSolo: () => {
+          solo = true;
+        },
+        onState: (s) => states.push(s),
+        onConflictCopy: (c) => copies.push(c),
+        soloText: () => buffer,
+        soloApply: (e) => {
+          buffer = buffer.slice(0, e.from) + e.insert + buffer.slice(e.to);
+        },
+      });
+      await waitFor(() => assert.equal(solo, true));
+
+      buffer = "B\n";
+      await file.saveNow();
+      if (scenario === "taken") {
+        // Refused at the taken name, landed at once at the next second.
+        same(server.log.map((l) => [l.ifNoneMatch, l.status]), [["*", 409], ["*", 200]]);
+        const [taken, mine] = server.log.map((l) => l.path);
+        assert.notEqual(taken, mine);
+        assert.ok(mine.includes("notes.md.bdrive-conflict-"));
+        assert.equal(server.store.get(taken), "another tab's words\n"); // never overwritten
+        assert.equal(server.store.get(mine), "B\n");
+        same(copies, [mine]);
+        assert.equal(states.at(-1), "clean");
+      } else {
+        // Stored, but the answer was lost: unsaved, retried on the backoff.
+        same(server.log.map((l) => l.status), [503]);
+        assert.equal(states.at(-1), "error");
+        same(copies, []);
+        await advance(SAVE_RETRY_MS[0]);
+        same(server.log.map((l) => [l.ifNoneMatch, l.status]), [["*", 503], ["*", 200]]);
+        assert.equal(server.log[1].path, server.log[0].path); // the same name, not a second copy
+        assert.equal(server.store.size, 1);
+        assert.equal(server.store.get(server.log[0].path), "B\n");
+        same(copies, [server.log[0].path]);
+        assert.equal(states.at(-1), "clean");
+      }
+      await advance(60_000);
+      assert.equal(server.log.length, 2);
+      file.destroy();
+    } finally {
+      realTimers();
+    }
+  });
+}
+
+test("late join conflict park steps past a second another tab already took", async () => {
+  fakeTimers();
+  setSystemTime(new Date("2026-11-11T10:20:30.400Z"));
+  const h = joinHarness();
+  try {
+    h.net.putAnswer = 200;
+    const server = copyServer({ takenFirst: true });
+    const inner = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        const res = server.handle(url, init);
+        if (res.status !== 200) return res;
+      }
+      return inner(url, init);
+    }) as typeof fetch;
+
+    h.state.buffer = "the dog sat\n";
+    h.syncRoom("the bird sat\n");
+    await advance(0);
+
+    same(server.log.map((l) => [l.ifNoneMatch, l.status]), [["*", 409], ["*", 200]]);
+    const [taken, mine] = server.log.map((l) => l.path);
+    assert.notEqual(taken, mine);
+    assert.equal(server.store.get(taken), "another tab's words\n");
+    assert.equal(server.store.get(mine), "the dog sat\n");
+    same(h.copies, [mine]);
+    same(h.ready, [h.file.collab]);
+    assert.equal(h.file.current(), "the bird sat\n");
+    await advance(60_000);
+    assert.equal(server.log.length, 2);
+    h.file.destroy();
+  } finally {
+    realTimers();
+    h.connect.mock.restore();
+  }
+});
 
 /* R11: the socket syncs while a staging checkpoint is still on the wire. The
    room applies the checkpoint (its own item IDs), and the same items reach

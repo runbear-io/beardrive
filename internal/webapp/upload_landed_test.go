@@ -345,3 +345,95 @@ func TestUploadParkOnConflictAcrossProcessesNeverReplacesACopy(t *testing.T) {
 		}
 	}
 }
+
+/*
+A conflict copy the browser names itself is created with If-None-Match: *, so
+a second tab's copy under the same second can never replace the first's.
+
+  - A retry of a create whose answer was lost finds its own bytes and is ok,
+    unchanged: no second copy.
+  - Different bytes under a taken name are a 409, so a live tab names the
+    next copy itself.
+  - A closing tab cannot, so with X-Bdrive-Park-On-Conflict the hub moves the
+    copy a second on — and a retry of that finds its own bytes there too.
+
+Both on hub storage, where the version is the content hash, and on a plain
+directory, where it is not and the bytes themselves are compared.
+*/
+func TestUploadCreateOnlyConflictCopyIsIdempotentAndSteps(t *testing.T) {
+	name := conflictPath("notes.md", User{Name: "Tab"}, time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC))
+	next, ok := shiftConflictName(name, 1)
+	if !ok || conflictStamp(t, "notes.md", next).Sub(conflictStamp(t, "notes.md", name)) != time.Second {
+		t.Fatalf("shift %s by 1s = %s", name, next)
+	}
+	const tab1, tab2 = "tab one's text\n", "tab two's text\n"
+
+	run := func(t *testing.T, h http.Handler, prefix string) {
+		create := func(body string, park bool) *httptest.ResponseRecorder {
+			t.Helper()
+			rec := httptest.NewRecorder()
+			r := httptest.NewRequest("PUT", prefix+"upload/content?path="+name, strings.NewReader(body))
+			r.Header.Set("If-None-Match", "*")
+			if park {
+				r.Header.Set(parkOnConflictHeader, "1")
+			}
+			h.ServeHTTP(rec, r)
+			return rec
+		}
+		read := func(p string) string { return get(t, h, prefix+"file?path="+p).Body.String() }
+		type answer struct {
+			Path      string `json:"path"`
+			Unchanged bool   `json:"unchanged"`
+			Parked    string `json:"parked"`
+		}
+		decode := func(rec *httptest.ResponseRecorder) answer {
+			t.Helper()
+			var out answer
+			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+				t.Fatalf("%s: %v", rec.Body, err)
+			}
+			return out
+		}
+
+		if rec := create(tab1, false); rec.Code != http.StatusOK {
+			t.Fatalf("create: %d %s", rec.Code, rec.Body)
+		}
+		rec := create(tab1, false)
+		if rec.Code != http.StatusOK || !decode(rec).Unchanged {
+			t.Fatalf("retried create: %d %s, want ok unchanged", rec.Code, rec.Body)
+		}
+		if rec := create(tab2, false); rec.Code != http.StatusConflict {
+			t.Fatalf("another tab's create under a taken name: %d %s, want 409", rec.Code, rec.Body)
+		}
+		if got := read(name); got != tab1 {
+			t.Fatalf("%s = %q after a refused create, want %q", name, got, tab1)
+		}
+		for attempt := range 2 { // the second is a retry whose answer was lost
+			rec := create(tab2, true)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("parked create (attempt %d): %d %s", attempt, rec.Code, rec.Body)
+			}
+			if out := decode(rec); out.Parked != next || out.Path != next {
+				t.Fatalf("parked create (attempt %d) answered %s, want parked at %s", attempt, rec.Body, next)
+			}
+		}
+		if got := read(name); got != tab1 {
+			t.Fatalf("%s = %q, want tab one's %q", name, got, tab1)
+		}
+		if got := read(next); got != tab2 {
+			t.Fatalf("%s = %q, want tab two's %q", next, got, tab2)
+		}
+		after, _ := shiftConflictName(name, 2)
+		if rec := get(t, h, prefix+"file?path="+after); rec.Code != http.StatusNotFound {
+			t.Fatalf("%s exists (%d): a retry parked a second copy", after, rec.Code)
+		}
+	}
+
+	t.Run("hub storage", func(t *testing.T) {
+		srv, p, _ := newHub(t, true, nil)
+		run(t, srv.Handler(), "/api/p/"+p.ID+"/")
+	})
+	t.Run("directory", func(t *testing.T) {
+		run(t, writableDirServer(t, nil), "/api/")
+	})
+}

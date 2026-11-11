@@ -250,14 +250,19 @@ export async function putText(
   // in this same request (`parked` names the copy), since a closing page
   // never gets to send a second one.
   parkOnConflict = false,
+  // Create only: a path that already holds other bytes is refused 409 (a
+  // conflict copy another tab named in the same second), the same bytes are
+  // answered 200 unchanged (a retry whose first answer was lost).
+  ifNoneMatch = false,
   // `merged`: the hub found the file had moved past `base` and folded this
   // body into it three ways (upload.go) — the file is NOT exactly `text`.
-): Promise<{ sha?: string; merged?: boolean; parked?: string }> {
+): Promise<{ sha?: string; merged?: boolean; parked?: string; path?: string; unchanged?: boolean }> {
   const r = await fetch(url, {
     method: "PUT",
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       ...(base ? { "If-Match": base } : {}),
+      ...(ifNoneMatch ? { "If-None-Match": "*" } : {}),
       ...(confirmShrink ? { "X-Bdrive-Confirm-Shrink": "1" } : {}),
       ...(parkOnConflict ? { "X-Bdrive-Park-On-Conflict": "1" } : {}),
     },
@@ -268,7 +273,13 @@ export async function putText(
   if (r.status === 401 && !keepalive) toLogin();
   if (!r.ok) await fail(r);
   trackWrite("PUT", url);
-  return (await r.json().catch(() => ({}))) as { sha?: string; merged?: boolean; parked?: string };
+  return (await r.json().catch(() => ({}))) as {
+    sha?: string;
+    merged?: boolean;
+    parked?: string;
+    path?: string;
+    unchanged?: boolean;
+  };
 }
 
 /* Write into a file's co-editing room over plain HTTP, for a client that is

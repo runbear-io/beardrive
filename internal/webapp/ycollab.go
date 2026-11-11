@@ -2037,13 +2037,32 @@ var (
 // budget: once the room is evicted this text exists nowhere else, so giving
 // up would be the loss the copy exists to prevent. Held in memory only, so a
 // hub restart before the store recovers still loses it.
+//
+// The copy is only ever created, never written over: a name another copy
+// already holds (another room, or a closing tab, in the same second) moves it
+// a second on. A retry finding its own text under a name it reached before
+// is answered unchanged and counts as written.
 func (s *Server) parkCopy(ctx context.Context, who User, project, path, copy, text string) {
 	try := func(ctx context.Context) bool {
-		cw := s.putAs(ctx, who, project, copy, text, "")
-		if cw.code == http.StatusOK {
-			log.Printf("bdrive: %s: the room's text could not be written to it; parked beside it as %s", path, copy)
-			s.rooms().parkedOnStorage(project+"/"+path, text)
-			return true
+		var cw *memWriter
+		for i := range maxConflictNameTries {
+			name, ok := shiftConflictName(copy, i)
+			if !ok {
+				if i > 0 {
+					break
+				}
+				name = copy
+			}
+			cw = s.putVia(ctx, who, project, name, text, "", true)
+			if cw.code == http.StatusConflict {
+				continue
+			}
+			if cw.code == http.StatusOK {
+				log.Printf("bdrive: %s: the room's text could not be written to it; parked beside it as %s", path, name)
+				s.rooms().parkedOnStorage(project+"/"+path, text)
+				return true
+			}
+			break
 		}
 		log.Printf("bdrive: %s: could not park the room's refused text (%d bytes) as %s (%d); retrying", path, len(text), copy, cw.code)
 		return false
@@ -2284,7 +2303,25 @@ func conflictPath(path string, who User, at time.Time) string {
 		}
 		return '-'
 	}, name)
-	return path + ".bdrive-conflict-" + safe + "-" + at.UTC().Format("20060102T150405Z")
+	return path + ".bdrive-conflict-" + safe + "-" + at.UTC().Format(conflictStampLayout)
+}
+
+// conflictStampLayout is the second a conflict copy's name ends in. The sync
+// engine and the browser parse exactly this form.
+const conflictStampLayout = "20060102T150405Z"
+
+// shiftConflictName is a conflict copy's name moved step seconds on, and
+// whether name is one at all.
+func shiftConflictName(name string, step int) (string, bool) {
+	i := strings.LastIndex(name, "-")
+	if i < 0 || !strings.Contains(name[:i], ".bdrive-conflict-") {
+		return "", false
+	}
+	at, err := time.Parse(conflictStampLayout, name[i+1:])
+	if err != nil {
+		return "", false
+	}
+	return name[:i+1] + at.Add(time.Duration(step)*time.Second).UTC().Format(conflictStampLayout), true
 }
 
 // roomRegistry keeps a live room's document addressable, and remembers who may

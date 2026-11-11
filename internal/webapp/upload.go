@@ -775,6 +775,16 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	createOnly := base == "" && r.Header.Get("If-None-Match") == "*"
 	if createOnly {
 		if head, ok := s.headBlob(r.Context(), v, p); ok && head != blob {
+			// A retry of a create whose answer was lost finds its own bytes:
+			// nothing to refuse. A directory never names a version by its
+			// content, so the bytes are what is compared.
+			if s.holdsBytes(r.Context(), v, p, blob, size) {
+				writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "unchanged": true})
+				return
+			}
+			if s.stepConflictCopy(w, r, v, up, p, tmp, size, blob, -1) {
+				return
+			}
 			writeJSONStatus(w, http.StatusConflict, map[string]any{
 				"error": "this file already exists", "sha": head, "path": p,
 			})
@@ -924,7 +934,11 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 			}
 		}
 		// Quota already passed for these bytes above.
-		if !createOnly && s.parkStaleUpload(w, r, v, up, p, head, tmp, size, blob, billed) {
+		if createOnly {
+			if s.stepConflictCopy(w, r, v, up, p, tmp, size, blob, billed) {
+				return
+			}
+		} else if s.parkStaleUpload(w, r, v, up, p, head, tmp, size, blob, billed) {
 			return
 		}
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
@@ -966,14 +980,53 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 // for it (parkOnConflictHeader). handled says a response was written: ok
 // naming the copy, or the refusal that kept it from being stored. billed is
 // what quota already admitted for these bytes, or -1 when nobody asked yet.
-//
-// A copy is named to the second, and two tabs of one account can close in
-// the same one: each name is created only if it is free (createAbsent), and a
-// taken one moves the copy a second on, so neither replaces the other.
 func (s *Server) parkStaleUpload(w http.ResponseWriter, r *http.Request, v *volume, up Uploader, p, head string, tmp *os.File, size int64, blob string, billed int64) (handled bool) {
 	if r.Header.Get(parkOnConflictHeader) == "" || size == 0 {
 		return false
 	}
+	who := s.requestUser(r)
+	t0 := time.Now()
+	parked, ok := s.storeConflictCopy(w, r, v, up, func(i int) string {
+		return conflictPath(p, who, t0.Add(time.Duration(i)*time.Second))
+	}, tmp, size, blob, billed)
+	if ok {
+		writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "parked": parked})
+	}
+	return true
+}
+
+// stepConflictCopy is a create-only write of a conflict copy whose name is
+// taken (p, If-None-Match: *), asked to park anyway (parkOnConflictHeader):
+// a closing tab's flush of a copy it already named, which cannot answer a
+// 409 by naming the next one itself. The copy moves a second on at a time,
+// as the hub's own copies do. handled says a response was written.
+func (s *Server) stepConflictCopy(w http.ResponseWriter, r *http.Request, v *volume, up Uploader, p string, tmp *os.File, size int64, blob string, billed int64) (handled bool) {
+	if r.Header.Get(parkOnConflictHeader) == "" || size == 0 {
+		return false
+	}
+	if _, ok := shiftConflictName(p, 0); !ok {
+		return false // not a conflict copy's name: nothing to move
+	}
+	parked, ok := s.storeConflictCopy(w, r, v, up, func(i int) string {
+		next, _ := shiftConflictName(p, i+1)
+		return next
+	}, tmp, size, blob, billed)
+	if ok {
+		sha, found := s.headBlob(r.Context(), v, parked)
+		if !found {
+			sha = blob
+		}
+		writeJSON(w, map[string]any{"ok": true, "path": parked, "sha": sha, "parked": parked})
+	}
+	return true
+}
+
+// storeConflictCopy stores tmp under the first of name(0), name(1), … that is
+// free or already holds these bytes, up to maxConflictNameTries, and reports
+// it. ok false means a refusal was written instead: quota, a folder rule,
+// storage, or no free name. billed is what quota already admitted for these
+// bytes, or -1 when nobody asked yet.
+func (s *Server) storeConflictCopy(w http.ResponseWriter, r *http.Request, v *volume, up Uploader, name func(int) string, tmp *os.File, size int64, blob string, billed int64) (parked string, ok bool) {
 	who := s.requestUser(r)
 	ctx := r.Context()
 	project := projectID(r)
@@ -984,23 +1037,21 @@ func (s *Server) parkStaleUpload(w http.ResponseWriter, r *http.Request, v *volu
 			var err error
 			if billed, err = billableBytes(ctx, rs.Backend, "blobs/"+blob, size); err != nil {
 				storageErr(w, http.StatusBadGateway, "could not check the stored object", err)
-				return true
+				return "", false
 			}
 		}
 		if err := s.quota().CheckWrite(org, billed+s.reservedBytes(org)); err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)
-			return true
+			return "", false
 		}
 	}
-	t0 := time.Now()
-	parked := ""
 	for i := range maxConflictNameTries {
-		name := conflictPath(p, who, t0.Add(time.Duration(i)*time.Second))
-		if !s.writablePath(w, r, name) {
-			return true
+		n := name(i)
+		if !s.writablePath(w, r, n) {
+			return "", false
 		}
-		unlock := s.lockPath(project, name)
-		err := s.createAbsent(ctx, v, up, name, tmp, size, blob, who)
+		unlock := s.lockPath(project, n)
+		err := s.createAbsent(ctx, v, up, n, tmp, size, blob, who)
 		unlock()
 		var stale *staleWriteError
 		if errors.As(err, &stale) {
@@ -1008,16 +1059,16 @@ func (s *Server) parkStaleUpload(w http.ResponseWriter, r *http.Request, v *volu
 		}
 		if err != nil {
 			http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
-			return true
+			return "", false
 		}
-		parked = name
+		parked = n
 		break
 	}
 	if parked == "" {
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
-			"error": "no free conflict copy name", "sha": head, "path": p,
+			"error": "no free conflict copy name", "path": name(0),
 		})
-		return true
+		return "", false
 	}
 	if billed > 0 {
 		s.quota().RecordUsage(org, billed)
@@ -1026,8 +1077,33 @@ func (s *Server) parkStaleUpload(w http.ResponseWriter, r *http.Request, v *volu
 	s.dataWrote(ctx, project)
 	s.captureChange(r, "browser", 1, 0)
 	s.publishChange(r, "browser", []string{parked}, 1, 0)
-	writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "parked": parked})
-	return true
+	return parked, true
+}
+
+// holdsBytes reports whether p already holds exactly blob's bytes. Read back
+// only where the version name is not the content hash (a directory), and only
+// when the sizes agree.
+func (s *Server) holdsBytes(ctx context.Context, v *volume, p, blob string, size int64) bool {
+	fi, ok := s.headFile(ctx, v, p)
+	if !ok || fi.Size != size {
+		return false
+	}
+	if fi.Blob == blob {
+		return true
+	}
+	if _, journaled := v.source.(*RemoteSource); journaled {
+		return false
+	}
+	rc, err := v.source.Open(ctx, p, fi)
+	if err != nil {
+		return false
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, rc); err != nil {
+		return false
+	}
+	return hex.EncodeToString(h.Sum(nil)) == blob
 }
 
 // maxConflictNameTries bounds how many seconds past now a conflict copy's
@@ -1050,9 +1126,12 @@ func (s *Server) createAbsent(ctx context.Context, v *volume, up Uploader, p str
 		}
 		return rs.commitIfBase(ctx, p, blob, size, who, "", &commitBase{path: p, mustBeAbsent: true, blob: blob})
 	}
-	// A directory names a version by mtime and size, never content, so any
-	// file already there is taken.
+	// A directory names a version by mtime and size, never content: a file
+	// already there is taken unless it holds these very bytes (a retry).
 	if head, ok := s.headBlob(ctx, v, p); ok {
+		if s.holdsBytes(ctx, v, p, blob, size) {
+			return nil
+		}
 		return &staleWriteError{head: head}
 	}
 	return up.Upload(ctx, p, tmp, size, who, "")
