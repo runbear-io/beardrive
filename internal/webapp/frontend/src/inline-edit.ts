@@ -4,17 +4,20 @@
    This is a separate bundle from the app, loaded only by the ?edit=1 render
    (server.go's serveEditable). A reader never downloads an editor, and the
    iframe keeps exactly the sandbox it always had — no allow-same-origin — so
-   nothing here can reach the hub's session. It talks to the app by postMessage
-   and accepts two things back: `bd-edit:flush` (a numeric id, optionally
-   `lock: true`), which posts any edit still held here and answers
-   `bd-edit:flushed` with that id — so the app's Done saves only after every
-   patch before the answer has landed — and, with `lock`, stops accepting
-   edits until `bd-edit:unlock`, so nothing typed during Done's save can be
-   left out of it. It also takes `bd-edit:ack` (each patch's `seq`, once the
+   nothing here can reach the hub's session. It is injected FIRST in the
+   document, before any of the page's own scripts, and hands the app one end
+   of a MessageChannel (`bd-edit:hello`); everything after travels on that
+   port, never on window, so the page's scripts can neither hear nor forge
+   it. Back it takes `bd-edit:flush` (a numeric id, optionally `lock: true`),
+   which posts any edit still held here and answers `bd-edit:flushed` with
+   that id — so the app's Done saves only after every patch before the answer
+   has landed — and, with `lock`, stops accepting edits until
+   `bd-edit:unlock`. It also takes `bd-edit:ack` (each patch's `seq`, once the
    app has it in the document) and `bd-edit:port` (a MessagePort to the app's
    exit worker, lib/editexit.worker.ts): a tab closed before a patch was
    acknowledged posts every edited span down that port on the way out. This
-   frame never holds a URL or credential and makes no request of its own.
+   frame never holds a URL or credential and makes no request of its own, and
+   only a person's input (Event.isTrusted) opens or changes an editor.
 
    Three things had to be true at once, and they decided the design:
 
@@ -42,6 +45,92 @@ import { keymap } from "@tiptap/pm/keymap";
 import { baseKeymap, toggleMark } from "@tiptap/pm/commands";
 import { history, undo, redo } from "@tiptap/pm/history";
 import { ackEditedSpan, unackedExitPatches, type EditedSpan } from "./lib/editbeacon";
+
+/* ---- t = 0: before the page's own scripts exist ----
+
+   The server injects this script first in the document, synchronous, so it
+   runs in a realm no page script has touched yet. Everything a page script
+   could later replace to see or forge this editor's traffic is taken now:
+   the channel to the app, the methods that move messages on it, the
+   isTrusted getter that tells a person's input from a script's, and the DOM
+   reads the ranges come from. The app's end of the channel is handed up
+   below (`bd-edit:hello`) before any page script can watch window messages;
+   nothing in this editor ever travels on window again. */
+const NativeMessageChannel = window.MessageChannel;
+const portPost = MessagePort.prototype.postMessage;
+const portClose = MessagePort.prototype.close;
+const portStart = MessagePort.prototype.start;
+const targetAddListener = EventTarget.prototype.addEventListener;
+const getIsTrusted = Object.getOwnPropertyDescriptor(new Event("x"), "isTrusted")!.get!;
+const getMsgData = Object.getOwnPropertyDescriptor(MessageEvent.prototype, "data")!.get!;
+const getMsgPorts = Object.getOwnPropertyDescriptor(MessageEvent.prototype, "ports")!.get!;
+const elGetAttribute = Element.prototype.getAttribute;
+const elClosest = Element.prototype.closest;
+const docQueryAll = window.Document.prototype.querySelectorAll;
+const nativeSetTimeout = window.setTimeout.bind(window);
+const nativeClearTimeout = window.clearTimeout.bind(window);
+const postToParent = window.parent.postMessage.bind(window.parent);
+
+// The hash the server computed over the STORED bytes, read while this script
+// is still `currentScript`. The app compares it with the document it holds:
+// if they differ, the ranges describe a file that has since moved on, and it
+// reloads rather than splicing by them.
+const self = document.currentScript as HTMLScriptElement | null;
+const hash = self?.dataset.srcHash ?? "";
+// The source length in UTF-16 units, which is the app's fallback check when it
+// cannot compute a hash — crypto.subtle exists only in a secure context, and a
+// LAN hub on plain HTTP is not one.
+const len = Number(self?.dataset.srcLen ?? "-1");
+
+// This frame's end of the channel to the app; never on window or the DOM.
+const appChannel = new NativeMessageChannel();
+const appPort = appChannel.port1;
+const send = (msg: Record<string, unknown>) => {
+  portPost.call(appPort, msg);
+};
+
+/* A person's input, as opposed to a script's. Each trusted input event opens
+   a window that lasts through its own task — the handler and ProseMirror's
+   DOM-observer microtask after it — and closes on the next one. A document
+   change outside such a window was made by a script, not by the reader. */
+let trustedEditOpen = false;
+let composing = false;
+let trustedTimer: ReturnType<typeof setTimeout> | undefined;
+const openTrustedWindow = (ms = 0) => {
+  trustedEditOpen = true;
+  nativeClearTimeout(trustedTimer);
+  trustedTimer = nativeSetTimeout(() => {
+    trustedEditOpen = false;
+  }, ms);
+};
+for (const name of [
+  "keydown",
+  "beforeinput",
+  "input",
+  "textInput",
+  "compositionstart",
+  "compositionupdate",
+  "compositionend",
+  "paste",
+  "cut",
+  "drop",
+]) {
+  targetAddListener.call(
+    document,
+    name,
+    (e: Event) => {
+      if (!getIsTrusted.call(e)) return;
+      if (name === "compositionstart") composing = true;
+      else if (name === "compositionend") {
+        composing = false;
+        openTrustedWindow(60);
+        return;
+      }
+      openTrustedWindow(0);
+    },
+    true,
+  );
+}
 
 const SRC_ATTR = "data-bd-src";
 
@@ -156,7 +245,7 @@ function roundTrips(el: HTMLElement): boolean {
 type Range = { start: number; end: number };
 
 function rangeOf(el: Element): Range | null {
-  const raw = el.getAttribute(SRC_ATTR);
+  const raw = elGetAttribute.call(el, SRC_ATTR);
   if (!raw) return null;
   const [a, b] = raw.split(",");
   const start = Number(a);
@@ -164,8 +253,6 @@ function rangeOf(el: Element): Range | null {
   if (!Number.isInteger(start) || !Number.isInteger(end) || start > end) return null;
   return { start, end };
 }
-
-const send = (msg: Record<string, unknown>) => parent.postMessage(msg, "*");
 
 /* Whether an element may be edited is settled once and remembered. The check
    parses, so doing it per mousemove would be the one thing on this page that
@@ -315,6 +402,17 @@ function mount(el: HTMLElement, x?: number, y?: number) {
       editable: () => !locked,
       dispatchTransaction(tr) {
         if (locked && tr.docChanged) return;
+        if (tr.docChanged && !trustedEditOpen && !composing) {
+          /* The element changed with no input from the reader: the page's
+             own script wrote into it (or faked an event). That is not an
+             edit to save — close the editor and say so. */
+          send({ type: "bd-edit:clobbered" });
+          view?.destroy();
+          view = null;
+          host = null;
+          range = null;
+          return;
+        }
         view!.updateState(view!.state.apply(tr));
         /* Reported on EVERY change, with no debounce of its own.
 
@@ -339,13 +437,17 @@ function mount(el: HTMLElement, x?: number, y?: number) {
 // ---- wiring ----
 
 function nearestEditable(target: EventTarget | null): HTMLElement | null {
-  const el = (target as Element | null)?.closest?.(`[${SRC_ATTR}]`);
+  const el = target instanceof Element ? (elClosest.call(target, `[${SRC_ATTR}]`) as Element | null) : null;
   return el instanceof HTMLElement ? el : null;
 }
 
-document.addEventListener(
+targetAddListener.call(
+  document,
   "click",
-  (e) => {
+  (ev: Event) => {
+    // Only a person's click opens an editor: never el.click() from a script.
+    if (!getIsTrusted.call(ev)) return;
+    const e = ev as MouseEvent;
     if (locked) return; // no element opens or closes while Done saves
     const el = nearestEditable(e.target);
     if (!el) {
@@ -361,104 +463,106 @@ document.addEventListener(
 // Verdicts are computed on approach so the outline only ever appears on
 // something that will actually open. An element that cannot be edited says so
 // on hover instead of refusing a click for no visible reason.
-document.addEventListener(
+targetAddListener.call(
+  document,
   "mouseover",
-  (e) => {
+  (e: Event) => {
     const el = nearestEditable(e.target);
     if (el) editable(el);
   },
   true,
 );
 
-/* A page whose own script rewrites the DOM can replace the element out from
-   under an open editor, and the keystrokes go with it. There is no way to stop
-   that from here — the page's script is the page — so the honest move is to
-   notice and say so. Detaching is the observable form of every version of this:
-   a React re-render, a chart redraw, a template swap. */
-new MutationObserver(() => {
-  if (host && !host.isConnected) {
-    send({ type: "bd-edit:clobbered" });
-    view?.destroy();
-    view = null;
-    host = null;
-    range = null;
-  }
-}).observe(document.documentElement, { childList: true, subtree: true });
+/* The rest needs the document's body, which this script — first in the
+   document — runs ahead of. */
+function initDOM() {
+  /* A page whose own script rewrites the DOM can replace the element out from
+     under an open editor, and the keystrokes go with it. There is no way to
+     stop that from here — the page's script is the page — so the honest move
+     is to notice and say so. Detaching is the observable form of every version
+     of this: a React re-render, a chart redraw, a template swap. */
+  new MutationObserver(() => {
+    if (host && !host.isConnected) {
+      send({ type: "bd-edit:clobbered" });
+      view?.destroy();
+      view = null;
+      host = null;
+      range = null;
+    }
+  }).observe(document.documentElement, { childList: true, subtree: true });
 
-const style = document.createElement("style");
-style.textContent = `
+  const style = document.createElement("style");
+  style.textContent = `
   [${SRC_ATTR}][data-bd-edit="yes"]:hover { outline: 1px dashed rgba(99,102,241,.7); outline-offset: 2px; cursor: text; }
   [${SRC_ATTR}][data-bd-edit="no"]:hover  { outline: 1px dotted rgba(120,120,120,.5); outline-offset: 2px; cursor: not-allowed; }
   [${SRC_ATTR}][data-bd-editing] { outline: 2px solid rgba(99,102,241,.9); outline-offset: 2px; }
   [${SRC_ATTR}][data-bd-editing]:focus { outline: 2px solid rgba(99,102,241,.9); }
 `;
-document.head.appendChild(style);
+  (document.head ?? document.documentElement).appendChild(style);
 
-// The hash the server computed over the STORED bytes. The app compares it with
-// the document it holds: if they differ, the ranges below describe a file that
-// has since moved on, and it reloads rather than splicing by them.
-const self =
-  (document.currentScript as HTMLScriptElement | null) ??
-  document.querySelector<HTMLScriptElement>("script[data-src-hash]");
-const hash = self?.dataset.srcHash ?? "";
-// The source length in UTF-16 units, which is the app's fallback check when it
-// cannot compute a hash — crypto.subtle exists only in a secure context, and a
-// LAN hub on plain HTTP is not one.
-const len = Number(self?.dataset.srcLen ?? "-1");
+  send({
+    type: "bd-edit:ready",
+    hash,
+    len,
+    ranges: [...(docQueryAll.call(document, `[${SRC_ATTR}]`) as NodeListOf<Element>)]
+      .map((el) => rangeOf(el))
+      .filter(Boolean),
+  });
 
-send({
-  type: "bd-edit:ready",
-  hash,
-  len,
-  ranges: [...document.querySelectorAll(`[${SRC_ATTR}]`)]
-    .map((el) => rangeOf(el))
-    .filter(Boolean),
-});
-
-// The markers are in the served HTML, so their presence says nothing about
-// whether this script has run. Anything waiting to interact — a test, or a
-// person — needs to know the listeners are actually installed, and this is
-// the only observable difference between "rendered" and "editable".
-document.documentElement.setAttribute("data-bd-ready", "");
+  // The markers are in the served HTML, so their presence says nothing about
+  // whether this script has run. Anything waiting to interact — a test, or a
+  // person — needs to know the listeners are actually installed, and this is
+  // the only observable difference between "rendered" and "editable".
+  document.documentElement.setAttribute("data-bd-ready", "");
+}
 
 /* Leaving with an edit the app never acknowledged: hand it to the exit
-   worker, once per unload (marking it acknowledged). The worker, not this
+   worker, once per unload. What goes is recorded as acknowledged — the
+   ancestor (`ackedHtml`) for an edit made after the page comes back from the
+   bfcache, so that one neither drops nor repeats this. The worker, not this
    frame, decides whether and how it is saved. */
 function exitUnacked() {
   if (!exitPort) return;
   const patches = unackedExitPatches(editedSpans.values());
   if (patches === null) return;
-  for (const s of editedSpans.values()) s.acked = true;
-  exitPort.postMessage({ type: "bd-edit:exit", patches });
+  for (const s of editedSpans.values()) {
+    s.acked = true;
+    s.ackedHtml = s.html;
+  }
+  portPost.call(exitPort, { type: "bd-edit:exit", patches });
 }
 
-window.addEventListener("beforeunload", () => {
+targetAddListener.call(window, "beforeunload", () => {
   unmount();
   exitUnacked();
 });
 // Flush on pagehide too; keep the open element mounted when entering bfcache.
-window.addEventListener("pagehide", (e: PageTransitionEvent) => {
-  if (e.persisted) flush();
+targetAddListener.call(window, "pagehide", (e: Event) => {
+  if ((e as PageTransitionEvent).persisted) flush();
   else unmount();
   exitUnacked();
 });
 
-/* Done in the app: post what the open editor holds, then answer. The answer
-   follows every patch on the same channel, so once the app has handled it, it
-   has handled them all. With `lock`, nothing more is typed until the app
-   unlocks (its save failed or asked a question) or tears the page down (it
-   saved). Only the app (the parent window) may ask. */
-window.addEventListener("message", (e) => {
-  if (e.source !== window.parent) return;
-  const msg = e.data as { type?: unknown; id?: unknown; lock?: unknown; seq?: unknown } | null;
-  if (!msg) return;
+/* The app, on this frame's sealed port — never window:
+   - bd-edit:ack     a patch is in the app's document
+   - bd-edit:port    the exit worker's port (again, after a bfcache restore)
+   - bd-edit:flush   Done: post what the open editor holds, then answer; the
+                     answer follows every patch on the channel, so once the
+                     app has it, it has them all. With `lock`, nothing more is
+                     typed until bd-edit:unlock (its save failed or asked a
+                     question) or the page is torn down (it saved). */
+targetAddListener.call(appPort, "message", (e: Event) => {
+  const msg = getMsgData.call(e) as { type?: unknown; id?: unknown; lock?: unknown; seq?: unknown } | null;
+  if (!msg || typeof msg !== "object") return;
   if (msg.type === "bd-edit:ack" && typeof msg.seq === "number") {
     ackEditedSpan(editedSpans.values(), msg.seq);
     return;
   }
-  if (msg.type === "bd-edit:port" && e.ports[0]) {
-    exitPort?.close();
-    exitPort = e.ports[0];
+  if (msg.type === "bd-edit:port") {
+    const next = (getMsgPorts.call(e) as ReadonlyArray<MessagePort>)[0];
+    if (!next) return;
+    if (exitPort) portClose.call(exitPort);
+    exitPort = next;
     document.documentElement.setAttribute("data-bd-exit", "ready");
     return;
   }
@@ -476,3 +580,10 @@ window.addEventListener("message", (e) => {
     view?.setProps({ editable: () => !locked });
   }
 });
+portStart.call(appPort);
+
+if (document.readyState !== "loading") initDOM();
+else targetAddListener.call(document, "DOMContentLoaded", initDOM, { once: true });
+
+// The app's end of the channel, before any page script can see a message.
+postToParent({ type: "bd-edit:hello" }, "*", [appChannel.port2]);

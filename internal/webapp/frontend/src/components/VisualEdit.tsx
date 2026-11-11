@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState, type SharedFile } from "../lib/sharedfile";
 import { diffSplices, merge3PreferRight } from "../lib/merge3";
@@ -131,6 +131,29 @@ export function VisualEdit({
     fileRef.current?.rebase(baseSha);
   }, [baseSha]);
 
+  /* The frame's channel. Its script runs first in the document, before any of
+     the page's own, and hands up one end of a MessageChannel (`bd-edit:hello`)
+     before a page script exists to see it; every message after that travels
+     on that port, so nothing the page's scripts post on window is heard.
+
+     Only the FIRST hello from a frame document is taken, so it must not be
+     missed: this listener is in place in the same task that commits the
+     iframe (a layout effect), before the frame can have loaded anything. */
+  const helloPort = useRef<MessagePort | null>(null);
+  const helloTake = useRef<((port: MessagePort) => void) | null>(null);
+  useLayoutEffect(() => {
+    helloPort.current = null;
+    const onHello = (e: MessageEvent) => {
+      if (!frame.current || e.source !== frame.current.contentWindow || helloPort.current) return;
+      const d: unknown = e.data;
+      if (!d || typeof d !== "object" || !("type" in d) || d.type !== "bd-edit:hello" || !e.ports[0]) return;
+      helloPort.current = e.ports[0];
+      helloTake.current?.(e.ports[0]);
+    };
+    window.addEventListener("message", onHello);
+    return () => window.removeEventListener("message", onHello);
+  }, [apiBase, path, fileURL, gen]);
+
   useEffect(() => {
     /* The two halves arrive independently and BOTH are needed before a range
        means anything: the iframe's ranges, and a shared document that actually
@@ -196,15 +219,42 @@ export function VisualEdit({
     let frameInteracted = false;
     let latestSavedText = seed.current;
     let latestBaseSha: string | undefined = shaRef.current;
+    // The frame's end of the sealed channel (see helloPort above).
+    let appPort: MessagePort | null = null;
     const noteFrameInteraction = () => {
       if (frameInteracted || document.activeElement !== frame.current) return;
       frameInteracted = true;
       if (exitWorker && !workerDisarmed) exitWorker.postMessage({ type: "interacted" });
     };
+    // A real unload of this page (never a component cleanup): the worker may
+    // save what the frame hands it.
+    let hadPageHide = false;
     const onParentUnload = () => {
+      hadPageHide = true;
       noteFrameInteraction();
       if (!exitWorker || workerDisarmed || !frameInteracted) return;
       exitWorker.postMessage({ type: "parent-unload" });
+    };
+    /* Back from the bfcache: the exit that went on the way out closed its
+       port, and this page may be closed again with another edit the app has
+       not heard. A fresh port to the worker, for the same render. */
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (!hadPageHide && !e.persisted) return;
+      hadPageHide = false;
+      if (!anchored || !exitWorker || workerDisarmed || !appPort) return;
+      const mc = new MessageChannel();
+      exitWorker.postMessage(
+        {
+          type: "rearm",
+          savedText: latestSavedText,
+          baseSha: latestBaseSha,
+          hasBaseSha: true,
+          docText: activeDocText(),
+          interacted: frameInteracted,
+        },
+        [mc.port1],
+      );
+      appPort.postMessage({ type: "bd-edit:port" }, [mc.port2]);
     };
     const activeDocText = () =>
       stageDoc ? stageDoc.getText("body").toString() : (fileRef.current?.collab.text.toString() ?? "");
@@ -227,11 +277,12 @@ export function VisualEdit({
     // Every deliberate re-render of the frame: its unload is no tab closing.
     const reload = () => {
       disarmExitWorker();
+      appPort?.close();
+      appPort = null;
       setGen((g) => g + 1);
     };
     const armExitWorker = (renderText: string) => {
-      const win = frame.current?.contentWindow;
-      if (!exitWorker || workerDisarmed || !win) return;
+      if (!exitWorker || workerDisarmed || !appPort) return;
       const mc = new MessageChannel();
       exitWorker.postMessage(
         {
@@ -249,15 +300,15 @@ export function VisualEdit({
         },
         [mc.port1],
       );
-      win.postMessage({ type: "bd-edit:port" }, "*", [mc.port2]);
+      appPort.postMessage({ type: "bd-edit:port" }, [mc.port2]);
     };
     const ackPatch = (msg: Patch) => {
-      if (typeof msg.seq === "number") frame.current?.contentWindow?.postMessage({ type: "bd-edit:ack", seq: msg.seq }, "*");
+      if (typeof msg.seq === "number") appPort?.postMessage({ type: "bd-edit:ack", seq: msg.seq });
     };
     const drainFrame = async (lock: boolean) => {
       const el = frame.current;
-      const win = el?.contentWindow;
-      if (!el || !win) return;
+      const port = appPort;
+      if (!el || !port) return;
       // A frame that reloads or is replaced cannot answer: stop waiting then.
       let reloaded = false;
       const onLoad = () => {
@@ -266,8 +317,8 @@ export function VisualEdit({
       el.addEventListener("load", onLoad);
       try {
         await channel.drain(
-          (m) => win.postMessage(m, "*"),
-          () => !frameReady || reloaded || frame.current !== el || el.contentWindow !== win,
+          (m) => port.postMessage(m),
+          () => !frameReady || reloaded || frame.current !== el || appPort !== port,
           lock,
         );
       } finally {
@@ -280,24 +331,24 @@ export function VisualEdit({
     /* Lock the frame and drain it: every patch it posted is in the document
        and nothing more can be typed until the returned release. Done's save
        and the join (a staging buffer folded into the room) both hold one;
-       counted per frame window, so neither unlocks the other early and a
+       counted per frame channel, so neither unlocks the other early and a
        release meant for a frame since replaced never touches the new one. */
-    const winLocks = new Map<Window, number>();
+    const portLocks = new Map<MessagePort, number>();
     const lockFrame = async (): Promise<() => void> => {
-      const win = frame.current?.contentWindow;
-      if (!win) return () => {};
-      winLocks.set(win, (winLocks.get(win) ?? 0) + 1);
+      const port = appPort;
+      if (!port) return () => {};
+      portLocks.set(port, (portLocks.get(port) ?? 0) + 1);
       let released = false;
       const release = () => {
         if (released) return;
         released = true;
-        const left = (winLocks.get(win) ?? 1) - 1;
+        const left = (portLocks.get(port) ?? 1) - 1;
         if (left > 0) {
-          winLocks.set(win, left);
+          portLocks.set(port, left);
           return;
         }
-        winLocks.delete(win);
-        win.postMessage({ type: "bd-edit:unlock" }, "*");
+        portLocks.delete(port);
+        port.postMessage({ type: "bd-edit:unlock" });
       };
       try {
         await drainFrame(true);
@@ -513,6 +564,8 @@ export function VisualEdit({
       }
 
       if (msg.type === "bd-edit:ready") {
+        anchored = false;
+        anchors.clear();
         ranges = msg.ranges;
         srcHash = msg.hash;
         srcLen = msg.len;
@@ -617,15 +670,20 @@ export function VisualEdit({
       );
       return true;
     };
-    const onMessage = (e: MessageEvent) => {
-      // The iframe is sandboxed WITHOUT allow-same-origin, so its origin is
-      // the string "null" and checking it proves nothing. Identity has to come
-      // from the window itself — checked as the message arrives, since the
-      // frame may be replaced before its turn in the queue comes.
-      if (!frame.current || e.source !== frame.current.contentWindow) return;
-      const msg = e.data as FromFrame;
-      if (!msg || typeof msg !== "object") return;
-      channel.enqueue(() => handleMessage(msg));
+    // Every message from the frame arrives on its sealed port, in order.
+    const adoptPort = (port: MessagePort) => {
+      if (appPort === port) return;
+      appPort?.close();
+      appPort = port;
+      anchored = false;
+      ranges = null;
+      anchors.clear();
+      frameReady = false;
+      port.onmessage = (ev: MessageEvent) => {
+        const msg = ev.data as FromFrame;
+        if (!msg || typeof msg !== "object") return;
+        channel.enqueue(() => handleMessage(msg));
+      };
     };
 
     // The document filling in is itself a reason to try anchoring again: the
@@ -637,16 +695,19 @@ export function VisualEdit({
     };
     file.collab.text.observe(retry);
 
-    window.addEventListener("message", onMessage);
+    helloTake.current = adoptPort;
+    if (helloPort.current) adoptPort(helloPort.current);
     window.addEventListener("blur", noteFrameInteraction);
     window.addEventListener("beforeunload", onParentUnload);
     window.addEventListener("pagehide", onParentUnload);
+    window.addEventListener("pageshow", onPageShow);
     return () => {
       if (handle?.current === exposed) handle.current = null;
+      if (helloTake.current === adoptPort) helloTake.current = null;
       window.removeEventListener("blur", noteFrameInteraction);
       window.removeEventListener("beforeunload", onParentUnload);
       window.removeEventListener("pagehide", onParentUnload);
-      onParentUnload();
+      window.removeEventListener("pageshow", onPageShow);
       frameReady = false;
       channel.close();
       clearTimeout(retryTimer);
@@ -665,7 +726,8 @@ export function VisualEdit({
          cheap price for not having to be right about task ordering across
          browsers. */
       setTimeout(() => {
-        window.removeEventListener("message", onMessage);
+        appPort?.close();
+        appPort = null;
         clearTimeout(stageTimer);
         file.destroy();
         disarmExitWorker();

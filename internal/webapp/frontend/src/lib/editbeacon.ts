@@ -177,8 +177,15 @@ export function buildExitSaveRequest(
   if (mergedOk && want === state.savedText) return null;
 
   if (hasCollabRoute(state.apiBase)) {
+    const priorSent = ancestor !== state.savedText ? [ancestor] : undefined;
     const payload = mergedOk
-      ? { base: state.baseSha, base_text: state.savedText, text: want, park_on_conflict: true }
+      ? {
+          base: state.baseSha,
+          base_text: state.savedText,
+          text: want,
+          park_on_conflict: true,
+          ...(priorSent ? { prior_sent: priorSent } : {}),
+        }
       : { base_text: state.renderText, text: renderedWant, park_on_conflict: true };
     const body = JSON.stringify(payload);
     return {

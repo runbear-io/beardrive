@@ -480,28 +480,81 @@ test("two people editing different paragraphs both land", async ({ page, browser
   expect(after).toContain('<script>console.log("chart would render here");</script>');
 });
 
-/* Every message the editing iframe receives, recorded inside it (init scripts
-   run in every frame), so a spec can prove what the sandbox was handed. */
+/* Every message the editing iframe receives, recorded inside it, so a spec
+   can prove what the sandbox was handed. Nothing reaches it on window any
+   more — the editor's traffic is on its own MessagePort — so the recorder
+   wraps addEventListener, which an init script replaces before the frame's
+   editor script captures it. Installed in the frame only. */
 async function recordFrameMessages(page: Page) {
   await page.addInitScript(() => {
+    if (window.top === window) return;
     const seen: string[] = [];
     Object.defineProperty(window, "__bdSeen", { value: seen });
-    window.addEventListener("message", (e) => seen.push(JSON.stringify(e.data) ?? ""), true);
+    const add = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (
+      this: EventTarget,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      opts?: boolean | AddEventListenerOptions,
+    ) {
+      if (type === "message" && typeof listener === "function") {
+        const inner = listener;
+        listener = function (this: unknown, e: Event) {
+          try {
+            seen.push(JSON.stringify((e as MessageEvent).data) ?? "");
+          } catch {
+            seen.push("");
+          }
+          return inner.call(this, e);
+        } as EventListener;
+      }
+      return add.call(this, type, listener, opts);
+    };
   });
 }
 
-// Every bd-edit:patch is dropped before VisualEdit's listener can see it, so
-// nothing it carries is spliced, saved or acknowledged by the app.
+/* Patches travel on the frame's MessagePort now, so dropping them means
+   catching them at the app's end: in the parent page, a port's onmessage
+   handler skips every bd-edit:patch while `__dropBdEditPatches` is set, so
+   nothing it carries is spliced, saved or acknowledged by the app. Install
+   before the page loads; switch on with dropPatches. */
+async function installPatchDrop(page: Page) {
+  await page.addInitScript(() => {
+    if (window.top !== window) return;
+    const desc = Object.getOwnPropertyDescriptor(MessagePort.prototype, "onmessage")!;
+    const dropped = (ev: MessageEvent) => {
+      const d: unknown = ev.data;
+      return (
+        "__dropBdEditPatches" in window &&
+        window.__dropBdEditPatches === true &&
+        !!d &&
+        typeof d === "object" &&
+        "type" in d &&
+        d.type === "bd-edit:patch"
+      );
+    };
+    Object.defineProperty(MessagePort.prototype, "onmessage", {
+      configurable: true,
+      get(this: MessagePort) {
+        return desc.get!.call(this);
+      },
+      set(this: MessagePort, fn: ((this: MessagePort, ev: MessageEvent) => unknown) | null) {
+        desc.set!.call(
+          this,
+          typeof fn === "function"
+            ? function (this: MessagePort, ev: MessageEvent) {
+                if (!dropped(ev)) return fn.call(this, ev);
+              }
+            : fn,
+        );
+      },
+    });
+  });
+}
+
 async function dropPatches(page: Page) {
   await page.evaluate(() => {
-    window.addEventListener(
-      "message",
-      (e) => {
-        const d: unknown = e.data;
-        if (d && typeof d === "object" && "type" in d && d.type === "bd-edit:patch") e.stopImmediatePropagation();
-      },
-      true,
-    );
+    Object.defineProperty(window, "__dropBdEditPatches", { value: true, configurable: true, writable: true });
   });
 }
 
@@ -520,6 +573,7 @@ test("an edit whose postMessage is not delivered before tab close still lands", 
     const editor = await ctx.newPage();
     await login(editor, ADMIN);
     await recordFrameMessages(editor);
+    await installPatchDrop(editor);
     await editor.goto(`/${id}/${file}`);
     await editor.click("#edit-btn");
     const frame = editor.frameLocator("iframe.htmlview");
@@ -533,9 +587,15 @@ test("an edit whose postMessage is not delivered before tab close still lands", 
     // What the sandbox was ever sent: control messages only, no URL, no token.
     const child = editor.frames().find((f) => f.url().includes("edit=1"));
     expect(child).toBeTruthy();
-    const seen = await child!.evaluate(() => (window as unknown as { __bdSeen: string[] }).__bdSeen.slice());
-    const types = seen.map((s) => (JSON.parse(s) as { type?: string } | null)?.type);
-    expect(types).toContain("bd-edit:port");
+    const seen = await child!.evaluate(() =>
+      "__bdSeen" in window && Array.isArray(window.__bdSeen) ? window.__bdSeen.map(String) : [],
+    );
+    const types = seen.map((s) => {
+      const parsed: unknown = JSON.parse(s);
+      return parsed && typeof parsed === "object" && "type" in parsed && typeof parsed.type === "string"
+        ? parsed.type
+        : undefined;
+    });
     for (const t of types) expect(["bd-edit:port", "bd-edit:ack", "bd-edit:flush", "bd-edit:unlock"]).toContain(t);
     for (const s of seen) expect(s).not.toMatch(/https?:|\/api\/|token/i);
 
@@ -545,6 +605,147 @@ test("an edit whose postMessage is not delivered before tab close still lands", 
     // the tab is gone, and the edit must still land.
     const after = await waitForSource(page, id, file, "Revenue grew steadily across every region. Saved across close.");
     expect(after.split("<h1>").length - 1).toBe(1);
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+/* The synced file's own scripts — in <head> and in <body> — try everything
+   they can reach: catch a port off window, forge an exit and a patch, post a
+   fake hello/ready to the app, click an element and fake input into it. The
+   editor's script runs before them and talks only on its own port, and only
+   a person's input opens or changes an editor: the reader's edit lands, and
+   nothing the scripts wrote does. */
+const HOSTILE_SCRIPT = `<script>
+(function () {
+  var stolen = [];
+  window.addEventListener("message", function (e) {
+    if (e.ports && e.ports[0]) stolen.push(e.ports[0]);
+  }, true);
+  var forge = function () {
+    stolen.forEach(function (p) {
+      try { p.postMessage({ type: "bd-edit:exit", patches: [{ start: 1, end: 5, html: "PWNED" + "_EXIT" }] }); } catch {}
+    });
+  };
+  window.addEventListener("beforeunload", forge);
+  window.addEventListener("pagehide", forge);
+  try { parent.postMessage({ type: "bd-edit:hello" }, "*", [new MessageChannel().port2]); } catch {}
+  parent.postMessage({ type: "bd-edit:ready", hash: "", len: -1, ranges: [{ start: 1, end: 5 }] }, "*");
+  parent.postMessage({ type: "bd-edit:patch", seq: 1, start: 1, end: 5, html: "PWNED" + "_PATCH" }, "*");
+  setTimeout(function () {
+    var h = document.querySelector("h1");
+    if (h) h.click();
+    var p = document.querySelector("p.lead");
+    if (p) p.dispatchEvent(new InputEvent("input", { bubbles: true, data: "PWNED" + "_INPUT" }));
+  }, 0);
+})();
+</script>`;
+const HOSTILE = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>Hostile report</title>
+    ${HOSTILE_SCRIPT}
+  </head>
+  <body>
+    <h1>Hostile report</h1>
+    <p class="lead">Revenue grew steadily across every region.</p>
+    ${HOSTILE_SCRIPT}
+  </body>
+</html>
+`;
+
+test("hostile scripts inside the HTML file cannot steal editor ports or forge edits on close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = `hostile-${Date.now()}-${n++}.html`;
+  const put = await page.request.put(`/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`, {
+    data: HOSTILE,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+  expect(put.ok()).toBeTruthy();
+  litter.push(async () => {
+    await page.request.post(`/api/p/${id}/remove`, { data: { path: file } }).catch(() => {});
+  });
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor); // only the exit worker can save what follows
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Genuine edit.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(page, id, file, "Revenue grew steadily across every region. Genuine edit.");
+    expect(after).not.toContain("PWNED_EXIT");
+    expect(after).not.toContain("PWNED_PATCH");
+    expect(after).not.toContain("PWNED_INPUT");
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+/* The page goes into the bfcache (pagehide, persisted) with an edit the app
+   never heard: the exit worker saves it, and that exit's port is spent. The
+   page comes back (pageshow) and is edited again — still unheard — and then
+   really closed. The worker must have been re-armed with a fresh port, or the
+   second edit goes nowhere. Both must land. */
+test("after a bfcache pagehide and pageshow, a second undelivered edit still saves on tab close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" First bfcache.");
+
+    // Into the bfcache, in the browser's order: the parent, then the frame.
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await waitForSource(page, id, file, "Revenue grew steadily across every region. First bfcache.");
+
+    // Back again: the app hands the frame a fresh exit port.
+    await child!.evaluate(() => document.documentElement.removeAttribute("data-bd-exit"));
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+
+    await frame.locator("li").first().click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Second close.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(page, id, file, "North America led the quarter. Second close.");
+    expect(after).toContain("Revenue grew steadily across every region. First bfcache.");
+    expect(after.split("First bfcache.").length - 1).toBe(1);
     expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
   } finally {
     await ctx.close().catch(() => {});
@@ -604,6 +805,7 @@ test("plain-folder mode: an auto-saved edit followed by an undelivered edit befo
     const onDisk = () => fs.readFileSync(page, "utf8");
 
     const editor = await ctx.newPage();
+    await installPatchDrop(editor);
     await editor.goto(base + "/page.html");
     await editor.click("#edit-btn");
     const frame = editor.frameLocator("iframe.htmlview");

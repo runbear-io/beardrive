@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -255,7 +256,7 @@ func (s *stamper) findOpen(name string) int {
 }
 
 // stampEditable rewrites HTML source so every innermost text-bearing element
-// carries its inner content's byte range in the original source, and appends
+// carries its inner content's byte range in the original source, and inserts
 // the bootstrap that turns those ranges into editable regions.
 //
 // It is total: any input returns valid HTML. Malformed markup loses markers,
@@ -268,6 +269,35 @@ func stampEditable(src []byte, scriptURL string) []byte {
 	// resolve these offsets against (see utf16Len). It advances by the raw
 	// token length no matter what gets emitted in its place.
 	off := 0
+
+	/* Where the bootstrap goes: before the page can run a line of its own.
+
+	   The page is whatever the project's writers put there, and the bootstrap
+	   is what talks to the editor outside the frame. Run after the page's
+	   scripts, it would find a realm they had already had their way with — a
+	   message listener in place to take the channel's port, prototypes
+	   replaced under it. Run first and synchronously, it holds the originals
+	   before the parser reaches any page script. So it is the first child of
+	   <head> when the file has one, and otherwise sits just before the first
+	   tag that is not <html> — after the doctype and leading comments, so
+	   neither the rendering mode nor a byte of the body moves. Only the
+	   output is touched: every offset above is measured on the source.
+	   bootChunk indexes s.out; bootAfter says after it rather than before. */
+	bootChunk, bootAfter, decided := -1, false, false
+	htmlChunk := -1
+	place := func(tt html.TokenType, name string) {
+		if decided {
+			return
+		}
+		switch {
+		case strings.EqualFold(name, "html"):
+			htmlChunk = len(s.out) - 1 // the bootstrap goes inside it
+		case strings.EqualFold(name, "head") && tt == html.StartTagToken:
+			bootChunk, bootAfter, decided = len(s.out)-1, true, true
+		default:
+			bootChunk, bootAfter, decided = len(s.out)-1, false, true
+		}
+	}
 
 	for {
 		tt := z.Next()
@@ -297,10 +327,12 @@ func stampEditable(src []byte, scriptURL string) []byte {
 			}
 			if voidElements[tok.DataAtom] {
 				s.out = append(s.out, chunk)
+				place(tt, tok.Data)
 				continue
 			}
 			s.closeImplied(tok.DataAtom, start)
 			s.out = append(s.out, chunk)
+			place(tt, tok.Data)
 			inert := neverEditable[tok.DataAtom] ||
 				(len(s.stack) > 0 && s.stack[len(s.stack)-1].inert)
 			s.stack = append(s.stack, openElem{
@@ -329,22 +361,35 @@ func stampEditable(src []byte, scriptURL string) []byte {
 
 		default: // self-closing, comments, doctype: pass through untouched
 			s.out = append(s.out, chunk)
+			if tt == html.SelfClosingTagToken {
+				name, _ := z.TagName()
+				place(tt, string(name))
+			}
 		}
 	}
 
 	sum := sha256.Sum256(src)
-	body := bytes.Join(s.out, nil)
-	// Appended after the stored bytes — the same place printSuffix goes, and
-	// for the same reason: HTML's parser accepts trailing content, and this
-	// path never touches what is served for download.
-	//
-	// The length rides along with the hash because the browser cannot always
-	// compute a hash: crypto.subtle exists only in a secure context, and a
-	// LAN hub served over plain HTTP is not one. Comparing lengths is a weaker
-	// check — it misses an edit that happens to preserve length — but it is
-	// the difference between a safety net and none at all on those hubs.
-	return fmt.Appendf(body, "\n<script src=%q data-src-hash=%q data-src-len=%q defer></script>",
+	// Synchronous, never defer: deferred, it would run after every page
+	// script. The length rides along with the hash because the browser cannot
+	// always compute a hash: crypto.subtle exists only in a secure context,
+	// and a LAN hub served over plain HTTP is not one. Comparing lengths is a
+	// weaker check — it misses an edit that happens to preserve length — but
+	// it is the difference between a safety net and none at all on those hubs.
+	boot := fmt.Appendf(nil, "<script src=%q data-src-hash=%q data-src-len=%q></script>",
 		scriptURL, hex.EncodeToString(sum[:]), fmt.Sprint(utf16Len(src)))
+	if !decided && htmlChunk >= 0 {
+		bootChunk, bootAfter, decided = htmlChunk, true, true
+	}
+	if !decided {
+		// No tag at all: nothing runs before it wherever it goes.
+		return append(append(bytes.Join(s.out, nil), '\n'), boot...)
+	}
+	at := bootChunk
+	if bootAfter {
+		at++
+	}
+	s.out = slices.Insert(s.out, at, boot)
+	return bytes.Join(s.out, nil)
 }
 
 func hasSrcAttr(t html.Token) bool {

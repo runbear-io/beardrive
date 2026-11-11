@@ -452,3 +452,81 @@ func TestStampPreservesEverythingElse(t *testing.T) {
 		}
 	}
 }
+
+/*
+The bootstrap runs before any of the page's own scripts.
+
+	The page is whatever the project's writers put there. A script of its own
+	that ran first could listen for the editor's message and take the
+	channel's port, or replace the prototypes the bootstrap relies on. So the
+	bootstrap is synchronous and placed ahead of every page script — first in
+	<head>, or before the first tag — while the doctype stays first (it sets
+	the rendering mode), the body's bytes stay put, and every range is still
+	measured on the stored source.
+*/
+func TestStampRunsBootstrapBeforeEveryPageScript(t *testing.T) {
+	const boot = `<script src="/inline-edit.js"`
+	check := func(t *testing.T, src string) string {
+		t.Helper()
+		out := string(stampEditable([]byte(src), "/inline-edit.js"))
+		if strings.Count(out, boot) != 1 {
+			t.Fatalf("bootstrap appears %d times in %q", strings.Count(out, boot), out)
+		}
+		i := strings.Index(out, boot)
+		tag := out[i:]
+		tag = tag[:strings.Index(tag, "</script>")]
+		if strings.Contains(tag, "defer") || strings.Contains(tag, "async") {
+			t.Fatalf("bootstrap %q is not synchronous", tag)
+		}
+		for _, m := range parseStamped(t, []byte(out)) {
+			if got, want := normText(sliceText(sliceU16([]byte(src), m.start, m.end))), normText(m.text); got != want {
+				t.Errorf("<%s> range %d,%d slices to %q, shows %q", m.tag, m.start, m.end, got, want)
+			}
+		}
+		return out
+	}
+
+	t.Run("document", func(t *testing.T) {
+		out := check(t, "<!DOCTYPE html>\n<html><head><script>evilHead()</script></head>"+
+			"<body><script>evilBody()</script><p>hi</p></body></html>")
+		if !strings.HasPrefix(out, "<!DOCTYPE html>") {
+			t.Fatalf("doctype is no longer first: %.60q", out)
+		}
+		if b := strings.Index(out, boot); !strings.Contains(out, "<head>"+boot) || b > strings.Index(out, "evilHead()") {
+			t.Fatalf("bootstrap is not the first thing in <head>: %q", out)
+		}
+	})
+	t.Run("fragment", func(t *testing.T) {
+		src := "<script>evilFirst()</script><p>hi</p>"
+		out := check(t, src)
+		if !strings.HasPrefix(out, boot) {
+			t.Fatalf("bootstrap does not lead the fragment: %q", out)
+		}
+		marks := parseStamped(t, []byte(out))
+		if len(marks) != 1 || sliceU16([]byte(src), marks[0].start, marks[0].end) != "hi" {
+			t.Fatalf("<p> marks %+v, want one range slicing \"hi\"", marks)
+		}
+	})
+	t.Run("headless", func(t *testing.T) {
+		src := "<!DOCTYPE html>\n<body>\n  <p>Hello</p>\n</body>"
+		out := check(t, src)
+		if !strings.HasPrefix(out, "<!DOCTYPE html>\n"+boot) {
+			t.Fatalf("bootstrap is not between the doctype and <body>: %q", out)
+		}
+		if !strings.Contains(out, "<body>\n  <p") {
+			t.Fatalf("the body's bytes moved: %q", out)
+		}
+	})
+	t.Run("html only", func(t *testing.T) {
+		out := check(t, "<html></html>")
+		if !strings.HasPrefix(out, "<html>"+boot) {
+			t.Fatalf("bootstrap is not inside <html>: %q", out)
+		}
+	})
+	t.Run("no tags", func(t *testing.T) {
+		out := check(t, "<!-- just a note -->")
+		if !strings.HasPrefix(out, "<!-- just a note -->\n"+boot) {
+			t.Fatalf("tagless input: %q", out)
+		}
+	})
+}
