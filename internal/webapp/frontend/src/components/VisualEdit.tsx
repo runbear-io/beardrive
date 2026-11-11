@@ -166,6 +166,67 @@ export function VisualEdit({
     }, 11_000);
     const stuckTimer = setTimeout(() => setStuck(true), 24_000);
 
+    /* Messages from the frame, handled one at a time in arrival order; Done's
+       save first drains them (frame.current answers a flush only after every
+       patch it posted before), so a word typed just before Done is in the
+       document — and in its save, shrink check and failure — before the save
+       decides whether the editor may close. */
+    const channel = frameChannel();
+    let frameReady = false;
+    const drainFrame = async (lock: boolean) => {
+      const el = frame.current;
+      const win = el?.contentWindow;
+      if (!el || !win) return;
+      // A frame that reloads or is replaced cannot answer: stop waiting then.
+      let reloaded = false;
+      const onLoad = () => {
+        reloaded = true;
+      };
+      el.addEventListener("load", onLoad);
+      try {
+        await channel.drain(
+          (m) => win.postMessage(m, "*"),
+          () => !frameReady || reloaded || frame.current !== el || el.contentWindow !== win,
+          lock,
+        );
+      } finally {
+        el.removeEventListener("load", onLoad);
+      }
+      // Saving now: the idle save the last patch armed has nothing left to do.
+      clearTimeout(stageTimer);
+      stageTimer = undefined;
+    };
+    /* Lock the frame and drain it: every patch it posted is in the document
+       and nothing more can be typed until the returned release. Done's save
+       and the join (a staging buffer folded into the room) both hold one;
+       counted per frame window, so neither unlocks the other early and a
+       release meant for a frame since replaced never touches the new one. */
+    const winLocks = new Map<Window, number>();
+    const lockFrame = async (): Promise<() => void> => {
+      const win = frame.current?.contentWindow;
+      if (!win) return () => {};
+      winLocks.set(win, (winLocks.get(win) ?? 0) + 1);
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        const left = (winLocks.get(win) ?? 1) - 1;
+        if (left > 0) {
+          winLocks.set(win, left);
+          return;
+        }
+        winLocks.delete(win);
+        win.postMessage({ type: "bd-edit:unlock" }, "*");
+      };
+      try {
+        await drainFrame(true);
+      } catch (e) {
+        release();
+        throw e;
+      }
+      return release;
+    };
+
     const file = (fileRef.current = openSharedFile({
       apiBase,
       path,
@@ -176,6 +237,10 @@ export function VisualEdit({
       onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
       onShrinkRefused: (ask) => askShrink(path, ask),
       onShrinkWithdrawn: withdrawShrink,
+      // The socket synced while staging: every patch the frame has posted
+      // must be in the staging buffer before the join reads it, and nothing
+      // typed while the join folds it into the room. Unlocked once joined.
+      beforeJoin: async () => (stageDoc ? lockFrame() : () => {}),
       // Nothing to mount either way: the surface is the iframe, which is
       // already on screen. The room is joined for the CRDT alone.
       onReady: () => {
@@ -238,50 +303,24 @@ export function VisualEdit({
         });
       },
     }));
-    /* Messages from the frame, handled one at a time in arrival order; Done's
-       save first drains them (frame.current answers a flush only after every
-       patch it posted before), so a word typed just before Done is in the
-       document — and in its save, shrink check and failure — before the save
-       decides whether the editor may close. */
-    const channel = frameChannel();
-    let frameReady = false;
-    const drainFrame = async (lock: boolean) => {
-      const el = frame.current;
-      const win = el?.contentWindow;
-      if (!el || !win) return;
-      // A frame that reloads or is replaced cannot answer: stop waiting then.
-      let reloaded = false;
-      const onLoad = () => {
-        reloaded = true;
-      };
-      el.addEventListener("load", onLoad);
-      try {
-        await channel.drain(
-          (m) => win.postMessage(m, "*"),
-          () => !frameReady || reloaded || frame.current !== el || el.contentWindow !== win,
-          lock,
-        );
-      } finally {
-        el.removeEventListener("load", onLoad);
-      }
-      // Saving now: the idle save the last patch armed has nothing left to do.
-      clearTimeout(stageTimer);
-      stageTimer = undefined;
-    };
     /* Done: the frame is drained AND locked, so nothing typed while the save
        is on the wire can be left out of it; it is unlocked again unless the
        save landed (lib/frameflush.ts saveLocked). Concurrent calls share one. */
     let savingFrame: Promise<boolean> | null = null;
     const exposed: SharedFile = {
       ...file,
-      saveNow: () =>
-        (savingFrame ??= saveLocked(
-          () => drainFrame(true),
+      saveNow: () => {
+        let release = () => {};
+        return (savingFrame ??= saveLocked(
+          async () => {
+            release = await lockFrame();
+          },
           () => file.saveNow(),
-          () => frame.current?.contentWindow?.postMessage({ type: "bd-edit:unlock" }, "*"),
+          () => release(),
         ).finally(() => {
           savingFrame = null;
-        })),
+        }));
+      },
     };
     if (handle) handle.current = exposed;
 

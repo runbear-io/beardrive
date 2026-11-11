@@ -2681,3 +2681,102 @@ for (const outcome of ["saved", "503", "shrink"] as const) {
     }
   });
 }
+
+/* The socket syncs while VisualEdit is staging and the frame's last patch is
+   still in the postMessage queue. The join must not read the staging buffer
+   without it: beforeJoin drains and locks the frame first, so the patch is
+   in the join's merge (or in the conflict copy, if it clashes with the
+   room), and the frame is unlocked once the join is done. */
+for (const room of ["merges", "clashes"] as const) {
+  test(`a join drains the frame's queued patch before reading the staging buffer (${room})`, async () => {
+    const connect = mock.method(CollabDoc.prototype, "connect", () => {});
+    const puts: Array<{ url: string; body: string }> = [];
+    const posts: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        puts.push({ url: decodeURIComponent(String(url)), body: String(init.body) });
+        return new Response(JSON.stringify({ sha: "sha-copy" }), { status: 200 });
+      }
+      posts.push(String(init?.body));
+      return new Response(JSON.stringify({ sha: "sha-room", text: "" }), { status: 200 });
+    }) as typeof fetch;
+    const state = { buffer: "a\nb\nc\n" };
+    const channel = frameChannel();
+    const frame = { locked: false, unlocks: 0, readAt: "" };
+    // window "message" delivery: a later task, in posting order.
+    const deliver = (msg: { type: "patch"; text: string } | { type: "flushed"; id: number }) =>
+      setImmediate(() =>
+        channel.enqueue(async () => {
+          await Promise.resolve(); // anchoring is async; order must still hold
+          if (msg.type === "patch") state.buffer = msg.text;
+          else channel.flushed(msg.id);
+        }),
+      );
+    const ready: unknown[] = [];
+    const file = openSharedFile({
+      apiBase: "/api/p/proj/",
+      path: "page.html",
+      seed: "a\nb\nc\n",
+      baseSha: "sha-a",
+      who: "tester",
+      me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+      onReady: (c) => ready.push(c),
+      onSolo: () => {},
+      soloText: () => {
+        frame.readAt = state.buffer;
+        return state.buffer;
+      },
+      soloApply: (e) => {
+        state.buffer = state.buffer.slice(0, e.from) + e.insert + state.buffer.slice(e.to);
+      },
+      // VisualEdit's: drain and lock the frame, release unlocks it.
+      beforeJoin: async () => {
+        await channel.drain(
+          (m) => {
+            if (m.lock) frame.locked = true;
+            deliver({ type: "flushed", id: m.id });
+          },
+          () => false,
+          true,
+        );
+        return () => {
+          frame.locked = false;
+          frame.unlocks++;
+        };
+      },
+    });
+    try {
+      // The user's last edit is on its way from the frame...
+      deliver({ type: "patch", text: room === "merges" ? "a\nb\nc\nmine\n" : "a\nMINE\nc\n" });
+      // ...when the room's document arrives, with a peer's edit in it.
+      const sock = { destroy() {} };
+      const c = file.collab as unknown as { ws: unknown; onStatus: (s: string) => void; onReady: () => void };
+      c.ws = sock;
+      const peer = room === "merges" ? "peer\na\nb\nc\n" : "a\nPEER\nc\n";
+      file.collab.doc.transact(() => file.collab.text.insert(0, peer), sock);
+      c.onStatus("live");
+      c.onReady();
+      await waitFor(() => assert.equal(ready.length, 1));
+
+      if (room === "merges") {
+        assert.equal(frame.readAt, "a\nb\nc\nmine\n"); // read after the patch
+        assert.equal(file.collab.text.toString(), "peer\na\nb\nc\nmine\n");
+        same(puts, []);
+      } else {
+        // The same line two ways: the patched buffer is the conflict copy.
+        assert.equal(puts.length, 1);
+        assert.ok(puts[0].url.includes("page.html.bdrive-conflict-tester-"));
+        assert.equal(puts[0].body, "a\nMINE\nc\n");
+        assert.equal(file.collab.text.toString(), "a\nPEER\nc\n");
+      }
+      same(posts, []); // the join, not a checkpoint, handed the buffer over
+      assert.equal(frame.locked, false);
+      assert.equal(frame.unlocks, 1);
+    } finally {
+      channel.close();
+      file.destroy();
+      connect.mock.restore();
+      await settle();
+    }
+  });
+}

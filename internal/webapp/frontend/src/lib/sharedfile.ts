@@ -168,6 +168,10 @@ export type SharedFileOptions = {
       surface cannot take one, and merge() says so rather than claiming a
       change it could not make. */
   soloApply?: (e: { from: number; to: number; insert: string }) => void;
+  /** A surface whose edits reach `soloText` asynchronously (VisualEdit's
+      iframe) brings them all in and stops taking more before the join reads
+      the buffer; the join calls the returned release once it is done. */
+  beforeJoin?: () => Promise<() => void>;
 };
 
 /* Three ways to be connected, and what writes the file in each:
@@ -1022,48 +1026,78 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
         return;
       }
     }
-    const local = opts.soloText?.();
-    if (local === undefined || local === saved) return finishJoin();
-    const hub = collab.text.toString();
-    const res = mergeForPath(saved, hub, local);
-    if (res.ok) return finishJoin(() => collab.applySplices(diffSplices(hub, res.text)));
-    pendingJoin = true;
-    // One name for every attempt at the same text: a retry re-writes the same
-    // copy, never a second. Newer text — or a staging park still on the wire —
-    // gets a freshly minted name, so an older PUT never lands over it.
-    if (parkedName === null || parkedText !== local) {
-      parkedName = mintConflictPath();
-      parkedText = local;
-    }
-    joining = true;
-    let failed: { err: unknown } | null;
-    try {
-      failed = await preserve(local, base ?? "", parkedName);
-    } finally {
-      joining = false;
-    }
-    if (gone) return; // destroy() parked the buffer itself
-    if (!failed) {
-      // Typing that landed in the buffer while the copy was on the wire is
-      // not in it: go round again from what was parked.
-      if (opts.soloText?.() !== local) {
-        parkedName = null;
-        parkedText = null;
-        return join();
+    /* The buffer the join is about to read may still be arriving (an
+       iframe's patches over postMessage): bring it all in and hold the
+       surface still until the join is done. No checkpoint goes out meanwhile:
+       the join is what hands the buffer to the room. */
+    let unlockSurface: (() => void) | undefined;
+    if (opts.beforeJoin) {
+      waitingToJoin = true;
+      try {
+        unlockSurface = await opts.beforeJoin();
+      } catch {
+        // A surface that cannot be drained joins with what it has.
+      } finally {
+        waitingToJoin = false;
       }
-      // Parked: the editor now shows the room's text, which is what it is built on.
-      return finishJoin(() => {
-        saved = collab.text.toString();
-      });
+      if (gone || hubHoldsIt) {
+        unlockSurface?.();
+        return;
+      }
+      if (!live) {
+        unlockSurface?.();
+        if (current() !== saved || roomNeedsFlush) scheduleSave();
+        return;
+      }
     }
-    const e = failed.err;
-    if (e instanceof HttpError && !(e.status >= 500 || e.status === 429)) return; // waits for the next edit
-    const delay = SAVE_RETRY_MS[Math.min(joinAttempt, SAVE_RETRY_MS.length - 1)];
-    joinAttempt++;
-    joinTimer = setTimeout(() => {
-      joinTimer = null;
-      void join();
-    }, delay);
+    try {
+      const local = opts.soloText?.();
+      if (local === undefined || local === saved) return finishJoin();
+      const hub = collab.text.toString();
+      const res = mergeForPath(saved, hub, local);
+      if (res.ok) return finishJoin(() => collab.applySplices(diffSplices(hub, res.text)));
+      pendingJoin = true;
+      // One name for every attempt at the same text: a retry re-writes the same
+      // copy, never a second. Newer text — or a staging park still on the wire —
+      // gets a freshly minted name, so an older PUT never lands over it.
+      if (parkedName === null || parkedText !== local) {
+        parkedName = mintConflictPath();
+        parkedText = local;
+      }
+      joining = true;
+      let failed: { err: unknown } | null;
+      try {
+        failed = await preserve(local, base ?? "", parkedName);
+      } finally {
+        joining = false;
+      }
+      if (gone) return; // destroy() parked the buffer itself
+      if (!failed) {
+        // Typing that landed in the buffer while the copy was on the wire is
+        // not in it: go round again from what was parked.
+        if (opts.soloText?.() !== local) {
+          parkedName = null;
+          parkedText = null;
+          return join();
+        }
+        // Parked: the editor now shows the room's text, which is what it is built on.
+        return finishJoin(() => {
+          saved = collab.text.toString();
+        });
+      }
+      const e = failed.err;
+      if (e instanceof HttpError && !(e.status >= 500 || e.status === 429)) return; // waits for the next edit
+      const delay = SAVE_RETRY_MS[Math.min(joinAttempt, SAVE_RETRY_MS.length - 1)];
+      joinAttempt++;
+      joinTimer = setTimeout(() => {
+        joinTimer = null;
+        void join();
+      }, delay);
+    } finally {
+      // Joined (onReady has run), parked, or waiting on a retry: the surface
+      // takes typing again.
+      unlockSurface?.();
+    }
   };
 
   const collab = new CollabDoc(
