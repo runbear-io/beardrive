@@ -12,7 +12,9 @@
    after its last patch on the same channel, so by the time it is handled here
    every patch before it has been spliced into the document. */
 
-export type FlushRequest = { type: "bd-edit:flush"; id: number };
+// `lock`: the frame also stops taking edits until `bd-edit:unlock`, so nothing
+// typed while the save that follows is on the wire can be left out of it.
+export type FlushRequest = { type: "bd-edit:flush"; id: number; lock?: true };
 
 export type FrameChannel = {
   /** Handle one message, after every message before it has been handled. */
@@ -21,8 +23,9 @@ export type FrameChannel = {
   flushed(id: number): void;
   /** Ask the frame for everything it holds and wait until it has been
       handled. Waits as long as the frame is there to answer — never on a
-      timer — and gives up only once `gone()` says it cannot. */
-  drain(post: (msg: FlushRequest) => void, gone: () => boolean): Promise<void>;
+      timer — and gives up only once `gone()` says it cannot. With `lock`, the
+      frame takes no more edits until it is sent `bd-edit:unlock`. */
+  drain(post: (msg: FlushRequest) => void, gone: () => boolean, lock?: boolean): Promise<void>;
   /** The editor is going: nothing waits on the frame any more. */
   close(): void;
 };
@@ -45,7 +48,7 @@ export function frameChannel(): FrameChannel {
       waiting.get(id)?.();
       waiting.delete(id);
     },
-    async drain(post, gone) {
+    async drain(post, gone, lock = false) {
       await settled();
       if (closed || gone()) return;
       const id = ++seq;
@@ -59,7 +62,7 @@ export function frameChannel(): FrameChannel {
         }, GONE_POLL_MS);
       });
       try {
-        post({ type: "bd-edit:flush", id });
+        post(lock ? { type: "bd-edit:flush", id, lock: true } : { type: "bd-edit:flush", id });
         await answered;
       } finally {
         clearInterval(poll);
@@ -72,4 +75,24 @@ export function frameChannel(): FrameChannel {
       waiting.clear();
     },
   };
+}
+
+/* Done's save through the frame: drain it and lock it (`drain`), save, and
+   unlock it unless the save landed. A save that lands leaves the frame
+   locked, since the editor is about to close; one that fails, throws or
+   opens a question unlocks it, since the editor stays and the user may go on
+   typing. */
+export async function saveLocked(
+  drain: () => Promise<void>,
+  save: () => Promise<boolean>,
+  unlock: () => void,
+): Promise<boolean> {
+  let ok = false;
+  try {
+    await drain();
+    ok = await save();
+    return ok;
+  } finally {
+    if (!ok) unlock();
+  }
 }

@@ -5,9 +5,12 @@
    (server.go's serveEditable). A reader never downloads an editor, and the
    iframe keeps exactly the sandbox it always had — no allow-same-origin — so
    nothing here can reach the hub's session. It talks to the app by postMessage
-   and accepts one thing back: `bd-edit:flush` (with a numeric id), which posts
-   any edit still held here and answers `bd-edit:flushed` with that id, so the
-   app's Done saves only after every patch before the answer has landed.
+   and accepts two things back: `bd-edit:flush` (a numeric id, optionally
+   `lock: true`), which posts any edit still held here and answers
+   `bd-edit:flushed` with that id — so the app's Done saves only after every
+   patch before the answer has landed — and, with `lock`, stops accepting
+   edits until `bd-edit:unlock`, so nothing typed during Done's save can be
+   left out of it.
 
    Three things had to be true at once, and they decided the design:
 
@@ -180,6 +183,9 @@ let view: EditorView | null = null;
 let host: HTMLElement | null = null;
 let range: Range | null = null;
 let before = "";
+/* Done's save is on the wire: no edit may start until the app says how it
+   went (`bd-edit:unlock` if the editor stays; a page torn down otherwise). */
+let locked = false;
 
 // The document as markup, or null if there is no live editor.
 function currentHTML(): string | null {
@@ -280,7 +286,9 @@ function mount(el: HTMLElement, x?: number, y?: number) {
     { mount: el },
     {
       state,
+      editable: () => !locked,
       dispatchTransaction(tr) {
+        if (locked && tr.docChanged) return;
         view!.updateState(view!.state.apply(tr));
         /* Reported on EVERY change, with no debounce of its own.
 
@@ -312,6 +320,7 @@ function nearestEditable(target: EventTarget | null): HTMLElement | null {
 document.addEventListener(
   "click",
   (e) => {
+    if (locked) return; // no element opens or closes while Done saves
     const el = nearestEditable(e.target);
     if (!el) {
       unmount(); // clicking away commits, the same as blurring
@@ -390,11 +399,24 @@ window.addEventListener("beforeunload", unmount);
 
 /* Done in the app: post what the open editor holds, then answer. The answer
    follows every patch on the same channel, so once the app has handled it, it
-   has handled them all. Only the app (the parent window) may ask. */
+   has handled them all. With `lock`, nothing more is typed until the app
+   unlocks (its save failed or asked a question) or tears the page down (it
+   saved). Only the app (the parent window) may ask. */
 window.addEventListener("message", (e) => {
   if (e.source !== window.parent) return;
-  const msg = e.data as { type?: unknown; id?: unknown } | null;
-  if (!msg || msg.type !== "bd-edit:flush" || typeof msg.id !== "number") return;
-  flush();
-  send({ type: "bd-edit:flushed", id: msg.id });
+  const msg = e.data as { type?: unknown; id?: unknown; lock?: unknown } | null;
+  if (!msg) return;
+  if (msg.type === "bd-edit:flush" && typeof msg.id === "number") {
+    flush();
+    if (msg.lock === true) {
+      locked = true;
+      view?.setProps({ editable: () => !locked });
+    }
+    send({ type: "bd-edit:flushed", id: msg.id });
+    return;
+  }
+  if (msg.type === "bd-edit:unlock") {
+    locked = false;
+    view?.setProps({ editable: () => !locked });
+  }
 });

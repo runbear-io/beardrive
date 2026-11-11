@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState, type SharedFile } from "../lib/sharedfile";
 import { diffSplices, merge3PreferRight } from "../lib/merge3";
-import { frameChannel } from "../lib/frameflush";
+import { frameChannel, saveLocked } from "../lib/frameflush";
 import { type CollabStatus } from "../lib/collab";
 import { askShrink, withdrawShrink } from "./ShrinkDialog";
 
@@ -245,7 +245,7 @@ export function VisualEdit({
        decides whether the editor may close. */
     const channel = frameChannel();
     let frameReady = false;
-    const drainFrame = async () => {
+    const drainFrame = async (lock: boolean) => {
       const el = frame.current;
       const win = el?.contentWindow;
       if (!el || !win) return;
@@ -259,6 +259,7 @@ export function VisualEdit({
         await channel.drain(
           (m) => win.postMessage(m, "*"),
           () => !frameReady || reloaded || frame.current !== el || el.contentWindow !== win,
+          lock,
         );
       } finally {
         el.removeEventListener("load", onLoad);
@@ -267,12 +268,20 @@ export function VisualEdit({
       clearTimeout(stageTimer);
       stageTimer = undefined;
     };
+    /* Done: the frame is drained AND locked, so nothing typed while the save
+       is on the wire can be left out of it; it is unlocked again unless the
+       save landed (lib/frameflush.ts saveLocked). Concurrent calls share one. */
+    let savingFrame: Promise<boolean> | null = null;
     const exposed: SharedFile = {
       ...file,
-      saveNow: async () => {
-        await drainFrame();
-        return file.saveNow();
-      },
+      saveNow: () =>
+        (savingFrame ??= saveLocked(
+          () => drainFrame(true),
+          () => file.saveNow(),
+          () => frame.current?.contentWindow?.postMessage({ type: "bd-edit:unlock" }, "*"),
+        ).finally(() => {
+          savingFrame = null;
+        })),
     };
     if (handle) handle.current = exposed;
 

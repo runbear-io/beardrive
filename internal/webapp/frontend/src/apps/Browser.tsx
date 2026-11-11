@@ -1166,18 +1166,18 @@ export default function Browser(props: {
                 if (flush && leavingFlushRef.current === flush) return;
                 leavingFlushRef.current = flush;
                 try {
-                  const target = urlForPath(path, project?.id, version, route.full, false);
-                  const here = window.location.pathname + window.location.search;
+                  const herePath = window.location.pathname;
                   let okToLeave = true;
                   try {
                     okToLeave = await (flush?.() ?? Promise.resolve(true));
                   } catch {
                     // The editor's own teardown still sends what it holds.
                   }
-                  if (!okToLeave) return; // the shrink dialog is open: answer it here
-                  // Somewhere else already (a click elsewhere while saving): stay there.
-                  if (window.location.pathname + window.location.search !== here) return;
-                  navigate(target);
+                  if (!okToLeave) return; // unsaved or shrink dialog open: stay here
+                  // Left this edit route already (clicked another file/view): stay there.
+                  if (window.location.pathname !== herePath) return;
+                  const fullNow = new URLSearchParams(window.location.search).get("full") === "1";
+                  navigate(urlForPath(path, project?.id, version, fullNow, false));
                 } finally {
                   if (leavingFlushRef.current === flush) leavingFlushRef.current = null;
                 }

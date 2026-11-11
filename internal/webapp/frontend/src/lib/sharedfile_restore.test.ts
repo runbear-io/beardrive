@@ -54,7 +54,7 @@ const { CollabDoc } = await import("./collab.ts");
 const { openSharedFile, SAVE_RETRY_MS } = await import("./sharedfile.ts");
 const { parseConflict } = await import("./conflict.ts");
 const { merge3, merge3PreferRight, merge3ForPath, validMergedText } = await import("./merge3.ts");
-const { frameChannel } = await import("./frameflush.ts");
+const { frameChannel, saveLocked } = await import("./frameflush.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -2484,11 +2484,14 @@ for (const keepAnswer of [200, 503]) {
    that patch would meet. Draining first — flush request, the frame posts what
    it holds, then `bd-edit:flushed` on the same channel — puts the patch in
    the document before the save decides. `frame` stands in for the iframe:
-   `deliver` is a message arriving on window "message", later, in order. */
+   `deliver` is a message arriving on window "message", later, in order; a
+   flush with `lock` makes it refuse typing (`type`) until it is unlocked. */
 function frameHarness(answer: (body: string) => Response) {
   const puts: string[] = [];
+  const net: { hold: Promise<void> | null } = { hold: null };
   globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
     puts.push(String(init?.body));
+    if (net.hold) await net.hold;
     return answer(String(init?.body));
   }) as typeof fetch;
   const state = { buffer: "a\nb\nc\n" };
@@ -2521,18 +2524,29 @@ function frameHarness(answer: (body: string) => Response) {
         else channel.flushed(msg.id);
       }),
     );
-  const frame = { gone: false, answers: true, flushes: 0 };
-  const post = (m: { type: "bd-edit:flush"; id: number }) => {
+  const frame = { gone: false, answers: true, flushes: 0, locked: false };
+  const post = (m: { type: "bd-edit:flush"; id: number; lock?: true }) => {
     frame.flushes++;
+    if (m.lock) frame.locked = true;
     if (frame.answers) deliver({ type: "flushed", id: m.id });
   };
-  // VisualEdit's exposed saveNow.
-  const saveNow = async () => {
-    await channel.drain(post, () => frame.gone);
-    return file.saveNow();
+  // Typing in the frame: a patch posted, unless Done's save has it locked.
+  const type = (text: string) => {
+    if (frame.locked) return false;
+    deliver({ type: "patch", text });
+    return true;
   };
+  // VisualEdit's exposed saveNow.
+  const saveNow = () =>
+    saveLocked(
+      () => channel.drain(post, () => frame.gone, true),
+      () => file.saveNow(),
+      () => {
+        frame.locked = false;
+      },
+    );
   const ready = () => waitFor(() => assert.equal(solo, true));
-  return { file, state, asks, puts, channel, deliver, frame, saveNow, ready };
+  return { file, state, asks, puts, net, channel, deliver, type, frame, saveNow, ready };
 }
 
 test("Done drains the frame's queued patch before saving: a sharp shrink in it asks", async () => {
@@ -2611,3 +2625,59 @@ test("Done's drain waits on a live frame and stops once the frame is gone", asyn
     realTimers();
   }
 });
+
+/* Typing while Done's save is on the wire never reaches that save, so it is
+   blocked: the flush locks the frame. A save that lands leaves it locked (the
+   editor closes); one that fails or asks a question unlocks it, and the
+   typing after that is taken and saved by the next Done. */
+for (const outcome of ["saved", "503", "shrink"] as const) {
+  test(`the frame is locked while Done saves, and unlocked if the editor stays (${outcome})`, async () => {
+    let status = outcome === "saved" ? 200 : outcome === "503" ? 503 : 422;
+    const h = frameHarness(() =>
+      status === 200
+        ? new Response(JSON.stringify({ sha: "sha-b" }), { status: 200 })
+        : status === 503
+          ? new Response("unavailable", { status: 503 })
+          : new Response(JSON.stringify({ error: "would cut most of the file", shrink: true }), { status: 422 }),
+    );
+    try {
+      await h.ready();
+      assert.equal(h.type("a\nb\nc\nd\n"), true);
+      const gate = Promise.withResolvers<void>();
+      h.net.hold = gate.promise;
+      let result: boolean | null = null;
+      void h.saveNow().then((r) => {
+        result = r;
+      });
+      await waitFor(() => assert.equal(h.puts.length, 1)); // the save is on the wire
+      assert.equal(h.puts[0], "a\nb\nc\nd\n");
+      assert.equal(h.frame.locked, true);
+      assert.equal(h.type("a\nb\nc\nd\ntyped during the save\n"), false); // blocked
+
+      h.net.hold = null;
+      gate.resolve();
+      await waitFor(() => assert.notEqual(result, null));
+      if (outcome === "saved") {
+        assert.equal(result, true);
+        assert.equal(h.frame.locked, true); // the editor is closing
+        same(h.puts, ["a\nb\nc\nd\n"]);
+        return;
+      }
+      assert.equal(result, false);
+      assert.equal(h.frame.locked, false); // the editor stays: typing again
+      if (outcome === "shrink") assert.equal(h.file.askingShrink(), true);
+      else {
+        assert.equal(h.type("a\nb\nc\nd\ne\n"), true);
+        await waitFor(() => assert.equal(h.state.buffer, "a\nb\nc\nd\ne\n"));
+        status = 200;
+        assert.equal(await h.saveNow(), true);
+        assert.equal(h.puts.at(-1), "a\nb\nc\nd\ne\n");
+        assert.equal(h.frame.locked, true);
+      }
+    } finally {
+      h.channel.close();
+      h.file.destroy();
+      await settle();
+    }
+  });
+}
