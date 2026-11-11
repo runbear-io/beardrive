@@ -248,7 +248,7 @@ test("staging checkpoint refused 503 once is retried until it saves", async () =
     assert.ok(connect.mock.callCount() > 0);
 
     buffer = "B\n";
-    await file.saveNow();
+    assert.equal(await file.saveNow(), false); // unsaved: Done stays on the editor
     assert.equal(sent.length, 1);
     assert.ok(sent[0].includes("ycollab/sync"));
     assert.equal(states.at(-1), "error");
@@ -260,6 +260,7 @@ test("staging checkpoint refused 503 once is retried until it saves", async () =
     assert.equal(sent.length, 2);
     same(savedTexts, ["B\n"]);
     assert.equal(states.at(-1), "clean");
+    assert.equal(await file.saveNow(), true); // nothing owed: no request
 
     // Saved: no further attempts.
     await advance(60_000);
@@ -1024,7 +1025,7 @@ for (const closeBeforeRetry of [false, true]) {
       await waitFor(() => assert.equal(solo, true));
 
       buffer = "B\n";
-      await file.saveNow();
+      assert.equal(await file.saveNow(), false); // the park failed: Done stays
       // The file refused it, the head clashes, and the park was refused.
       assert.equal(puts.length, 2);
       assert.ok(!puts[0].url.includes("bdrive-conflict"));
@@ -1056,6 +1057,8 @@ for (const closeBeforeRetry of [false, true]) {
 
       // Parked: nothing more is sent.
       await advance(60_000);
+      assert.equal(puts.length, 3);
+      assert.equal(await file.saveNow(), true); // parked: nothing owed
       assert.equal(puts.length, 3);
       file.destroy();
       assert.equal(puts.length, 3);
@@ -2329,6 +2332,94 @@ test("a live save the hub refuses 422 for a shrink only it can see asks, however
     realTimers();
   }
 });
+
+/* Typing while Done's save is on the wire is saved — and shrink-checked —
+   before saveNow answers: a second pass sends it, or a shrink in it opens the
+   question (asked here in solo, refused by the hub in a live room), and
+   saveNow answers false so Done stays on the editor. */
+for (const mode of ["live", "solo"] as const) {
+  for (const followUp of ["typing", "shrink"] as const) {
+    test(`typing while saveNow is on the wire is saved before it answers (${mode}, ${followUp})`, async () => {
+      fakeTimers();
+      const h = await heldRoom(mode === "solo" ? { apiBase: "/api/" } : {});
+      try {
+        if (mode === "solo") await advance(0); // no room route: solo
+        else await h.goLive();
+        if (mode === "live") h.localEdit((t) => t.insert(t.length, "d\n"));
+        else h.state.buffer = "a\nb\nc\nd\n";
+        const gate = Promise.withResolvers<void>();
+        h.net.hold = gate.promise;
+        let result: boolean | null = null;
+        void h.file.saveNow().then((r) => {
+          result = r;
+        });
+        await advance(0);
+        assert.equal(h.reqs.length, 1);
+
+        // Typed while the first pass is out.
+        if (followUp === "typing") {
+          if (mode === "live") h.localEdit((t) => t.insert(t.length, "e\n"));
+          else h.state.buffer = "a\nb\nc\nd\ne\n";
+        } else if (mode === "live") {
+          h.localEdit((t) => t.delete(0, t.length));
+          // The room's own answer carries the deletion, so only the hub can
+          // tell it is a shrink: it refuses the second pass.
+          h.net.status = 422;
+          h.net.error = JSON.stringify({ error: "this would empty the file", shrink: true });
+        } else h.state.buffer = "";
+        h.net.hold = null;
+        gate.resolve();
+        await advance(0);
+
+        if (followUp === "typing") {
+          assert.equal(result, true);
+          assert.equal(h.reqs.length, 2);
+          if (mode === "solo") assert.equal(h.reqs[1].body, "a\nb\nc\nd\ne\n");
+          assert.equal(h.states.at(-1), "clean");
+        } else {
+          assert.equal(result, false);
+          assert.equal(h.file.askingShrink(), true);
+          assert.equal(h.asks.length, 1);
+          assert.equal(h.reqs.length, mode === "live" ? 2 : 1); // solo asks before sending
+        }
+      } finally {
+        h.done();
+        realTimers();
+      }
+    });
+  }
+}
+
+/* A save that fails leaves the buffer unsaved: saveNow answers false (its
+   retry stays armed, Done stays on the editor), and true once a save lands. */
+for (const mode of ["live", "offline", "solo"] as const) {
+  test(`saveNow answers false while a save fails and true once one lands (${mode})`, async () => {
+    fakeTimers();
+    const h = await heldRoom(mode === "solo" ? { apiBase: "/api/" } : {});
+    try {
+      if (mode === "solo") await advance(0); // no room route: solo
+      else await h.goLive();
+      if (mode === "offline") h.c.onStatus("offline");
+      if (mode === "solo") h.state.buffer = "a\nb\nc\nd\n";
+      else h.localEdit((t) => t.insert(t.length, "d\n"));
+
+      h.net.status = 503;
+      h.net.error = "unavailable";
+      assert.equal(await h.file.saveNow(), false);
+      assert.equal(h.reqs.length, 1);
+
+      h.net.status = 200;
+      assert.equal(await h.file.saveNow(), true);
+      assert.equal(h.reqs.length, 2);
+      // Nothing owed now: true at once, nothing sent.
+      assert.equal(await h.file.saveNow(), true);
+      assert.equal(h.reqs.length, 2);
+    } finally {
+      h.done();
+      realTimers();
+    }
+  });
+}
 
 /* Keep, with the socket down, after Done asked about a sharp shrink: the
    deletion is queued in this tab's document, so putting the file's bytes

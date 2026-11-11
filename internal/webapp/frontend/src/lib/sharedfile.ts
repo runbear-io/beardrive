@@ -87,7 +87,7 @@ export type SharedFile = {
   /** Force a save now, skipping the idle wait (Done, Mod-s). In a live room
       this hands the hub the room's state only when this tab has typing no
       snapshot carries yet; clean or a bystander, it sends nothing. */
-  saveNow(): Promise<void>;
+  saveNow(): Promise<boolean>;
   /** A shrink question is waiting on the user: leaving now would leave it
       unanswered (Done stays on the editor). */
   askingShrink(): boolean;
@@ -1239,61 +1239,99 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
   /* An explicit save (Done, Mod-s). In a live room idle typing never writes
      anything from here — the hub snapshots the room — but a user who asked to
      save and leave must not leave on a snapshot still pending: the room's
-     state goes to the hub, which answers only once storage holds it. Clean,
-     or a bystander: nothing to send. Concurrent calls share one request. */
-  let liveFlushing: Promise<void> | null = null;
-  const saveNow = (): Promise<void> => {
-    if (!gone) {
-      // The question is open: Done stays put until it is answered.
-      if (asking) return Promise.resolve();
-      /* A sharp shrink against what the file is known to hold needs the
-         user's word before any request: ask at once, so Done never waits on
-         the network (or times out past it) to learn what is known here. A
-         shrink only the hub can see (a `saved` that is not the whole file)
-         is still its 422, answered the same way. */
-      const wouldSend = hubHoldsIt ? (live ? localDirtyInRoom : pending > 0) : current() !== saved;
-      if (wouldSend && !confirmShrinkOnce && opts.onShrinkRefused && sharpShrink(byteLength(saved), byteLength(current()))) {
+     state goes to the hub, which answers only once storage holds it.
+
+     It sends until nothing is owed, so typing that lands while a pass is on
+     the wire is saved (and shrink-checked) by the next pass before it
+     answers. True: everything typed so far is saved and no question is open.
+     False: a question is open, or a pass failed and the buffer is still
+     unsaved — its retry stays armed, and Done stays on the editor. Clean, or
+     a bystander: true at once. Concurrent calls share one loop. */
+  const owesSave = (): boolean => {
+    if (gone) return false;
+    if (hubHoldsIt) return live ? localDirtyInRoom : offlineAckedSeq < offlineEditSeq;
+    return pendingJoin || stagingConflict || current() !== saved || roomNeedsFlush;
+  };
+  // A sharp shrink against what the file is known to hold is asked about
+  // before any request: the network is never waited on to learn it.
+  const askIfShrunk = (): boolean => {
+    if (confirmShrinkOnce || !opts.onShrinkRefused || !sharpShrink(byteLength(saved), byteLength(current()))) return false;
+    clearTimeout(shrinkTimer ?? undefined);
+    shrinkTimer = null;
+    askShrink(current());
+    return true;
+  };
+  // One live pass: the room's state to the hub, answered once storage holds it.
+  const flushLive = async (): Promise<boolean> => {
+    const sentRoomSeq = localRoomSeq;
+    setState("saving");
+    try {
+      const out = await syncCollab(syncURL, { update: collab.encodeState() });
+      if (gone) return false;
+      if (out.update) collab.applyRemoteUpdate(out.update);
+      adopt(out.text, out.sha);
+      // Typing that landed while this was out is not in it: owed still.
+      roomHandedOver(sentRoomSeq);
+      setState(localDirtyInRoom ? "dirty" : "clean");
+      opts.onSaved?.(saved);
+      return true;
+    } catch (e) {
+      if (gone) return false;
+      /* The hub refused to write a document this much smaller than the
+         file without a word from the user: ask now (the caller stays put
+         until it is answered), rather than wait for the idle check. */
+      if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
         clearTimeout(shrinkTimer ?? undefined);
         shrinkTimer = null;
         askShrink(current());
-        return Promise.resolve();
+        if (asking) return false;
       }
+      // The room still holds every edit and the hub still snapshots it.
+      setState(localDirtyInRoom ? "dirty" : "clean");
+      return false;
     }
-    if (!hubHoldsIt) return save();
-    if (gone) return Promise.resolve();
-    if (!live) return pending > 0 ? flushOffline(false) : Promise.resolve();
-    if (!localDirtyInRoom) return Promise.resolve();
-    if (liveFlushing) return liveFlushing;
-    const sentRoomSeq = localRoomSeq;
-    setState("saving");
-    const run = (async () => {
-      try {
-        const out = await syncCollab(syncURL, { update: collab.encodeState() });
-        if (gone) return;
-        if (out.update) collab.applyRemoteUpdate(out.update);
-        adopt(out.text, out.sha);
-        // Typing that landed while this was out is not in it.
-        roomHandedOver(sentRoomSeq);
-        setState(localDirtyInRoom ? "dirty" : "clean");
-        opts.onSaved?.(saved);
-      } catch (e) {
-        if (gone) return;
-        /* The hub refused to write a document this much smaller than the
-           file without a word from the user: ask now (the caller stays put
-           until it is answered), rather than wait for the idle check. */
-        if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
-          clearTimeout(shrinkTimer ?? undefined);
-          shrinkTimer = null;
-          askShrink(current());
-          if (asking) return;
+  };
+  let explicitSaving: Promise<boolean> | null = null;
+  const saveNow = (): Promise<boolean> => {
+    if (explicitSaving) {
+      // Typing since the pass on the wire: the save loop sends it next.
+      if (saving) dirtyWhileSaving = true;
+      return explicitSaving;
+    }
+    if (gone || asking) return Promise.resolve(false);
+    if (!owesSave()) return Promise.resolve(true);
+    const p = (async (): Promise<boolean> => {
+      while (!gone && !asking && owesSave()) {
+        if (askIfShrunk()) return false;
+        if (hubHoldsIt) {
+          if (live) {
+            if (!(await flushLive())) return false;
+            continue;
+          }
+          // flushOffline sends until every edit is acknowledged; stopping
+          // short of that is a failure (its retry is armed) or a question.
+          await flushOffline(false);
+          if (gone || asking || (!live && offlineAckedSeq < offlineEditSeq)) return false;
+          continue;
         }
-        // The room still holds every edit and the hub still snapshots it.
-        setState(localDirtyInRoom ? "dirty" : "clean");
-      } finally {
-        liveFlushing = null;
+        // Staging or solo. A pass that moved nothing failed (a 503, a
+        // refused park, a join still waiting): its retry is armed, and
+        // looping would only send it again now.
+        const beforeText = current();
+        const beforeSaved = saved;
+        const beforeFlush = roomNeedsFlush;
+        await save();
+        if (gone || asking) return false;
+        if (owesSave() && current() === beforeText && saved === beforeSaved && roomNeedsFlush === beforeFlush) {
+          return false;
+        }
       }
+      return !gone && !asking && !owesSave();
     })();
-    liveFlushing = run;
+    const run = p.finally(() => {
+      if (explicitSaving === run) explicitSaving = null;
+    });
+    explicitSaving = run;
     return run;
   };
 

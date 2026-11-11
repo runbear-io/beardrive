@@ -513,19 +513,21 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   const { flushRef } = props;
   useEffect(() => {
     if (!flushRef) return;
-    /* Save and leave, once the save has settled — however long the hub
-       takes, since its answer may be a question (a shrink only it can see)
-       the user must answer here. Clean or a bystander settles at once, and a
-       failed request fails fast. */
+    /* Save and leave, only once everything typed is saved. A question the
+       user must answer (a shrink, however late the hub reports it) keeps
+       them here, and so does a save that failed: leaving would destroy the
+       only copy of the buffer and the retry that is still trying to land it.
+       Clean or a bystander settles at once. */
     const flush = async () => {
       const f = fileHandle.current;
       if (!f) return true;
+      let saved = false;
       try {
-        await f.saveNow();
+        saved = await f.saveNow();
       } catch {
-        // The editor's own teardown still sends what it holds.
+        return false;
       }
-      if (f.askingShrink()) return false;
+      if (!saved || f.askingShrink()) return false;
       void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });
       void qc.invalidateQueries({ queryKey: ["text", fileURL] });
       return true;
