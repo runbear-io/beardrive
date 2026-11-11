@@ -840,6 +840,237 @@ test("staging 409 park and join park in the same second never share a conflict p
   }
 });
 
+/* Solo: a PUT refused 409 whose head clashes is parked beside the file. A
+   park refused 503 keeps the buffer unsaved ("error") and is retried on the
+   save backoff onto the SAME copy, with no new typing and no new write to the
+   file; closing the file while that retry waits parks it there keepalive. */
+for (const closeBeforeRetry of [false, true]) {
+  test(`solo 409 clash: a park refused 503 is retried onto the same copy (close before retry: ${closeBeforeRetry})`, async () => {
+    fakeTimers();
+    try {
+      const puts: Array<{ url: string; body: string; keepalive?: boolean }> = [];
+      let copyAnswer = 503;
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        const u = decodeURIComponent(String(url));
+        const method = init?.method ?? "GET";
+        if (method === "GET") return new Response("Z\n", { status: 200, headers: { ETag: `"sha-z"` } });
+        puts.push({ url: u, body: String(init?.body), keepalive: init?.keepalive });
+        if (u.includes("bdrive-conflict")) {
+          if (copyAnswer !== 200) return new Response("unavailable", { status: copyAnswer });
+          return new Response(JSON.stringify({ sha: "sha-copy" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "changed", sha: "sha-z" }), { status: 409 });
+      }) as typeof fetch;
+
+      let buffer = "A\n";
+      let solo = false;
+      const states: string[] = [];
+      const copies: string[] = [];
+      const file = openSharedFile({
+        apiBase: "/api/", // no co-editing route: solo, saved with If-Match
+        path: "notes.md",
+        seed: "A\n",
+        baseSha: "sha-a",
+        me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+        onReady: () => {},
+        onSolo: () => {
+          solo = true;
+        },
+        onState: (s) => states.push(s),
+        onConflictCopy: (c) => copies.push(c),
+        soloText: () => buffer,
+        soloApply: (e) => {
+          buffer = buffer.slice(0, e.from) + e.insert + buffer.slice(e.to);
+        },
+      });
+      await waitFor(() => assert.equal(solo, true));
+
+      buffer = "B\n";
+      await file.saveNow();
+      // The file refused it, the head clashes, and the park was refused.
+      assert.equal(puts.length, 2);
+      assert.ok(!puts[0].url.includes("bdrive-conflict"));
+      assert.ok(puts[1].url.includes("notes.md.bdrive-conflict-"));
+      assert.equal(puts[1].body, "B\n");
+      assert.equal(states.at(-1), "error");
+      same(copies, []);
+
+      copyAnswer = 200;
+      if (closeBeforeRetry) {
+        file.destroy();
+        assert.equal(puts.length, 3);
+        assert.equal(puts[2].url, puts[1].url);
+        assert.equal(puts[2].body, "B\n");
+        assert.equal(puts[2].keepalive, true);
+        await advance(60_000);
+        assert.equal(puts.length, 3);
+        return;
+      }
+
+      // No typing: the backoff alone re-sends the park, to the same path.
+      await advance(SAVE_RETRY_MS[0]);
+      assert.equal(puts.length, 3);
+      assert.equal(puts[2].url, puts[1].url);
+      assert.equal(puts[2].body, "B\n");
+      assert.equal(copies.length, 1);
+      assert.ok(puts[2].url.includes(copies[0]));
+      assert.equal(states.at(-1), "clean");
+
+      // Parked: nothing more is sent.
+      await advance(60_000);
+      assert.equal(puts.length, 3);
+      file.destroy();
+      assert.equal(puts.length, 3);
+    } finally {
+      realTimers();
+    }
+  });
+}
+
+/* The page is going: its last flush asks the hub to park a clash itself, in
+   the same request — a discarded page never runs the JS that would send a
+   second one. An older hub refuses 409 instead, and a page still alive parks
+   from here, keepalive. A head that already carries our edit needs no copy. */
+test("staging pagehide asks the hub to park a clash in the same request", async () => {
+  Reflect.set(globalThis, "window", new EventTarget());
+  fakeTimers();
+  const h = stagingConflictHarness();
+  try {
+    h.state.buffer = "v1 conflict\n";
+    window.dispatchEvent(new Event("pagehide"));
+    assert.equal(h.posts.length, 1);
+    same(h.posts[0], { base: "sha-0", base_text: "v0\n", text: "v1 conflict\n", park_on_conflict: true });
+    const parked = "notes.md.bdrive-conflict-tester-20261111-102030";
+    h.roomAnswers[0].resolve(h.ok({ ok: true, path: "notes.md", sha: "sha-room", text: "v1 theirs\n", parked }));
+    await advance(0);
+    same(h.copies, [parked]);
+    same(h.puts, []); // one round trip: nothing parked from here
+    h.file.destroy();
+    await advance(60_000);
+    assert.equal(h.posts.length, 1);
+    same(h.puts, []);
+  } finally {
+    realTimers();
+    h.connect.mock.restore();
+  }
+});
+
+test("staging pagehide refused 409 by an older hub parks the buffer keepalive at once", async () => {
+  Reflect.set(globalThis, "window", new EventTarget());
+  fakeTimers();
+  const h = stagingConflictHarness();
+  try {
+    h.state.buffer = "v1 conflict\n";
+    window.dispatchEvent(new Event("pagehide"));
+    assert.equal(h.posts.length, 1);
+    same(h.posts[0], { base: "sha-0", base_text: "v0\n", text: "v1 conflict\n", park_on_conflict: true });
+    h.roomAnswers[0].resolve(h.clash());
+    await advance(0);
+    assert.equal(h.puts.length, 1);
+    assert.ok(h.puts[0].url.includes("notes.md.bdrive-conflict-tester-"));
+    assert.equal(h.puts[0].body, "v1 conflict\n");
+    assert.equal(h.puts[0].keepalive, true);
+    h.putAnswers[0].resolve(h.ok({ sha: "sha-copy" }));
+    await advance(0);
+    assert.equal(h.copies.length, 1);
+    assert.ok(h.puts[0].url.includes(h.copies[0]));
+    h.file.destroy();
+    await advance(60_000);
+    assert.equal(h.posts.length, 1);
+    assert.equal(h.puts.length, 1);
+  } finally {
+    realTimers();
+    h.connect.mock.restore();
+  }
+});
+
+test("staging pagehide refused 409 by a head that already holds the edit parks nothing", async () => {
+  Reflect.set(globalThis, "window", new EventTarget());
+  fakeTimers();
+  const h = stagingConflictHarness();
+  try {
+    // Our edit inserted a line; the room holds it, with a line after it.
+    h.state.buffer = "v0\nv1 mine\n";
+    window.dispatchEvent(new Event("pagehide"));
+    assert.equal(h.posts.length, 1);
+    h.roomAnswers[0].resolve(
+      new Response(JSON.stringify({ error: "changed", sha: "sha-room", text: "v0\nv1 mine\nmore\n" }), { status: 409 }),
+    );
+    await advance(0);
+    same(h.puts, []);
+    same(h.copies, []);
+    h.file.destroy();
+    same(h.puts, []);
+  } finally {
+    realTimers();
+    h.connect.mock.restore();
+  }
+});
+
+for (const hubParks of [true, false]) {
+  test(`solo pagehide PUT asks the hub to park a clash (${hubParks ? "hub parks it" : "older hub: 409, parked from here"})`, async () => {
+    Reflect.set(globalThis, "window", new EventTarget());
+    fakeTimers();
+    try {
+      const parked = "notes.md.bdrive-conflict-browser-20261111-102030";
+      const puts: Array<{ url: string; body: string; keepalive?: boolean; park?: string }> = [];
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        const u = decodeURIComponent(String(url));
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        puts.push({ url: u, body: String(init?.body), keepalive: init?.keepalive, park: headers["X-Bdrive-Park-On-Conflict"] });
+        if (u.includes("bdrive-conflict")) return new Response(JSON.stringify({ sha: "sha-copy" }), { status: 200 });
+        if (hubParks) return new Response(JSON.stringify({ ok: true, path: "notes.md", sha: "sha-z", parked }), { status: 200 });
+        return new Response(JSON.stringify({ error: "changed", sha: "sha-z" }), { status: 409 });
+      }) as typeof fetch;
+      let buffer = "A\n";
+      let solo = false;
+      const copies: string[] = [];
+      const file = openSharedFile({
+        apiBase: "/api/",
+        path: "notes.md",
+        seed: "A\n",
+        baseSha: "sha-a",
+        me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+        onReady: () => {},
+        onSolo: () => {
+          solo = true;
+        },
+        onConflictCopy: (c) => copies.push(c),
+        soloText: () => buffer,
+        soloApply: (e) => {
+          buffer = buffer.slice(0, e.from) + e.insert + buffer.slice(e.to);
+        },
+      });
+      await waitFor(() => assert.equal(solo, true));
+
+      buffer = "B\n";
+      window.dispatchEvent(new Event("pagehide"));
+      assert.equal(puts.length, 1);
+      assert.ok(puts[0].url.includes("upload/content?path=notes.md"));
+      assert.equal(puts[0].keepalive, true);
+      assert.equal(puts[0].park, "1");
+      await advance(0);
+      if (hubParks) {
+        assert.equal(puts.length, 1); // one round trip
+        same(copies, [parked]);
+      } else {
+        assert.equal(puts.length, 2);
+        assert.ok(puts[1].url.includes("notes.md.bdrive-conflict-"));
+        assert.equal(puts[1].body, "B\n");
+        assert.equal(puts[1].keepalive, true);
+        assert.equal(puts[1].park, undefined);
+        assert.equal(copies.length, 1);
+      }
+      const sent = puts.length;
+      file.destroy();
+      await advance(60_000);
+      assert.equal(puts.length, sent);
+    } finally {
+      realTimers();
+    }
+  });
+}
+
 /* R11: the socket syncs while a staging checkpoint is still on the wire. The
    room applies the checkpoint (its own item IDs), and the same items reach
    this tab twice — in the HTTP answer's `update` and on the socket. The join
@@ -1316,9 +1547,11 @@ for (const { mode, dirty } of [
       } else {
         assert.equal(r.method, "POST");
         assert.ok(r.url.includes("ycollab/sync?path=notes.md"));
-        const body = JSON.parse(r.body) as { update?: string; text?: string };
-        if (mode === "staging") assert.equal(body.text, "a\nb\nc\nlast words\n");
-        else assert.equal(typeof body.update, "string");
+        const body = JSON.parse(r.body) as { update?: string; text?: string; park_on_conflict?: boolean };
+        if (mode === "staging") {
+          assert.equal(body.text, "a\nb\nc\nlast words\n");
+          assert.equal(body.park_on_conflict, true);
+        } else assert.equal(typeof body.update, "string");
       }
     }
 

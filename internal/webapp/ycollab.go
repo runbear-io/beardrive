@@ -251,6 +251,11 @@ type ycollabSyncReq struct {
 	// room may already have applied it learns from this what landed.
 	Peek      bool     `json:"peek,omitempty"`
 	PriorSent []string `json:"prior_sent,omitempty"`
+	// ParkOnConflict asks a text checkpoint that clashes with the live room
+	// to be kept beside the file as a conflict copy, in this request: a tab
+	// closing sends one keepalive request and runs no code after it, so it
+	// cannot answer a 409 with a second request parking its text itself.
+	ParkOnConflict bool `json:"park_on_conflict,omitempty"`
 }
 
 /*
@@ -305,11 +310,9 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 	baseText := ""
 	if len(update) == 0 && req.Text != nil {
 		switch {
-		case req.BaseText != nil && (*req.BaseText != "" || req.Base == "" || req.Base == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"):
-			// Present, even empty when the file really was blank (no base,
-			// or the empty SHA-256). An empty base_text beside a non-empty
-			// blob's sha is a truncated read and falls through to blobText
-			// so the shrink guard sees the file's real size instead of 409.
+		case req.BaseText != nil:
+			// Present, even empty: "" is a real ancestor (a file that
+			// was blank), never "absent, read the blob instead".
 			baseText = *req.BaseText
 		case req.Base != "":
 			got, ok := s.blobText(ctx, project, req.Base)
@@ -375,9 +378,9 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 	}
 
 	var (
-		conflict, merged, tooLarge, pendingBusy bool
-		cur                                     string
-		applyErr                                error
+		conflict, merged, tooLarge, pendingBusy, shrinkRefused bool
+		cur                                                    string
+		applyErr                                               error
 		// wantUpdate and wantText are the room's document with this request
 		// in it, captured inside Apply: the version that must be on storage
 		// before the answer may say ok. Read after Apply returns, a keystroke
@@ -429,12 +432,24 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 				}
 			}
 			if cur != anc && cur != want {
-				out, ok := textmerge.Merge([]byte(anc), []byte(cur), []byte(want))
-				if !ok || !validMergedText(path, out) {
-					conflict = true
-					return
+				const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+				if anc == "" && req.Base != "" && req.Base != emptySHA256 && sharpShrink(int64(len(cur)), int64(len(want))) {
+					if !req.ConfirmShrink {
+						shrinkRefused = true
+						return
+					}
+					if req.Base != s.rooms().base(room) {
+						conflict = true
+						return
+					}
+				} else {
+					out, ok := textmerge.Merge([]byte(anc), []byte(cur), []byte(want))
+					if !ok || !validMergedText(path, out) {
+						conflict = true
+						return
+					}
+					want, merged = string(out), true
 				}
-				want, merged = string(out), true
 			}
 			if len(want) >= maxSeedBytes {
 				tooLarge = true
@@ -468,6 +483,38 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 		// Applied outside Apply's capture, so the room's own peers on this
 		// process are told here; the relay already has it.
 		_ = s.ydocs().BroadcastUpdate(ctx, room, update)
+	}
+	if shrinkRefused {
+		closeIfOpened()
+		writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  "this save would empty or sharply shrink the file",
+			"shrink": true,
+			"sha":    s.rooms().base(room),
+			"size":   len(cur),
+		})
+		return
+	}
+	if conflict && !tooLarge && req.ParkOnConflict && req.Text != nil &&
+		strings.TrimSpace(*req.Text) != "" && s.apiMux != nil {
+		// Through the upload door, as every park is: quota, folder rules,
+		// the journal, the data index and change frames all apply. Created
+		// only under a free name: another tab's copy is never replaced.
+		pw, parked := s.parkNewCopy(ctx, s.requestUser(r), project, path, *req.Text)
+		closeIfOpened()
+		if parked == "" {
+			code := pw.code
+			if code < 400 {
+				code = http.StatusBadGateway
+			}
+			if ct := pw.hdr.Get("Content-Type"); ct != "" {
+				w.Header().Set("Content-Type", ct)
+			}
+			w.WriteHeader(code)
+			_, _ = w.Write(pw.body.Bytes())
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "path": path, "sha": s.rooms().base(room), "text": cur, "parked": parked})
+		return
 	}
 	if conflict || tooLarge {
 		closeIfOpened()
@@ -2155,11 +2202,41 @@ func (s *Server) finishLater(ctx context.Context, room string, who User, text, b
 // putAs writes one path through the ordinary upload door as a human, with
 // the base the write is conditional on ("" for unconditional).
 func (s *Server) putAs(ctx context.Context, who User, project, path, text, base string) *memWriter {
+	return s.putVia(ctx, who, project, path, text, base, false)
+}
+
+// parkNewCopy writes text as a new conflict copy of path through the upload
+// door, as who. A copy is named to the second, and two tabs of one account
+// can close in the same one: each name is created only if it is free
+// (If-None-Match: *, which a second hub process is held to as well), and a
+// taken one moves the copy a second on, so neither replaces the other.
+// parked is the name it was written under, "" when it was not.
+func (s *Server) parkNewCopy(ctx context.Context, who User, project, path, text string) (pw *memWriter, parked string) {
+	t0 := time.Now()
+	for i := range maxConflictNameTries {
+		name := conflictPath(path, who, t0.Add(time.Duration(i)*time.Second))
+		pw = s.putVia(ctx, who, project, name, text, "", true)
+		if pw.code == http.StatusConflict {
+			continue
+		}
+		if pw.code == http.StatusOK {
+			parked = name
+		}
+		return pw, parked
+	}
+	return pw, ""
+}
+
+// putVia is putAs, or with create a write that only creates path.
+func (s *Server) putVia(ctx context.Context, who User, project, path, text, base string, create bool) *memWriter {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
 		"/api/p/"+url.PathEscape(project)+"/upload/content?path="+url.QueryEscape(path),
 		strings.NewReader(text))
 	if err != nil {
 		return &memWriter{code: 0, hdr: http.Header{}}
+	}
+	if create {
+		req.Header.Set("If-None-Match", "*")
 	}
 	if base != "" {
 		req.Header.Set("If-Match", base)

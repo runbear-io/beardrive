@@ -246,15 +246,20 @@ export async function putText(
   // Outlive the page (a closing tab parking its buffer). Past the browser's
   // keepalive cap the request goes as an ordinary one, as syncCollab's does.
   keepalive = false,
+  // Leaving for good: a body the hub cannot merge is parked beside the file
+  // in this same request (`parked` names the copy), since a closing page
+  // never gets to send a second one.
+  parkOnConflict = false,
   // `merged`: the hub found the file had moved past `base` and folded this
   // body into it three ways (upload.go) — the file is NOT exactly `text`.
-): Promise<{ sha?: string; merged?: boolean }> {
+): Promise<{ sha?: string; merged?: boolean; parked?: string }> {
   const r = await fetch(url, {
     method: "PUT",
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       ...(base ? { "If-Match": base } : {}),
       ...(confirmShrink ? { "X-Bdrive-Confirm-Shrink": "1" } : {}),
+      ...(parkOnConflict ? { "X-Bdrive-Park-On-Conflict": "1" } : {}),
     },
     body: text,
     keepalive: Boolean(keepalive && new TextEncoder().encode(text).byteLength <= KEEPALIVE_MAX_BYTES),
@@ -263,7 +268,7 @@ export async function putText(
   if (r.status === 401 && !keepalive) toLogin();
   if (!r.ok) await fail(r);
   trackWrite("PUT", url);
-  return (await r.json().catch(() => ({}))) as { sha?: string; merged?: boolean };
+  return (await r.json().catch(() => ({}))) as { sha?: string; merged?: boolean; parked?: string };
 }
 
 /* Write into a file's co-editing room over plain HTTP, for a client that is
@@ -282,9 +287,20 @@ const KEEPALIVE_MAX_BYTES = 60_000;
 
 export async function syncCollab(
   url: string,
-  payload: { update?: string; base?: string; base_text?: string; text?: string; confirm_shrink?: boolean; peek?: boolean; prior_sent?: string[] },
+  payload: {
+    update?: string;
+    base?: string;
+    base_text?: string;
+    text?: string;
+    confirm_shrink?: boolean;
+    peek?: boolean;
+    prior_sent?: string[];
+    // A text that clashes with the room is parked beside the file by the hub
+    // in this same request, answered with `parked` (a closing page's flush).
+    park_on_conflict?: boolean;
+  },
   keepalive = false,
-): Promise<{ sha: string; text: string; merged?: boolean; update?: string }> {
+): Promise<{ sha: string; text: string; merged?: boolean; update?: string; parked?: string }> {
   const body = JSON.stringify(payload);
   const bodyBytes = new TextEncoder().encode(body).byteLength;
   const r = await fetch(url, {
@@ -294,5 +310,5 @@ export async function syncCollab(
     keepalive: Boolean(keepalive && bodyBytes <= KEEPALIVE_MAX_BYTES),
   });
   if (!r.ok) await fail(r);
-  return (await r.json()) as { sha: string; text: string; merged?: boolean; update?: string };
+  return (await r.json()) as { sha: string; text: string; merged?: boolean; update?: string; parked?: string };
 }

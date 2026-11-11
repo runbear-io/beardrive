@@ -708,6 +708,11 @@ const (
 	// noMergeHeader asks a conditional write to be refused on a stale base
 	// rather than merged: a co-editing room settles its own (ycollab.go).
 	noMergeHeader = "X-Bdrive-No-Merge"
+	// parkOnConflictHeader asks a conditional write that can be neither
+	// taken nor merged to be kept beside the file as a conflict copy, in
+	// this request: a closing tab's keepalive request is the last code it
+	// runs, so it cannot answer a 409 by parking its text itself.
+	parkOnConflictHeader = "X-Bdrive-Park-On-Conflict"
 	// maxUploadMergeBytes bounds what a stale conditional write reads into
 	// memory to merge; the same bound a device merges under.
 	maxUploadMergeBytes = 4 << 20
@@ -765,12 +770,26 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 		s.reconcileGrants(r.Context(), project, rs.Backend)
 	}
 	base := strings.Trim(r.Header.Get("If-Match"), `"`)
+	// If-None-Match: * creates p or refuses: a conflict copy named for a
+	// second that another one already took must never replace it.
+	createOnly := base == "" && r.Header.Get("If-None-Match") == "*"
+	if createOnly {
+		if head, ok := s.headBlob(r.Context(), v, p); ok && head != blob {
+			writeJSONStatus(w, http.StatusConflict, map[string]any{
+				"error": "this file already exists", "sha": head, "path": p,
+			})
+			return
+		}
+	}
 	if base != "" {
 		if head, ok := s.headBlob(r.Context(), v, p); ok && head != base && head != blob {
 			if handled, now := s.mergeStaleUpload(w, r, v, p, base, head, tmp, size); handled {
 				return
 			} else if now != "" {
 				head = now
+			}
+			if s.parkStaleUpload(w, r, v, up, p, head, tmp, size, blob, -1) {
+				return
 			}
 			writeJSONStatus(w, http.StatusConflict, map[string]any{
 				"error": "this file changed since you last read it",
@@ -884,9 +903,12 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// source the base also rides into the append, which checks it against the
 	// journals the op lands on — the only place a write from another hub
 	// process is guaranteed to be seen.
-	if rs, ok := up.(*RemoteSource); ok {
+	switch rs, ok := up.(*RemoteSource); {
+	case createOnly:
+		err = s.createAbsent(r.Context(), v, up, p, tmp, size, blob, s.requestUser(r))
+	case ok:
 		err = rs.uploadIf(r.Context(), p, tmp, s.requestUser(r), "", base)
-	} else {
+	default:
 		err = up.Upload(r.Context(), p, tmp, size, s.requestUser(r), "")
 	}
 	var stale *staleWriteError
@@ -900,6 +922,10 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 			} else if now != "" {
 				head = now
 			}
+		}
+		// Quota already passed for these bytes above.
+		if !createOnly && s.parkStaleUpload(w, r, v, up, p, head, tmp, size, blob, billed) {
+			return
 		}
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
 			"error": stale.Error(), "sha": head, "path": p,
@@ -933,6 +959,103 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	}
 	s.adoptRoomWrite(r.Context(), projectID(r), p, head, tmp)
 	writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head})
+}
+
+// parkStaleUpload keeps a conditional write that lost its base, and could not
+// be merged, beside the file as a conflict copy — only when the request asks
+// for it (parkOnConflictHeader). handled says a response was written: ok
+// naming the copy, or the refusal that kept it from being stored. billed is
+// what quota already admitted for these bytes, or -1 when nobody asked yet.
+//
+// A copy is named to the second, and two tabs of one account can close in
+// the same one: each name is created only if it is free (createAbsent), and a
+// taken one moves the copy a second on, so neither replaces the other.
+func (s *Server) parkStaleUpload(w http.ResponseWriter, r *http.Request, v *volume, up Uploader, p, head string, tmp *os.File, size int64, blob string, billed int64) (handled bool) {
+	if r.Header.Get(parkOnConflictHeader) == "" || size == 0 {
+		return false
+	}
+	who := s.requestUser(r)
+	ctx := r.Context()
+	project := projectID(r)
+	org := s.orgOf(project)
+	if billed < 0 {
+		billed = size
+		if rs, ok := v.source.(*RemoteSource); ok {
+			var err error
+			if billed, err = billableBytes(ctx, rs.Backend, "blobs/"+blob, size); err != nil {
+				storageErr(w, http.StatusBadGateway, "could not check the stored object", err)
+				return true
+			}
+		}
+		if err := s.quota().CheckWrite(org, billed+s.reservedBytes(org)); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return true
+		}
+	}
+	t0 := time.Now()
+	parked := ""
+	for i := range maxConflictNameTries {
+		name := conflictPath(p, who, t0.Add(time.Duration(i)*time.Second))
+		if !s.writablePath(w, r, name) {
+			return true
+		}
+		unlock := s.lockPath(project, name)
+		err := s.createAbsent(ctx, v, up, name, tmp, size, blob, who)
+		unlock()
+		var stale *staleWriteError
+		if errors.As(err, &stale) {
+			continue // that second's copy is somebody else's
+		}
+		if err != nil {
+			http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
+			return true
+		}
+		parked = name
+		break
+	}
+	if parked == "" {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{
+			"error": "no free conflict copy name", "sha": head, "path": p,
+		})
+		return true
+	}
+	if billed > 0 {
+		s.quota().RecordUsage(org, billed)
+	}
+	v.invalidate()
+	s.dataWrote(ctx, project)
+	s.captureChange(r, "browser", 1, 0)
+	s.publishChange(r, "browser", []string{parked}, 1, 0)
+	writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "parked": parked})
+	return true
+}
+
+// maxConflictNameTries bounds how many seconds past now a conflict copy's
+// name moves while earlier ones are taken.
+const maxConflictNameTries = 64
+
+// createAbsent stores tmp (blob, size) at p only if p does not exist or
+// already holds blob; otherwise it is a *staleWriteError naming what p holds.
+// On a journal-backed source the absence rides into the append itself, so a
+// second hub process creating p at the same moment is refused there too. On
+// any other source the caller holds p's path lock.
+func (s *Server) createAbsent(ctx context.Context, v *volume, up Uploader, p string, tmp *os.File, size int64, blob string, who User) error {
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if rs, ok := up.(*RemoteSource); ok {
+		// Blob before journal, always.
+		if err := rs.Backend.Put(ctx, "blobs/"+blob, tmp, size); err != nil {
+			return fmt.Errorf("push blob: %w", err)
+		}
+		return rs.commitIfBase(ctx, p, blob, size, who, "", &commitBase{path: p, mustBeAbsent: true, blob: blob})
+	}
+	// A directory names a version by mtime and size, never content, so any
+	// file already there is taken.
+	if head, ok := s.headBlob(ctx, v, p); ok {
+		return &staleWriteError{head: head}
+	}
+	return up.Upload(ctx, p, tmp, size, who, "")
 }
 
 // validMergedText reports whether a clean three-way text merge of path is

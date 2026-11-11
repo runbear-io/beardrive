@@ -241,6 +241,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
   let waitingToJoin = false;
   let parkedName: string | null = null;
   let parkedText: string | null = null; // what `parkedName` was minted for
+  let parkedSha = ""; // the head `parkedText` clashed with, kept for a retry
   /* Every conflict copy this file opens gets a name no other copy from it
      has had: conflictName stamps whole UTC seconds, so each name is minted
      at least a second after the last. Two parks on the wire at once — a
@@ -257,9 +258,10 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
   const conflictPuts = new Map<string, string>();
   // Bumped per park: only the newest park moves `saved` when it lands.
   let conflictSeq = 0;
-  /* A staging checkpoint the room refused for a genuine clash, whose buffer
-     has not durably landed as a conflict copy yet. Sending it to the room
-     again on the way out would only be refused again: destroy() parks it. */
+  /* A clash (a staging checkpoint the room refused, or a solo write the file
+     refused) whose buffer has not durably landed as a conflict copy yet.
+     Sending it again on the way out would only be refused again: destroy()
+     parks it, and the save loop's retry parks it again under the same name. */
   let stagingConflict = false;
   let joinTimer: ReturnType<typeof setTimeout> | null = null;
   let joinAttempt = 0;
@@ -429,11 +431,21 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       }
       setState("saving");
       opts.onWriting?.();
+      if (stagingConflict) {
+        // A park that failed: retry that same copy before anything else, so
+        // the backoff timer re-sends the park rather than a write the hub
+        // will refuse again. Newer typing is a new attempt from scratch.
+        if (parkedName !== null && parkedText === text) {
+          if ((await parkConflict(text, parkedSha)) === "stop") return;
+          continue;
+        }
+        stagingConflict = false;
+      }
       const r = solo || noRoomHttp ? await sendFile(text) : await sendRoom(text);
       if (r === "stop") return;
       if (r === "rebased") {
         if (++rebases > MAX_REBASES) {
-          await preserve(current(), base ?? "");
+          await parkConflict(current(), base ?? "");
           return;
         }
         continue;
@@ -516,10 +528,10 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
     const res = merge3(from, head.text, cur);
     if (!res.ok || !applyText(res.text)) {
       // The same words changed two different ways: genuinely contended.
-      // Theirs is the file (it got there first); ours goes beside it.
-      if (landed) adopt(head.text, head.sha);
-      await preserve(cur, head.sha ?? "");
-      return false;
+      // Theirs is the file (it got there first); ours goes beside it. Only
+      // the head moves now: `saved` moves when the copy durably lands.
+      if (landed) rebase(head.sha);
+      return (await parkConflict(cur, head.sha ?? "")) === "rebased";
     }
     adopt(head.text, head.sha);
     if (landed) opts.onSaved?.(head.text);
@@ -604,18 +616,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
             return "rebased";
           }
         }
-        stagingConflict = true;
-        const parked = current();
-        const failed = await preserve(parked, theirs.sha ?? "");
-        if (gone) return "stop"; // destroy() parked the buffer itself
-        if (failed) {
-          retryAfterFailure(failed.err);
-          return "stop";
-        }
-        stagingConflict = false;
-        // Typing that landed while the copy was on the wire is not in it:
-        // it goes to the room, built on what was parked.
-        return current() !== parked ? "rebased" : "stop";
+        return parkConflict(current(), theirs.sha ?? "");
       }
       setState(hubHoldsIt ? "dirty" : "error");
       retryAfterFailure(e);
@@ -774,6 +775,36 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
     } finally {
       if (conflictPuts.get(copy) === text) conflictPuts.delete(copy);
     }
+  };
+
+  /* Park `parked` beside the file after a clash with head `theirSha`. One
+     name per text: a retry re-writes the same copy. Until it lands the clash
+     is unparked (`stagingConflict`), so leaving parks it keepalive, and a
+     transient failure re-arms the save loop, which retries this park. */
+  const parkConflict = async (parked: string, theirSha: string): Promise<"rebased" | "stop"> => {
+    if (parkedName === null || parkedText !== parked) {
+      parkedName = mintConflictPath();
+      parkedText = parked;
+    }
+    const name = parkedName;
+    parkedSha = theirSha;
+    stagingConflict = true;
+    const failed = await preserve(parked, theirSha, name);
+    if (gone) return "stop"; // destroy() parked the buffer itself
+    if (failed) {
+      retryAfterFailure(failed.err);
+      return "stop";
+    }
+    stagingConflict = false;
+    // A newer park (a join's, over newer typing) keeps its own name.
+    if (parkedName === name) {
+      parkedName = null;
+      parkedText = null;
+      parkedSha = "";
+    }
+    // Typing that landed while the copy was on the wire is not in it: it is
+    // sent next, built on what was parked.
+    return current() !== parked ? "rebased" : "stop";
   };
 
   /* Edits made while a held room's socket is down live only in this tab's
@@ -1251,10 +1282,41 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       return;
     }
     exitSent = key;
+    const from = saved;
+    /* The page is going and will not get to send a second request, so this
+       one asks the hub to park a clash beside the file itself and answers
+       with the copy (`parked`). An older hub refuses 409 instead: if its head
+       already holds our edit there is nothing to keep; otherwise the words
+       are parked from here, as long as the page lives to send it. */
+    const onExitError = (e: unknown) => {
+      if (!(e instanceof HttpError && e.status === 409)) return exitFailed(key)();
+      let theirs: { text?: unknown } = {};
+      try {
+        const parsed: unknown = JSON.parse(e.body);
+        if (parsed && typeof parsed === "object") theirs = parsed as typeof theirs;
+      } catch {
+        // an older hub, or a body we cannot read: park
+      }
+      if (typeof theirs.text === "string" && (theirs.text === text || retainsChanges(from, text, theirs.text))) return;
+      stagingConflict = true;
+      let copy = parkedName !== null && parkedText === text ? parkedName : null;
+      for (const [path, held] of conflictPuts) if (copy === null && held === text) copy = path;
+      copy ??= mintConflictPath();
+      parkedName = copy;
+      parkedText = text;
+      const parkedCopy = copy;
+      void putText(contentURL(parkedCopy), text, undefined, false, true).then(() => {
+        stagingConflict = false;
+        opts.onConflictCopy?.(parkedCopy);
+      }, exitFailed(key));
+    };
+    const landed = (out: { parked?: string }) => {
+      if (out.parked) opts.onConflictCopy?.(out.parked);
+    };
     if (solo || noRoomHttp) {
-      void putText(contentURL(opts.path), text, base, confirmShrinkOnce, true).catch(exitFailed(key));
+      void putText(contentURL(opts.path), text, base, confirmShrinkOnce, true, true).then(landed, onExitError);
     } else {
-      void syncCollab(syncURL, roomPayload(text), true).catch(exitFailed(key));
+      void syncCollab(syncURL, { ...roomPayload(text), park_on_conflict: true }, true).then(landed, onExitError);
     }
   };
   const onPageHide = () => {

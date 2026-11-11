@@ -730,6 +730,111 @@ func TestMoveDocLiveSameLineConcurrentKeystrokeKeepsBothEdits(t *testing.T) {
 	}
 }
 
+// A closing tab's last checkpoint that clashes with the live room is kept as a
+// conflict copy by the hub, in that one request — the page is gone before it
+// could answer a 409 with a second one. The room keeps its own text, the copy
+// holds the caller's, and quota still decides whether the copy is stored.
+func TestYCollabSyncParkOnConflictWritesCopyInOneRequest(t *testing.T) {
+	fastRoom(t, time.Hour, time.Hour)
+	srv, p, _ := newHub(t, true, nil)
+	h := srv.Handler()
+	path := "notes.md"
+	room := p.ID + "/" + path
+	t.Cleanup(func() { srv.dropRoom(room) })
+	const base = "l1\nl2\nl3\n"
+	const live = "l1 from the room\nl2\nl3\n"
+	const mine = "l1 from the closing tab\nl2\nl3\n"
+	putContent(t, h, "/api/p/"+p.ID+"/upload/content?path="+path, base, "")
+
+	leave := srv.rooms().enter(room) // a socket in the room: it stays open
+	t.Cleanup(leave)
+	if err := srv.ydocs().Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		txt := doc.GetText("body")
+		spliceVia(transact, txt, txt.ToString(), live)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := func(park bool) *httptest.ResponseRecorder {
+		return syncAs(t, h, p.ID, path, map[string]any{"base": shaOf(base), "base_text": base, "text": mine, "park_on_conflict": park})
+	}
+
+	if rec := checkpoint(false); rec.Code != http.StatusConflict {
+		t.Fatalf("clash without park_on_conflict: %d %s, want 409", rec.Code, rec.Body)
+	}
+	if cc := conflictTexts(t, srv, p.ID, path); len(cc) != 0 {
+		t.Fatalf("a 409 parked %d copies", len(cc))
+	}
+
+	rec := checkpoint(true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clash with park_on_conflict: %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		OK     bool   `json:"ok"`
+		Text   string `json:"text"`
+		Parked string `json:"parked"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || !strings.HasPrefix(out.Parked, path+".bdrive-conflict-") {
+		t.Fatalf("answer %s: want ok naming the conflict copy", rec.Body)
+	}
+	if out.Text != live {
+		t.Fatalf("answered text %q, want the room's %q", out.Text, live)
+	}
+	if got := get(t, h, "/api/p/"+p.ID+"/file?path="+out.Parked).Body.String(); got != mine {
+		t.Fatalf("copy %s = %q, want the caller's %q", out.Parked, got, mine)
+	}
+	if got := roomText(srv, room); got != live {
+		t.Fatalf("room = %q after the park, want it untouched", got)
+	}
+	if got := get(t, h, "/api/p/"+p.ID+"/file?path="+path).Body.String(); got != base {
+		t.Fatalf("file = %q after the park, want it untouched", got)
+	}
+	if cc := conflictTexts(t, srv, p.ID, path); len(cc) != 1 {
+		t.Fatalf("%d conflict copies, want the one parked", len(cc))
+	}
+
+	// A second tab of the same account closes in the same second with a
+	// different clash: its copy takes the next free name and the first tab's
+	// copy is not replaced.
+	const mine2 = "l1 from the second closing tab\nl2\nl3\n"
+	rec = syncAs(t, h, p.ID, path, map[string]any{"base": shaOf(base), "base_text": base, "text": mine2, "park_on_conflict": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second tab's park: %d %s", rec.Code, rec.Body)
+	}
+	var out2 struct {
+		Parked string `json:"parked"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out2); err != nil {
+		t.Fatal(err)
+	}
+	if out2.Parked == out.Parked {
+		t.Fatalf("both tabs parked at %s", out.Parked)
+	}
+	conflictStamp(t, path, out.Parked)
+	conflictStamp(t, path, out2.Parked)
+	cc := conflictTexts(t, srv, p.ID, path)
+	if len(cc) != 2 || cc[out.Parked] != mine || cc[out2.Parked] != mine2 {
+		t.Fatalf("conflict copies %v: want the first tab's at %s and the second's at %s", cc, out.Parked, out2.Parked)
+	}
+
+	// A full org: the copy is refused like any write, and nothing is stored.
+	srv.Quota = fullQuota{}
+	t.Cleanup(func() { srv.Quota = nil })
+	const again = "l1 from a tab over quota\nl2\nl3\n"
+	rec = syncAs(t, h, p.ID, path, map[string]any{"base": shaOf(base), "base_text": base, "text": again, "park_on_conflict": true})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("park over quota: %d %s, want 403", rec.Code, rec.Body)
+	}
+	for cp, txt := range conflictTexts(t, srv, p.ID, path) {
+		if txt == again {
+			t.Fatalf("%s holds the over-quota text", cp)
+		}
+	}
+}
+
 // An update whose result is past maxSeedBytes is refused before the live room
 // takes it: an applied update cannot be taken back, and a room that large
 // could be neither snapshotted whole nor seeded again.
