@@ -2118,32 +2118,30 @@ test("a failed or bfcache-restored pagehide flush leaves the typing to be sent a
   }
 });
 
-/* Done in a live room the hub refuses for emptying the file: the user is
-   asked at once (the caller stays on the editor), a second Done sends
-   nothing while the question is open, and confirming writes it. */
-test("an explicit live save refused for a sharp shrink asks the user and waits", async () => {
+/* Done in a live room on a buffer emptied against what the file is known to
+   hold: the user is asked at once, before any request (the caller stays on
+   the editor), a second Done sends nothing while the question is open, and
+   confirming writes it. */
+test("an explicit live save of a sharp shrink asks the user first and waits", async () => {
   fakeTimers();
   const h = await heldRoom();
   try {
     await h.goLive();
     h.localEdit((t) => t.delete(0, t.length));
-    h.net.status = 422;
-    h.net.error = JSON.stringify({ error: "this would empty the file", shrink: true });
     await h.file.saveNow();
-    assert.equal(h.reqs.length, 1);
+    same(h.reqs, []);
     assert.equal(h.asks.length, 1);
     assert.equal(h.file.askingShrink(), true);
     assert.equal(h.states.at(-1), "error");
 
     await h.file.saveNow();
     await advance(60_000); // nor does the idle check stack a second dialog
-    assert.equal(h.reqs.length, 1);
+    same(h.reqs, []);
     assert.equal(h.asks.length, 1);
 
-    h.net.status = 200;
     await (h.asks[0] as ShrinkAsk).confirm();
-    assert.equal(h.reqs.length, 2);
-    const body = JSON.parse(h.reqs[1].body) as { confirm_shrink?: boolean };
+    assert.equal(h.reqs.length, 1);
+    const body = JSON.parse(h.reqs[0].body) as { confirm_shrink?: boolean };
     assert.equal(body.confirm_shrink, true);
     assert.equal(h.file.askingShrink(), false);
     assert.equal(h.states.at(-1), "clean");
@@ -2172,33 +2170,30 @@ test("a restore to a state older than `saved` is an outside write, not the room'
   }
 });
 
-/* The same refusal with the socket down: Done's offline flush is answered
-   422. No retry can land an unconfirmed shrink, so the user is asked at once
-   and nothing is re-sent while the question is open; confirming hands the
-   queued edits over and leaves nothing pending. */
-test("an offline explicit save refused for a sharp shrink asks at once and never retries unconfirmed", async () => {
+/* The same shrink with the socket down: Done asks at once and sends nothing
+   (no retry can land an unconfirmed shrink), nothing is sent while the
+   question is open, and confirming hands the queued edits over and leaves
+   nothing pending. */
+test("an offline explicit save of a sharp shrink asks at once and never sends unconfirmed", async () => {
   fakeTimers();
   const h = await heldRoom();
   try {
     await h.goLive();
     h.c.onStatus("offline");
     h.localEdit((t) => t.delete(0, t.length));
-    h.net.status = 422;
-    h.net.error = JSON.stringify({ error: "this would empty the file", shrink: true });
     await h.file.saveNow();
-    assert.equal(h.reqs.length, 1);
+    same(h.reqs, []);
     assert.equal(h.file.askingShrink(), true);
     assert.equal(h.asks.length, 1);
     assert.equal(h.pendings.at(-1), 1);
 
     await advance(60_000); // the offline timer and the idle check stay quiet
-    assert.equal(h.reqs.length, 1);
+    same(h.reqs, []);
     assert.equal(h.asks.length, 1);
 
-    h.net.status = 200;
     await (h.asks[0] as ShrinkAsk).confirm();
-    assert.equal(h.reqs.length, 2);
-    const body = JSON.parse(h.reqs[1].body) as { confirm_shrink?: boolean; update?: string };
+    assert.equal(h.reqs.length, 1);
+    const body = JSON.parse(h.reqs[0].body) as { confirm_shrink?: boolean; update?: string };
     assert.equal(body.confirm_shrink, true);
     assert.equal(typeof body.update, "string");
     assert.equal(h.file.askingShrink(), false);
@@ -2207,18 +2202,104 @@ test("an offline explicit save refused for a sharp shrink asks at once and never
 
     await advance(60_000);
     h.destroy();
-    assert.equal(h.reqs.length, 2);
+    assert.equal(h.reqs.length, 1);
   } finally {
     h.done();
     realTimers();
   }
 });
 
-/* Keep, with the socket down, after the offline flush was refused for a
-   sharp shrink: that refused update had already reached the room's document,
-   so the room holds the shrunk text. Putting the file's bytes back is an edit
-   the room must get — over HTTP at once, or, if that fails, still queued for
-   the retry, pagehide and the unmount. */
+/* Done on a sharply shrunk buffer while the network never answers, in every
+   mode: the question opens at once and nothing is sent, so Done stays on the
+   editor instead of timing out past an unanswered save. */
+for (const mode of ["live", "offline", "staging", "solo"] as const) {
+  test(`Done on a sharp shrink asks at once and sends nothing, the network hung (${mode})`, async () => {
+    fakeTimers();
+    const h = await heldRoom(mode === "solo" ? { apiBase: "/api/" } : {});
+    try {
+      if (mode === "solo") await advance(0); // no room route: solo
+      if (mode === "live" || mode === "offline") await h.goLive();
+      if (mode === "offline") h.c.onStatus("offline");
+      h.net.hold = Promise.withResolvers<void>().promise; // never answers
+      if (mode === "live" || mode === "offline") h.localEdit((t) => t.delete(0, t.length));
+      else h.state.buffer = "";
+
+      let settled = false;
+      void h.file.saveNow().then(() => {
+        settled = true;
+      });
+      await settle(); // no timer runs: the answer is local
+      assert.equal(settled, true);
+      assert.equal(h.file.askingShrink(), true);
+      assert.equal(h.asks.length, 1);
+      same(h.reqs, []);
+    } finally {
+      h.done();
+      realTimers();
+    }
+  });
+}
+
+/* A shrink only the hub can see: the read seeded an empty buffer (`saved`
+   is "", so nothing local is a shrink) and the hub refuses the save 422,
+   slowly. The question opens when the answer comes, and Done — waiting on
+   the save — finds it open and stays. */
+test("a shrink the hub refuses 422 after a slow answer still asks before Done leaves", async () => {
+  fakeTimers();
+  try {
+    const reqs: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      reqs.push((init?.method ?? "GET") + " " + decodeURIComponent(String(url)));
+      // The hub answers late (fake clock: advance() moves it).
+      const late = Promise.withResolvers<void>();
+      setTimeout(late.resolve, 800);
+      await late.promise;
+      return new Response(JSON.stringify({ error: "would cut most of the file", shrink: true }), { status: 422 });
+    }) as typeof fetch;
+    let buffer = "";
+    let solo = false;
+    const asks: ShrinkAsk[] = [];
+    const file = openSharedFile({
+      apiBase: "/api/",
+      path: "notes.md",
+      seed: "",
+      baseSha: "sha-big",
+      me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+      onReady: () => {},
+      onSolo: () => {
+        solo = true;
+      },
+      onShrinkRefused: (a) => asks.push(a),
+      soloText: () => buffer,
+      soloApply: (e) => {
+        buffer = buffer.slice(0, e.from) + e.insert + buffer.slice(e.to);
+      },
+    });
+    await waitFor(() => assert.equal(solo, true));
+
+    buffer = "x\n";
+    let settled = false;
+    void file.saveNow().then(() => {
+      settled = true;
+    });
+    await advance(799);
+    assert.equal(reqs.length, 1);
+    assert.equal(settled, false);
+    assert.equal(file.askingShrink(), false);
+    await advance(1);
+    assert.equal(settled, true);
+    assert.equal(file.askingShrink(), true);
+    assert.equal(asks.length, 1);
+    file.destroy();
+  } finally {
+    realTimers();
+  }
+});
+
+/* Keep, with the socket down, after Done asked about a sharp shrink: the
+   deletion is queued in this tab's document, so putting the file's bytes
+   back is an edit the room must get too — over HTTP at once, or, if that
+   fails, still queued for the retry, pagehide and the unmount. */
 for (const keepAnswer of [200, 503]) {
   test(`offline Keep after a shrink refusal hands the restored text to the room (answer ${keepAnswer})`, async () => {
     const Y = await import("yjs");
@@ -2234,10 +2315,8 @@ for (const keepAnswer of [200, 503]) {
       await h.goLive();
       h.c.onStatus("offline");
       h.localEdit((t) => t.delete(0, t.length));
-      h.net.status = 422;
-      h.net.error = JSON.stringify({ error: "this would empty the file", shrink: true });
       await h.file.saveNow();
-      assert.equal(posts().length, 1);
+      same(posts(), []); // asked before anything was sent
       assert.equal(h.file.askingShrink(), true);
 
       h.net.status = keepAnswer;
@@ -2245,8 +2324,8 @@ for (const keepAnswer of [200, 503]) {
       await (h.asks[0] as ShrinkAsk).keep();
       assert.equal(h.file.askingShrink(), false);
       assert.equal(h.file.current(), "a\nb\nc\n");
-      assert.equal(posts().length, 2);
-      const sent = JSON.parse(posts()[1].body) as { update?: string; confirm_shrink?: boolean };
+      assert.equal(posts().length, 1);
+      const sent = JSON.parse(posts()[0].body) as { update?: string; confirm_shrink?: boolean };
       assert.equal(sent.confirm_shrink, undefined);
       assert.equal(roomText(sent.update ?? ""), "a\nb\nc\n");
 
@@ -2255,15 +2334,15 @@ for (const keepAnswer of [200, 503]) {
         assert.equal(h.states.at(-1), "clean");
         await advance(60_000);
         h.destroy();
-        assert.equal(posts().length, 2);
+        assert.equal(posts().length, 1);
       } else {
         // Not handed over: still queued, and a closing tab still sends it.
         assert.ok((h.pendings.at(-1) ?? 0) > 0);
         assert.equal(h.states.at(-1), "dirty");
         window.dispatchEvent(new Event("pagehide"));
-        assert.equal(posts().length, 3);
-        assert.equal(posts()[2].keepalive, true);
-        const exit = JSON.parse(posts()[2].body) as { update?: string };
+        assert.equal(posts().length, 2);
+        assert.equal(posts()[1].keepalive, true);
+        const exit = JSON.parse(posts()[1].body) as { update?: string };
         assert.equal(roomText(exit.update ?? ""), "a\nb\nc\n");
       }
     } finally {

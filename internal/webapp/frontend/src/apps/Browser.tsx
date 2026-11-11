@@ -1157,17 +1157,14 @@ export default function Browser(props: {
                   navigate(urlForPath(path, project?.id, version, route.full, true));
                   return;
                 }
-                // Save and leave: the flush gets a moment, never a veto — a
-                // hub that does not answer must not trap the user in the
-                // editor. Only a question the user must answer keeps them here.
+                // Save and leave: FileView's flush bounds its own wait, so a
+                // hub that does not answer never traps the user in the editor.
+                // Only a question the user must answer keeps them here.
                 const target = urlForPath(path, project?.id, version, route.full, false);
                 const here = window.location.pathname + window.location.search;
                 let okToLeave = true;
                 try {
-                  okToLeave = await Promise.race([
-                    editFlushRef.current?.() ?? Promise.resolve(true),
-                    new Promise<boolean>((r) => setTimeout(() => r(true), 1_500)),
-                  ]);
+                  okToLeave = await (editFlushRef.current?.() ?? Promise.resolve(true));
                 } catch {
                   // The editor's own teardown still sends what it holds.
                 }

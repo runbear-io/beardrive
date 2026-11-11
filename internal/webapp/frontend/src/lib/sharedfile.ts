@@ -1243,8 +1243,24 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
      or a bystander: nothing to send. Concurrent calls share one request. */
   let liveFlushing: Promise<void> | null = null;
   const saveNow = (): Promise<void> => {
+    if (!gone) {
+      // The question is open: Done stays put until it is answered.
+      if (asking) return Promise.resolve();
+      /* A sharp shrink against what the file is known to hold needs the
+         user's word before any request: ask at once, so Done never waits on
+         the network (or times out past it) to learn what is known here. A
+         shrink only the hub can see (a `saved` that is not the whole file)
+         is still its 422, answered the same way. */
+      const wouldSend = hubHoldsIt ? (live ? localDirtyInRoom : pending > 0) : current() !== saved;
+      if (wouldSend && !confirmShrinkOnce && opts.onShrinkRefused && sharpShrink(byteLength(saved), byteLength(current()))) {
+        clearTimeout(shrinkTimer ?? undefined);
+        shrinkTimer = null;
+        askShrink(current());
+        return Promise.resolve();
+      }
+    }
     if (!hubHoldsIt) return save();
-    if (asking || gone) return Promise.resolve();
+    if (gone) return Promise.resolve();
     if (!live) return pending > 0 ? flushOffline(false) : Promise.resolve();
     if (!localDirtyInRoom) return Promise.resolve();
     if (liveFlushing) return liveFlushing;
