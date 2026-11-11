@@ -1493,6 +1493,105 @@ test("after a failed bfcache exit save, pageshow and a second undelivered edit s
   }
 });
 
+/* Out-of-order acks on the same element: an in-flight bfcache exit save for
+   edit #1 finishes AFTER the page has returned, edited the same paragraph
+   again (#2), and received the app's newer ack for #2. That late response
+   must not roll `ackedHtml` back to #1 — or a third undelivered edit (#3)
+   before close would re-merge #2 and duplicate it. */
+test("a late exit-save response arriving after a newer app ack does not duplicate same-element edits on close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  const ctx = await browser.newContext();
+  try {
+    let holdFirstSync = true;
+    let sawFirstSync: (() => void) | null = null;
+    const firstSyncArrived = new Promise<void>((r) => {
+      sawFirstSync = r;
+    });
+    let releaseFirstSync: (() => void) | null = null;
+    const allowFirstSyncFinish = new Promise<void>((r) => {
+      releaseFirstSync = r;
+    });
+    let firstSyncDone: (() => void) | null = null;
+    const firstSyncCompleted = new Promise<void>((r) => {
+      firstSyncDone = r;
+    });
+
+    await ctx.route("**/ycollab/sync*", async (route) => {
+      if (holdFirstSync) {
+        holdFirstSync = false;
+        sawFirstSync?.();
+        await allowFirstSyncFinish;
+        await route.continue();
+        firstSyncDone?.();
+        return;
+      }
+      await route.continue();
+    });
+
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+
+    // 1) Edit #1 (undelivered to app) enters bfcache; its worker sync is held in flight.
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" First.");
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await firstSyncArrived;
+
+    // 2) Page restores from bfcache; re-enable patch delivery so edit #2 on the
+    //    SAME `p.lead` element is applied and acked by the app BEFORE sync #1 finishes!
+    await child!.evaluate(() => document.documentElement.removeAttribute("data-bd-exit"));
+    await editor.evaluate(() => {
+      Object.defineProperty(window, "__dropBdEditPatches", { value: false, configurable: true, writable: true });
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    });
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+
+    await editor.keyboard.type(" Second.");
+    // Give the in-tab MessagePort task one beat so VisualEdit applies #2 and posts ack(#2) to exitWorker.
+    await editor.waitForTimeout(150);
+
+    // 3) Now release the older sync #1 response so confirmSeqs(#1) arrives AFTER ack(#2)!
+    releaseFirstSync!();
+    await firstSyncCompleted;
+    await editor.waitForTimeout(100);
+
+    // 4) Drop patches again, type edit #3 in the SAME `p.lead` element, and close immediately.
+    await dropPatches(editor);
+    await editor.keyboard.type(" Third.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(
+      page,
+      id,
+      file,
+      "Revenue grew steadily across every region. First. Second. Third.",
+    );
+    expect(after.split("First.").length - 1).toBe(1);
+    expect(after.split("Second.").length - 1).toBe(1);
+    expect(after.split("Third.").length - 1).toBe(1);
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 
 function freePort(): Promise<number> {

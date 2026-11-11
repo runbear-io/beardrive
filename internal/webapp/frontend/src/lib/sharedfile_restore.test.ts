@@ -2870,6 +2870,22 @@ test("unackedExitPatches: per-span acks, gaps and re-edits", () => {
   assert.notEqual(unackedExitPatches(spans), null);
   ackEditedSpan(spans, 3);
   assert.equal(unackedExitPatches(spans), null);
+
+  // Out-of-order acks on the same span: if seq 5 (newer app ack) arrives
+  // BEFORE a late retry response for seq 4, ackedHtml must NOT roll back to 4!
+  const history = new Map<number, string>([
+    [4, "Lead. First."],
+    [5, "Lead. First. Second."],
+    [6, "Lead. First. Second. Third."],
+  ]);
+  const sameSpan: EditedSpan[] = [
+    { start: 10, end: 20, html: "Lead. First. Second. Third.", seq: 6, acked: false, history },
+  ];
+  ackEditedSpan(sameSpan, 5);
+  ackEditedSpan(sameSpan, 4); // late ack for older seq 4 must not overwrite seq 5's ackedHtml!
+  same(unackedExitPatches(sameSpan), [
+    { start: 10, end: 20, html: "Lead. First. Second. Third.", ackedHtml: "Lead. First. Second." },
+  ]);
   assert.equal(unackedExitPatches([]), null);
 });
 

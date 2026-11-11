@@ -27,23 +27,29 @@ export type EditedSpan = {
   html: string;
   seq: number;
   acked?: boolean;
+  ackedSeq?: number;
   ackedHtml?: string;
   history?: Map<number, string>;
 };
 
 /* Marks the span edit `seq` acknowledged, recording the HTML that `seq`
    carried (`ackedHtml`) as the ancestor already present in the app's document.
-   A later edit to a different span never clears an earlier unapplied span, and
-   an older ack arriving after a newer edit to the same span advances `ackedHtml`
-   to what landed while keeping the newer edit unacknowledged. */
+   `ackedSeq` moves forward only, so a late retry response confirming an older
+   `seq` can never roll `ackedHtml` backward behind a newer app `ack`. */
 export function ackEditedSpan(spans: Iterable<EditedSpan>, seq: number): void {
   for (const s of spans) {
     const h = s.history?.get(seq);
     if (h !== undefined) {
-      s.ackedHtml = h;
+      if (s.ackedSeq === undefined || seq > s.ackedSeq) {
+        s.ackedSeq = seq;
+        s.ackedHtml = h;
+      }
       if (s.seq === seq) s.acked = true;
     } else if (s.seq === seq) {
-      s.ackedHtml = s.html;
+      if (s.ackedSeq === undefined || seq > s.ackedSeq) {
+        s.ackedSeq = seq;
+        s.ackedHtml = s.html;
+      }
       s.acked = true;
     }
   }

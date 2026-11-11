@@ -126,7 +126,10 @@ const reconcileAfterRearm = () => {
           for (const s of editedSpans.values()) {
             for (const seq of amb.seqs) {
               const h = s.history?.get(seq);
-              if (h !== undefined) s.ackedHtml = h;
+              if (h !== undefined && (s.ackedSeq === undefined || seq > s.ackedSeq)) {
+                s.ackedSeq = seq;
+                s.ackedHtml = h;
+              }
             }
           }
           if (curState.docText === amb.fromText) curState.docText = peek.text;
@@ -197,8 +200,8 @@ const sendUnacked = (asUnload: boolean) => {
       }
       const landedText = typeof out.text === "string" ? out.text : req.method === "PUT" ? req.body : null;
       if (landedText === null) return;
-      workerSaved = { fromText, text: landedText, sha: out.sha };
       if (state === curState && state.savedText === fromText) {
+        workerSaved = { fromText, text: landedText, sha: out.sha };
         if (state.docText === state.savedText) state.docText = landedText;
         state.savedText = landedText;
         if (typeof out.sha === "string" && out.sha) state.baseSha = out.sha;
@@ -245,11 +248,11 @@ const onChildMessage = (ev: MessageEvent) => {
     const prev = editedSpans.get(k);
     const history = prev?.history ?? new Map<number, string>();
     history.set(msg.seq, msg.html);
+    let ackedSeq = prev?.ackedSeq;
     let ackedHtml = prev?.ackedHtml;
-    let maxAcked = -1;
     for (const [hSeq, hHtml] of history) {
-      if (ackedSeqs.has(hSeq) && hSeq > maxAcked) {
-        maxAcked = hSeq;
+      if (ackedSeqs.has(hSeq) && (ackedSeq === undefined || hSeq > ackedSeq)) {
+        ackedSeq = hSeq;
         ackedHtml = hHtml;
       }
     }
@@ -261,6 +264,7 @@ const onChildMessage = (ev: MessageEvent) => {
       html: latestHtml,
       seq: latestSeq,
       acked: ackedSeqs.has(latestSeq),
+      ackedSeq,
       ackedHtml,
       history,
     });
