@@ -1,10 +1,14 @@
 package main
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/webapp"
 )
 
@@ -62,5 +66,64 @@ func TestDesktopRoutesClassified(t *testing.T) {
 	sort.Strings(stale)
 	for _, pat := range stale {
 		t.Errorf("desktopRoutes lists %q, which the hub no longer serves — renamed or removed?", pat)
+	}
+}
+
+func TestDesktopCapabilityBeaconAcceptsOpaqueOriginWithoutAmbientToken(t *testing.T) {
+	t.Setenv("BDRIVE_HOME", t.TempDir())
+	t.Setenv("BDRIVE_TOKEN", "")
+
+	var gotAuth, gotPath, gotBody string
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer hub.Close()
+
+	if err := config.SaveSettings(config.Settings{
+		Server: hub.URL,
+		Token:  "ambient-device-secret",
+		Email:  "alice@example.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	desk := httptest.NewServer(desktopHandler())
+	defer desk.Close()
+
+	// Minting an edit token still requires same-origin: Origin: null is refused.
+	mintReq, _ := http.NewRequest("POST", desk.URL+"/api/p/p-1/ycollab/frame", strings.NewReader(`{"path":"a.html"}`))
+	mintReq.Header.Set("Origin", "null")
+	mintResp, err := http.DefaultClient.Do(mintReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mintResp.Body.Close()
+	if mintResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("mint with Origin: null = %d, want 403", mintResp.StatusCode)
+	}
+
+	// Flushing with the capability token in the URL accepts Origin: null from
+	// the sandboxed iframe and never attaches the saved device token.
+	flushReq, _ := http.NewRequest("POST", desk.URL+"/api/p/p-1/ycollab/frame/tok.sig", strings.NewReader(`{"patches":[]}`))
+	flushReq.Header.Set("Origin", "null")
+	flushReq.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	flushResp, err := http.DefaultClient.Do(flushReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flushResp.Body.Close()
+	if flushResp.StatusCode != http.StatusOK {
+		t.Fatalf("flush with Origin: null = %d, want 200", flushResp.StatusCode)
+	}
+	if gotPath != "/api/p/p-1/ycollab/frame/tok.sig" || gotBody != `{"patches":[]}` {
+		t.Fatalf("proxied path=%q body=%q", gotPath, gotBody)
+	}
+	if gotAuth != "" {
+		t.Fatalf("capability beacon attached ambient Authorization=%q, want empty", gotAuth)
 	}
 }

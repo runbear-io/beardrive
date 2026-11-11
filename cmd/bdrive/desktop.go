@@ -77,6 +77,10 @@ const (
 	routeLocal routeMode = iota
 	// routeProxy forwards to the project's own hub with the device token.
 	routeProxy
+	// routeProxyCapability forwards to the project's own hub without the
+	// device token and without originGuard: the URL carries a hub-signed
+	// capability token, and the sandboxed iframe that posts it has Origin: null.
+	routeProxyCapability
 )
 
 // desktopRoutes classifies every per-project route the hub serves, and the
@@ -175,7 +179,7 @@ var desktopRoutes = []struct {
 	// A framed HTML page's edit beacon: minted and flushed against the hub's
 	// live document for the same reason /ycollab/sync is.
 	{"POST /api/p/{project}/ycollab/frame", routeProxy, ""},
-	{"POST /api/p/{project}/ycollab/frame/{token}", routeProxy, ""},
+	{"POST /api/p/{project}/ycollab/frame/{token}", routeProxyCapability, ""},
 
 	{"POST /api/p/{project}/reads", routeLocal, "the sync client posts these straight to the hub, never through here; the app's own viewer reads go out through desktop_reads.go instead, as human traffic"},
 }
@@ -210,14 +214,16 @@ func desktopHandler() http.Handler {
 	// Every per-project hub route is classified in desktopRoutes below, and the
 	// proxies are registered FROM it — see the table for why that matters.
 	for _, rt := range desktopRoutes {
-		if rt.mode != routeProxy {
-			continue // falls through to srv, answered from this machine
+		switch rt.mode {
+		case routeProxy:
+			h := http.HandlerFunc(proxyProject)
+			if !strings.HasPrefix(rt.pattern, "GET ") {
+				h = originGuard(h) // every proxied write, exactly as before
+			}
+			mux.HandleFunc(rt.pattern, h)
+		case routeProxyCapability:
+			mux.HandleFunc(rt.pattern, proxyCapabilityProject)
 		}
-		h := http.HandlerFunc(proxyProject)
-		if !strings.HasPrefix(rt.pattern, "GET ") {
-			h = originGuard(h) // every proxied write, exactly as before
-		}
-		mux.HandleFunc(rt.pattern, h)
 	}
 	// Project creation and its template seeding are hub writes (2026-08-20
 	// owner decision): create goes to the signed-in hub, uploads go to the
@@ -809,6 +815,19 @@ func proxyProject(w http.ResponseWriter, r *http.Request) {
 	proxyDefaultHub(w, r)
 }
 
+func proxyCapabilityProject(w http.ResponseWriter, r *http.Request) {
+	if m, ok := desktopMounts()[r.PathValue("project")]; ok {
+		proxyHubWithAuth(w, r, m.server, false)
+		return
+	}
+	settings, _ := config.LoadSettings()
+	if settings.Server == "" {
+		http.Error(w, "not signed in to a hub", http.StatusBadGateway)
+		return
+	}
+	proxyHubWithAuth(w, r, settings.Server, false)
+}
+
 // proxyDefaultHub forwards a token-scoped request (share revoke/expiry —
 // nothing in the path names a project) to the signed-in hub.
 // ponytail: a mount syncing through a DIFFERENT hub than the signed-in one
@@ -846,10 +865,17 @@ func proxyDefaultHub(w http.ResponseWriter, r *http.Request) {
 }
 
 func proxyHub(w http.ResponseWriter, r *http.Request, server string) {
-	settings, _ := config.LoadSettings()
-	token := os.Getenv("BDRIVE_TOKEN")
-	if token == "" {
-		token = settings.Token
+	proxyHubWithAuth(w, r, server, true)
+}
+
+func proxyHubWithAuth(w http.ResponseWriter, r *http.Request, server string, attachToken bool) {
+	var token string
+	if attachToken {
+		settings, _ := config.LoadSettings()
+		token = os.Getenv("BDRIVE_TOKEN")
+		if token == "" {
+			token = settings.Token
+		}
 	}
 	u := server + r.URL.Path
 	if r.URL.RawQuery != "" {
@@ -866,7 +892,7 @@ func proxyHub(w http.ResponseWriter, r *http.Request, server string) {
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		req.Header.Set("Content-Type", ct)
 	}
-	if token != "" && tokenGoesTo(server) {
+	if attachToken && token != "" && tokenGoesTo(server) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	// A long-lived stream cannot use initClient: its 10s whole-request timeout

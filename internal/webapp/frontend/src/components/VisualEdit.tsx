@@ -470,19 +470,17 @@ export function VisualEdit({
       if (msg.type !== "bd-edit:patch") return;
       if (!anchored)
         return anchorRanges().then(() => {
-          applyPatch(msg);
-          ackPatch(msg);
+          if (applyPatch(msg)) ackPatch(msg);
         });
-      applyPatch(msg);
-      ackPatch(msg);
+      if (applyPatch(msg)) ackPatch(msg);
     };
-    const applyPatch = (msg: Patch) => {
+    const applyPatch = (msg: Patch): boolean => {
       const a = anchors.get(key(msg));
-      if (!a) return; // a range from a render this side has already replaced
+      if (!a) return false; // a range from a render this side has already replaced
       if (stageDoc) {
         const sFrom = Y.createAbsolutePositionFromRelativePosition(a.from, stageDoc);
         const sTo = Y.createAbsolutePositionFromRelativePosition(a.to, stageDoc);
-        if (!sFrom || !sTo || sFrom.index > sTo.index) return;
+        if (!sFrom || !sTo || sFrom.index > sTo.index) return false;
         const sText = stageDoc.getText("body");
         const sSpan = sTo.index - sFrom.index;
         const sWhole = sFrom.index === 0 && sTo.index === sText.length;
@@ -490,12 +488,12 @@ export function VisualEdit({
           anchors.clear();
           anchored = false;
           setGen((g) => g + 1);
-          return;
+          return false;
         }
         const sLive = sText.toString().slice(sFrom.index, sTo.index);
         const sWant = merge3PreferRight(a.orig, sLive, msg.html);
         a.orig = msg.html;
-        if (sLive === sWant) return;
+        if (sLive === sWant) return true;
         stageDoc.transact(() => {
           for (const s of diffSplices(sLive, sWant)) {
             if (s.deleteCount > 0) sText.delete(sFrom.index + s.index, s.deleteCount);
@@ -505,13 +503,12 @@ export function VisualEdit({
         cb.current.onStateChange?.("dirty");
         clearTimeout(stageTimer);
         stageTimer = setTimeout(() => void file.saveNow(), STAGE_IDLE_MS);
-        return;
+        return true;
       }
       const doc = file.collab.doc;
       const from = Y.createAbsolutePositionFromRelativePosition(a.from, doc);
       const to = Y.createAbsolutePositionFromRelativePosition(a.to, doc);
-      if (!from || !to || from.index > to.index) return;
-
+      if (!from || !to || from.index > to.index) return false;
       const text = file.collab.text;
 
       /* Last line of defence: a patch may not swallow the document.
@@ -539,7 +536,7 @@ export function VisualEdit({
         anchors.clear();
         anchored = false;
         setGen((g) => g + 1);
-        return;
+        return false;
       }
 
       const live = text.toString().slice(from.index, to.index);
@@ -552,13 +549,14 @@ export function VisualEdit({
          other words of the same element survives the collision. */
       const want = merge3PreferRight(a.orig, live, msg.html);
       a.orig = msg.html;
-      if (live === want) return;
+      if (live === want) return true;
       // Splices run last-first in `live` coordinates, so shifting by the
       // span's start keeps every one valid. One transaction, so peers see one
       // change rather than a moment of missing content.
       file.collab.applySplices(
         diffSplices(live, want).map((s) => ({ ...s, index: s.index + from.index })),
       );
+      return true;
     };
     const onMessage = (e: MessageEvent) => {
       // The iframe is sandboxed WITHOUT allow-same-origin, so its origin is
