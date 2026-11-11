@@ -172,6 +172,10 @@ var desktopRoutes = []struct {
 	// it has to be classified, or the desktop answers it locally.
 	{"GET /api/p/{project}/ycollab/{room...}", routeProxy, ""},
 	{"POST /api/p/{project}/ycollab/sync", routeProxy, ""},
+	// A framed HTML page's edit beacon: minted and flushed against the hub's
+	// live document for the same reason /ycollab/sync is.
+	{"POST /api/p/{project}/ycollab/frame", routeProxy, ""},
+	{"POST /api/p/{project}/ycollab/frame/{token}", routeProxy, ""},
 
 	{"POST /api/p/{project}/reads", routeLocal, "the sync client posts these straight to the hub, never through here; the app's own viewer reads go out through desktop_reads.go instead, as human traffic"},
 }

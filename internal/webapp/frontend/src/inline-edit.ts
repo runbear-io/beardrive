@@ -10,7 +10,10 @@
    `bd-edit:flushed` with that id — so the app's Done saves only after every
    patch before the answer has landed — and, with `lock`, stops accepting
    edits until `bd-edit:unlock`, so nothing typed during Done's save can be
-   left out of it.
+   left out of it. It also takes `bd-edit:ack` (each patch's `seq`, once the
+   app has it in the document) and `bd-edit:beacon` (a single-file save URL):
+   a tab closed before a patch was acknowledged posts every edit here to that
+   URL on the way out — cookie-free, so the sandbox still holds no session.
 
    Three things had to be true at once, and they decided the design:
 
@@ -37,6 +40,7 @@ import { EditorView } from "@tiptap/pm/view";
 import { keymap } from "@tiptap/pm/keymap";
 import { baseKeymap, toggleMark } from "@tiptap/pm/commands";
 import { history, undo, redo } from "@tiptap/pm/history";
+import { beaconBody, type EditedSpan } from "./lib/editbeacon";
 
 const SRC_ATTR = "data-bd-src";
 
@@ -186,6 +190,14 @@ let before = "";
 /* Done's save is on the wire: no edit may start until the app says how it
    went (`bd-edit:unlock` if the editor stays; a page torn down otherwise). */
 let locked = false;
+/* The exit beacon (lib/editbeacon.ts): every patch is numbered, the app
+   acknowledges each once it is in the document, and a page that goes with a
+   patch unacknowledged posts every span edited on this render to the URL the
+   app gave it. */
+let patchSeq = 0;
+let ackedSeq = 0;
+let beaconURL = "";
+const editedSpans = new Map<string, EditedSpan>();
 
 // The document as markup, or null if there is no live editor.
 function currentHTML(): string | null {
@@ -197,7 +209,9 @@ function flush() {
   const html = currentHTML();
   if (html === null || html === before) return;
   before = html;
-  send({ type: "bd-edit:patch", start: range.start, end: range.end, html });
+  const seq = ++patchSeq;
+  editedSpans.set(range.start + "," + range.end, { start: range.start, end: range.end, html, seq });
+  send({ type: "bd-edit:patch", seq, start: range.start, end: range.end, html });
 }
 
 function unmount() {
@@ -395,11 +409,27 @@ send({
 // the only observable difference between "rendered" and "editable".
 document.documentElement.setAttribute("data-bd-ready", "");
 
-window.addEventListener("beforeunload", unmount);
+/* Leaving with an edit the app never acknowledged: post it to the hub
+   ourselves, once per unload (marking it acknowledged), without cookies. A
+   keepalive body is capped by the browser; past that it goes as an ordinary
+   request that may still finish. */
+function beaconUnacked() {
+  const body = beaconBody({ url: beaconURL, patchSeq, ackedSeq, hash, len, spans: editedSpans.values() });
+  if (body === null) return;
+  ackedSeq = patchSeq;
+  const keepalive = new TextEncoder().encode(body).byteLength <= 60_000;
+  void fetch(beaconURL, { method: "POST", mode: "no-cors", credentials: "omit", keepalive, body }).catch(() => {});
+}
+
+window.addEventListener("beforeunload", () => {
+  unmount();
+  beaconUnacked();
+});
 // Flush on pagehide too; keep the open element mounted when entering bfcache.
 window.addEventListener("pagehide", (e: PageTransitionEvent) => {
   if (e.persisted) flush();
   else unmount();
+  beaconUnacked();
 });
 
 /* Done in the app: post what the open editor holds, then answer. The answer
@@ -409,8 +439,22 @@ window.addEventListener("pagehide", (e: PageTransitionEvent) => {
    saved). Only the app (the parent window) may ask. */
 window.addEventListener("message", (e) => {
   if (e.source !== window.parent) return;
-  const msg = e.data as { type?: unknown; id?: unknown; lock?: unknown } | null;
+  const msg = e.data as { type?: unknown; id?: unknown; lock?: unknown; seq?: unknown; url?: unknown } | null;
   if (!msg) return;
+  if (msg.type === "bd-edit:ack" && typeof msg.seq === "number") {
+    if (msg.seq > ackedSeq) ackedSeq = msg.seq;
+    return;
+  }
+  if (msg.type === "bd-edit:beacon" && typeof msg.url === "string" && msg.url.startsWith("/")) {
+    // The document's own URL has the hub's scheme and host even though this
+    // sandbox's origin is the opaque "null".
+    try {
+      beaconURL = new URL(msg.url, window.location.href).href;
+    } catch {
+      // an unusable URL: no beacon, as before
+    }
+    return;
+  }
   if (msg.type === "bd-edit:flush" && typeof msg.id === "number") {
     flush();
     if (msg.lock === true) {

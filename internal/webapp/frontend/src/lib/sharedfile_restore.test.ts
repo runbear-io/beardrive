@@ -55,6 +55,7 @@ const { openSharedFile, SAVE_RETRY_MS } = await import("./sharedfile.ts");
 const { parseConflict } = await import("./conflict.ts");
 const { merge3, merge3PreferRight, merge3ForPath, validMergedText } = await import("./merge3.ts");
 const { frameChannel, saveLocked } = await import("./frameflush.ts");
+const { beaconBody } = await import("./editbeacon.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -2843,4 +2844,29 @@ test("frameChannel keeps arrival order behind an async handler, then handles at 
   channel.enqueue(() => log.push("patch 3"));
   same(log, ["ready", "patch 1", "patch 2", "patch 3"]); // idle: synchronous
   channel.close();
+});
+
+/* The frame's exit beacon goes only when a patch is still unacknowledged,
+   and then carries every span edited on the render, in source order, over
+   the rendered version's hash — enough for the hub to rebuild the whole
+   document. Acknowledged, or nothing to splice onto: nothing is sent. */
+test("beaconBody: sent only while a patch is unacknowledged, carrying every edited span", () => {
+  const spans = [
+    { start: 40, end: 52, html: "Second", seq: 2 },
+    { start: 10, end: 20, html: "First", seq: 1 },
+  ];
+  const base = { url: "https://hub/api/p/x/ycollab/frame/tok", hash: "h", len: 100, spans };
+  same(JSON.parse(beaconBody({ ...base, patchSeq: 2, ackedSeq: 1 }) ?? "null"), {
+    src_hash: "h",
+    src_len: 100,
+    patches: [
+      { start: 10, end: 20, html: "First" },
+      { start: 40, end: 52, html: "Second" },
+    ],
+  });
+  assert.equal(beaconBody({ ...base, patchSeq: 2, ackedSeq: 2 }), null); // all acknowledged
+  assert.equal(beaconBody({ ...base, url: "", patchSeq: 2, ackedSeq: 1 }), null); // no capability
+  assert.equal(beaconBody({ ...base, hash: "", patchSeq: 2, ackedSeq: 1 }), null); // no version
+  assert.equal(beaconBody({ ...base, len: -1, patchSeq: 2, ackedSeq: 1 }), null);
+  assert.equal(beaconBody({ ...base, spans: [], patchSeq: 2, ackedSeq: 1 }), null); // nothing edited
 });

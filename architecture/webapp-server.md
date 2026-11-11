@@ -52,6 +52,8 @@ classDiagram
         -syncDurable / awaitDurable(ctx, room, text, synced) sha, snapFailure
         -mergeStaleUpload(w, r, v, path, base, head, tmp, size) handled, now
         -moveDocLive(ctx, room, text, to, sha, filed, recompute)
+        -handleEditFrame() POST {prefix}ycollab/frame, PermWrite
+        -handleEditFrameFlush() POST {prefix}ycollab/frame/{token}
     }
     class recordingMux {
         <<http.ServeMux wrapper>>
@@ -591,12 +593,14 @@ classDiagram
     }
     note for printView "The one thing allowed to relax sandboxInline's wall, and by exactly one flag. The app shell cannot print synced HTML: it renders in a cross-origin frame, and a cross-origin frame prints CLIPPED to its box — the parent may not measure the content to size it, and an over-tall guess prints the slack as blank pages. So ?print=1 serves the document as a TOP-LEVEL page that presses Print itself, which needs allow-modals (the flag that gates print/alert/confirm in a sandbox). allow-same-origin stays off, so the document is still opaque and can no more reach the API or the session cookie than the frame it replaces. text/html only, because the suffix is appended AFTER the stored bytes: HTML's parser accepts that and XHTML — parsed as XML — does not. Never on a download door, where it would corrupt the saved file, and Content-Length is dropped when it fires or the promised length truncates the script straight back off"
     class frameToken {
-        <<frame.go, GET frame + GET raw/{token}/{path...}>>
-        HMAC over project, folder, reader, expiry
+        <<frame.go, GET frame + GET raw/{token}/{path...}, POST ycollab/frame[/{token}]>>
+        HMAC over project, folder or file, reader, expiry, write flag
         key shared at hub/frame-key in Root
-        reads the page's folder as its reader, inline only
+        read token: the page's folder as its reader, inline only
+        edit token (frameClaims Write true, Path): one file, exit beacon only
     }
     note for frameToken "Synced HTML renders in an opaque-origin sandbox, so the browser sends no session cookie for the page's own images, and /file?path= cannot be the base a relative src resolves against. /frame mints a path-shaped URL for a signed-in reader; authGate's frameUser resolves its token before the provider, and handleRaw re-checks the folder scope and serves through serveBlob, so the reader's current permissions decide every request. The page can read its own URL, so the token is assumed to leak to the page's authors: what leaks is one reader's read access to one folder for frameTokenTTL"
+    note for frameToken "The VisualEdit exit beacon. The editing iframe is sandboxed without allow-same-origin, so it has no session to save an edit the app never acknowledged. POST {prefix}ycollab/frame (handleEditFrame, PermWrite, uploads enabled) mints a single-file edit token (Write true, Path) and returns its URL. On the way out the iframe POSTs to ycollab/frame/{token} cookie-free (no-cors, keepalive up to 60,000 bytes) the body { src_hash, src_len, patches }. handleEditFrameFlush checks the token's project and path and the caller's current write access, bounds the flush (maxEditPatches 256), rebuilds the text by splicing each UTF-16 span onto the src_hash version, and hands it to the editor's own save door: ycollab/sync with base_text and park_on_conflict on a hub, the upload door with the park header on a plain folder. The result merges with what the document holds now, is idempotent when the app's own save already landed, and parks a conflict copy when somebody changed the same words. Both routes are proxied by bdrive desktop (desktopRoutes)"
     class editView {
         <<serveBlob, ?edit=1>>
         text/html only, inline only, PermWrite on the path
@@ -812,7 +816,8 @@ classDiagram
     commentEvent ..> CommentThread : foldComments
     CommentThread *-- CommentAnchor
     Server ..> commentView : serveBlob
-    Server ..> frameToken : handleFrame, handleRaw, authGate
+    Server ..> frameToken : handleFrame, handleRaw, authGate, handleEditFrame, handleEditFrameFlush
+    frameToken ..> ydocs : edit beacon flush through POST ycollab/sync (park_on_conflict)
     frameToken ..> Backend : hub/frame-key
     Server o-- ReadLedger
     Server o-- DataIndex : Data

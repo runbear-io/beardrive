@@ -474,6 +474,59 @@ test("two people editing different paragraphs both land", async ({ page, browser
   expect(after).toContain('<script>console.log("chart would render here");</script>');
 });
 
+/* A tab closed before the edit's postMessage reached the app. The app never
+   hears the patch (every one is dropped on its way in, so nothing is spliced
+   and nothing is acknowledged), so its own exit flush has nothing to send.
+   The frame, sandboxed without a session, posts the edit itself on the way
+   out to the single-file beacon URL the app handed it — and it lands. */
+test("an edit whose postMessage is not delivered before tab close still lands", async ({ page, browser }) => {
+  await login(page, ADMIN); // the verifier: makes the file and reads it back
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    const issued = editor.waitForResponse(
+      (r) => r.url().includes("/ycollab/frame?") && r.request().method() === "POST" && r.ok(),
+    );
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+    await issued;
+    // The URL reaches the frame as a postMessage of its own, which nothing in
+    // the frame makes observable; one beat for that task to run.
+    await editor.waitForTimeout(200);
+
+    // Every patch is dropped before VisualEdit's listener can see it.
+    await editor.evaluate(() => {
+      window.addEventListener(
+        "message",
+        (e) => {
+          const d: unknown = e.data;
+          if (d && typeof d === "object" && "type" in d && d.type === "bd-edit:patch") e.stopImmediatePropagation();
+        },
+        true,
+      );
+    });
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Saved across close.");
+    await editor.close({ runBeforeUnload: true }); // the tab goes at once
+
+    // The context (its network) outlives the tab, as the browser does; only
+    // the tab is gone, and the edit must still land.
+    const after = await waitForSource(page, id, file, "Revenue grew steadily across every region. Saved across close.");
+    expect(after.split("<h1>").length - 1).toBe(1);
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
 /* A file that is not in English, edited through the whole real stack.
 
    The offsets the server stamps are UTF-16 code units, because that is how a

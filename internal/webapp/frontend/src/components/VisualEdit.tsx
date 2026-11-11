@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState, type SharedFile } from "../lib/sharedfile";
+import { postJSON } from "../api/http";
 import { diffSplices, merge3PreferRight } from "../lib/merge3";
 import { frameChannel, saveLocked } from "../lib/frameflush";
 import { type CollabStatus } from "../lib/collab";
@@ -31,7 +32,10 @@ import { askShrink, withdrawShrink } from "./ShrinkDialog";
 // request (lib/frameflush.ts), answered by `bd-edit:flushed` after every patch
 // the frame held.
 type Ready = { type: "bd-edit:ready"; hash: string; len: number; ranges: Span[] };
-type Patch = { type: "bd-edit:patch"; start: number; end: number; html: string };
+// `seq` numbers the frame's patches; each is acknowledged (`bd-edit:ack`) once
+// it is in the document, and one never acknowledged goes out by the frame's
+// own exit beacon (lib/editbeacon.ts).
+type Patch = { type: "bd-edit:patch"; seq?: number; start: number; end: number; html: string };
 type Clobbered = { type: "bd-edit:clobbered" };
 type Flushed = { type: "bd-edit:flushed"; id: number };
 type FromFrame = Ready | Patch | Clobbered | Flushed;
@@ -173,6 +177,35 @@ export function VisualEdit({
        decides whether the editor may close. */
     const channel = frameChannel();
     let frameReady = false;
+    /* The frame's way out for a patch that never reaches here — a tab closed
+       between the keystroke and its message (lib/editbeacon.ts): a
+       single-file save URL it may post to without cookies. Fetched for each
+       render, refreshed before it expires, handed to the frame once ready. */
+    let beaconPath = "";
+    let beaconTimer: ReturnType<typeof setTimeout> | undefined;
+    let beaconStopped = false;
+    const sendBeaconURL = () => {
+      if (beaconPath && frameReady) frame.current?.contentWindow?.postMessage({ type: "bd-edit:beacon", url: beaconPath }, "*");
+    };
+    const fetchBeacon = () => {
+      postJSON<{ url?: unknown; expires?: unknown }>(apiBase + "ycollab/frame?path=" + encodeURIComponent(path), {})
+        .then((r) => {
+          if (beaconStopped || typeof r?.url !== "string") return;
+          beaconPath = r.url;
+          sendBeaconURL();
+          if (typeof r.expires !== "number") return;
+          // A deadline (epoch ms) or a lifetime (ms): renewed a minute early.
+          const left = r.expires > 1e12 ? r.expires - Date.now() : r.expires;
+          beaconTimer = setTimeout(fetchBeacon, Math.max(30_000, left - 60_000));
+        })
+        .catch(() => {
+          // An older hub: no beacon, exactly as before.
+        });
+    };
+    fetchBeacon();
+    const ackPatch = (msg: Patch) => {
+      if (typeof msg.seq === "number") frame.current?.contentWindow?.postMessage({ type: "bd-edit:ack", seq: msg.seq }, "*");
+    };
     const drainFrame = async (lock: boolean) => {
       const el = frame.current;
       const win = el?.contentWindow;
@@ -430,12 +463,18 @@ export function VisualEdit({
         srcHash = msg.hash;
         srcLen = msg.len;
         frameReady = true;
+        sendBeaconURL();
         return anchorRanges(); // no-op until the document is seeded too
       }
 
       if (msg.type !== "bd-edit:patch") return;
-      if (!anchored) return anchorRanges().then(() => applyPatch(msg));
+      if (!anchored)
+        return anchorRanges().then(() => {
+          applyPatch(msg);
+          ackPatch(msg);
+        });
       applyPatch(msg);
+      ackPatch(msg);
     };
     const applyPatch = (msg: Patch) => {
       const a = anchors.get(key(msg));
@@ -543,6 +582,8 @@ export function VisualEdit({
       if (handle?.current === exposed) handle.current = null;
       frameReady = false;
       channel.close();
+      beaconStopped = true;
+      clearTimeout(beaconTimer);
       clearTimeout(retryTimer);
       clearTimeout(stuckTimer);
       clearTimeout(stageTimer);

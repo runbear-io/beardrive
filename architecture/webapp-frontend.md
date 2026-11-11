@@ -191,6 +191,7 @@ classDiagram
         +collabroute.ts hasCollabRoute (only a project api base has a room; a single volume opens solo at once)
         +merge3.ts merge3 merge3PreferRight merge3ForPath validMergedText diffSplices applySplices retainsChanges (TS port of internal/textmerge; .json/.jsonl merges held to valid JSON as the hub holds them)
         +frameflush.ts frameChannel FrameChannel saveLocked (FIFO queue of iframe messages; drain posts bd-edit:flush, optionally with lock, and waits for bd-edit:flushed; saveLocked unlocks with bd-edit:unlock unless the save landed)
+        +editbeacon.ts beaconBody EditedSpan (the iframe's exit beacon body: src_hash, src_len, every span edited on this render; null when every patch is acknowledged)
         +sharedfile.ts openSharedFile SharedFile SAVE_IDLE_MS saveNow askingShrink
         +sharedfile.ts merge MergeResult (an outside write, offered to an open document; held = already in the room)
         +sharedfile.ts rebase (the head sha moved because a co-editor saved)
@@ -247,6 +248,7 @@ classDiagram
     inlineComment --> lib : anchor.ts (no app imports)
     components --> lib : rangeFor describe hitTest (Comments)
     components --> lib : merge3PreferRight diffSplices frameChannel saveLocked (VisualEdit), saveNow askingShrink (FileView flush)
+    note for lib "editbeacon.ts is the VisualEdit iframe's last word. inline-edit.ts numbers each bd-edit:patch (seq) and VisualEdit answers bd-edit:ack once the patch is in the document. VisualEdit fetches a single-file edit URL from POST {prefix}ycollab/frame and hands it to the iframe as bd-edit:beacon. On the iframe's beforeunload or pagehide, if any patch is unacknowledged (patchSeq greater than ackedSeq), inline-edit.ts posts beaconBody straight to POST ycollab/frame/{token}: cookie-free (credentials omit, no-cors), with keepalive when the body is at most 60,000 bytes. The iframe keeps sandbox allow-scripts allow-downloads, with no allow-same-origin; the token, not a session, authorizes the write, and the hub merges it like a staging checkpoint"
     Browser ..> components : Done awaits FileView's flushRef
     lib --> api : syncCollab putText keepalive (sharedfile)
     components ..> inlineComment : postMessage via the ?comment=1 iframe

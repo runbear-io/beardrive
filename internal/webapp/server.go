@@ -1706,6 +1706,10 @@ func (s *Server) Handler() http.Handler {
 		// A client's state merged into the live room over plain HTTP (no
 		// socket, or a shrink to confirm). It writes, so it needs write.
 		mux.HandleFunc("POST "+prefix+"ycollab/sync", resolve(PermWrite, s.handleYCollabSync))
+		// A framed HTML page's edit beacon (frame.go): minted with the
+		// session, flushed by the cookieless page as it unloads.
+		mux.HandleFunc("POST "+prefix+"ycollab/frame", resolve(PermWrite, s.handleEditFrame))
+		mux.HandleFunc("POST "+prefix+"ycollab/frame/{token}", resolve(PermWrite, s.handleEditFrameFlush))
 		mux.HandleFunc("POST "+prefix+"upload/init", resolve(PermWrite, s.handleUploadInit))
 		mux.HandleFunc("PUT "+prefix+"upload/content", resolve(PermWrite, s.handleUploadContent))
 		mux.HandleFunc("POST "+prefix+"upload/commit", resolve(PermWrite, s.handleUploadCommit))
