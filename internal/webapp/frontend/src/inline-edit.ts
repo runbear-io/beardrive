@@ -142,7 +142,9 @@ const docCreateElement = window.Document.prototype.createElement;
 const nodeAppendChild = Node.prototype.appendChild;
 const elSetAttribute = Element.prototype.setAttribute;
 const nodeIsConnectedGet = Object.getOwnPropertyDescriptor(Node.prototype, "isConnected")!.get!;
+const nodeTextContentGet = Object.getOwnPropertyDescriptor(Node.prototype, "textContent")!.get!;
 const nodeTextContentSet = Object.getOwnPropertyDescriptor(Node.prototype, "textContent")!.set!;
+const elTagNameGet = Object.getOwnPropertyDescriptor(Element.prototype, "tagName")!.get!;
 const getInputType = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "inputType")?.get;
 const getInputData = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "data")?.get;
 const getInputDT = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "dataTransfer")?.get;
@@ -685,6 +687,7 @@ function installGuards() {
   }
 }
 installGuards();
+let editorUiStyle: HTMLStyleElement | null = null;
 
 // The document as markup, or null if there is no live editor.
 function currentHTML(): string | null {
@@ -798,10 +801,40 @@ function mount(el: HTMLElement, x?: number, y?: number) {
   elSetAttribute.call(sh, "data-bd-shadow", "");
   nodeAppendChild.call(el, sh);
   const shadow = rawAttachShadow.call(sh, { mode: "closed" });
+  // Carry the page's own stylesheets into the shadow tree so descendant rules
+  // (`p a`, `.badge`, `code`) keep styling inline markup while it is open.
+  for (const sheet of docQueryAll.call(document, 'style, link[rel~="stylesheet"]') as NodeListOf<Element>) {
+    if (sheet === editorUiStyle) continue;
+    const tag = String(elTagNameGet.call(sheet)).toLowerCase();
+    if (tag === "style") {
+      const copy = docCreateElement.call(document, "style");
+      nodeTextContentSet.call(copy, (nodeTextContentGet.call(sheet) as string | null) ?? "");
+      nodeAppendChild.call(shadow, copy);
+    } else if (tag === "link") {
+      const href = elGetAttribute.call(sheet, "href");
+      if (href) {
+        const copy = docCreateElement.call(document, "link");
+        elSetAttribute.call(copy, "rel", "stylesheet");
+        elSetAttribute.call(copy, "href", href);
+        const media = elGetAttribute.call(sheet, "media");
+        if (media) elSetAttribute.call(copy, "media", media);
+        nodeAppendChild.call(shadow, copy);
+      }
+    }
+  }
   const style = docCreateElement.call(document, "style");
-  nodeTextContentSet.call(style, ":host { display: block; } [data-bd-pm] { display: block; outline: none; }");
+  nodeTextContentSet.call(
+    style,
+    ":host { display: block; } :host > [data-bd-pm] { all: inherit; display: block !important; margin: 0 !important; padding: 0 !important; border: 0 !important; background: none !important; box-shadow: none !important; outline: none !important; list-style: none !important; }",
+  );
   nodeAppendChild.call(shadow, style);
-  const pmMount = docCreateElement.call(document, "span") as HTMLElement;
+  const hostTag = String(elTagNameGet.call(el)).toLowerCase();
+  const mountTag = hostTag === "td" || hostTag === "th" || hostTag === "tr" ? "div" : hostTag;
+  const pmMount = docCreateElement.call(document, mountTag) as HTMLElement;
+  const cls = elGetAttribute.call(el, "class");
+  if (cls) elSetAttribute.call(pmMount, "class", cls);
+  const idAttr = elGetAttribute.call(el, "id");
+  if (idAttr) elSetAttribute.call(pmMount, "id", idAttr);
   elSetAttribute.call(pmMount, "data-bd-pm", "");
   nodeAppendChild.call(shadow, pmMount);
   shadowHost = sh;
@@ -984,6 +1017,7 @@ function initDOM() {
   ).observe(document.documentElement, { childList: true, subtree: true });
 
   const style = document.createElement("style");
+  editorUiStyle = style;
   style.textContent = `
   [${SRC_ATTR}][data-bd-edit="yes"]:hover { outline: 1px dashed rgba(99,102,241,.7); outline-offset: 2px; cursor: text; }
   [${SRC_ATTR}][data-bd-edit="no"]:hover  { outline: 1px dotted rgba(120,120,120,.5); outline-offset: 2px; cursor: not-allowed; }
