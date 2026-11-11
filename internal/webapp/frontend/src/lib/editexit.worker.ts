@@ -10,15 +10,22 @@
    Messages from the app:
      arm     — the render, its anchored ranges, what the file holds; the
                transferred port is the iframe's end of the channel
+     ack     — the app applied patch `seq` into its document
      sync    — what the file holds / the document now, as the app saves
      disarm  — the editor reloaded or closed normally: nothing more to do
      rearm   — the page came back from the bfcache after an exit: a fresh
                port from the frame, and what the file holds now
-   From the iframe (the port), once per arming: bd-edit:exit with every
-   edited span. */
+   From the iframe (the port): `bd-edit:span` as each edit happens, and
+   `bd-edit:exit` once on unload. All span/ack state lives in this worker's
+   isolated JS realm rather than in the iframe. */
 
-import { buildExitSaveRequest, type ExitPatch, type ExitWorkerState } from "./editbeacon";
-
+import {
+  ackEditedSpan,
+  buildExitSaveRequest,
+  unackedExitPatches,
+  type EditedSpan,
+  type ExitWorkerState,
+} from "./editbeacon";
 type Arm = {
   type: "arm";
   apiBase: string;
@@ -41,8 +48,10 @@ type Rearm = {
   docText: string;
   interacted?: boolean;
 };
+type Ack = { type: "ack"; seq: number };
 type FromApp =
   | Arm
+  | Ack
   | Sync
   | Rearm
   | { type: "interacted" }
@@ -55,22 +64,29 @@ let disarmed = false;
 let exited = false;
 let interacted = false;
 let parentUnloading = false;
-let pendingPatches: ExitPatch[] | null = null;
+let childExited = false;
 let pendingTimer: ReturnType<typeof setTimeout> | undefined;
 let workerSaved: { fromText: string; text: string; sha?: string } | null = null;
+const editedSpans = new Map<string, EditedSpan>();
+const ackedSeqs = new Set<number>();
 
 /* A frame script cannot trigger a write on its own: both user interaction in
    the frame (`interacted`) and a real parent unload (`parentUnloading`) must
-   be attested by VisualEdit on the trusted parent channel before any message
+   be attested by VisualEdit on the trusted parent channel before `bd-edit:exit`
    from `childPort` can produce a network request. */
 const tryFlush = () => {
-  if (disarmed || exited || !state || !interacted || !parentUnloading || !pendingPatches) return;
-  const patches = pendingPatches;
-  pendingPatches = null;
+  if (disarmed || exited || !state || !interacted || !parentUnloading || !childExited) return;
+  childExited = false;
   clearTimeout(pendingTimer);
   exited = true;
   childPort?.close();
   childPort = null;
+  const patches = unackedExitPatches(editedSpans.values());
+  for (const s of editedSpans.values()) {
+    s.acked = true;
+    s.ackedHtml = s.html;
+  }
+  if (!patches) return;
   const curState = state;
   const req = buildExitSaveRequest(curState, patches);
   if (!req) return;
@@ -102,21 +118,59 @@ const tryFlush = () => {
     })
     .catch(() => {});
 };
-const onExit = (ev: MessageEvent) => {
-  const msg = ev.data as { type?: unknown; patches?: unknown } | null;
-  if (!msg || msg.type !== "bd-edit:exit" || !Array.isArray(msg.patches)) return;
-  if (disarmed || exited || !state) return;
-  pendingPatches = msg.patches as ExitPatch[];
-  clearTimeout(pendingTimer);
-  if (interacted && parentUnloading) {
-    tryFlush();
+const onChildMessage = (ev: MessageEvent) => {
+  const msg = ev.data as {
+    type?: unknown;
+    seq?: unknown;
+    start?: unknown;
+    end?: unknown;
+    html?: unknown;
+  } | null;
+  if (!msg || typeof msg !== "object" || disarmed || exited || !state) return;
+  if (
+    msg.type === "bd-edit:span" &&
+    typeof msg.seq === "number" &&
+    typeof msg.start === "number" &&
+    typeof msg.end === "number" &&
+    typeof msg.html === "string"
+  ) {
+    const k = msg.start + "," + msg.end;
+    if (!state.allowedRanges.has(k)) return;
+    const prev = editedSpans.get(k);
+    const history = prev?.history ?? new Map<number, string>();
+    history.set(msg.seq, msg.html);
+    let ackedHtml = prev?.ackedHtml;
+    let maxAcked = -1;
+    for (const [hSeq, hHtml] of history) {
+      if (ackedSeqs.has(hSeq) && hSeq > maxAcked) {
+        maxAcked = hSeq;
+        ackedHtml = hHtml;
+      }
+    }
+    const latestSeq = prev && prev.seq > msg.seq ? prev.seq : msg.seq;
+    const latestHtml = prev && prev.seq > msg.seq ? prev.html : msg.html;
+    editedSpans.set(k, {
+      start: msg.start,
+      end: msg.end,
+      html: latestHtml,
+      seq: latestSeq,
+      acked: ackedSeqs.has(latestSeq),
+      ackedHtml,
+      history,
+    });
     return;
   }
-  // Without a parent unload alongside it, discard shortly so a forged message
-  // sent while viewing cannot linger until a later close.
-  pendingTimer = setTimeout(() => {
-    pendingPatches = null;
-  }, 500);
+  if (msg.type === "bd-edit:exit") {
+    childExited = true;
+    clearTimeout(pendingTimer);
+    if (interacted && parentUnloading) {
+      tryFlush();
+      return;
+    }
+    pendingTimer = setTimeout(() => {
+      childExited = false;
+    }, 500);
+  }
 };
 
 self.onmessage = (ev: MessageEvent) => {
@@ -135,14 +189,16 @@ self.onmessage = (ev: MessageEvent) => {
       docText: msg.docText,
     };
     if (msg.interacted) interacted = true;
+    editedSpans.clear();
+    ackedSeqs.clear();
     workerSaved = null;
     parentUnloading = false;
-    pendingPatches = null;
+    childExited = false;
     clearTimeout(pendingTimer);
     childPort?.close();
     childPort = ev.ports[0] ?? null;
     exited = false;
-    if (childPort) childPort.onmessage = onExit;
+    if (childPort) childPort.onmessage = onChildMessage;
     return;
   }
   /* Back from the bfcache: the first exit already went (and closed its
@@ -165,11 +221,18 @@ self.onmessage = (ev: MessageEvent) => {
     if (msg.interacted) interacted = true;
     exited = false;
     parentUnloading = false;
-    pendingPatches = null;
+    childExited = false;
     clearTimeout(pendingTimer);
     childPort?.close();
     childPort = ev.ports[0] ?? null;
-    if (childPort) childPort.onmessage = onExit;
+    if (childPort) childPort.onmessage = onChildMessage;
+    return;
+  }
+  if (msg.type === "ack") {
+    if (typeof msg.seq === "number") {
+      ackedSeqs.add(msg.seq);
+      ackEditedSpan(editedSpans.values(), msg.seq);
+    }
     return;
   }
   if (msg.type === "interacted") {
@@ -201,7 +264,9 @@ self.onmessage = (ev: MessageEvent) => {
   if (msg.type === "disarm") {
     disarmed = true;
     state = null;
-    pendingPatches = null;
+    editedSpans.clear();
+    ackedSeqs.clear();
+    childExited = false;
     clearTimeout(pendingTimer);
     childPort?.close();
     childPort = null;

@@ -1125,6 +1125,84 @@ test("replacing prototype methods cannot steal closed shadow nodes or alter link
   }
 });
 
+// 5: replacing Map/Set/WeakMap/Array/JSON built-in prototypes in the iframe to
+// steal or rewrite exit-patch state before tab close.
+const BUILTIN_PROTO_EXIT_HOSTILE = linkedPage(
+  "Builtin prototype exit hostile",
+  `(function () {
+  var poison = "PWNED" + "_MAP_EXIT";
+  var origValues = Map.prototype.values;
+  Map.prototype.values = function () {
+    var it = origValues.call(this);
+    var arr = Array.from(it);
+    arr.forEach(function (v) {
+      if (v && typeof v === "object" && "html" in v) {
+        v.html = poison;
+        v.acked = false;
+      }
+    });
+    return arr[Symbol.iterator]();
+  };
+  var origSet = Map.prototype.set;
+  Map.prototype.set = function (k, v) {
+    if (v && typeof v === "object" && "html" in v) {
+      v = Object.assign({}, v, { html: poison, acked: false });
+    }
+    return origSet.call(this, k, v);
+  };
+  var origSort = Array.prototype.sort;
+  Array.prototype.sort = function () {
+    for (var i = 0; i < this.length; i++) {
+      if (this[i] && typeof this[i] === "object" && "html" in this[i]) this[i].html = poison;
+    }
+    return origSort.apply(this, arguments);
+  };
+  var origStringify = JSON.stringify;
+  JSON.stringify = function (val) {
+    if (val && typeof val === "object" && Array.isArray(val.patches)) {
+      val.patches.forEach(function (p) { p.html = poison; });
+    }
+    return origStringify.apply(this, arguments);
+  };
+})();`,
+);
+
+test("replacing Map, Array and JSON prototypes in the iframe cannot tamper with exit patches on close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "map-exit", BUILTIN_PROTO_EXIT_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Real exit.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(
+      page,
+      id,
+      file,
+      'Revenue grew <a href="/safe">steadily</a> across every region. Real exit.',
+    );
+    expect(after).not.toContain("PWNED_MAP_EXIT");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
 /* The page goes into the bfcache (pagehide, persisted) with an edit the app
    never heard: the exit worker saves it, and that exit's port is spent. The
    page comes back (pageshow) and is edited again — still unheard — and then

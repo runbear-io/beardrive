@@ -320,7 +320,9 @@ export function VisualEdit({
       appPort.postMessage({ type: "bd-edit:port" }, [mc.port2]);
     };
     const ackPatch = (msg: Patch) => {
-      if (typeof msg.seq === "number") appPort?.postMessage({ type: "bd-edit:ack", seq: msg.seq });
+      if (typeof msg.seq === "number" && exitWorker && !workerDisarmed) {
+        exitWorker.postMessage({ type: "ack", seq: msg.seq });
+      }
     };
     const drainFrame = async (lock: boolean) => {
       const el = frame.current;

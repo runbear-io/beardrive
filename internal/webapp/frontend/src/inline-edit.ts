@@ -44,7 +44,7 @@ import { EditorView } from "@tiptap/pm/view";
 import { keymap } from "@tiptap/pm/keymap";
 import { baseKeymap, toggleMark } from "@tiptap/pm/commands";
 import { history, undo, redo } from "@tiptap/pm/history";
-import { ackEditedSpan, unackedExitPatches, type EditedSpan } from "./lib/editbeacon";
+// Exit span state lives in the app's dedicated worker (lib/editexit.worker.ts).
 
 /* ---- t = 0: before the page's own scripts exist ----
 
@@ -56,17 +56,30 @@ import { ackEditedSpan, unackedExitPatches, type EditedSpan } from "./lib/editbe
    reads the ranges come from. The app's end of the channel is handed up
    below (`bd-edit:hello`) before any page script can watch window messages;
    nothing in this editor ever travels on window again. */
+const uncurry = Function.prototype.bind.bind(Function.prototype.call) as <T extends (...a: never[]) => unknown>(
+  fn: T,
+) => (self: unknown, ...a: unknown[]) => unknown;
 const NativeMessageChannel = window.MessageChannel;
-const portPost = MessagePort.prototype.postMessage;
-const portClose = MessagePort.prototype.close;
-const portStart = MessagePort.prototype.start;
+const portPost = uncurry(MessagePort.prototype.postMessage);
+const portClose = uncurry(MessagePort.prototype.close);
+const portStart = uncurry(MessagePort.prototype.start);
 const targetAddListener = EventTarget.prototype.addEventListener;
-const getIsTrusted = Object.getOwnPropertyDescriptor(new Event("x"), "isTrusted")!.get!;
-const getMsgData = Object.getOwnPropertyDescriptor(MessageEvent.prototype, "data")!.get!;
-const getMsgPorts = Object.getOwnPropertyDescriptor(MessageEvent.prototype, "ports")!.get!;
-const elGetAttribute = Element.prototype.getAttribute;
-const elClosest = Element.prototype.closest;
-const docQueryAll = window.Document.prototype.querySelectorAll;
+const getIsTrusted = uncurry(Object.getOwnPropertyDescriptor(new Event("x"), "isTrusted")!.get!);
+const getMsgData = uncurry(Object.getOwnPropertyDescriptor(MessageEvent.prototype, "data")!.get!);
+const getMsgPorts = uncurry(Object.getOwnPropertyDescriptor(MessageEvent.prototype, "ports")!.get!);
+const elGetAttribute = uncurry(Element.prototype.getAttribute);
+const elClosest = uncurry(Element.prototype.closest);
+const docQueryAll = uncurry(window.Document.prototype.querySelectorAll);
+const wmGet = uncurry(WeakMap.prototype.get);
+const wmSet = uncurry(WeakMap.prototype.set);
+const wmDelete = uncurry(WeakMap.prototype.delete);
+const mapGet = uncurry(Map.prototype.get);
+const mapSet = uncurry(Map.prototype.set);
+const setHas = uncurry(Set.prototype.has);
+const setAdd = uncurry(Set.prototype.add);
+const setClear = uncurry(Set.prototype.clear);
+const setSizeGet = uncurry(Object.getOwnPropertyDescriptor(Set.prototype, "size")!.get!);
+const jsonStringify = JSON.stringify;
 const nativeSetTimeout = window.setTimeout.bind(window);
 const nativeClearTimeout = window.clearTimeout.bind(window);
 const postToParent = window.parent.postMessage.bind(window.parent);
@@ -182,7 +195,7 @@ if (self) {
 const appChannel = new NativeMessageChannel();
 const appPort = appChannel.port1;
 const send = (msg: Record<string, unknown>) => {
-  portPost.call(appPort, msg);
+  portPost(appPort, msg);
 };
 
 /* A person's input, as opposed to a script's. Each trusted input event opens
@@ -203,7 +216,7 @@ const addPasteHtmlMarks = (htmlClip: string | null | undefined) => {
   if (!htmlClip) return;
   try {
     parseMarkup(htmlClip).descendants((node) => {
-      for (const m of node.marks) allowedPasteMarks.add(JSON.stringify([m.type.name, m.attrs]));
+      for (const m of node.marks) setAdd(allowedPasteMarks, jsonStringify([m.type.name, m.attrs]));
     });
   } catch {}
 };
@@ -256,7 +269,7 @@ const openTrustedWindow = (ms = 0) => {
     if (!composing) {
       allowedTextBudget = "";
       allowRemoval = false;
-      allowedPasteMarks.clear();
+      setClear(allowedPasteMarks);
     }
   }, ms);
 };
@@ -276,7 +289,7 @@ for (const name of [
     document,
     name,
     (e: Event) => {
-      if (!getIsTrusted.call(e)) return;
+      if (!getIsTrusted(e)) return;
       if (name === "compositionstart") composing = true;
       recordTrustedText(name, e);
       if (name === "compositionend") {
@@ -401,13 +414,13 @@ type Range = { start: number; end: number };
 /* An element's range, as bound when the document was first read (initDOM):
    never the attribute again, which a page script may since have rewritten. */
 function rangeOf(el: Element): Range | null {
-  const b = boundRanges.get(el);
+  const b = wmGet(boundRanges, el) as { start: number; end: number; initialHtml: string } | undefined;
   return b ? { start: b.start, end: b.end } : null;
 }
 
 // The attribute as served, parsed once (initDOM).
 function parseRange(el: Element): Range | null {
-  const raw = elGetAttribute.call(el, SRC_ATTR);
+  const raw = elGetAttribute(el, SRC_ATTR) as string | null;
   if (!raw) return null;
   const [a, b] = raw.split(",");
   const start = Number(a);
@@ -416,17 +429,14 @@ function parseRange(el: Element): Range | null {
   return { start, end };
 }
 
-/* Whether an element may be edited is settled once and remembered. The check
-   parses, so doing it per mousemove would be the one thing on this page that
-   makes reading a document slow. */
 const verdicts = new WeakMap<HTMLElement, boolean>();
 
 function editable(el: HTMLElement): boolean {
-  let v = verdicts.get(el);
+  let v = wmGet(verdicts, el) as boolean | undefined;
   if (v === undefined) {
     v = roundTrips(el);
-    verdicts.set(el, v);
-    el.setAttribute("data-bd-edit", v ? "yes" : "no");
+    wmSet(verdicts, el, v);
+    elSetAttribute.call(el, "data-bd-edit", v ? "yes" : "no");
   }
   return v;
 }
@@ -453,7 +463,9 @@ let locked = false;
    exit worker, which saves it with the app's own session. */
 let patchSeq = 0;
 let exitPort: MessagePort | null = null;
-const editedSpans = new Map<string, EditedSpan>();
+type QueuedSpan = { seq: number; start: number; end: number; html: string; next: QueuedSpan | null };
+let queuedHead: QueuedSpan | null = null;
+let queuedTail: QueuedSpan | null = null;
 /* Elements bound to their source ranges, privately: the page can rewrite an
    attribute, but not this. Filled once, when the document is first read. */
 const boundRanges = new WeakMap<Element, { start: number; end: number; initialHtml: string }>();
@@ -471,7 +483,7 @@ function clobberFromScript() {
   host = null;
   range = null;
   shadowHost = null;
-  boundRanges.delete(el);
+  wmDelete(boundRanges, el);
   inEditorCall++;
   try {
     v?.destroy();
@@ -661,7 +673,7 @@ function installGuards() {
   const wrapped = new WeakMap<object, AnyFn>();
   const wrapListener = (l: unknown): unknown => {
     if (l === null || (typeof l !== "function" && typeof l !== "object")) return l;
-    let w = wrapped.get(l);
+    let w = wmGet(wrapped, l) as AnyFn | undefined;
     if (!w) {
       const call: AnyFn =
         typeof l === "function"
@@ -671,7 +683,7 @@ function installGuards() {
               return undefined;
             };
       w = forCaller(call);
-      wrapped.set(l, w);
+      wmSet(wrapped, l, w);
     }
     return w;
   };
@@ -679,7 +691,7 @@ function installGuards() {
     return targetAddListener.call(this, type, wrapListener(l) as EventListener, o as AddEventListenerOptions);
   });
   freeze(EventTarget.prototype, "removeEventListener", function (this: EventTarget, type: string, l: unknown, o?: unknown) {
-    const w = l !== null && (typeof l === "function" || typeof l === "object") ? wrapped.get(l) : undefined;
+    const w = l !== null && (typeof l === "function" || typeof l === "object") ? (wmGet(wrapped, l) as AnyFn | undefined) : undefined;
     return rawRemoveListener.call(this, type, (w ?? l) as EventListener, o as EventListenerOptions);
   });
   class GuardedMutationObserver extends RawMutationObserver {
@@ -726,7 +738,7 @@ function installGuards() {
     if (!d || !("value" in d) || typeof d.value !== "function") continue;
     const proto: unknown = d.value.prototype;
     if (!proto || typeof proto !== "object") continue;
-    if (proto instanceof EventTarget || proto instanceof Event || extraDOMProtos.has(proto)) {
+    if (proto instanceof EventTarget || proto instanceof Event || Boolean(setHas(extraDOMProtos, proto))) {
       try {
         Object.freeze(proto);
       } catch {}
@@ -747,19 +759,14 @@ function flush() {
   if (html === null || html === before) return;
   before = html;
   const seq = ++patchSeq;
-  const k = range.start + "," + range.end;
-  const prev = editedSpans.get(k);
-  const history = prev?.history ?? new Map<number, string>();
-  history.set(seq, html);
-  editedSpans.set(k, {
-    start: range.start,
-    end: range.end,
-    html,
-    seq,
-    acked: false,
-    ackedHtml: prev?.ackedHtml,
-    history,
-  });
+  if (exitPort) {
+    portPost(exitPort, { type: "bd-edit:span", seq, start: range.start, end: range.end, html });
+  } else {
+    const item: QueuedSpan = { seq, start: range.start, end: range.end, html, next: null };
+    if (queuedTail) queuedTail.next = item;
+    else queuedHead = item;
+    queuedTail = item;
+  }
   send({ type: "bd-edit:patch", seq, start: range.start, end: range.end, html });
 }
 
@@ -790,7 +797,7 @@ function unmount() {
     el.removeAttribute("data-bd-editing");
     // The content is new DOM, so a verdict about the old nodes is stale —
     // and it would be wrong to keep one that was computed before an edit.
-    verdicts.delete(el);
+    wmDelete(verdicts, el);
     el.removeAttribute("data-bd-edit");
   }
   host = null;
@@ -850,7 +857,7 @@ function mount(el: HTMLElement, x?: number, y?: number) {
   const shadow = rawAttachShadow.call(sh, { mode: "closed" });
   // Carry the page's own stylesheets into the shadow tree so descendant rules
   // (`p a`, `.badge`, `code`) keep styling inline markup while it is open.
-  for (const sheet of docQueryAll.call(document, 'style, link[rel~="stylesheet"]') as NodeListOf<Element>) {
+  for (const sheet of docQueryAll(document, 'style, link[rel~="stylesheet"]') as NodeListOf<Element>) {
     if (sheet === editorUiStyle) continue;
     const tag = String(elTagNameGet.call(sheet)).toLowerCase();
     if (tag === "style") {
@@ -858,12 +865,12 @@ function mount(el: HTMLElement, x?: number, y?: number) {
       nodeTextContentSet.call(copy, (nodeTextContentGet.call(sheet) as string | null) ?? "");
       nodeAppendChild.call(shadow, copy);
     } else if (tag === "link") {
-      const href = elGetAttribute.call(sheet, "href");
+      const href = elGetAttribute(sheet, "href") as string | null;
       if (href) {
         const copy = docCreateElement.call(document, "link");
         elSetAttribute.call(copy, "rel", "stylesheet");
         elSetAttribute.call(copy, "href", href);
-        const media = elGetAttribute.call(sheet, "media");
+        const media = elGetAttribute(sheet, "media") as string | null;
         if (media) elSetAttribute.call(copy, "media", media);
         nodeAppendChild.call(shadow, copy);
       }
@@ -895,18 +902,18 @@ function mount(el: HTMLElement, x?: number, y?: number) {
   for (let i = chain.length - 1; i >= 0; i--) {
     const a = chain[i];
     const wrap = docCreateElement.call(document, safeMirrorTag(a));
-    const aCls = elGetAttribute.call(a, "class");
+    const aCls = elGetAttribute(a, "class") as string | null;
     if (aCls) elSetAttribute.call(wrap, "class", aCls);
-    const aId = elGetAttribute.call(a, "id");
+    const aId = elGetAttribute(a, "id") as string | null;
     if (aId) elSetAttribute.call(wrap, "id", aId);
     elSetAttribute.call(wrap, "data-bd-anc", "");
     nodeAppendChild.call(parentNode, wrap);
     parentNode = wrap;
   }
   const pmMount = docCreateElement.call(document, safeMirrorTag(el)) as HTMLElement;
-  const cls = elGetAttribute.call(el, "class");
+  const cls = elGetAttribute(el, "class") as string | null;
   if (cls) elSetAttribute.call(pmMount, "class", cls);
-  const idAttr = elGetAttribute.call(el, "id");
+  const idAttr = elGetAttribute(el, "id") as string | null;
   if (idAttr) elSetAttribute.call(pmMount, "id", idAttr);
   elSetAttribute.call(pmMount, "data-bd-pm", "");
   nodeAppendChild.call(parentNode, pmMount);
@@ -949,8 +956,8 @@ function mount(el: HTMLElement, x?: number, y?: number) {
           // Only a person's paste or drop: one a script dispatched is
           // swallowed before ProseMirror reads it.
           handleDOMEvents: {
-            paste: (_v, e) => !getIsTrusted.call(e),
-            drop: (_v, e) => !getIsTrusted.call(e),
+            paste: (_v, e) => !getIsTrusted(e),
+            drop: (_v, e) => !getIsTrusted(e),
           },
           dispatchTransaction(tr) {
             if (locked && tr.docChanged) return;
@@ -989,7 +996,7 @@ function mount(el: HTMLElement, x?: number, y?: number) {
               if (
                 (added && !allowedTextBudget.includes(added)) ||
                 (removed && !allowRemoval) ||
-                (!added && !removed && allowedPasteMarks.size === 0)
+                (!added && !removed && (setSizeGet(allowedPasteMarks) as number) === 0)
               ) {
                 clobberFromScript();
                 return;
@@ -1004,7 +1011,7 @@ function mount(el: HTMLElement, x?: number, y?: number) {
                     !PMMark.sameSet(u.marks, cursorMarks) &&
                     !PMMark.sameSet(u.marks, adjLeft) &&
                     !PMMark.sameSet(u.marks, adjRight) &&
-                    !u.marks.every((m) => allowedPasteMarks.has(JSON.stringify([m.type.name, m.attrs])))
+                    !u.marks.every((m) => Boolean(setHas(allowedPasteMarks, jsonStringify([m.type.name, m.attrs]))))
                   ) {
                     clobberFromScript();
                     return;
@@ -1038,7 +1045,7 @@ function mount(el: HTMLElement, x?: number, y?: number) {
 // ---- wiring ----
 
 function nearestEditable(target: EventTarget | null): HTMLElement | null {
-  const el = target instanceof Element ? (elClosest.call(target, `[${SRC_ATTR}]`) as Element | null) : null;
+  const el = target instanceof Element ? (elClosest(target, `[${SRC_ATTR}]`) as Element | null) : null;
   return el instanceof HTMLElement ? el : null;
 }
 
@@ -1047,7 +1054,7 @@ listen(
   "click",
   (ev: Event) => {
     // Only a person's click opens an editor: never el.click() from a script.
-    if (!getIsTrusted.call(ev)) return;
+    if (!getIsTrusted(ev)) return;
     const e = ev as MouseEvent;
     if (locked) return; // no element opens or closes while Done saves
     const el = nearestEditable(e.target);
@@ -1106,19 +1113,19 @@ function initDOM() {
      so the app can check it is what the source holds there. */
   const found: Array<{ el: Element; r: Range }> = [];
   const claims = new Map<string, number>();
-  for (const el of docQueryAll.call(document, `[${SRC_ATTR}]`) as NodeListOf<Element>) {
+  for (const el of docQueryAll(document, `[${SRC_ATTR}]`) as NodeListOf<Element>) {
     const r = parseRange(el);
     if (!r) continue;
     const k = r.start + "," + r.end;
-    if (serverRanges !== null && !serverRanges.has(k)) continue;
+    if (serverRanges !== null && !setHas(serverRanges, k)) continue;
     found.push({ el, r });
-    claims.set(k, (claims.get(k) ?? 0) + 1);
+    mapSet(claims, k, ((mapGet(claims, k) as number | undefined) ?? 0) + 1);
   }
   const ranges: Array<{ start: number; end: number; html: string }> = [];
   for (const { el, r } of found) {
-    if (claims.get(r.start + "," + r.end) !== 1) continue;
+    if (mapGet(claims, r.start + "," + r.end) !== 1) continue;
     const initialHtml = elInnerHTMLGet.call(el) as string;
-    boundRanges.set(el, { start: r.start, end: r.end, initialHtml });
+    wmSet(boundRanges, el, { start: r.start, end: r.end, initialHtml });
     ranges.push({ start: r.start, end: r.end, html: initialHtml });
   }
   send({ type: "bd-edit:ready", hash, len, ranges });
@@ -1137,13 +1144,7 @@ function initDOM() {
    frame, decides whether and how it is saved. */
 function exitUnacked() {
   if (!exitPort) return;
-  const patches = unackedExitPatches(editedSpans.values());
-  if (patches === null) return;
-  for (const s of editedSpans.values()) {
-    s.acked = true;
-    s.ackedHtml = s.html;
-  }
-  portPost.call(exitPort, { type: "bd-edit:exit", patches });
+  portPost(exitPort, { type: "bd-edit:exit" });
 }
 
 listen(window, "beforeunload", () => {
@@ -1157,27 +1158,20 @@ listen(window, "pagehide", (e: Event) => {
   exitUnacked();
 });
 
-/* The app, on this frame's sealed port — never window:
-   - bd-edit:ack     a patch is in the app's document
-   - bd-edit:port    the exit worker's port (again, after a bfcache restore)
-   - bd-edit:flush   Done: post what the open editor holds, then answer; the
-                     answer follows every patch on the channel, so once the
-                     app has it, it has them all. With `lock`, nothing more is
-                     typed until bd-edit:unlock (its save failed or asked a
-                     question) or the page is torn down (it saved). */
 listen(appPort, "message", (e: Event) => {
-  const msg = getMsgData.call(e) as { type?: unknown; id?: unknown; lock?: unknown; seq?: unknown } | null;
+  const msg = getMsgData(e) as { type?: unknown; id?: unknown; lock?: unknown } | null;
   if (!msg || typeof msg !== "object") return;
-  if (msg.type === "bd-edit:ack" && typeof msg.seq === "number") {
-    ackEditedSpan(editedSpans.values(), msg.seq);
-    return;
-  }
   if (msg.type === "bd-edit:port") {
-    const next = (getMsgPorts.call(e) as ReadonlyArray<MessagePort>)[0];
+    const next = (getMsgPorts(e) as ReadonlyArray<MessagePort>)[0];
     if (!next) return;
-    if (exitPort) portClose.call(exitPort);
+    if (exitPort) portClose(exitPort);
     exitPort = next;
-    document.documentElement.setAttribute("data-bd-exit", "ready");
+    for (let q = queuedHead; q !== null; q = q.next) {
+      portPost(exitPort, { type: "bd-edit:span", seq: q.seq, start: q.start, end: q.end, html: q.html });
+    }
+    queuedHead = null;
+    queuedTail = null;
+    elSetAttribute.call(document.documentElement, "data-bd-exit", "ready");
     return;
   }
   if (msg.type === "bd-edit:flush" && typeof msg.id === "number") {
@@ -1194,7 +1188,7 @@ listen(appPort, "message", (e: Event) => {
     view?.setProps({ editable: () => !locked });
   }
 });
-portStart.call(appPort);
+portStart(appPort);
 
 if (document.readyState !== "loading") initDOM();
 else listen(document, "DOMContentLoaded", initDOM, { once: true });
