@@ -13,6 +13,7 @@ import { createRequire, registerHooks } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { SharedFile, ShrinkAsk } from "./sharedfile.ts";
+import type { EditedSpan } from "./editbeacon.ts";
 
 /* The modules under test are app code: extensionless imports, and TypeScript
    node cannot strip on its own (collab.ts's parameter properties). So every
@@ -55,7 +56,7 @@ const { openSharedFile, SAVE_RETRY_MS } = await import("./sharedfile.ts");
 const { parseConflict } = await import("./conflict.ts");
 const { merge3, merge3PreferRight, merge3ForPath, validMergedText } = await import("./merge3.ts");
 const { frameChannel, saveLocked } = await import("./frameflush.ts");
-const { beaconBody } = await import("./editbeacon.ts");
+const { ackEditedSpan, beaconBody } = await import("./editbeacon.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -2850,13 +2851,17 @@ test("frameChannel keeps arrival order behind an async handler, then handles at 
    and then carries every span edited on the render, in source order, over
    the rendered version's hash — enough for the hub to rebuild the whole
    document. Acknowledged, or nothing to splice onto: nothing is sent. */
-test("beaconBody: sent only while a patch is unacknowledged, carrying every edited span", () => {
-  const spans = [
-    { start: 40, end: 52, html: "Second", seq: 2 },
-    { start: 10, end: 20, html: "First", seq: 1 },
+test("beaconBody: per-span ack keeps an unapplied earlier span owed even after a later span is acked", () => {
+  const spans: EditedSpan[] = [
+    { start: 40, end: 52, html: "Second", seq: 2, acked: false },
+    { start: 10, end: 20, html: "First", seq: 1, acked: false },
   ];
   const base = { url: "https://hub/api/p/x/ycollab/frame/tok", hash: "h", len: 100, spans };
-  same(JSON.parse(beaconBody({ ...base, patchSeq: 2, ackedSeq: 1 }) ?? "null"), {
+
+  // Patch 1 was not applied (no ack 1), while patch 2 on another span succeeded (ack 2):
+  // patch 1 is still unacknowledged, so unload still sends the beacon!
+  ackEditedSpan(spans, 2);
+  same(JSON.parse(beaconBody(base) ?? "null"), {
     src_hash: "h",
     src_len: 100,
     patches: [
@@ -2864,9 +2869,22 @@ test("beaconBody: sent only while a patch is unacknowledged, carrying every edit
       { start: 40, end: 52, html: "Second" },
     ],
   });
-  assert.equal(beaconBody({ ...base, patchSeq: 2, ackedSeq: 2 }), null); // all acknowledged
-  assert.equal(beaconBody({ ...base, url: "", patchSeq: 2, ackedSeq: 1 }), null); // no capability
-  assert.equal(beaconBody({ ...base, hash: "", patchSeq: 2, ackedSeq: 1 }), null); // no version
-  assert.equal(beaconBody({ ...base, len: -1, patchSeq: 2, ackedSeq: 1 }), null);
-  assert.equal(beaconBody({ ...base, spans: [], patchSeq: 2, ackedSeq: 1 }), null); // nothing edited
+
+  // Once patch 1 is also acknowledged, nothing is owed.
+  ackEditedSpan(spans, 1);
+  assert.equal(beaconBody(base), null);
+
+  // Re-editing span 1 (seq 3) resets acked=false; a stale ack(1) does not clear seq 3.
+  spans[1] = { start: 10, end: 20, html: "First again", seq: 3, acked: false };
+  ackEditedSpan(spans, 1);
+  assert.notEqual(beaconBody(base), null);
+  ackEditedSpan(spans, 3);
+  assert.equal(beaconBody(base), null);
+
+  // Missing capability, hash, length, or spans -> null even when unacked.
+  spans[1].acked = false;
+  assert.equal(beaconBody({ ...base, url: "" }), null);
+  assert.equal(beaconBody({ ...base, hash: "" }), null);
+  assert.equal(beaconBody({ ...base, len: -1 }), null);
+  assert.equal(beaconBody({ ...base, spans: [] }), null);
 });

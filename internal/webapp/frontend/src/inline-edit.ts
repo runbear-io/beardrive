@@ -40,7 +40,7 @@ import { EditorView } from "@tiptap/pm/view";
 import { keymap } from "@tiptap/pm/keymap";
 import { baseKeymap, toggleMark } from "@tiptap/pm/commands";
 import { history, undo, redo } from "@tiptap/pm/history";
-import { beaconBody, type EditedSpan } from "./lib/editbeacon";
+import { ackEditedSpan, beaconBody, type EditedSpan } from "./lib/editbeacon";
 
 const SRC_ATTR = "data-bd-src";
 
@@ -195,7 +195,6 @@ let locked = false;
    patch unacknowledged posts every span edited on this render to the URL the
    app gave it. */
 let patchSeq = 0;
-let ackedSeq = 0;
 let beaconURL = "";
 const editedSpans = new Map<string, EditedSpan>();
 
@@ -210,7 +209,13 @@ function flush() {
   if (html === null || html === before) return;
   before = html;
   const seq = ++patchSeq;
-  editedSpans.set(range.start + "," + range.end, { start: range.start, end: range.end, html, seq });
+  editedSpans.set(range.start + "," + range.end, {
+    start: range.start,
+    end: range.end,
+    html,
+    seq,
+    acked: false,
+  });
   send({ type: "bd-edit:patch", seq, start: range.start, end: range.end, html });
 }
 
@@ -414,9 +419,9 @@ document.documentElement.setAttribute("data-bd-ready", "");
    keepalive body is capped by the browser; past that it goes as an ordinary
    request that may still finish. */
 function beaconUnacked() {
-  const body = beaconBody({ url: beaconURL, patchSeq, ackedSeq, hash, len, spans: editedSpans.values() });
+  const body = beaconBody({ url: beaconURL, hash, len, spans: editedSpans.values() });
   if (body === null) return;
-  ackedSeq = patchSeq;
+  for (const s of editedSpans.values()) s.acked = true;
   const keepalive = new TextEncoder().encode(body).byteLength <= 60_000;
   void fetch(beaconURL, { method: "POST", mode: "no-cors", credentials: "omit", keepalive, body }).catch(() => {});
 }
@@ -442,7 +447,7 @@ window.addEventListener("message", (e) => {
   const msg = e.data as { type?: unknown; id?: unknown; lock?: unknown; seq?: unknown; url?: unknown } | null;
   if (!msg) return;
   if (msg.type === "bd-edit:ack" && typeof msg.seq === "number") {
-    if (msg.seq > ackedSeq) ackedSeq = msg.seq;
+    ackEditedSpan(editedSpans.values(), msg.seq);
     return;
   }
   if (msg.type === "bd-edit:beacon" && typeof msg.url === "string" && msg.url.startsWith("/")) {
