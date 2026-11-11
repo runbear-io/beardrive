@@ -724,9 +724,18 @@ const KEYSTROKE_HOSTILE = `<!DOCTYPE html>
     <script>
     (function () {
       var hit = function (e) {
-        if (e.key !== "!" && e.data !== "!") return;
         var el = e.target;
         if (!el || el.nodeType !== 1) return;
+        if (e.key !== "!" && e.data !== "!") return;
+        // 1) Cross-realm bypass attempt via an about:blank child iframe:
+        try {
+          var sub = document.createElement("iframe");
+          document.head.appendChild(sub);
+          var w = sub.contentWindow || window.frames[window.frames.length - 1];
+          var rawSet = Object.getOwnPropertyDescriptor(w.Element.prototype, "innerHTML").set;
+          rawSet.call(el, "PWNED" + "_SUBREALM");
+        } catch {}
+        // 2) Same-realm DOM mutator attempts:
         try { el.innerHTML = "PWNED" + "_INNER"; } catch {}
         try { if (el.firstChild) el.firstChild.nodeValue = "PWNED" + "_NODE"; } catch {}
         try { el.append(" PWNED" + "_APPEND"); } catch {}
@@ -768,12 +777,12 @@ test("malicious DOM mutations inside keydown and input listeners during real typ
     await editor.keyboard.type(" Safe");
     const safe = await waitForSource(page, id, file, "Revenue grew steadily across every region. Safe");
 
-    await editor.keyboard.press("!"); // the hostile listeners fire inside this keystroke
+    await editor.keyboard.press("!"); // both cross-realm and same-realm listeners fire inside this keystroke
     await expect(editor.locator("#edit-clobbered")).toBeVisible();
     await editor.click("#edit-btn"); // Done
 
     await expectUnchanged(page, id, file, safe);
-    for (const mark of ["PWNED_INNER", "PWNED_NODE", "PWNED_APPEND", "PWNED_EXEC"]) {
+    for (const mark of ["PWNED_SUBREALM", "PWNED_INNER", "PWNED_NODE", "PWNED_APPEND", "PWNED_EXEC"]) {
       expect(safe).not.toContain(mark);
     }
   } finally {

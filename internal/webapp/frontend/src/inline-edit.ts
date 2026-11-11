@@ -135,7 +135,11 @@ const elRemoveAttribute = Element.prototype.removeAttribute;
 const attrNameGet = Object.getOwnPropertyDescriptor(Attr.prototype, "name")!.get!;
 const datasetGet = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "dataset")!.get!;
 const nativeExecCommand = window.Document.prototype.execCommand;
-
+const getInputData = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "data")?.get;
+const getInputDT = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "dataTransfer")?.get;
+const getCompData = Object.getOwnPropertyDescriptor(window.CompositionEvent.prototype, "data")?.get;
+const getClipDT = Object.getOwnPropertyDescriptor(window.ClipboardEvent.prototype, "clipboardData")?.get;
+const dtGetData = window.DataTransfer.prototype.getData;
 // The hash the server computed over the STORED bytes, read while this script
 // is still `currentScript`. The app compares it with the document it holds:
 // if they differ, the ranges describe a file that has since moved on, and it
@@ -170,12 +174,43 @@ const send = (msg: Record<string, unknown>) => {
    change outside such a window was made by a script, not by the reader. */
 let trustedEditOpen = false;
 let composing = false;
+let inKeymapCmd = 0;
+let allowedTextBudget = "";
 let trustedTimer: ReturnType<typeof setTimeout> | undefined;
+const normSpace = (s: string) => s.replace(/\u00a0/g, " ");
+const addBudget = (s: string | null | undefined) => {
+  if (s) allowedTextBudget += normSpace(s);
+};
+const recordTrustedText = (e: Event) => {
+  if (e instanceof window.InputEvent) {
+    addBudget(getInputData?.call(e));
+    const dt = getInputDT?.call(e);
+    if (dt) {
+      addBudget(dtGetData.call(dt, "text/plain"));
+      addBudget(dtGetData.call(dt, "text/html"));
+    }
+    return;
+  }
+  if (e instanceof window.CompositionEvent) {
+    addBudget(getCompData?.call(e));
+    return;
+  }
+  if (e instanceof window.ClipboardEvent) {
+    const cd = getClipDT?.call(e);
+    if (cd) {
+      addBudget(dtGetData.call(cd, "text/plain"));
+      addBudget(dtGetData.call(cd, "text/html"));
+    }
+    return;
+  }
+  if ("data" in e && typeof e.data === "string") addBudget(e.data);
+};
 const openTrustedWindow = (ms = 0) => {
   trustedEditOpen = true;
   nativeClearTimeout(trustedTimer);
   trustedTimer = nativeSetTimeout(() => {
     trustedEditOpen = false;
+    if (!composing) allowedTextBudget = "";
   }, ms);
 };
 for (const name of [
@@ -195,6 +230,7 @@ for (const name of [
     name,
     (e: Event) => {
       if (!getIsTrusted.call(e)) return;
+      recordTrustedText(e);
       if (name === "compositionstart") composing = true;
       else if (name === "compositionend") {
         composing = false;
@@ -661,6 +697,19 @@ function caretAt(v: EditorView, x: number, y: number) {
   v.dispatch(v.state.tr.setSelection(sel));
 }
 
+function wrapKeymapCmd<C extends (...args: never[]) => boolean>(cmd: C): C {
+  const f = cmd as unknown as AnyFn;
+  return function (this: unknown, ...a: unknown[]) {
+    if (!trustedEditOpen) return false;
+    inKeymapCmd++;
+    try {
+      return Boolean(f.apply(this, a));
+    } finally {
+      inKeymapCmd--;
+    }
+  } as unknown as C;
+}
+
 function mount(el: HTMLElement, x?: number, y?: number) {
   if (host === el) return;
   unmount();
@@ -680,11 +729,11 @@ function mount(el: HTMLElement, x?: number, y?: number) {
       // which is not something a single-range splice can express. They are
       // swallowed rather than left to fall through to a browser default.
       keymap({
-        "Mod-b": toggleMark(schema.marks.bold),
-        "Mod-i": toggleMark(schema.marks.italic),
-        "Mod-z": undo,
-        "Mod-y": redo,
-        "Shift-Mod-z": redo,
+        "Mod-b": wrapKeymapCmd(toggleMark(schema.marks.bold)),
+        "Mod-i": wrapKeymapCmd(toggleMark(schema.marks.italic)),
+        "Mod-z": wrapKeymapCmd(undo),
+        "Mod-y": wrapKeymapCmd(redo),
+        "Shift-Mod-z": wrapKeymapCmd(redo),
         Enter: () => true,
         "Shift-Enter": () => true,
         Escape: () => {
@@ -692,7 +741,7 @@ function mount(el: HTMLElement, x?: number, y?: number) {
           return true;
         },
       }),
-      keymap(baseKeymap),
+      keymap(Object.fromEntries(Object.entries(baseKeymap).map(([k, fn]) => [k, wrapKeymapCmd(fn)]))),
     ],
   });
 
@@ -707,14 +756,27 @@ function mount(el: HTMLElement, x?: number, y?: number) {
           editable: () => !locked,
           dispatchTransaction(tr) {
             if (locked && tr.docChanged) return;
-            if (tr.docChanged && !trustedEditOpen && !composing) {
-              /* The element changed with no input from the reader: the
-                 page's own script wrote into it (or faked an event). That is
-                 not an edit to save — close the editor and say so. */
-              clobberFromScript();
-              return;
+            const nextState = view!.state.apply(tr);
+            if (tr.docChanged && inKeymapCmd === 0) {
+              if (!trustedEditOpen && !composing) {
+                clobberFromScript();
+                return;
+              }
+              const prev = normSpace(view!.state.doc.textBetween(0, view!.state.doc.content.size, ""));
+              const next = normSpace(nextState.doc.textBetween(0, nextState.doc.content.size, ""));
+              let p = 0;
+              while (p < prev.length && p < next.length && prev[p] === next[p]) p++;
+              let s = 0;
+              while (s < prev.length - p && s < next.length - p && prev[prev.length - 1 - s] === next[next.length - 1 - s]) s++;
+              const added = next.slice(p, next.length - s);
+              if (added && !allowedTextBudget.includes(added)) {
+                /* Even a write made through another realm's unwrapped DOM
+                   setter introduces text no trusted input event carried. */
+                clobberFromScript();
+                return;
+              }
             }
-            view!.updateState(view!.state.apply(tr));
+            view!.updateState(nextState);
             /* Reported on EVERY change, with no debounce of its own.
 
                There used to be a 700ms idle here, mirroring the save timer.
