@@ -38,7 +38,7 @@ import Text from "@tiptap/extension-text";
 import Bold from "@tiptap/extension-bold";
 import Italic from "@tiptap/extension-italic";
 import Code from "@tiptap/extension-code";
-import { DOMParser as PMParser, DOMSerializer, type Node as PMNode } from "@tiptap/pm/model";
+import { DOMParser as PMParser, DOMSerializer, Mark as PMMark, type Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
 import { keymap } from "@tiptap/pm/keymap";
@@ -142,6 +142,8 @@ const getCompData = Object.getOwnPropertyDescriptor(window.CompositionEvent.prot
 const getClipDT = Object.getOwnPropertyDescriptor(window.ClipboardEvent.prototype, "clipboardData")?.get;
 const dtGetData = window.DataTransfer.prototype.getData;
 const attrOwnerGet = Object.getOwnPropertyDescriptor(Attr.prototype, "ownerElement")?.get;
+const mapGetNamed = NamedNodeMap.prototype.getNamedItem;
+const mapGetNamedNS = NamedNodeMap.prototype.getNamedItemNS;
 // The hash the server computed over the STORED bytes, read while this script
 // is still `currentScript`. The app compares it with the document it holds:
 // if they differ, the ranges describe a file that has since moved on, and it
@@ -589,8 +591,23 @@ function installGuards() {
     const owner = a[0] instanceof Attr ? attrOwnerGet?.call(a[0]) : null;
     return srcWrite(isSrcAttr(a[0])) || (owner ? hostWrite(owner, []) : false);
   });
-  methods(NamedNodeMap.prototype, ["removeNamedItem"], (_s, a) => srcWrite(isSrcName(a[0])));
-  methods(NamedNodeMap.prototype, ["removeNamedItemNS"], (_s, a) => srcWrite(isSrcName(a[1])));
+  methods(NamedNodeMap.prototype, ["removeNamedItem"], (s, a) => {
+    let owner: unknown = null;
+    try {
+      const attr = typeof a[0] === "string" ? mapGetNamed.call(s as NamedNodeMap, a[0]) : null;
+      owner = attr ? attrOwnerGet?.call(attr) : null;
+    } catch {}
+    return srcWrite(isSrcName(a[0])) || (owner ? hostWrite(owner, []) : false);
+  });
+  methods(NamedNodeMap.prototype, ["removeNamedItemNS"], (s, a) => {
+    let owner: unknown = null;
+    try {
+      const ns = typeof a[0] === "string" || a[0] === null ? a[0] : null;
+      const attr = typeof a[1] === "string" ? mapGetNamedNS.call(s as NamedNodeMap, ns, a[1]) : null;
+      owner = attr ? attrOwnerGet?.call(attr) : null;
+    } catch {}
+    return srcWrite(isSrcName(a[1])) || (owner ? hostWrite(owner, []) : false);
+  });
   setters(Attr.prototype, ["value"], (s) => {
     const owner = s instanceof Attr ? attrOwnerGet?.call(s) : null;
     return srcWrite(isSrcAttr(s)) || (owner ? hostWrite(owner, []) : false);
@@ -600,12 +617,13 @@ function installGuards() {
     enumerable: true,
     get(this: HTMLElement) {
       const map = datasetGet.call(this) as DOMStringMap;
-      const locked = (p: string | symbol) => p === "bdSrc" && inEditorCall === 0;
+      const el = this;
+      const blocked = (p: string | symbol) => (p === "bdSrc" && inEditorCall === 0) || hostWrite(el, []);
       return new Proxy(map, {
         get: (t, p) => Reflect.get(t, p),
-        set: (t, p, v) => (locked(p) ? true : Reflect.set(t, p, v)),
-        deleteProperty: (t, p) => (locked(p) ? true : Reflect.deleteProperty(t, p)),
-        defineProperty: (t, p, d) => (locked(p) ? true : Reflect.defineProperty(t, p, d)),
+        set: (t, p, v) => (blocked(p) ? true : Reflect.set(t, p, v)),
+        deleteProperty: (t, p) => (blocked(p) ? true : Reflect.deleteProperty(t, p)),
+        defineProperty: (t, p, d) => (blocked(p) ? true : Reflect.defineProperty(t, p, d)),
       });
     },
   });
@@ -790,14 +808,32 @@ function mount(el: HTMLElement, x?: number, y?: number) {
                 clobberFromScript();
                 return;
               }
-              const prev = view!.state.doc.textBetween(0, view!.state.doc.content.size, "").replace(/\u00a0/g, " ");
-              const next = nextState.doc.textBetween(0, nextState.doc.content.size, "").replace(/\u00a0/g, " ");
+              const charsWithMarks = (doc: PMNode) => {
+                const out: Array<{ ch: string; marks: readonly PMMark[] }> = [];
+                doc.descendants((node) => {
+                  if (!node.isText || !node.text) return;
+                  const t = node.text.replace(/\u00a0/g, " ");
+                  for (let i = 0; i < t.length; i++) out.push({ ch: t[i], marks: node.marks });
+                });
+                return out;
+              };
+              const prev = charsWithMarks(view!.state.doc);
+              const next = charsWithMarks(nextState.doc);
+              const sameUnit = (a: { ch: string; marks: readonly PMMark[] }, b: { ch: string; marks: readonly PMMark[] }) =>
+                a.ch === b.ch && PMMark.sameSet(a.marks, b.marks);
               let p = 0;
-              while (p < prev.length && p < next.length && prev[p] === next[p]) p++;
+              while (p < prev.length && p < next.length && sameUnit(prev[p], next[p])) p++;
               let s = 0;
-              while (s < prev.length - p && s < next.length - p && prev[prev.length - 1 - s] === next[next.length - 1 - s]) s++;
-              const removed = prev.slice(p, prev.length - s);
-              const added = next.slice(p, next.length - s);
+              while (
+                s < prev.length - p &&
+                s < next.length - p &&
+                sameUnit(prev[prev.length - 1 - s], next[next.length - 1 - s])
+              ) {
+                s++;
+              }
+              const removed = prev.slice(p, prev.length - s).map((u) => u.ch).join("");
+              const addedUnits = next.slice(p, next.length - s);
+              const added = addedUnits.map((u) => u.ch).join("");
               if (
                 (added && !allowedTextBudget.includes(added)) ||
                 (removed && !allowRemoval) ||
@@ -806,20 +842,20 @@ function mount(el: HTMLElement, x?: number, y?: number) {
                 clobberFromScript();
                 return;
               }
-              if (!allowRichPaste) {
-                const prevMarks = new Set<string>();
-                view!.state.doc.descendants((node) => {
-                  for (const m of node.marks) prevMarks.add(JSON.stringify([m.type.name, m.attrs]));
-                });
-                let forgedMark = false;
-                nextState.doc.descendants((node) => {
-                  for (const m of node.marks) {
-                    if (!prevMarks.has(JSON.stringify([m.type.name, m.attrs]))) forgedMark = true;
+              if (!allowRichPaste && addedUnits.length > 0) {
+                const cursorMarks = view!.state.storedMarks ?? view!.state.selection.$from.marks();
+                const adjLeft = p > 0 ? prev[p - 1].marks : cursorMarks;
+                const adjRight = p < prev.length ? prev[p].marks : cursorMarks;
+                for (const u of addedUnits) {
+                  if (
+                    u.marks.length > 0 &&
+                    !PMMark.sameSet(u.marks, cursorMarks) &&
+                    !PMMark.sameSet(u.marks, adjLeft) &&
+                    !PMMark.sameSet(u.marks, adjRight)
+                  ) {
+                    clobberFromScript();
+                    return;
                   }
-                });
-                if (forgedMark) {
-                  clobberFromScript();
-                  return;
                 }
               }
             }

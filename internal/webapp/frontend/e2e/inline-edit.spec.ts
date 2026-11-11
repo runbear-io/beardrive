@@ -737,6 +737,7 @@ const KEYSTROKE_HOSTILE = `<!DOCTYPE html>
         } catch {}
         // 2) Same-realm DOM and attribute/href mutator attempts:
         var link = el.querySelector && el.querySelector("a");
+        try { if (link) link.attributes.removeNamedItem("href"); } catch {}
         try { if (link) link.href = "https://evil." + "example/phish"; } catch {}
         try { if (link) link.setAttribute("href", "https://evil." + "example/attr"); } catch {}
         try { el.innerHTML = "PWNED" + "_INNER"; } catch {}
