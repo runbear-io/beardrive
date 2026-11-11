@@ -530,3 +530,37 @@ func TestStampRunsBootstrapBeforeEveryPageScript(t *testing.T) {
 		}
 	})
 }
+
+// The bootstrap carries every range the hub stamped, so it knows the measured
+// set before the page can add a marker of its own — and none when nothing was
+// stamped.
+func TestStampBootstrapCarriesMeasuredRanges(t *testing.T) {
+	rangesAttr := regexp.MustCompile(`<script src="/x\.js"[^>]* data-src-ranges="([^"]*)"`)
+	for _, tc := range []struct{ name, src string }{
+		{"document", "<!DOCTYPE html>\n<html><head><title>T</title></head><body>\n" +
+			"<h1>Title</h1>\n<p>make <strong>this</strong> bold</p>\n<ul><li>one<li>two</ul>\n<p>Café</p>\n</body></html>"},
+		{"fragment", `<script>first()</script><p>one</p><p>two</p>`},
+		{"nothing stamped", `<script>only()</script><style>.a{}</style>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := stampEditable([]byte(tc.src), "/x.js")
+			m := rangesAttr.FindSubmatch(out)
+			if m == nil {
+				t.Fatalf("no data-src-ranges on the bootstrap: %q", out)
+			}
+			var want []string
+			for _, s := range parseStamped(t, out) {
+				want = append(want, fmt.Sprintf("%d,%d", s.start, s.end))
+			}
+			if got := string(m[1]); got != strings.Join(want, ";") {
+				t.Fatalf("data-src-ranges = %q, want the stamped %q", got, strings.Join(want, ";"))
+			}
+			if tc.name == "nothing stamped" && len(m[1]) != 0 {
+				t.Fatalf("ranges %q with nothing stamped", m[1])
+			}
+			if tc.name != "nothing stamped" && len(want) == 0 {
+				t.Fatal("nothing stamped: the fixture tests nothing")
+			}
+		})
+	}
+}

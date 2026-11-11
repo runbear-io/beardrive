@@ -169,6 +169,8 @@ type openElem struct {
 type stamper struct {
 	out   [][]byte
 	stack []openElem
+	// ranges is every range stamped, in document order, for the bootstrap.
+	ranges []string
 }
 
 /*
@@ -225,10 +227,11 @@ func (s *stamper) pop(contentEnd int, stampable bool) {
 	// the same bytes.
 	stamp := stampable && e.hasText && !e.hasStamped && !e.inert && contentEnd >= e.inner
 	if stamp {
+		r := fmt.Sprintf("%d,%d", e.inner, contentEnd)
 		tok := e.token
-		tok.Attr = append(append([]html.Attribute(nil), tok.Attr...),
-			html.Attribute{Key: srcAttr, Val: fmt.Sprintf("%d,%d", e.inner, contentEnd)})
+		tok.Attr = append(append([]html.Attribute(nil), tok.Attr...), html.Attribute{Key: srcAttr, Val: r})
 		s.out[e.chunk] = []byte(tok.String())
+		s.ranges = append(s.ranges, r)
 	}
 	if (stamp || e.hasStamped) && len(s.stack) > 0 {
 		s.stack[len(s.stack)-1].hasStamped = true
@@ -375,8 +378,12 @@ func stampEditable(src []byte, scriptURL string) []byte {
 	// and a LAN hub served over plain HTTP is not one. Comparing lengths is a
 	// weaker check — it misses an edit that happens to preserve length — but
 	// it is the difference between a safety net and none at all on those hubs.
-	boot := fmt.Appendf(nil, "<script src=%q data-src-hash=%q data-src-len=%q></script>",
-		scriptURL, hex.EncodeToString(sum[:]), fmt.Sprint(utf16Len(src)))
+	//
+	// The ranges are the ones stamped above, carried by the one element the
+	// page's own scripts run too late to touch: the bootstrap learns which
+	// ranges the hub measured before the page can add or forge a marker.
+	boot := fmt.Appendf(nil, "<script src=%q data-src-hash=%q data-src-len=%q data-src-ranges=%q></script>",
+		scriptURL, hex.EncodeToString(sum[:]), fmt.Sprint(utf16Len(src)), strings.Join(s.ranges, ";"))
 	if !decided && htmlChunk >= 0 {
 		bootChunk, bootAfter, decided = htmlChunk, true, true
 	}

@@ -697,6 +697,151 @@ test("hostile scripts inside the HTML file cannot steal editor ports or forge ed
   }
 });
 
+// A file of the spec's own, removed afterwards.
+async function putHTML(page: Page, id: string, prefix: string, body: string): Promise<string> {
+  const file = `${prefix}-${Date.now()}-${n++}.html`;
+  const put = await page.request.put(`/api/p/${id}/upload/content?path=${encodeURIComponent(file)}`, {
+    data: body,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+  expect(put.ok()).toBeTruthy();
+  litter.push(async () => {
+    await page.request.post(`/api/p/${id}/remove`, { data: { path: file } }).catch(() => {});
+  });
+  return file;
+}
+
+/* A page script's own keydown/beforeinput/input listeners run inside the
+   reader's real keystroke. On "!" they try every way into the open element —
+   innerHTML, a text node's value, append, execCommand. None may land: the
+   editor closes and says so, and the file keeps exactly what was typed
+   before. (The markers are built at run time so the file's own script text
+   never contains them.) */
+const KEYSTROKE_HOSTILE = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>Keystroke hostile</title>
+    <script>
+    (function () {
+      var hit = function (e) {
+        if (e.key !== "!" && e.data !== "!") return;
+        var el = e.target;
+        if (!el || el.nodeType !== 1) return;
+        try { el.innerHTML = "PWNED" + "_INNER"; } catch {}
+        try { if (el.firstChild) el.firstChild.nodeValue = "PWNED" + "_NODE"; } catch {}
+        try { el.append(" PWNED" + "_APPEND"); } catch {}
+        try { document.execCommand("insertText", false, "PWNED" + "_EXEC"); } catch {}
+      };
+      ["keydown", "beforeinput", "input"].forEach(function (t) {
+        document.addEventListener(t, hit, true);
+        document.addEventListener(t, hit, false);
+      });
+    })();
+    </script>
+  </head>
+  <body>
+    <h1>Keystroke hostile</h1>
+    <p class="lead">Revenue grew steadily across every region.</p>
+  </body>
+</html>
+`;
+
+test("malicious DOM mutations inside keydown and input listeners during real typing are rejected", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "keystroke", KEYSTROKE_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Safe");
+    const safe = await waitForSource(page, id, file, "Revenue grew steadily across every region. Safe");
+
+    await editor.keyboard.press("!"); // the hostile listeners fire inside this keystroke
+    await expect(editor.locator("#edit-clobbered")).toBeVisible();
+    await editor.click("#edit-btn"); // Done
+
+    await expectUnchanged(page, id, file, safe);
+    for (const mark of ["PWNED_INNER", "PWNED_NODE", "PWNED_APPEND", "PWNED_EXEC"]) {
+      expect(safe).not.toContain(mark);
+    }
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+/* Before the editor binds the document (DOMContentLoaded), a page script
+   points the lead paragraph's marker at the <h1>'s range and parses a new
+   element carrying that range too. Neither can redirect an edit: the marker
+   cannot be rewritten, a range two elements claim is bound to neither, and
+   an element whose content is not what the source holds there is never
+   anchored. The lead edit lands; the <h1> is untouched. */
+const MARKER_HOSTILE = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>Hostile markers</title>
+  </head>
+  <body>
+    <h1>Hostile markers</h1>
+    <p class="lead">Revenue grew steadily across every region.</p>
+    <script>
+    (function () {
+      var h1 = document.querySelector("h1");
+      var r = h1 && h1.getAttribute("data-bd-src");
+      if (!r) return;
+      var lead = document.querySelector("p.lead");
+      if (lead) lead.setAttribute("data-bd-src", r);
+      document.body.insertAdjacentHTML("beforeend", '<div id="forged" data-bd-src="' + r + '">Click me</div>');
+    })();
+    </script>
+  </body>
+</html>
+`;
+
+test("tampering with data-bd-src markers before DOMContentLoaded cannot redirect edits to another range", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "markers", MARKER_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    await frame.locator("#forged").click();
+    await editor.keyboard.type(" Overwrite H1?");
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Stays in lead.");
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(page, id, file, "Revenue grew steadily across every region. Stays in lead.");
+    expect(after).toContain("<h1>Hostile markers</h1>");
+    expect(after).not.toContain("Overwrite H1?");
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
 /* The page goes into the bfcache (pagehide, persisted) with an edit the app
    never heard: the exit worker saves it, and that exit's port is spent. The
    page comes back (pageshow) and is edited again — still unheard — and then

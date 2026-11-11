@@ -39,7 +39,24 @@ type Clobbered = { type: "bd-edit:clobbered" };
 type Flushed = { type: "bd-edit:flushed"; id: number };
 type FromFrame = Ready | Patch | Clobbered | Flushed;
 
-type Span = { start: number; end: number };
+// `html`: the element's content as the frame found it when it bound the range
+// (inline-edit.ts initDOM), checked against the source before it is anchored.
+type Span = { start: number; end: number; html?: string };
+
+/* Markup as the browser's own HTML parser reads it back: a <template> parses
+   with the real HTML5 parser and serializes the result, so two spellings of
+   the same content (entities, void tags, attribute quoting) compare equal —
+   while nothing in it runs or loads. The editor's own markers are not
+   content: a stamped child's data-bd-src (and the edit verdicts) are dropped. */
+const EDITOR_ATTRS = ["data-bd-src", "data-bd-edit", "data-bd-editing"];
+function canonicalHTML(raw: string): string {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = raw;
+  for (const el of tpl.content.querySelectorAll("*")) {
+    for (const a of EDITOR_ATTRS) el.removeAttribute(a);
+  }
+  return tpl.innerHTML;
+}
 
 /* A hash of the document, when the browser will give us one.
 
@@ -529,6 +546,14 @@ export function VisualEdit({
       }
       anchors.clear();
       for (const s of ranges) {
+        /* The frame read each element's content when it bound it to its
+           range. Content that is not what the source holds there — a page
+           script rewrote the element, or forged a marker onto another one
+           before the frame could bind it — is not anchored: nothing typed
+           into it can reach the file, here or by the exit worker. */
+        if (typeof s.html === "string" && canonicalHTML(s.html) !== canonicalHTML(text.slice(s.start, s.end))) {
+          continue;
+        }
         anchors.set(key(s), {
           from: Y.createRelativePositionFromTypeIndex(activeYText, s.start),
           to: Y.createRelativePositionFromTypeIndex(activeYText, s.end),

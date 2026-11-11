@@ -71,6 +71,71 @@ const nativeSetTimeout = window.setTimeout.bind(window);
 const nativeClearTimeout = window.clearTimeout.bind(window);
 const postToParent = window.parent.postMessage.bind(window.parent);
 
+/* Who is running. The page's scripts share this realm with the editor, and
+   while the editor is open they must not write into it: a keystroke is a
+   person's, but a page script's own keydown/input listener runs inside that
+   very keystroke. So every callback is marked by who registered it —
+   ProseMirror's (registered while the editor sets itself up or runs) count
+   as the editor's (`inEditorCall` > 0), everyone else's run with it at 0 —
+   and the DOM methods that could write into the open element refuse a caller
+   at 0 (installGuards, below). */
+let inEditorSetup = 0;
+let inEditorCall = 0;
+type AnyFn = (this: unknown, ...args: unknown[]) => unknown;
+function asEditor<F extends (...args: never[]) => unknown>(fn: F): F {
+  const f = fn as unknown as AnyFn;
+  return function (this: unknown, ...a: unknown[]) {
+    inEditorCall++;
+    try {
+      return f.apply(this, a);
+    } finally {
+      inEditorCall--;
+    }
+  } as unknown as F;
+}
+function asPage<F extends (...args: never[]) => unknown>(fn: F): F {
+  const f = fn as unknown as AnyFn;
+  return function (this: unknown, ...a: unknown[]) {
+    const saved = inEditorCall;
+    inEditorCall = 0;
+    try {
+      return f.apply(this, a);
+    } finally {
+      inEditorCall = saved;
+    }
+  } as unknown as F;
+}
+const forCaller = <F extends (...args: never[]) => unknown>(fn: F): F =>
+  inEditorSetup > 0 || inEditorCall > 0 ? asEditor(fn) : asPage(fn);
+// ProseMirror setting itself up: everything it registers is the editor's.
+function editorSetup<T>(make: () => T): T {
+  inEditorSetup++;
+  inEditorCall++;
+  try {
+    return make();
+  } finally {
+    inEditorSetup--;
+    inEditorCall--;
+  }
+}
+// The editor's own listeners, registered on the untouched method.
+const listen = (target: EventTarget, type: string, fn: (e: Event) => void, opts?: boolean | AddEventListenerOptions) =>
+  targetAddListener.call(target, type, asEditor(fn), opts);
+
+// Natives the guards call through, taken before anything can replace them.
+const rawRemoveListener = EventTarget.prototype.removeEventListener;
+const RawMutationObserver = window.MutationObserver;
+const nodeContains = Node.prototype.contains;
+const rangeIntersects = Range.prototype.intersectsNode;
+const selectionContains = Selection.prototype.containsNode;
+const innerHTMLDesc = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")!;
+const elInnerHTMLGet = innerHTMLDesc.get!;
+const elInnerHTMLSet = innerHTMLDesc.set!;
+const elRemoveAttribute = Element.prototype.removeAttribute;
+const attrNameGet = Object.getOwnPropertyDescriptor(Attr.prototype, "name")!.get!;
+const datasetGet = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "dataset")!.get!;
+const nativeExecCommand = window.Document.prototype.execCommand;
+
 // The hash the server computed over the STORED bytes, read while this script
 // is still `currentScript`. The app compares it with the document it holds:
 // if they differ, the ranges describe a file that has since moved on, and it
@@ -81,6 +146,16 @@ const hash = self?.dataset.srcHash ?? "";
 // cannot compute a hash — crypto.subtle exists only in a secure context, and a
 // LAN hub on plain HTTP is not one.
 const len = Number(self?.dataset.srcLen ?? "-1");
+// Every range the server stamped ("start,end;..."): an element may only ever
+// be bound to one of these. Null on a server that does not send the list.
+const serverRanges =
+  self && self.hasAttribute("data-src-ranges")
+    ? new Set((self.dataset.srcRanges ?? "").split(";").filter(Boolean))
+    : null;
+// Read, then gone: nothing a page script could use is left on the tag.
+if (self) {
+  for (const a of ["data-src-hash", "data-src-len", "data-src-ranges"]) elRemoveAttribute.call(self, a);
+}
 
 // This frame's end of the channel to the app; never on window or the DOM.
 const appChannel = new NativeMessageChannel();
@@ -243,8 +318,15 @@ function roundTrips(el: HTMLElement): boolean {
 }
 
 type Range = { start: number; end: number };
-
+/* An element's range, as bound when the document was first read (initDOM):
+   never the attribute again, which a page script may since have rewritten. */
 function rangeOf(el: Element): Range | null {
+  const b = boundRanges.get(el);
+  return b ? { start: b.start, end: b.end } : null;
+}
+
+// The attribute as served, parsed once (initDOM).
+function parseRange(el: Element): Range | null {
   const raw = elGetAttribute.call(el, SRC_ATTR);
   if (!raw) return null;
   const [a, b] = raw.split(",");
@@ -285,6 +367,225 @@ let locked = false;
 let patchSeq = 0;
 let exitPort: MessagePort | null = null;
 const editedSpans = new Map<string, EditedSpan>();
+/* Elements bound to their source ranges, privately: the page can rewrite an
+   attribute, but not this. Filled once, when the document is first read. */
+const boundRanges = new WeakMap<Element, { start: number; end: number; initialHtml: string }>();
+
+/* A page script tried to write into the open element. The write does not
+   happen, the editor closes with the element as it was last saved — never
+   flushed, so the script's markup is never sent — and the element is not
+   offered for editing again on this render: the page's script has its hands
+   on it. */
+function clobberFromScript() {
+  const el = host;
+  const v = view;
+  if (!el) return;
+  view = null;
+  host = null;
+  range = null;
+  boundRanges.delete(el);
+  inEditorCall++;
+  try {
+    v?.destroy();
+    elInnerHTMLSet.call(el, before);
+    elRemoveAttribute.call(el, "data-bd-editing");
+    elRemoveAttribute.call(el, "contenteditable");
+  } catch {
+    // a page that broke its own element: the editor is closed either way
+  } finally {
+    inEditorCall--;
+  }
+  send({ type: "bd-edit:clobbered" });
+}
+
+/* The guards, installed before any page script runs and frozen so none can
+   take them back out. Each refuses a caller outside the editor:
+   - writes into the open element (and everything in it): the editor closes
+     (clobberFromScript) and the write never lands;
+   - any change to a data-bd-src marker;
+   - document.execCommand, which edits whatever is focused;
+   and every listener, observer and timer runs as whoever registered it. */
+function installGuards() {
+  const touches = (n: unknown): boolean => {
+    if (host === null) return false;
+    if (n === host) return true;
+    try {
+      return nodeContains.call(host, n as Node);
+    } catch {
+      return false;
+    }
+  };
+  const hostWrite = (self: unknown, args: unknown[]): boolean => {
+    if (inEditorCall > 0 || host === null) return false;
+    if (!touches(self) && !args.some(touches)) return false;
+    clobberFromScript();
+    return true;
+  };
+  const isSrcName = (n: unknown) => typeof n === "string" && n.toLowerCase() === SRC_ATTR;
+  const localOf = (q: unknown) => (typeof q === "string" ? q.slice(q.indexOf(":") + 1) : q);
+  const isSrcAttr = (a: unknown) => {
+    try {
+      return isSrcName(attrNameGet.call(a));
+    } catch {
+      return false;
+    }
+  };
+  const srcWrite = (blocked: boolean) => inEditorCall === 0 && blocked;
+
+  const freeze = (obj: object, name: string, value: unknown) =>
+    Object.defineProperty(obj, name, { value, writable: false, configurable: false, enumerable: false });
+  const methods = (
+    proto: object,
+    names: string[],
+    blocked: (self: unknown, args: unknown[]) => boolean,
+    refused?: unknown,
+  ) => {
+    for (const name of names) {
+      const d = Object.getOwnPropertyDescriptor(proto, name);
+      if (!d || typeof d.value !== "function") continue;
+      const native = d.value as AnyFn;
+      freeze(proto, name, function (this: unknown, ...a: unknown[]) {
+        return blocked(this, a) ? refused : native.apply(this, a);
+      });
+    }
+  };
+  const setters = (proto: object, names: string[], blocked: (self: unknown) => boolean) => {
+    for (const name of names) {
+      const d = Object.getOwnPropertyDescriptor(proto, name);
+      if (!d?.set) continue;
+      const set = d.set;
+      Object.defineProperty(proto, name, {
+        configurable: false,
+        enumerable: d.enumerable,
+        get: d.get,
+        set(this: unknown, v: unknown) {
+          if (!blocked(this)) set.call(this, v);
+        },
+      });
+    }
+  };
+
+  // The open element and everything in it.
+  setters(Element.prototype, ["innerHTML", "outerHTML"], (s) => hostWrite(s, []));
+  setters(HTMLElement.prototype, ["innerText", "outerText"], (s) => hostWrite(s, []));
+  setters(Node.prototype, ["textContent", "nodeValue"], (s) => srcWrite(isSrcAttr(s)) || hostWrite(s, []));
+  setters(CharacterData.prototype, ["data"], (s) => hostWrite(s, []));
+  methods(CharacterData.prototype, ["appendData", "insertData", "deleteData", "replaceData"], hostWrite);
+  methods(CharacterData.prototype, ["before", "after", "replaceWith", "remove"], hostWrite);
+  methods(window.Text.prototype, ["splitText"], hostWrite);
+  methods(Node.prototype, ["appendChild", "insertBefore", "replaceChild", "removeChild", "normalize"], hostWrite);
+  methods(
+    Element.prototype,
+    [
+      "insertAdjacentHTML",
+      "insertAdjacentText",
+      "insertAdjacentElement",
+      "append",
+      "prepend",
+      "replaceChildren",
+      "replaceWith",
+      "remove",
+      "before",
+      "after",
+    ],
+    hostWrite,
+  );
+  const rangeWrite = (self: unknown, args: unknown[]): boolean => {
+    if (inEditorCall > 0 || host === null) return false;
+    let hits = args.some(touches);
+    try {
+      hits ||= rangeIntersects.call(self as globalThis.Range, host);
+    } catch {
+      // not a Range: leave it to the native method to refuse
+    }
+    if (!hits) return false;
+    clobberFromScript();
+    return true;
+  };
+  methods(window.Range.prototype, ["deleteContents", "extractContents", "insertNode", "surroundContents"], rangeWrite);
+  methods(Selection.prototype, ["deleteFromDocument"], (self) => {
+    if (inEditorCall > 0 || host === null) return false;
+    try {
+      if (!selectionContains.call(self as Selection, host, true)) return false;
+    } catch {
+      return false;
+    }
+    clobberFromScript();
+    return true;
+  });
+  freeze(window.Document.prototype, "execCommand", function (this: unknown, ...a: unknown[]) {
+    if (inEditorCall === 0) return false;
+    return (nativeExecCommand as unknown as AnyFn).apply(this, a);
+  });
+
+  // The range markers.
+  methods(Element.prototype, ["setAttribute", "removeAttribute", "toggleAttribute"], (_s, a) =>
+    srcWrite(isSrcName(a[0])),
+  );
+  methods(Element.prototype, ["setAttributeNS"], (_s, a) => srcWrite(isSrcName(localOf(a[1]))));
+  methods(Element.prototype, ["removeAttributeNS"], (_s, a) => srcWrite(isSrcName(a[1])));
+  methods(Element.prototype, ["setAttributeNode", "setAttributeNodeNS", "removeAttributeNode"], (_s, a) =>
+    srcWrite(isSrcAttr(a[0])),
+  );
+  methods(NamedNodeMap.prototype, ["setNamedItem", "setNamedItemNS"], (_s, a) => srcWrite(isSrcAttr(a[0])));
+  methods(NamedNodeMap.prototype, ["removeNamedItem"], (_s, a) => srcWrite(isSrcName(a[0])));
+  methods(NamedNodeMap.prototype, ["removeNamedItemNS"], (_s, a) => srcWrite(isSrcName(a[1])));
+  setters(Attr.prototype, ["value"], (s) => srcWrite(isSrcAttr(s)));
+  Object.defineProperty(HTMLElement.prototype, "dataset", {
+    configurable: false,
+    enumerable: true,
+    get(this: HTMLElement) {
+      const map = datasetGet.call(this) as DOMStringMap;
+      const locked = (p: string | symbol) => p === "bdSrc" && inEditorCall === 0;
+      return new Proxy(map, {
+        get: (t, p) => Reflect.get(t, p),
+        set: (t, p, v) => (locked(p) ? true : Reflect.set(t, p, v)),
+        deleteProperty: (t, p) => (locked(p) ? true : Reflect.deleteProperty(t, p)),
+        defineProperty: (t, p, d) => (locked(p) ? true : Reflect.defineProperty(t, p, d)),
+      });
+    },
+  });
+
+  // Listeners, observers and timers run as whoever registered them.
+  const wrapped = new WeakMap<object, AnyFn>();
+  const wrapListener = (l: unknown): unknown => {
+    if (l === null || (typeof l !== "function" && typeof l !== "object")) return l;
+    let w = wrapped.get(l);
+    if (!w) {
+      const call: AnyFn =
+        typeof l === "function"
+          ? (l as AnyFn)
+          : function (this: unknown, ...a: unknown[]) {
+              if ("handleEvent" in l && typeof l.handleEvent === "function") return l.handleEvent(...a);
+              return undefined;
+            };
+      w = forCaller(call);
+      wrapped.set(l, w);
+    }
+    return w;
+  };
+  freeze(EventTarget.prototype, "addEventListener", function (this: EventTarget, type: string, l: unknown, o?: unknown) {
+    return targetAddListener.call(this, type, wrapListener(l) as EventListener, o as AddEventListenerOptions);
+  });
+  freeze(EventTarget.prototype, "removeEventListener", function (this: EventTarget, type: string, l: unknown, o?: unknown) {
+    const w = l !== null && (typeof l === "function" || typeof l === "object") ? wrapped.get(l) : undefined;
+    return rawRemoveListener.call(this, type, (w ?? l) as EventListener, o as EventListenerOptions);
+  });
+  class GuardedMutationObserver extends RawMutationObserver {
+    constructor(cb: MutationCallback) {
+      super(forCaller(cb));
+    }
+  }
+  freeze(window, "MutationObserver", GuardedMutationObserver);
+  for (const name of ["setTimeout", "setInterval", "requestAnimationFrame", "requestIdleCallback", "queueMicrotask"]) {
+    const native: unknown = Reflect.get(window, name);
+    if (typeof native !== "function") continue;
+    freeze(window, name, function (this: unknown, cb: unknown, ...rest: unknown[]) {
+      return (native as AnyFn).call(window, typeof cb === "function" ? forCaller(cb as AnyFn) : cb, ...rest);
+    });
+  }
+}
+installGuards();
 
 // The document as markup, or null if there is no live editor.
 function currentHTML(): string | null {
@@ -395,40 +696,42 @@ function mount(el: HTMLElement, x?: number, y?: number) {
     ],
   });
 
-  view = new EditorView(
-    { mount: el },
-    {
-      state,
-      editable: () => !locked,
-      dispatchTransaction(tr) {
-        if (locked && tr.docChanged) return;
-        if (tr.docChanged && !trustedEditOpen && !composing) {
-          /* The element changed with no input from the reader: the page's
-             own script wrote into it (or faked an event). That is not an
-             edit to save — close the editor and say so. */
-          send({ type: "bd-edit:clobbered" });
-          view?.destroy();
-          view = null;
-          host = null;
-          range = null;
-          return;
-        }
-        view!.updateState(view!.state.apply(tr));
-        /* Reported on EVERY change, with no debounce of its own.
+  // Set up as the editor: every listener and observer ProseMirror registers
+  // here runs as the editor, and only the editor may write into the element.
+  view = editorSetup(
+    () =>
+      new EditorView(
+        { mount: el },
+        {
+          state,
+          editable: () => !locked,
+          dispatchTransaction(tr) {
+            if (locked && tr.docChanged) return;
+            if (tr.docChanged && !trustedEditOpen && !composing) {
+              /* The element changed with no input from the reader: the
+                 page's own script wrote into it (or faked an event). That is
+                 not an edit to save — close the editor and say so. */
+              clobberFromScript();
+              return;
+            }
+            view!.updateState(view!.state.apply(tr));
+            /* Reported on EVERY change, with no debounce of its own.
 
-           There used to be a 700ms idle here, mirroring the save timer. It
-           meant that for 700ms after the last keystroke the edit existed ONLY
-           inside this iframe — and pressing Done in that window tears the
-           iframe down with the edit still pending, losing it silently. That is
-           not an edge case: typing and immediately clicking Done is what
-           finishing an edit looks like.
+               There used to be a 700ms idle here, mirroring the save timer.
+               It meant that for 700ms after the last keystroke the edit
+               existed ONLY inside this iframe — and pressing Done in that
+               window tears the iframe down with the edit still pending,
+               losing it silently. That is not an edge case: typing and
+               immediately clicking Done is what finishing an edit looks like.
 
-           There is nothing to gain by waiting. A patch is a postMessage into
-           the same tab; the debounce that actually matters is the app's save
-           timer, which still batches the writes that reach the hub. */
-        if (tr.docChanged) flush();
-      },
-    },
+               There is nothing to gain by waiting. A patch is a postMessage
+               into the same tab; the debounce that actually matters is the
+               app's save timer, which still batches the writes that reach
+               the hub. */
+            if (tr.docChanged) flush();
+          },
+        },
+      ),
   );
   view.focus();
   if (x !== undefined && y !== undefined) caretAt(view, x, y);
@@ -441,7 +744,7 @@ function nearestEditable(target: EventTarget | null): HTMLElement | null {
   return el instanceof HTMLElement ? el : null;
 }
 
-targetAddListener.call(
+listen(
   document,
   "click",
   (ev: Event) => {
@@ -463,7 +766,7 @@ targetAddListener.call(
 // Verdicts are computed on approach so the outline only ever appears on
 // something that will actually open. An element that cannot be edited says so
 // on hover instead of refusing a click for no visible reason.
-targetAddListener.call(
+listen(
   document,
   "mouseover",
   (e: Event) => {
@@ -481,15 +784,11 @@ function initDOM() {
      stop that from here — the page's script is the page — so the honest move
      is to notice and say so. Detaching is the observable form of every version
      of this: a React re-render, a chart redraw, a template swap. */
-  new MutationObserver(() => {
-    if (host && !host.isConnected) {
-      send({ type: "bd-edit:clobbered" });
-      view?.destroy();
-      view = null;
-      host = null;
-      range = null;
-    }
-  }).observe(document.documentElement, { childList: true, subtree: true });
+  new RawMutationObserver(
+    asEditor(() => {
+      if (host && !host.isConnected) clobberFromScript();
+    }),
+  ).observe(document.documentElement, { childList: true, subtree: true });
 
   const style = document.createElement("style");
   style.textContent = `
@@ -500,14 +799,28 @@ function initDOM() {
 `;
   (document.head ?? document.documentElement).appendChild(style);
 
-  send({
-    type: "bd-edit:ready",
-    hash,
-    len,
-    ranges: [...(docQueryAll.call(document, `[${SRC_ATTR}]`) as NodeListOf<Element>)]
-      .map((el) => rangeOf(el))
-      .filter(Boolean),
-  });
+  /* Bind each element to its range, now and once. A range the server did
+     not stamp, or one two elements claim (a page script cloned or forged a
+     marker), is bound to nothing. The element's content goes with its range,
+     so the app can check it is what the source holds there. */
+  const found: Array<{ el: Element; r: Range }> = [];
+  const claims = new Map<string, number>();
+  for (const el of docQueryAll.call(document, `[${SRC_ATTR}]`) as NodeListOf<Element>) {
+    const r = parseRange(el);
+    if (!r) continue;
+    const k = r.start + "," + r.end;
+    if (serverRanges !== null && !serverRanges.has(k)) continue;
+    found.push({ el, r });
+    claims.set(k, (claims.get(k) ?? 0) + 1);
+  }
+  const ranges: Array<{ start: number; end: number; html: string }> = [];
+  for (const { el, r } of found) {
+    if (claims.get(r.start + "," + r.end) !== 1) continue;
+    const initialHtml = elInnerHTMLGet.call(el) as string;
+    boundRanges.set(el, { start: r.start, end: r.end, initialHtml });
+    ranges.push({ start: r.start, end: r.end, html: initialHtml });
+  }
+  send({ type: "bd-edit:ready", hash, len, ranges });
 
   // The markers are in the served HTML, so their presence says nothing about
   // whether this script has run. Anything waiting to interact — a test, or a
@@ -532,12 +845,12 @@ function exitUnacked() {
   portPost.call(exitPort, { type: "bd-edit:exit", patches });
 }
 
-targetAddListener.call(window, "beforeunload", () => {
+listen(window, "beforeunload", () => {
   unmount();
   exitUnacked();
 });
 // Flush on pagehide too; keep the open element mounted when entering bfcache.
-targetAddListener.call(window, "pagehide", (e: Event) => {
+listen(window, "pagehide", (e: Event) => {
   if ((e as PageTransitionEvent).persisted) flush();
   else unmount();
   exitUnacked();
@@ -551,7 +864,7 @@ targetAddListener.call(window, "pagehide", (e: Event) => {
                      app has it, it has them all. With `lock`, nothing more is
                      typed until bd-edit:unlock (its save failed or asked a
                      question) or the page is torn down (it saved). */
-targetAddListener.call(appPort, "message", (e: Event) => {
+listen(appPort, "message", (e: Event) => {
   const msg = getMsgData.call(e) as { type?: unknown; id?: unknown; lock?: unknown; seq?: unknown } | null;
   if (!msg || typeof msg !== "object") return;
   if (msg.type === "bd-edit:ack" && typeof msg.seq === "number") {
@@ -583,7 +896,7 @@ targetAddListener.call(appPort, "message", (e: Event) => {
 portStart.call(appPort);
 
 if (document.readyState !== "loading") initDOM();
-else targetAddListener.call(document, "DOMContentLoaded", initDOM, { once: true });
+else listen(document, "DOMContentLoaded", initDOM, { once: true });
 
 // The app's end of the channel, before any page script can see a message.
 postToParent({ type: "bd-edit:hello" }, "*", [appChannel.port2]);
