@@ -171,6 +171,7 @@ var desktopRoutes = []struct {
 	// argument to the URL. Decoration — the hub names the room itself — but
 	// it has to be classified, or the desktop answers it locally.
 	{"GET /api/p/{project}/ycollab/{room...}", routeProxy, ""},
+	{"POST /api/p/{project}/ycollab/sync", routeProxy, ""},
 
 	{"POST /api/p/{project}/reads", routeLocal, "the sync client posts these straight to the hub, never through here; the app's own viewer reads go out through desktop_reads.go instead, as human traffic"},
 }

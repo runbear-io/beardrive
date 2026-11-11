@@ -21,6 +21,7 @@ import (
 	"github.com/runbear-io/beardrive/internal/config"
 	"github.com/runbear-io/beardrive/internal/journal"
 	"github.com/runbear-io/beardrive/internal/remote"
+	"github.com/runbear-io/beardrive/internal/textmerge"
 )
 
 // Uploads run in two modes, chosen by the server per request so the client
@@ -202,10 +203,16 @@ func (r *RemoteSource) commitIfBase(ctx context.Context, p, blob string, size in
 	if !ok {
 		return errBlobMissing
 	}
-	return r.appendOpsIf(ctx, []journal.Op{{
+	op := journal.Op{
 		Kind: journal.KindPut, Path: p, Blob: blob, Size: size, Mode: 0o644,
 		User: who.Email, UserName: who.Name, Note: note,
-	}}, cb)
+	}
+	// The version this put edited from, when the writer named one: a device
+	// merging against this op finds its ancestor without guessing.
+	if cb != nil && cb.path == p && cb.sha != "" {
+		op.Base = cb.sha
+	}
+	return r.appendOpsIf(ctx, []journal.Op{op}, cb)
 }
 
 // commitBase is the version of one path a write was built on: what its
@@ -698,6 +705,12 @@ func (s *Server) headFile(ctx context.Context, v *volume, p string) (FileInfo, b
 // Small files are exempt from the ratio, not from emptying.
 const (
 	confirmShrinkHeader = "X-Bdrive-Confirm-Shrink"
+	// noMergeHeader asks a conditional write to be refused on a stale base
+	// rather than merged: a co-editing room settles its own (ycollab.go).
+	noMergeHeader = "X-Bdrive-No-Merge"
+	// maxUploadMergeBytes bounds what a stale conditional write reads into
+	// memory to merge; the same bound a device merges under.
+	maxUploadMergeBytes = 4 << 20
 	shrinkRatioFloor    = 256
 )
 
@@ -747,12 +760,32 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	defer tmp.Close()
 	project := r.PathValue("project")
 
+	org := s.orgOf(project)
+	if rs, ok := v.source.(*RemoteSource); ok {
+		s.reconcileGrants(r.Context(), project, rs.Backend)
+	}
+	base := strings.Trim(r.Header.Get("If-Match"), `"`)
+	if base != "" {
+		if head, ok := s.headBlob(r.Context(), v, p); ok && head != base && head != blob {
+			if handled, now := s.mergeStaleUpload(w, r, v, p, base, head, tmp, size); handled {
+				return
+			} else if now != "" {
+				head = now
+			}
+			writeJSONStatus(w, http.StatusConflict, map[string]any{
+				"error": "this file changed since you last read it",
+				"sha":   head,
+				"path":  p,
+			})
+			return
+		}
+	}
+
 	// billed is what this write actually adds: zero when the store already
 	// holds this exact blob, which is every co-editor after the first saving
 	// the same converged text. See billableBytes.
 	billed := size
 	if rs, ok := v.source.(*RemoteSource); ok {
-		s.reconcileGrants(r.Context(), project, rs.Backend)
 		var billErr error
 		billed, billErr = billableBytes(r.Context(), rs.Backend, "blobs/"+blob, size)
 		if billErr != nil {
@@ -760,8 +793,23 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 			return
 		}
 	}
-	org := s.orgOf(project)
 	if err := s.quota().CheckWrite(org, billed+s.reservedBytes(org)); err != nil {
+		if base != "" && billed > 0 {
+			v.invalidate()
+			if head, ok := s.headBlob(r.Context(), v, p); ok && head != base && head != blob {
+				if handled, now := s.mergeStaleUpload(w, r, v, p, base, head, tmp, size); handled {
+					return
+				} else if now != "" {
+					head = now
+				}
+				writeJSONStatus(w, http.StatusConflict, map[string]any{
+					"error": "this file changed since you last read it",
+					"sha":   head,
+					"path":  p,
+				})
+				return
+			}
+		}
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -814,19 +862,7 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	// Optional by design. A caller that sends no If-Match gets the old
 	// behaviour, so older clients, the MCP tools and every other writer here
 	// are untouched.
-	base := strings.Trim(r.Header.Get("If-Match"), `"`)
 	if base != "" {
-		if head, ok := s.headBlob(r.Context(), v, p); ok && head != base {
-			// The current sha travels with the refusal, so the client can fetch
-			// what it missed without a second round trip to find out what to ask
-			// for.
-			writeJSONStatus(w, http.StatusConflict, map[string]any{
-				"error": "this file changed since you last read it",
-				"sha":   head,
-				"path":  p,
-			})
-			return
-		}
 		if fi, ok := s.headFile(r.Context(), v, p); ok && sharpShrink(fi.Size, size) &&
 			r.Header.Get(confirmShrinkHeader) == "" {
 			writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{
@@ -855,8 +891,18 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	}
 	var stale *staleWriteError
 	if errors.As(err, &stale) {
+		// The write that beat this one landed between the check above and the
+		// append (another hub process): merged the same way, when it can be.
+		head := stale.head
+		if base != "" && head != "" {
+			if handled, now := s.mergeStaleUpload(w, r, v, p, base, head, tmp, size); handled {
+				return
+			} else if now != "" {
+				head = now
+			}
+		}
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
-			"error": stale.Error(), "sha": stale.head, "path": p,
+			"error": stale.Error(), "sha": head, "path": p,
 		})
 		return
 	}
@@ -887,6 +933,213 @@ func (s *Server) handleUploadContent(v *volume, w http.ResponseWriter, r *http.R
 	}
 	s.adoptRoomWrite(r.Context(), projectID(r), p, head, tmp)
 	writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head})
+}
+
+// validMergedText reports whether a clean three-way text merge of path is
+// still a well-formed file of its kind. Two edits that each keep a .json
+// document valid can merge into one that is not (two keys added at one
+// point, with no comma between them); a merge the format refuses is a
+// conflict, never a commit. Mirrors the device-side check in
+// internal/syncer/merge.go.
+func validMergedText(path string, merged []byte) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json":
+		return json.Valid(merged)
+	case ".jsonl":
+		for _, line := range bytes.Split(merged, []byte{'\n'}) {
+			if line = bytes.TrimSpace(line); len(line) > 0 && !json.Valid(line) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// mergeStaleUpload settles a conditional write whose base lost a race: the
+// base, the head that replaced it and the incoming bytes are merged three
+// ways (textmerge), and the merge is written held to that head. handled says
+// a response was written; otherwise the caller refuses with a 409 naming now
+// (the newest head seen, "" if unchanged).
+//
+// Only text, only under maxUploadMergeBytes, only when the base can be read
+// back, and never for a co-editing room's own write (noMergeHeader). A head
+// that moves again while the merge is appended is merged again, up to three
+// times. The merged write reaches an open room like any outside write:
+// a clean room follows it, a dirty one reconciles at its next snapshot.
+func (s *Server) mergeStaleUpload(w http.ResponseWriter, r *http.Request, v *volume, p, base, head string, tmp *os.File, size int64) (handled bool, now string) {
+	rs, ok := v.source.(*RemoteSource)
+	if !ok || r.Header.Get(noMergeHeader) != "" || size > maxUploadMergeBytes {
+		return false, ""
+	}
+	ctx := r.Context()
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return false, ""
+	}
+	incoming, err := io.ReadAll(io.LimitReader(tmp, maxUploadMergeBytes+1))
+	if err != nil || len(incoming) > maxUploadMergeBytes || !textmerge.IsText(incoming) {
+		return false, ""
+	}
+	read := func(sha string) ([]byte, bool) {
+		rc, err := rs.OpenBlob(ctx, sha)
+		if err != nil {
+			return nil, false
+		}
+		defer rc.Close()
+		b, err := io.ReadAll(io.LimitReader(rc, maxUploadMergeBytes+1))
+		if err != nil || len(b) > maxUploadMergeBytes {
+			return nil, false
+		}
+		return b, true
+	}
+	baseBytes, ok := read(base)
+	if !ok {
+		return false, ""
+	}
+	// A retry of a write that already landed — the response was lost, and
+	// somebody else has written on top of it since — carries a body the
+	// path's history already holds after its base. Merging it again would
+	// insert its lines a second time; it is already in the file's lineage.
+	// Only while the head still carries every line that write made, though:
+	// once a later edit removed or rewrote them (X -> A -> B), resubmitting
+	// A on X is a fresh edit to merge, and answering B unchanged would drop it.
+	project := projectID(r)
+	org := s.orgOf(project)
+	if rs.landedAfter(ctx, p, base, head, sha256Hex(incoming), s.requestUser(r).Email) {
+		if headBytes, ok := read(head); ok && textmerge.RetainsChanges(baseBytes, incoming, headBytes) {
+			if err := s.quota().CheckWrite(org, s.reservedBytes(org)); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return true, head
+			}
+			writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "merged": true, "unchanged": true})
+			return true, head
+		}
+	}
+	who := s.requestUser(r)
+	for range 3 {
+		headBytes, ok := read(head)
+		if !ok {
+			return false, head
+		}
+		merged, ok := textmerge.Merge(baseBytes, headBytes, incoming)
+		if !ok || len(merged) > maxUploadMergeBytes || !validMergedText(p, merged) {
+			return false, head
+		}
+		sum := sha256.Sum256(merged)
+		blob := hex.EncodeToString(sum[:])
+		if blob == head {
+			if err := s.quota().CheckWrite(org, s.reservedBytes(org)); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return true, head
+			}
+			// The head already holds everything this write adds.
+			writeJSON(w, map[string]any{"ok": true, "path": p, "sha": head, "merged": true, "unchanged": true})
+			return true, head
+		}
+		// The shrink guard holds the merge to the head it lands on.
+		if sharpShrink(int64(len(headBytes)), int64(len(merged))) && r.Header.Get(confirmShrinkHeader) == "" {
+			return false, head
+		}
+		n := int64(len(merged))
+		billed, err := billableBytes(ctx, rs.Backend, "blobs/"+blob, n)
+		if err != nil {
+			storageErr(w, http.StatusBadGateway, "could not check the stored object", err)
+			return true, head
+		}
+		if err := s.quota().CheckWrite(org, billed+s.reservedBytes(org)); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return true, head
+		}
+		// Blob before journal, always.
+		if err := rs.Backend.Put(ctx, "blobs/"+blob, bytes.NewReader(merged), n); err != nil {
+			http.Error(w, fmt.Sprintf("store: push blob: %v", err), http.StatusBadGateway)
+			return true, head
+		}
+		err = rs.commitIfBase(ctx, p, blob, n, who, "merged concurrent edits", &commitBase{path: p, sha: head, blob: blob})
+		var stale *staleWriteError
+		if errors.As(err, &stale) {
+			if stale.head == "" {
+				return false, head // deleted meanwhile: nothing to merge onto
+			}
+			head = stale.head
+			continue
+		}
+		if err != nil {
+			http.Error(w, fmt.Sprintf("store: %v", err), http.StatusBadGateway)
+			return true, head
+		}
+		if billed > 0 {
+			s.quota().RecordUsage(org, billed)
+		}
+		v.invalidate()
+		s.dataWrote(ctx, project)
+		s.captureChange(r, "browser", 1, 0)
+		s.publishChange(r, "browser", []string{p}, 1, 0)
+		// Not inline: a dirty room settles by writing through this door,
+		// whose path lock the caller still holds.
+		go s.notifyRoomExternalWrite(project, []string{p})
+		writeJSON(w, map[string]any{"ok": true, "path": p, "sha": blob, "merged": true})
+		return true, blob
+	}
+	return false, head
+}
+
+// landedAfter reports whether the write being retried — blob, built on base,
+// by user — already landed and what replaced it since was written on top of
+// it. It walks the head's ancestry backwards along each put's Base link and
+// stops at the NEWEST occurrence of base: only a put of blob made on that
+// base by the same user, strictly between it and the head, is the retried
+// write. Anything older is a different lineage — X -> A -> X -> B holds a
+// put of A after a put of X, but a stale write of A against the second X is
+// a fresh edit to merge, not a retry.
+func (r *RemoteSource) landedAfter(ctx context.Context, path, base, head, blob, user string) bool {
+	if blob == base || blob == head || base == "" || head == "" {
+		return false
+	}
+	idx, err := r.historyIndex(ctx)
+	if err != nil {
+		return false
+	}
+	var ops []journal.Op // this path's ops, oldest first (journal.Less)
+	for _, so := range idx.all {
+		if so.Op.Path == path {
+			ops = append(ops, so.Op)
+		}
+	}
+	if len(ops) == 0 {
+		return false
+	}
+	// The winning op is the newest; it must be the head being merged onto.
+	at := len(ops) - 1
+	cur := ops[at]
+	if cur.Kind != journal.KindPut || cur.Blob != head {
+		return false
+	}
+	for range len(ops) {
+		if at != len(ops)-1 && cur.Blob == blob && cur.Base == base && cur.User == user {
+			return true
+		}
+		if cur.Base == "" || cur.Base == base {
+			return false
+		}
+		// Step to the newest earlier put that produced cur's base.
+		next := -1
+		for i := at - 1; i >= 0; i-- {
+			if ops[i].Kind == journal.KindPut && ops[i].Blob == cur.Base {
+				next = i
+				break
+			}
+		}
+		if next < 0 {
+			return false
+		}
+		at, cur = next, ops[next]
+	}
+	return false
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // handleUploadCommit journals a direct upload after the blob is in the store.

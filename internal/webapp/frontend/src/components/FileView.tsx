@@ -130,6 +130,11 @@ export function FileView(props: {
   // An HTML file renders its commentable variant (comments.go's ?comment=1),
   // which carries the bootstrap Comments.tsx talks to.
   commentable?: boolean;
+  // Filled while editing with "save the open file now": what Done awaits
+  // before it leaves, so the last words are on the hub, not a pending idle
+  // timer or room snapshot. False: the save is waiting on a question to the
+  // user (a sharp shrink), which leaving would withdraw unanswered.
+  flushRef?: { current: (() => Promise<boolean>) | null };
 }) {
   const { apiBase, path, version, onMeta } = props;
   const fileURL = fileURLFor(apiBase, path, version);
@@ -505,6 +510,21 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     void qc.invalidateQueries({ queryKey: ["text", fileURL] });
     void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });
   };
+  const { flushRef } = props;
+  useEffect(() => {
+    if (!flushRef) return;
+    const flush = async () => {
+      const f = fileHandle.current;
+      await f?.saveNow();
+      void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });
+      void qc.invalidateQueries({ queryKey: ["text", fileURL] });
+      return !f?.askingShrink();
+    };
+    flushRef.current = flush;
+    return () => {
+      if (flushRef.current === flush) flushRef.current = null;
+    };
+  }, [flushRef, qc, apiBase, path, fileURL]);
   // Co-editors in this document right now. A write while somebody else is in
   // the room is their snapshot of the document I already have — warning about
   // it would fire on every co-editing save. Alone, the same event means
@@ -704,6 +724,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
           }}
           me={props.me}
           onRendered={props.onRendered}
+          handle={fileHandle}
         />
         )
       ) : !Editor ? (

@@ -238,16 +238,40 @@ export function Editor({
           : undefined,
         onNotice: (m) => toast(m),
       }),
-      keymap.of([...completionKeymap, ...foldKeymap, ...defaultKeymap, ...historyKeymap, indentWithTab]),
+      keymap.of([
+        // Save now, not after the idle wait — and never the browser's own
+        // "Save Page As" dialog. In a live room this hands the hub the room's
+        // state; clean, it sends nothing.
+        {
+          key: "Mod-s",
+          preventDefault: true,
+          run: () => {
+            void file.saveNow();
+            return true;
+          },
+        },
+        ...completionKeymap,
+        ...foldKeymap,
+        ...defaultKeymap,
+        ...historyKeymap,
+        indentWithTab,
+      ]),
       EditorView.lineWrapping,
       EditorView.updateListener.of((u) => {
         if (u.docChanged || u.selectionSet || u.focusChanged) report(u.view);
       }),
     ];
     let viaRoom = false;
+    // A plain buffer mounted while the room was slow to answer (onStalled).
+    // Its typing is checkpointed into the room over HTTP and merged into the
+    // shared document on sync, when the CRDT-bound editor replaces it.
+    let staging = false;
+    // What this editor opened on: the staging buffer's text until one exists.
+    const openedWith = seed.current;
 
     // Without the CRDT there is no shared document to observe, so the save
-    // timer hangs off CodeMirror's own updates instead.
+    // timer hangs off CodeMirror's own updates instead — for a solo buffer
+    // (written to the file) and a staging one (checkpointed into the room).
     const soloListener = EditorView.updateListener.of((u) => {
       if (!u.docChanged) return;
       cb.current.onStateChange?.("dirty");
@@ -257,12 +281,15 @@ export function Editor({
 
     // The fallback surface: the same editor without the Yjs binding, seeded
     // from the file. Its edits still reach everyone through the ordinary save.
-    const mountSolo = () => {
+    const mountSolo = (asStaging = false) => {
       if (view || !host.current) return;
+      staging = asStaging;
       view = new EditorView({
         parent: host.current,
         state: EditorState.create({
-          doc: seed.current,
+          // A staging buffer starts from exactly the text the room join will
+          // merge it against.
+          doc: asStaging ? openedWith : seed.current,
           extensions: [...baseExtensions, meetingExt(), soloListener],
         }),
       });
@@ -276,11 +303,25 @@ export function Editor({
     // document that already holds either the file's text or the room's —
     // never to an empty one that would then have text appear underneath it.
     const mount = () => {
-      if (view || !host.current) return;
+      if (!host.current) return;
+      // Late join: the staging buffer's typing is already in the shared
+      // document (sharedfile.ts join), so the buffer gives way to the real
+      // editor, keeping the caret where it was as near as the text allows.
+      let caret = -1;
+      if (view && staging) {
+        if (timer.current) clearTimeout(timer.current);
+        caret = view.state.selection.main.head;
+        view.destroy();
+        view = null;
+        staging = false;
+      }
+      if (view) return;
+      const doc = file.collab.text.toString();
       view = new EditorView({
         parent: host.current,
         state: EditorState.create({
-          doc: file.collab.text.toString(),
+          doc,
+          ...(caret >= 0 ? { selection: { anchor: Math.min(caret, doc.length) } } : {}),
           extensions: [
             ...baseExtensions,
             // The binding: every local edit becomes a Yjs update, every
@@ -316,6 +357,9 @@ export function Editor({
       // route. Editing is single-writer then — exactly what it was before
       // co-editing existed — rather than a pane that never appears.
       onSolo: () => mountSolo(),
+      // The room is slow (a deploy, a cold start): let the user type now
+      // rather than stare at a preview. The socket keeps retrying underneath.
+      onStalled: () => mountSolo(true),
       onState: (s) => cb.current.onStateChange?.(s),
       onCollab: (s) => {
         live.current = s;
@@ -325,7 +369,7 @@ export function Editor({
       onPeers: (n) => cb.current.onPeers?.(n),
       onSaved: (t) => cb.current.onSaved?.(t),
       onWriting: () => cb.current.onWriting?.(),
-      soloText: () => view?.state.doc.toString() ?? "",
+      soloText: () => (view ? view.state.doc.toString() : openedWith),
       // No CRDT to splice into, so the outside write goes straight into
       // CodeMirror — which maps the cursor through it for free.
       soloApply: (e) => view?.dispatch({ changes: e }),

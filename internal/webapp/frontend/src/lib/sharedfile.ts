@@ -1,7 +1,7 @@
 import { CollabDoc, type CollabStatus } from "./collab";
 import { hasCollabRoute } from "./collabroute";
-import { textEdit } from "./diff";
-import { HttpError, putText } from "../api/http";
+import { diffSplices, merge3, retainsChanges } from "./merge3";
+import { HttpError, putText, syncCollab } from "../api/http";
 import { conflictName } from "./conflict";
 import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
 import { byteLength, sharpShrink } from "./meeting";
@@ -54,12 +54,37 @@ export type ShrinkAsk = {
 // Idle time before the document is written to the file.
 export const SAVE_IDLE_MS = 700;
 
+// Backoff between attempts to re-send a save that failed transiently (a 5xx,
+// a 429, no answer). The last value repeats while the buffer stays unsaved.
+export const SAVE_RETRY_MS = [2_000, 4_000, 8_000, 15_000];
+
+// How long edits may sit queued in a document that has lost its socket before
+// they are handed to the hub over HTTP instead.
+const OFFLINE_FLUSH_MS = 2_000;
+
+// Consecutive refusals one save may rebase across before its text is parked
+// beside the file. A path contended this hard is not a race any more.
+const MAX_REBASES = 4;
+
+// Above this, a staging checkpoint names its ancestor by sha alone when it can
+// (the hub reads the blob) instead of carrying it as text.
+const INLINE_BASE_MAX = 32_000;
+
+// How many of a held room's recent texts are remembered, to recognise a
+// snapshot of this room coming back through the change stream (merge()).
+const SEEN_ROOM_TEXTS = 32;
+
 export type SharedFile = {
   readonly collab: CollabDoc;
   /** Text as it stands, whether the relay ever answered or not. */
   current(): string;
-  /** Force a save now, skipping the idle wait. */
+  /** Force a save now, skipping the idle wait (Done, Mod-s). In a live room
+      this hands the hub the room's state only when this tab has typing no
+      snapshot carries yet; clean or a bystander, it sends nothing. */
   saveNow(): Promise<void>;
+  /** A shrink question is waiting on the user: leaving now would leave it
+      unanswered (Done stays on the editor). */
+  askingShrink(): boolean;
   /** Fold an outside write — an agent, a CLI, another device — into the open
       document. "blocked" means the caller should SAY so instead, because this
       refused to resolve it. `held` says the hub has already put this text
@@ -75,10 +100,11 @@ export type SharedFile = {
   destroy(): void;
 };
 
-export function openSharedFile(opts: {
+export type SharedFileOptions = {
   apiBase: string;
   path: string;
-  /** The file's current bytes, used only if this client seeds the room. */
+  /** The file's current bytes: what a surface typing before the room answers
+      starts from, and the base its typing is merged against when it does. */
   seed: string;
   /** The version those bytes ARE (the read's ETag). Every save says it was
       built on this, so the hub can refuse one that would erase a write that
@@ -100,16 +126,24 @@ export function openSharedFile(opts: {
       answer runs after destroy — both are no-ops on a closed file. */
   onShrinkWithdrawn?: (ask: ShrinkAsk) => void;
   /** Local edits made while the room is not live: they are queued in this
-      tab's document and merge when the socket comes back. 0 once it has. */
+      tab's document and merge when the socket comes back (or are handed to
+      the hub over HTTP if it stays away). 0 once they have. */
   onPending?: (n: number) => void;
   me?: { name: string; colour: string };
-  /** The document arrived: it is live and holds the truth. */
+  /** The document arrived: it is live and holds the truth. Called again on
+      every reconnect. Anything typed into a staging surface before it has
+      already been merged into `collab.text` when this runs. */
   onReady: (collab: CollabDoc) => void;
-  /** The document could not be reached — an older hub, or a proxy that will
-      not upgrade a websocket. The caller falls back to single-writer editing:
-      the editor still opens and still saves, it just has no live
-      collaboration. Deliberately NOT a second CRDT path. */
+  /** The server has no co-editing room at all (a single-volume server). The
+      caller edits a buffer of its own and this file saves it with If-Match,
+      rebasing over other writers three ways. Never called for a room that is
+      merely slow — see onStalled. */
   onSolo: () => void;
+  /** The room has not answered yet and is still being retried. The caller
+      MAY mount a staging surface over `seed` (soloText/soloApply, saveNow on
+      idle): its typing is checkpointed into the room over HTTP and merged
+      into the shared document the moment the socket syncs. */
+  onStalled?: () => void;
   onState?: (s: SaveState) => void;
   onCollab?: (s: CollabStatus) => void;
   onPeers?: (n: number) => void;
@@ -120,94 +154,498 @@ export function openSharedFile(opts: {
       that only learns about its own write afterwards will see its own save
       arrive as if a stranger had made it. */
   onWriting?: () => void;
-  /** Text to save when the relay never answered, so there is no CRDT to read
-      it from. The solo surface owns its own buffer. */
+  /** The caller's own buffer while there is no shared document under it
+      (solo, or staging before the room answers). Must return `seed` while
+      nothing has been typed. */
   soloText?: () => string;
-  /** Apply a merged-in outside write to that same solo buffer. Without it a
-      relay-less surface cannot take one, and merge() says so rather than
-      claiming a change it could not make. */
+  /** Apply a merged-in change to that same buffer. Without it a relay-less
+      surface cannot take one, and merge() says so rather than claiming a
+      change it could not make. */
   soloApply?: (e: { from: number; to: number; insert: string }) => void;
-}): SharedFile {
+};
+
+/* Three ways to be connected, and what writes the file in each:
+
+   - hub-held (`hubHoldsIt`): the socket synced at least once. The hub is the
+     ONLY writer (ycollab.go). Edits made while the socket is down queue in
+     the Y.Doc and, if it stays down, are handed over as a Yjs update on
+     POST ycollab/sync — never as a PUT that would race the hub's own write.
+   - staging: the room has a route but has not answered yet. Nothing goes
+     into the Y.Doc (a locally built copy of the file merged with the hub's
+     would hold every character twice); the caller's buffer is checkpointed
+     into the room as TEXT over POST ycollab/sync, and three-way merged into
+     the shared document the moment the socket syncs.
+   - solo: no room route at all. The file is written with If-Match by a
+     single-flight loop that rebases over other writers with merge3, and
+     parks a conflict copy only for a genuine same-token conflict. */
+export function openSharedFile(opts: SharedFileOptions): SharedFile {
+  /* The text `base` names: the last version of the file this buffer is known
+     to be built on. Every local change is (buffer − saved); every outside
+     write is (next − saved). That is what makes a three-way merge possible. */
   let saved = opts.seed;
   let base = opts.baseSha;
-  /* The texts of writes that have left but not landed.
+  /* Only two texts are ever "ours" and so never merged back in: `saved`, the
+     version the buffer is built on, and `inFlightSentText`, the one save on
+     the wire right now (its echo through the change stream routinely beats
+     the response back). Nothing older is remembered: a text this client once
+     wrote can come back legitimately — a History restore from B back to A —
+     and must then be merged like any other outside write. */
+  const adopt = (text: string, sha?: string) => {
+    saved = text;
+    savedSha = sha;
+    rebase(sha);
+    // Only room states NEWER than `saved` stay recognisable as this room's
+    // own past; a text not among them (an outside write, a restore) leaves
+    // nothing older to match.
+    const idx = seenRoomTexts.lastIndexOf(text);
+    if (idx >= 0) seenRoomTexts.splice(0, idx + 1);
+    else seenRoomTexts.length = 0;
+  };
+  /* The sha known to spell exactly `saved` — `base` can move on its own (a
+     co-editor's save learned from the change stream). When the two agree the
+     hub can read the ancestor itself, so a large one is not sent: the request
+     stays small enough for a keepalive on the way out, and half the bytes. */
+  let savedSha: string | undefined = opts.baseSha;
+  const priorSentList = (head: Ambiguous | null): string[] | undefined => {
+    if (!head) return undefined;
+    const out: string[] = [];
+    for (let c: Ambiguous | null = head; c !== null && out.length < 4; c = c.prev) {
+      if (c.sent !== c.from && !out.includes(c.sent)) out.push(c.sent);
+    }
+    return out.length ? out : undefined;
+  };
+  const roomPayload = (text: string, prior: Ambiguous | null = ambiguousRoomCheckpoint) => {
+    const prior_sent = priorSentList(prior);
+    return savedSha && savedSha === base && saved.length > INLINE_BASE_MAX
+      ? { base, text, ...(prior_sent ? { prior_sent } : {}) }
+      : { base, base_text: saved, text, ...(prior_sent ? { prior_sent } : {}) };
+  };
 
-     A SET, not a slot: a second idle timer can fire while the first PUT is
-     still out — type, pause, type again on a slow link — and a single slot
-     would forget the earlier write exactly when its own refetch arrives. That
-     is not hypothetical, it is what the first version of this fix did, and
-     the e2e caught it.
+  let solo = false;
+  // The room route answered 404/405 to an HTTP checkpoint: an older hub.
+  // Staging then saves like solo, with If-Match.
+  let noRoomHttp = false;
+  let hubHoldsIt = false;
+  let live = false;
+  let gone = false;
+  let pending = 0;
+  let finalText: string | null = null;
+  /* A late join whose buffer conflicts with the room: the buffer is the only
+     copy of those words until its conflict copy lands, so it stays the text
+     (and the editor stays on it) until then. See join(). */
+  let pendingJoin = false;
+  let joining = false; // a park of the buffer is on the wire
+  /* join() is waiting for a staging checkpoint on the wire to land before it
+     reads the buffer and the room: the save loop sends nothing more, so the
+     join is the only thing that hands the rest of the buffer to the room. */
+  let waitingToJoin = false;
+  let parkedName: string | null = null;
+  let parkedText: string | null = null; // what `parkedName` was minted for
+  /* Every conflict copy this file opens gets a name no other copy from it
+     has had: conflictName stamps whole UTC seconds, so each name is minted
+     at least a second after the last. Two parks on the wire at once — a
+     staging checkpoint's and a join's, or either and a teardown — can then
+     never share a path, and a slow older PUT can never land over a newer
+     one. A name is reused only to retry the same text. */
+  let lastConflictMs = 0;
+  const mintConflictPath = (now = Date.now()): string => {
+    const ms = Math.max(now, lastConflictMs + 1000);
+    lastConflictMs = ms;
+    return conflictName(opts.path, opts.who || "browser", new Date(ms));
+  };
+  // The conflict copies whose PUT is on the wire right now, and what each holds.
+  const conflictPuts = new Map<string, string>();
+  // Bumped per park: only the newest park moves `saved` when it lands.
+  let conflictSeq = 0;
+  /* A staging checkpoint the room refused for a genuine clash, whose buffer
+     has not durably landed as a conflict copy yet. Sending it to the room
+     again on the way out would only be refused again: destroy() parks it. */
+  let stagingConflict = false;
+  let joinTimer: ReturnType<typeof setTimeout> | null = null;
+  let joinAttempt = 0;
+  let readyWaiting = false; // the room synced; onReady waits for the join
+  /* A staging checkpoint whose outcome is unknown: it failed in a way (5xx,
+     429, 422, no answer) that may come after the hub already put `sent` into
+     the room's document. Until a peek or a later checkpoint settles it, a
+     join cannot know whether the room holds `sent` — and guessing "not" would
+     splice its lines in a second time under fresh item IDs. See join().
+     `from` is the ancestor it was sent against (`saved` then); `prev` is an
+     earlier checkpoint still unsettled when this one went out, since a later
+     one that never reached the room says nothing about it. */
+  type Ambiguous = { sent: string; from: string; prev: Ambiguous | null };
+  let ambiguousRoomCheckpoint: Ambiguous | null = null;
+  // Set when a peek confirms an ambiguous checkpoint is in room memory while
+  // its durable write had failed: saveLoop must still call syncCollab to flush
+  // storage even when `current() === saved`.
+  let roomNeedsFlush = false;
 
-     `saved` only moves when a PUT RESOLVES, and the hub announces a write the
-     moment it journals it — so the change frame, and the refetch it triggers,
-     routinely beat our own response back. Without this, that refetch looked
-     like a stranger's write: merge() saw text that matched neither `saved`
-     nor a buffer we had typed further into, and raised "someone else changed
-     this file" over the user's own save. It also stops a second idle timer
-     re-sending bytes that are already on their way, which is how two
-     byte-identical PUTs 4.5s apart ended up in one user's history. */
-  const inFlight = new Set<string>();
+  /* A held room's file is a PAST state of the document by the time anybody
+     reads it: with eight people typing, every snapshot the hub writes is
+     behind the room the moment it lands. `seenRoomTexts` remembers, oldest
+     first, the texts this room has held SINCE `saved` (every change, ours or
+     a peer's), so a snapshot coming back through the change stream is
+     recognised as our own history rather than refused as an outside write.
+     adopt() drops everything up to the adopted text, so a restore to a state
+     from before `saved` is never mistaken for one. Bounded: a snapshot older
+     than this still passes when the room carries every edit it made. */
+  const seenRoomTexts: string[] = [];
+  const seeRoomText = (t: string) => {
+    if (seenRoomTexts.at(-1) === t) return;
+    seenRoomTexts.push(t);
+    if (seenRoomTexts.length > SEEN_ROOM_TEXTS) seenRoomTexts.shift();
+  };
+  /* Typing in a held room that no snapshot is known to carry yet — what an
+     explicit save (Done, Mod-s) or a closing tab still has to hand the hub.
+     `lastLocalRoomText` is the room's text after the latest such edit;
+     `localRoomSeq` counts those edits, so a request that settles can tell
+     whether anything was typed while it was out. */
+  let localDirtyInRoom = false;
+  let lastLocalRoomText: string | null = null;
+  let localRoomSeq = 0;
+  const roomCaughtUp = () => {
+    localDirtyInRoom = false;
+    lastLocalRoomText = null;
+  };
+  // Settled a request that carried every local edit up to `sentSeq`.
+  const roomHandedOver = (sentSeq: number) => {
+    if (localRoomSeq === sentSeq) roomCaughtUp();
+  };
+  /* Edits made while a held room's socket is down, as watermarks rather than
+     a count: `offlineEditSeq` numbers every one, `offlineAckedSeq` is the
+     newest the hub has confirmed. Two flushes settling in any order can only
+     move the acknowledgement forward — never subtract the same edits twice. */
+  let offlineEditSeq = 0;
+  let offlineAckedSeq = 0;
+  let offlineFlushing: Promise<void> | null = null;
+
+  /* Single-flight. At most one write is ever on the wire: a second idle timer
+     firing while one is out only marks the buffer dirty, and the loop sends
+     the latest text when the first lands — rebased onto whatever it learned.
+     Two writes in flight from one buffer are two writes against one base,
+     and the second is a 409 against our own first. */
+  let saving: Promise<void> | null = null;
+  let dirtyWhileSaving = false;
+  // The text on the wire, so its own echo through the change stream (which
+  // routinely beats the response back) is not mistaken for a stranger's.
+  // Cleared the moment the request settles.
+  let inFlightSentText: string | null = null;
+  // An outside write was merged into the buffer while `inFlightSentText` was out.
+  let disturbed = false;
+
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let offlineTimer: ReturnType<typeof setTimeout> | null = null;
   const setState = (s: SaveState) => opts.onState?.(s);
 
   const contentURL = (p: string) =>
     opts.apiBase + "upload/content?path=" + encodeURIComponent(p);
+  const syncURL = opts.apiBase + "ycollab/sync?path=" + encodeURIComponent(opts.path);
 
-  const save = async (text: string) => {
-    if (inFlight.has(text)) return; // already on its way; its response decides
-    if (text === saved) {
-      // Nothing to write IS clean, and saying so matters: seeding the room
-      // marks the document dirty, and the save it schedules lands here — so
-      // without this the status line read "unsaved" for the rest of a session
-      // in which everything had been saved all along.
-      setState("clean");
+  /* A save the network or the hub failed for a moment (a 5xx, a 429, no
+     answer) is tried again on its own, backing off to a cap, for as long as
+     the buffer stays unsaved: typing that stopped would otherwise wait for a
+     next keystroke that may never come. A refusal that cannot change by
+     waiting (401/403/404/422) is never retried. The next edit's idle timer,
+     the room going live, and destroy() each cancel it. */
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryAttempt = 0;
+  const cancelRetry = () => {
+    clearTimeout(retryTimer ?? undefined);
+    retryTimer = null;
+  };
+  const retryAfterFailure = (e: unknown) => {
+    const transient = e instanceof HttpError ? e.status >= 500 || e.status === 429 : true;
+    if (!transient || gone || hubHoldsIt) return;
+    cancelRetry();
+    const delay = SAVE_RETRY_MS[Math.min(retryAttempt, SAVE_RETRY_MS.length - 1)];
+    retryAttempt++;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (!gone && !hubHoldsIt) void save();
+    }, delay);
+  };
+  // A write got through: the backoff starts over at its first step.
+  const landedWrite = () => {
+    cancelRetry();
+    retryAttempt = 0;
+  };
+
+  const scheduleSave = () => {
+    cancelRetry();
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => void save(), SAVE_IDLE_MS);
+  };
+
+  /* Replace what the buffer holds with `next`, touching only what differs:
+     multi-hunk splices, so every character outside them — and every cursor
+     and remote caret in them — stays where it was. */
+  const applyText = (next: string): boolean => {
+    if (gone) {
+      finalText = next;
+      return true;
+    }
+    const cur = current();
+    if (cur === next) return true;
+    const splices = diffSplices(cur, next);
+    if (onShared()) {
+      collab.applySplices(splices);
+      return true;
+    }
+    if (!opts.soloApply) return false;
+    for (const s of splices) opts.soloApply({ from: s.index, to: s.index + s.deleteCount, insert: s.insertText });
+    return true;
+  };
+
+  const save = (): Promise<void> => {
+    if (hubHoldsIt) return Promise.resolve(); // the hub writes a held room
+    // The room has the file; the buffer waits on its conflict copy. A save
+    // request is a nudge to try parking it again, never a write of its own.
+    if (pendingJoin) return joining ? Promise.resolve() : join();
+    if (saving) {
+      dirtyWhileSaving = true;
+      return saving;
+    }
+    const run = (async () => {
+      try {
+        await saveLoop();
+      } finally {
+        saving = null;
+      }
+    })();
+    saving = run;
+    return run;
+  };
+
+  const saveLoop = async () => {
+    let rebases = 0;
+    for (;;) {
+      dirtyWhileSaving = false;
+      if (asking || hubHoldsIt || waitingToJoin) return;
+      const text = current();
+      if (text === saved && !roomNeedsFlush) {
+        // Nothing to write IS clean, and saying so matters: a merge that
+        // marked the buffer dirty and scheduled this save lands here.
+        setState("clean");
+        return;
+      }
+      setState("saving");
+      opts.onWriting?.();
+      const r = solo || noRoomHttp ? await sendFile(text) : await sendRoom(text);
+      if (r === "stop") return;
+      if (r === "rebased") {
+        if (++rebases > MAX_REBASES) {
+          await preserve(current(), base ?? "");
+          return;
+        }
+        continue;
+      }
+      if (!dirtyWhileSaving) {
+        // Typing since the send that no timer has asked for yet: its own
+        // idle timer will.
+        setState(current() === saved && !roomNeedsFlush ? "clean" : "dirty");
+        return;
+      }
+    }
+  };
+  let confirmShrinkOnce = false;
+
+  /* Solo: PUT the whole file with If-Match. */
+  const sendFile = async (text: string): Promise<"done" | "rebased" | "stop"> => {
+    inFlightSentText = text;
+    disturbed = false;
+    let out: { sha?: string; merged?: boolean };
+    try {
+      out = await putText(contentURL(opts.path), text, base, confirmShrinkOnce);
+    } catch (e) {
+      inFlightSentText = null;
+      if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
+        confirmShrinkOnce = false;
+        askShrink(text);
+        return "stop";
+      }
+      /* A 409 is a write that landed since `saved`. Ours did not. Rebase over
+         it three ways and send again: two people editing different parts of
+         a file is not a conflict, and parking one of them beside the file —
+         which is what this did until now — erased that edit from the file
+         for everyone, every round, until the other side lost too. */
+      if (e instanceof HttpError && e.status === 409) {
+        return (await rebaseOnHead(saved, false)) ? "rebased" : "stop";
+      }
+      // Keep the buffer: it is the truth until a save lands. A transient
+      // failure is retried on its own; anything else waits for the next edit.
+      setState("error");
+      retryAfterFailure(e);
+      return "stop";
+    }
+    inFlightSentText = null;
+    confirmShrinkOnce = false;
+    landedWrite();
+    if (out.merged) {
+      // The hub folded our body into a newer file (upload.go): the file is
+      // not `text`. Learn what it is, carrying anything typed since onto it.
+      return (await rebaseOnHead(text, true)) ? "rebased" : "stop";
+    }
+    // A write merged in while ours was out landed AFTER ours (ours was not
+    // refused), so it is the newer version and `saved` already names it.
+    if (!disturbed) adopt(text, out.sha);
+    opts.onSaved?.(text);
+    return "done";
+  };
+
+  /* Read the file and rebase the buffer onto it: merge3(from, head, buffer).
+     `from` is the version both descend from — `saved` after a refusal, the
+     text we sent after the hub merged it. `landed` says our write is in the
+     head. False when it could not, and then the buffer has been parked. */
+  const rebaseOnHead = async (from: string, landed: boolean): Promise<boolean> => {
+    let head;
+    try {
+      head = await fetchBlobText(fileURLFor(opts.apiBase, opts.path));
+    } catch (e) {
+      setState("error");
+      // The buffer is still unsaved and nothing else may ever ask again (the
+      // typing stopped): a read that failed for a moment arms the same retry
+      // a failed save does, which re-sends and lands here again once the hub
+      // recovers.
+      if (current() !== saved) retryAfterFailure(e);
+      return false;
+    }
+    if (head.kind !== "text") {
+      setState("error");
+      return false;
+    }
+    const cur = current();
+    const res = merge3(from, head.text, cur);
+    if (!res.ok || !applyText(res.text)) {
+      // The same words changed two different ways: genuinely contended.
+      // Theirs is the file (it got there first); ours goes beside it.
+      if (landed) adopt(head.text, head.sha);
+      await preserve(cur, head.sha ?? "");
+      return false;
+    }
+    adopt(head.text, head.sha);
+    if (landed) opts.onSaved?.(head.text);
+    return true;
+  };
+
+  /* Staging: hand the typing to the room as text. The hub merges
+     (saved, room, text) and answers with the room's text, which this buffer
+     is then rebased onto, so the next checkpoint is a small diff again. */
+  const applyAmbiguousPeek = (peek: { sha: string; text: string; update?: string }) => {
+    if (peek.update) collab.applyRemoteUpdate(peek.update);
+    if (typeof peek.text !== "string") {
+      ambiguousRoomCheckpoint = null;
       return;
     }
-    setState("saving");
-    opts.onWriting?.();
-    inFlight.add(text);
-    try {
-      const out = await putText(contentURL(opts.path), text, base);
-      saved = text;
-      if (out.sha) base = out.sha;
-      setState("clean");
-      opts.onSaved?.(text);
-    } catch (e) {
-      if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
-        askShrink(text);
-        return;
+    let landed: Ambiguous | null = null;
+    for (let c: Ambiguous | null = ambiguousRoomCheckpoint; c !== null; c = c.prev) {
+      if (c.sent !== c.from && retainsChanges(c.from, c.sent, peek.text)) {
+        landed = c;
+        break;
       }
-      if (e instanceof HttpError && e.status === 409) {
-        inFlight.delete(text); // preserve() writes under a different path
-        /* A 409 in a shared room is usually a LOST RACE, not a disagreement.
-
-           Everyone in the room holds one document, so a co-editor's save is
-           a past state of the text we are about to write: their bytes are
-           already in our CRDT. If they land between our reading `base` and
-           our PUT arriving, the hub is right to refuse us — our base moved —
-           but parking the result beside the file is nonsense, because our
-           text already contains theirs. A real session did exactly that and
-           collected dozens of conflict copies of files against themselves.
-
-           No amount of care about WHEN we adopt a peer's sha closes this:
-           the window is between the read and the write, and something has to
-           happen after the refusal. So, once: re-read, check that our text
-           still contains theirs, rebase and try again. Same shape as the
-           hub's own journal append (appendConditional), for the same reason.
-
-           If containment fails, the writer was an outsider — an agent, the
-           CLI, another device — whose work is NOT in our document, and the
-           conflict copy below is exactly right. */
-        if (await rebaseOnLostRace(text)) return;
-        await preserve(text, e);
-        return;
-      }
-      // Keep the document: the CRDT is the truth until a save lands, and the
-      // next edit schedules another attempt.
-      setState("error");
-    } finally {
-      inFlight.delete(text);
     }
+    ambiguousRoomCheckpoint = null;
+    if (landed) {
+      roomNeedsFlush = true;
+      // The room holds `sent`: what the buffer adds is only past it.
+      const res = merge3(landed.sent, peek.text, current());
+      if (res.ok && applyText(res.text)) {
+        saved = peek.text;
+        savedSha = undefined;
+        rebase(peek.sha);
+      } else {
+        saved = landed.sent;
+        savedSha = undefined;
+      }
+    }
+  };
+
+  const sendRoom = async (text: string): Promise<"done" | "rebased" | "stop"> => {
+    inFlightSentText = text;
+    disturbed = false;
+    let out: { sha: string; text: string; update?: string };
+    const before = ambiguousRoomCheckpoint;
+    try {
+      ambiguousRoomCheckpoint = { sent: text, from: saved, prev: before };
+      out = await syncCollab(syncURL, { ...roomPayload(text, before), ...(confirmShrinkOnce ? { confirm_shrink: true } : {}) });
+    } catch (e) {
+      inFlightSentText = null;
+      // Refusals the hub gives before it touches the room's document; any
+      // other failure may have landed `text` there first.
+      if (e instanceof HttpError && [400, 401, 403, 404, 405, 409, 413].includes(e.status)) {
+        ambiguousRoomCheckpoint = before;
+      }
+      if (e instanceof HttpError && (e.status === 404 || e.status === 405)) {
+        noRoomHttp = true; // an older hub: save the file as solo does
+        return "rebased";
+      }
+      if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
+        confirmShrinkOnce = false;
+        askShrink(text);
+        return "stop";
+      }
+      if (e instanceof HttpError && e.status === 409 && !hubHoldsIt) {
+        /* The room changed the same lines this checkpoint did. The checkpoint
+           was `text`, but the buffer may have moved on while it was out — and
+           its idle timer already asked for that, into this loop — so what is
+           settled is the buffer as it is NOW, never the stale `text`. */
+        let theirs: { sha?: string; text?: string } = {};
+        try {
+          theirs = JSON.parse(e.body) as typeof theirs;
+        } catch {
+          // an older hub, or a body we cannot read: park the buffer
+        }
+        const room = typeof theirs.text === "string" ? theirs.text : null;
+        if (room !== null) {
+          const res = merge3(saved, room, current());
+          if (res.ok && applyText(res.text)) {
+            // Rebased onto the room: send the merge, as a diff against it.
+            saved = room;
+            savedSha = undefined;
+            rebase(theirs.sha);
+            return "rebased";
+          }
+        }
+        stagingConflict = true;
+        const parked = current();
+        const failed = await preserve(parked, theirs.sha ?? "");
+        if (gone) return "stop"; // destroy() parked the buffer itself
+        if (failed) {
+          retryAfterFailure(failed.err);
+          return "stop";
+        }
+        stagingConflict = false;
+        // Typing that landed while the copy was on the wire is not in it:
+        // it goes to the room, built on what was parked.
+        return current() !== parked ? "rebased" : "stop";
+      }
+      setState(hubHoldsIt ? "dirty" : "error");
+      retryAfterFailure(e);
+      return "stop";
+    }
+    inFlightSentText = null;
+    confirmShrinkOnce = false;
+    landedWrite();
+    /* The room's state with this checkpoint in it, with the room's own item
+       IDs: in the document before anything else reads it, so a join waiting
+       on this request splices only what the room does not hold yet — and the
+       same items arriving on the socket, before or after, merge as no-ops.
+       Without it a join that read the room before the socket delivered them
+       inserted the checkpoint's lines a second time. */
+    if (out.update) collab.applyRemoteUpdate(out.update);
+    ambiguousRoomCheckpoint = null;
+    roomNeedsFlush = false;
+    // Joined while this was out: the join merged the same buffer into the
+    // shared document, which now holds the truth.
+    if (hubHoldsIt) return "stop";
+    const res = merge3(text, out.text, current());
+    // The buffer is now built on `out.text` even with typing past `text` in
+    // it: that is the base the join and the next checkpoint diff against.
+    if (res.ok && applyText(res.text)) {
+      if (!disturbed) adopt(out.text, out.sha);
+    }
+    // Otherwise the newest typing could not be carried across here; `saved`
+    // stays where it was and the hub's own merge decides on the next checkpoint.
+    opts.onSaved?.(out.text);
+    return "done";
   };
 
   /* One question at a time: while the user is deciding, a second refusal or
@@ -221,40 +659,66 @@ export function openSharedFile(opts: {
       now: byteLength(text),
       confirm: async () => {
         if (gone) return;
-        // The user may keep typing while the dialog is open, so the
-        // confirmation writes the document as it stands when clicked.
-        const now = current();
-        setState("saving");
-        opts.onWriting?.();
-        try {
-          const out = await putText(contentURL(opts.path), now, base, true);
-          saved = now;
-          if (out.sha) base = out.sha;
-          setState("clean");
-          opts.onSaved?.(now);
-        } catch {
-          setState("error");
-        } finally {
-          asking = null;
+        if (hubHoldsIt) {
+          setState("saving");
+          opts.onWriting?.();
+          // Edits queued offline are in this update too: it acknowledges them.
+          const targetOfflineSeq = offlineEditSeq;
+          const sentRoomSeq = localRoomSeq;
+          try {
+            const out = await syncCollab(syncURL, { update: collab.encodeState(), base, confirm_shrink: true });
+            adopt(out.text, out.sha);
+            offlineAcked(targetOfflineSeq, sentRoomSeq);
+            const caughtUp = !localDirtyInRoom && offlineAckedSeq >= offlineEditSeq;
+            setState(caughtUp ? "clean" : "dirty");
+            opts.onSaved?.(saved);
+            // Typed while the question was open: still queued, still sent.
+            if (!live && !gone && offlineAckedSeq < offlineEditSeq) {
+              asking = null;
+              void flushOffline(false);
+            }
+          } catch {
+            setState("error");
+          } finally {
+            asking = null;
+          }
+          return;
         }
+        // Staging or solo: run through the single-flight `save()` loop so
+        // join() awaits it, `ambiguousRoomCheckpoint` tracks it, and the
+        // returned room text rebases any concurrent typing.
+        confirmShrinkOnce = true;
+        asking = null;
+        roomNeedsFlush = true;
+        await save();
       },
       keep: async () => {
         if (gone) return;
         try {
           const head = await fetchBlobText(fileURLFor(opts.apiBase, opts.path));
           if (gone || head.kind !== "text") return;
-          const cur = current();
-          const e = textEdit(cur, head.text);
-          saved = head.text;
-          rebase(head.sha);
-          if (e) {
-            if (collab.text.length || hubHoldsIt) {
-              collab.doc.transact(() => {
-                collab.text.delete(e.from, e.to - e.from);
-                collab.text.insert(e.from, e.insert);
-              });
-            } else opts.soloApply?.(e);
+          adopt(head.text, head.sha);
+          applyText(head.text);
+          asking = null;
+          /* Socket down: the refused update had already reached the room's
+             document (the hub applies before it snapshots), so the room holds
+             the shrunk text. Putting the bytes back is an edit the room must
+             get — over HTTP now, or by the retry, pagehide or destroy() if
+             this attempt fails. */
+          if (hubHoldsIt && !live) {
+            await flushOffline(false);
+            if (gone) return;
+            setState(offlineAckedSeq >= offlineEditSeq && !localDirtyInRoom ? "clean" : "dirty");
+            return;
           }
+          // Live, the socket carries the restoration; staging or solo, the
+          // file already holds these bytes. Nothing queued either way.
+          offlineAckedSeq = offlineEditSeq;
+          if (pending) {
+            pending = 0;
+            opts.onPending?.(0);
+          }
+          roomCaughtUp();
           setState("clean");
         } catch {
           setState("error");
@@ -279,323 +743,556 @@ export function openSharedFile(opts: {
     }, SAVE_IDLE_MS);
   };
 
-  /* rebaseOnLostRace turns a refused save into a retried one, ONCE, when the
-     refusal was a race rather than a disagreement.
-
-     Two ways a refusal is a race rather than a disagreement, and BOTH have
-     to be handled — shipping only the first is what produced conflict copies
-     that were subsets of the files they sat beside:
-
-       ours contains theirs  -> our write is the superset; rebase and retry
-       theirs contains ours  -> the file is ahead; drop the write entirely
-
-     Returns true when there is nothing left to do. Deliberately not a loop:
-     if neither containment holds, the path is genuinely contended by someone
-     outside the room and a conflict copy is the honest answer. */
-  const rebaseOnLostRace = async (text: string): Promise<boolean> => {
-    try {
-      const head = await fetchBlobText(fileURLFor(opts.apiBase, opts.path));
-      if (head.kind !== "text" || !head.sha) return false;
-
-      /* THE FILE IS AHEAD OF US.
-
-         Our text holds nothing the file lacks — a peer saved a newer state of
-         the document we share while our save was in flight, so what we were
-         writing is simply out of date. There is nothing to write and nothing
-         to preserve: parking it beside the file produces a conflict copy that
-         is a SUBSET of the file it sits next to, which is what shipped in the
-         first version of this fix and what put four more copies in a project
-         minutes after it deployed.
-
-         Record where the file is and go clean. Our own document catches up
-         over the websocket like everyone else's. */
-      const oursToTheirs = textEdit(text, head.text);
-      if (!oursToTheirs || oursToTheirs.from === oursToTheirs.to) {
-        saved = head.text;
-        rebase(head.sha);
-        setState("clean");
-        return true;
-      }
-
-      // Their text must be contained in ours, or we would be erasing work
-      // this document never saw. Same test merge() uses, same reason.
-      const theirsToOurs = textEdit(head.text, text);
-      if (theirsToOurs && theirsToOurs.from !== theirsToOurs.to) return false;
-      rebase(head.sha);
-      const out = await putText(contentURL(opts.path), text, base);
-      saved = text;
-      if (out.sha) base = out.sha;
-      setState("clean");
-      opts.onSaved?.(text);
-      return true;
-    } catch {
-      return false; // fall through to the conflict copy
-    }
-  };
-
   /* Somebody else's write landed on this path while we were editing, and the
-     two versions cannot be reconciled here — if they could, merge() would
-     already have done it, because a save only happens when this buffer has
-     changes of its own.
-
-     So neither version is dropped. Theirs is the file (it got there first);
-     ours goes beside it under the same name the sync path has used since the
-     beginning, `<name>.bdrive-conflict-<who>-<utc>`, which the reader already
-     knows how to explain (lib/conflict.ts, ConflictBanner).
-
-     The alternative is what this door did until now: take the body wholesale
-     and erase their work silently. Two browsers holding different documents —
-     one that had lost the co-editing relay — did exactly that to each other
-     every few seconds, with nothing anywhere to say so. */
-  const preserve = async (text: string, e: HttpError) => {
-    let theirs = "";
-    try {
-      theirs = (JSON.parse(e.body) as { sha?: string }).sha ?? "";
-    } catch {
-      /* an older hub, or a body we cannot read: the copy still matters */
-    }
-    const copy = conflictName(opts.path, opts.who || "browser", new Date());
+     two versions cannot be reconciled — merge3 found the same words changed
+     two different ways. So neither version is dropped: theirs is the file,
+     ours goes beside it as `<name>.bdrive-conflict-<who>-<utc>`, which the
+     reader already knows how to explain (lib/conflict.ts, ConflictBanner). */
+  const preserve = async (
+    text: string,
+    theirs: string,
+    copy = mintConflictPath(),
+  ): Promise<{ err: unknown } | null> => {
+    const seq = ++conflictSeq;
+    conflictPuts.set(copy, text);
+    // A newer park started since this one (a join's, over newer typing), or
+    // the room took the buffer: such a landing settles nothing about `saved`.
     try {
       await putText(contentURL(copy), text); // unconditional: a new path
-      saved = text;
-      base = theirs;
-      setState("clean");
+      if (seq === conflictSeq && !hubHoldsIt) {
+        saved = text;
+        savedSha = undefined;
+        if (theirs) base = theirs;
+        setState("clean");
+      }
       opts.onConflictCopy?.(copy);
-    } catch {
+      return null;
+    } catch (e) {
       // Could not even park it. Stay dirty and loud rather than pretend.
-      setState("error");
+      if (seq === conflictSeq && !hubHoldsIt) setState("error");
+      return { err: e };
+    } finally {
+      if (conflictPuts.get(copy) === text) conflictPuts.delete(copy);
     }
   };
 
-  /* Whether the hub holds this document.
+  /* Edits made while a held room's socket is down live only in this tab's
+     Y.Doc. If the socket stays away, hand them to the hub as a Yjs update:
+     applying it to the room is idempotent, so the reconnect that eventually
+     comes adds nothing twice, and a tab closed in the meantime loses nothing. */
+  const offlineAcked = (targetSeq: number, sentRoomSeq: number) => {
+    offlineAckedSeq = Math.max(offlineAckedSeq, targetSeq);
+    roomHandedOver(sentRoomSeq);
+    if (gone || live) return;
+    pending = offlineEditSeq - offlineAckedSeq;
+    opts.onPending?.(pending);
+  };
+  /* Refused or unwritten (a 503 while another process has not written it
+     yet, quota, storage): the edits are still queued in the document and
+     `pending` still counts them. The socket, the next edit, or this timer
+     retries — the last so a tab that stays offline and idle does not wait
+     forever for a nudge. */
+  const retryOffline = () => {
+    if (gone || live || asking || offlineTimer) return;
+    offlineTimer = setTimeout(() => {
+      offlineTimer = null;
+      if (!live && !gone) void flushOffline(false);
+    }, OFFLINE_FLUSH_MS);
+  };
+  /* A keepalive flush (the page is going) fires at once and rejects when it
+     fails, so the exit path can offer it again. Any other is single-flight:
+     concurrent callers share one loop, which sends until the hub has
+     acknowledged every edit made so far. */
+  const flushOffline = (keepalive: boolean): Promise<void> => {
+    clearTimeout(offlineTimer ?? undefined);
+    offlineTimer = null;
+    if (keepalive) {
+      if (offlineAckedSeq >= offlineEditSeq) return Promise.resolve();
+      const targetSeq = offlineEditSeq;
+      const sentRoomSeq = localRoomSeq;
+      return syncCollab(syncURL, { update: collab.encodeState(), base }, true).then((out) => {
+        rebase(out.sha);
+        offlineAcked(targetSeq, sentRoomSeq);
+      });
+    }
+    if (offlineFlushing) return offlineFlushing;
+    const run = (async () => {
+      try {
+        while (!live && !gone && !asking && offlineAckedSeq < offlineEditSeq) {
+          const targetSeq = offlineEditSeq;
+          const sentRoomSeq = localRoomSeq;
+          let out: { sha: string };
+          try {
+            out = await syncCollab(syncURL, { update: collab.encodeState(), base }, false);
+          } catch (e) {
+            /* Refused for sharply shrinking the file: no retry can land it
+               until the user agrees, so ask now — Done waits on the answer. */
+            if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
+              clearTimeout(shrinkTimer ?? undefined);
+              shrinkTimer = null;
+              askShrink(current());
+              if (asking) return;
+            }
+            retryOffline();
+            return;
+          }
+          rebase(out.sha);
+          offlineAcked(targetSeq, sentRoomSeq);
+        }
+      } finally {
+        offlineFlushing = null;
+      }
+    })();
+    offlineFlushing = run;
+    return run;
+  };
 
-     Once it does, the hub is the ONLY writer (ycollab.go, watchRoom): it sees
-     every update and writes the file once per pause. This client's own save
-     timer used to run beside that — and beside every other co-editor's — and
-     N writers racing for one file is what turned a lost race into a conflict
-     copy of the file against itself. So the moment the room is live the
-     timer here stops being armed, and stays stopped: the hub is now the one
-     that knows the file's version, and a client that reconnects after a blip
-     writing "its" version is exactly the race coming back.
+  /* The first sync: the hub's document has arrived. Whatever was typed into a
+     staging buffer in the meantime is merged in three ways — (what it started
+     from, what the room holds, what it holds now) — and spliced into the
+     shared document as minimal hunks. A checkpoint that already reached the
+     room is in both and lands once.
 
-     Never live means solo — an older hub, a proxy that will not upgrade —
-     and then this client saves exactly as it always did. */
-  let hubHoldsIt = false;
-  let gone = false;
-  // Whether the socket is up right now, and how many local edits were made
-  // while it was not.
-  let live = false;
-  let pending = 0;
+     When the same words changed two ways the buffer is parked beside the file
+     as a conflict copy — and the editor stays on that buffer until the copy
+     is durably on the hub. Swapping onto the shared document first would
+     unmount the only place those words exist: a failed park would then lose
+     them outright. A transient failure (5xx, 429, no answer) is retried on
+     the save backoff; destroy() parks the buffer on the way out. */
+  const finishJoin = (then?: () => void) => {
+    pendingJoin = false;
+    parkedName = null;
+    parkedText = null;
+    joinAttempt = 0;
+    clearTimeout(joinTimer ?? undefined);
+    joinTimer = null;
+    roomNeedsFlush = false;
+    hubHoldsIt = true;
+    seeRoomText(collab.text.toString());
+    then?.();
+    if (readyWaiting) {
+      readyWaiting = false;
+      opts.onReady(collab);
+    }
+  };
+  const join = async (): Promise<void> => {
+    if (gone || hubHoldsIt || joining || waitingToJoin) return;
+    clearTimeout(joinTimer ?? undefined);
+    joinTimer = null;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    /* A staging checkpoint still on the wire is part of what the room will
+       hold. Read the buffer and the room before it lands and the merge sees
+       its lines as typing the room lacks, splices them in, and the room's
+       own copy of them arrives after: every checkpointed line twice. So wait
+       for it — the loop sends no further checkpoint meanwhile — and let it
+       hand its items to the document first (sendRoom). */
+    if (saving) {
+      waitingToJoin = true;
+      try {
+        while (saving) await saving;
+      } finally {
+        waitingToJoin = false;
+      }
+      if (gone || hubHoldsIt) return;
+      if (!live) {
+        // The socket dropped while we waited: staging again, and the typing
+        // the loop held back still has to reach the room.
+        if (current() !== saved) scheduleSave();
+        return;
+      }
+    }
+    /* A checkpoint that failed after the hub may already have put it into
+       the room (a 5xx, a 422, an answer that never came back) leaves the
+       room's content unknown: its items may still be on their way down the
+       socket. Merging from `saved` now would splice its lines in a second
+       time under fresh item IDs — and when the room's own copy arrives,
+       every one of them twice. So ask the room first (a peek writes
+       nothing), take its items into the document, and if it holds the
+       checkpoint, rebase the buffer over it before the join reads either. */
+    if (ambiguousRoomCheckpoint !== null && !noRoomHttp) {
+      let peek: { sha: string; text: string; update?: string };
+      waitingToJoin = true; // no checkpoint goes out while the room is read
+      try {
+        peek = await syncCollab(syncURL, { peek: true });
+      } catch {
+        if (gone || hubHoldsIt) return;
+        const delay = SAVE_RETRY_MS[Math.min(joinAttempt, SAVE_RETRY_MS.length - 1)];
+        joinAttempt++;
+        joinTimer = setTimeout(() => {
+          joinTimer = null;
+          void join();
+        }, delay);
+        return;
+      } finally {
+        waitingToJoin = false;
+      }
+      if (gone || hubHoldsIt) return;
+      applyAmbiguousPeek(peek);
+      if (!live) {
+        if (current() !== saved || roomNeedsFlush) scheduleSave();
+        return;
+      }
+    }
+    const local = opts.soloText?.();
+    if (local === undefined || local === saved) return finishJoin();
+    const hub = collab.text.toString();
+    const res = merge3(saved, hub, local);
+    if (res.ok) return finishJoin(() => collab.applySplices(diffSplices(hub, res.text)));
+    pendingJoin = true;
+    // One name for every attempt at the same text: a retry re-writes the same
+    // copy, never a second. Newer text — or a staging park still on the wire —
+    // gets a freshly minted name, so an older PUT never lands over it.
+    if (parkedName === null || parkedText !== local) {
+      parkedName = mintConflictPath();
+      parkedText = local;
+    }
+    joining = true;
+    let failed: { err: unknown } | null;
+    try {
+      failed = await preserve(local, base ?? "", parkedName);
+    } finally {
+      joining = false;
+    }
+    if (gone) return; // destroy() parked the buffer itself
+    if (!failed) {
+      // Typing that landed in the buffer while the copy was on the wire is
+      // not in it: go round again from what was parked.
+      if (opts.soloText?.() !== local) {
+        parkedName = null;
+        parkedText = null;
+        return join();
+      }
+      // Parked: the editor now shows the room's text, which is what it is built on.
+      return finishJoin(() => {
+        saved = collab.text.toString();
+      });
+    }
+    const e = failed.err;
+    if (e instanceof HttpError && !(e.status >= 500 || e.status === 429)) return; // waits for the next edit
+    const delay = SAVE_RETRY_MS[Math.min(joinAttempt, SAVE_RETRY_MS.length - 1)];
+    joinAttempt++;
+    joinTimer = setTimeout(() => {
+      joinTimer = null;
+      void join();
+    }, delay);
+  };
 
   const collab = new CollabDoc(
     opts.apiBase + "ycollab?path=" + encodeURIComponent(opts.path),
     (s) => {
-      if (s === "live") {
-        hubHoldsIt = true;
+      live = s === "live";
+      if (s === "solo") solo = true;
+      if (live) {
+        if (offlineTimer) clearTimeout(offlineTimer);
+        offlineTimer = null;
+        cancelRetry(); // the room holds the buffer now, and the hub writes it
+        if (!hubHoldsIt) void join();
+        offlineAckedSeq = offlineEditSeq;
         if (pending) {
           pending = 0;
           opts.onPending?.(0);
         }
       }
-      live = s === "live";
       opts.onCollab?.(s);
     },
-    () => opts.onReady(collab),
-    () => opts.onSolo(),
+    // The editor moves onto the shared document only once the join is done:
+    // a buffer still waiting for its conflict copy to land stays mounted.
+    () => {
+      if (hubHoldsIt) opts.onReady(collab);
+      else readyWaiting = true;
+    },
+    () => {
+      if (!gone && !hubHoldsIt) opts.onStalled?.();
+    },
     opts.me,
   );
 
-  /* MY changes restart the idle timer. A peer's do not.
-
-     This used to be "any change, mine or a peer's — whoever stops typing last
-     writes the file", on the reasoning that the content is identical for
-     everyone so a second writer is a harmless no-op put. It is not harmless.
-     In a room of N editors, 700ms after the last keystroke by ANYONE, all N
-     clients PUT the identical full body: N uploads of the same text, and a
-     History feed that grows N versions every time the room goes quiet. That
-     is the "too many change histories" report, and four co-editors made it
-     four of everything (docs/hub-load-prd.md Stage 4).
-
-     Dropping to one writer loses nothing. Every copy is identical by
-     construction — that is what the CRDT is for — and the hub snapshots the
-     room itself when the last editor leaves (ycollab.go, OnLastPeer), so the
-     closed-laptop case never depended on a bystander saving on the typist's
-     behalf either.
-
-     Seeding is a remote change too, which is a second thing this fixes: the
-     document arriving from the hub used to mark the buffer dirty and schedule
-     a save of bytes the file already contained. */
+  /* MY changes restart the idle timer. A peer's do not — and in a held room
+     nothing here writes at all: N clients saving one shared document is N
+     identical PUTs and N history entries every time the room goes quiet
+     (docs/hub-load-prd.md Stage 4). The hub writes it, once. */
   const onDocChange = (_e: unknown, tx: { origin?: unknown }) => {
+    const roomText = hubHoldsIt ? collab.text.toString() : null;
+    if (roomText !== null) seeRoomText(roomText);
     if (collab.isRemote(tx?.origin)) return;
     setState("dirty");
-    if (hubHoldsIt && !live) opts.onPending?.(++pending);
-    if (hubHoldsIt) watchShrink();
-    // The hub writes for a live room; "dirty" clears when its write comes
-    // back through the change stream and merge() finds the file equal to the
-    // document. Honest, rather than "saved" the moment a key is pressed.
-    if (hubHoldsIt) return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => save(collab.text.toString()), SAVE_IDLE_MS);
+    if (hubHoldsIt) {
+      localDirtyInRoom = true;
+      lastLocalRoomText = roomText;
+      localRoomSeq += 1;
+      if (!live) {
+        // Counted whether or not the caller shows it (VisualEdit passes no
+        // onPending): `pending` is what tells flushOffline there is anything
+        // to hand over on the offline timer and on destroy().
+        offlineEditSeq += 1;
+        pending = offlineEditSeq - offlineAckedSeq;
+        opts.onPending?.(pending);
+        clearTimeout(offlineTimer ?? undefined);
+        offlineTimer = setTimeout(() => {
+          offlineTimer = null;
+          if (!live && !gone) void flushOffline(false);
+        }, OFFLINE_FLUSH_MS);
+      }
+      // "dirty" clears when the hub's write comes back through the change
+      // stream and merge() finds the file equal to the document.
+      watchShrink();
+      return;
+    }
+    scheduleSave();
   };
   collab.text.observe(onDocChange);
   const onPeerChange = () => opts.onPeers?.(collab.peerCount());
   collab.awareness.on("change", onPeerChange);
-  /* Solo is decided once and kept: CollabDoc.stop() has already ended the
-     transport by the time onSolo runs, so `hubHoldsIt` can never flip under
-     a solo surface and every save from here on is this client's own,
-     If-Match and all. A server with no room route goes straight there; the
-     callback is deferred because the caller's own handle to this file is
-     not assigned until this returns. */
+  /* A server with no room route goes straight to solo; a route that is slow
+     is retried for as long as this file is open (CollabDoc.connect). The
+     callback is deferred because the caller's own handle to this file is not
+     assigned until this returns. */
   if (hasCollabRoute(opts.apiBase)) collab.connect();
   else
     queueMicrotask(() => {
       if (gone) return;
+      solo = true;
       collab.stop();
       opts.onSolo();
     });
 
-  // Whichever surface is live holds the truth: the CRDT when the relay
-  // answered, the surface's own buffer when it never did.
-  const current = () =>
-    collab.text.length ? collab.text.toString() : (opts.soloText?.() ?? "");
+  // The shared document once the hub has it; before that (or without a room
+  // at all) the caller's own buffer — except a solo surface that keeps its
+  // text in the Y.Text anyway (VisualEdit).
+  const current = () => {
+    if (finalText !== null) return finalText;
+    if (onShared()) return collab.text.toString();
+    return opts.soloText?.() ?? "";
+  };
+  /* Is the shared document the buffer? Once the hub holds it, yes — and for
+     a solo surface that keeps its text in the Y.Text (VisualEdit). Never
+     while staging or joining: the document then holds the ROOM's text (the
+     socket's, or a checkpoint's answer, sendRoom) while the editor is still
+     on the caller's own buffer, which is the only copy of the typing. */
+  const onShared = () => hubHoldsIt || (solo && collab.text.length > 0);
 
-  /* Somebody wrote this file while it was open here.
-
-     The editor deliberately does not re-seed itself from the server — that
-     would reset the document under a typist's cursor — so this is the other
-     way the change gets in: as the one splice that turns what we have into
-     what the file says, leaving every untouched character (and so every
-     cursor and every remote caret) exactly where it was.
-
-     It refuses in the two cases where a splice would destroy something, and
-     the refusal is the caller's banner. */
   /* The file's current sha, learned from somewhere other than our own write.
-
-     `base` is the If-Match this editor saves against, and until now the ONLY
-     thing that moved it was a successful save of our own. That is fine alone
-     and wrong in a room: a co-editor's save moves the file's head, every other
-     member keeps the sha from before it, and their next save is a 409 against
-     a file that already contains their work.
-
-     The hub is right to refuse it — a stale base is exactly what If-Match is
-     for — and the conflict copy that followed was right for the writer it was
-     designed for, an agent or a device outside the room. It was nonsense
-     between two people in one document: the CRDT had already merged them, so
-     the "conflict" was a copy of the file against itself.
-
-     So whoever learns the new sha tells us. Nothing about the CONTENT is
-     assumed here; the caller has just read this path from the hub. */
+     A co-editor's save moves the head; whoever learns the new sha tells us,
+     so our next save is not refused for a conflict that does not exist. */
   const rebase = (sha?: string) => {
     if (sha) base = sha;
   };
 
   const merge = (next: string, nextSha?: string, how?: { held?: boolean }): MergeResult => {
     if (how?.held) {
-      saved = next;
-      rebase(nextSha);
+      adopt(next, nextSha);
       return "same";
     }
-    // The file is at the content we last knew about: our own write coming
-    // back through the change stream, or nothing new at all. `inFlight`
-    // covers the common case that `saved` cannot — the frame announcing our
-    // own write arriving before that write's own response does.
-    /* Adopting the sha is NOT the same decision as accepting the content —
-       see the two-questions note below. It never happens here, though: at
-       this point we have not yet read the buffer, so we cannot know whether
-       their bytes are already in it. */
-    if (next === saved || inFlight.has(next)) {
+    // Our own write coming back (possibly before its response), or nothing new.
+    if (next === saved || next === inFlightSentText) {
       rebase(nextSha);
       return "same";
     }
     const cur = current();
     // Already in the buffer: a co-editor snapshotted the document we share.
-    // Recording it is what keeps the check above true for the rest of the
-    // session, so their next save is not mistaken for an outsider's.
     if (next === cur) {
-      saved = next;
-      rebase(nextSha);
+      adopt(next, nextSha);
       // For a live room this IS the save landing — the hub's write, back
       // through the stream — so this is where "dirty" honestly ends.
-      if (hubHoldsIt) setState("clean");
+      if (hubHoldsIt) {
+        roomCaughtUp();
+        setState("clean");
+      }
       return "same";
     }
-    /* Two different questions, which used to be one.
 
-       "Can we splice their write into the buffer?" and "is their VERSION a
-       valid base for our next write?" are not the same question, and
-       answering only the first is what put a co-editing session into a loop
-       of conflict copies.
-
-       In a room everyone shares one document, so a peer's save is a PAST
-       STATE of the text we are holding: their bytes are already in our CRDT,
-       arriving over the websocket rather than through this function. We must
-       not splice it (it is already applied, and splicing would apply it
-       twice) — but their sha is exactly the right base for our next save,
-       because our text is theirs plus whatever we have typed since.
-
-       Not assumed, checked. Turning their text into ours deletes nothing iff
-       ours is a strict superset of theirs, which is precisely the condition
-       that makes their version a safe base. An outsider's write — an agent,
-       the CLI, another device — fails that test, keeps the old base, and is
-       still refused with a conflict copy, which is what If-Match is for. */
-    const theirsToOurs = textEdit(next, cur);
-    const oursContainsTheirs = !theirsToOurs || theirsToOurs.from === theirsToOurs.to;
-
-    // Unsaved local edits: not ours to resolve. Splicing over a half-typed
-    // sentence is the one thing this must never do.
-    if (cur !== saved) {
-      if (oursContainsTheirs) rebase(nextSha);
-      return "blocked";
+    if (hubHoldsIt) {
+      /* In a room a peer's save — or the hub's own snapshot — is a PAST STATE
+         of the shared document: its bytes are already in our CRDT, and the
+         room has moved on since (peers kept typing, or deleting). Splicing it
+         would apply it twice; refusing it would raise a banner over nothing.
+         It is the file now, so it is the base the next write builds on. */
+      const prevSaved = saved;
+      const roomAlreadyHasIt = seenRoomTexts.includes(next) || retainsChanges(prevSaved, next, cur);
+      if (roomAlreadyHasIt) {
+        adopt(next, nextSha);
+        if (
+          localDirtyInRoom &&
+          (lastLocalRoomText === null ||
+            next === lastLocalRoomText ||
+            retainsChanges(prevSaved, lastLocalRoomText, next))
+        ) {
+          roomCaughtUp();
+          setState("clean");
+        }
+        return "same";
+      }
+      /* An outsider's write that never went through the room (an
+         unconditional PUT): with unsaved typing or company it is the caller's
+         banner; alone and clean it simply becomes the document. */
+      if (cur !== saved || collab.peerCount() > 0) return "blocked";
+      adopt(next, nextSha);
+      applyText(next);
+      roomCaughtUp();
+      return "merged";
     }
-    // A co-editor in the room: they are looking at the same stale document
-    // and would compute the same splice, and two identical splices into one
-    // CRDT is the change applied twice.
-    if (collab.peerCount() > 0) {
-      if (oursContainsTheirs) rebase(nextSha);
-      return "blocked";
-    }
-    const e = textEdit(cur, next);
-    if (!e) return "same";
+
+    /* Solo or staging: three ways. Our unsaved typing is (cur − saved), their
+       write is (next − saved); both survive unless they changed the same
+       words differently, and only then is this the caller's banner. */
     if (!collab.text.length && !opts.soloApply) return "blocked";
-    // Before the splice, not after: the document change it causes schedules a
-    // save, and this is what makes that save a no-op instead of a write-back
-    // of what we just read.
-    saved = next;
-    rebase(nextSha);
-    if (collab.text.length) {
-      // One transaction, so a peer sees a replacement rather than a delete
-      // followed by a moment of missing text.
-      collab.doc.transact(() => {
-        collab.text.delete(e.from, e.to - e.from);
-        collab.text.insert(e.from, e.insert);
-      });
-    } else {
-      opts.soloApply!(e);
-    }
-    return "merged";
+    const res = merge3(saved, next, cur);
+    if (!res.ok) return "blocked";
+    if (inFlightSentText !== null) disturbed = true;
+    adopt(next, nextSha);
+    applyText(res.text);
+    // What is left over is our own typing, rebased: it still needs saving.
+    if (res.text !== next) scheduleSave();
+    else if (inFlightSentText === null) setState("clean");
+    return res.text === cur ? "same" : "merged";
   };
+
+  /* An explicit save (Done, Mod-s). In a live room idle typing never writes
+     anything from here — the hub snapshots the room — but a user who asked to
+     save and leave must not leave on a snapshot still pending: the room's
+     state goes to the hub, which answers only once storage holds it. Clean,
+     or a bystander: nothing to send. Concurrent calls share one request. */
+  let liveFlushing: Promise<void> | null = null;
+  const saveNow = (): Promise<void> => {
+    if (!hubHoldsIt) return save();
+    if (asking || gone) return Promise.resolve();
+    if (!live) return pending > 0 ? flushOffline(false) : Promise.resolve();
+    if (!localDirtyInRoom) return Promise.resolve();
+    if (liveFlushing) return liveFlushing;
+    const sentRoomSeq = localRoomSeq;
+    setState("saving");
+    const run = (async () => {
+      try {
+        const out = await syncCollab(syncURL, { update: collab.encodeState() });
+        if (gone) return;
+        if (out.update) collab.applyRemoteUpdate(out.update);
+        adopt(out.text, out.sha);
+        // Typing that landed while this was out is not in it.
+        roomHandedOver(sentRoomSeq);
+        setState(localDirtyInRoom ? "dirty" : "clean");
+        opts.onSaved?.(saved);
+      } catch (e) {
+        if (gone) return;
+        /* The hub refused to write a document this much smaller than the
+           file without a word from the user: ask now (the caller stays put
+           until it is answered), rather than wait for the idle check. */
+        if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
+          clearTimeout(shrinkTimer ?? undefined);
+          shrinkTimer = null;
+          askShrink(current());
+          if (asking) return;
+        }
+        // The room still holds every edit and the hub still snapshots it.
+        setState(localDirtyInRoom ? "dirty" : "clean");
+      } finally {
+        liveFlushing = null;
+      }
+    })();
+    liveFlushing = run;
+    return run;
+  };
+
+  /* Leaving mid-word must not lose the word — a raw tab close or reload
+     (pagehide) or the surface unmounting (destroy), whichever comes first.
+     Every request is keepalive so it outlives the page, and the second of the
+     two finds the same state already on the wire and sends nothing. Nothing
+     counts as handed over until the hub answers: a failed request, or a page
+     restored from the back/forward cache (pageshow), may send it again.
+     - held and live: an edit no snapshot is known to carry goes to the hub
+       as the room's state; clean or a bystander sends nothing.
+     - held, socket down: the queued update goes over HTTP.
+     - staging: the buffer goes to the room as text.
+     - joining, or a staging checkpoint the room refused for a clash, its
+       conflict copy not yet landed: the buffer goes to that copy — the room
+       already holds the file's other side.
+     - solo: an unloading page PUTs with If-Match; an unmount runs the save
+       loop (or, mid-flight, it sends it next).
+     An unanswered shrink question means the user has not agreed to write
+     this text, so it is not written on the way out either. */
+  let exitSent: string | null = null;
+  // A request that failed releases its key, so the state can be offered again.
+  const exitFailed = (key: string) => () => {
+    if (exitSent === key) exitSent = null;
+  };
+  const flushExit = (text: string, unloading: boolean) => {
+    if (asking) return;
+    if (hubHoldsIt) {
+      const offline = !live && pending > 0;
+      if (!offline && !(live && localDirtyInRoom)) return;
+      const key = "room\u0000" + collab.text.toString();
+      if (exitSent === key) return;
+      exitSent = key;
+      const sentRoomSeq = localRoomSeq;
+      const req = offline
+        ? flushOffline(true)
+        : syncCollab(syncURL, { update: collab.encodeState() }, true).then((out) => rebase(out.sha));
+      req.then(() => roomHandedOver(sentRoomSeq), exitFailed(key));
+      return;
+    }
+    if (pendingJoin || stagingConflict) {
+      const key = "park\u0000" + text;
+      if (exitSent === key) return;
+      exitSent = key;
+      // The same words as a park already named reuse its name (writing the
+      // same bytes twice is harmless); newer words get a freshly minted
+      // one, so no older park still on the wire can land over them.
+      let copy = parkedName !== null && parkedText === text ? parkedName : null;
+      for (const [path, held] of conflictPuts) if (copy === null && held === text) copy = path;
+      copy ??= mintConflictPath();
+      void putText(contentURL(copy), text, undefined, false, true).catch(exitFailed(key));
+      return;
+    }
+    if (!text || text === saved) return;
+    const key = "text\u0000" + text;
+    if (exitSent === key) return;
+    if ((solo || noRoomHttp) && !unloading) {
+      void save();
+      return;
+    }
+    exitSent = key;
+    if (solo || noRoomHttp) {
+      void putText(contentURL(opts.path), text, base, confirmShrinkOnce, true).catch(exitFailed(key));
+    } else {
+      void syncCollab(syncURL, roomPayload(text), true).catch(exitFailed(key));
+    }
+  };
+  const onPageHide = () => {
+    if (!gone) flushExit(current(), true);
+  };
+  // Back from the back/forward cache: the page lives on, and whatever it
+  // sent on the way "out" is no reason to send nothing on the next exit.
+  const onPageShow = () => {
+    exitSent = null;
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+  }
 
   return {
     collab,
     current,
     merge,
     rebase,
-    // An explicit save from a live room is a request to the hub, and the
-    // hub is already going to; there is nothing for this client to send.
-    saveNow: () => (hubHoldsIt ? Promise.resolve() : save(current())),
+    saveNow,
+    askingShrink: () => asking !== null,
     destroy() {
-      if (timer) clearTimeout(timer);
-      if (shrinkTimer) clearTimeout(shrinkTimer);
-      gone = true;
-      // Closing the tab mid-word must not lose the word. For a live room
-      // the hub has the word — it writes on last peer, and on the debounce
-      // for everyone still there — and a parting write from here would be
-      // one more racer against it.
-      // An unanswered shrink question means the user has not agreed to write
-      // this text, so it is not written on the way out either.
+      if (typeof window !== "undefined") {
+        window.removeEventListener("pagehide", onPageHide);
+        window.removeEventListener("pageshow", onPageShow);
+      }
+      clearTimeout(timer ?? undefined);
+      clearTimeout(shrinkTimer ?? undefined);
+      cancelRetry();
+      clearTimeout(joinTimer ?? undefined);
+      joinTimer = null;
       const text = current();
+      gone = true;
+      finalText = text;
       if (asking) opts.onShrinkWithdrawn?.(asking);
-      else if (!hubHoldsIt && text && text !== saved) void save(text);
+      else flushExit(text, false);
+      clearTimeout(offlineTimer ?? undefined);
       collab.awareness.off("change", onPeerChange);
       collab.text.unobserve(onDocChange);
       collab.destroy();

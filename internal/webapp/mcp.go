@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1458,7 +1459,15 @@ func (s *Server) mcpWrite(ctx context.Context, in writeIn) (string, error) {
 		// version rides along as the upload's If-Match, so a write that lands
 		// between the two is caught where the op is appended.
 		if base, err = s.checkStale(ctx, project, rest, in.SHA, in.Path); err != nil {
-			return "", err
+			// Moved on since the agent read it: the version it read is still
+			// the base, and the upload door merges this content with what
+			// landed since, three ways. Only the same lines rewritten two
+			// ways come back as stale.
+			var st *staleShaError
+			if !errors.As(err, &st) {
+				return "", err
+			}
+			base = st.base
 		}
 	}
 	msg, err := s.putFile(ctx, project, rest, []byte(in.Content), "wrote", base)
@@ -1498,14 +1507,28 @@ func (s *Server) checkStale(ctx context.Context, project, rest, want, shown stri
 		// false and unrecoverable: the retry reads, gets the same current sha,
 		// and fails again the same way. restore already discriminates; this is
 		// the same question, asked before the accusation.
-		if _, err := s.resolveSHA(ctx, project, rest, want); err != nil {
+		full, err := s.resolveSHA(ctx, project, rest, want)
+		if err != nil {
 			return "", err
 		}
-		return "", fmt.Errorf("stale: %s has changed since you read it (now sha %s). Read it again, then retry",
-			shown, short(fi.Blob))
+		return "", &staleShaError{
+			msg: fmt.Sprintf("stale: %s has changed since you read it (now sha %s). Read it again, then retry",
+				shown, short(fi.Blob)),
+			base: full,
+		}
 	}
 	return fi.Blob, nil
 }
+
+// staleShaError is checkStale's refusal for a sha that names a real, older
+// version of the file. base is that version in full, so a writer can merge
+// from it instead of failing.
+type staleShaError struct {
+	msg  string
+	base string
+}
+
+func (e *staleShaError) Error() string { return e.msg }
 
 // putFile is the one write path, shared by write/edit/move/restore-as-copy:
 // a single-shot relay upload to the hub's own endpoint. Everything that makes
@@ -1580,9 +1603,18 @@ func (s *Server) mcpEdit(ctx context.Context, in editIn) (string, error) {
 	// putFile below), so of two concurrent edits replacing the one occurrence
 	// of a token, the second is refused as stale instead of both reporting
 	// "1 replacement(s)".
+	// A sha the file has moved on from is not refused outright: the edit is
+	// made on the version the agent read, and the upload door merges it with
+	// what landed since. Only the same lines changed two ways stay stale.
+	var staleBase string
+	var staleErr error
 	if in.SHA != "" {
 		if _, err := s.checkStale(ctx, project, rest, in.SHA, in.Path); err != nil {
-			return "", err
+			var st *staleShaError
+			if !errors.As(err, &st) {
+				return "", err
+			}
+			staleBase, staleErr = st.base, err
 		}
 	}
 	_, v, err := s.projectVolume(project)
@@ -1601,10 +1633,21 @@ func (s *Server) mcpEdit(ctx context.Context, in editIn) (string, error) {
 	if isBinary(data) {
 		return "", fmt.Errorf("%s is a binary file; edit only works on text", in.Path)
 	}
+	putBase := fi.Blob
+	if staleBase != "" {
+		was, ok := s.blobText(ctx, project, staleBase)
+		if !ok || len(was) > maxReadBytes || isBinary([]byte(was)) {
+			return "", staleErr
+		}
+		data, putBase = []byte(was), staleBase
+	}
 	body := string(data)
 	n := strings.Count(body, in.OldString)
 	switch {
 	case n == 0:
+		if staleErr != nil {
+			return "", staleErr
+		}
 		return "", fmt.Errorf("old_string not found in %s", in.Path)
 	case n > 1 && !in.ReplaceAll:
 		return "", fmt.Errorf("old_string appears %d times in %s; pass replace_all or include more context", n, in.Path)
@@ -1619,10 +1662,11 @@ func (s *Server) mcpEdit(ctx context.Context, in editIn) (string, error) {
 	} else {
 		body = strings.Replace(body, in.OldString, in.NewString, 1)
 	}
-	// Held to fi, the version the substitution was made on, whether or not the
-	// agent named one: an edit is a read-modify-write, and a write that lands
-	// after the read must refuse it rather than be overwritten by it.
-	msg, err := s.putFile(ctx, project, rest, []byte(body), "edited", fi.Blob)
+	// Held to the version the substitution was made on — fi, or the older
+	// one the agent read — whether or not the agent named one: an edit is a
+	// read-modify-write, and a write that lands after the read is merged
+	// with it or refuses it, never overwritten by it.
+	msg, err := s.putFile(ctx, project, rest, []byte(body), "edited", putBase)
 	if err != nil {
 		return "", err
 	}

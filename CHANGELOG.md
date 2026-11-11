@@ -5,6 +5,46 @@ Notable changes per release. Format loosely follows
 minor versions may ship breaking changes (see [SemVer §4](https://semver.org/#spec-item-4)).
 ## Unreleased
 
+## v0.18.10 — 2026-11-11
+
+**Update your devices and self-hosted hubs** for the co-editing and merge
+fixes; running daemons switch over the first time the updated `bdrive` runs.
+Client wire and local volume on-disk formats remain backward-compatible, and
+v0.18.10 hubs read the bare-sha `ydoc/head/<path>` records older hubs wrote.
+**Upgrade every hub process that shares a storage root together:** v0.18.10
+hubs write `ydoc/head/<path>` as JSON (`{sha, win}`), which a v0.18.9 or
+earlier hub process cannot read. During a mixed-version rollout or a rollback,
+that older process skips the newest stored room state and falls back to the
+per-blob CRDT history (`ydoc/<sha>`) or, when none matches, to fresh file
+bytes, so do not run v0.18.9 and v0.18.10 side by side on one storage root.
+
+- **Co-editing rooms seed from the newest stored state across hub processes.** `ydoc/head/<path>` now stores `{sha, win}`, where `win` is the `winKey` of the journal op that produced the stored room state. A head write with an older `win` is refused, so an older fold in any process can no longer move the head backwards, and a room whose file no longer matches the head seeds from the file. `knows()` merges the other state into a scratch copy and checks whether anything changed, so stored histories that contain deletions compare correctly. Empty rooms stay loaded for 2 minutes (`collabRoomIdleTimeout`), and the Redis relay keeps 30 minutes of updates (`StreamRetention`, up from ygo's 60-second default); a failed snapshot republishes the room's full state into that window and retries.
+- **Outside writes merge into live rooms without losing concurrent typing.** `moveDocLive` computes the change on a private copy of one atomic room snapshot and applies only the resulting CRDT item delta, so keystrokes that arrive during the merge stay in place instead of shifting by stale character offsets.
+- **`POST /api/p/<id>/ycollab/sync` merges browser edits into a room over HTTP.** A browser without a connected socket sends its Yjs state, or its text with the base it started from; `peek` reads the room without writing. The hub answers `ok` only after storage holds the edit, waiting up to 8 seconds (`ycollabSyncDurableWait`), including for the lease holder in another process; otherwise it returns `503` and the browser keeps its edits.
+- **Concurrent text edits merge per hunk and per word.** `internal/textmerge` and its browser port `frontend/src/lib/merge3.ts` diff each side with Myers O(ND), so edits in different parts of a file merge as separate hunks (diff3). Two edits to the same line merge word by word when they change different words, and insertions at the same point are ordered by content, so `merge(base, a, b)` equals `merge(base, b, a)`. The merge now runs in four places: `PUT /api/p/<id>/upload/content` with a stale `If-Match` merges base, head and incoming bytes instead of returning `409` (text only, up to 4 MiB; `X-Bdrive-No-Merge` opts out); MCP `write` and `edit` given an outdated sha merge from that version; live room reconciliation; and `internal/syncer` before it writes a conflict copy. Two different rewrites of the same lines or words still conflict.
+- **Hub writes record their base, and devices skip redundant merges.** Conditional hub writes record the version they were built on in `Op.Base`. The sync engine merges a losing op against the op that won, and when the result equals the winner's content (another device or the hub already merged both sides), it fast-forwards and writes no new op.
+- **Browser co-editing keeps edits through slow joins, saves and most tab closes.** When the room has not answered after 2.5 seconds, the editor mounts a staging buffer (`onStalled`) and checkpoints it into the room as text over `ycollab/sync`, then merges it three ways when the socket connects. Previously the editor gave up on the room after 8 seconds and saved its own copy for the rest of the session. `save()` is single-flight. `Mod-s` saves immediately, and Done saves before leaving (waiting up to 1.5 seconds, and staying only for an open shrink question). `pagehide` sends pending edits with `keepalive` when the encoded HTTP request body is at most 60,000 bytes (`KEEPALIVE_MAX_BYTES`, below the browser's 64 KiB in-flight `keepalive` limit); a larger body goes out as a regular `fetch`, which the browser may cancel during unload, and delivery is never guaranteed once the browser tears the page down. `pageshow` resets the exit-send guard, so a page restored from the back/forward cache can flush again on a later close. Room snapshots that arrive after a save are recognized as the room's own history (`seenRoomTexts`), which stops false `#peer-wrote` banners when eight or more people edit one meeting note. `VisualEdit` applies an element edit as the smallest splice inside that element.
+
+## v0.18.9 — 2026-11-11
+
+**Update self-hosted hubs** for faster history and cold starts on large
+projects; **update your devices** to keep verified blobs across offline
+cycles. Storage formats are unchanged.
+
+- **Incremental history and fold checkpoint tails.** `restoreFoldCheckpoint`, `tryIncrementalFold` and the history index apply only appended journal tails, so a checkpoint is no longer discarded when a journal has grown and a live file with historical delete tombstones (such as `log.md`) no longer forces a rebuild. (#354)
+- **Version-pinned range reads for journal tails.** `VersionedRangeGetter` / `GetVersionedRange` (GCS, forwarded through `remote.Prefixed`) read only the appended tail of a peer journal once its prefix digest is verified for that object generation. (#354)
+- **Blob existence cache.** `RemoteSource` caches positive `blobs/` and `chunks/` existence checks after folder-visibility checks, and the daemon keeps its `httpBackend` across transient offline cycles, clearing verified blobs on a `404` or a journal-list reset. (#354)
+
+## v0.18.8 — 2026-11-10
+
+**Update self-hosted hubs** for the fold checkpoint, history and live tree
+changes; **update your devices** for faster push retries. Storage formats are
+unchanged.
+
+- **Push retries skip blobs the hub already confirmed.** The `https://` backend remembers blobs and chunks confirmed by `Exists` or `Put` during a session (bounded FIFO), so a retry after a partial failure skips `/store/sign` and `/store/exists` for them and `Session.push` does not reopen their local files. (#351)
+- **Derived fold checkpoint, pre-sorted history and hub hot-path caches.** The hub persists a fold checkpoint (`hub-cache/fold-v1.bin.gz`: live winners, delete tombstones, move history) so a cold instance restores a large project without re-parsing every journal; journal hashes are verified on restore. `histIndex` keeps a time-ordered permutation and `handleHistory` stops once the page is full, instead of sorting every op per request. `handleStoreSign` checks blob existence before quota reservation, so an org at its storage limit can still reference blobs already stored. Journal append and tail prefixes, unsealed blob generations, restricted tree responses and visible blob sets are cached. (#352)
+- **Open tabs patch the file tree from change events.** Small SSE `change` frames (up to 16 paths) carry permission-filtered file metadata, so open tabs update their tree and since-visit caches without refetching `/tree` or `/history`; a reader with hidden paths falls back to a filtered refetch. The ambient history query runs only on Home, the 30- and 60-second `/comments` polls are gone, and a tab promoted to stream leader resyncs at once. (#353)
+
 ## v0.18.7 — 2026-11-10
 
 **Update your devices** to reclaim superseded local blobs and skip redundant

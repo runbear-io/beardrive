@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
-import { openSharedFile, type SaveState } from "../lib/sharedfile";
+import { openSharedFile, type SaveState, type SharedFile } from "../lib/sharedfile";
+import { diffSplices, merge3 } from "../lib/merge3";
 import { type CollabStatus } from "../lib/collab";
 import { askShrink, withdrawShrink } from "./ShrinkDialog";
 
@@ -65,6 +66,7 @@ export function VisualEdit({
   onSaved,
   onWriting,
   onRendered,
+  handle,
 }: {
   apiBase: string;
   fileURL: string;
@@ -79,6 +81,8 @@ export function VisualEdit({
   onSaved?: (text: string) => void;
   onWriting?: () => void;
   onRendered?: () => void;
+  // The open file, for a caller that must save it now (EditView's Done).
+  handle?: { current: SharedFile | null };
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -135,6 +139,9 @@ export function VisualEdit({
        corrupts a document in the field. */
     let ranges: Span[] | null = null;
     let docReady = false;
+    let stageDoc: Y.Doc | null = null;
+    let stageTimer: ReturnType<typeof setTimeout> | undefined;
+    const STAGE_IDLE_MS = 700;
     setArmed(false);
     setStuck(false);
 
@@ -169,18 +176,47 @@ export function VisualEdit({
       // Nothing to mount either way: the surface is the iframe, which is
       // already on screen. The room is joined for the CRDT alone.
       onReady: () => {
+        clearTimeout(stageTimer);
+        stageTimer = undefined;
+        if (stageDoc) {
+          const prev = stageDoc;
+          stageDoc = null;
+          const prevText = prev.getText("body").toString();
+          const nextText = file.collab.text.toString();
+          if (anchored && prevText === nextText) {
+            for (const [k, a] of anchors) {
+              const f = Y.createAbsolutePositionFromRelativePosition(a.from, prev);
+              const t = Y.createAbsolutePositionFromRelativePosition(a.to, prev);
+              if (f && t) {
+                anchors.set(k, {
+                  from: Y.createRelativePositionFromTypeIndex(file.collab.text, f.index),
+                  to: Y.createRelativePositionFromTypeIndex(file.collab.text, t.index),
+                  span: a.span,
+                  orig: a.orig,
+                });
+              }
+            }
+          } else {
+            anchors.clear();
+            anchored = false;
+            if (prevText !== nextText) setGen((g) => g + 1);
+          }
+          prev.destroy();
+        }
         docReady = true;
         void anchorRanges();
       },
       onSolo: () => {
-        // No relay, so no room and no peer that could double-seed it: the
-        // provider is stopped before this runs and cannot later hand this
-        // document the hub's copy of the same bytes. Filling
-        // the document locally keeps ONE code path for splicing instead of a
-        // second plain-string one that would only ever run on an older hub.
         if (!file.collab.text.length) {
           file.collab.text.insert(0, seed.current);
         }
+        docReady = true;
+        void anchorRanges();
+      },
+      onStalled: () => {
+        if (docReady || stageDoc) return;
+        stageDoc = new Y.Doc();
+        stageDoc.getText("body").insert(0, seed.current);
         docReady = true;
         void anchorRanges();
       },
@@ -189,8 +225,17 @@ export function VisualEdit({
       onPeers: (n) => cb.current.onPeers?.(n),
       onSaved: (t) => cb.current.onSaved?.(t),
       onWriting: () => cb.current.onWriting?.(),
-      soloText: () => seed.current,
+      soloText: () => (stageDoc ? stageDoc.getText("body").toString() : seed.current),
+      soloApply: ({ from, to, insert }) => {
+        if (!stageDoc) return;
+        stageDoc.transact(() => {
+          const t = stageDoc!.getText("body");
+          if (to > from) t.delete(from, to - from);
+          if (insert) t.insert(from, insert);
+        });
+      },
     }));
+    if (handle) handle.current = file;
 
     /* Ranges are held as RELATIVE positions, not offsets.
 
@@ -204,7 +249,10 @@ export function VisualEdit({
     // be sanity-checked before anything is deleted (see the splice below).
     const anchors = new Map<
       string,
-      { from: Y.RelativePosition; to: Y.RelativePosition; span: number }
+      // `orig`: the source the iframe's element was last rendered from (the
+      // stamped bytes, then each patch this side applied) — the base a patch
+      // and a co-editor's typing in the same element are merged against.
+      { from: Y.RelativePosition; to: Y.RelativePosition; span: number; orig: string }
     >();
     const key = (s: Span) => s.start + "," + s.end;
 
@@ -229,7 +277,8 @@ export function VisualEdit({
          resolved to the same empty span, which became from=0 to=end once the
          document filled, and the first patch replaced THE WHOLE FILE with one
          paragraph. The guard has to look at the thing being measured. */
-      const text = file.collab.text.toString();
+      const activeYText = stageDoc ? stageDoc.getText("body") : file.collab.text;
+      const text = activeYText.toString();
       if (!text) return; // nothing to anchor into yet — try again on the next update
       // A range that runs past the end cannot belong to this document. Cheap,
       // and it fails closed on any future way the two could drift apart.
@@ -257,9 +306,10 @@ export function VisualEdit({
       anchors.clear();
       for (const s of ranges) {
         anchors.set(key(s), {
-          from: Y.createRelativePositionFromTypeIndex(file.collab.text, s.start),
-          to: Y.createRelativePositionFromTypeIndex(file.collab.text, s.end),
+          from: Y.createRelativePositionFromTypeIndex(activeYText, s.start),
+          to: Y.createRelativePositionFromTypeIndex(activeYText, s.end),
           span: s.end - s.start,
+          orig: text.slice(s.start, s.end),
         });
       }
       anchored = true;
@@ -296,6 +346,35 @@ export function VisualEdit({
       if (msg.type !== "bd-edit:patch") return;
       const a = anchors.get(key(msg));
       if (!a) return; // a range from a render this side has already replaced
+      if (stageDoc) {
+        const sFrom = Y.createAbsolutePositionFromRelativePosition(a.from, stageDoc);
+        const sTo = Y.createAbsolutePositionFromRelativePosition(a.to, stageDoc);
+        if (!sFrom || !sTo || sFrom.index > sTo.index) return;
+        const sText = stageDoc.getText("body");
+        const sSpan = sTo.index - sFrom.index;
+        const sWhole = sFrom.index === 0 && sTo.index === sText.length;
+        if ((sWhole && a.span < sText.length) || sSpan > a.span * 4 + 256) {
+          anchors.clear();
+          anchored = false;
+          setGen((g) => g + 1);
+          return;
+        }
+        const sLive = sText.toString().slice(sFrom.index, sTo.index);
+        const sMerged = merge3(a.orig, sLive, msg.html);
+        const sWant = sMerged.ok ? sMerged.text : msg.html;
+        a.orig = msg.html;
+        if (sLive === sWant) return;
+        stageDoc.transact(() => {
+          for (const s of diffSplices(sLive, sWant)) {
+            if (s.deleteCount > 0) sText.delete(sFrom.index + s.index, s.deleteCount);
+            if (s.insertText) sText.insert(sFrom.index + s.index, s.insertText);
+          }
+        });
+        cb.current.onStateChange?.("dirty");
+        clearTimeout(stageTimer);
+        stageTimer = setTimeout(() => void file.saveNow(), STAGE_IDLE_MS);
+        return;
+      }
       const doc = file.collab.doc;
       const from = Y.createAbsolutePositionFromRelativePosition(a.from, doc);
       const to = Y.createAbsolutePositionFromRelativePosition(a.to, doc);
@@ -331,13 +410,23 @@ export function VisualEdit({
         return;
       }
 
-      if (text.toString().slice(from.index, to.index) === msg.html) return;
-      // One transaction, so peers see the replacement rather than a delete
-      // followed by a moment of missing content.
-      doc.transact(() => {
-        text.delete(from.index, span);
-        text.insert(from.index, msg.html);
-      });
+      const live = text.toString().slice(from.index, to.index);
+      /* Only the characters that changed, not the whole element. A co-editor
+         typing elsewhere in the same paragraph is in `live` but not in the
+         patch, which the iframe built from what it last rendered — replacing
+         the span wholesale erased their keystrokes. So: their change
+         (live − orig) and ours (html − orig), merged three ways; where they
+         collide on the same words the patch wins, as it always did. */
+      const merged = merge3(a.orig, live, msg.html);
+      const want = merged.ok ? merged.text : msg.html;
+      a.orig = msg.html;
+      if (live === want) return;
+      // Splices run last-first in `live` coordinates, so shifting by the
+      // span's start keeps every one valid. One transaction, so peers see one
+      // change rather than a moment of missing content.
+      file.collab.applySplices(
+        diffSplices(live, want).map((s) => ({ ...s, index: s.index + from.index })),
+      );
     };
 
     // The document filling in is itself a reason to try anchoring again: the
@@ -348,8 +437,10 @@ export function VisualEdit({
 
     window.addEventListener("message", onMessage);
     return () => {
+      if (handle?.current === file) handle.current = null;
       clearTimeout(retryTimer);
       clearTimeout(stuckTimer);
+      clearTimeout(stageTimer);
       file.collab.text.unobserve(retry);
 
       /* Torn down a beat later, so a patch already in flight still lands.
@@ -365,7 +456,9 @@ export function VisualEdit({
          browsers. */
       setTimeout(() => {
         window.removeEventListener("message", onMessage);
+        clearTimeout(stageTimer);
         file.destroy();
+        stageDoc?.destroy();
       }, 300);
     };
     // The document, and the render generation. Not the callbacks: they are

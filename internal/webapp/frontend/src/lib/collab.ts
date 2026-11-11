@@ -1,6 +1,7 @@
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { Awareness } from "y-protocols/awareness";
+import type { Splice } from "./merge3";
 
 /* A Yjs document, held by the hub.
 
@@ -23,9 +24,14 @@ import { Awareness } from "y-protocols/awareness";
    `awareness`, `peerCount`, `connect`, `destroy`), so swapping the transport
    underneath them changed almost nothing above. */
 
-// "solo": the room was given up on for the life of this editor (see stop());
-// the file is saved by this client alone and nothing will ever go live.
+// "solo": this server has no room route at all (see stop()); the file is
+// saved by this client alone and nothing will ever go live. A room that is
+// merely SLOW never becomes solo: the provider keeps retrying for the life of
+// the editor, and the caller hears about the wait through onStalled.
 export type CollabStatus = "connecting" | "live" | "offline" | "solo";
+
+// The origin of a hub update that arrived over HTTP before the socket existed.
+const HTTP_REMOTE = Symbol("collab-http-remote");
 
 export class CollabDoc {
   readonly doc = new Y.Doc();
@@ -35,6 +41,7 @@ export class CollabDoc {
   private ws: WebsocketProvider | null = null;
   private closed = false;
   private reached = false;
+  private stallTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Where each OTHER participant's caret sits, by name, as an index into the
   // text. A method rather than a helper beside the editor, so a caller that
@@ -55,13 +62,17 @@ export class CollabDoc {
     private readonly url: string,
     private readonly onStatus: (s: CollabStatus) => void,
     private readonly onReady: () => void,
-    // Called when the document cannot be reached at all — an older hub with
-    // no such route, or a proxy that will not upgrade a websocket. The editor
-    // still opens and still saves; what it loses is LIVE collaboration, not
-    // the ability to write. That is deliberately not a second CRDT path: a
-    // client editing its own copy of a shared document is how two browsers
-    // came to overwrite each other.
-    private readonly onUnavailable: () => void,
+    // Called once when the first handshake has not finished after
+    // STALLED_MS — a deploy rolling, a cold start, a proxy that will not
+    // upgrade. Advisory only: the provider is NOT torn down, it keeps
+    // reconnecting, and when it does get through onReady fires as usual. The
+    // caller may let the user type in the meantime and hand that typing to
+    // the hub over HTTP (sharedfile.ts, staging).
+    //
+    // This used to be onUnavailable, which ended the transport for good after
+    // 8s: a room that answered at 8.6s was never joined, and the editor wrote
+    // its own copy against everybody else's for the rest of the session.
+    private readonly onStalled: () => void,
     private readonly me?: { name: string; colour: string },
   ) {
     this.text = this.doc.getText("body");
@@ -131,32 +142,52 @@ export class CollabDoc {
         this.onReady();
       }
     });
-    /* A connection that never succeeds has to be reported, or the editor
-       waits forever for a document that is not coming. y-websocket retries on
-       its own — which is right, a flaky network should heal — so this asks
-       only once, well past the first few attempts. */
-    setTimeout(() => {
-      // Once reached, a later drop is a reconnect to wait out, never solo:
-      // the editor is already bound to this document.
+    /* A slow first handshake is reported, never acted on here. y-websocket
+       retries on its own — which is right, a flaky network should heal — and
+       this document stays EMPTY until the hub's arrives: nothing local is
+       ever written into it before "sync", so joining late can never merge a
+       locally built copy of the file with the hub's and double the text. */
+    this.stallTimer = setTimeout(() => {
+      this.stallTimer = null;
       if (this.closed || this.reached) return;
-      this.stop();
-      this.onUnavailable();
-    }, UNREACHABLE_MS);
+      this.onStalled();
+    }, STALLED_MS);
   }
 
-  /* Give up on the room for good, keeping the document.
-
-     A solo editor edits its own copy. If the provider were left retrying, a
-     handshake that finally succeeded would merge the hub's document — built
-     from the same file — with that copy, and every character the two share
-     would be in the result twice. So the transport goes before anything
-     local is written, and nothing after this can bring it back. */
+  /* There is no room to join: the server has no such route at all (a
+     single-volume server). Never called for a room that is merely slow. */
   stop() {
     if (this.closed) return;
     this.closed = true;
+    if (this.stallTimer) clearTimeout(this.stallTimer);
     this.ws?.destroy();
     this.ws = null;
     this.onStatus("solo");
+  }
+
+  /* This document's whole state as one Yjs update, base64: what a client that
+     cannot reach the socket hands the hub over HTTP. Applying it to the room
+     is idempotent — whatever the room already holds is not added twice. */
+  encodeState(): string {
+    const u8 = Y.encodeStateAsUpdate(this.doc);
+    let bin = "";
+    for (let i = 0; i < u8.length; i += 0x8000) {
+      bin += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
+  /* Apply splices (lib/merge3.ts diffSplices: old-text coordinates, last
+     first) in one transaction, so peers see one change and every character
+     outside them keeps its identity. */
+  applySplices(splices: Splice[]) {
+    if (!splices.length) return;
+    this.doc.transact(() => {
+      for (const s of splices) {
+        if (s.deleteCount) this.text.delete(s.index, s.deleteCount);
+        if (s.insertText) this.text.insert(s.index, s.insertText);
+      }
+    });
   }
 
   /* Did this change come from the hub, or from the person at this keyboard?
@@ -171,7 +202,20 @@ export class CollabDoc {
      provider, so testing against the provider identifies remote changes
      precisely rather than guessing at the local ones. */
   isRemote(origin: unknown): boolean {
-    return this.ws !== null && origin === this.ws;
+    return origin === HTTP_REMOTE || (this.ws !== null && origin === this.ws);
+  }
+
+  /* Apply a Yjs update the hub answered over HTTP (ycollab/sync's `update`:
+     the room's state with a staging checkpoint in it). It carries the room's
+     own item IDs, so applying it is idempotent with the same items arriving
+     on the socket — before or after — and a join that follows splices only
+     what the room does not hold yet. Stamped remote: it is the hub's change,
+     never a keystroke here. */
+  applyRemoteUpdate(b64: string): void {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    Y.applyUpdate(this.doc, bytes, this.ws ?? HTTP_REMOTE);
   }
 
   /* How many OTHER editors are in this document right now, from awareness.
@@ -185,6 +229,7 @@ export class CollabDoc {
 
   destroy() {
     this.closed = true;
+    if (this.stallTimer) clearTimeout(this.stallTimer);
     this.ws?.destroy();
     this.ws = null;
     this.awareness.destroy();
@@ -192,7 +237,7 @@ export class CollabDoc {
   }
 }
 
-// How long to let the provider retry before telling the caller the document
-// is unreachable. Long enough to cover a reconnect on a bad network, short
-// enough that a hub without the route does not leave an editor waiting.
-const UNREACHABLE_MS = 8_000;
+// How long the first handshake may take before the caller is told the room is
+// slow. Short, because nothing is given up when it fires: the user just gets
+// a buffer to type into while the provider keeps trying.
+const STALLED_MS = 2_500;

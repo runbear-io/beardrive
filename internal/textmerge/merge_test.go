@@ -82,3 +82,56 @@ func TestMergeKeepsNewlineEdits(t *testing.T) {
 		}
 	}
 }
+
+// Two insertions at one point of a file both survive, in an order picked by
+// content; over an EMPTY ancestor the point is the whole file, and two
+// different bodies there are two documents, never spliced into one.
+func TestSamePointInsertions(t *testing.T) {
+	for _, c := range []struct {
+		name, base, a, b, want string
+		ok                     bool
+	}{
+		{"inside a file: both kept", "a\nc\n", "a\nFROM-A\nc\n", "a\nFROM-B\nc\n", "a\nFROM-A\nFROM-B\nc\n", true},
+		{"inside a file: one append repeating the other is two appends", "log\n", "log\nx\n", "log\nx\nx\n", "log\nx\nx\nx\n", true},
+		{"empty ancestor: two different bodies", "", "x\n", "y\n", "", false},
+		{"empty ancestor: one body holds the other", "", "a\n", "a\nb\n", "a\nb\n", true},
+		{"empty ancestor: the same body", "", "x\n", "x\n", "x\n", true},
+	} {
+		for _, swap := range []bool{false, true} {
+			x, y := c.a, c.b
+			if swap {
+				x, y = y, x
+			}
+			got, ok := Merge([]byte(c.base), []byte(x), []byte(y))
+			if ok != c.ok || (ok && string(got) != c.want) {
+				t.Errorf("%s: Merge(%q, %q, %q) = %q, %v; want %q, %v", c.name, c.base, x, y, got, ok, c.want, c.ok)
+			}
+		}
+	}
+}
+
+func TestRetainsChanges(t *testing.T) {
+	cases := []struct {
+		name             string
+		base, cand, head string
+		want             bool
+	}{
+		{"T5 append after", "- item 1\n", "- item 1\n- alice\n", "- item 1\n- alice\n- bob\n", true},
+		{"edit elsewhere", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n", true},
+		{"head removed the line", "a\nc\n", "a\nA\nc\n", "a\nc\nB\n", false},
+		{"head rewrote the line", "a\nb\nc\n", "a\nA\nc\n", "a\nZ\nc\n", false},
+		{"head inserted inside span", "a\nd\n", "a\nb\nc\nd\n", "a\nb\nX\nc\nd\n", false},
+		{"deletion kept", "a\nb\nc\n", "a\nc\n", "a\nc\nd\n", true},
+		{"deletion undone", "a\nb\nc\n", "a\nc\n", "a\nb\nc\n", false},
+		{"newline change undone", "a", "a\n", "a", false},
+		{"newline change kept", "a", "a\n", "a\nb\n", true},
+		{"binary", "a\x00", "a\x00b", "a\x00b", false},
+		{"replaced line restored beside it", "a\nb\nc\n", "a\nX\nc\n", "a\nX\nb\nc\n", false},
+		{"replaced line restored before it", "a\nb\nc\n", "a\nX\nc\n", "a\nb\nX\nc\n", false},
+	}
+	for _, c := range cases {
+		if got := RetainsChanges([]byte(c.base), []byte(c.cand), []byte(c.head)); got != c.want {
+			t.Errorf("%s: RetainsChanges = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
