@@ -24,6 +24,21 @@ func defaultCacheBytes() int64 {
 	return 256 << 20
 }
 
+// ApplyMemoryLimit sets the Go runtime soft memory limit when GOMEMLIMIT is not
+// already configured in the environment and updates hubCaches accordingly.
+func ApplyMemoryLimit(defaultBytes int64) {
+	lim := debug.SetMemoryLimit(-1)
+	if lim <= 0 || lim == math.MaxInt64 {
+		if defaultBytes > 0 {
+			debug.SetMemoryLimit(defaultBytes)
+			lim = defaultBytes
+		}
+	}
+	if lim > 0 && lim < math.MaxInt64 {
+		hubCaches.setLimit(lim / 4)
+	}
+}
+
 type cacheBudget struct {
 	mu      sync.Mutex
 	limit   int64

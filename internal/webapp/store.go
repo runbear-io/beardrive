@@ -21,7 +21,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 // The store API (/api/store/*) lets other devices sync through this server
@@ -46,20 +45,131 @@ var (
 	manifestKeyRe = regexp.MustCompile(`^manifests/[0-9a-f]{64}$`)
 )
 
-type appendCacheKey struct {
-	project string
-	key     string
-	version remote.Version
-}
-
-type appendCacheValue struct {
+// journalVersionEntry remembers verified metadata for the latest observed
+// storage version of one journal on a RemoteSource. Keying by journal key on
+// RemoteSource and replacing the entry whenever the object's version advances
+// prevents unbounded growth across repeated appends.
+type journalVersionEntry struct {
+	version    remote.Version
 	size       int64
 	sha256     string
 	storedMax  int64
 	endsWithNL bool
+	hasAppend  bool
+	prevSize   int64
+	prevSHA    string
+	prefixes   map[int64]string
 }
 
-var journalAppendCache sync.Map // map[appendCacheKey]appendCacheValue
+const (
+	maxJournalVersionCacheKeys = 1024
+	maxJournalVersionPrefixes  = 8
+)
+
+func (r *RemoteSource) loadJournalAppendMeta(key string, ver remote.Version) (journalVersionEntry, bool) {
+	if ver == remote.VersionAbsent {
+		return journalVersionEntry{}, false
+	}
+	r.jverMu.Lock()
+	defer r.jverMu.Unlock()
+	e, ok := r.jverCache[key]
+	if !ok || !e.hasAppend || e.version != ver {
+		return journalVersionEntry{}, false
+	}
+	return e, true
+}
+
+func (r *RemoteSource) ensureJournalVersionSlotLocked(key string, ver remote.Version) journalVersionEntry {
+	if r.jverCache == nil {
+		r.jverCache = make(map[string]journalVersionEntry)
+	}
+	e, exists := r.jverCache[key]
+	if !exists {
+		if len(r.jverOrder) >= maxJournalVersionCacheKeys {
+			oldest := r.jverOrder[0]
+			r.jverOrder = r.jverOrder[1:]
+			delete(r.jverCache, oldest)
+		}
+		r.jverOrder = append(r.jverOrder, key)
+		return journalVersionEntry{version: ver}
+	}
+	if e.version != ver {
+		return journalVersionEntry{version: ver}
+	}
+	return e
+}
+
+func (r *RemoteSource) storeJournalAppendMeta(key string, ver remote.Version, size int64, sha256Hex string, storedMax int64, endsWithNL bool, prevSize int64, prevSHA string) {
+	if ver == remote.VersionAbsent {
+		return
+	}
+	r.jverMu.Lock()
+	defer r.jverMu.Unlock()
+	e := r.ensureJournalVersionSlotLocked(key, ver)
+	e.size = size
+	e.sha256 = strings.ToLower(sha256Hex)
+	e.storedMax = storedMax
+	e.endsWithNL = endsWithNL
+	e.hasAppend = true
+	if prevSize > 0 && prevSHA != "" {
+		e.prevSize = prevSize
+		e.prevSHA = strings.ToLower(prevSHA)
+	}
+	if e.prefixes == nil {
+		e.prefixes = make(map[int64]string, 2)
+	}
+	if prevSize > 0 && prevSHA != "" && len(e.prefixes) < maxJournalVersionPrefixes {
+		e.prefixes[prevSize] = strings.ToLower(prevSHA)
+	}
+	if size > 0 && sha256Hex != "" && len(e.prefixes) < maxJournalVersionPrefixes {
+		e.prefixes[size] = strings.ToLower(sha256Hex)
+	}
+	r.jverCache[key] = e
+}
+
+func (r *RemoteSource) loadJournalPrefixSHA(key string, ver remote.Version, offset int64) (string, bool) {
+	if ver == remote.VersionAbsent || offset <= 0 {
+		return "", false
+	}
+	r.jverMu.Lock()
+	defer r.jverMu.Unlock()
+	e, ok := r.jverCache[key]
+	if !ok || e.version != ver || e.prefixes == nil {
+		return "", false
+	}
+	sha, ok := e.prefixes[offset]
+	return sha, ok
+}
+
+func (r *RemoteSource) storeJournalPrefixSHA(key string, ver remote.Version, offset int64, prefixSHA string) {
+	if ver == remote.VersionAbsent || offset <= 0 || prefixSHA == "" {
+		return
+	}
+	r.jverMu.Lock()
+	defer r.jverMu.Unlock()
+	e := r.ensureJournalVersionSlotLocked(key, ver)
+	if e.prefixes == nil || len(e.prefixes) >= maxJournalVersionPrefixes {
+		e.prefixes = make(map[int64]string, 2)
+	}
+	e.prefixes[offset] = strings.ToLower(prefixSHA)
+	r.jverCache[key] = e
+}
+
+func (r *RemoteSource) lookupAppendedJournalSHA(key string, ver remote.Version, prevSize int64, prevSHA string, newSize int64) (string, bool) {
+	if ver == remote.VersionAbsent || prevSHA == "" {
+		return "", false
+	}
+	r.jverMu.Lock()
+	defer r.jverMu.Unlock()
+	e, ok := r.jverCache[key]
+	if !ok || !e.hasAppend || e.version != ver {
+		return "", false
+	}
+	if e.prevSize != prevSize || e.prevSHA != strings.ToLower(prevSHA) || e.size != newSize || e.sha256 == "" {
+		return "", false
+	}
+	return e.sha256, true
+}
 
 // fileShaKey reports whether a store key is addressed by the FILE's sha256 —
 // blobs/ and manifests/ both are, and both must therefore answer the same
@@ -483,6 +593,46 @@ func (s *Server) handleStoreGet(v *volume, w http.ResponseWriter, r *http.Reques
 		}
 		if blob, isBlob := strings.CutPrefix(key, "blobs/"); isBlob {
 			rc, err = rs.OpenBlob(r.Context(), blob)
+		} else if journalKeyRe.MatchString(key) && hasOff {
+			if vrg, ok := rs.Backend.(remote.VersionedRangeGetter); ok {
+				if tailRC, ver, verr := vrg.GetVersionedRange(r.Context(), key, offset, -1); verr == nil {
+					if cached, hit := rs.loadJournalPrefixSHA(key, ver, offset); hit && cached == prefixSHA {
+						w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
+						rc = tailRC
+						hasOff = false
+					}
+					if rc == nil {
+						_ = tailRC.Close()
+					}
+				}
+			}
+			if rc == nil {
+				if cp, ok := rs.Backend.(remote.ConditionalPutter); ok {
+					var ver remote.Version
+					rc, ver, err = cp.GetVersioned(r.Context(), key)
+					if err == nil {
+						origRC := rc
+						h := sha256.New()
+						n, rerr := io.CopyN(h, origRC, offset)
+						if rerr != nil && !errors.Is(rerr, io.EOF) {
+							origRC.Close()
+							storageErr(w, http.StatusBadGateway, "could not read the journal", rerr)
+							return
+						}
+						if n == offset && hex.EncodeToString(h.Sum(nil)) == prefixSHA {
+							rs.storeJournalPrefixSHA(key, ver, offset, prefixSHA)
+							w.Header().Set("X-Bdrive-Tail-Offset", strconv.FormatInt(offset, 10))
+							rc = origRC
+						} else {
+							origRC.Close()
+							rc, err = rs.Backend.Get(r.Context(), key)
+						}
+						hasOff = false
+					}
+				} else {
+					rc, err = rs.Backend.Get(r.Context(), key)
+				}
+			}
 		} else {
 			rc, err = rs.Backend.Get(r.Context(), key)
 		}
@@ -1457,10 +1607,7 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 		seqCollision := false
 		var parseErr error
 		storedMax = 0
-		cacheValue, cacheHit := journalAppendCache.Load(appendCacheKey{
-			project: project, key: key, version: ver,
-		})
-		cached, cacheHit := cacheValue.(appendCacheValue)
+		cached, cacheHit := rs.loadJournalAppendMeta(key, ver)
 		cacheHit = cacheHit && cached.size == prevSize && cached.sha256 == prevSHA
 		needNewline := false
 		if !absent {
@@ -1535,13 +1682,11 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 				needNewline = prevSize > 0 && lastByte != '\n'
 			}
 			if !cacheHit && ver != remote.VersionAbsent && parseErr == nil && len(rem) == 0 {
-				journalAppendCache.Store(appendCacheKey{
-					project: project, key: key, version: ver,
-				}, appendCacheValue{
-					size:      prefixRead + int64(len(rem)),
-					sha256:    hex.EncodeToString(fullHash.Sum(nil)),
-					storedMax: storedMax, endsWithNL: !needNewline,
-				})
+				rs.storeJournalAppendMeta(
+					key, ver, prefixRead+int64(len(rem)),
+					hex.EncodeToString(fullHash.Sum(nil)),
+					storedMax, !needNewline, 0, "",
+				)
 			}
 		}
 		prefixHashOK := cacheHit || (prevSize == 0 && prevSHA == "") || hex.EncodeToString(h.Sum(nil)) == prevSHA
@@ -1607,12 +1752,12 @@ func (s *Server) handleStoreAppend(v *volume, w http.ResponseWriter, r *http.Req
 			} else if needNewline {
 				endsWithNL = true
 			}
-			journalAppendCache.Store(appendCacheKey{
-				project: project, key: key, version: newVer,
-			}, appendCacheValue{
-				size: totalLen, sha256: hex.EncodeToString(fullHash.Sum(nil)),
-				storedMax: tailOps[len(tailOps)-1].Seq, endsWithNL: endsWithNL,
-			})
+			fullSHA := hex.EncodeToString(fullHash.Sum(nil))
+			rs.storeJournalAppendMeta(
+				key, newVer, totalLen, fullSHA,
+				tailOps[len(tailOps)-1].Seq, endsWithNL,
+				prevSize, prevSHA,
+			)
 		}
 		cleanupTmp()
 		if errors.Is(err, remote.ErrVersionMismatch) {

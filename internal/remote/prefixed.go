@@ -167,6 +167,30 @@ func (p *prefixedCond) PutIf(ctx context.Context, key string, r io.Reader, size 
 	return p.cond.PutIf(ctx, k, r, size, expect)
 }
 
+func (p *prefixedCond) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	rg, ok := p.be.(RangeGetter)
+	if !ok {
+		return nil, fmt.Errorf("range read unsupported")
+	}
+	k, err := p.key(key)
+	if err != nil {
+		return nil, err
+	}
+	return rg.GetRange(ctx, k, offset, length)
+}
+
+func (p *prefixedCond) GetVersionedRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, Version, error) {
+	vrg, ok := p.be.(VersionedRangeGetter)
+	if !ok {
+		return nil, VersionAbsent, fmt.Errorf("versioned range read unsupported")
+	}
+	k, err := p.key(key)
+	if err != nil {
+		return nil, VersionAbsent, err
+	}
+	return vrg.GetVersionedRange(ctx, k, offset, length)
+}
+
 // prefixedSignerCond is both, which is what a GCS root is.
 type prefixedSignerCond struct {
 	*prefixedCond

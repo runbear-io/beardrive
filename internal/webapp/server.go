@@ -717,7 +717,11 @@ type RemoteSource struct {
 	ckptMu      sync.Mutex
 	ckptWriting bool
 	ckptFP      string
+	ckptBytes   int64
 
+	jverMu    sync.Mutex
+	jverCache map[string]journalVersionEntry
+	jverOrder []string
 	// flight joins requests for the same derived state of the same journal
 	// listing (a fold, a history index) into one computation. Each copy is
 	// every op in the project, so a team opening one page at once would
@@ -1270,7 +1274,7 @@ func (r *RemoteSource) sourcedOpsOf(ctx context.Context, keep []remote.Object) (
 	for _, ops := range parsed {
 		n += len(ops)
 	}
-	all := make([]sourcedOp, 0, n)
+	all := make([]sourcedOp, 0, n+512)
 	for i, o := range keep {
 		from := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
 		for _, op := range parsed[i] {
@@ -1444,11 +1448,17 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 		moves moveIndex
 	}
 	res, err, _ := r.flight.Do("fold\x00"+fp, func() (any, error) {
-		if files, tombs, moves, ok := r.restoreFoldCheckpoint(context.WithoutCancel(ctx), keep, fp); ok {
-			return fold{files: files, tombs: tombs, moves: moves}, nil
-		}
-		if files, tombs, moves, ok := r.tryIncrementalFold(context.WithoutCancel(ctx), keep, fp); ok {
-			return fold{files: files, tombs: tombs, moves: moves}, nil
+		r.foldMu.Lock()
+		hasFold := r.foldFiles != nil
+		r.foldMu.Unlock()
+		if hasFold {
+			if files, tombs, moves, ok := r.tryIncrementalFold(context.WithoutCancel(ctx), keep, fp); ok {
+				return fold{files: files, tombs: tombs, moves: moves}, nil
+			}
+		} else {
+			if files, tombs, moves, ok := r.restoreFoldCheckpoint(context.WithoutCancel(ctx), keep, fp); ok {
+				return fold{files: files, tombs: tombs, moves: moves}, nil
+			}
 		}
 		parsed, err := r.parsedJournals(context.WithoutCancel(ctx), keep)
 		if err != nil {
@@ -1457,11 +1467,15 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 		all := byPathOrder(parsed...)
 		files, tombs := foldFilesAndTombstones(all)
 		moves := buildMoveIndex(all)
+		jmeta, ok := r.journalMetaFromCache(keep)
+		if !ok {
+			jmeta = checkpointMeta(keep)
+		}
 		r.foldMu.Lock()
 		r.foldFP, r.foldFiles, r.foldTombstones, r.foldMoves = fp, files, tombs, moves
-		r.foldJournals = checkpointMeta(keep)
+		r.foldJournals = jmeta
 		r.foldMu.Unlock()
-		r.scheduleFoldCheckpoint(ctx, fp, keep, files, tombs, moves)
+		r.scheduleFoldCheckpointFromMeta(fp, jmeta, files, tombs, moves)
 		return fold{files: files, tombs: tombs, moves: moves}, nil
 	})
 	if err != nil {
