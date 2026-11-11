@@ -1203,6 +1203,72 @@ test("replacing Map, Array and JSON prototypes in the iframe cannot tamper with 
   }
 });
 
+// 6: mutating an element's innerHTML AFTER initDOM (`data-bd-ready`), before
+// the user ever clicks it (`host === null`), so a single real keystroke would
+// otherwise flush the page script's forged markup as the user's edit.
+const POST_INIT_PRE_CLICK_HOSTILE = linkedPage(
+  "Post-init pre-click hostile",
+  `(function () {
+  var poison = "https://evil." + "example/preclick";
+  window.__tamperLeadBeforeClick = function () {
+    var lead = document.querySelector("p.lead");
+    if (lead) {
+      lead.innerHTML = 'Revenue grew <a href="' + poison + '">steadily</a> across every region. PWNED' + '_PRECLICK';
+    }
+  };
+})();`,
+);
+
+test("mutating an element after initialization before the user clicks it refuses editing and never saves tampered DOM", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "preclick", POST_INIT_PRE_CLICK_HOSTILE);
+  const before = await source(page, id, file);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+    // After initialization, while no element is open (`host === null`), the
+    // page's own script rewrites `p.lead` in place.
+    await child!.evaluate(() => {
+      if ("__tamperLeadBeforeClick" in window && typeof window.__tamperLeadBeforeClick === "function") {
+        window.__tamperLeadBeforeClick();
+      }
+    });
+
+    // The user clicks `p.lead` and types: it must refuse to mount, announce
+    // clobbering, and never flush the tampered markup; meanwhile untampered
+    // `h1` still edits cleanly.
+    await frame.locator("p.lead").click();
+    await editor.keyboard.type("x");
+    await expect(editor.locator("#edit-clobbered")).toBeVisible();
+
+    await frame.locator("h1").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Clean H1.");
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(page, id, file, "<h1>Post-init pre-click hostile Clean H1.</h1>");
+    expect(after).toContain('<p class="lead">Revenue grew <a href="/safe">steadily</a> across every region.</p>');
+    expect(after).not.toContain("evil.example");
+    expect(after).not.toContain("PWNED_PRECLICK");
+    expect(after).not.toBe(before);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
 /* The page goes into the bfcache (pagehide, persisted) with an edit the app
    never heard: the exit worker saves it, and that exit's port is spent. The
    page comes back (pageshow) and is edited again — still unheard — and then

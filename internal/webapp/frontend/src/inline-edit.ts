@@ -75,11 +75,16 @@ const wmSet = uncurry(WeakMap.prototype.set);
 const wmDelete = uncurry(WeakMap.prototype.delete);
 const mapGet = uncurry(Map.prototype.get);
 const mapSet = uncurry(Map.prototype.set);
+const wsHas = uncurry(WeakSet.prototype.has);
+const wsAdd = uncurry(WeakSet.prototype.add);
 const setHas = uncurry(Set.prototype.has);
 const setAdd = uncurry(Set.prototype.add);
 const setClear = uncurry(Set.prototype.clear);
 const setSizeGet = uncurry(Object.getOwnPropertyDescriptor(Set.prototype, "size")!.get!);
 const jsonStringify = JSON.stringify;
+const objFreeze = Object.freeze;
+const objCreate = Object.create;
+const objAssign = Object.assign;
 const nativeSetTimeout = window.setTimeout.bind(window);
 const nativeClearTimeout = window.clearTimeout.bind(window);
 const postToParent = window.parent.postMessage.bind(window.parent);
@@ -391,10 +396,6 @@ function parseMarkup(htmlStr: string): PMNode {
   return parser.parse(box, PARSE);
 }
 
-function parseInner(el: HTMLElement): PMNode {
-  return parseMarkup(elInnerHTMLGet.call(el) as string);
-}
-
 function serializeInner(doc: PMNode): string {
   const box = docCreateElement.call(document, "div");
   nodeAppendChild.call(box, serializer.serializeFragment(doc.content));
@@ -411,11 +412,32 @@ function roundTrips(el: HTMLElement): boolean {
 }
 
 type Range = { start: number; end: number };
-/* An element's range, as bound when the document was first read (initDOM):
-   never the attribute again, which a page script may since have rewritten. */
-function rangeOf(el: Element): Range | null {
-  const b = wmGet(boundRanges, el) as { start: number; end: number; initialHtml: string } | undefined;
-  return b ? { start: b.start, end: b.end } : null;
+type BoundRange = { readonly start: number; readonly end: number; readonly expectedHtml: string };
+
+const makeBoundRange = (start: number, end: number, expectedHtml: string): BoundRange =>
+  objFreeze(objAssign(objCreate(null) as BoundRange, { start, end, expectedHtml }));
+
+/* Checks that `el` is bound AND still holds the exact markup verified at
+   initDOM (or written back by our own unmount). A page script that rewrites
+   `el.innerHTML` after initDOM, before the user clicks `el`, fails here so
+   the tampered DOM is never ingested into ProseMirror or flushed as a save. */
+const tamperedElements = new WeakSet<Element>();
+function verifiedBound(el: HTMLElement, announceClobber: boolean): BoundRange | null {
+  if (wsHas(tamperedElements, el)) {
+    if (announceClobber) send({ type: "bd-edit:clobbered" });
+    return null;
+  }
+  const b = wmGet(boundRanges, el) as BoundRange | undefined;
+  if (!b) return null;
+  if ((elInnerHTMLGet.call(el) as string) !== b.expectedHtml) {
+    wsAdd(tamperedElements, el);
+    wmDelete(boundRanges, el);
+    wmSet(verdicts, el, false);
+    elSetAttribute.call(el, "data-bd-edit", "no");
+    if (announceClobber) send({ type: "bd-edit:clobbered" });
+    return null;
+  }
+  return b;
 }
 
 // The attribute as served, parsed once (initDOM).
@@ -431,7 +453,9 @@ function parseRange(el: Element): Range | null {
 
 const verdicts = new WeakMap<HTMLElement, boolean>();
 
-function editable(el: HTMLElement): boolean {
+function editable(el: HTMLElement, announceClobber = false): boolean {
+  const b = verifiedBound(el, announceClobber);
+  if (!b) return false;
   let v = wmGet(verdicts, el) as boolean | undefined;
   if (v === undefined) {
     v = roundTrips(el);
@@ -468,7 +492,7 @@ let queuedHead: QueuedSpan | null = null;
 let queuedTail: QueuedSpan | null = null;
 /* Elements bound to their source ranges, privately: the page can rewrite an
    attribute, but not this. Filled once, when the document is first read. */
-const boundRanges = new WeakMap<Element, { start: number; end: number; initialHtml: string }>();
+const boundRanges = new WeakMap<Element, BoundRange>();
 
 /* A page script tried to write into the open element. The write does not
    happen, the editor closes with the element as it was last saved — never
@@ -792,8 +816,11 @@ function unmount() {
   view = null;
   shadowHost = null;
   if (el) {
+    const nextHtml = html ?? before;
+    const prevBound = wmGet(boundRanges, el) as BoundRange | undefined;
+    if (prevBound) wmSet(boundRanges, el, makeBoundRange(prevBound.start, prevBound.end, nextHtml));
     // Replaces the shadow host: the element is plain markup again.
-    elInnerHTMLSet.call(el, html ?? before);
+    elInnerHTMLSet.call(el, nextHtml);
     el.removeAttribute("data-bd-editing");
     // The content is new DOM, so a verdict about the old nodes is stale —
     // and it would be wrong to keep one that was computed before an edit.
@@ -837,14 +864,13 @@ function wrapKeymapCmd<C extends (...args: never[]) => boolean>(cmd: C): C {
 function mount(el: HTMLElement, x?: number, y?: number) {
   if (host === el) return;
   unmount();
-  const r = rangeOf(el);
-  if (!r) return;
+  const b = verifiedBound(el, true);
+  if (!b) return;
   host = el;
-  range = r;
-  before = elInnerHTMLGet.call(el) as string;
-  // Read while the element still holds its own markup.
-  const doc = parseInner(el);
-  el.setAttribute("data-bd-editing", "");
+  range = { start: b.start, end: b.end };
+  before = b.expectedHtml;
+  const doc = parseMarkup(b.expectedHtml);
+  elSetAttribute.call(el, "data-bd-editing", "");
 
   /* The editor is not mounted on the page's element: it is mounted in a
      closed shadow root inside it, out of reach of the page's scripts (see
@@ -1062,7 +1088,7 @@ listen(
       unmount(); // clicking away commits, the same as blurring
       return;
     }
-    if (!editable(el)) return;
+    if (!editable(el, true)) return;
     mount(el, e.clientX, e.clientY);
   },
   true,
@@ -1125,7 +1151,7 @@ function initDOM() {
   for (const { el, r } of found) {
     if (mapGet(claims, r.start + "," + r.end) !== 1) continue;
     const initialHtml = elInnerHTMLGet.call(el) as string;
-    wmSet(boundRanges, el, { start: r.start, end: r.end, initialHtml });
+    wmSet(boundRanges, el, makeBoundRange(r.start, r.end, initialHtml));
     ranges.push({ start: r.start, end: r.end, html: initialHtml });
   }
   send({ type: "bd-edit:ready", hash, len, ranges });
