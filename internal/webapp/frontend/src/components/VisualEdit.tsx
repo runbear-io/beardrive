@@ -193,8 +193,19 @@ export function VisualEdit({
       exitWorker = null; // no worker (a CSP, an old browser): no exit save, as before
     }
     let workerDisarmed = false;
+    let frameInteracted = false;
     let latestSavedText = seed.current;
     let latestBaseSha: string | undefined = shaRef.current;
+    const noteFrameInteraction = () => {
+      if (frameInteracted || document.activeElement !== frame.current) return;
+      frameInteracted = true;
+      if (exitWorker && !workerDisarmed) exitWorker.postMessage({ type: "interacted" });
+    };
+    const onParentUnload = () => {
+      noteFrameInteraction();
+      if (!exitWorker || workerDisarmed || !frameInteracted) return;
+      exitWorker.postMessage({ type: "parent-unload" });
+    };
     const activeDocText = () =>
       stageDoc ? stageDoc.getText("body").toString() : (fileRef.current?.collab.text.toString() ?? "");
     const syncExitWorker = () => {
@@ -234,6 +245,7 @@ export function VisualEdit({
           savedText: latestSavedText,
           baseSha: latestBaseSha,
           docText: renderText,
+          interacted: frameInteracted,
         },
         [mc.port1],
       );
@@ -509,6 +521,8 @@ export function VisualEdit({
       }
 
       if (msg.type !== "bd-edit:patch") return;
+      noteFrameInteraction();
+      if (!frameInteracted) return;
       if (!anchored)
         return anchorRanges().then(() => {
           if (!applyPatch(msg)) return;
@@ -624,18 +638,21 @@ export function VisualEdit({
     file.collab.text.observe(retry);
 
     window.addEventListener("message", onMessage);
+    window.addEventListener("blur", noteFrameInteraction);
+    window.addEventListener("beforeunload", onParentUnload);
+    window.addEventListener("pagehide", onParentUnload);
     return () => {
       if (handle?.current === exposed) handle.current = null;
+      window.removeEventListener("blur", noteFrameInteraction);
+      window.removeEventListener("beforeunload", onParentUnload);
+      window.removeEventListener("pagehide", onParentUnload);
+      onParentUnload();
       frameReady = false;
       channel.close();
-      // The exit worker stays armed: a tab closing goes through here too, and
-      // the frame's last patch may yet arrive at it. Disarmed below, once the
-      // editor is really gone and nothing more can come.
       clearTimeout(retryTimer);
       clearTimeout(stuckTimer);
       clearTimeout(stageTimer);
       file.collab.text.unobserve(retry);
-
       /* Torn down a beat later, so a patch already in flight still lands.
 
          Defensive, and honestly so: with the iframe's debounce gone a patch is

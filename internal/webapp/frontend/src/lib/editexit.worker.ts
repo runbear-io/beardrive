@@ -27,24 +27,38 @@ type Arm = {
   savedText: string;
   baseSha?: string;
   docText: string;
+  interacted?: boolean;
 };
 type Sync = { type: "sync"; savedText?: string; baseSha?: string; hasBaseSha?: boolean; docText?: string };
-type FromApp = Arm | Sync | { type: "disarm" };
+type FromApp =
+  | Arm
+  | Sync
+  | { type: "interacted" }
+  | { type: "parent-unload" }
+  | { type: "disarm" };
 
 let state: ExitWorkerState | null = null;
 let childPort: MessagePort | null = null;
 let disarmed = false;
 let exited = false;
+let interacted = false;
+let parentUnloading = false;
+let pendingPatches: ExitPatch[] | null = null;
+let pendingTimer: ReturnType<typeof setTimeout> | undefined;
 
-const onExit = (ev: MessageEvent) => {
-  const msg = ev.data as { type?: unknown; patches?: unknown } | null;
-  if (!msg || msg.type !== "bd-edit:exit" || !Array.isArray(msg.patches)) return;
-  if (disarmed || exited || !state) return;
+/* A frame script cannot trigger a write on its own: both user interaction in
+   the frame (`interacted`) and a real parent unload (`parentUnloading`) must
+   be attested by VisualEdit on the trusted parent channel before any message
+   from `childPort` can produce a network request. */
+const tryFlush = () => {
+  if (disarmed || exited || !state || !interacted || !parentUnloading || !pendingPatches) return;
+  const patches = pendingPatches;
+  pendingPatches = null;
+  clearTimeout(pendingTimer);
   exited = true;
   childPort?.close();
   childPort = null;
-  // Shapes are checked spliced (applyRenderPatches): a bad one sends nothing.
-  const req = buildExitSaveRequest(state, msg.patches as ExitPatch[]);
+  const req = buildExitSaveRequest(state, patches);
   if (!req) return;
   void fetch(req.url, {
     method: req.method,
@@ -53,6 +67,23 @@ const onExit = (ev: MessageEvent) => {
     body: req.body,
     keepalive: req.keepalive,
   }).catch(() => {});
+};
+
+const onExit = (ev: MessageEvent) => {
+  const msg = ev.data as { type?: unknown; patches?: unknown } | null;
+  if (!msg || msg.type !== "bd-edit:exit" || !Array.isArray(msg.patches)) return;
+  if (disarmed || exited || !state) return;
+  pendingPatches = msg.patches as ExitPatch[];
+  clearTimeout(pendingTimer);
+  if (interacted && parentUnloading) {
+    tryFlush();
+    return;
+  }
+  // Without a parent unload alongside it, discard shortly so a forged message
+  // sent while viewing cannot linger until a later close.
+  pendingTimer = setTimeout(() => {
+    pendingPatches = null;
+  }, 500);
 };
 
 self.onmessage = (ev: MessageEvent) => {
@@ -70,11 +101,24 @@ self.onmessage = (ev: MessageEvent) => {
       baseSha: msg.baseSha,
       docText: msg.docText,
     };
-    // A re-arm (a new render) replaces the iframe's channel; nothing sent yet.
+    if (msg.interacted) interacted = true;
+    parentUnloading = false;
+    pendingPatches = null;
+    clearTimeout(pendingTimer);
     childPort?.close();
     childPort = ev.ports[0] ?? null;
     exited = false;
     if (childPort) childPort.onmessage = onExit;
+    return;
+  }
+  if (msg.type === "interacted") {
+    interacted = true;
+    tryFlush();
+    return;
+  }
+  if (msg.type === "parent-unload") {
+    parentUnloading = true;
+    tryFlush();
     return;
   }
   if (msg.type === "sync") {
@@ -87,6 +131,8 @@ self.onmessage = (ev: MessageEvent) => {
   if (msg.type === "disarm") {
     disarmed = true;
     state = null;
+    pendingPatches = null;
+    clearTimeout(pendingTimer);
     childPort?.close();
     childPort = null;
     self.close();
