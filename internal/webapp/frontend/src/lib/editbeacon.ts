@@ -84,6 +84,8 @@ export type ExitWorkerState = {
   baseSha?: string;
   // The app's document as it stands (staging buffer or shared document).
   docText: string;
+  // Earlier ambiguous exit-save bodies whose HTTP outcome was never confirmed.
+  priorSent?: ReadonlyArray<string>;
 };
 
 // Far more than one render has elements; a body claiming more is not one.
@@ -134,6 +136,7 @@ export type ExitSaveRequest = {
   headers: Record<string, string>;
   body: string;
   keepalive: boolean;
+  sentText: string;
 };
 
 /* The one request the worker sends, or null when there is nothing to send
@@ -174,17 +177,22 @@ export function buildExitSaveRequest(
     else mergedOk = false;
   }
   if (state.savedText.length > 0 && sharpShrink(byteLength(state.savedText), byteLength(want))) return null;
-  if (mergedOk && want === state.savedText) return null;
+  const hasAmbiguous = (state.priorSent?.length ?? 0) > 0;
+  if (mergedOk && want === state.savedText && want === latest && !hasAmbiguous) return null;
 
   if (hasCollabRoute(state.apiBase)) {
-    const priorSent = ancestor !== state.savedText ? [ancestor] : undefined;
+    const priorList: string[] = [];
+    if (ancestor !== state.savedText) priorList.push(ancestor);
+    for (const ps of state.priorSent ?? []) {
+      if (ps !== state.savedText && !priorList.includes(ps) && priorList.length < 4) priorList.push(ps);
+    }
     const payload = mergedOk
       ? {
           base: state.baseSha,
           base_text: state.savedText,
           text: want,
           park_on_conflict: true,
-          ...(priorSent ? { prior_sent: priorSent } : {}),
+          ...(priorList.length > 0 ? { prior_sent: priorList } : {}),
         }
       : { base_text: state.renderText, text: renderedWant, park_on_conflict: true };
     const body = JSON.stringify(payload);
@@ -194,6 +202,7 @@ export function buildExitSaveRequest(
       headers: { "Content-Type": "application/json" },
       body,
       keepalive: byteLength(body) <= KEEPALIVE_MAX_BYTES,
+      sentText: mergedOk ? want : renderedWant,
     };
   }
 
@@ -210,6 +219,7 @@ export function buildExitSaveRequest(
       headers,
       body: want,
       keepalive: byteLength(want) <= KEEPALIVE_MAX_BYTES,
+      sentText: want,
     };
   }
   return {
@@ -221,5 +231,6 @@ export function buildExitSaveRequest(
     headers: { "Content-Type": text, "If-None-Match": "*", "X-Bdrive-Park-On-Conflict": "1" },
     body: renderedWant,
     keepalive: byteLength(renderedWant) <= KEEPALIVE_MAX_BYTES,
+    sentText: renderedWant,
   };
 }

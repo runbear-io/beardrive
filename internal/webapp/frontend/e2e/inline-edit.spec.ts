@@ -1418,6 +1418,81 @@ test("after a bfcache pagehide and pageshow, a second undelivered edit still sav
   }
 });
 
+/* If the first bfcache exit save fails (503), its edit was NEVER confirmed on
+   storage and must stay unacknowledged across pageshow — so when the user
+   returns, edits a second element (also undelivered), and closes the tab, the
+   second exit save carries BOTH edits rather than treating the first as
+   already saved and losing it. */
+test("after a failed bfcache exit save, pageshow and a second undelivered edit save both edits on close", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await ownFile(page, id);
+
+  const ctx = await browser.newContext();
+  try {
+    let failFirstExit = true;
+    let sawFailedExit: (() => void) | null = null;
+    const firstExitFailed = new Promise<void>((resolve) => {
+      sawFailedExit = resolve;
+    });
+    await ctx.route("**/ycollab/sync*", async (route) => {
+      if (failFirstExit) {
+        failFirstExit = false;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "temporary outage" }),
+        });
+        sawFailedExit?.();
+        return;
+      }
+      await route.continue();
+    });
+
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await installPatchDrop(editor);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" First failed-exit.");
+
+    // First bfcache exit hits 503: nothing lands on the hub yet.
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await firstExitFailed;
+    expect(await source(page, id, file)).not.toContain("First failed-exit.");
+
+    // Restore from bfcache, make a second undelivered edit, and close immediately.
+    await child!.evaluate(() => document.documentElement.removeAttribute("data-bd-exit"));
+    await editor.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await child!.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+
+    await frame.locator("li").first().click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Second close.");
+    await editor.close({ runBeforeUnload: true });
+
+    const after = await waitForSource(page, id, file, "North America led the quarter. Second close.");
+    expect(after).toContain("Revenue grew steadily across every region. First failed-exit.");
+    expect(after.split("First failed-exit.").length - 1).toBe(1);
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 
 function freePort(): Promise<number> {

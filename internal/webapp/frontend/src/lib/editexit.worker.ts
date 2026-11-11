@@ -19,6 +19,7 @@
    `bd-edit:exit` once on unload. All span/ack state lives in this worker's
    isolated JS realm rather than in the iframe. */
 
+import { hasCollabRoute } from "./collabroute";
 import {
   ackEditedSpan,
   buildExitSaveRequest,
@@ -26,6 +27,7 @@ import {
   type EditedSpan,
   type ExitWorkerState,
 } from "./editbeacon";
+import { retainsChanges } from "./merge3";
 type Arm = {
   type: "arm";
   apiBase: string;
@@ -66,28 +68,91 @@ let interacted = false;
 let parentUnloading = false;
 let childExited = false;
 let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let workerSaved: { fromText: string; text: string; sha?: string } | null = null;
+let ambiguousAttempt: { fromText: string; sentText: string; seqs: number[] } | null = null;
+const priorSentTexts: string[] = [];
 const editedSpans = new Map<string, EditedSpan>();
 const ackedSeqs = new Set<number>();
 
-/* A frame script cannot trigger a write on its own: both user interaction in
-   the frame (`interacted`) and a real parent unload (`parentUnloading`) must
-   be attested by VisualEdit on the trusted parent channel before `bd-edit:exit`
-   from `childPort` can produce a network request. */
-const tryFlush = () => {
-  if (disarmed || exited || !state || !interacted || !parentUnloading || !childExited) return;
-  childExited = false;
-  clearTimeout(pendingTimer);
-  exited = true;
-  childPort?.close();
-  childPort = null;
-  const patches = unackedExitPatches(editedSpans.values());
-  for (const s of editedSpans.values()) {
-    s.acked = true;
-    s.ackedHtml = s.html;
+const confirmSeqs = (seqs: ReadonlyArray<number>) => {
+  for (const seq of seqs) {
+    ackedSeqs.add(seq);
+    ackEditedSpan(editedSpans.values(), seq);
   }
-  if (!patches) return;
+};
+
+const recordAmbiguous = (curState: ExitWorkerState, fromText: string, sentText: string, seqs: number[]) => {
+  ambiguousAttempt = { fromText, sentText, seqs };
+  if (!priorSentTexts.includes(sentText)) {
+    priorSentTexts.unshift(sentText);
+    if (priorSentTexts.length > 4) priorSentTexts.length = 4;
+  }
+  curState.priorSent = priorSentTexts;
+};
+
+const scheduleRearmRetry = () => {
+  clearTimeout(retryTimer);
+  if (disarmed || exited || !state || !unackedExitPatches(editedSpans.values())) return;
+  retryTimer = setTimeout(() => {
+    retryTimer = undefined;
+    if (disarmed || exited || !state) return;
+    sendUnacked(false);
+  }, 1_500);
+};
+
+const reconcileAfterRearm = () => {
+  if (disarmed || exited || !state || !unackedExitPatches(editedSpans.values())) return;
   const curState = state;
+  const amb = ambiguousAttempt;
+  if (amb && hasCollabRoute(curState.apiBase)) {
+    void fetch(curState.apiBase + "ycollab/sync?path=" + encodeURIComponent(curState.path), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ peek: true }),
+    })
+      .then(async (res) => {
+        if (!res.ok || disarmed || state !== curState) {
+          scheduleRearmRetry();
+          return;
+        }
+        const peek = (await res.json().catch(() => null)) as { ok?: boolean; sha?: string; text?: string } | null;
+        if (peek?.ok && typeof peek.text === "string" && retainsChanges(amb.fromText, amb.sentText, peek.text)) {
+          // A peek proves the live room holds the edit, NOT that storage does:
+          // advance `ackedHtml` + `docText` so a retry merges from the room's
+          // text without duplicating the insertion, while keeping `s.acked`
+          // false and `priorSentTexts` intact until a real sync answers 200 OK.
+          for (const s of editedSpans.values()) {
+            for (const seq of amb.seqs) {
+              const h = s.history?.get(seq);
+              if (h !== undefined) s.ackedHtml = h;
+            }
+          }
+          if (curState.docText === amb.fromText) curState.docText = peek.text;
+          ambiguousAttempt = null;
+          scheduleRearmRetry();
+          return;
+        }
+        ambiguousAttempt = null;
+        scheduleRearmRetry();
+      })
+      .catch(() => {
+        scheduleRearmRetry();
+      });
+    return;
+  }
+  scheduleRearmRetry();
+};
+
+const sendUnacked = (asUnload: boolean) => {
+  if (disarmed || !state) return;
+  const patches = unackedExitPatches(editedSpans.values());
+  if (!patches) return;
+  const sentSeqs: number[] = [];
+  for (const s of editedSpans.values()) sentSeqs.push(s.seq);
+  const curState = state;
+  curState.priorSent = priorSentTexts.length > 0 ? priorSentTexts : undefined;
   const req = buildExitSaveRequest(curState, patches);
   if (!req) return;
   const fromText = curState.savedText;
@@ -96,17 +161,40 @@ const tryFlush = () => {
     credentials: "same-origin",
     headers: req.headers,
     body: req.body,
-    keepalive: req.keepalive,
+    keepalive: asUnload && req.keepalive,
   })
     .then(async (res) => {
-      if (!res.ok) return;
+      if (!res.ok) {
+        // A 5xx (notably 503 when syncDurable failed after Apply) may already
+        // have spliced the edit into the live room: record it as ambiguous so
+        // rearm peeks first and a retry carries prior_sent.
+        if (res.status >= 500) {
+          recordAmbiguous(curState, fromText, req.sentText, sentSeqs);
+          if (!exited && !disarmed && state === curState) reconcileAfterRearm();
+        } else if (res.status === 429 && !exited && !disarmed && state === curState) {
+          scheduleRearmRetry();
+        }
+        return;
+      }
       const out = (await res.json().catch(() => null)) as {
         ok?: boolean;
         sha?: string;
         text?: string;
         parked?: string;
       } | null;
-      if (!out || out.parked) return;
+      if (!out || out.ok !== true) {
+        recordAmbiguous(curState, fromText, req.sentText, sentSeqs);
+        if (!exited && !disarmed && state === curState) reconcileAfterRearm();
+        return;
+      }
+      confirmSeqs(sentSeqs);
+      ambiguousAttempt = null;
+      priorSentTexts.length = 0;
+      curState.priorSent = undefined;
+      if (out.parked) {
+        if (state === curState && typeof out.sha === "string" && out.sha) state.baseSha = out.sha;
+        return;
+      }
       const landedText = typeof out.text === "string" ? out.text : req.method === "PUT" ? req.body : null;
       if (landedText === null) return;
       workerSaved = { fromText, text: landedText, sha: out.sha };
@@ -116,7 +204,25 @@ const tryFlush = () => {
         if (typeof out.sha === "string" && out.sha) state.baseSha = out.sha;
       }
     })
-    .catch(() => {});
+    .catch(() => {
+      recordAmbiguous(curState, fromText, req.sentText, sentSeqs);
+      if (!exited && !disarmed && state === curState) reconcileAfterRearm();
+    });
+};
+
+/* A frame script cannot trigger a write on its own: both user interaction in
+   the frame (`interacted`) and a real parent unload (`parentUnloading`) must
+   be attested by VisualEdit on the trusted parent channel before `bd-edit:exit`
+   from `childPort` can produce a network request. */
+const tryFlush = () => {
+  if (disarmed || exited || !state || !interacted || !parentUnloading || !childExited) return;
+  childExited = false;
+  clearTimeout(pendingTimer);
+  clearTimeout(retryTimer);
+  exited = true;
+  childPort?.close();
+  childPort = null;
+  sendUnacked(true);
 };
 const onChildMessage = (ev: MessageEvent) => {
   const msg = ev.data as {
@@ -191,10 +297,13 @@ self.onmessage = (ev: MessageEvent) => {
     if (msg.interacted) interacted = true;
     editedSpans.clear();
     ackedSeqs.clear();
+    ambiguousAttempt = null;
+    priorSentTexts.length = 0;
     workerSaved = null;
     parentUnloading = false;
     childExited = false;
     clearTimeout(pendingTimer);
+    clearTimeout(retryTimer);
     childPort?.close();
     childPort = ev.ports[0] ?? null;
     exited = false;
@@ -223,9 +332,11 @@ self.onmessage = (ev: MessageEvent) => {
     parentUnloading = false;
     childExited = false;
     clearTimeout(pendingTimer);
+    clearTimeout(retryTimer);
     childPort?.close();
     childPort = ev.ports[0] ?? null;
     if (childPort) childPort.onmessage = onChildMessage;
+    reconcileAfterRearm();
     return;
   }
   if (msg.type === "ack") {
@@ -266,8 +377,11 @@ self.onmessage = (ev: MessageEvent) => {
     state = null;
     editedSpans.clear();
     ackedSeqs.clear();
+    ambiguousAttempt = null;
+    priorSentTexts.length = 0;
     childExited = false;
     clearTimeout(pendingTimer);
+    clearTimeout(retryTimer);
     childPort?.close();
     childPort = null;
     self.close();
