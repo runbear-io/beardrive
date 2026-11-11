@@ -1207,6 +1207,201 @@ test("late join conflict park steps past a second another tab already took", asy
   }
 });
 
+/* Emptying a file is an edit: the way out sends "" rather than treating an
+   empty buffer as nothing to say, in every mode and on both exits. */
+for (const mode of ["staging", "solo"] as const) {
+  for (const exit of ["pagehide", "destroy"] as const) {
+    test(`an emptied file is flushed on the way out (${mode}, ${exit})`, async () => {
+      Reflect.set(globalThis, "window", new EventTarget());
+      fakeTimers();
+      const connect = mock.method(CollabDoc.prototype, "connect", () => {});
+      try {
+        const reqs: Array<{ method: string; url: string; body: string }> = [];
+        globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+          const method = init?.method ?? "GET";
+          reqs.push({ method, url: decodeURIComponent(String(url)), body: String(init?.body) });
+          if (method === "PUT") return new Response(JSON.stringify({ sha: "sha-2" }), { status: 200 });
+          return new Response(JSON.stringify({ sha: "sha-2", text: "" }), { status: 200 });
+        }) as typeof fetch;
+        let buffer = "todo\n";
+        let solo = false;
+        const file = openSharedFile({
+          apiBase: mode === "solo" ? "/api/" : "/api/p/proj/",
+          path: "notes.md",
+          seed: "todo\n",
+          baseSha: "sha-a",
+          who: "tester",
+          me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+          onReady: () => {},
+          onSolo: () => {
+            solo = true;
+          },
+          soloText: () => buffer,
+          soloApply: (e) => {
+            buffer = buffer.slice(0, e.from) + e.insert + buffer.slice(e.to);
+          },
+        });
+        if (mode === "solo") await waitFor(() => assert.equal(solo, true));
+
+        buffer = "";
+        if (exit === "pagehide") window.dispatchEvent(new Event("pagehide"));
+        else file.destroy();
+        await advance(0);
+        assert.equal(reqs.length, 1);
+        if (mode === "solo") {
+          assert.equal(reqs[0].method, "PUT");
+          assert.ok(reqs[0].url.includes("upload/content?path=notes.md"));
+          assert.equal(reqs[0].body, "");
+        } else {
+          assert.equal(reqs[0].method, "POST");
+          assert.ok(reqs[0].url.includes("ycollab/sync?path=notes.md"));
+          const body = JSON.parse(reqs[0].body) as { base_text?: string; text?: string };
+          assert.equal(body.text, "");
+          assert.equal(body.base_text, "todo\n");
+        }
+        if (exit === "pagehide") {
+          // Landed: the unmount that follows has nothing left to send.
+          file.destroy();
+          await advance(0);
+          assert.equal(reqs.length, 1);
+        }
+      } finally {
+        realTimers();
+        connect.mock.restore();
+      }
+    });
+  }
+}
+
+/* A pagehide flush refused for a sharp shrink, on a page that lives on (the
+   bfcache, or no unload at all): the user is asked, as a save would ask. */
+test("a pagehide flush refused 422 for a shrink asks the user when the page lives on", async () => {
+  Reflect.set(globalThis, "window", new EventTarget());
+  fakeTimers();
+  try {
+    const reqs: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      reqs.push((init?.method ?? "GET") + " " + decodeURIComponent(String(url)));
+      return new Response(JSON.stringify({ error: "would empty the file", shrink: true }), { status: 422 });
+    }) as typeof fetch;
+    let buffer = "todo\n";
+    let solo = false;
+    const asks: ShrinkAsk[] = [];
+    const file = openSharedFile({
+      apiBase: "/api/",
+      path: "notes.md",
+      seed: "todo\n",
+      baseSha: "sha-a",
+      me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+      onReady: () => {},
+      onSolo: () => {
+        solo = true;
+      },
+      onShrinkRefused: (a) => asks.push(a),
+      soloText: () => buffer,
+      soloApply: (e) => {
+        buffer = buffer.slice(0, e.from) + e.insert + buffer.slice(e.to);
+      },
+    });
+    await waitFor(() => assert.equal(solo, true));
+    buffer = "";
+    window.dispatchEvent(new Event("pagehide"));
+    await advance(0);
+    assert.equal(reqs.length, 1);
+    assert.equal(asks.length, 1);
+    file.destroy();
+  } finally {
+    realTimers();
+  }
+});
+
+/* A staging pagehide checkpoints "v0\nx\n"; the page is restored from the
+   bfcache and the user types a second "x". Landed, the next checkpoint is
+   built on what landed (two x lines at the hub, never three). Failed after
+   it may have reached the room, the next one names it in prior_sent so the
+   hub never applies it twice. Still unanswered, the next save waits for it
+   rather than racing it to the room. */
+for (const answer of ["landed", "502", "unsettled"] as const) {
+  test(`a bfcache-restored page builds on its pagehide checkpoint (${answer})`, async () => {
+    Reflect.set(globalThis, "window", new EventTarget());
+    fakeTimers();
+    const h = stagingConflictHarness();
+    try {
+      h.state.buffer = "v0\nx\n";
+      window.dispatchEvent(new Event("pagehide"));
+      assert.equal(h.posts.length, 1);
+      same(h.posts[0], { base: "sha-0", base_text: "v0\n", text: "v0\nx\n", park_on_conflict: true });
+      if (answer === "landed") h.roomAnswers[0].resolve(h.ok({ ok: true, sha: "sha-1", text: "v0\nx\n" }));
+      if (answer === "502") h.roomAnswers[0].resolve(new Response("bad gateway", { status: 502 }));
+      await advance(0);
+
+      window.dispatchEvent(new Event("pageshow"));
+      h.state.buffer = "v0\nx\nx\n";
+      void h.file.saveNow();
+      await advance(0);
+      if (answer === "unsettled") {
+        // Held behind the pagehide request until it settles, here as a 502.
+        assert.equal(h.posts.length, 1);
+        h.roomAnswers[0].resolve(new Response("bad gateway", { status: 502 }));
+        await advance(0);
+      }
+      assert.equal(h.posts.length, 2);
+      if (answer === "landed") {
+        same(h.posts[1], { base: "sha-1", base_text: "v0\nx\n", text: "v0\nx\nx\n" });
+      } else {
+        same(h.posts[1], { base: "sha-0", base_text: "v0\n", text: "v0\nx\nx\n", prior_sent: ["v0\nx\n"] });
+      }
+    } finally {
+      realTimers();
+      h.connect.mock.restore();
+    }
+  });
+}
+
+/* Back from the bfcache with the pagehide checkpoint still on the wire, the
+   socket syncs: the join waits for that checkpoint rather than peeking past
+   it (a peek that beats it to the room would splice "x" in, and the late
+   checkpoint would land a second one). It lands, and the line is there once. */
+test("a join after a bfcache restore waits for the in-flight pagehide checkpoint", async () => {
+  Reflect.set(globalThis, "window", new EventTarget());
+  fakeTimers();
+  const h = stagingConflictHarness();
+  try {
+    const sock = { destroy() {} };
+    const c = h.file.collab as unknown as { ws: unknown; onStatus: (s: string) => void; onReady: () => void };
+
+    h.state.buffer = "v0\nx\n";
+    window.dispatchEvent(new Event("pagehide"));
+    assert.equal(h.posts.length, 1);
+    window.dispatchEvent(new Event("pageshow"));
+
+    // The room's document arrives before the checkpoint has reached it.
+    c.ws = sock;
+    h.file.collab.doc.transact(() => h.file.collab.text.insert(0, "v0\n"), sock);
+    c.onStatus("live");
+    c.onReady();
+    await advance(0);
+    // Waiting: no peek, no splice, no park.
+    assert.equal(h.posts.length, 1);
+    same(h.puts, []);
+    assert.equal(h.file.collab.text.toString(), "v0\n");
+
+    // The checkpoint lands, and the room broadcasts its line on the socket.
+    h.roomAnswers[0].resolve(h.ok({ ok: true, sha: "sha-1", text: "v0\nx\n" }));
+    h.file.collab.doc.transact(() => h.file.collab.text.insert(3, "x\n"), sock);
+    await advance(0);
+    assert.equal(h.file.collab.text.toString(), "v0\nx\n"); // once, never twice
+    assert.equal(h.posts.length, 1);
+    same(h.puts, []);
+    await advance(60_000);
+    assert.equal(h.file.collab.text.toString(), "v0\nx\n");
+    assert.equal(h.posts.length, 1);
+  } finally {
+    realTimers();
+    h.connect.mock.restore();
+  }
+});
+
 /* R11: the socket syncs while a staging checkpoint is still on the wire. The
    room applies the checkpoint (its own item IDs), and the same items reach
    this tab twice — in the HTTP answer's `update` and on the socket. The join

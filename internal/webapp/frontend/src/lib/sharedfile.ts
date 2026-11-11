@@ -333,6 +333,11 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
      and the second is a 409 against our own first. */
   let saving: Promise<void> | null = null;
   let dirtyWhileSaving = false;
+  /* The way-out write (flushExit) on the wire. It runs outside `saving` —
+     the page may be gone before it lands — but a page that lives on (the
+     bfcache) must not checkpoint or join past it: a join that peeks before it
+     reaches the room splices its text in, and then it lands a second copy. */
+  let exitSaving: Promise<void> | null = null;
   // The text on the wire, so its own echo through the change stream (which
   // routinely beats the response back) is not mistaken for a stranger's.
   // Cleared the moment the request settles.
@@ -414,6 +419,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
     }
     const run = (async () => {
       try {
+        while (exitSaving) await exitSaving;
         await saveLoop();
       } finally {
         saving = null;
@@ -964,10 +970,12 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
        own copy of them arrives after: every checkpointed line twice. So wait
        for it — the loop sends no further checkpoint meanwhile — and let it
        hand its items to the document first (sendRoom). */
-    if (saving) {
+    if (saving || exitSaving) {
       waitingToJoin = true;
       try {
-        while (saving) await saving;
+        // The way-out checkpoint too: a page back from the bfcache joins
+        // only once it has landed (or failed, and is named for the peek).
+        while (saving || exitSaving) await (saving ?? exitSaving);
       } finally {
         waitingToJoin = false;
       }
@@ -1308,6 +1316,9 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       return;
     }
     if (pendingJoin || stagingConflict) {
+      // A blank buffer is never parked beside a file (the hub agrees:
+      // upload.go refuses a whitespace-only conflict copy).
+      if (!text.trim()) return;
       const key = "park\u0000" + text;
       if (exitSent === key) return;
       exitSent = key;
@@ -1320,7 +1331,9 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       parkOnExit(copy, text, key);
       return;
     }
-    if (!text || text === saved) return;
+    // An emptied file is an edit like any other: only "nothing changed" is
+    // nothing to send.
+    if (text === saved && !roomNeedsFlush) return;
     const key = "text\u0000" + text;
     if (exitSent === key) return;
     if ((solo || noRoomHttp) && !unloading) {
@@ -1329,21 +1342,61 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
     }
     exitSent = key;
     const from = saved;
+    const staging = !(solo || noRoomHttp);
+    /* A staging checkpoint is recorded as ambiguous until answered, exactly
+       as sendRoom records one: a page restored from the bfcache with this
+       request unsettled (or failed after it reached the room) names it in
+       `prior_sent`, and a join peeks, so it is never applied twice. */
+    const before = ambiguousRoomCheckpoint;
+    const mine: Ambiguous = { sent: text, from, prev: before };
+    if (staging) ambiguousRoomCheckpoint = mine;
     /* The page is going and will not get to send a second request, so this
        one asks the hub to park a clash beside the file itself and answers
        with the copy (`parked`). An older hub refuses 409 instead: if its head
        already holds our edit there is nothing to keep; otherwise the words
        are parked from here, as long as the page lives to send it. */
     const onExitError = (e: unknown) => {
+      // Refused before the room was touched: the checkpoint is not ambiguous.
+      if (
+        staging &&
+        e instanceof HttpError &&
+        [400, 401, 403, 404, 405, 409, 413].includes(e.status) &&
+        ambiguousRoomCheckpoint === mine
+      ) {
+        ambiguousRoomCheckpoint = before;
+      }
+      // A page that lives on (bfcache, or no unload at all) asks the user,
+      // as a save would have.
+      if (e instanceof HttpError && e.status === 422 && isShrinkRefusal(e)) {
+        exitFailed(key)();
+        if (!gone) {
+          clearTimeout(shrinkTimer ?? undefined);
+          shrinkTimer = null;
+          askShrink(current());
+        }
+        return;
+      }
       if (!(e instanceof HttpError && e.status === 409)) return exitFailed(key)();
-      let theirs: { text?: unknown } = {};
+      let theirs: { text?: unknown; sha?: unknown } = {};
       try {
         const parsed: unknown = JSON.parse(e.body);
         if (parsed && typeof parsed === "object") theirs = parsed as typeof theirs;
       } catch {
         // an older hub, or a body we cannot read: park
       }
-      if (typeof theirs.text === "string" && (theirs.text === text || retainsChanges(from, text, theirs.text))) return;
+      if (typeof theirs.text === "string" && (theirs.text === text || retainsChanges(from, text, theirs.text))) {
+        // Already in the hub's text: a page that lives on is built on it now.
+        if (!gone && !hubHoldsIt) {
+          const res = merge3(text, theirs.text, current());
+          if (res.ok && applyText(res.text)) {
+            saved = theirs.text;
+            savedSha = undefined;
+            if (typeof theirs.sha === "string") rebase(theirs.sha);
+          }
+        }
+        return;
+      }
+      if (!text.trim()) return; // a blank buffer is never parked
       stagingConflict = true;
       let copy = parkedName !== null && parkedText === text ? parkedName : null;
       for (const [path, held] of conflictPuts) if (copy === null && held === text) copy = path;
@@ -1355,14 +1408,58 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
         opts.onConflictCopy?.(path);
       });
     };
-    const landed = (out: { parked?: string }) => {
-      if (out.parked) opts.onConflictCopy?.(out.parked);
+    /* Answered: what landed is what a page restored from the bfcache builds
+       on, so its next save diffs against it rather than against `from`. */
+    const parkedHere = (parked: string, sha?: string) => {
+      saved = text;
+      savedSha = undefined;
+      rebase(sha);
+      if (!gone && current() === text) setState("clean");
+      opts.onConflictCopy?.(parked);
     };
-    if (solo || noRoomHttp) {
-      void putText(contentURL(opts.path), text, base, confirmShrinkOnce, true, true).then(landed, onExitError);
+    let req: Promise<unknown>;
+    if (!staging) {
+      req = putText(contentURL(opts.path), text, base, confirmShrinkOnce, true, true).then((out) => {
+        confirmShrinkOnce = false;
+        if (out.parked) return parkedHere(out.parked, out.sha);
+        if (out.merged) {
+          // The hub folded it into a newer file: learn what the file is.
+          if (!gone) void rebaseOnHead(text, true);
+          else rebase(out.sha);
+          return;
+        }
+        adopt(text, out.sha);
+        if (!gone && current() === saved) setState("clean");
+        opts.onSaved?.(text);
+      }, onExitError);
     } else {
-      void syncCollab(syncURL, { ...roomPayload(text), park_on_conflict: true }, true).then(landed, onExitError);
+      req = syncCollab(syncURL, { ...roomPayload(text, before), park_on_conflict: true }, true).then((out) => {
+        confirmShrinkOnce = false;
+        if (ambiguousRoomCheckpoint === mine) ambiguousRoomCheckpoint = null;
+        roomNeedsFlush = false;
+        if (out.parked) return parkedHere(out.parked, out.sha);
+        if (out.update) collab.applyRemoteUpdate(out.update);
+        if (gone || hubHoldsIt || typeof out.text !== "string") {
+          rebase(out.sha);
+          return;
+        }
+        const res = merge3(text, out.text, current());
+        if (res.ok && applyText(res.text)) {
+          adopt(out.text, out.sha);
+          if (current() === saved) setState("clean");
+        }
+        opts.onSaved?.(out.text);
+      }, onExitError);
     }
+    // Settled either way: what waits on it only needs to know it is over.
+    const settled: Promise<void> = req.then(
+      () => {},
+      () => {},
+    );
+    exitSaving = settled;
+    void settled.then(() => {
+      if (exitSaving === settled) exitSaving = null;
+    });
   };
   const onPageHide = () => {
     if (!gone) flushExit(current(), true);
