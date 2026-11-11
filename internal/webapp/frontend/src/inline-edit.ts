@@ -135,6 +135,14 @@ const elRemoveAttribute = Element.prototype.removeAttribute;
 const attrNameGet = Object.getOwnPropertyDescriptor(Attr.prototype, "name")!.get!;
 const datasetGet = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "dataset")!.get!;
 const nativeExecCommand = window.Document.prototype.execCommand;
+// What the editor is built from: a closed shadow root and the plain DOM calls
+// that fill it, untouched by any guard or by anything a page does later.
+const rawAttachShadow = Element.prototype.attachShadow;
+const docCreateElement = window.Document.prototype.createElement;
+const nodeAppendChild = Node.prototype.appendChild;
+const elSetAttribute = Element.prototype.setAttribute;
+const nodeIsConnectedGet = Object.getOwnPropertyDescriptor(Node.prototype, "isConnected")!.get!;
+const nodeTextContentSet = Object.getOwnPropertyDescriptor(Node.prototype, "textContent")!.set!;
 const getInputType = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "inputType")?.get;
 const getInputData = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "data")?.get;
 const getInputDT = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "dataTransfer")?.get;
@@ -415,6 +423,13 @@ function editable(el: HTMLElement): boolean {
 
 let view: EditorView | null = null;
 let host: HTMLElement | null = null;
+/* The open element's only light-DOM child while it is being edited. The
+   editor lives in its CLOSED shadow root: no page script, in any realm, can
+   reach the nodes ProseMirror edits — shadowRoot is null, events leave it
+   retargeted to this span, and anything a script held from the element
+   before is detached. All a script can do is remove this span, which closes
+   the editor (initDOM's observer). */
+let shadowHost: HTMLElement | null = null;
 let range: Range | null = null;
 let before = "";
 /* Done's save is on the wire: no edit may start until the app says how it
@@ -443,6 +458,7 @@ function clobberFromScript() {
   view = null;
   host = null;
   range = null;
+  shadowHost = null;
   boundRanges.delete(el);
   inEditorCall++;
   try {
@@ -547,6 +563,7 @@ function installGuards() {
       "remove",
       "before",
       "after",
+      "attachShadow",
     ],
     hostWrite,
   );
@@ -716,8 +733,10 @@ function unmount() {
   const html = currentHTML();
   view.destroy();
   view = null;
+  shadowHost = null;
   if (el) {
-    if (html !== null) el.innerHTML = html;
+    // Replaces the shadow host: the element is plain markup again.
+    elInnerHTMLSet.call(el, html ?? before);
     el.removeAttribute("data-bd-editing");
     // The content is new DOM, so a verdict about the old nodes is stale —
     // and it would be wrong to keep one that was computed before an edit.
@@ -737,7 +756,9 @@ function unmount() {
    first thing typed appears in the wrong place, which is the single most
    noticeable way a click-to-edit surface can feel broken. */
 function caretAt(v: EditorView, x: number, y: number) {
-  const at = v.posAtCoords({ left: x, top: y });
+  const rect = v.dom.getBoundingClientRect();
+  const clampedX = rect.width > 2 ? Math.max(rect.left + 1, Math.min(x, rect.right - 2)) : x;
+  const at = v.posAtCoords({ left: clampedX, top: y });
   if (!at) return;
   const sel = TextSelection.near(v.state.doc.resolve(at.pos));
   v.dispatch(v.state.tr.setSelection(sel));
@@ -763,11 +784,30 @@ function mount(el: HTMLElement, x?: number, y?: number) {
   if (!r) return;
   host = el;
   range = r;
-  before = el.innerHTML;
+  before = elInnerHTMLGet.call(el) as string;
+  // Read while the element still holds its own markup.
+  const doc = parseInner(el);
   el.setAttribute("data-bd-editing", "");
 
+  /* The editor is not mounted on the page's element: it is mounted in a
+     closed shadow root inside it, out of reach of the page's scripts (see
+     shadowHost). The element's own content is taken out — ProseMirror holds
+     it now — and written back when editing closes (unmount). */
+  elInnerHTMLSet.call(el, "");
+  const sh = docCreateElement.call(document, "span") as HTMLElement;
+  elSetAttribute.call(sh, "data-bd-shadow", "");
+  nodeAppendChild.call(el, sh);
+  const shadow = rawAttachShadow.call(sh, { mode: "closed" });
+  const style = docCreateElement.call(document, "style");
+  nodeTextContentSet.call(style, ":host { display: block; } [data-bd-pm] { display: block; outline: none; }");
+  nodeAppendChild.call(shadow, style);
+  const pmMount = docCreateElement.call(document, "span") as HTMLElement;
+  elSetAttribute.call(pmMount, "data-bd-pm", "");
+  nodeAppendChild.call(shadow, pmMount);
+  shadowHost = sh;
+
   const state = EditorState.create({
-    doc: parseInner(el),
+    doc,
     plugins: [
       history(),
       // Bound BEFORE baseKeymap so these win. Enter and Backspace-at-start are
@@ -796,10 +836,16 @@ function mount(el: HTMLElement, x?: number, y?: number) {
   view = editorSetup(
     () =>
       new EditorView(
-        { mount: el },
+        { mount: pmMount },
         {
           state,
           editable: () => !locked,
+          // Only a person's paste or drop: one a script dispatched is
+          // swallowed before ProseMirror reads it.
+          handleDOMEvents: {
+            paste: (_v, e) => !getIsTrusted.call(e),
+            drop: (_v, e) => !getIsTrusted.call(e),
+          },
           dispatchTransaction(tr) {
             if (locked && tr.docChanged) return;
             const nextState = view!.state.apply(tr);
@@ -931,7 +977,9 @@ function initDOM() {
      of this: a React re-render, a chart redraw, a template swap. */
   new RawMutationObserver(
     asEditor(() => {
-      if (host && !host.isConnected) clobberFromScript();
+      if (host && (!nodeIsConnectedGet.call(host) || (shadowHost && !nodeIsConnectedGet.call(shadowHost)))) {
+        clobberFromScript();
+      }
     }),
   ).observe(document.documentElement, { childList: true, subtree: true });
 

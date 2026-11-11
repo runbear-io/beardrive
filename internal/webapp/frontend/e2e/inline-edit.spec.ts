@@ -860,6 +860,179 @@ test("tampering with data-bd-src markers before DOMContentLoaded cannot redirect
   }
 });
 
+/* The editor lives in a closed shadow root inside the element, so a page
+   script holds nothing it edits. Each of the next three tests tries ONE way
+   in, unmixed with any other write that would close the editor first. The
+   evil values are built at run time, so the file's own script text never
+   contains them. */
+const LINKED_LEAD = `<p class="lead">Revenue grew <a href="/safe">steadily</a> across every region.</p>`;
+const linkedPage = (title: string, script: string) => `<!DOCTYPE html>
+<html>
+  <head>
+    <title>${title}</title>
+  </head>
+  <body>
+    <h1>${title}</h1>
+    ${LINKED_LEAD}
+    <script>
+${script}
+    </script>
+  </body>
+</html>
+`;
+
+// 1: only the reflected href setter — on a link saved before editing began,
+// and on whatever the keystroke's target holds.
+const HREF_HOSTILE = linkedPage(
+  "Href hostile",
+  `(function () {
+  var preSavedLink = document.querySelector("p.lead a");
+  var hrefSet = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, "href").set;
+  var evil = "https://evil." + "example/href";
+  var hit = function (e) {
+    try { if (preSavedLink) hrefSet.call(preSavedLink, evil); } catch {}
+    try {
+      var a = e.target && e.target.querySelector && e.target.querySelector("a");
+      if (a) hrefSet.call(a, evil);
+    } catch {}
+  };
+  ["keydown", "beforeinput", "input"].forEach(function (t) { document.addEventListener(t, hit, true); });
+})();`,
+);
+
+test("a reflected href setter on a saved link cannot change the link being edited", async ({ page, browser }) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "href", HREF_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Clean.");
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(
+      page,
+      id,
+      file,
+      'Revenue grew <a href="/safe">steadily</a> across every region. Clean.',
+    );
+    expect(after).not.toContain("evil.example");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+// 2: only another realm's untouched innerHTML setter (an about:blank child
+// frame's), on the element and on the keystroke's target, on "!".
+const CROSSREALM_HOSTILE = linkedPage(
+  "Cross-realm hostile",
+  `(function () {
+  var sub = document.createElement("iframe");
+  sub.style.display = "none";
+  document.body.appendChild(sub);
+  var setInner = null;
+  try { setInner = Object.getOwnPropertyDescriptor(sub.contentWindow.Element.prototype, "innerHTML").set; } catch {}
+  var mark = "PWNED" + "_CROSSREALM";
+  var hit = function (e) {
+    if (e.key !== "!" && e.data !== "!") return;
+    if (!setInner) return;
+    try { setInner.call(document.querySelector("p.lead"), mark); } catch {}
+    try { setInner.call(e.target, mark); } catch {}
+  };
+  ["keydown", "beforeinput", "input"].forEach(function (t) { document.addEventListener(t, hit, true); });
+})();`,
+);
+
+test("another realm's innerHTML setter during real typing never reaches the saved file", async ({ page, browser }) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "crossrealm", CROSSREALM_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Safe");
+    await waitForSource(page, id, file, "across every region. Safe");
+
+    await editor.keyboard.press("!");
+    await editor.click("#edit-btn"); // Done
+
+    // Either the other realm could not be reached (and "!" was typed), or it
+    // detached the editor (which closed, keeping " Safe"): never the mark.
+    await page.waitForTimeout(2500); // both idles, plus room for any write
+    const after = await source(page, id, file);
+    expect(after).toContain("across every region. Safe");
+    expect(after).not.toContain("PWNED_CROSSREALM");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
+// 3: a real paste, while the page's paste/beforeinput/input listeners try to
+// repoint the saved link and to swap in their own clipboard markup.
+const PASTE_HOSTILE = linkedPage(
+  "Paste hostile",
+  `(function () {
+  var preSavedLink = document.querySelector("p.lead a");
+  var evil = "https://evil." + "example/paste";
+  var hit = function (e) {
+    try { if (preSavedLink) preSavedLink.href = evil; } catch {}
+    try {
+      if (e.clipboardData) e.clipboardData.setData("text/html", '<a href="https://evil.' + 'example/clip">x</a>');
+    } catch {}
+  };
+  ["paste", "beforeinput", "input"].forEach(function (t) { document.addEventListener(t, hit, true); });
+})();`,
+);
+
+test("a real paste lands while hostile paste listeners try to hijack the link", async ({ page, browser }) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "paste", PASTE_HOSTILE);
+
+  const ctx = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+    await editor.evaluate(() => navigator.clipboard.writeText(" pasted words"));
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.press("ControlOrMeta+v"); // the browser's own paste
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(page, id, file, "pasted words");
+    // A leading space may be kept as a non-breaking one.
+    expect(after).toMatch(
+      /Revenue grew <a href="\/safe">steadily<\/a> across every region\.(?: |&nbsp;)pasted words/,
+    );
+    expect(after).not.toContain("evil.example");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
 /* The page goes into the bfcache (pagehide, persisted) with an edit the app
    never heard: the exit worker saves it, and that exit's port is spent. The
    page comes back (pageshow) and is edited again — still unheard — and then
