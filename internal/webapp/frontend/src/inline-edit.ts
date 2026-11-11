@@ -83,6 +83,10 @@ const setClear = uncurry(Set.prototype.clear);
 const setSizeGet = uncurry(Object.getOwnPropertyDescriptor(Set.prototype, "size")!.get!);
 const jsonStringify = JSON.stringify;
 const objFreeze = Object.freeze;
+const strReplace = uncurry(String.prototype.replace);
+const strIncludes = uncurry(String.prototype.includes);
+const elAttrsGet = Object.getOwnPropertyDescriptor(Element.prototype, "attributes")!.get!;
+const attrValGet = Object.getOwnPropertyDescriptor(Attr.prototype, "value")!.get!;
 const objCreate = Object.create;
 const objAssign = Object.assign;
 const nativeSetTimeout = window.setTimeout.bind(window);
@@ -358,12 +362,18 @@ const RawInline = Mark.create({
         // it needs to not damage one.
         tag: "a, span, sup, sub, small, abbr, mark, u, s, del, ins, cite, q, var, samp, kbd, time, data, bdi, bdo, big, strike, tt, font, label, ruby, rt, rp, dfn",
         priority: 10,
-        getAttrs: (el: HTMLElement) => ({
-          tag: el.tagName.toLowerCase(),
-          attrs: Object.fromEntries(
-            [...el.attributes].map((a) => [a.name, a.value]),
-          ),
-        }),
+        getAttrs: (el: HTMLElement) => {
+          const raw = objCreate(null) as Record<string, string>;
+          const list = elAttrsGet.call(el) as NamedNodeMap;
+          for (let i = 0; i < list.length; i++) {
+            const a = list.item(i);
+            if (a) raw[attrNameGet.call(a)] = attrValGet.call(a);
+          }
+          return {
+            tag: String(elTagNameGet.call(el)).toLowerCase(),
+            attrs: objFreeze(raw),
+          };
+        },
       },
     ];
   },
@@ -768,6 +778,96 @@ function installGuards() {
       } catch {}
     }
   }
+  /* Lock every EXISTING method/accessor on JS built-in intrinsics as
+     non-writable and non-configurable so page scripts cannot hijack methods
+     that ProseMirror or this bundle calls (e.g. Array.prototype.push/slice/map,
+     Map.prototype.get/set, String.prototype.replace, RegExp.prototype.exec,
+     Function.prototype.call, JSON.stringify, Object.entries). Prototype objects
+     themselves (other than Object.prototype) stay extensible so strict-mode
+     page polyfills adding NEW methods (`Array.prototype.sum = ...`) continue
+     to work; Object.prototype uses SES-style safe-override accessors and is
+     sealed against new property pollution (`Object.prototype.href = ...`). */
+  const lockExistingProps = (target: object, safeOverride = false) => {
+    for (const k of Reflect.ownKeys(target)) {
+      if (k === "__proto__") continue;
+      const d = Object.getOwnPropertyDescriptor(target, k);
+      if (!d || !d.configurable) continue;
+      try {
+        if ("value" in d) {
+          if (safeOverride && typeof k === "string") {
+            const val = d.value;
+            Object.defineProperty(target, k, {
+              configurable: false,
+              enumerable: d.enumerable,
+              get: () => val,
+              set(this: unknown, v: unknown) {
+                if (this !== target && this !== null && (typeof this === "object" || typeof this === "function")) {
+                  try {
+                    Object.defineProperty(this, k, {
+                      value: v,
+                      writable: true,
+                      enumerable: true,
+                      configurable: true,
+                    });
+                  } catch {}
+                }
+              },
+            });
+          } else {
+            Object.defineProperty(target, k, {
+              value: d.value,
+              writable: false,
+              enumerable: d.enumerable,
+              configurable: false,
+            });
+          }
+        } else {
+          Object.defineProperty(target, k, {
+            get: d.get,
+            set: d.set,
+            enumerable: d.enumerable,
+            configurable: false,
+          });
+        }
+      } catch {}
+    }
+  };
+  lockExistingProps(Object.prototype, true);
+  try {
+    Object.preventExtensions(Object.prototype);
+  } catch {}
+  for (const intr of [
+    Object,
+    Function,
+    Function.prototype,
+    Array,
+    Array.prototype,
+    String,
+    String.prototype,
+    Number,
+    Number.prototype,
+    Boolean,
+    Boolean.prototype,
+    Symbol,
+    Symbol.prototype,
+    RegExp,
+    RegExp.prototype,
+    Map,
+    Map.prototype,
+    Set,
+    Set.prototype,
+    WeakMap,
+    WeakMap.prototype,
+    WeakSet,
+    WeakSet.prototype,
+    Promise,
+    Promise.prototype,
+    JSON,
+    Reflect,
+    Math,
+  ]) {
+    lockExistingProps(intr);
+  }
 }
 installGuards();
 let editorUiStyle: HTMLStyleElement | null = null;
@@ -993,19 +1093,25 @@ function mount(el: HTMLElement, x?: number, y?: number) {
                 clobberFromScript();
                 return;
               }
-              const charsWithMarks = (doc: PMNode) => {
-                const out: Array<{ ch: string; marks: readonly PMMark[] }> = [];
+              type CharUnit = { readonly ch: string; readonly marks: readonly PMMark[] };
+              const charsWithMarks = (doc: PMNode): CharUnit[] => {
+                const out: CharUnit[] = [];
+                let len = 0;
                 doc.descendants((node) => {
                   if (!node.isText || !node.text) return;
-                  const t = node.text.replace(/\u00a0/g, " ");
-                  for (let i = 0; i < t.length; i++) out.push({ ch: t[i], marks: node.marks });
+                  const t = strReplace(node.text, /\u00a0/g, " ") as string;
+                  for (let i = 0; i < t.length; i++) {
+                    const u = objCreate(null) as { ch: string; marks: readonly PMMark[] };
+                    u.ch = t[i];
+                    u.marks = node.marks;
+                    out[len++] = objFreeze(u);
+                  }
                 });
                 return out;
               };
               const prev = charsWithMarks(view!.state.doc);
               const next = charsWithMarks(nextState.doc);
-              const sameUnit = (a: { ch: string; marks: readonly PMMark[] }, b: { ch: string; marks: readonly PMMark[] }) =>
-                a.ch === b.ch && PMMark.sameSet(a.marks, b.marks);
+              const sameUnit = (a: CharUnit, b: CharUnit) => a.ch === b.ch && PMMark.sameSet(a.marks, b.marks);
               let p = 0;
               while (p < prev.length && p < next.length && sameUnit(prev[p], next[p])) p++;
               let s = 0;
@@ -1016,31 +1122,42 @@ function mount(el: HTMLElement, x?: number, y?: number) {
               ) {
                 s++;
               }
-              const removed = prev.slice(p, prev.length - s).map((u) => u.ch).join("");
-              const addedUnits = next.slice(p, next.length - s);
-              const added = addedUnits.map((u) => u.ch).join("");
+              let removed = "";
+              for (let i = p; i < prev.length - s; i++) removed += prev[i].ch;
+              let added = "";
+              for (let i = p; i < next.length - s; i++) added += next[i].ch;
               if (
-                (added && !allowedTextBudget.includes(added)) ||
+                (added && !Boolean(strIncludes(allowedTextBudget, added))) ||
                 (removed && !allowRemoval) ||
                 (!added && !removed && (setSizeGet(allowedPasteMarks) as number) === 0)
               ) {
                 clobberFromScript();
                 return;
               }
-              if (addedUnits.length > 0) {
+              if (p < next.length - s) {
                 const cursorMarks = view!.state.storedMarks ?? view!.state.selection.$from.marks();
                 const adjLeft = p > 0 ? prev[p - 1].marks : cursorMarks;
                 const adjRight = p < prev.length ? prev[p].marks : cursorMarks;
-                for (const u of addedUnits) {
+                for (let i = p; i < next.length - s; i++) {
+                  const u = next[i];
                   if (
                     u.marks.length > 0 &&
                     !PMMark.sameSet(u.marks, cursorMarks) &&
                     !PMMark.sameSet(u.marks, adjLeft) &&
-                    !PMMark.sameSet(u.marks, adjRight) &&
-                    !u.marks.every((m) => Boolean(setHas(allowedPasteMarks, jsonStringify([m.type.name, m.attrs]))))
+                    !PMMark.sameSet(u.marks, adjRight)
                   ) {
-                    clobberFromScript();
-                    return;
+                    let allWhitelisted = true;
+                    for (let mi = 0; mi < u.marks.length; mi++) {
+                      const m = u.marks[mi];
+                      if (!Boolean(setHas(allowedPasteMarks, jsonStringify([m.type.name, m.attrs])))) {
+                        allWhitelisted = false;
+                        break;
+                      }
+                    }
+                    if (!allWhitelisted) {
+                      clobberFromScript();
+                      return;
+                    }
                   }
                 }
               }

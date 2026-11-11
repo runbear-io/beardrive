@@ -1269,6 +1269,100 @@ test("mutating an element after initialization before the user clicks it refuses
   }
 });
 
+// 7: replacing Array.prototype.push / map / slice to intercept ProseMirror's
+// shared `node.marks` array during real typing and mutate `marks[0].attrs.attrs.href`,
+// while also verifying strict-mode polyfills adding NEW methods on Array.prototype still work.
+const ARRAY_PUSH_MARK_HOSTILE = linkedPage(
+  "Array push mark hostile",
+  `(function () {
+  "use strict";
+  var evil = "https://evil." + "example/array-push";
+  // Legitimate strict-mode polyfill adding a brand-new method must keep working:
+  Array.prototype.__bdTestPolyfill = function () { return this.length; };
+  window.__polyfillWorked = [1, 2, 3].__bdTestPolyfill() === 3;
+
+  var corruptMarks = function (val) {
+    if (!val || typeof val !== "object") return;
+    var list = Array.isArray(val) ? val : Array.isArray(val.marks) ? val.marks : null;
+    if (!list) return;
+    for (var i = 0; i < list.length; i++) {
+      var m = list[i];
+      if (m && m.attrs && m.attrs.attrs && m.attrs.attrs.href) {
+        try { m.attrs.attrs.href = evil; } catch {}
+        try { m.attrs.attrs = { href: evil }; } catch {}
+      }
+    }
+  };
+  ["push", "map", "slice", "forEach"].forEach(function (k) {
+    try {
+      var orig = Array.prototype[k];
+      Array.prototype[k] = function () {
+        for (var i = 0; i < arguments.length; i++) corruptMarks(arguments[i]);
+        corruptMarks(this);
+        return orig.apply(this, arguments);
+      };
+    } catch {}
+    try {
+      var orig2 = Array.prototype[k];
+      Object.defineProperty(Array.prototype, k, {
+        value: function () {
+          for (var i = 0; i < arguments.length; i++) corruptMarks(arguments[i]);
+          corruptMarks(this);
+          return orig2.apply(this, arguments);
+        },
+      });
+    } catch {}
+  });
+  try {
+    Object.defineProperty(Object.prototype, "marks", {
+      configurable: true,
+      set: function (v) { corruptMarks(v); },
+    });
+  } catch {}
+})();`,
+);
+
+test("replacing Array.prototype.push cannot steal or mutate RawInline link marks during typing", async ({
+  page,
+  browser,
+}) => {
+  await login(page, ADMIN);
+  const id = await project(page);
+  const file = await putHTML(page, id, "array-push", ARRAY_PUSH_MARK_HOSTILE);
+
+  const ctx = await browser.newContext();
+  try {
+    const editor = await ctx.newPage();
+    await login(editor, ADMIN);
+    await editor.goto(`/${id}/${file}`);
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-ready]").waitFor();
+
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+    const polyfillOk = await child!.evaluate(() =>
+      "__polyfillWorked" in window ? window.__polyfillWorked === true : false,
+    );
+    expect(polyfillOk).toBe(true);
+
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Typed cleanly.");
+    await editor.click("#edit-btn"); // Done
+
+    const after = await waitForSource(
+      page,
+      id,
+      file,
+      'Revenue grew <a href="/safe">steadily</a> across every region. Typed cleanly.',
+    );
+    expect(after).not.toContain("evil.example");
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+});
+
 /* The page goes into the bfcache (pagehide, persisted) with an edit the app
    never heard: the exit worker saves it, and that exit's port is spent. The
    page comes back (pageshow) and is edited again — still unheard — and then
