@@ -135,11 +135,13 @@ const elRemoveAttribute = Element.prototype.removeAttribute;
 const attrNameGet = Object.getOwnPropertyDescriptor(Attr.prototype, "name")!.get!;
 const datasetGet = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "dataset")!.get!;
 const nativeExecCommand = window.Document.prototype.execCommand;
+const getInputType = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "inputType")?.get;
 const getInputData = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "data")?.get;
 const getInputDT = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "dataTransfer")?.get;
 const getCompData = Object.getOwnPropertyDescriptor(window.CompositionEvent.prototype, "data")?.get;
 const getClipDT = Object.getOwnPropertyDescriptor(window.ClipboardEvent.prototype, "clipboardData")?.get;
 const dtGetData = window.DataTransfer.prototype.getData;
+const attrOwnerGet = Object.getOwnPropertyDescriptor(Attr.prototype, "ownerElement")?.get;
 // The hash the server computed over the STORED bytes, read while this script
 // is still `currentScript`. The app compares it with the document it holds:
 // if they differ, the ranges describe a file that has since moved on, and it
@@ -176,13 +178,28 @@ let trustedEditOpen = false;
 let composing = false;
 let inKeymapCmd = 0;
 let allowedTextBudget = "";
+let allowRemoval = false;
+let allowRichPaste = false;
 let trustedTimer: ReturnType<typeof setTimeout> | undefined;
-const normSpace = (s: string) => s.replace(/\u00a0/g, " ");
 const addBudget = (s: string | null | undefined) => {
-  if (s) allowedTextBudget += normSpace(s);
+  if (s) allowedTextBudget += s.replace(/\u00a0/g, " ");
 };
-const recordTrustedText = (e: Event) => {
+const recordTrustedText = (name: string, e: Event) => {
+  if (view && !view.state.selection.empty) allowRemoval = true;
+  if (name === "cut" || name === "paste" || name === "drop" || composing) allowRemoval = true;
+  if (name === "paste" || name === "drop") allowRichPaste = true;
   if (e instanceof window.InputEvent) {
+    const it = getInputType?.call(e) ?? "";
+    if (
+      it.startsWith("delete") ||
+      it.startsWith("insertReplacement") ||
+      it.startsWith("insertComposition") ||
+      it.startsWith("insertFrom") ||
+      it.startsWith("history")
+    ) {
+      allowRemoval = true;
+    }
+    if (it === "insertFromPaste" || it === "insertFromDrop") allowRichPaste = true;
     addBudget(getInputData?.call(e));
     const dt = getInputDT?.call(e);
     if (dt) {
@@ -192,6 +209,7 @@ const recordTrustedText = (e: Event) => {
     return;
   }
   if (e instanceof window.CompositionEvent) {
+    allowRemoval = true;
     addBudget(getCompData?.call(e));
     return;
   }
@@ -210,7 +228,11 @@ const openTrustedWindow = (ms = 0) => {
   nativeClearTimeout(trustedTimer);
   trustedTimer = nativeSetTimeout(() => {
     trustedEditOpen = false;
-    if (!composing) allowedTextBudget = "";
+    if (!composing) {
+      allowedTextBudget = "";
+      allowRemoval = false;
+      allowRichPaste = false;
+    }
   }, ms);
 };
 for (const name of [
@@ -230,9 +252,9 @@ for (const name of [
     name,
     (e: Event) => {
       if (!getIsTrusted.call(e)) return;
-      recordTrustedText(e);
       if (name === "compositionstart") composing = true;
-      else if (name === "compositionend") {
+      recordTrustedText(name, e);
+      if (name === "compositionend") {
         composing = false;
         openTrustedWindow(60);
         return;
@@ -555,18 +577,24 @@ function installGuards() {
   });
 
   // The range markers.
-  methods(Element.prototype, ["setAttribute", "removeAttribute", "toggleAttribute"], (_s, a) =>
-    srcWrite(isSrcName(a[0])),
+  methods(Element.prototype, ["setAttribute", "removeAttribute", "toggleAttribute"], (s, a) =>
+    srcWrite(isSrcName(a[0])) || hostWrite(s, []),
   );
-  methods(Element.prototype, ["setAttributeNS"], (_s, a) => srcWrite(isSrcName(localOf(a[1]))));
-  methods(Element.prototype, ["removeAttributeNS"], (_s, a) => srcWrite(isSrcName(a[1])));
-  methods(Element.prototype, ["setAttributeNode", "setAttributeNodeNS", "removeAttributeNode"], (_s, a) =>
-    srcWrite(isSrcAttr(a[0])),
+  methods(Element.prototype, ["setAttributeNS"], (s, a) => srcWrite(isSrcName(localOf(a[1]))) || hostWrite(s, []));
+  methods(Element.prototype, ["removeAttributeNS"], (s, a) => srcWrite(isSrcName(a[1])) || hostWrite(s, []));
+  methods(Element.prototype, ["setAttributeNode", "setAttributeNodeNS", "removeAttributeNode"], (s, a) =>
+    srcWrite(isSrcAttr(a[0])) || hostWrite(s, []),
   );
-  methods(NamedNodeMap.prototype, ["setNamedItem", "setNamedItemNS"], (_s, a) => srcWrite(isSrcAttr(a[0])));
+  methods(NamedNodeMap.prototype, ["setNamedItem", "setNamedItemNS"], (_s, a) => {
+    const owner = a[0] instanceof Attr ? attrOwnerGet?.call(a[0]) : null;
+    return srcWrite(isSrcAttr(a[0])) || (owner ? hostWrite(owner, []) : false);
+  });
   methods(NamedNodeMap.prototype, ["removeNamedItem"], (_s, a) => srcWrite(isSrcName(a[0])));
   methods(NamedNodeMap.prototype, ["removeNamedItemNS"], (_s, a) => srcWrite(isSrcName(a[1])));
-  setters(Attr.prototype, ["value"], (s) => srcWrite(isSrcAttr(s)));
+  setters(Attr.prototype, ["value"], (s) => {
+    const owner = s instanceof Attr ? attrOwnerGet?.call(s) : null;
+    return srcWrite(isSrcAttr(s)) || (owner ? hostWrite(owner, []) : false);
+  });
   Object.defineProperty(HTMLElement.prototype, "dataset", {
     configurable: false,
     enumerable: true,
@@ -762,18 +790,37 @@ function mount(el: HTMLElement, x?: number, y?: number) {
                 clobberFromScript();
                 return;
               }
-              const prev = normSpace(view!.state.doc.textBetween(0, view!.state.doc.content.size, ""));
-              const next = normSpace(nextState.doc.textBetween(0, nextState.doc.content.size, ""));
+              const prev = view!.state.doc.textBetween(0, view!.state.doc.content.size, "").replace(/\u00a0/g, " ");
+              const next = nextState.doc.textBetween(0, nextState.doc.content.size, "").replace(/\u00a0/g, " ");
               let p = 0;
               while (p < prev.length && p < next.length && prev[p] === next[p]) p++;
               let s = 0;
               while (s < prev.length - p && s < next.length - p && prev[prev.length - 1 - s] === next[next.length - 1 - s]) s++;
+              const removed = prev.slice(p, prev.length - s);
               const added = next.slice(p, next.length - s);
-              if (added && !allowedTextBudget.includes(added)) {
-                /* Even a write made through another realm's unwrapped DOM
-                   setter introduces text no trusted input event carried. */
+              if (
+                (added && !allowedTextBudget.includes(added)) ||
+                (removed && !allowRemoval) ||
+                (!added && !removed && !allowRichPaste)
+              ) {
                 clobberFromScript();
                 return;
+              }
+              if (!allowRichPaste) {
+                const prevMarks = new Set<string>();
+                view!.state.doc.descendants((node) => {
+                  for (const m of node.marks) prevMarks.add(JSON.stringify([m.type.name, m.attrs]));
+                });
+                let forgedMark = false;
+                nextState.doc.descendants((node) => {
+                  for (const m of node.marks) {
+                    if (!prevMarks.has(JSON.stringify([m.type.name, m.attrs]))) forgedMark = true;
+                  }
+                });
+                if (forgedMark) {
+                  clobberFromScript();
+                  return;
+                }
               }
             }
             view!.updateState(nextState);

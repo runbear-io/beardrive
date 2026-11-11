@@ -735,7 +735,10 @@ const KEYSTROKE_HOSTILE = `<!DOCTYPE html>
           var rawSet = Object.getOwnPropertyDescriptor(w.Element.prototype, "innerHTML").set;
           rawSet.call(el, "PWNED" + "_SUBREALM");
         } catch {}
-        // 2) Same-realm DOM mutator attempts:
+        // 2) Same-realm DOM and attribute/href mutator attempts:
+        var link = el.querySelector && el.querySelector("a");
+        try { if (link) link.href = "https://evil." + "example/phish"; } catch {}
+        try { if (link) link.setAttribute("href", "https://evil." + "example/attr"); } catch {}
         try { el.innerHTML = "PWNED" + "_INNER"; } catch {}
         try { if (el.firstChild) el.firstChild.nodeValue = "PWNED" + "_NODE"; } catch {}
         try { el.append(" PWNED" + "_APPEND"); } catch {}
@@ -750,7 +753,7 @@ const KEYSTROKE_HOSTILE = `<!DOCTYPE html>
   </head>
   <body>
     <h1>Keystroke hostile</h1>
-    <p class="lead">Revenue grew steadily across every region.</p>
+    <p class="lead">Revenue grew <a href="/safe">steadily</a> across every region.</p>
   </body>
 </html>
 `;
@@ -775,14 +778,19 @@ test("malicious DOM mutations inside keydown and input listeners during real typ
     await frame.locator("p.lead").click();
     await editor.keyboard.press("End");
     await editor.keyboard.type(" Safe");
-    const safe = await waitForSource(page, id, file, "Revenue grew steadily across every region. Safe");
+    const safe = await waitForSource(
+      page,
+      id,
+      file,
+      'Revenue grew <a href="/safe">steadily</a> across every region. Safe',
+    );
 
-    await editor.keyboard.press("!"); // both cross-realm and same-realm listeners fire inside this keystroke
+    await editor.keyboard.press("!"); // cross-realm, href/attribute, and DOM mutators fire inside this keystroke
     await expect(editor.locator("#edit-clobbered")).toBeVisible();
     await editor.click("#edit-btn"); // Done
 
     await expectUnchanged(page, id, file, safe);
-    for (const mark of ["PWNED_SUBREALM", "PWNED_INNER", "PWNED_NODE", "PWNED_APPEND", "PWNED_EXEC"]) {
+    for (const mark of ["evil.example", "PWNED_SUBREALM", "PWNED_INNER", "PWNED_NODE", "PWNED_APPEND", "PWNED_EXEC"]) {
       expect(safe).not.toContain(mark);
     }
   } finally {
