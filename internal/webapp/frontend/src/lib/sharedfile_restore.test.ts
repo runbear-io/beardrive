@@ -2242,8 +2242,9 @@ for (const mode of ["live", "offline", "staging", "solo"] as const) {
 
 /* A shrink only the hub can see: the read seeded an empty buffer (`saved`
    is "", so nothing local is a shrink) and the hub refuses the save 422,
-   slowly. The question opens when the answer comes, and Done — waiting on
-   the save — finds it open and stays. */
+   ten seconds later. The file says so (mayServerRefuseShrink), so Done waits
+   the save out instead of leaving on a timer; the question opens when the
+   answer comes, and Done finds it open and stays. */
 test("a shrink the hub refuses 422 after a slow answer still asks before Done leaves", async () => {
   fakeTimers();
   try {
@@ -2252,7 +2253,7 @@ test("a shrink the hub refuses 422 after a slow answer still asks before Done le
       reqs.push((init?.method ?? "GET") + " " + decodeURIComponent(String(url)));
       // The hub answers late (fake clock: advance() moves it).
       const late = Promise.withResolvers<void>();
-      setTimeout(late.resolve, 800);
+      setTimeout(late.resolve, 10_000);
       await late.promise;
       return new Response(JSON.stringify({ error: "would cut most of the file", shrink: true }), { status: 422 });
     }) as typeof fetch;
@@ -2278,11 +2279,12 @@ test("a shrink the hub refuses 422 after a slow answer still asks before Done le
     await waitFor(() => assert.equal(solo, true));
 
     buffer = "x\n";
+    assert.equal(file.mayServerRefuseShrink(), true);
     let settled = false;
     void file.saveNow().then(() => {
       settled = true;
     });
-    await advance(799);
+    await advance(9_999);
     assert.equal(reqs.length, 1);
     assert.equal(settled, false);
     assert.equal(file.askingShrink(), false);
@@ -2290,9 +2292,70 @@ test("a shrink the hub refuses 422 after a slow answer still asks before Done le
     assert.equal(settled, true);
     assert.equal(file.askingShrink(), true);
     assert.equal(asks.length, 1);
+    assert.equal(file.mayServerRefuseShrink(), false); // the question is open
     file.destroy();
   } finally {
     realTimers();
+  }
+});
+
+/* When a save could meet a shrink refusal nothing here can see — and when
+   it cannot, so Done keeps its short wait. */
+test("mayServerRefuseShrink is true only where the hub alone can see a shrink", async () => {
+  fakeTimers();
+  const solos: SharedFile[] = [];
+  try {
+    globalThis.fetch = (async () => new Response("{}", { status: 200 })) as typeof fetch;
+    const openSolo = async (seed: string, baseSha: string | undefined, buffer: string) => {
+      let solo = false;
+      const file = openSharedFile({
+        apiBase: "/api/",
+        path: "notes.md",
+        seed,
+        baseSha,
+        me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+        onReady: () => {},
+        onSolo: () => {
+          solo = true;
+        },
+        onShrinkRefused: () => {},
+        soloText: () => buffer,
+        soloApply: () => {},
+      });
+      solos.push(file);
+      await waitFor(() => assert.equal(solo, true));
+      return file;
+    };
+    // Empty `saved`, a version that is not the empty file: only the hub knows.
+    assert.equal((await openSolo("", "sha-big", "x\n")).mayServerRefuseShrink(), true);
+    // Solo over a file a peer may have grown since it was read.
+    assert.equal((await openSolo("a\nb\nc\n", "sha-a", "a\nb\n")).mayServerRefuseShrink(), true);
+    // No version to be conditional on, or the version of no bytes.
+    assert.equal((await openSolo("", undefined, "x\n")).mayServerRefuseShrink(), false);
+    const empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    assert.equal((await openSolo("", empty, "x\n")).mayServerRefuseShrink(), false);
+    // Nothing to save.
+    assert.equal((await openSolo("a\nb\nc\n", "sha-a", "a\nb\nc\n")).mayServerRefuseShrink(), false);
+  } finally {
+    for (const f of solos) f.destroy();
+    await settle(); // their unmount saves land on this test's fetch
+    realTimers();
+  }
+
+  // A room, live or staging, over a non-empty `saved`: every shrink is local.
+  for (const mode of ["live", "staging"] as const) {
+    fakeTimers();
+    const h = await heldRoom();
+    try {
+      if (mode === "live") {
+        await h.goLive();
+        h.localEdit((t) => t.insert(t.length, "d\n"));
+      } else h.state.buffer = "a\nb\nc\nd\n";
+      assert.equal(h.file.mayServerRefuseShrink(), false);
+    } finally {
+      h.done();
+      realTimers();
+    }
   }
 });
 

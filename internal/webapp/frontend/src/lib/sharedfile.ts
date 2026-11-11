@@ -72,6 +72,10 @@ const MAX_REBASES = 4;
 const MAX_CONFLICT_TRIES = 64;
 const MAX_EXIT_COPY_TRIES = 8;
 
+// The sha of no bytes: a base naming it is a known-empty file, which nothing
+// can shrink.
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 // Above this, a staging checkpoint names its ancestor by sha alone when it can
 // (the hub reads the blob) instead of carrying it as text.
 const INLINE_BASE_MAX = 32_000;
@@ -91,6 +95,12 @@ export type SharedFile = {
   /** A shrink question is waiting on the user: leaving now would leave it
       unanswered (Done stays on the editor). */
   askingShrink(): boolean;
+  /** A save now could still be refused by the hub as a sharp shrink that
+      nothing here can see: `saved` is empty while the base names a non-empty
+      version, or a solo write lands on a file a peer may have grown. Done
+      then waits for the save's outcome, however long, rather than leave on a
+      timer before the question could open. */
+  mayServerRefuseShrink(): boolean;
   /** Fold an outside write — an agent, a CLI, another device — into the open
       document. "blocked" means the caller should SAY so instead, because this
       refused to resolve it. `held` says the hub has already put this text
@@ -1500,6 +1510,12 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
     rebase,
     saveNow,
     askingShrink: () => asking !== null,
+    mayServerRefuseShrink: () => {
+      if (asking || gone || confirmShrinkOnce || !opts.onShrinkRefused) return false;
+      if (!base || base === EMPTY_SHA256) return false;
+      if (hubHoldsIt) return saved === "" && (localDirtyInRoom || pending > 0);
+      return (saved === "" && (current() !== "" || roomNeedsFlush)) || ((solo || noRoomHttp) && current() !== saved);
+    },
     destroy() {
       if (typeof window !== "undefined") {
         window.removeEventListener("pagehide", onPageHide);

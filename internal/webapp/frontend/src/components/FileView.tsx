@@ -511,26 +511,30 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });
   };
   const { flushRef } = props;
-  /* A read that came back empty yet names a version: the file may hold more
-     than this buffer was seeded with, so only the hub can tell a shrink (its
-     422), and its answer gets longer before Done gives up waiting. */
-  const onlyHubSeesShrink = data?.kind === "text" && data.text === "" && !!data.sha;
   useEffect(() => {
     if (!flushRef) return;
     /* Save and leave: the save gets a moment, never a veto — a hub that does
        not answer must not trap the user in the editor. A question the user
-       must answer does keep them here, however it opened: before any request
-       (a shrink known here), or from the hub's answer within the wait. */
+       must answer does keep them here, however it opened. The one exception
+       to the moment: a save only the hub can refuse as a shrink is waited out
+       in full, since leaving before its answer would close the editor under
+       the question it opens. */
     const flush = async () => {
       const f = fileHandle.current;
       if (!f) return true;
+      const mustSettle = f.mayServerRefuseShrink();
+      const saving = f.saveNow();
       // Promise constructor, not withResolvers: the app targets ES2022.
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const waited = new Promise<void>((r) => {
-        timer = setTimeout(r, onlyHubSeesShrink ? 5_000 : 1_500);
-      });
       try {
-        await Promise.race([f.saveNow(), waited]);
+        if (mustSettle) await saving;
+        else
+          await Promise.race([
+            saving,
+            new Promise<void>((r) => {
+              timer = setTimeout(r, 1_500);
+            }),
+          ]);
       } catch {
         // The editor's own teardown still sends what it holds.
       } finally {
@@ -545,7 +549,7 @@ function EditView(props: Parameters<typeof FileView>[0]) {
     return () => {
       if (flushRef.current === flush) flushRef.current = null;
     };
-  }, [flushRef, qc, apiBase, path, fileURL, onlyHubSeesShrink]);
+  }, [flushRef, qc, apiBase, path, fileURL]);
   // Co-editors in this document right now. A write while somebody else is in
   // the room is their snapshot of the document I already have — warning about
   // it would fire on every co-editing save. Alone, the same event means
