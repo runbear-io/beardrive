@@ -407,7 +407,12 @@ export function VisualEdit({
     let srcLen = -1;
     let anchored = false;
 
-    const handleMessage = async (msg: FromFrame) => {
+    /* Synchronous unless it has to wait for anchoring: a patch that arrives
+       with the ranges anchored is in the document before this returns, so a
+       pagehide right after its message event (before any microtask) already
+       sends it. Only `ready`, and a patch that comes before anchoring, wait —
+       and the channel holds every message behind them meanwhile. */
+    const handleMessage = (msg: FromFrame): void | Promise<void> => {
       if (msg.type === "bd-edit:flushed") {
         channel.flushed(msg.id);
         return;
@@ -425,12 +430,14 @@ export function VisualEdit({
         srcHash = msg.hash;
         srcLen = msg.len;
         frameReady = true;
-        await anchorRanges(); // no-op until the document is seeded too
-        return;
+        return anchorRanges(); // no-op until the document is seeded too
       }
 
       if (msg.type !== "bd-edit:patch") return;
-      if (!anchored) await anchorRanges();
+      if (!anchored) return anchorRanges().then(() => applyPatch(msg));
+      applyPatch(msg);
+    };
+    const applyPatch = (msg: Patch) => {
       const a = anchors.get(key(msg));
       if (!a) return; // a range from a render this side has already replaced
       if (stageDoc) {

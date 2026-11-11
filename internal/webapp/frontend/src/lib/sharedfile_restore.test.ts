@@ -2780,3 +2780,67 @@ for (const room of ["merges", "clashes"] as const) {
     }
   });
 }
+
+/* A patch whose message event is followed at once by pagehide — no await, no
+   microtask in between — must already be in the document pagehide sends.
+   With nothing waiting in the channel (the ranges anchored), the handler
+   runs inside enqueue itself. */
+for (const mode of ["staging", "live"] as const) {
+  test(`an anchored patch is in the document before an immediate pagehide (${mode})`, async () => {
+    const Y = await import("yjs");
+    fakeTimers();
+    const h = await heldRoom();
+    const channel = frameChannel();
+    try {
+      if (mode === "live") await h.goLive();
+      // VisualEdit's handler for an anchored patch: synchronous.
+      channel.enqueue(() => {
+        if (mode === "live") h.localEdit((t) => t.insert(t.length, "patched\n"));
+        else h.state.buffer += "patched\n";
+      });
+      window.dispatchEvent(new Event("pagehide"));
+
+      assert.equal(h.reqs.length, 1);
+      assert.equal(h.reqs[0].keepalive, true);
+      const body = JSON.parse(h.reqs[0].body) as { text?: string; update?: string };
+      if (mode === "staging") assert.equal(body.text, "a\nb\nc\npatched\n");
+      else {
+        const d = new Y.Doc();
+        Y.applyUpdate(d, Uint8Array.from(atob(body.update ?? ""), (ch) => ch.charCodeAt(0)));
+        assert.equal(d.getText("body").toString(), "a\nb\nc\npatched\n");
+      }
+    } finally {
+      channel.close();
+      h.done();
+      realTimers();
+    }
+  });
+}
+
+/* Order still holds when a handler waits (`ready` anchoring): every message
+   after it waits too, and runs in arrival order; once the channel is idle
+   again, a message is handled at once. */
+test("frameChannel keeps arrival order behind an async handler, then handles at once again", async () => {
+  const channel = frameChannel();
+  const log: string[] = [];
+  const anchoring = Promise.withResolvers<void>();
+  channel.enqueue(async () => {
+    await anchoring.promise;
+    log.push("ready");
+  });
+  channel.enqueue(() => log.push("patch 1"));
+  channel.enqueue(() => {
+    throw new Error("a bad message");
+  });
+  channel.enqueue(() => log.push("patch 2"));
+  await settle();
+  same(log, []); // all held behind the anchoring
+
+  anchoring.resolve();
+  await settle();
+  same(log, ["ready", "patch 1", "patch 2"]); // a throwing handler stalls nothing
+
+  channel.enqueue(() => log.push("patch 3"));
+  same(log, ["ready", "patch 1", "patch 2", "patch 3"]); // idle: synchronous
+  channel.close();
+});

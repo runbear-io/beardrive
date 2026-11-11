@@ -396,6 +396,11 @@ send({
 document.documentElement.setAttribute("data-bd-ready", "");
 
 window.addEventListener("beforeunload", unmount);
+// Flush on pagehide too; keep the open element mounted when entering bfcache.
+window.addEventListener("pagehide", (e: PageTransitionEvent) => {
+  if (e.persisted) flush();
+  else unmount();
+});
 
 /* Done in the app: post what the open editor holds, then answer. The answer
    follows every patch on the same channel, so once the app has handled it, it
