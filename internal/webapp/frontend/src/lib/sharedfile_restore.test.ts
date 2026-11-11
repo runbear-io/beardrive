@@ -54,6 +54,7 @@ const { CollabDoc } = await import("./collab.ts");
 const { openSharedFile, SAVE_RETRY_MS } = await import("./sharedfile.ts");
 const { parseConflict } = await import("./conflict.ts");
 const { merge3, merge3PreferRight, merge3ForPath, validMergedText } = await import("./merge3.ts");
+const { frameChannel } = await import("./frameflush.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -2476,3 +2477,137 @@ for (const keepAnswer of [200, 503]) {
     }
   });
 }
+
+/* VisualEdit's Done: the iframe's last patch may still be in the postMessage
+   queue when Done asks the file to save. Saving then sees a clean buffer and
+   answers true, and the editor closes before the shrink check or the failure
+   that patch would meet. Draining first — flush request, the frame posts what
+   it holds, then `bd-edit:flushed` on the same channel — puts the patch in
+   the document before the save decides. `frame` stands in for the iframe:
+   `deliver` is a message arriving on window "message", later, in order. */
+function frameHarness(answer: (body: string) => Response) {
+  const puts: string[] = [];
+  globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+    puts.push(String(init?.body));
+    return answer(String(init?.body));
+  }) as typeof fetch;
+  const state = { buffer: "a\nb\nc\n" };
+  const asks: ShrinkAsk[] = [];
+  let solo = false;
+  const file = openSharedFile({
+    apiBase: "/api/",
+    path: "page.html",
+    seed: "a\nb\nc\n",
+    baseSha: "sha-a",
+    me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+    onReady: () => {},
+    onSolo: () => {
+      solo = true;
+    },
+    onShrinkRefused: (a) => asks.push(a),
+    soloText: () => state.buffer,
+    soloApply: (e) => {
+      state.buffer = state.buffer.slice(0, e.from) + e.insert + state.buffer.slice(e.to);
+    },
+  });
+  const channel = frameChannel();
+  type Msg = { type: "patch"; text: string } | { type: "flushed"; id: number };
+  // window "message" delivery: a later task, in posting order.
+  const deliver = (msg: Msg) =>
+    setImmediate(() =>
+      channel.enqueue(async () => {
+        await Promise.resolve(); // anchoring is async; order must still hold
+        if (msg.type === "patch") state.buffer = msg.text;
+        else channel.flushed(msg.id);
+      }),
+    );
+  const frame = { gone: false, answers: true, flushes: 0 };
+  const post = (m: { type: "bd-edit:flush"; id: number }) => {
+    frame.flushes++;
+    if (frame.answers) deliver({ type: "flushed", id: m.id });
+  };
+  // VisualEdit's exposed saveNow.
+  const saveNow = async () => {
+    await channel.drain(post, () => frame.gone);
+    return file.saveNow();
+  };
+  const ready = () => waitFor(() => assert.equal(solo, true));
+  return { file, state, asks, puts, channel, deliver, frame, saveNow, ready };
+}
+
+test("Done drains the frame's queued patch before saving: a sharp shrink in it asks", async () => {
+  const h = frameHarness(() => new Response(JSON.stringify({ sha: "sha-b" }), { status: 200 }));
+  try {
+    await h.ready();
+    // The user deleted the page and clicked Done at once: the patch is still
+    // on its way when Done runs.
+    h.deliver({ type: "patch", text: "" });
+    assert.equal(await h.saveNow(), false);
+    assert.equal(h.frame.flushes, 1);
+    assert.equal(h.state.buffer, "");
+    assert.equal(h.file.askingShrink(), true);
+    assert.equal(h.asks.length, 1);
+    same(h.puts, []); // asked before anything was sent
+  } finally {
+    h.channel.close();
+    h.file.destroy();
+  }
+});
+
+test("Done drains the frame's queued patch before saving: a failed save keeps the editor", async () => {
+  const h = frameHarness(() => new Response("unavailable", { status: 503 }));
+  try {
+    await h.ready();
+    h.deliver({ type: "patch", text: "a\nb\nc\nd\n" });
+    assert.equal(await h.saveNow(), false); // the patch met the 503
+    same(h.puts, ["a\nb\nc\nd\n"]);
+  } finally {
+    h.channel.close();
+    h.file.destroy();
+    await settle();
+  }
+});
+
+test("Done's drain lands every queued patch in order, then saves once", async () => {
+  const h = frameHarness((body) => new Response(JSON.stringify({ sha: "sha-" + body.length }), { status: 200 }));
+  try {
+    await h.ready();
+    h.deliver({ type: "patch", text: "a\nb\nc\nd\n" });
+    h.deliver({ type: "patch", text: "a\nb\nc\nd\ne\n" });
+    assert.equal(await h.saveNow(), true);
+    same(h.puts, ["a\nb\nc\nd\ne\n"]);
+    // Nothing held, nothing owed: the next Done answers without a request.
+    assert.equal(await h.saveNow(), true);
+    assert.equal(h.frame.flushes, 2);
+    same(h.puts, ["a\nb\nc\nd\ne\n"]);
+  } finally {
+    h.channel.close();
+    h.file.destroy();
+  }
+});
+
+/* A frame that never answers — reloaded, replaced, never ready — is not
+   waited on: the drain checks it is still there and stops once it is not.
+   One that is there is waited on, with no timer to leave on. */
+test("Done's drain waits on a live frame and stops once the frame is gone", async () => {
+  fakeTimers();
+  const h = frameHarness(() => new Response(JSON.stringify({ sha: "sha-b" }), { status: 200 }));
+  try {
+    await h.ready();
+    h.frame.answers = false;
+    let result: boolean | null = null;
+    void h.saveNow().then((r) => {
+      result = r;
+    });
+    await advance(60_000);
+    assert.equal(result, null); // still there: still waited on
+    h.frame.gone = true;
+    await advance(50);
+    assert.equal(result, true); // gone: nothing it held can arrive; clean
+    same(h.puts, []);
+  } finally {
+    h.channel.close();
+    h.file.destroy();
+    realTimers();
+  }
+});

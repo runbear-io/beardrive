@@ -5,7 +5,9 @@
    (server.go's serveEditable). A reader never downloads an editor, and the
    iframe keeps exactly the sandbox it always had — no allow-same-origin — so
    nothing here can reach the hub's session. It talks to the app by postMessage
-   and accepts nothing back.
+   and accepts one thing back: `bd-edit:flush` (with a numeric id), which posts
+   any edit still held here and answers `bd-edit:flushed` with that id, so the
+   app's Done saves only after every patch before the answer has landed.
 
    Three things had to be true at once, and they decided the design:
 
@@ -385,3 +387,14 @@ send({
 document.documentElement.setAttribute("data-bd-ready", "");
 
 window.addEventListener("beforeunload", unmount);
+
+/* Done in the app: post what the open editor holds, then answer. The answer
+   follows every patch on the same channel, so once the app has handled it, it
+   has handled them all. Only the app (the parent window) may ask. */
+window.addEventListener("message", (e) => {
+  if (e.source !== window.parent) return;
+  const msg = e.data as { type?: unknown; id?: unknown } | null;
+  if (!msg || msg.type !== "bd-edit:flush" || typeof msg.id !== "number") return;
+  flush();
+  send({ type: "bd-edit:flushed", id: msg.id });
+});

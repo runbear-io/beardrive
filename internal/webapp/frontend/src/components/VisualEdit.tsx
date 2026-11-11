@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState, type SharedFile } from "../lib/sharedfile";
 import { diffSplices, merge3PreferRight } from "../lib/merge3";
+import { frameChannel } from "../lib/frameflush";
 import { type CollabStatus } from "../lib/collab";
 import { askShrink, withdrawShrink } from "./ShrinkDialog";
 
@@ -26,12 +27,14 @@ import { askShrink, withdrawShrink } from "./ShrinkDialog";
    and somebody typing markup in the source editor are in one room, and a
    patch from either merges with the other. */
 
-// What the injected script sends up. It can send nothing else, and this
-// component sends nothing down.
+// What the injected script sends up. The one thing sent down is a flush
+// request (lib/frameflush.ts), answered by `bd-edit:flushed` after every patch
+// the frame held.
 type Ready = { type: "bd-edit:ready"; hash: string; len: number; ranges: Span[] };
 type Patch = { type: "bd-edit:patch"; start: number; end: number; html: string };
 type Clobbered = { type: "bd-edit:clobbered" };
-type FromFrame = Ready | Patch | Clobbered;
+type Flushed = { type: "bd-edit:flushed"; id: number };
+type FromFrame = Ready | Patch | Clobbered | Flushed;
 
 type Span = { start: number; end: number };
 
@@ -235,7 +238,43 @@ export function VisualEdit({
         });
       },
     }));
-    if (handle) handle.current = file;
+    /* Messages from the frame, handled one at a time in arrival order; Done's
+       save first drains them (frame.current answers a flush only after every
+       patch it posted before), so a word typed just before Done is in the
+       document — and in its save, shrink check and failure — before the save
+       decides whether the editor may close. */
+    const channel = frameChannel();
+    let frameReady = false;
+    const drainFrame = async () => {
+      const el = frame.current;
+      const win = el?.contentWindow;
+      if (!el || !win) return;
+      // A frame that reloads or is replaced cannot answer: stop waiting then.
+      let reloaded = false;
+      const onLoad = () => {
+        reloaded = true;
+      };
+      el.addEventListener("load", onLoad);
+      try {
+        await channel.drain(
+          (m) => win.postMessage(m, "*"),
+          () => !frameReady || reloaded || frame.current !== el || el.contentWindow !== win,
+        );
+      } finally {
+        el.removeEventListener("load", onLoad);
+      }
+      // Saving now: the idle save the last patch armed has nothing left to do.
+      clearTimeout(stageTimer);
+      stageTimer = undefined;
+    };
+    const exposed: SharedFile = {
+      ...file,
+      saveNow: async () => {
+        await drainFrame();
+        return file.saveNow();
+      },
+    };
+    if (handle) handle.current = exposed;
 
     /* Ranges are held as RELATIVE positions, not offsets.
 
@@ -320,13 +359,11 @@ export function VisualEdit({
     let srcLen = -1;
     let anchored = false;
 
-    const onMessage = async (e: MessageEvent) => {
-      // The iframe is sandboxed WITHOUT allow-same-origin, so its origin is
-      // the string "null" and checking it proves nothing. Identity has to come
-      // from the window itself.
-      if (!frame.current || e.source !== frame.current.contentWindow) return;
-      const msg = e.data as FromFrame;
-      if (!msg || typeof msg !== "object") return;
+    const handleMessage = async (msg: FromFrame) => {
+      if (msg.type === "bd-edit:flushed") {
+        channel.flushed(msg.id);
+        return;
+      }
 
       if (msg.type === "bd-edit:clobbered") {
         setWarning(
@@ -339,11 +376,13 @@ export function VisualEdit({
         ranges = msg.ranges;
         srcHash = msg.hash;
         srcLen = msg.len;
+        frameReady = true;
         await anchorRanges(); // no-op until the document is seeded too
         return;
       }
 
       if (msg.type !== "bd-edit:patch") return;
+      if (!anchored) await anchorRanges();
       const a = anchors.get(key(msg));
       if (!a) return; // a range from a render this side has already replaced
       if (stageDoc) {
@@ -427,6 +466,16 @@ export function VisualEdit({
         diffSplices(live, want).map((s) => ({ ...s, index: s.index + from.index })),
       );
     };
+    const onMessage = (e: MessageEvent) => {
+      // The iframe is sandboxed WITHOUT allow-same-origin, so its origin is
+      // the string "null" and checking it proves nothing. Identity has to come
+      // from the window itself — checked as the message arrives, since the
+      // frame may be replaced before its turn in the queue comes.
+      if (!frame.current || e.source !== frame.current.contentWindow) return;
+      const msg = e.data as FromFrame;
+      if (!msg || typeof msg !== "object") return;
+      channel.enqueue(() => handleMessage(msg));
+    };
 
     // The document filling in is itself a reason to try anchoring again: the
     // relay may seed AFTER onReady fires, and a peer's first update is the
@@ -436,7 +485,9 @@ export function VisualEdit({
 
     window.addEventListener("message", onMessage);
     return () => {
-      if (handle?.current === file) handle.current = null;
+      if (handle?.current === exposed) handle.current = null;
+      frameReady = false;
+      channel.close();
       clearTimeout(retryTimer);
       clearTimeout(stuckTimer);
       clearTimeout(stageTimer);
