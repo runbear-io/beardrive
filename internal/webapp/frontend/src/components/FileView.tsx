@@ -513,32 +513,17 @@ function EditView(props: Parameters<typeof FileView>[0]) {
   const { flushRef } = props;
   useEffect(() => {
     if (!flushRef) return;
-    /* Save and leave: the save gets a moment, never a veto — a hub that does
-       not answer must not trap the user in the editor. A question the user
-       must answer does keep them here, however it opened. The one exception
-       to the moment: a save only the hub can refuse as a shrink is waited out
-       in full, since leaving before its answer would close the editor under
-       the question it opens. */
+    /* Save and leave, once the save has settled — however long the hub
+       takes, since its answer may be a question (a shrink only it can see)
+       the user must answer here. Clean or a bystander settles at once, and a
+       failed request fails fast. */
     const flush = async () => {
       const f = fileHandle.current;
       if (!f) return true;
-      const mustSettle = f.mayServerRefuseShrink();
-      const saving = f.saveNow();
-      // Promise constructor, not withResolvers: the app targets ES2022.
-      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        if (mustSettle) await saving;
-        else
-          await Promise.race([
-            saving,
-            new Promise<void>((r) => {
-              timer = setTimeout(r, 1_500);
-            }),
-          ]);
+        await f.saveNow();
       } catch {
         // The editor's own teardown still sends what it holds.
-      } finally {
-        clearTimeout(timer);
       }
       if (f.askingShrink()) return false;
       void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });

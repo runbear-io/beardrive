@@ -252,6 +252,9 @@ export default function Browser(props: {
   // it (briefly) so leaving never strands the last words in a pending save.
   // It answers false when the save is waiting on the user (ShrinkDialog).
   const editFlushRef = useRef<(() => Promise<boolean>) | null>(null);
+  // A Done already saving: a second click waits on the first, never leaves
+  // past it (that would skip the shrink question its answer may open).
+  const leavingFlushRef = useRef<(() => Promise<boolean>) | null>(null);
 
   const panel = props.panel ?? null;
   // Sharing is a write — a read-only member sees no Share button rather than
@@ -1157,21 +1160,27 @@ export default function Browser(props: {
                   navigate(urlForPath(path, project?.id, version, route.full, true));
                   return;
                 }
-                // Save and leave: FileView's flush bounds its own wait, so a
-                // hub that does not answer never traps the user in the editor.
-                // Only a question the user must answer keeps them here.
-                const target = urlForPath(path, project?.id, version, route.full, false);
-                const here = window.location.pathname + window.location.search;
-                let okToLeave = true;
+                // Save and leave, once the save has settled: an answer that
+                // opens a question (ShrinkDialog) keeps the user here.
+                const flush = editFlushRef.current;
+                if (flush && leavingFlushRef.current === flush) return;
+                leavingFlushRef.current = flush;
                 try {
-                  okToLeave = await (editFlushRef.current?.() ?? Promise.resolve(true));
-                } catch {
-                  // The editor's own teardown still sends what it holds.
+                  const target = urlForPath(path, project?.id, version, route.full, false);
+                  const here = window.location.pathname + window.location.search;
+                  let okToLeave = true;
+                  try {
+                    okToLeave = await (flush?.() ?? Promise.resolve(true));
+                  } catch {
+                    // The editor's own teardown still sends what it holds.
+                  }
+                  if (!okToLeave) return; // the shrink dialog is open: answer it here
+                  // Somewhere else already (a click elsewhere while saving): stay there.
+                  if (window.location.pathname + window.location.search !== here) return;
+                  navigate(target);
+                } finally {
+                  if (leavingFlushRef.current === flush) leavingFlushRef.current = null;
                 }
-                if (!okToLeave) return; // the shrink dialog is open: answer it here
-                // Somewhere else already (a click elsewhere while saving): stay there.
-                if (window.location.pathname + window.location.search !== here) return;
-                navigate(target);
               }}
             >
               {!editing && <Icon name="pencil" />} <span className="lbl-keep">{editing ? "Done" : "Edit"}</span>
