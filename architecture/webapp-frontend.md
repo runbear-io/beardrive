@@ -189,7 +189,7 @@ classDiagram
         +sidebarSearch.ts useSidebarSearch setFilterQuery registerFilterResults
         +collab.ts CollabDoc peerCount isRemote onStalled encodeState applySplices applyRemoteUpdate (y-websocket to the hub-held document; stop only when there is no room route)
         +collabroute.ts hasCollabRoute (only a project api base has a room; a single volume opens solo at once)
-        +merge3.ts merge3 diffSplices applySplices retainsChanges (TS port of internal/textmerge)
+        +merge3.ts merge3 merge3PreferRight diffSplices applySplices retainsChanges (TS port of internal/textmerge)
         +sharedfile.ts openSharedFile SharedFile SAVE_IDLE_MS saveNow askingShrink
         +sharedfile.ts merge MergeResult (an outside write, offered to an open document; held = already in the room)
         +sharedfile.ts rebase (the head sha moved because a co-editor saved)
@@ -244,7 +244,7 @@ classDiagram
     shareMermaid --> lib : renderMermaid
     inlineComment --> lib : anchor.ts (no app imports)
     components --> lib : rangeFor describe hitTest (Comments)
-    components --> lib : merge3 diffSplices (VisualEdit), saveNow askingShrink (FileView flush)
+    components --> lib : merge3PreferRight diffSplices (VisualEdit), saveNow askingShrink (FileView flush)
     Browser ..> components : Done awaits FileView's flushRef
     lib --> api : syncCollab putText keepalive (sharedfile)
     components ..> inlineComment : postMessage via the ?comment=1 iframe

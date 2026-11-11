@@ -21,7 +21,11 @@
    which side is called `a`: merge3(base, a, b) === merge3(base, b, a).
 
    { ok: false } is the honest answer only for the same token changed two
-   different ways. */
+   different ways.
+
+   merge3PreferRight(base, a, b) is the same merge for a caller that must get
+   a text back: every region still merges as above, and only the minimal
+   token span both sides changed differently takes `b`'s version. */
 
 export type Merge3Result = { ok: true; text: string } | { ok: false };
 
@@ -181,7 +185,11 @@ function sameAnchor(x: string, y: string, concat: boolean, emptyBase: boolean): 
 
 type Side = { h: Hunk; toks: string[]; side: 0 | 1 };
 
-function mergeAt(base: string, a: string, b: string, level: Level): string | null {
+/* With `preferB`, a collision takes `b`'s side of the colliding region rather
+   than failing the merge — at the narrowest level that still collides: lines
+   descend to tokens, and a token collision the char level cannot resolve is
+   `b`'s tokens for that span alone. */
+function mergeAt(base: string, a: string, b: string, level: Level, preferB = false): string | null {
   if (a === b) return a;
   if (a === base) return b;
   if (b === base) return a;
@@ -247,13 +255,26 @@ function mergeAt(base: string, a: string, b: string, level: Level): string | nul
     }
     if (gs === ge) {
       const s = sameAnchor(ra, rb, level !== CHARS, bt.length === 0);
-      if (s === null) return null;
+      if (s === null) {
+        if (!preferB) return null;
+        out += rb;
+        continue;
+      }
       out += s;
       continue;
     }
     if (level === CHARS) return null;
-    const sub = mergeAt(join(bt, gs, ge), ra, rb, (level + 1) as Level);
-    if (sub === null) return null;
+    // Chars only recognise a continued insertion; they are never asked to
+    // pick a side, so a token collision there falls back to `b`'s tokens.
+    const sub =
+      level === TOKENS
+        ? mergeAt(join(bt, gs, ge), ra, rb, CHARS)
+        : mergeAt(join(bt, gs, ge), ra, rb, (level + 1) as Level, preferB);
+    if (sub === null) {
+      if (!preferB) return null;
+      out += rb;
+      continue;
+    }
     out += sub;
   }
   return out + join(bt, pos, bt.length);
@@ -265,15 +286,30 @@ function mergeAt(base: string, a: string, b: string, level: Level): string | nul
    lands after it — "x" + "x\nx" is "xx\nx", one line where Go has two. */
 const terminated = (s: string) => (s === "" || s.endsWith("\n") ? s : s + "\n");
 
+// The final newline is one more thing a side may change: whichever side
+// changed it from the base wins, and both can only change it one way.
+function withTrailing(base: string, a: string, b: string, text: string): string {
+  let trailing = a.endsWith("\n");
+  if (trailing === base.endsWith("\n")) trailing = b.endsWith("\n");
+  if (text === "" || trailing === text.endsWith("\n")) return text;
+  return trailing ? text + "\n" : text.slice(0, -1);
+}
+
 export function merge3(base: string, a: string, b: string): Merge3Result {
   const text = mergeAt(terminated(base), terminated(a), terminated(b), LINES);
   if (text === null) return { ok: false };
-  // The final newline is one more thing a side may change: whichever side
-  // changed it from the base wins, and both can only change it one way.
-  let trailing = a.endsWith("\n");
-  if (trailing === base.endsWith("\n")) trailing = b.endsWith("\n");
-  if (text === "" || trailing === text.endsWith("\n")) return { ok: true, text };
-  return { ok: true, text: trailing ? text + "\n" : text.slice(0, -1) };
+  return { ok: true, text: withTrailing(base, a, b, text) };
+}
+
+/* merge3, except a conflict is not an answer: where `left` and `right` changed
+   the same base tokens differently, `right` wins THAT span, and every other
+   edit either side made — including ones inside the same line — survives. */
+export function merge3PreferRight(base: string, left: string, right: string): string {
+  if (left === right) return left;
+  if (base === left) return right;
+  if (base === right) return left;
+  const text = mergeAt(terminated(base), terminated(left), terminated(right), LINES, true) ?? terminated(right);
+  return withTrailing(base, left, right, text);
 }
 
 /* The splices that turn `oldText` into `newText`, touching as little as

@@ -53,7 +53,7 @@ registerHooks({
 const { CollabDoc } = await import("./collab.ts");
 const { openSharedFile, SAVE_RETRY_MS } = await import("./sharedfile.ts");
 const { parseConflict } = await import("./conflict.ts");
-const { merge3 } = await import("./merge3.ts");
+const { merge3, merge3PreferRight } = await import("./merge3.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -588,6 +588,29 @@ test("merge3 keeps an unterminated same-anchor insertion its own line, matching 
   same(merge3("log\n", "log\ny\n", "log\nx"), { ok: true, text: "log\nx\ny" });
   same(merge3("a\nb\n", "a\nb", "a\nb\nc\n"), { ok: true, text: "a\nb\nc" });
   same(merge3("a\nb\n", "a\nb\nc\n", "a\nb"), { ok: true, text: "a\nb\nc" });
+});
+
+/* VisualEdit's patch against a co-editor's typing in the same element: when
+   both changed the same word, only that word takes the patch (`right`); a
+   word only the co-editor changed survives, and so does the next keystroke. */
+test("merge3PreferRight lets only the colliding words take the patch", () => {
+  same(merge3("cat sales", "dog revenue", "bird sales"), { ok: false });
+  assert.equal(merge3PreferRight("cat sales", "dog revenue", "bird sales"), "bird revenue");
+  assert.equal(merge3PreferRight("bird sales", "bird revenue", "bird! sales"), "bird! revenue");
+  assert.equal(
+    merge3PreferRight("line1\ncat sales\nline3", "PEER1\ndog revenue\nline3", "line1\nbird sales\nMY3"),
+    "PEER1\nbird revenue\nMY3",
+  );
+  assert.equal(
+    merge3PreferRight("<b>cat</b> and <i>sales</i>", "<b>dog</b> and <i>revenue</i>", "<b>bird</b> and <i>sales</i>"),
+    "<b>bird</b> and <i>revenue</i>",
+  );
+  // Fast paths and clean merges are merge3's answer.
+  assert.equal(merge3PreferRight("a b", "a b", "a c"), "a c");
+  assert.equal(merge3PreferRight("a b", "x b", "a b"), "x b");
+  assert.equal(merge3PreferRight("a b", "x b", "a y"), "x y");
+  // Same-anchor insertions keep both, as merge3 does.
+  assert.equal(merge3PreferRight("log\n", "log\nb\n", "log\na\n"), "log\na\nb\n");
 });
 
 /* A staging checkpoint the room refuses 409 while newer typing waits behind

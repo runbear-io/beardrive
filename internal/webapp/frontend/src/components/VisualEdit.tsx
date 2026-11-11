@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState, type SharedFile } from "../lib/sharedfile";
-import { diffSplices, merge3 } from "../lib/merge3";
+import { diffSplices, merge3PreferRight } from "../lib/merge3";
 import { type CollabStatus } from "../lib/collab";
 import { askShrink, withdrawShrink } from "./ShrinkDialog";
 
@@ -360,8 +360,7 @@ export function VisualEdit({
           return;
         }
         const sLive = sText.toString().slice(sFrom.index, sTo.index);
-        const sMerged = merge3(a.orig, sLive, msg.html);
-        const sWant = sMerged.ok ? sMerged.text : msg.html;
+        const sWant = merge3PreferRight(a.orig, sLive, msg.html);
         a.orig = msg.html;
         if (sLive === sWant) return;
         stageDoc.transact(() => {
@@ -415,10 +414,10 @@ export function VisualEdit({
          typing elsewhere in the same paragraph is in `live` but not in the
          patch, which the iframe built from what it last rendered — replacing
          the span wholesale erased their keystrokes. So: their change
-         (live − orig) and ours (html − orig), merged three ways; where they
-         collide on the same words the patch wins, as it always did. */
-      const merged = merge3(a.orig, live, msg.html);
-      const want = merged.ok ? merged.text : msg.html;
+         (live − orig) and ours (html − orig), merged three ways; only the
+         words where they collide take the patch, and a co-editor's edit to
+         other words of the same element survives the collision. */
+      const want = merge3PreferRight(a.orig, live, msg.html);
       a.orig = msg.html;
       if (live === want) return;
       // Splices run last-first in `live` coordinates, so shifting by the
