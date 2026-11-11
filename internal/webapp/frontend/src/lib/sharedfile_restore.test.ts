@@ -53,7 +53,7 @@ registerHooks({
 const { CollabDoc } = await import("./collab.ts");
 const { openSharedFile, SAVE_RETRY_MS } = await import("./sharedfile.ts");
 const { parseConflict } = await import("./conflict.ts");
-const { merge3, merge3PreferRight } = await import("./merge3.ts");
+const { merge3, merge3PreferRight, merge3ForPath, validMergedText } = await import("./merge3.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -613,12 +613,37 @@ test("merge3PreferRight lets only the colliding words take the patch", () => {
   assert.equal(merge3PreferRight("log\n", "log\nb\n", "log\na\n"), "log\na\nb\n");
 });
 
+/* The hub's validMergedText, in the browser: line merges of two valid JSON
+   edits can be invalid JSON, and only a REAL merge is held to it. */
+test("validMergedText and merge3ForPath hold .json/.jsonl merges to valid JSON", () => {
+  // Two inserts at one anchor: a line merge, but not JSON.
+  same(merge3("[\n]\n", "[\n1\n]\n", "[\n2\n]\n"), { ok: true, text: "[\n1\n2\n]\n" });
+  assert.equal(validMergedText("data.json", "[\n1\n2\n]\n"), false);
+  assert.equal(validMergedText("DIR/Data.JSON", "[\n1\n2\n]\n"), false); // extension case-insensitive
+  assert.equal(validMergedText("notes.md", "[\n1\n2\n]\n"), true);
+  assert.equal(validMergedText("data.json.bdrive-conflict-x-20261111T102030Z", "[\n1\n2\n]\n"), true);
+  same(merge3ForPath("data.json", "[\n]\n", "[\n1\n]\n", "[\n2\n]\n"), { ok: false });
+  same(merge3ForPath("notes.md", "[\n]\n", "[\n1\n]\n", "[\n2\n]\n"), { ok: true, text: "[\n1\n2\n]\n" });
+  // One side alone is its own text, valid or mid-typing: never a conflict.
+  same(merge3ForPath("data.json", "[\n]\n", "[\n]\n", "[\n2,\n"), { ok: true, text: "[\n2,\n" });
+
+  // JSONL: two valid lines at one anchor merge; a broken line does not.
+  same(merge3ForPath("events.jsonl", '{"x":0}\n', '{"x":0}\n{"a":1}\n', '{"x":0}\n{"b":2}\n'), {
+    ok: true,
+    text: '{"x":0}\n{"a":1}\n{"b":2}\n',
+  });
+  assert.equal(validMergedText("events.jsonl", '{"a":1}\n\n  \n{"b":2}'), true);
+  same(merge3ForPath("events.jsonl", '{"x":0}\n', '{"x":0}\n{"a":1}\n', '{"x":0}\n{"b":\n'), { ok: false });
+  assert.equal(validMergedText("events.jsonl", '{"a":1}\n{"b":'), false);
+});
+
 /* A staging checkpoint the room refuses 409 while newer typing waits behind
    it (its idle timer already fired into the in-flight loop). The refusal is
    settled for the buffer as it is NOW: the conflict copy carries the newer
    words, typing that lands while the copy is on the wire goes to the room
    next, and a tab closed mid-park parks the newest words keepalive. */
-function stagingConflictHarness() {
+function stagingConflictHarness(o: { path?: string; seed?: string } = {}) {
+  const seed = o.seed ?? "v0\n";
   const connect = mock.method(CollabDoc.prototype, "connect", () => {});
   const posts: { base_text?: string; text?: string }[] = [];
   const puts: { url: string; body: string; keepalive?: boolean }[] = [];
@@ -636,12 +661,12 @@ function stagingConflictHarness() {
     roomAnswers.push(d);
     return d.promise;
   }) as typeof fetch;
-  const state = { buffer: "v0\n" };
+  const state = { buffer: seed };
   const copies: string[] = [];
   const file = openSharedFile({
     apiBase: "/api/p/proj/",
-    path: "notes.md",
-    seed: "v0\n",
+    path: o.path ?? "notes.md",
+    seed,
     baseSha: "sha-0",
     who: "tester",
     me: { name: "t", colour: "oklch(0.7 0.1 200)" },
@@ -699,6 +724,119 @@ test("staging 409 parks the NEWER buffer typed while the checkpoint was out, nev
     await advance(0);
     assert.equal(h.posts.length, 2);
     assert.equal(h.puts.length, 1);
+  } finally {
+    realTimers();
+    h.connect.mock.restore();
+  }
+});
+
+/* data.json: a staging checkpoint refused 409 by a room that inserted "1"
+   where the buffer inserted "2". The line merge "[1 2]" is not JSON, so the
+   buffer is parked beside the file — never rebased and re-sent as one. */
+test("staging 409 on a .json file parks an invalid JSON merge instead of sending it", async () => {
+  fakeTimers();
+  const h = stagingConflictHarness({ path: "data.json", seed: "[\n]\n" });
+  try {
+    h.state.buffer = "[\n2\n]\n";
+    void h.file.saveNow();
+    await advance(0);
+    same(h.posts, [{ base: "sha-0", base_text: "[\n]\n", text: "[\n2\n]\n" }]);
+    h.roomAnswers[0].resolve(
+      new Response(JSON.stringify({ error: "the same lines changed", sha: "sha-1", text: "[\n1\n]\n" }), { status: 409 }),
+    );
+    await advance(0);
+    assert.equal(h.puts.length, 1);
+    assert.ok(h.puts[0].url.includes("data.json.bdrive-conflict-tester-"));
+    assert.equal(h.puts[0].body, "[\n2\n]\n");
+    assert.equal(h.state.buffer, "[\n2\n]\n"); // never rebased into "[1 2]"
+    h.putAnswers[0].resolve(h.ok({ sha: "sha-copy" }));
+    await advance(60_000);
+    assert.equal(h.copies.length, 1);
+    assert.equal(h.posts.length, 1);
+    h.file.destroy();
+    assert.ok(h.posts.every((p) => p.text !== "[\n1\n2\n]\n"));
+  } finally {
+    realTimers();
+    h.connect.mock.restore();
+  }
+});
+
+test("solo 409 on a .json file parks an invalid JSON merge instead of writing it", async () => {
+  fakeTimers();
+  try {
+    const puts: Array<{ url: string; body: string }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const u = decodeURIComponent(String(url));
+      const method = init?.method ?? "GET";
+      if (method === "GET") return new Response("[\n1\n]\n", { status: 200, headers: { ETag: `"sha-1"` } });
+      puts.push({ url: u, body: String(init?.body) });
+      if (u.includes("bdrive-conflict")) return new Response(JSON.stringify({ sha: "sha-copy" }), { status: 200 });
+      return new Response(JSON.stringify({ error: "changed", sha: "sha-1" }), { status: 409 });
+    }) as typeof fetch;
+    let buffer = "[\n]\n";
+    let solo = false;
+    const states: string[] = [];
+    const copies: string[] = [];
+    const file = openSharedFile({
+      apiBase: "/api/",
+      path: "data.json",
+      seed: "[\n]\n",
+      baseSha: "sha-0",
+      me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+      onReady: () => {},
+      onSolo: () => {
+        solo = true;
+      },
+      onState: (s) => states.push(s),
+      onConflictCopy: (c) => copies.push(c),
+      soloText: () => buffer,
+      soloApply: (e) => {
+        buffer = buffer.slice(0, e.from) + e.insert + buffer.slice(e.to);
+      },
+    });
+    await waitFor(() => assert.equal(solo, true));
+
+    buffer = "[\n2\n]\n";
+    await file.saveNow();
+    assert.equal(puts.length, 2);
+    assert.ok(puts[0].url.includes("upload/content?path=data.json"));
+    assert.equal(puts[0].body, "[\n2\n]\n");
+    assert.ok(puts[1].url.includes("data.json.bdrive-conflict-"));
+    assert.equal(puts[1].body, "[\n2\n]\n");
+    assert.equal(buffer, "[\n2\n]\n");
+    assert.equal(copies.length, 1);
+    assert.equal(states.at(-1), "clean");
+    await advance(60_000);
+    assert.ok(puts.every((p) => p.body !== "[\n1\n2\n]\n"));
+    file.destroy();
+  } finally {
+    realTimers();
+  }
+});
+
+test("late join on a .json file parks an invalid JSON merge and takes the room's text", async () => {
+  fakeTimers();
+  const h = stagingConflictHarness({ path: "data.json", seed: "[\n]\n" });
+  try {
+    h.state.buffer = "[\n2\n]\n";
+    const sock = { destroy() {} };
+    const c = h.file.collab as unknown as { ws: unknown; onStatus: (s: string) => void; onReady: () => void };
+    c.ws = sock;
+    h.file.collab.doc.transact(() => h.file.collab.text.insert(0, "[\n1\n]\n"), sock);
+    c.onStatus("live");
+    c.onReady();
+    await advance(0);
+    assert.equal(h.puts.length, 1);
+    assert.ok(h.puts[0].url.includes("data.json.bdrive-conflict-tester-"));
+    assert.equal(h.puts[0].body, "[\n2\n]\n");
+    assert.equal(h.file.collab.text.toString(), "[\n1\n]\n"); // nothing spliced in
+    h.putAnswers[0].resolve(h.ok({ sha: "sha-copy" }));
+    await advance(0);
+    assert.equal(h.copies.length, 1);
+    assert.equal(h.file.collab.text.toString(), "[\n1\n]\n");
+    assert.equal(h.file.current(), "[\n1\n]\n");
+    same(h.posts, []);
+    h.file.destroy();
   } finally {
     realTimers();
     h.connect.mock.restore();

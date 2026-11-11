@@ -312,6 +312,42 @@ export function merge3PreferRight(base: string, left: string, right: string): st
   return withTrailing(base, left, right, text);
 }
 
+/* Whether a MERGED text may be written to `path` — the hub's
+   validMergedText (upload.go, syncer/merge.go): two valid JSON edits can
+   merge line by line into JSON that is not, and that merge is a conflict.
+   Extension compared case-insensitively, as Go's filepath.Ext lowered. */
+export function validMergedText(path: string, merged: string): boolean {
+  const name = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "";
+  const valid = (s: string) => {
+    try {
+      JSON.parse(s);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (ext === ".json") return valid(merged);
+  if (ext === ".jsonl") {
+    for (const line of merged.split("\n")) {
+      const t = line.trim();
+      if (t.length > 0 && !valid(t)) return false;
+    }
+  }
+  return true;
+}
+
+/* merge3 for a file at `path`. Only a real merge — both sides moved, two
+   different ways — is held to validMergedText, as the hub holds it: a side
+   that alone changed the text is that side's own text (an editor mid-way
+   through typing JSON is not a conflict). */
+export function merge3ForPath(path: string, base: string, a: string, b: string): Merge3Result {
+  const res = merge3(base, a, b);
+  if (!res.ok || a === b || a === base || b === base) return res;
+  return validMergedText(path, res.text) ? res : { ok: false };
+}
+
 /* The splices that turn `oldText` into `newText`, touching as little as
    possible: line hunks, refined to token hunks, trimmed to the characters
    that actually differ. Every untouched character keeps its identity in a

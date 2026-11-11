@@ -189,7 +189,7 @@ classDiagram
         +sidebarSearch.ts useSidebarSearch setFilterQuery registerFilterResults
         +collab.ts CollabDoc peerCount isRemote onStalled encodeState applySplices applyRemoteUpdate (y-websocket to the hub-held document; stop only when there is no room route)
         +collabroute.ts hasCollabRoute (only a project api base has a room; a single volume opens solo at once)
-        +merge3.ts merge3 merge3PreferRight diffSplices applySplices retainsChanges (TS port of internal/textmerge)
+        +merge3.ts merge3 merge3PreferRight merge3ForPath validMergedText diffSplices applySplices retainsChanges (TS port of internal/textmerge; .json/.jsonl merges held to valid JSON as the hub holds them)
         +sharedfile.ts openSharedFile SharedFile SAVE_IDLE_MS saveNow askingShrink
         +sharedfile.ts merge MergeResult (an outside write, offered to an open document; held = already in the room)
         +sharedfile.ts rebase (the head sha moved because a co-editor saved)

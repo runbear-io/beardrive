@@ -1,6 +1,6 @@
 import { CollabDoc, type CollabStatus } from "./collab";
 import { hasCollabRoute } from "./collabroute";
-import { diffSplices, merge3, retainsChanges } from "./merge3";
+import { diffSplices, merge3ForPath, retainsChanges } from "./merge3";
 import { HttpError, putText, syncCollab } from "../api/http";
 import { conflictName } from "./conflict";
 import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
@@ -185,6 +185,9 @@ export type SharedFileOptions = {
      single-flight loop that rebases over other writers with merge3, and
      parks a conflict copy only for a genuine same-token conflict. */
 export function openSharedFile(opts: SharedFileOptions): SharedFile {
+  // Every merge here is of this file: a .json/.jsonl merge that is not
+  // valid JSON is a conflict, as the hub's is.
+  const mergeForPath = (base: string, a: string, b: string) => merge3ForPath(opts.path, base, a, b);
   /* The text `base` names: the last version of the file this buffer is known
      to be built on. Every local change is (buffer − saved); every outside
      write is (next − saved). That is what makes a three-way merge possible. */
@@ -537,7 +540,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       return false;
     }
     const cur = current();
-    const res = merge3(from, head.text, cur);
+    const res = mergeForPath(from, head.text, cur);
     if (!res.ok || !applyText(res.text)) {
       // The same words changed two different ways: genuinely contended.
       // Theirs is the file (it got there first); ours goes beside it. Only
@@ -570,7 +573,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
     if (landed) {
       roomNeedsFlush = true;
       // The room holds `sent`: what the buffer adds is only past it.
-      const res = merge3(landed.sent, peek.text, current());
+      const res = mergeForPath(landed.sent, peek.text, current());
       if (res.ok && applyText(res.text)) {
         saved = peek.text;
         savedSha = undefined;
@@ -619,7 +622,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
         }
         const room = typeof theirs.text === "string" ? theirs.text : null;
         if (room !== null) {
-          const res = merge3(saved, room, current());
+          const res = mergeForPath(saved, room, current());
           if (res.ok && applyText(res.text)) {
             // Rebased onto the room: send the merge, as a diff against it.
             saved = room;
@@ -649,7 +652,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
     // Joined while this was out: the join merged the same buffer into the
     // shared document, which now holds the truth.
     if (hubHoldsIt) return "stop";
-    const res = merge3(text, out.text, current());
+    const res = mergeForPath(text, out.text, current());
     // The buffer is now built on `out.text` even with typing past `text` in
     // it: that is the base the join and the next checkpoint diff against.
     if (res.ok && applyText(res.text)) {
@@ -1022,7 +1025,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
     const local = opts.soloText?.();
     if (local === undefined || local === saved) return finishJoin();
     const hub = collab.text.toString();
-    const res = merge3(saved, hub, local);
+    const res = mergeForPath(saved, hub, local);
     if (res.ok) return finishJoin(() => collab.applySplices(diffSplices(hub, res.text)));
     pendingJoin = true;
     // One name for every attempt at the same text: a retry re-writes the same
@@ -1222,7 +1225,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
        write is (next − saved); both survive unless they changed the same
        words differently, and only then is this the caller's banner. */
     if (!collab.text.length && !opts.soloApply) return "blocked";
-    const res = merge3(saved, next, cur);
+    const res = mergeForPath(saved, next, cur);
     if (!res.ok) return "blocked";
     if (inFlightSentText !== null) disturbed = true;
     adopt(next, nextSha);
@@ -1387,7 +1390,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       if (typeof theirs.text === "string" && (theirs.text === text || retainsChanges(from, text, theirs.text))) {
         // Already in the hub's text: a page that lives on is built on it now.
         if (!gone && !hubHoldsIt) {
-          const res = merge3(text, theirs.text, current());
+          const res = mergeForPath(text, theirs.text, current());
           if (res.ok && applyText(res.text)) {
             saved = theirs.text;
             savedSha = undefined;
@@ -1443,7 +1446,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
           rebase(out.sha);
           return;
         }
-        const res = merge3(text, out.text, current());
+        const res = mergeForPath(text, out.text, current());
         if (res.ok && applyText(res.text)) {
           adopt(out.text, out.sha);
           if (current() === saved) setState("clean");
