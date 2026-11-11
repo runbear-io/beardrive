@@ -1199,7 +1199,10 @@ export default function Browser(props: {
                   ? "Back to editing the page"
                   : "Edit this file's HTML markup"
               }
-              onClick={() => setEditSource((e) => !e)}
+              onClick={() => {
+                if (editFlushRef.current && leavingFlushRef.current === editFlushRef.current) return;
+                setEditSource((e) => !e);
+              }}
             >
               {editSource ? "Edit page" : "Edit source"}
             </Button>

@@ -519,15 +519,19 @@ function EditView(props: Parameters<typeof FileView>[0]) {
        only copy of the buffer and the retry that is still trying to land it.
        Clean or a bystander settles at once. */
     const flush = async () => {
-      const f = fileHandle.current;
-      if (!f) return true;
-      let saved = false;
-      try {
-        saved = await f.saveNow();
-      } catch {
-        return false;
+      for (;;) {
+        const f = fileHandle.current;
+        if (!f) return true;
+        let saved = false;
+        try {
+          saved = await f.saveNow();
+        } catch {
+          return false;
+        }
+        if (!saved || f.askingShrink()) return false;
+        if (fileHandle.current && fileHandle.current !== f) continue;
+        break;
       }
-      if (!saved || f.askingShrink()) return false;
       void qc.invalidateQueries({ queryKey: ["render", apiBase, path] });
       void qc.invalidateQueries({ queryKey: ["text", fileURL] });
       return true;
