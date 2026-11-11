@@ -145,6 +145,7 @@ const nodeIsConnectedGet = Object.getOwnPropertyDescriptor(Node.prototype, "isCo
 const nodeTextContentGet = Object.getOwnPropertyDescriptor(Node.prototype, "textContent")!.get!;
 const nodeTextContentSet = Object.getOwnPropertyDescriptor(Node.prototype, "textContent")!.set!;
 const elTagNameGet = Object.getOwnPropertyDescriptor(Element.prototype, "tagName")!.get!;
+const nodeParentElGet = Object.getOwnPropertyDescriptor(Node.prototype, "parentElement")!.get!;
 const getInputType = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "inputType")?.get;
 const getInputData = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "data")?.get;
 const getInputDT = Object.getOwnPropertyDescriptor(window.InputEvent.prototype, "dataTransfer")?.get;
@@ -825,18 +826,44 @@ function mount(el: HTMLElement, x?: number, y?: number) {
   const style = docCreateElement.call(document, "style");
   nodeTextContentSet.call(
     style,
-    ":host { display: block; } :host > [data-bd-pm] { all: inherit; display: block !important; margin: 0 !important; padding: 0 !important; border: 0 !important; background: none !important; box-shadow: none !important; outline: none !important; list-style: none !important; }",
+    ":host { display: block; } [data-bd-anc] { display: contents !important; } [data-bd-pm] { all: inherit; display: block !important; margin: 0 !important; padding: 0 !important; border: 0 !important; background: none !important; box-shadow: none !important; outline: none !important; list-style: none !important; }",
   );
   nodeAppendChild.call(shadow, style);
-  const hostTag = String(elTagNameGet.call(el)).toLowerCase();
-  const mountTag = hostTag === "td" || hostTag === "th" || hostTag === "tr" ? "div" : hostTag;
-  const pmMount = docCreateElement.call(document, mountTag) as HTMLElement;
+  // Mirror the element's ancestor chain (display: contents, so zero layout
+  // boxes) so ancestor-qualified rules like `.article p a` or `table td a`
+  // match inside the closed shadow root too.
+  const chain: Element[] = [];
+  for (let cur = nodeParentElGet.call(el) as Element | null; cur; cur = nodeParentElGet.call(cur) as Element | null) {
+    chain.push(cur);
+  }
+  // Never instantiate a custom element (contains "-") or active container
+  // inside the closed root: a custom element's connectedCallback could read
+  // this.getRootNode() and escape the shadow boundary.
+  const safeMirrorTag = (elNode: Element): string => {
+    const raw = String(elTagNameGet.call(elNode)).toLowerCase();
+    if (!/^[a-z][a-z0-9]*$/.test(raw)) return "div";
+    if (raw === "script" || raw === "iframe" || raw === "object" || raw === "embed" || raw === "applet") return "div";
+    return raw;
+  };
+  let parentNode: Node = shadow;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const a = chain[i];
+    const wrap = docCreateElement.call(document, safeMirrorTag(a));
+    const aCls = elGetAttribute.call(a, "class");
+    if (aCls) elSetAttribute.call(wrap, "class", aCls);
+    const aId = elGetAttribute.call(a, "id");
+    if (aId) elSetAttribute.call(wrap, "id", aId);
+    elSetAttribute.call(wrap, "data-bd-anc", "");
+    nodeAppendChild.call(parentNode, wrap);
+    parentNode = wrap;
+  }
+  const pmMount = docCreateElement.call(document, safeMirrorTag(el)) as HTMLElement;
   const cls = elGetAttribute.call(el, "class");
   if (cls) elSetAttribute.call(pmMount, "class", cls);
   const idAttr = elGetAttribute.call(el, "id");
   if (idAttr) elSetAttribute.call(pmMount, "id", idAttr);
   elSetAttribute.call(pmMount, "data-bd-pm", "");
-  nodeAppendChild.call(shadow, pmMount);
+  nodeAppendChild.call(parentNode, pmMount);
   shadowHost = sh;
 
   const state = EditorState.create({
