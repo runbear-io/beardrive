@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { openSharedFile, type SaveState, type SharedFile } from "../lib/sharedfile";
-import { postJSON } from "../api/http";
 import { diffSplices, merge3PreferRight } from "../lib/merge3";
 import { frameChannel, saveLocked } from "../lib/frameflush";
 import { type CollabStatus } from "../lib/collab";
@@ -33,8 +32,8 @@ import { askShrink, withdrawShrink } from "./ShrinkDialog";
 // the frame held.
 type Ready = { type: "bd-edit:ready"; hash: string; len: number; ranges: Span[] };
 // `seq` numbers the frame's patches; each is acknowledged (`bd-edit:ack`) once
-// it is in the document, and one never acknowledged goes out by the frame's
-// own exit beacon (lib/editbeacon.ts).
+// it is in the document, and one never acknowledged is handed on the way out
+// to this component's exit worker (lib/editexit.worker.ts).
 type Patch = { type: "bd-edit:patch"; seq?: number; start: number; end: number; html: string };
 type Clobbered = { type: "bd-edit:clobbered" };
 type Flushed = { type: "bd-edit:flushed"; id: number };
@@ -165,7 +164,7 @@ export function VisualEdit({
     const retryTimer = setTimeout(() => {
       if (!anchored && attempt.current < 1) {
         attempt.current++;
-        setGen((g) => g + 1);
+        reload();
       }
     }, 11_000);
     const stuckTimer = setTimeout(() => setStuck(true), 24_000);
@@ -177,32 +176,69 @@ export function VisualEdit({
        decides whether the editor may close. */
     const channel = frameChannel();
     let frameReady = false;
-    /* The frame's way out for a patch that never reaches here — a tab closed
-       between the keystroke and its message (lib/editbeacon.ts): a
-       single-file save URL it may post to without cookies. Fetched for each
-       render, refreshed before it expires, handed to the frame once ready. */
-    let beaconPath = "";
-    let beaconTimer: ReturnType<typeof setTimeout> | undefined;
-    let beaconStopped = false;
-    const sendBeaconURL = () => {
-      if (beaconPath && frameReady) frame.current?.contentWindow?.postMessage({ type: "bd-edit:beacon", url: beaconPath }, "*");
+    /* The exit save (lib/editexit.worker.ts): a patch that never reaches here
+       — a tab closed between the keystroke and its message — is posted by
+       the frame down a MessagePort to a dedicated worker on this origin,
+       which outlives the tab long enough to save it with the app's own
+       session. The frame never sees a URL or a credential. The worker is
+       armed once the ranges are anchored, kept on what the file holds as
+       saves land, and disarmed whenever the frame is replaced on purpose. */
+    let exitWorker: Worker | null = null;
+    try {
+      exitWorker =
+        typeof Worker !== "undefined"
+          ? new Worker(new URL("../lib/editexit.worker.ts", import.meta.url), { type: "module" })
+          : null;
+    } catch {
+      exitWorker = null; // no worker (a CSP, an old browser): no exit save, as before
+    }
+    let workerDisarmed = false;
+    let latestSavedText = seed.current;
+    let latestBaseSha: string | undefined = shaRef.current;
+    const activeDocText = () =>
+      stageDoc ? stageDoc.getText("body").toString() : (fileRef.current?.collab.text.toString() ?? "");
+    const syncExitWorker = () => {
+      if (!exitWorker || workerDisarmed) return;
+      exitWorker.postMessage({
+        type: "sync",
+        savedText: latestSavedText,
+        baseSha: latestBaseSha,
+        hasBaseSha: true,
+        docText: activeDocText(),
+      });
     };
-    const fetchBeacon = () => {
-      postJSON<{ url?: unknown; expires?: unknown }>(apiBase + "ycollab/frame?path=" + encodeURIComponent(path), {})
-        .then((r) => {
-          if (beaconStopped || typeof r?.url !== "string") return;
-          beaconPath = r.url;
-          sendBeaconURL();
-          if (typeof r.expires !== "number") return;
-          // A deadline (epoch ms) or a lifetime (ms): renewed a minute early.
-          const left = r.expires > 1e12 ? r.expires - Date.now() : r.expires;
-          beaconTimer = setTimeout(fetchBeacon, Math.max(30_000, left - 60_000));
-        })
-        .catch(() => {
-          // An older hub: no beacon, exactly as before.
-        });
+    const disarmExitWorker = () => {
+      if (!exitWorker || workerDisarmed) return;
+      workerDisarmed = true;
+      exitWorker.postMessage({ type: "disarm" });
+      exitWorker.terminate();
     };
-    fetchBeacon();
+    // Every deliberate re-render of the frame: its unload is no tab closing.
+    const reload = () => {
+      disarmExitWorker();
+      setGen((g) => g + 1);
+    };
+    const armExitWorker = (renderText: string) => {
+      const win = frame.current?.contentWindow;
+      if (!exitWorker || workerDisarmed || !win) return;
+      const mc = new MessageChannel();
+      exitWorker.postMessage(
+        {
+          type: "arm",
+          apiBase,
+          path,
+          who: meRef.current?.name,
+          renderText,
+          renderLen: renderText.length,
+          allowedRanges: [...anchors.keys()],
+          savedText: latestSavedText,
+          baseSha: latestBaseSha,
+          docText: renderText,
+        },
+        [mc.port1],
+      );
+      win.postMessage({ type: "bd-edit:port" }, "*", [mc.port2]);
+    };
     const ackPatch = (msg: Patch) => {
       if (typeof msg.seq === "number") frame.current?.contentWindow?.postMessage({ type: "bd-edit:ack", seq: msg.seq }, "*");
     };
@@ -300,7 +336,7 @@ export function VisualEdit({
           } else {
             anchors.clear();
             anchored = false;
-            if (prevText !== nextText) setGen((g) => g + 1);
+            if (prevText !== nextText) reload();
           }
           prev.destroy();
         }
@@ -326,6 +362,11 @@ export function VisualEdit({
       onPeers: (n) => cb.current.onPeers?.(n),
       onSaved: (t) => cb.current.onSaved?.(t),
       onWriting: () => cb.current.onWriting?.(),
+      onBaseChange: (savedText, nextBaseSha) => {
+        latestSavedText = savedText;
+        latestBaseSha = nextBaseSha;
+        syncExitWorker();
+      },
       soloText: () => (stageDoc ? stageDoc.getText("body").toString() : seed.current),
       soloApply: ({ from, to, insert }) => {
         if (!stageDoc) return;
@@ -404,7 +445,7 @@ export function VisualEdit({
       // and it fails closed on any future way the two could drift apart.
       if (ranges.some((r) => r.end > text.length || r.start > r.end)) {
         ranges = null;
-        setGen((g) => g + 1);
+        reload();
         return;
       }
       /* The ranges describe the document the SERVER served. If this side holds
@@ -420,7 +461,7 @@ export function VisualEdit({
         digest !== null ? digest !== srcHash : srcLen >= 0 && text.length !== srcLen;
       if (moved) {
         ranges = null;
-        setGen((g) => g + 1);
+        reload();
         return;
       }
       anchors.clear();
@@ -433,6 +474,7 @@ export function VisualEdit({
         });
       }
       anchored = true;
+      armExitWorker(text);
       setArmed(true);
       cb.current.onRendered?.();
     };
@@ -463,16 +505,19 @@ export function VisualEdit({
         srcHash = msg.hash;
         srcLen = msg.len;
         frameReady = true;
-        sendBeaconURL();
         return anchorRanges(); // no-op until the document is seeded too
       }
 
       if (msg.type !== "bd-edit:patch") return;
       if (!anchored)
         return anchorRanges().then(() => {
-          if (applyPatch(msg)) ackPatch(msg);
+          if (!applyPatch(msg)) return;
+          ackPatch(msg);
+          syncExitWorker();
         });
-      if (applyPatch(msg)) ackPatch(msg);
+      if (!applyPatch(msg)) return;
+      ackPatch(msg);
+      syncExitWorker();
     };
     const applyPatch = (msg: Patch): boolean => {
       const a = anchors.get(key(msg));
@@ -487,7 +532,7 @@ export function VisualEdit({
         if ((sWhole && a.span < sText.length) || sSpan > a.span * 4 + 256) {
           anchors.clear();
           anchored = false;
-          setGen((g) => g + 1);
+          reload();
           return false;
         }
         const sLive = sText.toString().slice(sFrom.index, sTo.index);
@@ -535,7 +580,7 @@ export function VisualEdit({
         // The ranges cannot be trusted any more; re-render and re-anchor.
         anchors.clear();
         anchored = false;
-        setGen((g) => g + 1);
+        reload();
         return false;
       }
 
@@ -572,7 +617,10 @@ export function VisualEdit({
     // The document filling in is itself a reason to try anchoring again: the
     // relay may seed AFTER onReady fires, and a peer's first update is the
     // other way an empty room becomes a real one.
-    const retry = () => void anchorRanges();
+    const retry = () => {
+      syncExitWorker();
+      void anchorRanges();
+    };
     file.collab.text.observe(retry);
 
     window.addEventListener("message", onMessage);
@@ -580,8 +628,9 @@ export function VisualEdit({
       if (handle?.current === exposed) handle.current = null;
       frameReady = false;
       channel.close();
-      beaconStopped = true;
-      clearTimeout(beaconTimer);
+      // The exit worker stays armed: a tab closing goes through here too, and
+      // the frame's last patch may yet arrive at it. Disarmed below, once the
+      // editor is really gone and nothing more can come.
       clearTimeout(retryTimer);
       clearTimeout(stuckTimer);
       clearTimeout(stageTimer);
@@ -602,6 +651,7 @@ export function VisualEdit({
         window.removeEventListener("message", onMessage);
         clearTimeout(stageTimer);
         file.destroy();
+        disarmExitWorker();
         stageDoc?.destroy();
       }, 300);
     };

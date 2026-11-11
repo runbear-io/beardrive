@@ -11,9 +11,10 @@
    patch before the answer has landed — and, with `lock`, stops accepting
    edits until `bd-edit:unlock`, so nothing typed during Done's save can be
    left out of it. It also takes `bd-edit:ack` (each patch's `seq`, once the
-   app has it in the document) and `bd-edit:beacon` (a single-file save URL):
-   a tab closed before a patch was acknowledged posts every edit here to that
-   URL on the way out — cookie-free, so the sandbox still holds no session.
+   app has it in the document) and `bd-edit:port` (a MessagePort to the app's
+   exit worker, lib/editexit.worker.ts): a tab closed before a patch was
+   acknowledged posts every edited span down that port on the way out. This
+   frame never holds a URL or credential and makes no request of its own.
 
    Three things had to be true at once, and they decided the design:
 
@@ -40,7 +41,7 @@ import { EditorView } from "@tiptap/pm/view";
 import { keymap } from "@tiptap/pm/keymap";
 import { baseKeymap, toggleMark } from "@tiptap/pm/commands";
 import { history, undo, redo } from "@tiptap/pm/history";
-import { ackEditedSpan, beaconBody, type EditedSpan } from "./lib/editbeacon";
+import { ackEditedSpan, unackedExitPatches, type EditedSpan } from "./lib/editbeacon";
 
 const SRC_ATTR = "data-bd-src";
 
@@ -190,12 +191,12 @@ let before = "";
 /* Done's save is on the wire: no edit may start until the app says how it
    went (`bd-edit:unlock` if the editor stays; a page torn down otherwise). */
 let locked = false;
-/* The exit beacon (lib/editbeacon.ts): every patch is numbered, the app
+/* The exit path (lib/editbeacon.ts): every patch is numbered, the app
    acknowledges each once it is in the document, and a page that goes with a
-   patch unacknowledged posts every span edited on this render to the URL the
-   app gave it. */
+   patch unacknowledged hands every span edited on this render to the app's
+   exit worker, which saves it with the app's own session. */
 let patchSeq = 0;
-let beaconURL = "";
+let exitPort: MessagePort | null = null;
 const editedSpans = new Map<string, EditedSpan>();
 
 // The document as markup, or null if there is no live editor.
@@ -209,12 +210,18 @@ function flush() {
   if (html === null || html === before) return;
   before = html;
   const seq = ++patchSeq;
-  editedSpans.set(range.start + "," + range.end, {
+  const k = range.start + "," + range.end;
+  const prev = editedSpans.get(k);
+  const history = prev?.history ?? new Map<number, string>();
+  history.set(seq, html);
+  editedSpans.set(k, {
     start: range.start,
     end: range.end,
     html,
     seq,
     acked: false,
+    ackedHtml: prev?.ackedHtml,
+    history,
   });
   send({ type: "bd-edit:patch", seq, start: range.start, end: range.end, html });
 }
@@ -414,27 +421,26 @@ send({
 // the only observable difference between "rendered" and "editable".
 document.documentElement.setAttribute("data-bd-ready", "");
 
-/* Leaving with an edit the app never acknowledged: post it to the hub
-   ourselves, once per unload (marking it acknowledged), without cookies. A
-   keepalive body is capped by the browser; past that it goes as an ordinary
-   request that may still finish. */
-function beaconUnacked() {
-  const body = beaconBody({ url: beaconURL, hash, len, spans: editedSpans.values() });
-  if (body === null) return;
+/* Leaving with an edit the app never acknowledged: hand it to the exit
+   worker, once per unload (marking it acknowledged). The worker, not this
+   frame, decides whether and how it is saved. */
+function exitUnacked() {
+  if (!exitPort) return;
+  const patches = unackedExitPatches(editedSpans.values());
+  if (patches === null) return;
   for (const s of editedSpans.values()) s.acked = true;
-  const keepalive = new TextEncoder().encode(body).byteLength <= 60_000;
-  void fetch(beaconURL, { method: "POST", mode: "no-cors", credentials: "omit", keepalive, body }).catch(() => {});
+  exitPort.postMessage({ type: "bd-edit:exit", patches });
 }
 
 window.addEventListener("beforeunload", () => {
   unmount();
-  beaconUnacked();
+  exitUnacked();
 });
 // Flush on pagehide too; keep the open element mounted when entering bfcache.
 window.addEventListener("pagehide", (e: PageTransitionEvent) => {
   if (e.persisted) flush();
   else unmount();
-  beaconUnacked();
+  exitUnacked();
 });
 
 /* Done in the app: post what the open editor holds, then answer. The answer
@@ -444,20 +450,16 @@ window.addEventListener("pagehide", (e: PageTransitionEvent) => {
    saved). Only the app (the parent window) may ask. */
 window.addEventListener("message", (e) => {
   if (e.source !== window.parent) return;
-  const msg = e.data as { type?: unknown; id?: unknown; lock?: unknown; seq?: unknown; url?: unknown } | null;
+  const msg = e.data as { type?: unknown; id?: unknown; lock?: unknown; seq?: unknown } | null;
   if (!msg) return;
   if (msg.type === "bd-edit:ack" && typeof msg.seq === "number") {
     ackEditedSpan(editedSpans.values(), msg.seq);
     return;
   }
-  if (msg.type === "bd-edit:beacon" && typeof msg.url === "string" && msg.url.startsWith("/")) {
-    // The document's own URL has the hub's scheme and host even though this
-    // sandbox's origin is the opaque "null".
-    try {
-      beaconURL = new URL(msg.url, window.location.href).href;
-    } catch {
-      // an unusable URL: no beacon, as before
-    }
+  if (msg.type === "bd-edit:port" && e.ports[0]) {
+    exitPort?.close();
+    exitPort = e.ports[0];
+    document.documentElement.setAttribute("data-bd-exit", "ready");
     return;
   }
   if (msg.type === "bd-edit:flush" && typeof msg.id === "number") {

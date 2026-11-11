@@ -1,4 +1,10 @@
 import { test, expect, Page, FrameLocator } from "@playwright/test";
+import { execFileSync, spawn } from "node:child_process";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { login, ADMIN, READER } from "./helpers";
 
 /* Click-to-edit on a synced HTML file, end to end: the real hub, the real
@@ -474,11 +480,36 @@ test("two people editing different paragraphs both land", async ({ page, browser
   expect(after).toContain('<script>console.log("chart would render here");</script>');
 });
 
+/* Every message the editing iframe receives, recorded inside it (init scripts
+   run in every frame), so a spec can prove what the sandbox was handed. */
+async function recordFrameMessages(page: Page) {
+  await page.addInitScript(() => {
+    const seen: string[] = [];
+    Object.defineProperty(window, "__bdSeen", { value: seen });
+    window.addEventListener("message", (e) => seen.push(JSON.stringify(e.data) ?? ""), true);
+  });
+}
+
+// Every bd-edit:patch is dropped before VisualEdit's listener can see it, so
+// nothing it carries is spliced, saved or acknowledged by the app.
+async function dropPatches(page: Page) {
+  await page.evaluate(() => {
+    window.addEventListener(
+      "message",
+      (e) => {
+        const d: unknown = e.data;
+        if (d && typeof d === "object" && "type" in d && d.type === "bd-edit:patch") e.stopImmediatePropagation();
+      },
+      true,
+    );
+  });
+}
+
 /* A tab closed before the edit's postMessage reached the app. The app never
-   hears the patch (every one is dropped on its way in, so nothing is spliced
-   and nothing is acknowledged), so its own exit flush has nothing to send.
-   The frame, sandboxed without a session, posts the edit itself on the way
-   out to the single-file beacon URL the app handed it — and it lands. */
+   hears the patch, so its own exit flush has nothing to send. The frame hands
+   the edit down its MessagePort to the app's exit worker, which saves it with
+   the app's session as the tab goes — and the frame was never handed a URL,
+   a token or anything else it could write with. */
 test("an edit whose postMessage is not delivered before tab close still lands", async ({ page, browser }) => {
   await login(page, ADMIN); // the verifier: makes the file and reads it back
   const id = await project(page);
@@ -488,33 +519,26 @@ test("an edit whose postMessage is not delivered before tab close still lands", 
   try {
     const editor = await ctx.newPage();
     await login(editor, ADMIN);
-    const issued = editor.waitForResponse(
-      (r) => r.url().includes("/ycollab/frame?") && r.request().method() === "POST" && r.ok(),
-    );
+    await recordFrameMessages(editor);
     await editor.goto(`/${id}/${file}`);
     await editor.click("#edit-btn");
     const frame = editor.frameLocator("iframe.htmlview");
-    await frame.locator("html[data-bd-ready]").waitFor();
-    await issued;
-    // The URL reaches the frame as a postMessage of its own, which nothing in
-    // the frame makes observable; one beat for that task to run.
-    await editor.waitForTimeout(200);
-
-    // Every patch is dropped before VisualEdit's listener can see it.
-    await editor.evaluate(() => {
-      window.addEventListener(
-        "message",
-        (e) => {
-          const d: unknown = e.data;
-          if (d && typeof d === "object" && "type" in d && d.type === "bd-edit:patch") e.stopImmediatePropagation();
-        },
-        true,
-      );
-    });
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+    await dropPatches(editor);
 
     await frame.locator("p.lead").click();
     await editor.keyboard.press("End");
     await editor.keyboard.type(" Saved across close.");
+
+    // What the sandbox was ever sent: control messages only, no URL, no token.
+    const child = editor.frames().find((f) => f.url().includes("edit=1"));
+    expect(child).toBeTruthy();
+    const seen = await child!.evaluate(() => (window as unknown as { __bdSeen: string[] }).__bdSeen.slice());
+    const types = seen.map((s) => (JSON.parse(s) as { type?: string } | null)?.type);
+    expect(types).toContain("bd-edit:port");
+    for (const t of types) expect(["bd-edit:port", "bd-edit:ack", "bd-edit:flush", "bd-edit:unlock"]).toContain(t);
+    for (const s of seen) expect(s).not.toMatch(/https?:|\/api\/|token/i);
+
     await editor.close({ runBeforeUnload: true }); // the tab goes at once
 
     // The context (its network) outlives the tab, as the browser does; only
@@ -524,6 +548,89 @@ test("an edit whose postMessage is not delivered before tab close still lands", 
     expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
   } finally {
     await ctx.close().catch(() => {});
+  }
+});
+
+const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      srv.close(() => (addr && typeof addr === "object" ? resolve(addr.port) : reject(new Error("no port"))));
+    });
+  });
+}
+
+/* A plain folder (`bdrive serve --upload --dir`, DirSource): no room, no past
+   versions — a file is named by its mtime and size, so once autosave #1 has
+   rewritten it the version the frame rendered is gone. Edit #2 is then never
+   delivered to the app before the tab closes; the exit worker must build it
+   on the LATEST version (autosave #1's), not the render, or it is refused and
+   lost. Both edits must be on disk. */
+test("plain-folder mode: an auto-saved edit followed by an undelivered edit before tab close keeps both", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000); // includes building the binary
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bdrive-dir-e2e-"));
+  const site = path.join(tmp, "site");
+  fs.mkdirSync(site);
+  const page = path.join(site, "page.html");
+  fs.writeFileSync(page, FIXTURE);
+  const bin = path.join(tmp, "bdrive");
+  execFileSync("go", ["build", "-o", bin, "./cmd/bdrive"], { cwd: REPO, stdio: "inherit" });
+  const port = await freePort();
+  const server = spawn(bin, ["serve", "--upload", "--addr", `127.0.0.1:${port}`, "--dir", site], {
+    env: { ...process.env, BDRIVE_HOME: path.join(tmp, "home") },
+    stdio: "inherit",
+  });
+  const ctx = await browser.newContext();
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    await expect
+      .poll(
+        async () => {
+          try {
+            return (await fetch(base + "/api/config")).status;
+          } catch {
+            return 0;
+          }
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(200);
+    const onDisk = () => fs.readFileSync(page, "utf8");
+
+    const editor = await ctx.newPage();
+    await editor.goto(base + "/page.html");
+    await editor.click("#edit-btn");
+    const frame = editor.frameLocator("iframe.htmlview");
+    await frame.locator("html[data-bd-exit='ready']").waitFor();
+
+    // Edit #1 autosaves: the file on disk (and its ETag) moves on.
+    await frame.locator("p.lead").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" First autosaved.");
+    await expect.poll(onDisk, { timeout: 15_000 }).toContain("First autosaved.");
+
+    // Edit #2, in another element, never reaches the app; the tab goes.
+    await dropPatches(editor);
+    await frame.locator("h1").click();
+    await editor.keyboard.press("End");
+    await editor.keyboard.type(" Second across close.");
+    await editor.close({ runBeforeUnload: true });
+
+    await expect.poll(onDisk, { timeout: 15_000 }).toContain("Second across close.");
+    const after = onDisk();
+    expect(after).toContain("Revenue grew steadily across every region. First autosaved.");
+    expect(after).toContain("Quarterly report Second across close.");
+    expect(after.split("<!DOCTYPE html>").length - 1).toBe(1);
+  } finally {
+    await ctx.close().catch(() => {});
+    server.kill();
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 

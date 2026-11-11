@@ -172,6 +172,10 @@ export type SharedFileOptions = {
       iframe) brings them all in and stops taking more before the join reads
       the buffer; the join calls the returned release once it is done. */
   beforeJoin?: () => Promise<() => void>;
+  /** The file's known version moved (every adopt and rebase): the text it
+      holds and the sha to build the next save on. VisualEdit keeps its exit
+      worker on it, so a save from a closing tab is built on the latest. */
+  onBaseChange?: (savedText: string, baseSha?: string) => void;
 };
 
 /* Three ways to be connected, and what writes the file in each:
@@ -585,6 +589,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
       } else {
         saved = landed.sent;
         savedSha = undefined;
+        opts.onBaseChange?.(saved, base);
       }
     }
   };
@@ -1199,6 +1204,7 @@ export function openSharedFile(opts: SharedFileOptions): SharedFile {
      so our next save is not refused for a conflict that does not exist. */
   const rebase = (sha?: string) => {
     if (sha) base = sha;
+    opts.onBaseChange?.(saved, base);
   };
 
   const merge = (next: string, nextSha?: string, how?: { held?: boolean }): MergeResult => {

@@ -56,7 +56,7 @@ const { openSharedFile, SAVE_RETRY_MS } = await import("./sharedfile.ts");
 const { parseConflict } = await import("./conflict.ts");
 const { merge3, merge3PreferRight, merge3ForPath, validMergedText } = await import("./merge3.ts");
 const { frameChannel, saveLocked } = await import("./frameflush.ts");
-const { ackEditedSpan, beaconBody } = await import("./editbeacon.ts");
+const { ackEditedSpan, unackedExitPatches, applyRenderPatches, buildExitSaveRequest } = await import("./editbeacon.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -2847,44 +2847,120 @@ test("frameChannel keeps arrival order behind an async handler, then handles at 
   channel.close();
 });
 
-/* The frame's exit beacon goes only when a patch is still unacknowledged,
-   and then carries every span edited on the render, in source order, over
-   the rendered version's hash — enough for the hub to rebuild the whole
-   document. Acknowledged, or nothing to splice onto: nothing is sent. */
-test("beaconBody: per-span ack keeps an unapplied earlier span owed even after a later span is acked", () => {
+/* The frame hands its edits to the exit worker only while a patch is still
+   unacknowledged, and then hands every span edited on the render, in source
+   order, so the worker can rebuild the whole document from the render. */
+test("unackedExitPatches: per-span acks, gaps and re-edits", () => {
   const spans: EditedSpan[] = [
     { start: 40, end: 52, html: "Second", seq: 2, acked: false },
     { start: 10, end: 20, html: "First", seq: 1, acked: false },
   ];
-  const base = { url: "https://hub/api/p/x/ycollab/frame/tok", hash: "h", len: 100, spans };
-
-  // Patch 1 was not applied (no ack 1), while patch 2 on another span succeeded (ack 2):
-  // patch 1 is still unacknowledged, so unload still sends the beacon!
+  // Patch 1 was not applied (no ack 1) while patch 2 was: 1 is still owed.
   ackEditedSpan(spans, 2);
-  same(JSON.parse(beaconBody(base) ?? "null"), {
-    src_hash: "h",
-    src_len: 100,
-    patches: [
-      { start: 10, end: 20, html: "First" },
-      { start: 40, end: 52, html: "Second" },
-    ],
-  });
-
-  // Once patch 1 is also acknowledged, nothing is owed.
+  same(unackedExitPatches(spans), [
+    { start: 10, end: 20, html: "First" },
+    { start: 40, end: 52, html: "Second", ackedHtml: "Second" },
+  ]);
   ackEditedSpan(spans, 1);
-  assert.equal(beaconBody(base), null);
+  assert.equal(unackedExitPatches(spans), null);
 
-  // Re-editing span 1 (seq 3) resets acked=false; a stale ack(1) does not clear seq 3.
+  // A re-edit (seq 3) is owed until its own ack: a stale ack(1) clears nothing.
   spans[1] = { start: 10, end: 20, html: "First again", seq: 3, acked: false };
   ackEditedSpan(spans, 1);
-  assert.notEqual(beaconBody(base), null);
+  assert.notEqual(unackedExitPatches(spans), null);
   ackEditedSpan(spans, 3);
-  assert.equal(beaconBody(base), null);
+  assert.equal(unackedExitPatches(spans), null);
+  assert.equal(unackedExitPatches([]), null);
+});
 
-  // Missing capability, hash, length, or spans -> null even when unacked.
-  spans[1].acked = false;
-  assert.equal(beaconBody({ ...base, url: "" }), null);
-  assert.equal(beaconBody({ ...base, hash: "" }), null);
-  assert.equal(beaconBody({ ...base, len: -1 }), null);
-  assert.equal(beaconBody({ ...base, spans: [] }), null);
+/* The exit worker's one request. The frame's spans are spliced onto the
+   render (only at ranges the app anchored, never a script), merged onto what
+   the file holds now, and sent the way the mode saves: a room checkpoint on
+   a hub, a conditional PUT on the LATEST base in a plain folder — where the
+   render's version is gone once an autosave replaced it. */
+test("buildExitSaveRequest: hub checkpoint, plain-folder save after an autosave, and refusals", () => {
+  const v0 = '<!DOCTYPE html>\n<h1>Title</h1>\n<p class="lead">Lead.</p>\n';
+  const h1 = { start: v0.indexOf("Title"), end: v0.indexOf("Title") + "Title".length };
+  const lead = { start: v0.indexOf("Lead."), end: v0.indexOf("Lead.") + "Lead.".length };
+  const allowedRanges = new Set([h1.start + "," + h1.end, lead.start + "," + lead.end]);
+  const edit1 = { ...lead, html: "Lead. First autosaved." };
+  const edit2 = { ...h1, html: "Title Second across close." };
+  const v1 = v0.replace("Lead.", edit1.html);
+  const v2 = v1.replace("Title", edit2.html);
+  const state = {
+    apiBase: "/api/",
+    path: "page.html",
+    who: "tester",
+    renderText: v0,
+    renderLen: v0.length,
+    allowedRanges,
+    savedText: v0,
+    baseSha: "sha-0",
+    docText: v0,
+  };
+
+  // 1) A hub: a checkpoint into the room, asking the hub to park a clash.
+  const hub = buildExitSaveRequest({ ...state, apiBase: "/api/p/p-1/" }, [edit1]);
+  assert.ok(hub);
+  assert.equal(hub.method, "POST");
+  assert.equal(hub.url, "/api/p/p-1/ycollab/sync?path=page.html");
+  same(JSON.parse(hub.body), { base: "sha-0", base_text: v0, text: v1, park_on_conflict: true });
+  assert.equal(hub.keepalive, true);
+
+  // 2) A plain folder after autosave #1: the file holds v1 under a new ETag,
+  //    edit1 was acknowledged (ackedHtml set), and edit2 was never delivered.
+  //    Built from the acknowledged ancestor v1 and PUT on the latest base:
+  //    both edits land with no duplicate insertion — including a follow-up
+  //    unacked edit to the SAME paragraph that autosaved!
+  const dir = buildExitSaveRequest(
+    { ...state, savedText: v1, baseSha: "dir-2000-110", docText: v1 },
+    [edit2, { ...edit1, ackedHtml: edit1.html }],
+  );
+  assert.ok(dir);
+  assert.equal(dir.method, "PUT");
+  assert.equal(dir.url, "/api/upload/content?path=page.html");
+  same(dir.headers, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "X-Bdrive-Park-On-Conflict": "1",
+    "If-Match": '"dir-2000-110"',
+  });
+  assert.equal(dir.body, v2);
+
+  const sameParaFollowUp = buildExitSaveRequest(
+    { ...state, savedText: v1, baseSha: "dir-2000-110", docText: v1 },
+    [{ ...lead, html: "Lead. First autosaved. More words.", ackedHtml: edit1.html }],
+  );
+  assert.ok(sameParaFollowUp);
+  assert.equal(sameParaFollowUp.body, v0.replace("Lead.", "Lead. First autosaved. More words."));
+  // The same words changed outside: the frame's document goes beside the file.
+  const outside = v0.replace("Title", "Other");
+  const mine = { ...h1, html: "Mine" };
+  const clash = buildExitSaveRequest({ ...state, savedText: outside, docText: outside }, [mine]);
+  assert.ok(clash);
+  assert.ok(clash.url.startsWith("/api/upload/content?path=page.html.bdrive-conflict-tester-"));
+  assert.equal(clash.headers["If-None-Match"], "*");
+  assert.equal(clash.body, v0.replace("Title", "Mine"));
+
+  // Nothing new: nothing sent.
+  assert.equal(buildExitSaveRequest({ ...state, savedText: v1, docText: v1 }, [edit1]), null);
+
+  // 3) Refusals: a range the app never anchored, a script, an unconfirmed shrink.
+  assert.equal(applyRenderPatches(v0, v0.length, allowedRanges, [{ start: 1, end: 5, html: "x" }]), null);
+  assert.equal(buildExitSaveRequest(state, [{ start: 1, end: 5, html: "x" }]), null);
+  assert.equal(buildExitSaveRequest(state, [{ ...h1, html: "<script>steal()</script>" }]), null);
+  assert.equal(buildExitSaveRequest(state, [{ ...h1, html: "< SCRIPT src=x>" }]), null);
+  assert.equal(buildExitSaveRequest(state, [{ ...h1, html: "a\0b" }]), null);
+  assert.equal(buildExitSaveRequest(state, [edit2, edit2]), null); // overlapping
+  assert.equal(buildExitSaveRequest({ ...state, renderLen: v0.length + 1 }, [edit2]), null);
+  const big = "<!DOCTYPE html>\n<p>" + "word ".repeat(1000) + "</p>\n";
+  const para = { start: big.indexOf("word"), end: big.lastIndexOf("</p>") };
+  const bigState = {
+    ...state,
+    renderText: big,
+    renderLen: big.length,
+    allowedRanges: new Set([para.start + "," + para.end]),
+    savedText: big,
+    docText: big,
+  };
+  assert.equal(buildExitSaveRequest(bigState, [{ ...para, html: "x" }]), null);
 });

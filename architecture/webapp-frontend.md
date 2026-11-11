@@ -191,7 +191,8 @@ classDiagram
         +collabroute.ts hasCollabRoute (only a project api base has a room; a single volume opens solo at once)
         +merge3.ts merge3 merge3PreferRight merge3ForPath validMergedText diffSplices applySplices retainsChanges (TS port of internal/textmerge; .json/.jsonl merges held to valid JSON as the hub holds them)
         +frameflush.ts frameChannel FrameChannel saveLocked (FIFO queue of iframe messages; drain posts bd-edit:flush, optionally with lock, and waits for bd-edit:flushed; saveLocked unlocks with bd-edit:unlock unless the save landed)
-        +editbeacon.ts beaconBody EditedSpan (the iframe's exit beacon body: src_hash, src_len, every span edited on this render; null when every patch is acknowledged)
+        +editbeacon.ts ackEditedSpan unackedExitPatches applyRenderPatches buildExitSaveRequest (pure exit-save logic, tested without a DOM)
+        +editexit.worker.ts (dedicated same-origin Web Worker: arm / sync / disarm from VisualEdit, bd-edit:exit from the iframe's MessagePort)
         +sharedfile.ts openSharedFile SharedFile SAVE_IDLE_MS saveNow askingShrink
         +sharedfile.ts merge MergeResult (an outside write, offered to an open document; held = already in the room)
         +sharedfile.ts rebase (the head sha moved because a co-editor saved)
@@ -247,8 +248,8 @@ classDiagram
     shareMermaid --> lib : renderMermaid
     inlineComment --> lib : anchor.ts (no app imports)
     components --> lib : rangeFor describe hitTest (Comments)
-    components --> lib : merge3PreferRight diffSplices frameChannel saveLocked (VisualEdit), saveNow askingShrink (FileView flush)
-    note for lib "editbeacon.ts is the VisualEdit iframe's last word. inline-edit.ts numbers each bd-edit:patch (seq) and VisualEdit answers bd-edit:ack once the patch is in the document. VisualEdit fetches a single-file edit URL from POST {prefix}ycollab/frame and hands it to the iframe as bd-edit:beacon. On the iframe's beforeunload or pagehide, if any patch is unacknowledged (patchSeq greater than ackedSeq), inline-edit.ts posts beaconBody straight to POST ycollab/frame/{token}: cookie-free (credentials omit, no-cors), with keepalive when the body is at most 60,000 bytes. The iframe keeps sandbox allow-scripts allow-downloads, with no allow-same-origin; the token, not a session, authorizes the write, and the hub merges it like a staging checkpoint"
+    components --> lib : merge3PreferRight diffSplices frameChannel saveLocked, Worker(editexit.worker.ts) + MessageChannel (VisualEdit), saveNow askingShrink (FileView flush)
+    note for lib "The VisualEdit exit save. The editing iframe runs the synced file's own scripts in sandbox allow-scripts with no allow-same-origin, so it is never given a session, a token or a URL. VisualEdit spawns a dedicated same-origin Worker (editexit.worker.ts) and arms it with the rendered source, the anchored allowedRanges and the live (savedText, baseSha, docText), which it keeps current on every save and rebase through SharedFile's onBaseChange. It transfers one end of a MessageChannel to inline-edit.ts as bd-edit:port. inline-edit.ts numbers each bd-edit:patch (seq) and VisualEdit answers bd-edit:ack for each patch it applied (ackEditedSpan). On beforeunload or pagehide with an unacknowledged span, inline-edit.ts posts { type: bd-edit:exit, patches } (unackedExitPatches) over that port. The worker trusts none of it: applyRenderPatches splices only anchored, ordered, script-free spans onto renderText, and buildExitSaveRequest three-way merges the result with docText / savedText, refuses an unconfirmed sharp shrink, and sends one request with the app's own same-origin cookie: POST ycollab/sync with park_on_conflict on a hub or desktop, or PUT upload/content with the latest If-Match and X-Bdrive-Park-On-Conflict on a plain folder (a create-only conflict copy for a same-word clash). keepalive when the body is at most 60,000 bytes"
     Browser ..> components : Done awaits FileView's flushRef
     lib --> api : syncCollab putText keepalive (sharedfile)
     components ..> inlineComment : postMessage via the ?comment=1 iframe

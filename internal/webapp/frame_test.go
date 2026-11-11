@@ -3,9 +3,9 @@ package webapp
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -291,133 +291,5 @@ func TestFrameKeyCreateIsAtomicOrRefused(t *testing.T) {
 		if !bytes.Equal(k, keys[0]) {
 			t.Fatal("concurrent first use produced different keys")
 		}
-	}
-}
-
-// beacon is what the edit frame's unload sends: a no-cors keepalive POST, no
-// cookie, a text/plain body.
-func beacon(h http.Handler, target string, body any) *httptest.ResponseRecorder {
-	data, _ := json.Marshal(body)
-	req := httptest.NewRequest("POST", target, bytes.NewReader(data))
-	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	return rec
-}
-
-/*
-An edit typed into a framed page whose postMessage never reached the editor —
-the tab closed first — still lands: the frame's own unload beacon carries it,
-with a token that writes that one file and nothing else.
-
-	A read token cannot write and an edit token cannot read. The beacon
-	merges into the document, is idempotent when repeated, parks a conflict
-	copy when somebody changed the same words meanwhile, and stops the
-	moment the editor may no longer write.
-*/
-func TestEditFrameFlushSavesUnackedSpanAndBlocksReadTokens(t *testing.T) {
-	h, srv, c, p := frameHub(t)
-	const path = "site/page.html"
-	const page = "<html><body><p>Hello world</p><p>Second line</p></body></html>\n"
-	api := "/api/p/" + p.ID + "/"
-	file := func() string {
-		t.Helper()
-		return doAs(t, h, "GET", api+"file?path="+url.QueryEscape(path), nil, c["alice"]).Body.String()
-	}
-	if rec := doAs(t, h, "PUT", api+"upload/content?path="+url.QueryEscape(path), []byte(page), c["bob"]); rec.Code != 200 {
-		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
-	}
-
-	// A read token opens the raw route only.
-	readURL := frameURL(t, h, p, path, c["bob"])
-	readTok := strings.Split(strings.TrimPrefix(readURL, api+"raw/"), "/")[0]
-	if rec := beacon(h, api+"ycollab/frame/"+readTok, map[string]any{}); rec.Code != http.StatusUnauthorized && rec.Code != http.StatusForbidden {
-		t.Fatalf("a read token flushed an edit: %d %s", rec.Code, rec.Body)
-	}
-
-	rec := doAs(t, h, "POST", api+"ycollab/frame?path="+url.QueryEscape(path), nil, c["bob"])
-	if rec.Code != 200 {
-		t.Fatalf("mint edit token: %d %s", rec.Code, rec.Body)
-	}
-	var minted struct{ URL string }
-	if err := json.Unmarshal(rec.Body.Bytes(), &minted); err != nil || !strings.HasPrefix(minted.URL, api+"ycollab/frame/") {
-		t.Fatalf("minted %s", rec.Body)
-	}
-	editTok := strings.TrimPrefix(minted.URL, api+"ycollab/frame/")
-	if rec := cookieless(h, api+"raw/"+editTok+"/"+path); rec.Code != http.StatusUnauthorized && rec.Code != http.StatusNotFound {
-		t.Fatalf("an edit token read the page: %d %s", rec.Code, rec.Body)
-	}
-	if rec := doAs(t, h, "POST", api+"ycollab/frame?path="+url.QueryEscape(path), nil, c["dave"]); rec.Code != http.StatusForbidden {
-		t.Fatalf("an outsider minted an edit token: %d", rec.Code)
-	}
-
-	flush := func(word string) *httptest.ResponseRecorder {
-		start := strings.Index(page, "Hello world")
-		return beacon(h, minted.URL, map[string]any{
-			"src_hash": shaOf(page), "src_len": len(page),
-			"patches": []map[string]any{{"start": start, "end": start + len("Hello world"), "html": word}},
-		})
-	}
-	edited := strings.Replace(page, "Hello world", "Hello there", 1)
-	for attempt := range 2 { // the second is the same beacon again
-		if rec := flush("Hello there"); rec.Code != 200 {
-			t.Fatalf("flush (attempt %d): %d %s", attempt, rec.Code, rec.Body)
-		}
-		if got := file(); got != edited {
-			t.Fatalf("file after flush %d = %q, want %q", attempt, got, edited)
-		}
-	}
-	if cc := conflictTexts(t, srv, p.ID, path); len(cc) != 0 {
-		t.Fatalf("an idempotent flush parked %d copies", len(cc))
-	}
-
-	// Out-of-range and malformed patches write nothing.
-	for _, bad := range []map[string]any{
-		{"src_hash": shaOf(page), "src_len": len(page), "patches": []map[string]any{{"start": 0, "end": len(page), "html": "x"}}},
-		{"src_hash": shaOf(page), "src_len": len(page) + 1, "patches": []map[string]any{{"start": 5, "end": 6, "html": "x"}}},
-		{"src_hash": shaOf("not this page"), "src_len": 13, "patches": []map[string]any{{"start": 1, "end": 2, "html": "x"}}},
-	} {
-		if rec := beacon(h, minted.URL, bad); rec.Code == 200 {
-			t.Fatalf("bad flush %v accepted: %s", bad, rec.Body)
-		}
-	}
-	if got := file(); got != edited {
-		t.Fatalf("a refused flush wrote: %q", got)
-	}
-
-	// Carol changes the same words; the page that never saw it still flushes
-	// against what it rendered. The page's edit is kept beside the file.
-	carols := strings.Replace(page, "Hello world", "Hello carol", 1)
-	if rec := doAs(t, h, "PUT", api+"upload/content?path="+url.QueryEscape(path), []byte(carols), c["carol"]); rec.Code != 200 {
-		t.Fatalf("carol's write: %d %s", rec.Code, rec.Body)
-	}
-	rec = flush("Hello bob")
-	if rec.Code != 200 {
-		t.Fatalf("clashing flush: %d %s", rec.Code, rec.Body)
-	}
-	var out struct {
-		Parked string `json:"parked"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || !strings.HasPrefix(out.Parked, path+".bdrive-conflict-") {
-		t.Fatalf("clashing flush answered %s: want a conflict copy", rec.Body)
-	}
-	if got := file(); got != carols {
-		t.Fatalf("file = %q, want carol's %q", got, carols)
-	}
-	want := strings.Replace(page, "Hello world", "Hello bob", 1)
-	if got := doAs(t, h, "GET", api+"file?path="+url.QueryEscape(out.Parked), nil, c["alice"]).Body.String(); got != want {
-		t.Fatalf("copy %s = %q, want the page's %q", out.Parked, got, want)
-	}
-
-	// Bob may no longer write: the open page's beacon stops at once.
-	if err := srv.Projects.SetPerm(p.ID, "bob@x.io", PermRead); err != nil {
-		t.Fatal(err)
-	}
-	before := file()
-	if rec := flush("Hello again"); rec.Code != http.StatusForbidden {
-		t.Fatalf("flush after write was revoked: %d %s", rec.Code, rec.Body)
-	}
-	if got := file(); got != before {
-		t.Fatalf("a revoked flush wrote: %q", got)
 	}
 }
