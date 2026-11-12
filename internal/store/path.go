@@ -6,7 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // UnderRoot reports whether p resolves inside root ON DISK — following every
@@ -50,26 +51,70 @@ func UnderRoot(root, p string) bool {
 // ErrNotRegular marks an entry that must not be read as file content.
 var ErrNotRegular = errors.New("not a regular file")
 
-// OpenRegularUnderRoot opens a regular file without following its final entry
-// or blocking on a FIFO. The returned metadata describes the opened descriptor,
-// not a path that may have changed between inspection and opening.
+// OpenRegularUnderRoot pins the mount root and walks its descendants through
+// directory descriptors. No descendant component may be a symlink, and the leaf
+// is opened nonblocking and checked as a regular file before it can be read.
+// The caller owns the returned file.
 func OpenRegularUnderRoot(root, abs string) (*os.File, os.FileInfo, error) {
-	if !UnderRoot(root, filepath.Dir(abs)) {
-		return nil, nil, fmt.Errorf("%s resolves outside the mount root", abs)
-	}
-	f, err := os.OpenFile(abs, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	root, abs = filepath.Clean(root), filepath.Clean(abs)
+	rel, err := filepath.Rel(root, abs)
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK) {
-			return nil, nil, fmt.Errorf("%w: %s", ErrNotRegular, abs)
-		}
-		// Some non-regular entries (for example sockets) cannot be opened
-		// at all. Keep that classification distinct from a regular file's
-		// permission or I/O error.
-		if fi, statErr := os.Lstat(abs); statErr == nil && !fi.Mode().IsRegular() {
-			return nil, nil, fmt.Errorf("%w: %s", ErrNotRegular, abs)
-		}
 		return nil, nil, err
 	}
+	separator := string(filepath.Separator)
+	if rel == ".." || strings.HasPrefix(rel, ".."+separator) {
+		// Resolve only the trusted mount root, never the candidate path.
+		// This permits aliases such as /tmp and /private/tmp.
+		realRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return nil, nil, err
+		}
+		rel, err = filepath.Rel(realRoot, abs)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+separator) || filepath.IsAbs(rel) {
+		return nil, nil, fmt.Errorf("%s is not a descendant of the mount root", abs)
+	}
+	dirFD, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, &os.PathError{Op: "open", Path: root, Err: err}
+	}
+	leaf := rel
+	for {
+		segment, rest, parent := strings.Cut(leaf, separator)
+		if segment == "" || segment == "." || segment == ".." {
+			unix.Close(dirFD)
+			return nil, nil, fmt.Errorf("%s has an invalid path segment", abs)
+		}
+		if !parent {
+			break
+		}
+		nextFD, err := unix.Openat(dirFD, segment, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		unix.Close(dirFD)
+		if err != nil {
+			return nil, nil, &os.PathError{Op: "openat", Path: abs, Err: err}
+		}
+		dirFD = nextFD
+		leaf = rest
+	}
+	fd, err := unix.Openat(dirFD, leaf, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		nonRegular := errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EMLINK)
+		if !nonRegular {
+			var st unix.Stat_t
+			nonRegular = unix.Fstatat(dirFD, leaf, &st, unix.AT_SYMLINK_NOFOLLOW) == nil &&
+				st.Mode&unix.S_IFMT != unix.S_IFREG
+		}
+		unix.Close(dirFD)
+		if nonRegular {
+			return nil, nil, fmt.Errorf("%w: %s", ErrNotRegular, abs)
+		}
+		return nil, nil, &os.PathError{Op: "openat", Path: abs, Err: err}
+	}
+	unix.Close(dirFD)
+	f := os.NewFile(uintptr(fd), abs)
 	fi, err := f.Stat()
 	if err != nil {
 		f.Close()

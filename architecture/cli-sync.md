@@ -133,7 +133,7 @@ classDiagram
         +UnderRoot(root, p) bool
         +OpenRegularUnderRoot(root, abs)
     }
-    note for UnderRoot "path.go — symlink-aware containment: resolves the root and the deepest existing ancestor of p, so a symlinked directory cannot land a materialized write outside the mount. A dangling component is false. Shared by materialize, the file:// backend, templates, scope-file writes and init's BDRIVE_HOME gate. OpenRegularUnderRoot adds a nonblocking, no-follow open and descriptor type validation for grep, stale and ignore-rule reads; ErrNotRegular distinguishes non-regular entries from regular-file permission or I/O errors"
+    note for UnderRoot "path.go — UnderRoot checks symlink-aware containment for materialized writes, the file:// backend, templates, scope files and init's BDRIVE_HOME gate. OpenRegularUnderRoot pins the mount root descriptor and walks every descendant with no-follow Openat calls; the leaf is nonblocking and descriptor-validated as regular. grep, stale and ignore-rule reads cannot follow a concurrently swapped parent outside the mount. Symlinked mount roots remain valid; ErrNotRegular classifies only leaf non-regular entries"
 
     class walkFolder {
         +walkFolder(folder, filter, fn)

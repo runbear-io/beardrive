@@ -125,3 +125,114 @@ func TestSymlink_OpenRegularUnderRootPreservesPermissionErrors(t *testing.T) {
 		t.Fatalf("regular-file permission error = %v", err)
 	}
 }
+
+func TestSymlink_OpenRegularUnderRootPinsParentsDuringSwaps(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	sub := filepath.Join(root, "sub")
+	parked := filepath.Join(root, "parked")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "note.txt"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "note.txt"), []byte("OUTSIDE_SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		for {
+			select {
+			case <-stop:
+				done <- nil
+				return
+			default:
+			}
+			if err := os.Rename(sub, parked); err != nil {
+				done <- err
+				return
+			}
+			if err := os.Symlink(outside, sub); err != nil {
+				done <- err
+				return
+			}
+			if err := os.Remove(sub); err != nil {
+				done <- err
+				return
+			}
+			if err := os.Rename(parked, sub); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	<-started
+	// Stop only between complete swaps, leaving the real directory in place.
+	defer func() {
+		close(stop)
+		if err := <-done; err != nil {
+			t.Errorf("swap directory: %v", err)
+		}
+	}()
+	for range 500 {
+		f, _, err := OpenRegularUnderRoot(root, filepath.Join(root, "sub", "note.txt"))
+		if err != nil {
+			continue
+		} // a missing or symlinked parent is an ordinary refusal
+		data, readErr := io.ReadAll(f)
+		closeErr := f.Close()
+		if readErr != nil || closeErr != nil {
+			t.Fatalf("read pinned file: %v, close: %v", readErr, closeErr)
+		}
+		if string(data) != "inside" {
+			t.Fatalf("parent swap exposed %q", data)
+		}
+	}
+}
+
+func TestSymlink_OpenRegularUnderRootAllowsSymlinkedMountRoot(t *testing.T) {
+	realMount := t.TempDir()
+	mountLink := filepath.Join(t.TempDir(), "mount")
+	if err := os.WriteFile(filepath.Join(realMount, "note.txt"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realMount, mountLink); err != nil {
+		t.Fatal(err)
+	}
+	for _, abs := range []string{filepath.Join(mountLink, "note.txt"), filepath.Join(realMount, "note.txt")} {
+		f, _, err := OpenRegularUnderRoot(mountLink, abs)
+		if err != nil {
+			t.Fatalf("open legitimate mount alias %s: %v", abs, err)
+		}
+		data, readErr := io.ReadAll(f)
+		closeErr := f.Close()
+		if readErr != nil || closeErr != nil || string(data) != "inside" {
+			t.Fatalf("read mount alias = %q, %v; close: %v", data, readErr, closeErr)
+		}
+	}
+}
+
+func TestSymlink_OpenRegularUnderRootRejectsIntermediateLinkInsideMount(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "note.txt"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	f, _, err := OpenRegularUnderRoot(root, filepath.Join(root, "alias", "note.txt"))
+	if f != nil {
+		f.Close()
+	}
+	if err == nil || errors.Is(err, ErrNotRegular) {
+		t.Fatalf("intermediate symlink = %v, want a parent-walk error", err)
+	}
+}
