@@ -20,11 +20,18 @@ export function useComments(apiBase: string, path: string, enabled: boolean) {
 
 export function useCommentActions(apiBase: string) {
   const qc = useQueryClient();
+  // The refetch carries this tab's comment receipts (api/http.ts), so the
+  // list it brings back includes the write whichever hub process answers.
   const refetch = () => void qc.invalidateQueries({ queryKey: ["comments", apiBase] });
   /* The hub answers a write with the thread as it now stands, so the cached
      list takes that answer at once and the refetch only confirms it in the
-     background: whoever just posted sees it without a second round trip. */
-  const place = (t: CommentThread | null, drop?: string) => {
+     background: whoever just posted sees it without a second round trip.
+
+     A list read already in flight was asked before the write and would land
+     after it, putting the old list back over the answer — so it is cancelled
+     first, and the refetch that follows asks again. */
+  const place = async (t: CommentThread | null, drop?: string) => {
+    await qc.cancelQueries({ queryKey: ["comments", apiBase] });
     for (const [key, data] of qc.getQueriesData<{ comments: CommentThread[] }>({ queryKey: ["comments", apiBase] })) {
       if (!data || key.length !== 3) continue;
       const path = key[2] as string;
@@ -40,19 +47,19 @@ export function useCommentActions(apiBase: string) {
   return {
     create: async (path: string, body: string, anchor?: CommentAnchor, sha?: string) => {
       const r = await postJSON<{ comment: CommentThread }>(apiBase + "comments", { path, body, anchor, sha });
-      place(r.comment);
+      await place(r.comment);
       refetch();
       return r.comment;
     },
     act: async (id: string, action: "reply" | "resolve" | "reopen", body = "") => {
       const r = await postJSON<{ comment?: CommentThread }>(apiBase + "comments/" + id, { action, body });
-      if (r?.comment) place(r.comment);
+      if (r?.comment) await place(r.comment);
       refetch();
     },
     // Gone from the list before the hub answers; a refusal is put back by the
     // refetch, which runs either way.
     remove: async (id: string) => {
-      place(null, id);
+      await place(null, id);
       try {
         await api("DELETE", apiBase + "comments/" + id);
       } finally {

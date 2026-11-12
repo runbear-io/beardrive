@@ -47,6 +47,7 @@ func (r *RemoteSource) removeIfBase(ctx context.Context, p string, cb *commitBas
 
 // handleRemove serves POST /api/p/<id>/remove {path}.
 func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request) {
+	r, sink := withReceiptSink(r)
 	up := s.gateUpload(v, w) // a read-only hub stays read-only
 	if up == nil {
 		return
@@ -105,5 +106,7 @@ func (s *Server) handleRemove(v *volume, w http.ResponseWriter, r *http.Request)
 	s.dataWrote(r.Context(), projectID(r))
 	s.captureChange(r, "browser", 0, 1)
 	s.publishChange(r, "browser", []string{p}, 0, 1)
-	writeJSON(w, map[string]any{"ok": true, "path": p})
+	resp := map[string]any{"ok": true, "path": p}
+	stampReceipt(w, resp, sink.String())
+	writeJSON(w, resp)
 }

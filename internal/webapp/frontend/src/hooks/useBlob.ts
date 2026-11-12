@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getJSON, getResponse, HttpError } from "../api/http";
 import { MAX_BYTES, sniffBytes, type BlobText } from "../lib/sniff";
 
@@ -16,8 +16,17 @@ export function blobURL(apiBase: string, sha: string, name?: string, download?: 
   return u;
 }
 
-export async function fetchBlobText(url: string): Promise<BlobText> {
-  const r = await getResponse(url);
+// `quiet` is for the boot prefetch, which must never navigate: a refusal is
+// a plain error left in the cache, and the mounting hook's own read (not
+// quiet) is what sends a signed-out visitor to sign in.
+export async function fetchBlobText(url: string, quiet = false): Promise<BlobText> {
+  let r: Response;
+  if (quiet) {
+    r = await fetch(url);
+    if (!r.ok) throw new Error(url + ": " + r.status);
+  } else {
+    r = await getResponse(url);
+  }
   // Cheap out before reading the body when the server tells us the size.
   // Content-Length is a hint, not a guarantee (a chunked or proxied
   // response may omit it), so sniffBytes checks the real length too.
@@ -56,23 +65,38 @@ export function fileURLFor(apiBase: string, path: string, version?: string): str
    429 and 5xx are the server saying "not now"; a dropped connection is not an
    answer at all. 403 and 404 ARE answers, and retrying them just spends
    requests on a hub that is already telling us to slow down. */
-function transient(e: unknown): boolean {
+export function isTransientBlobError(e: unknown): boolean {
   return !(e instanceof HttpError) || e.status === 429 || e.status >= 500;
 }
 
-export function useTextAt(url: string, key: unknown[], enabled: boolean, immutable: boolean) {
-  return useQuery({
-    queryKey: key,
+/* The one query every reader of a file's bytes shares. ["text", url] has a
+   single shape — a BlobText — no matter who asks: the reading views, the
+   editor's seed, Copy, the boot prefetch and hover prefetches all build it
+   here, so no caller can park a raw string under the key another reads as an
+   object (React error #31 was exactly that: a `string` and a BlobText
+   sharing one cache slot). */
+export function textQueryOptions(url: string, immutable = false) {
+  return queryOptions({
+    queryKey: ["text", url] as const,
     queryFn: () => fetchBlobText(url),
-    enabled,
+    ...textPolicy(immutable),
+  });
+}
+
+function textPolicy(immutable: boolean) {
+  return {
     ...(immutable ? { staleTime: Infinity, gcTime: Infinity } : {}),
     // A pinned ?v= URL is content-addressed: if it failed it failed, and
     // there is no editor open on it to protect. A LIVE path is different —
     // one 429 used to end an editing session (see EditView), so it backs off
     // and tries again rather than turning into a dead end.
-    retry: immutable ? false : (count, e) => count < 3 && transient(e),
-    retryDelay: (count) => Math.min(1_000 * 2 ** count, 8_000),
-  });
+    retry: immutable ? false : (count: number, e: unknown) => count < 3 && isTransientBlobError(e),
+    retryDelay: (count: number) => Math.min(1_000 * 2 ** count, 8_000),
+  };
+}
+
+export function useTextAt(url: string, key: unknown[], enabled: boolean, immutable: boolean) {
+  return useQuery({ queryKey: key, queryFn: () => fetchBlobText(url), enabled, ...textPolicy(immutable) });
 }
 
 export function useBlobText(apiBase: string, sha: string | undefined, enabled: boolean) {
@@ -93,12 +117,14 @@ export function useBlobText(apiBase: string, sha: string | undefined, enabled: b
    fresh() is for a reload: it resolves to a URL with time left on it, minting
    a new one when the held one is near its expiry, so a tab left open for hours
    does not reload into a dead token. */
-export function useFrameURL(apiBase: string, path: string, fileURL: string, version?: string) {
+export function useFrameURL(apiBase: string, path: string, fileURL: string, version?: string, enabled = true) {
   const { data, isError, refetch } = useQuery({
     queryKey: ["frame", apiBase, path],
     queryFn: () =>
       getJSON<{ url: string; expires: number }>(apiBase + "frame?path=" + encodeURIComponent(path)),
-    enabled: !version,
+    // Only a surface that actually frames the page mints one: an editor on
+    // Markdown or code has no iframe, and asking anyway is a wasted request.
+    enabled: enabled && !version,
     staleTime: Infinity,
     retry: 1,
   });

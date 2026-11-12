@@ -214,6 +214,37 @@ test("A -> save B -> outside restore to A merges A back into the buffer", async 
   file.destroy();
 });
 
+/* Done seeds the reading view from settled(): the bytes the file now holds,
+   and the sha they are stored under — never a sha for text it did not write. */
+test("settled() names the saved text and its sha, and no sha for unsaved typing", async () => {
+  globalThis.fetch = (async () => new Response(JSON.stringify({ sha: "sha-b" }), { status: 200 })) as typeof fetch;
+  let buffer = "A\n";
+  let solo = false;
+  const file = openSharedFile({
+    apiBase: "/api/",
+    path: "notes.md",
+    seed: "A\n",
+    baseSha: "sha-a",
+    me: { name: "t", colour: "oklch(0.7 0.1 200)" },
+    onReady: () => {},
+    onSolo: () => {
+      solo = true;
+    },
+    soloText: () => buffer,
+    soloApply: (e) => {
+      buffer = buffer.slice(0, e.from) + e.insert + buffer.slice(e.to);
+    },
+  });
+  await waitFor(() => assert.equal(solo, true));
+  same(file.settled(), { text: "A\n", sha: "sha-a" });
+
+  buffer = "B\n";
+  same(file.settled(), { text: "B\n", sha: undefined });
+  assert.equal(await file.saveNow(), true);
+  same(file.settled(), { text: "B\n", sha: "sha-b" });
+  file.destroy();
+});
+
 /* A staging checkpoint the hub answers 503 (a write it could not land yet)
    is re-sent on its own once the typing has stopped: nothing else would
    ever send it. A permanent refusal is not retried. */

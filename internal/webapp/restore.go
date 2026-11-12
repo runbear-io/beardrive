@@ -22,6 +22,7 @@ import (
 
 // handleRestore serves POST /api/p/<id>/restore {path, sha}.
 func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request) {
+	r, sink := withReceiptSink(r)
 	up := s.gateUpload(v, w) // a read-only hub stays read-only
 	if up == nil {
 		return
@@ -133,5 +134,9 @@ func (s *Server) handleRestore(v *volume, w http.ResponseWriter, r *http.Request
 	s.publishChange(r, "browser", []string{p}, 1, 0)
 	// "folded" tells the editor that asked that the room already holds the
 	// restored text, so it must not splice it in a second time.
-	writeJSON(w, map[string]any{"ok": true, "blob": req.SHA, "size": found.Size, "folded": folded})
+	resp := map[string]any{"ok": true, "blob": req.SHA, "size": found.Size, "folded": folded}
+	// The restore's own op: a reader on another hub process that echoes it
+	// gets the restored version, never the one it replaced.
+	stampReceipt(w, resp, sink.String())
+	writeJSON(w, resp)
 }

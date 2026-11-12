@@ -6,6 +6,7 @@ import { HEAT_DISCLOSURE, staleNote } from "../lib/heat";
 import { humanSize } from "../util";
 import { Icon } from "./shell";
 import { HistoryRow } from "./HistoryRow";
+import { useHoverPrefetch } from "./FileTree";
 
 export function FolderListing(props: {
   node: Node;
@@ -20,8 +21,11 @@ export function FolderListing(props: {
   onOpen: (path: string, version?: string) => void;
   onFullHistory: (prefix: string) => void;
   onRendered?: () => void; // scroll restoration: content height just grew
+  // Start loading a file row's content on hover, and its editor on press.
+  onPrefetch?: (path: string, press: boolean) => void;
 }) {
   const { node, heatMap, folders, onOpen } = props;
+  const hover = useHoverPrefetch(props.onPrefetch);
   const kids = (node.children || [])
     .slice()
     .sort((a, b) => Number(b.dir || false) - Number(a.dir || false) || a.name.localeCompare(b.name));
@@ -81,6 +85,9 @@ export function FolderListing(props: {
                 role="button"
                 title={c.path}
                 onClick={() => onOpen(c.path)}
+                onPointerEnter={c.dir ? undefined : () => hover.enter(c.path)}
+                onPointerLeave={c.dir ? undefined : hover.leave}
+                onPointerDown={c.dir ? undefined : () => hover.press(c.path)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();

@@ -275,7 +275,6 @@ still applies; the answer is the sha the room now stands on and its text. A
 room this request had to open is closed again once written.
 */
 func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Request) {
-	_ = v
 	path, err := cleanUploadPath(r.URL.Query().Get("path"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -513,7 +512,9 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 			_, _ = w.Write(pw.body.Bytes())
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "path": path, "sha": s.rooms().base(room), "text": cur, "parked": parked})
+		resp := map[string]any{"ok": true, "path": path, "sha": s.rooms().base(room), "text": cur, "parked": parked}
+		stampReceipt(w, resp, pw.hdr.Get(receiptHeader)) // the copy's own write
+		writeJSON(w, resp)
 		return
 	}
 	if conflict || tooLarge {
@@ -568,6 +569,15 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	// The receipt of the op that made the file say sha, when syncDurable
+	// proved it on storage and this process's fold already names that op: a
+	// reader on another hub process echoing it then sees the synced text.
+	receipt := ""
+	if sha != "" && v != nil {
+		if fi, ok := s.headFile(ctx, v, path); ok && fi.Blob == sha {
+			receipt = fileReceipt(fi)
+		}
+	}
 	if sha == "" {
 		sha = s.rooms().base(room)
 	}
@@ -584,6 +594,7 @@ func (s *Server) handleYCollabSync(v *volume, w http.ResponseWriter, r *http.Req
 		   of the client re-inserting the same lines a second time. */
 		resp["update"] = base64.StdEncoding.EncodeToString(synced)
 	}
+	stampReceipt(w, resp, receipt)
 	writeJSON(w, resp)
 }
 

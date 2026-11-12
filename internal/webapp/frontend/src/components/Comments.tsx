@@ -402,11 +402,16 @@ export function CommentPanel(props: {
   const open = numbered.filter((t) => !t.resolved);
   const done = numbered.filter((t) => t.resolved);
   const [tab, setTab] = useState<"open" | "resolved">("open");
-  // A focused thread that is resolved lives on the other tab; follow it.
+  // A focused thread lives on one tab; follow it. That includes the thread
+  // just posted from the page (CommentSurface focuses what it created): a
+  // new comment is open, and posting it with Resolved showing used to leave
+  // it off screen, as if it had not saved.
   const focusResolved = !!focus && done.some((t) => t.id === focus);
+  const focusOpen = !!focus && open.some((t) => t.id === focus);
   useEffect(() => {
     if (focusResolved) setTab("resolved");
-  }, [focus, focusResolved]);
+    else if (focusOpen) setTab("open");
+  }, [focus, focusResolved, focusOpen]);
   const list = tab === "open" ? open : done;
   const [general, setGeneral] = useState("");
   const [busy, setBusy] = useState(false);

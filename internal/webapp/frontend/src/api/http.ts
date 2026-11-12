@@ -157,10 +157,117 @@ async function fail(r: Response): Promise<never> {
   throw new HttpError(r.status, errorFor(r.status, body), body);
 }
 
+/* Causal receipts: read-your-own-writes across hub processes.
+
+   A hub is more than one process, and each one folds the project's journals
+   on its own clock. A write answered by one can be followed by a read served
+   by another whose snapshot predates it — the file you just saved reads back
+   as it was, the comment you just posted is missing from the list. Every
+   write answers with a receipt naming what it stored (X-Bdrive-Receipt: the
+   journal op `<device>:<seq>`; X-Bdrive-Comment-Receipt: the comment event's
+   object key), and the reads that could show it carry the recent ones back,
+   so whichever process answers folds far enough to include them first.
+
+   In memory and short-lived on purpose: a receipt only has to outlive the
+   gap between processes catching up, which is seconds, and a reload starts
+   from reads that are fresh anyway. Per project, because a receipt names an
+   op in that project's journals and means nothing to another. */
+const RECEIPT_TTL_MS = 30_000;
+const MAX_JOURNAL_RECEIPTS = 4;
+const MAX_COMMENT_RECEIPTS = 8;
+const JOURNAL_RECEIPT = /^[A-Za-z0-9._-]+:[1-9][0-9]*$/;
+const COMMENT_RECEIPT = /^comments\/[0-9a-f]{12}\/([0-9]{19}-[0-9a-f]{8}|deleted)\.json$/;
+// The reads a journal receipt can change the answer of.
+const JOURNAL_READS: Record<string, true> = { tree: true, file: true, render: true, resolve: true, frame: true };
+
+type Held = { token: string; at: number };
+const journalReceipts = new Map<string, Held[]>();
+const commentReceipts = new Map<string, Held[]>();
+
+// `/api/p/<id>/` and the route under it, or null for anything else.
+function projectRoute(url: string): { base: string; route: string } | null {
+  let path = url;
+  if (!url.startsWith("/")) {
+    try {
+      const u = new URL(url, location.href);
+      if (u.origin !== location.origin) return null;
+      path = u.pathname + u.search;
+    } catch {
+      return null;
+    }
+  }
+  const m = /^(\/api\/p\/[^/?#]+\/)([^/?#]*)/.exec(path);
+  return m ? { base: m[1], route: m[2] } : null;
+}
+
+function hold(map: Map<string, Held[]>, base: string, token: string, max: number) {
+  const now = Date.now();
+  const list = (map.get(base) || []).filter((h) => now - h.at < RECEIPT_TTL_MS && h.token !== token);
+  list.push({ token, at: now });
+  map.set(base, list.slice(-max));
+}
+
+function held(map: Map<string, Held[]>, base: string): string[] {
+  const list = map.get(base);
+  if (!list) return [];
+  const now = Date.now();
+  const live = list.filter((h) => now - h.at < RECEIPT_TTL_MS);
+  if (live.length) map.set(base, live);
+  else map.delete(base);
+  return live.map((h) => h.token);
+}
+
+/* Record a journal receipt for a project. Exported for a write whose answer
+   does not come back through these helpers. */
+export function recordProjectReceipt(apiBase: string, receipt: string | null | undefined) {
+  if (receipt && JOURNAL_RECEIPT.test(receipt)) hold(journalReceipts, apiBase, receipt, MAX_JOURNAL_RECEIPTS);
+}
+
+export function recordCommentReceipt(apiBase: string, key: string | null | undefined) {
+  if (key && COMMENT_RECEIPT.test(key)) hold(commentReceipts, apiBase, key, MAX_COMMENT_RECEIPTS);
+}
+
+// Take whatever receipts a project response carries.
+function noteReceipts(url: string, r: Response) {
+  const p = projectRoute(url);
+  if (!p) return;
+  recordProjectReceipt(p.base, r.headers.get("X-Bdrive-Receipt"));
+  recordCommentReceipt(p.base, r.headers.get("X-Bdrive-Comment-Receipt"));
+}
+
+// The receipts a request to `url` should carry, as headers.
+function receiptHeaders(url: string): Record<string, string> {
+  const p = projectRoute(url);
+  if (!p) return {};
+  const out: Record<string, string> = {};
+  // Comments carry journal receipts too: a thread on a file created a moment
+  // ago is checked against that file, on whichever process answers.
+  if (JOURNAL_READS[p.route] || p.route === "comments") {
+    const t = held(journalReceipts, p.base);
+    if (t.length) out["X-Bdrive-Receipt"] = t.join(",");
+  }
+  if (p.route === "comments") {
+    const t = held(commentReceipts, p.base);
+    if (t.length) out["X-Bdrive-Comment-Receipt"] = t.join(",");
+  }
+  return out;
+}
+
+// fetch, carrying and collecting receipts on project routes.
+async function projectFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const extra = receiptHeaders(url);
+  const r = await fetch(
+    url,
+    Object.keys(extra).length ? { ...init, headers: { ...(init.headers as Record<string, string>), ...extra } } : init,
+  );
+  noteReceipts(url, r);
+  return r;
+}
+
 export async function getJSON<T>(url: string): Promise<T> {
   // Explicit Accept so endpoints that content-negotiate (e.g. /billing:
   // JSON data vs the app shell) know this is a data fetch.
-  const r = await fetch(url, { headers: { Accept: "application/json" } });
+  const r = await projectFetch(url, { headers: { Accept: "application/json" } });
   if (r.status === 401) toLogin();
   if (!r.ok) await fail(r);
   return r.json();
@@ -169,7 +276,7 @@ export async function getJSON<T>(url: string): Promise<T> {
 // Same auth/error handling as getJSON, but hands back the raw Response —
 // for endpoints that serve bytes rather than JSON (blob?sha=).
 export async function getResponse(url: string): Promise<Response> {
-  const r = await fetch(url);
+  const r = await projectFetch(url);
   if (r.status === 401) toLogin();
   if (!r.ok) await fail(r);
   return r;
@@ -186,7 +293,7 @@ export async function api<T = unknown>(
     opt.headers = { "Content-Type": "application/json" };
     opt.body = JSON.stringify(body);
   }
-  const r = await fetch(url, opt);
+  const r = await projectFetch(url, opt);
   if (!r.ok) await fail(r);
   trackWrite(method, url);
   return r.status === 204 ? ({} as T) : r.json();
@@ -214,7 +321,7 @@ export async function desktopPost(path: string, body?: unknown): Promise<Respons
 }
 
 export async function postJSON<T>(url: string, body?: unknown): Promise<T> {
-  const r = await fetch(url, {
+  const r = await projectFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
@@ -256,8 +363,8 @@ export async function putText(
   ifNoneMatch = false,
   // `merged`: the hub found the file had moved past `base` and folded this
   // body into it three ways (upload.go) — the file is NOT exactly `text`.
-): Promise<{ sha?: string; merged?: boolean; parked?: string; path?: string; unchanged?: boolean }> {
-  const r = await fetch(url, {
+): Promise<{ sha?: string; merged?: boolean; parked?: string; path?: string; unchanged?: boolean; receipt?: string }> {
+  const r = await projectFetch(url, {
     method: "PUT",
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
@@ -279,6 +386,7 @@ export async function putText(
     parked?: string;
     path?: string;
     unchanged?: boolean;
+    receipt?: string;
   };
 }
 
@@ -311,15 +419,17 @@ export async function syncCollab(
     park_on_conflict?: boolean;
   },
   keepalive = false,
-): Promise<{ sha: string; text: string; merged?: boolean; update?: string; parked?: string }> {
+): Promise<{ sha: string; text: string; merged?: boolean; update?: string; parked?: string; receipt?: string }> {
   const body = JSON.stringify(payload);
   const bodyBytes = new TextEncoder().encode(body).byteLength;
-  const r = await fetch(url, {
+  // Through projectFetch so the receipt of what the room wrote is held for
+  // the reads that follow it (Done re-reads the file and its render).
+  const r = await projectFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body,
     keepalive: Boolean(keepalive && bodyBytes <= KEEPALIVE_MAX_BYTES),
   });
   if (!r.ok) await fail(r);
-  return (await r.json()) as { sha: string; text: string; merged?: boolean; update?: string; parked?: string };
+  return (await r.json()) as { sha: string; text: string; merged?: boolean; update?: string; parked?: string; receipt?: string };
 }

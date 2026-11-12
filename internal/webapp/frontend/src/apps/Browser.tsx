@@ -3,12 +3,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { atLeast } from "../api/types";
 import { getJSON, postJSON, putText } from "../api/http";
-import type { Project, ServerConfig, UndoPlan } from "../api/types";
-import { useHeat, useTree } from "../hooks/useBrowse";
+import type { Node, Project, ServerConfig, UndoPlan } from "../api/types";
+import { applyTreeDeltas, useHeat, useTree } from "../hooks/useBrowse";
 import { useProjectEvents } from "../hooks/useProjectEvents";
 import { usePresence } from "../hooks/usePresence";
 import { PresenceBar } from "../components/PresenceBar";
-import { fetchBlobText, fileURLFor } from "../hooks/useBlob";
+import { fileURLFor, textQueryOptions, type BlobText } from "../hooks/useBlob";
 import { useFolders, useShares } from "../hooks/useHub";
 import { ruleFor } from "../lib/folders";
 import { urlForPath, urlForView, withoutFull, type Route } from "../router";
@@ -27,7 +27,7 @@ import { clearFilter, useSidebarSearch } from "../lib/sidebarSearch";
 import { treeStats } from "../lib/treeview";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { FolderListing } from "../components/FolderListing";
-import { FileSkeleton, FileView, prefetchEditText, preloadEditor, renderQuery } from "../components/FileView";
+import { FileSkeleton, FileView, prefetchEditText, prefetchFile, preloadEditorForPath, renderQuery } from "../components/FileView";
 import { ShareDialog } from "../components/ShareDialog";
 import { ShareBanner } from "../components/ShareBanner";
 import { CommentPanel, CommentSurface } from "../components/Comments";
@@ -297,12 +297,17 @@ export default function Browser(props: {
   // ?v= version, so the editor never opens on bytes it would overwrite.
   const editing = !!route.editing && canEdit;
   // Someone who can edit what they are reading may well press Edit, and the
-  // editor is a separate download: fetch it once the page has settled.
+  // editor is a separate download: fetch it once the page has settled — at
+  // once when the page IS the editor. Only the chunk this file edits with.
   useEffect(() => {
-    if (!canEdit || !isFile || editing) return;
+    if (!canEdit || !isFile) return;
+    if (editing) {
+      preloadEditorForPath(path);
+      return;
+    }
     const idle = window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 1500));
-    idle(() => preloadEditor());
-  }, [canEdit, isFile, editing]);
+    idle(() => preloadEditorForPath(path));
+  }, [canEdit, isFile, editing, path]);
   // HTML edits as its rendered page by default; this is the way down to its
   // markup. Only meaningful for HTML — every other type has one surface.
   const [editSource, setEditSource] = useState(false);
@@ -499,13 +504,12 @@ export default function Browser(props: {
 
   // Copy is Download's counterpart: the same bytes, to the clipboard instead
   // of to disk — whole file, frontmatter included, so what you paste back is
-  // the file. It re-fetches rather than reading the ["text", url] query cache
-  // on purpose: TextView stores a bare string under that key and SniffView
-  // stores a BlobText object, so a cache read would refuse .csv/.txt files
-  // while working fine on the markdown a reviewer would test with.
+  // the file. Through the shared ["text", url] query, so a file already on
+  // screen copies without a second request (every reader stores the same
+  // BlobText under that key now).
   const copyNow = useCallback(async () => {
     try {
-      const data = await fetchBlobText(fileURLFor(apiBase, path, version));
+      const data = await qc.fetchQuery(textQueryOptions(fileURLFor(apiBase, path, version), !!version));
       if (data.kind !== "text")
         return toast(
           data.kind === "too-large" ? "Too large to copy — use Download." : "That file isn't text — use Download.",
@@ -519,7 +523,7 @@ export default function Browser(props: {
     } catch (err) {
       toast("Copy failed: " + (err as Error).message, true);
     }
-  }, [apiBase, path, version]);
+  }, [apiBase, path, version, qc]);
 
   /* Opening the dialog IS the action now. The mint, its 409 credential gate
      and track("share_created") moved into ShareDialog: the gate used to be a
@@ -559,8 +563,11 @@ export default function Browser(props: {
         await postJSON(apiBase + "restore", { path: p, sha });
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
-        qc.invalidateQueries({ queryKey: ["render", apiBase, p] });
-        qc.invalidateQueries({ queryKey: ["text"] });
+        // Reset, not just invalidated: an invalidated query keeps painting
+        // its old data while it refetches, which showed the overwritten
+        // version for a moment on opening the file after a restore.
+        void qc.resetQueries({ queryKey: ["render", apiBase, p] });
+        void qc.resetQueries({ queryKey: ["text", fileURLFor(apiBase, p)] });
         toast("Restored " + p + " — it syncs to every device like any other change.");
       } catch (err) {
         toast("Restore failed: " + (err as Error).message, true);
@@ -823,15 +830,36 @@ export default function Browser(props: {
         return;
       }
       try {
-        await putText(apiBase + "upload/content?path=" + encodeURIComponent(p), "");
-        await qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        const res = await putText(apiBase + "upload/content?path=" + encodeURIComponent(p), "");
+        /* The new file is on screen at once: in the tree, and as the empty
+           buffer the editor opens on, so the edit page neither waits for a
+           tree refetch nor shows a skeleton for bytes we already know. A tree
+           read already in flight predates the create and would drop the row,
+           so it is cancelled first; the refetch after carries this write's
+           receipt, so whichever hub process answers includes the file. */
+        await qc.cancelQueries({ queryKey: ["tree", apiBase] });
+        qc.setQueryData<Node>(["tree", apiBase], (t) =>
+          t ? applyTreeDeltas(t, [{ path: p, op: "put", size: 0, time: new Date().toISOString() }]) : t,
+        );
+        const seeded: BlobText = res.sha ? { kind: "text", text: "", sha: res.sha } : { kind: "text", text: "" };
+        qc.setQueryData(textQueryOptions(fileURLFor(apiBase, p)).queryKey, seeded);
         navigate(urlForPath(p, project?.id, undefined, false, true));
         closeSidebarOnMobile();
+        void qc.invalidateQueries({ queryKey: ["tree", apiBase] });
       } catch (err) {
         toast("Could not create " + p + ": " + (err as Error).message, true);
       }
     },
     [apiBase, filePaths, dirIndex, project?.id, qc],
+  );
+  // A file row the pointer rests on is likely the next page: start its reads,
+  // and on a press the editor chunk too for someone who could edit it.
+  const prefetchRow = useCallback(
+    (p: string, press: boolean) => {
+      prefetchFile(qc, apiBase, p);
+      if (press && canWrite) preloadEditorForPath(p);
+    },
+    [qc, apiBase, canWrite],
   );
   const treeActions = useMemo<TreeActions>(
     () => ({
@@ -865,9 +893,10 @@ export default function Browser(props: {
       history: hub && project ? (p) => openHistory(p) : undefined,
       insights: hub && project ? (p) => navigate(urlForView("dashboard", project.id, p)) : undefined,
       remove: canRestore ? onRemove : undefined,
+      prefetch: prefetchRow,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [canWrite, newFile, canCreateIn, pid, hub, project, shares, openPath, openHistory, canRestore, onRemove, props.onClosePanel],
+    [canWrite, newFile, canCreateIn, pid, hub, project, shares, openPath, openHistory, canRestore, onRemove, props.onClosePanel, prefetchRow],
   );
 
   /* ---- "⋯ More" menu (secondary actions on narrow screens) ---- */
@@ -966,6 +995,7 @@ export default function Browser(props: {
           onOpen={openPath}
           onFullHistory={openHistory}
           onRendered={onRendered}
+          onPrefetch={prefetchRow}
         />
       );
     } else {
@@ -1146,12 +1176,17 @@ export default function Browser(props: {
               variant="toolbar"
               onPointerEnter={() => {
                 if (editing) return;
-                preloadEditor();
+                preloadEditorForPath(path);
+                prefetchEditText(qc, apiBase, path);
+              }}
+              onPointerDown={() => {
+                if (editing) return;
+                preloadEditorForPath(path);
                 prefetchEditText(qc, apiBase, path);
               }}
               onFocus={() => {
                 if (editing) return;
-                preloadEditor();
+                preloadEditorForPath(path);
                 prefetchEditText(qc, apiBase, path);
               }}
               title={editing ? "Stop editing" : "Edit this file"}

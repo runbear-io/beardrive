@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Compartment, EditorState } from "@codemirror/state";
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { Compartment, EditorState, Prec, Transaction, type Extension } from "@codemirror/state";
 import {
   EditorView,
   keymap,
@@ -13,13 +13,17 @@ import {
   indentWithTab,
 } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
+import { json } from "@codemirror/lang-json";
+import { javascript } from "@codemirror/lang-javascript";
+import { python } from "@codemirror/lang-python";
 import {
   syntaxHighlighting,
   defaultHighlightStyle,
 } from "@codemirror/language";
 import { completionKeymap } from "@codemirror/autocomplete";
 import { foldKeymap } from "@codemirror/language";
-import { yCollab } from "y-codemirror.next";
+import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
+import * as Y from "yjs";
 import { type CollabDoc, type CollabStatus } from "../lib/collab";
 import { meetingSections } from "../lib/cm-meeting";
 import { slashMenu } from "../lib/cm-slash";
@@ -148,9 +152,14 @@ export function Editor({
   const live = useRef<CollabStatus>("connecting");
   const modeSlot = useRef(new Compartment());
   const seed = useRef(initial);
-  // The bytes this editor opened with, so a later `initial` can be told apart
-  // from the one that mounted us.
-  const opened = useRef(initial);
+  // Read through a ref for the same reason `seed` is: the effect must depend
+  // on the document alone, and this changes on every save.
+  const shaRef = useRef(baseSha);
+  shaRef.current = baseSha;
+  // The (bytes, version) last handed to this editor, so a later pair can be
+  // told apart from the one already in it — including the same bytes at a
+  // new sha (our own save landing), which moves the base a save writes on.
+  const applied = useRef({ text: initial, sha: baseSha });
   const shared = useRef<SharedFile | null>(null);
   const editor = useRef<EditorView | null>(null);
 
@@ -159,38 +168,88 @@ export function Editor({
      (and the cursor sitting in it) alone, and refuses outright when it would
      have to overwrite unsaved edits. Nothing here re-seeds the document.
 
-     Depends on `initial` ALONE. It is the live ["text", file] query, so a
-     write to this path — ours, a co-editor's, an agent's — refetches it. */
+     Depends on `initial` and `baseSha` alone. They are the live ["text",
+     file] query, so a write to this path — ours, a co-editor's, an agent's —
+     refetches them, and a background revalidation of the cached copy the
+     editor opened on lands here the same way. */
   useEffect(() => {
-    if (initial === opened.current) return;
+    if (initial === applied.current.text && baseSha === applied.current.sha) return;
+    applied.current = { text: initial, sha: baseSha };
     seed.current = initial;
     const f = shared.current;
-    // Before the editor is up there is nothing to splice into, and the room
-    // may still be seeding from bytes we now know are stale: say so.
     // The sha travels with the bytes: both come from the same ["text", file]
     // query, so this is the version `initial` IS. Without it a co-editor's
     // save leaves us writing against a base the hub has moved past.
-    cb.current.onExternal?.(
-      f && editor.current ? f.merge(initial, shaRef.current) : "blocked",
-    );
-  }, [initial]);
+    cb.current.onExternal?.(f && editor.current ? f.merge(initial, baseSha) : "blocked");
+  }, [initial, baseSha]);
   const meRef = useRef(me);
   meRef.current = me;
-  // Read through a ref for the same reason `seed` is: the effect must depend
-  // on the document alone, and this changes on every save.
-  const shaRef = useRef(baseSha);
-  shaRef.current = baseSha;
 
-  // False until a document is mounted: the preview below stands in for it.
-  const [ready, setReady] = useState(false);
+  /* One view for the life of the document, built before the first paint.
 
-  useEffect(() => {
+     It used to wait for the room: a plain-text preview stood in until the
+     relay answered, and then CodeMirror replaced it — a visible swap from
+     unstyled text to the editor, and on a slow room a SECOND swap from the
+     stall buffer to the CRDT-bound view. Now the styled, typeable editor is
+     on screen from the first frame, seeded from the file, and the room is
+     attached to that same view when it is ready: its text is spliced in as
+     an ordinary change, then the binding is switched on without touching the
+     document, so the caret, selection and scroll all survive the join. */
+  useLayoutEffect(() => {
     if (!host.current) return;
     let view: EditorView | null = null;
-    setReady(false);
+    // Bound to the room. Until then the buffer is the caller's own: solo, or
+    // staging (its typing checkpointed into the room over HTTP and merged
+    // into the shared document on the join — sharedfile.ts). There is no
+    // onStalled: a slow room has nothing to mount, because the user has been
+    // typing into this view since the first frame.
+    let viaRoom = false;
+    // Our own splice of the room's text into the buffer is not typing.
+    let splicing = false;
+    const collabSlot = new Compartment();
+    const langSlot = new Compartment();
+    const meetingSlot = new Compartment();
 
-    // The extensions both mounts share. Only the collaborative binding and
-    // the change listener differ between them.
+    // The room, the CRDT and the idle save — everything about having this file
+    // open that is not about a keyboard. Shared with the visual editor, which
+    // joins the same room over the same Y.Text, so the two co-edit each other.
+    // None of its callbacks fire before this effect returns (the socket is
+    // asynchronous, and a relay-less hub's onSolo is a microtask), so the
+    // view below exists by the time any of them runs.
+    const file = openSharedFile({
+      apiBase,
+      path,
+      seed: seed.current,
+      baseSha: shaRef.current,
+      who: meRef.current?.name,
+      me: meRef.current,
+      onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
+      onShrinkRefused: (ask) => askShrink(path, ask),
+      onShrinkWithdrawn: withdrawShrink,
+      onReady: () => attach(),
+      // No relay: an older hub, or a desktop build that does not proxy the
+      // route. Editing is single-writer then — exactly what it was before
+      // co-editing existed. The view is already up and stays the buffer.
+      onSolo: () => {
+        if (view) report(view);
+      },
+      onState: (s) => cb.current.onStateChange?.(s),
+      onCollab: (s) => {
+        live.current = s;
+        cb.current.onCollab?.(s);
+      },
+      onPending: (n) => cb.current.onPending?.(n),
+      onPeers: (n) => cb.current.onPeers?.(n),
+      onSaved: (t) => cb.current.onSaved?.(t),
+      onWriting: () => cb.current.onWriting?.(),
+      soloText: () => (view ? view.state.doc.toString() : seed.current),
+      // No CRDT to splice into, so the outside write goes straight into
+      // CodeMirror — which maps the cursor through it for free.
+      soloApply: (e) => view?.dispatch({ changes: e }),
+    });
+    shared.current = file;
+    if (handle) handle.current = file;
+
     const who = meRef.current?.name ?? "";
     const report = (v: EditorView) => {
       const head = v.state.selection.main.head;
@@ -202,180 +261,147 @@ export function Editor({
         collab: view === v && viaRoom ? file.collab : null,
       });
     };
-    const meetingExt = () =>
+    const meetingExt = (collab: CollabDoc | null) =>
       meetingRef.current
         ? meetingSections({
             me: who,
-            collab: file.collab,
+            collab,
             offline: () => viaRoom && live.current !== "live",
             onBlocked: () => toast("Offline: other people's sections are read-only until you reconnect."),
           })
         : [];
-    const baseExtensions = [
-      modeSlot.current.of(modeExtensions(modeRef.current)),
-      highlightActiveLine(),
-      history(),
-      markdown(),
-      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      slashMenu({
-        me: who,
-        files: () => filesRef.current,
-        people: () => {
-          const names = sections(view?.state.doc.toString() ?? "").map((x) => x.name);
-          file.collab.awareness.getStates().forEach((st) => {
-            const n = (st as { user?: { name?: string } }).user?.name;
-            if (n) names.push(n);
-          });
-          return names;
-        },
-        carryOver: meetingRef.current
-          ? async () => {
-              const prev = previousNote(path, filesRef.current);
-              if (!prev) return null;
-              const got = await fetchBlobText(fileURLFor(apiBase, prev));
-              return { from: prev, items: got.kind === "text" ? openItems(got.text) : [] };
-            }
-          : undefined,
-        onNotice: (m) => toast(m),
-      }),
-      keymap.of([
-        // Save now, not after the idle wait — and never the browser's own
-        // "Save Page As" dialog. In a live room this hands the hub the room's
-        // state; clean, it sends nothing.
-        {
-          key: "Mod-s",
-          preventDefault: true,
-          run: () => {
-            void file.saveNow();
-            return true;
-          },
-        },
-        ...completionKeymap,
-        ...foldKeymap,
-        ...defaultKeymap,
-        ...historyKeymap,
-        indentWithTab,
-      ]),
-      EditorView.lineWrapping,
-      EditorView.updateListener.of((u) => {
-        if (u.docChanged || u.selectionSet || u.focusChanged) report(u.view);
-      }),
-    ];
-    let viaRoom = false;
-    // A plain buffer mounted while the room was slow to answer (onStalled).
-    // Its typing is checkpointed into the room over HTTP and merged into the
-    // shared document on sync, when the CRDT-bound editor replaces it.
-    let staging = false;
-    // What this editor opened on: the staging buffer's text until one exists.
-    const openedWith = seed.current;
 
     // Without the CRDT there is no shared document to observe, so the save
     // timer hangs off CodeMirror's own updates instead — for a solo buffer
     // (written to the file) and a staging one (checkpointed into the room).
+    // Bound to the room, the shared document drives saving instead.
     const soloListener = EditorView.updateListener.of((u) => {
-      if (!u.docChanged) return;
+      if (!u.docChanged || viaRoom || splicing) return;
       cb.current.onStateChange?.("dirty");
       if (timer.current) clearTimeout(timer.current);
       timer.current = setTimeout(() => void file.saveNow(), SAVE_IDLE_MS);
     });
 
-    // The fallback surface: the same editor without the Yjs binding, seeded
-    // from the file. Its edits still reach everyone through the ordinary save.
-    const mountSolo = (asStaging = false) => {
-      if (view || !host.current) return;
-      staging = asStaging;
-      view = new EditorView({
-        parent: host.current,
-        state: EditorState.create({
-          // A staging buffer starts from exactly the text the room join will
-          // merge it against.
-          doc: asStaging ? openedWith : seed.current,
-          extensions: [...baseExtensions, meetingExt(), soloListener],
-        }),
-      });
-      editor.current = view;
-      setReady(true);
-      view.focus();
-      report(view);
-    };
+    view = new EditorView({
+      parent: host.current,
+      state: EditorState.create({
+        doc: seed.current,
+        extensions: [
+          modeSlot.current.of(modeExtensions(modeRef.current)),
+          highlightActiveLine(),
+          history(),
+          langSlot.of(languageFor(path)),
+          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          slashMenu({
+            me: who,
+            files: () => filesRef.current,
+            people: () => {
+              const names = sections(view?.state.doc.toString() ?? "").map((x) => x.name);
+              file.collab.awareness.getStates().forEach((st) => {
+                const n = (st as { user?: { name?: string } }).user?.name;
+                if (n) names.push(n);
+              });
+              return names;
+            },
+            carryOver: meetingRef.current
+              ? async () => {
+                  const prev = previousNote(path, filesRef.current);
+                  if (!prev) return null;
+                  const got = await fetchBlobText(fileURLFor(apiBase, prev));
+                  return { from: prev, items: got.kind === "text" ? openItems(got.text) : [] };
+                }
+              : undefined,
+            onNotice: (m) => toast(m),
+          }),
+          keymap.of([
+            // Save now, not after the idle wait — and never the browser's own
+            // "Save Page As" dialog. In a live room this hands the hub the
+            // room's state; clean, it sends nothing.
+            {
+              key: "Mod-s",
+              preventDefault: true,
+              run: () => {
+                void file.saveNow();
+                return true;
+              },
+            },
+            ...completionKeymap,
+            ...foldKeymap,
+            ...defaultKeymap,
+            ...historyKeymap,
+            indentWithTab,
+          ]),
+          EditorView.lineWrapping,
+          EditorView.updateListener.of((u) => {
+            if (u.docChanged || u.selectionSet || u.focusChanged) report(u.view);
+          }),
+          collabSlot.of([]),
+          meetingSlot.of(meetingExt(null)),
+          soloListener,
+        ],
+      }),
+    });
+    editor.current = view;
+    view.focus();
+    report(view);
 
-    // Mounted only once the relay has answered, so CodeMirror binds to a
-    // document that already holds either the file's text or the room's —
-    // never to an empty one that would then have text appear underneath it.
-    const mount = () => {
-      if (!host.current) return;
-      // Late join: the staging buffer's typing is already in the shared
-      // document (sharedfile.ts join), so the buffer gives way to the real
-      // editor, keeping the caret where it was as near as the text allows.
-      let caret = -1;
-      if (view && staging) {
-        if (timer.current) clearTimeout(timer.current);
-        caret = view.state.selection.main.head;
-        view.destroy();
-        view = null;
-        staging = false;
+    /* The room has the document (sharedfile.ts has already merged anything
+       typed into the staging buffer into it). Bring this view onto it.
+
+       CollabDoc calls this again on every reconnect: once bound, the binding
+       is already carrying the document, and re-attaching would reset the
+       undo history and splice text that is already there. */
+    const attach = () => {
+      if (viaRoom || !view) return;
+      clearTimeout(timer.current ?? undefined);
+      timer.current = null;
+      const remote = file.collab.text.toString();
+      const local = view.state.doc.toString();
+      if (local !== remote) {
+        // The smallest change that turns the buffer into the room's text,
+        // applied while the binding is still off: bound, y-sync would push
+        // it back into the document it came from and the text would double.
+        let from = 0;
+        const max = Math.min(local.length, remote.length);
+        while (from < max && local.charCodeAt(from) === remote.charCodeAt(from)) from++;
+        let tail = 0;
+        while (
+          tail < max - from &&
+          local.charCodeAt(local.length - 1 - tail) === remote.charCodeAt(remote.length - 1 - tail)
+        )
+          tail++;
+        splicing = true;
+        try {
+          view.dispatch({
+            changes: { from, to: local.length - tail, insert: remote.slice(from, remote.length - tail) },
+            annotations: [Transaction.addToHistory.of(false)],
+          });
+        } finally {
+          splicing = false;
+        }
       }
-      if (view) return;
-      const doc = file.collab.text.toString();
-      view = new EditorView({
-        parent: host.current,
-        state: EditorState.create({
-          doc,
-          ...(caret >= 0 ? { selection: { anchor: Math.min(caret, doc.length) } } : {}),
-          extensions: [
-            ...baseExtensions,
+      // Undo follows the shared document from here: only this client's own
+      // changes, never a co-editor's.
+      const undoManager = new Y.UndoManager(file.collab.text);
+      // Effects only — the document does not change, so nothing is synced.
+      view.dispatch({
+        effects: [
+          collabSlot.reconfigure([
             // The binding: every local edit becomes a Yjs update, every
             // remote update becomes a CodeMirror transaction, and remote
             // cursors are drawn from awareness.
-            yCollab(file.collab.text, file.collab.awareness),
-            meetingExt(),
-          ],
-        }),
+            yCollab(file.collab.text, file.collab.awareness, { undoManager }),
+            Prec.high(keymap.of(yUndoManagerKeymap)),
+          ]),
+          meetingSlot.reconfigure(meetingExt(file.collab)),
+        ],
       });
+      // An empty update so the remote-selection plugin publishes this caret
+      // and paints the peers already in the room.
+      view.dispatch({ annotations: [Transaction.addToHistory.of(false)] });
       viaRoom = true;
-      editor.current = view;
-      setReady(true);
-      view.focus();
       report(view);
     };
-
-    // The room, the CRDT and the idle save — everything about having this file
-    // open that is not about a keyboard. Shared with the visual editor, which
-    // joins the same room over the same Y.Text, so the two co-edit each other.
-    const file = openSharedFile({
-      apiBase,
-      path,
-      seed: seed.current,
-      baseSha: shaRef.current,
-      who: meRef.current?.name,
-      me: meRef.current,
-      onConflictCopy: (p) => cb.current.onConflictCopy?.(p),
-      onShrinkRefused: (ask) => askShrink(path, ask),
-      onShrinkWithdrawn: withdrawShrink,
-      onReady: () => mount(),
-      // No relay: an older hub, or a desktop build that does not proxy the
-      // route. Editing is single-writer then — exactly what it was before
-      // co-editing existed — rather than a pane that never appears.
-      onSolo: () => mountSolo(),
-      // The room is slow (a deploy, a cold start): let the user type now
-      // rather than stare at a preview. The socket keeps retrying underneath.
-      onStalled: () => mountSolo(true),
-      onState: (s) => cb.current.onStateChange?.(s),
-      onCollab: (s) => {
-        live.current = s;
-        cb.current.onCollab?.(s);
-      },
-      onPending: (n) => cb.current.onPending?.(n),
-      onPeers: (n) => cb.current.onPeers?.(n),
-      onSaved: (t) => cb.current.onSaved?.(t),
-      onWriting: () => cb.current.onWriting?.(),
-      soloText: () => (view ? view.state.doc.toString() : openedWith),
-      // No CRDT to splice into, so the outside write goes straight into
-      // CodeMirror — which maps the cursor through it for free.
-      soloApply: (e) => view?.dispatch({ changes: e }),
-    });
-    shared.current = file;
-    if (handle) handle.current = file;
 
     return () => {
       if (timer.current) clearTimeout(timer.current);
@@ -384,6 +410,7 @@ export function Editor({
       editor.current = null;
       file.destroy();
       view?.destroy();
+      view = null;
     };
     // The document, and nothing else. Opening another file rebuilds the
     // editor (correct); a re-render must not.
@@ -393,20 +420,18 @@ export function Editor({
     editor.current?.dispatch({ effects: modeSlot.current.reconfigure(modeExtensions(mode)) });
   }, [mode]);
 
-  return (
-    <>
-      {/* The file's text while the room answers, so the page has its content
-          at once instead of after a handshake. Plain text rather than a
-          second CodeMirror: nothing here takes input, and anything looking for
-          the editor finds only the real one. */}
-      {!ready && (
-        <pre className={"cm-preview cm-mode-" + mode} aria-busy="true">
-          {initial}
-        </pre>
-      )}
-      <div ref={host} id="editor" className={"cm-host cm-mode-" + mode} data-mode={mode} />
-    </>
-  );
+  return <div ref={host} id="editor" className={"cm-host cm-mode-" + mode} data-mode={mode} />;
+}
+
+// Syntax for the file's kind; plain text for anything else.
+function languageFor(path: string): Extension {
+  if (/\.(md|markdown)$/i.test(path)) return markdown();
+  if (/\.jsonl?$/i.test(path)) return json();
+  if (/\.(js|jsx|ts|tsx|mjs|cjs)$/i.test(path)) {
+    return javascript({ jsx: /\.[jt]sx$/i.test(path), typescript: /\.tsx?$/i.test(path) });
+  }
+  if (/\.py$/i.test(path)) return python();
+  return [];
 }
 
 // Write is the note as prose — no gutter, the reading measure; Markdown is the

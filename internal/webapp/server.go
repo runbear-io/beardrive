@@ -41,6 +41,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -336,6 +337,13 @@ type volume struct {
 	treeCache map[treeCacheKey]*treeCacheEntry
 	treeTick  uint64
 
+	// unseen is the negative cache for causal receipts (see snapshotWithReceipts): a
+	// receipt a fresh fold still did not contain is not refolded for again
+	// until receiptMissCooldown passes, so a forged one cannot turn every
+	// request into a storage List.
+	unseenMu sync.Mutex
+	unseen   map[string]time.Time
+
 	// Background rebuilds requested by refreshThen. bgDone holds the callbacks
 	// waiting for a rebuild that starts after they were queued.
 	bgMu      sync.Mutex
@@ -364,6 +372,10 @@ type snapshot struct {
 	// journals to derive it from — every resolver then answers "not found",
 	// so the DirSource exclusion falls out instead of needing a rule.
 	moves moveIndex
+	// cov reports which journal ops this listing folded in, per device, so a
+	// causal receipt (see snapshotWithReceipts) can be checked without storage. Nil for a
+	// source with no journals: every receipt then counts as covered.
+	cov *seqCoverage
 
 	// tree holds the encoded /tree answer for callers who may see every file,
 	// keyed by the slim flag. A snapshot never changes once built, so neither
@@ -445,14 +457,14 @@ func (v *volume) snapshotCoveringFresh(ctx context.Context, want uint64) (*snaps
 	}
 	v.gen++
 	gen, acc := v.gen, v.acceptedNow()
-	files, moves, err := v.load(ctx)
+	files, moves, cov, err := v.load(ctx)
 	if err != nil {
 		if v.snap != nil {
 			return v.snap, true, nil // readers may serve stale; indexes must stay behind
 		}
 		return nil, false, err
 	}
-	v.install(files, moves, gen, acc)
+	v.install(files, moves, cov, gen, acc)
 	return v.snap, false, nil
 }
 
@@ -462,17 +474,21 @@ func (v *volume) acceptedNow() uint64 {
 	return v.accepted
 }
 
-func (v *volume) load(ctx context.Context) (map[string]FileInfo, moveIndex, error) {
+func (v *volume) load(ctx context.Context) (map[string]FileInfo, moveIndex, *seqCoverage, error) {
+	if rs, ok := v.source.(*RemoteSource); ok {
+		return rs.filesMovesCoverage(ctx)
+	}
 	if ms, ok := v.source.(MoveSource); ok {
-		return ms.FilesWithMoves(ctx)
+		files, moves, err := ms.FilesWithMoves(ctx)
+		return files, moves, nil, err
 	}
 	files, err := v.source.Files(ctx)
-	return files, nil, err
+	return files, nil, nil, err
 }
 
 // install makes a rebuild the current snapshot unless a newer one already is.
 // Callers hold mu.
-func (v *volume) install(files map[string]FileInfo, moves moveIndex, gen, acc uint64) {
+func (v *volume) install(files map[string]FileInfo, moves moveIndex, cov *seqCoverage, gen, acc uint64) {
 	if gen < v.snapGen {
 		return
 	}
@@ -485,9 +501,19 @@ func (v *volume) install(files map[string]FileInfo, moves moveIndex, gen, acc ui
 	// and with it everything already encoded from it.
 	if v.snap != nil && sameMap(v.snap.files, files) {
 		v.at = at
+		if cov != nil && cov != v.snap.cov {
+			// Same listing, better coverage (an exact fold replacing a lazy
+			// one): swap only the coverage, keeping gen — the filtered tree
+			// cache is keyed on it — and the encoded full trees.
+			old := v.snap
+			old.treeMu.Lock()
+			tree := maps.Clone(old.tree)
+			old.treeMu.Unlock()
+			v.snap = &snapshot{gen: old.gen, files: old.files, moves: old.moves, cov: cov, tree: tree}
+		}
 		return
 	}
-	v.snap, v.at = &snapshot{gen: gen, files: files, moves: moves}, at
+	v.snap, v.at = &snapshot{gen: gen, files: files, moves: moves, cov: cov}, at
 }
 
 // backgroundRebuildTimeout bounds one rebuild that no request is waiting on.
@@ -559,7 +585,7 @@ func (v *volume) rebuildLoop() {
 		gen, acc := v.gen, v.acceptedNow()
 		v.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), backgroundRebuildTimeout)
-		files, moves, err := v.load(ctx)
+		files, moves, cov, err := v.load(ctx)
 		cancel()
 		if err != nil {
 			// The batch is kept for a retry: telling watchers now would send
@@ -573,7 +599,7 @@ func (v *volume) rebuildLoop() {
 			continue
 		}
 		v.mu.Lock()
-		v.install(files, moves, gen, acc)
+		v.install(files, moves, cov, gen, acc)
 		v.mu.Unlock()
 		for _, f := range batch {
 			f()
@@ -713,6 +739,12 @@ type RemoteSource struct {
 	foldTombstones map[string]winOp
 	foldJournals   map[string]ckptJournalMeta
 	foldMoves      moveIndex
+	// foldCov is the receipt coverage of foldFiles (see snapshotWithReceipts).
+	// Every fold path sets it in the SAME foldMu section that sets foldFP and
+	// foldFiles: a fold that lands late must never leave a newer fold's
+	// coverage beside its older files, or a receipt would be "covered" by a
+	// listing that lacks it.
+	foldCov *seqCoverage
 
 	ckptMu      sync.Mutex
 	ckptWriting bool
@@ -1429,23 +1461,34 @@ func (r *RemoteSource) Files(ctx context.Context) (map[string]FileInfo, error) {
 // snapshot built from them, which is safe because nothing writes to a
 // snapshot after it is built.
 func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo, moveIndex, error) {
+	files, moves, _, err := r.filesMovesCoverage(ctx)
+	return files, moves, err
+}
+
+// filesMovesCoverage is FilesWithMoves plus the receipt coverage of the same
+// fold (see snapshotWithReceipts), so a snapshot always carries the coverage of the very
+// listing it was built from.
+func (r *RemoteSource) filesMovesCoverage(ctx context.Context) (map[string]FileInfo, moveIndex, *seqCoverage, error) {
 	keep, err := r.listJournals(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	fp := journalFingerprint(keep)
-	r.foldMu.Lock()
-	if r.foldFP == fp && r.foldFiles != nil {
-		files, moves := r.foldFiles, r.foldMoves
-		r.foldMu.Unlock()
-		return files, moves, nil
+	if files, moves, cov, ok := r.cachedFold(fp); ok {
+		return files, moves, cov, nil
 	}
-	r.foldMu.Unlock()
 
 	type fold struct {
 		files map[string]FileInfo
 		tombs map[string]winOp
 		moves moveIndex
+		cov   *seqCoverage
+	}
+	// A fold fold_checkpoint.go installed set foldCov itself, atomically
+	// with its files; the answer here carries coverage of exactly the files
+	// it returns, whatever has replaced them since.
+	adopt := func(files map[string]FileInfo, tombs map[string]winOp, moves moveIndex) fold {
+		return fold{files: files, tombs: tombs, moves: moves, cov: lazyCoverage(files, tombs)}
 	}
 	res, err, _ := r.flight.Do("fold\x00"+fp, func() (any, error) {
 		r.foldMu.Lock()
@@ -1453,11 +1496,11 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 		r.foldMu.Unlock()
 		if hasFold {
 			if files, tombs, moves, ok := r.tryIncrementalFold(context.WithoutCancel(ctx), keep, fp); ok {
-				return fold{files: files, tombs: tombs, moves: moves}, nil
+				return adopt(files, tombs, moves), nil
 			}
 		} else {
 			if files, tombs, moves, ok := r.restoreFoldCheckpoint(context.WithoutCancel(ctx), keep, fp); ok {
-				return fold{files: files, tombs: tombs, moves: moves}, nil
+				return adopt(files, tombs, moves), nil
 			}
 		}
 		parsed, err := r.parsedJournals(context.WithoutCancel(ctx), keep)
@@ -1467,22 +1510,40 @@ func (r *RemoteSource) FilesWithMoves(ctx context.Context) (map[string]FileInfo,
 		all := byPathOrder(parsed...)
 		files, tombs := foldFilesAndTombstones(all)
 		moves := buildMoveIndex(all)
+		cov := exactCoverage(keep, parsed)
 		jmeta, ok := r.journalMetaFromCache(keep)
 		if !ok {
 			jmeta = checkpointMeta(keep)
 		}
 		r.foldMu.Lock()
 		r.foldFP, r.foldFiles, r.foldTombstones, r.foldMoves = fp, files, tombs, moves
-		r.foldJournals = jmeta
+		r.foldJournals, r.foldCov = jmeta, cov
 		r.foldMu.Unlock()
 		r.scheduleFoldCheckpointFromMeta(fp, jmeta, files, tombs, moves)
-		return fold{files: files, tombs: tombs, moves: moves}, nil
+		return fold{files: files, tombs: tombs, moves: moves, cov: cov}, nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	f := res.(fold)
-	return f.files, f.moves, nil
+	return f.files, f.moves, f.cov, nil
+}
+
+// cachedFold answers the last fold when it was built from listing fp: files,
+// moves and coverage read together under one foldMu section, so they always
+// describe the same fold.
+func (r *RemoteSource) cachedFold(fp string) (map[string]FileInfo, moveIndex, *seqCoverage, bool) {
+	r.foldMu.Lock()
+	defer r.foldMu.Unlock()
+	if r.foldFP != fp || r.foldFiles == nil {
+		return nil, nil, nil, false
+	}
+	if r.foldCov == nil {
+		// Only a fold installed by something that predates coverage: derive
+		// it from the files it sits beside, in this same section.
+		r.foldCov = lazyCoverage(r.foldFiles, r.foldTombstones)
+	}
+	return r.foldFiles, r.foldMoves, r.foldCov, true
 }
 
 // journalFingerprint names a journal listing: two equal fingerprints are the
@@ -2231,8 +2292,13 @@ type Node struct {
 }
 
 func (s *Server) handleTree(v *volume, w http.ResponseWriter, r *http.Request) {
-	snap, err := v.snapshot(r.Context())
+	w.Header().Add("Vary", receiptHeader)
+	snap, err := v.snapshotWithReceipts(r.Context(), r.Header)
 	if err != nil {
+		if errors.Is(err, errReceiptUnavailable) {
+			snapshotErr(w, err)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -2370,7 +2436,13 @@ func (s *Server) lookup(v *volume, r *http.Request) (string, FileInfo, int, erro
 	if p == "" {
 		return "", FileInfo{}, http.StatusBadRequest, fmt.Errorf("missing ?path=")
 	}
-	snap, err := v.snapshot(r.Context())
+	// Receipt-checked: a read that follows a write through another hub
+	// process must find it — and must find it BEFORE any conditional request
+	// is answered, or a 304 for the version the write replaced comes back.
+	snap, err := v.snapshotWithReceipts(r.Context(), r.Header)
+	if errors.Is(err, errReceiptUnavailable) {
+		return "", FileInfo{}, http.StatusServiceUnavailable, err
+	}
 	if err != nil {
 		log.Printf("beardrive: read project snapshot: %v", err)
 		return "", FileInfo{}, http.StatusBadGateway, fmt.Errorf("content temporarily unavailable")
@@ -2409,9 +2481,12 @@ func (s *Server) lookup(v *volume, r *http.Request) (string, FileInfo, int, erro
 }
 
 func (s *Server) serveBlob(v *volume, w http.ResponseWriter, r *http.Request, attach bool) {
+	// The answer depends on the receipts: a cache must not hand the bytes it
+	// stored for a request without them to one that carries them.
+	w.Header().Add("Vary", receiptHeader)
 	p, fi, code, err := s.lookup(v, r)
 	if err != nil {
-		http.Error(w, err.Error(), code)
+		lookupErr(w, code, err)
 		return
 	}
 	setCanonical(w, r, p)
@@ -2542,7 +2617,7 @@ func (s *Server) handleRender(v *volume, w http.ResponseWriter, r *http.Request)
 	}
 	p, fi, code, err := s.lookup(v, r)
 	if err != nil {
-		http.Error(w, err.Error(), code)
+		lookupErr(w, code, err)
 		return
 	}
 	setCanonical(w, r, p)
@@ -2871,4 +2946,328 @@ func writeJSONStatus(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+// lookupErr answers a failed lookup; a receipt refold that could not reach
+// storage says when to come back.
+func lookupErr(w http.ResponseWriter, code int, err error) {
+	if code == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "1")
+	}
+	http.Error(w, err.Error(), code)
+}
+
+/* Causal receipts: read-your-own-writes across hub processes.
+
+   A hub is more than one process, and each one caches its fold for refresh.
+   A write answered by process A is in storage the moment A answers, but
+   process B can keep serving its cached fold for up to refresh — so the
+   writer's next read, routed to B, 404s the file it just created or shows the
+   version it just restored over.
+
+   Every synchronous write door therefore answers with the (device, seq) of the
+   journal op it appended — X-Bdrive-Receipt: <device>:<seq> — and a client
+   echoes the receipts of its recent writes on its reads. A process whose fold
+   does not cover one refolds ONCE (bypassing refresh) before answering. A
+   receipt costs nothing when the cached fold already covers it, which is
+   every request but the first after a write, and a receipt a fresh fold still
+   lacks (forged, or from another project) is remembered for
+   receiptMissCooldown so it cannot buy a storage List per request. */
+
+const (
+	receiptHeader = "X-Bdrive-Receipt"
+	// maxReceipts bounds the tokens one request may carry: a client echoes
+	// only its last few writes.
+	maxReceipts         = 4
+	receiptMissCooldown = 5 * time.Second
+	// maxUnseenReceipts caps each negative receipt cache (per volume, and per
+	// project for comments): a client minting fresh forged receipts must not
+	// grow hub memory without bound.
+	maxUnseenReceipts = 256
+)
+
+var errReceiptUnavailable = errors.New("the change this request follows is not readable yet")
+
+// journalReceipt names one journal op: the device whose journal holds it and
+// its seq there.
+type journalReceipt struct {
+	dev string
+	seq int64
+}
+
+func (rc journalReceipt) String() string { return rc.dev + ":" + strconv.FormatInt(rc.seq, 10) }
+
+// receiptOf is the receipt of an appended op, "" when it carries none.
+func receiptOf(op journal.Op) string {
+	if op.Device == "" || op.Seq <= 0 {
+		return ""
+	}
+	return journalReceipt{dev: op.Device, seq: op.Seq}.String()
+}
+
+// fileReceipt is the receipt of the op that produced fi, "" for a source that
+// does not record one (DirSource).
+func fileReceipt(fi FileInfo) string {
+	return receiptOf(journal.Op{Device: fi.DeviceID, Seq: fi.Seq})
+}
+
+// parseReceipts reads the first maxReceipts tokens of X-Bdrive-Receipt.
+// Malformed tokens are dropped without a word: a receipt is a hint, and a bad
+// one must cost nothing, least of all a storage call.
+func parseReceipts(h http.Header) []journalReceipt {
+	var out []journalReceipt
+	n := 0
+	for _, line := range h.Values(receiptHeader) {
+		for _, tok := range strings.Split(line, ",") {
+			if n == maxReceipts {
+				return out
+			}
+			n++
+			tok = strings.TrimSpace(tok)
+			i := strings.LastIndexByte(tok, ':')
+			if i <= 0 {
+				continue
+			}
+			seq, err := strconv.ParseInt(tok[i+1:], 10, 64)
+			if err != nil || seq <= 0 || !deviceIDRe.MatchString(tok[:i]) {
+				continue
+			}
+			out = append(out, journalReceipt{dev: tok[:i], seq: seq})
+		}
+	}
+	return out
+}
+
+// seqCoverage is the highest seq a fold read from each device's journal.
+// Devices append to their own journal only, in seq order, so a fold that read
+// seq n of a device read every op of it up to n.
+//
+// A full fold knows it exactly (exactCoverage). A checkpoint or incremental
+// fold never sees the ops it skipped, so its coverage is derived — lazily, on
+// the first receipt that asks — from the winning op of every path and
+// tombstone it holds: a lower bound, which can only cost a refold, never claim
+// an op the fold lacks.
+type seqCoverage struct {
+	once  sync.Once
+	build func() map[string]int64
+	seqs  map[string]int64
+}
+
+func exactCoverage(keep []remote.Object, parsed [][]journal.Op) *seqCoverage {
+	seqs := make(map[string]int64, len(keep))
+	for i, o := range keep {
+		dev := strings.TrimSuffix(strings.TrimPrefix(o.Key, "journal/"), ".jsonl")
+		var hi int64
+		for j := range parsed[i] {
+			hi = max(hi, parsed[i][j].Seq)
+		}
+		seqs[dev] = hi
+	}
+	return &seqCoverage{seqs: seqs}
+}
+
+// lazyCoverage holds files and tombs until coverage is first asked for. Both
+// are never written after the fold that built them.
+func lazyCoverage(files map[string]FileInfo, tombs map[string]winOp) *seqCoverage {
+	return &seqCoverage{build: func() map[string]int64 {
+		seqs := make(map[string]int64)
+		for _, fi := range files {
+			if fi.DeviceID != "" && fi.Seq > seqs[fi.DeviceID] {
+				seqs[fi.DeviceID] = fi.Seq
+			}
+		}
+		for _, t := range tombs {
+			if t.Device != "" && t.Seq > seqs[t.Device] {
+				seqs[t.Device] = t.Seq
+			}
+		}
+		return seqs
+	}}
+}
+
+func (c *seqCoverage) covers(rc journalReceipt) bool {
+	c.once.Do(func() {
+		if c.build != nil {
+			c.seqs, c.build = c.build(), nil
+		}
+	})
+	return c.seqs[rc.dev] >= rc.seq
+}
+
+// coversReceipt reports whether the snapshot's fold read rc. A source with no
+// journals has nothing to wait for.
+func (s *snapshot) coversReceipt(rc journalReceipt) bool {
+	return s.cov == nil || s.cov.covers(rc)
+}
+
+// uncovered is the receipts snap lacks that are not cooling down after a
+// fresh fold already failed to find them.
+func (v *volume) uncovered(snap *snapshot, rcs []journalReceipt) []journalReceipt {
+	var out []journalReceipt
+	now := time.Now()
+	for _, rc := range rcs {
+		if snap.coversReceipt(rc) || v.cooling(rc.String(), now) {
+			continue
+		}
+		out = append(out, rc)
+	}
+	return out
+}
+
+func (v *volume) cooling(key string, now time.Time) bool {
+	v.unseenMu.Lock()
+	defer v.unseenMu.Unlock()
+	t, ok := v.unseen[key]
+	if !ok {
+		return false
+	}
+	if now.Sub(t) < receiptMissCooldown {
+		return true
+	}
+	delete(v.unseen, key)
+	return false
+}
+
+func (v *volume) markUnseen(key string, now time.Time) {
+	v.unseenMu.Lock()
+	defer v.unseenMu.Unlock()
+	v.unseen = insertUnseen(v.unseen, key, now, receiptMissCooldown)
+}
+
+// insertUnseen records key as missed at now in a negative cache, pruning
+// every entry past cooldown on each insert and, when the cache is still at
+// maxUnseenReceipts, evicting the oldest entries until the new one fits.
+// Callers hold whatever lock guards m.
+func insertUnseen(m map[string]time.Time, key string, now time.Time, cooldown time.Duration) map[string]time.Time {
+	if m == nil {
+		m = make(map[string]time.Time)
+	}
+	for k, t := range m {
+		if now.Sub(t) >= cooldown {
+			delete(m, k)
+		}
+	}
+	delete(m, key)
+	for len(m) >= maxUnseenReceipts {
+		oldest, first := "", true
+		var at time.Time
+		for k, t := range m {
+			if first || t.Before(at) {
+				oldest, at, first = k, t, false
+			}
+		}
+		delete(m, oldest)
+	}
+	m[key] = now
+	return m
+}
+
+// snapshotWithReceipts is snapshot for a read that may follow a write made
+// through another hub process: when the request's receipts name ops the
+// cached fold has not read, it refolds from storage once, ignoring refresh.
+//
+// The refold runs under mu, so concurrent requests waiting on the same write
+// share it — each rechecks coverage (and the cooldown) once it holds the lock.
+// A refold that fails answers errReceiptUnavailable rather than the cached
+// fold: serving the stale snapshot as if it held the write is exactly the bug
+// this exists to remove.
+func (v *volume) snapshotWithReceipts(ctx context.Context, h http.Header) (*snapshot, error) {
+	rcs := parseReceipts(h)
+	snap, err := v.snapshot(ctx)
+	if err != nil || len(rcs) == 0 || snap.cov == nil {
+		return snap, err
+	}
+	need := v.uncovered(snap, rcs)
+	if len(need) == 0 {
+		return snap, nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.snap != nil {
+		if need = v.uncovered(v.snap, need); len(need) == 0 {
+			return v.snap, nil
+		}
+	}
+	v.gen++
+	gen, acc := v.gen, v.acceptedNow()
+	files, moves, cov, err := v.load(ctx)
+	if err != nil {
+		log.Printf("beardrive: refold for a receipt: %v", err)
+		return nil, errReceiptUnavailable
+	}
+	v.install(files, moves, cov, gen, acc)
+	now := time.Now()
+	for _, rc := range need {
+		if !v.snap.coversReceipt(rc) {
+			v.markUnseen(rc.String(), now)
+		}
+	}
+	return v.snap, nil
+}
+
+// snapshotErr answers a failed snapshotWithReceipts: 503 with a short retry
+// for a refold that could not reach storage, 502 for any other failure.
+func snapshotErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, errReceiptUnavailable) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	storageErr(w, http.StatusBadGateway, "content temporarily unavailable", err)
+}
+
+// receiptSink collects the receipt of the journal append a request made, for
+// write doors whose append sits several calls down (appendOpsIf).
+type receiptSink struct {
+	mu      sync.Mutex
+	receipt journalReceipt
+}
+
+type receiptSinkKey struct{}
+
+// withReceiptSink returns r carrying a fresh sink, and the sink.
+func withReceiptSink(r *http.Request) (*http.Request, *receiptSink) {
+	sink := &receiptSink{}
+	return r.WithContext(context.WithValue(r.Context(), receiptSinkKey{}, sink)), sink
+}
+
+// noteReceipt records ops (just appended, so stamped) on ctx's sink, keeping
+// the highest seq: coverage is per device and monotonic, so the last op of
+// the last append covers every earlier one of this hub.
+func noteReceipt(ctx context.Context, ops []journal.Op) {
+	sink, _ := ctx.Value(receiptSinkKey{}).(*receiptSink)
+	if sink == nil || len(ops) == 0 {
+		return
+	}
+	last := ops[len(ops)-1]
+	if last.Device == "" || last.Seq <= 0 {
+		return
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if last.Seq > sink.receipt.seq || sink.receipt.dev != last.Device {
+		sink.receipt = journalReceipt{dev: last.Device, seq: last.Seq}
+	}
+}
+
+// String is the recorded receipt, "" when the request appended nothing.
+func (s *receiptSink) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.receipt.seq <= 0 {
+		return ""
+	}
+	return s.receipt.String()
+}
+
+// stampReceipt puts receipt on the response header and, when body is given,
+// in its "receipt" field. Either way nothing happens for "".
+func stampReceipt(w http.ResponseWriter, body map[string]any, receipt string) {
+	if receipt == "" {
+		return
+	}
+	w.Header().Set(receiptHeader, receipt)
+	if body != nil {
+		body["receipt"] = receipt
+	}
 }
