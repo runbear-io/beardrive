@@ -115,6 +115,24 @@ export function useProjectEvents(
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
       }, delay);
     };
+    const invalidateTreeRespectingFence = () => {
+      const hasLoadedTree = !!qc.getQueryData<Node>(["tree", apiBase]);
+      const windowClear =
+        lastUnfencedDeltaAt === 0 ||
+        Date.now() - lastUnfencedDeltaAt >= UNFENCED_TREE_MS;
+      if (windowClear) {
+        if (unfencedTreeTimer) {
+          window.clearTimeout(unfencedTreeTimer);
+          unfencedTreeTimer = null;
+        }
+        void qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        return;
+      }
+      if (!hasLoadedTree) {
+        void qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+      }
+      scheduleUnfencedTreeRefetch();
+    };
     const invalidateHistory = () => {
       if (historyCoalesce) return;
       historyCoalesce = window.setTimeout(() => {
@@ -132,7 +150,7 @@ export function useProjectEvents(
       if (coalesce) return;
       coalesce = window.setTimeout(() => {
         coalesce = null;
-        qc.invalidateQueries({ queryKey: ["tree", apiBase] });
+        invalidateTreeRespectingFence();
         qc.invalidateQueries({ queryKey: ["history", apiBase] });
         qc.invalidateQueries({ queryKey: ["history-summary", apiBase] });
         qc.invalidateQueries({ queryKey: ["homeHistory", apiBase] });
@@ -176,6 +194,10 @@ export function useProjectEvents(
         pendingCancelDeltas.length = 0;
         cancelRequiredReceipts.clear();
         lastUnfencedDeltaAt = 0;
+        if (unfencedTreeTimer) {
+          window.clearTimeout(unfencedTreeTimer);
+          unfencedTreeTimer = null;
+        }
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
         // These two are keyed on the project id, not apiBase (useHub.ts), and
@@ -208,6 +230,47 @@ export function useProjectEvents(
       const oldTree = qc.getQueryData<Node>(treeKey);
       const treeFetching = qc.getQueryState(treeKey)?.fetchStatus === "fetching";
       const canPatchTree = ev.type === "change" && !ev.more && changes > 0 && !!ev.files?.length && !!oldTree;
+      const cancelAndReplayTree = (
+        deltas: ChangeFileDelta[],
+        fenced: boolean,
+        receipts: string[],
+      ) => {
+        if (!cancelTreeInFlight) {
+          cancelTreeAllFenced = true;
+          cancelRequiredReceipts.clear();
+        }
+        if (deltas.length) pendingCancelDeltas.push(...deltas);
+        if (fenced) {
+          for (const tok of receipts) cancelRequiredReceipts.add(tok);
+        } else {
+          cancelTreeAllFenced = false;
+        }
+        if (cancelTreeInFlight) return;
+        cancelTreeInFlight = true;
+        void qc.cancelQueries({ queryKey: treeKey }).then(() => {
+          cancelTreeInFlight = false;
+          const batch = pendingCancelDeltas.splice(0);
+          const required = new Set(cancelRequiredReceipts);
+          const allFenced = cancelTreeAllFenced;
+          cancelRequiredReceipts.clear();
+          cancelTreeAllFenced = true;
+          if (done) return;
+          if (batch.length) {
+            qc.setQueryData<Node>(treeKey, (old) => (old ? applyTreeDeltas(old, batch) : old));
+          }
+          const unfencedWindowClear =
+            lastUnfencedDeltaAt === 0 || Date.now() - lastUnfencedDeltaAt >= UNFENCED_TREE_MS;
+          if (allFenced && unfencedWindowClear && coversProjectReceipts(apiBase, required)) {
+            if (unfencedTreeTimer) {
+              window.clearTimeout(unfencedTreeTimer);
+              unfencedTreeTimer = null;
+            }
+            return qc.invalidateQueries({ queryKey: treeKey });
+          }
+          if (!lastUnfencedDeltaAt) lastUnfencedDeltaAt = Date.now();
+          scheduleUnfencedTreeRefetch();
+        });
+      };
       if (canPatchTree) {
         const deltas = ev.files!;
         if (!hasValidReceipt) {
@@ -216,52 +279,18 @@ export function useProjectEvents(
         }
         qc.setQueryData<Node>(treeKey, (old) => (old ? applyTreeDeltas(old, deltas) : old));
         if (treeFetching || cancelTreeInFlight) {
-          // An earlier tree read still in flight would overwrite the delta
-          // when it lands; cancel it once, replay every delta that arrived in
-          // stream order, and revalidate immediately ONLY when every delta in
-          // the batch (and any recent unreceipted delta) is causally fenced.
-          if (!cancelTreeInFlight) {
-            cancelTreeAllFenced = true;
-            cancelRequiredReceipts.clear();
-          }
-          pendingCancelDeltas.push(...deltas);
-          if (hasValidReceipt) {
-            for (const tok of recordedReceipts) cancelRequiredReceipts.add(tok);
-          } else {
-            cancelTreeAllFenced = false;
-          }
-          if (!cancelTreeInFlight) {
-            cancelTreeInFlight = true;
-            void qc.cancelQueries({ queryKey: treeKey }).then(() => {
-              cancelTreeInFlight = false;
-              const batch = pendingCancelDeltas.splice(0);
-              const required = new Set(cancelRequiredReceipts);
-              const allFenced = cancelTreeAllFenced;
-              cancelRequiredReceipts.clear();
-              cancelTreeAllFenced = true;
-              if (done) return;
-              if (batch.length) {
-                qc.setQueryData<Node>(treeKey, (old) => (old ? applyTreeDeltas(old, batch) : old));
-              }
-              const unfencedWindowClear =
-                lastUnfencedDeltaAt === 0 || Date.now() - lastUnfencedDeltaAt >= UNFENCED_TREE_MS;
-              if (allFenced && unfencedWindowClear && coversProjectReceipts(apiBase, required)) {
-                if (unfencedTreeTimer) {
-                  window.clearTimeout(unfencedTreeTimer);
-                  unfencedTreeTimer = null;
-                }
-                return qc.invalidateQueries({ queryKey: treeKey });
-              }
-              if (!lastUnfencedDeltaAt) lastUnfencedDeltaAt = Date.now();
-              scheduleUnfencedTreeRefetch();
-            });
-          }
+          cancelAndReplayTree(deltas, hasValidReceipt, recordedReceipts);
         }
         invalidateHistory();
       } else {
         if (ev.type === "change" && !hasValidReceipt) {
           lastUnfencedDeltaAt = Date.now();
-          if (unfencedTreeTimer) scheduleUnfencedTreeRefetch();
+          if (!oldTree || unfencedTreeTimer) scheduleUnfencedTreeRefetch();
+        }
+        const inUnfencedWindow =
+          !!oldTree && lastUnfencedDeltaAt > 0 && Date.now() - lastUnfencedDeltaAt < UNFENCED_TREE_MS;
+        if (inUnfencedWindow && (treeFetching || cancelTreeInFlight)) {
+          cancelAndReplayTree([], false, []);
         }
         invalidateProject();
       }
