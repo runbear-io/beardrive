@@ -173,9 +173,9 @@ func (s *Session) logInbound(rel string, deleted bool) {
 	_ = s.Store.LogInboundForMount(s.MountID, rel, deleted) // best-effort: never fails a cycle
 }
 
-// readOnlyPath reports whether rel sits under a folder this account may read
-// but not write. The prefixes are slash-terminated, so "locked/" governs
-// "locked/x.md" and never a sibling named "lockedout.md".
+// readOnlyPath reports whether rel must not be journaled: either read-only or
+// denied. It does not imply read access; materializers also check deniedPath.
+// Slash-terminated prefixes distinguish "locked/x.md" from "lockedout.md".
 func (s *Session) readOnlyPath(rel string) bool {
 	return underAny(rel, s.readOnly) || underAny(rel, s.denied)
 }
@@ -2410,7 +2410,7 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 		// naming one arrives from a peer's journal — where the scan-side
 		// check never ran. Writing it would let one device repoint another's
 		// mount (or drop a git hook that runs on the next commit).
-		if neverSync(rel) {
+		if neverSync(rel) || s.deniedPath(rel) {
 			continue
 		}
 		if want.Link == "" {
@@ -2461,8 +2461,8 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 		}
 		if fi, err := os.Lstat(abs); err == nil {
 			if !cachedPathMatches(abs, fi, c) {
-				if !s.readOnlyPath(rel) || fi.IsDir() {
-					continue // writable edits belong to scan; never destroy a directory
+				if !s.readOnlyPath(rel) || s.deniedPath(rel) || fi.IsDir() {
+					continue // keep local work in place; only read-only drift is reverted
 				}
 				if err := s.preserveLocalEntry(abs, rel, fi); err != nil {
 					skip(err)
@@ -2493,6 +2493,9 @@ func (s *Session) materialize(target map[string]journal.FileState, cache map[str
 // since the scan earlier in this cycle. Split out of materialize so the cycle
 // can land .bdriveignore on its own, before the rules are needed.
 func (s *Session) materializeFile(rel string, want journal.FileState, cache map[string]store.CachedFile) (bool, error) {
+	if s.deniedPath(rel) {
+		return false, nil // retained own-journal ops do not authorize materialization
+	}
 	// A peer may publish any path/value pair, but shared sync policy must
 	// never become a symlink. This gate covers every materialization phase.
 	if rel == IgnoreFile && want.Link != "" {

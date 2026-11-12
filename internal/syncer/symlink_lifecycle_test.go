@@ -1161,3 +1161,136 @@ func TestSymlink_IgnoreRegularPermissionErrorIsNotHidden(t *testing.T) {
 		t.Fatalf("regular ignore-file permission error = %v", err)
 	}
 }
+
+func TestSymlink_DeniedRevocationPreservesLocalEditsInPlace(t *testing.T) {
+	be := sharedRemote(t)
+	a := newDevice(t, "deva", be)
+	b := newDevice(t, "devb", hidingRemote{Backend: be, tag: "visible"})
+	write(t, a.Folder, "vault/clean.md", "clean peer content")
+	write(t, a.Folder, "vault/edited.md", "original peer content")
+	write(t, a.Folder, "public.md", "old public content")
+	lifecycleLink(t, a, "vault/clean-link", "missing-clean")
+	lifecycleLink(t, a, "vault/edited-link", "missing-original")
+	cycle(t, a)
+	cycle(t, b)
+
+	// B's retained journal must resolve to an older value than its cache
+	// after revocation removes A's later version from the filtered fold.
+	write(t, b.Folder, "vault/own.md", "older own version")
+	cycle(t, b)
+	cycle(t, a)
+	write(t, a.Folder, "vault/own.md", "newer peer version")
+	cycle(t, a)
+	cycle(t, b)
+	if got := read(t, b.Folder, "vault/own.md"); got != "newer peer version" {
+		t.Fatalf("fixture missed newer peer version: %q", got)
+	}
+	before, err := b.Store.DeviceOps(b.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	write(t, b.Folder, "vault/edited.md", "private local edited bytes")
+	write(t, b.Folder, "vault/own.md", "private local own bytes")
+	lifecycleRemove(t, b, "vault/edited-link")
+	lifecycleLink(t, b, "vault/edited-link", "private-local-target")
+	b.Backend = hidingRemote{Backend: be, hide: []string{"vault/"}, tag: "revoked"}
+	write(t, a.Folder, "public.md", "new public content")
+	cycle(t, a)
+
+	for range 2 {
+		res := cycle(t, b)
+		if len(res.Reverted) != 0 {
+			t.Errorf("revoked local work was reverted: %v", res.Reverted)
+		}
+		lifecycleAssertGone(t, b, "vault/clean.md")
+		lifecycleAssertGone(t, b, "vault/clean-link")
+		for rel, want := range map[string]string{
+			"vault/edited.md": "private local edited bytes",
+			"vault/own.md":    "private local own bytes",
+		} {
+			data, err := os.ReadFile(filepath.Join(b.Folder, rel))
+			if err != nil || string(data) != want {
+				t.Errorf("revocation disturbed %s: %q, %v", rel, data, err)
+			}
+		}
+		target, err := os.Readlink(filepath.Join(b.Folder, "vault/edited-link"))
+		if err != nil || target != "private-local-target" {
+			t.Errorf("revocation disturbed dirty link: %q, %v", target, err)
+		}
+		_ = filepath.WalkDir(b.Folder, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				t.Error(err)
+				return nil
+			}
+			if strings.Contains(d.Name(), "(local, not synced") {
+				t.Errorf("revocation copied local work aside: %s", p)
+			}
+			return nil
+		})
+		if got := read(t, b.Folder, "public.md"); got != "new public content" {
+			t.Errorf("visible project stopped syncing: %q", got)
+		}
+	}
+	after, err := b.Store.DeviceOps(b.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("revoked paths generated journal ops: before=%+v after=%+v", before, after)
+	}
+	cache := lifecycleCache(t, b)
+	for _, rel := range []string{"vault/clean.md", "vault/clean-link"} {
+		if _, ok := cache[rel]; ok {
+			t.Errorf("clean revoked peer entry remains cached: %s", rel)
+		}
+	}
+	cycle(t, a)
+	if got := read(t, a.Folder, "vault/edited.md"); got != "original peer content" {
+		t.Errorf("private edit reached peer: %q", got)
+	}
+	if got := read(t, a.Folder, "vault/own.md"); got != "newer peer version" {
+		t.Errorf("revocation changed peer's version: %q", got)
+	}
+	lifecycleAssertLink(t, a, "vault/edited-link", "missing-original")
+}
+
+func TestSymlink_DeniedMaterializeSkipsRetainedTargets(t *testing.T) {
+	for _, wantKind := range []string{"file", "link"} {
+		for _, localKind := range []string{"missing", "file", "link"} {
+			t.Run(wantKind+"/"+localKind, func(t *testing.T) {
+				s := newDevice(t, "devb", sharedRemote(t))
+				s.denied = []string{"vault/"}
+				sum, size, err := s.Store.PutBlobBytes([]byte("retained journal bytes"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := journal.FileState{Blob: sum, Size: size, Mode: 0o644}
+				if wantKind == "link" {
+					want = journal.FileState{Link: "retained-journal-target"}
+				}
+				switch localKind {
+				case "file":
+					write(t, s.Folder, "vault/entry", "private local bytes")
+				case "link":
+					lifecycleLink(t, s, "vault/entry", "private-local-target")
+				}
+				cache := map[string]store.CachedFile{}
+				wrote, err := s.materializeFile("vault/entry", want, cache)
+				if err != nil || wrote || len(cache) != 0 || s.cacheDirty || len(s.reverted) != 0 {
+					t.Errorf("denied materialize changed state: wrote=%t err=%v cache=%v dirty=%t reverted=%v", wrote, err, cache, s.cacheDirty, s.reverted)
+				}
+				switch localKind {
+				case "missing":
+					lifecycleAssertGone(t, s, "vault/entry")
+				case "file":
+					if got := read(t, s.Folder, "vault/entry"); got != "private local bytes" {
+						t.Errorf("denied local bytes overwritten: %q", got)
+					}
+				case "link":
+					lifecycleAssertLink(t, s, "vault/entry", "private-local-target")
+				}
+			})
+		}
+	}
+}
