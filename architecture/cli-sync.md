@@ -28,7 +28,7 @@ classDiagram
         -loadScope(ctx, st) scopeMoved
         -readOnlyPath / deniedPath
         -forgetPeerJournals()
-        -keepLocalCopy(abs)
+        -preserveLocalEntry(abs, rel, fi)
         -firePostSync(res)
         -logInbound(rel, deleted)
         +Restore(ctx, path, sha) error
@@ -84,8 +84,8 @@ classDiagram
         +RawIgnoreText() string
         +HasUpGuard() bool
     }
-    note for Filter "ignore.go — .bdriveignore rules (incl. the managed `# bdrive scope` negation block written by init --only / bdrive scope) + a legacy .bdrive include list; Negated() is what makes sync --prune refuse on a scoped project. NOT the whole predicate: walkFolder adds reserved-dir pruning, non-regular and reserved-name skips, and nested-mount handoff"
-    note for Filter "Folder permissions are NOT part of Filter and deliberately so: they are the hub's answer about this account, not the project's shared rules, and they are asymmetric in the other direction — a read-only folder is materialized normally and never journaled. scan returns early for such a path (marking it seen, so the delete pass mints nothing) and materializeFile reverts it, which is the one place a dirty file is clobbered"
+    note for Filter "ignore.go — .bdriveignore rules (incl. the managed `# bdrive scope` negation block written by init --only / bdrive scope) + a legacy .bdrive include list; Negated() is what makes sync --prune refuse on a scoped project. readRegularIgnoreFile fails closed on a non-regular policy: scans and queries stop until it is repaired, rather than dropping exclusions. Only a missing file means no local rules. walkFolder excludes symlinked policy files, and materializeFile refuses peer links there so a peer cannot install an invalid policy"
+    note for Filter "Folder permissions are separate from shared ignore rules. Read-only folders are materialized normally and never journaled; dirty local entries are preserved before applying the project version or deletion, while clean peer updates create no sidecar. Regular sidecars retain the opened source's permissions, and identical reused copies only lose excess permissions. Denied folders are never materialized, even from retained own-journal ops. Revocation removes unchanged cached peer entries but leaves dirty local files and links in place without sidecars or journal ops"
     note for Filter "The rules are NO LONGER symmetric. Skip governs materialize (download); SkipUp governs scan (upload) and adds the accepted-rules floor from AcceptRules: a pulled rule that NARROWS applies in both directions, a pulled `!` that WIDENS applies only downward — so a teammate editing .bdriveignore can never start uploading a file this device had excluded. .bdriveignore itself is always exempt. underMountOnDisk asks config.IsMount about each ancestor, so the project boundary no longer depends on what this walk happened to discover"
     note for Filter "EscapeIgnore is compile's inverse (escapes the glob metacharacters, the negation and comment markers, and trailing whitespace) so bdrive forget writes a rule matching exactly that path and nothing else"
 
@@ -131,15 +131,17 @@ classDiagram
     class UnderRoot {
         <<internal/store — one rule>>
         +UnderRoot(root, p) bool
+        +OpenRegularUnderRoot(root, abs)
     }
-    note for UnderRoot "path.go — symlink-aware containment: resolves the root and the deepest existing ancestor of p, so a symlinked directory cannot land a materialized write outside the mount. A dangling component is false. Shared by materialize, the file:// backend, templates, scope-file writes and init's BDRIVE_HOME gate"
+    note for UnderRoot "path.go — UnderRoot checks symlink-aware containment for materialized writes, the file:// backend, templates, scope files and init's BDRIVE_HOME gate. OpenRegularUnderRoot pins the mount root descriptor and walks every descendant with no-follow Openat calls; the leaf is nonblocking and descriptor-validated as regular. grep, stale, ignore rules and local-copy reads cannot follow a concurrently swapped parent outside the mount. Preservation reads source permissions from that descriptor and tightens reused copies through the opened descriptor. Symlinked mount roots remain valid. ErrNotRegular classifies leaf non-regular entries; the ignore loader propagates it as a fail-closed policy error"
 
     class walkFolder {
         +walkFolder(folder, filter, fn)
         +walkFolderPathsFast(folder, filter, roots, fastUnchanged, onWalkErr, fn)
+        +syncsEntry(verdict) bool
         verdict: vSync vSymlink vSkipFile vDescend vPruneDir vNested
     }
-    note for walkFolder "walk.go — the ONLY copy of the sync predicate; scan, Explain, Measure, SyncedFiles and Drift all go through it, so what --explain reports, what init warns about, what bdrive grep searches and what status calls unscanned cannot drift from what leaves. walkFolderPathsFast adds an opt-in unchanged-cache shortcut for scan when the mount's ignore fingerprint matches the last completed full scan"
+    note for walkFolder "walk.go — the shared sync predicate for scan, Explain, Measure, SyncedFiles and Drift. syncsEntry accepts regular files and symbolic links; the walker classifies a symlink at .bdriveignore as skipped because sync policy must be regular-file content. walkFolderPathsFast adds an unchanged-cache shortcut when the mount's ignore fingerprint matches the last full scan"
 
     class Measure {
         +Measure(folder, include) files, bytes
@@ -154,7 +156,7 @@ classDiagram
     class Drift {
         +Drift(folder, include, accepted, cache) added, modified, removed
     }
-    note for Drift "drift.go — the `local:` line in bdrive status: what is on disk that the state cache has not seen, using the scan's own size+mtime compare. Pure read like its siblings, and load-bearing that it stays one: status is what someone runs when sync is stuck, so it stores no blob, mints no op, rewrites no cache — it does not even mutate the cache map it is handed, which status prints `files:` from"
+    note for Drift "drift.go — the local line in bdrive status: compares entry types and size+mtime fingerprints against the materialization cache. A link with a changed fingerprint counts as modified only when its target changed; a same-target touch stays quiet. Pure read: stores no blob, mints no op and never mutates the cache"
 
     class Explain {
         +Explain(folder, include, accepted) two lists

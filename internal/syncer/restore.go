@@ -75,7 +75,7 @@ func (s *Session) fetchBlob(ctx context.Context, sha string) error {
 // fileMode keeps the file's current permissions when it still exists —
 // restoring content is not a reason to reset the mode.
 func fileMode(abs string) uint32 {
-	if fi, err := os.Stat(abs); err == nil {
+	if fi, err := os.Lstat(abs); err == nil && fi.Mode().IsRegular() {
 		return uint32(fi.Mode().Perm())
 	}
 	return 0o644

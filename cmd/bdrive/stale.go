@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -148,7 +147,7 @@ func runStale(cmd *cobra.Command, folderArg []string, filesOnly bool, limit int)
 			continue // never synced: nothing to date it by
 		}
 		var refs []staleRef
-		for _, ref := range staleRefs(filepath.Join(folder, rel), rel, synced) {
+		for _, ref := range staleRefs(folder, filepath.Join(folder, rel), rel, synced) {
 			refTime, ok := written[ref]
 			if !ok || !refTime.After(docTime) {
 				continue
@@ -238,8 +237,8 @@ func isMarkdownPath(rel string) bool {
 
 // staleRefs returns the synced paths one doc references, deduped. Unreadable
 // files are skipped, never fatal, the same posture the scan takes.
-func staleRefs(abs, rel string, synced map[string]bool) []string {
-	f, err := os.Open(abs)
+func staleRefs(folder, abs, rel string, synced map[string]bool) []string {
+	f, _, err := store.OpenRegularUnderRoot(folder, abs)
 	if err != nil {
 		return nil
 	}

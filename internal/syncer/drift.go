@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"io/fs"
+	"os"
 
 	"github.com/runbear-io/beardrive/internal/store"
 )
@@ -34,8 +35,8 @@ func Drift(folder string, include []string, accepted string, cache map[string]st
 	filter.AcceptRules(accepted)
 
 	seen := make(map[string]bool, len(cache))
-	err = walkFolder(folder, filter, func(_, rel string, d fs.DirEntry, v verdict) error {
-		if v != vSync {
+	err = walkFolder(folder, filter, func(abs, rel string, d fs.DirEntry, v verdict) error {
+		if !syncsEntry(v) {
 			return nil
 		}
 		info, err := d.Info()
@@ -47,6 +48,16 @@ func Drift(folder string, include []string, accepted string, cache map[string]st
 		switch {
 		case !ok:
 			added++
+		case v == vSymlink:
+			if c.Link == "" {
+				modified++
+			} else if c.Size != info.Size() || c.MTimeNS != info.ModTime().UnixNano() {
+				if target, err := os.Readlink(abs); err == nil && target != c.Link {
+					modified++
+				}
+			}
+		case c.Link != "":
+			modified++ // a link became a regular file, even with the same fingerprint
 		case c.Size != info.Size() || c.MTimeNS != info.ModTime().UnixNano():
 			modified++
 		}

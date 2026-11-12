@@ -1,6 +1,9 @@
 package syncer
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -8,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/runbear-io/beardrive/internal/config"
+	"github.com/runbear-io/beardrive/internal/store"
 )
 
 // IgnoreFile is the per-folder opt-out list at the mount root. It uses a
@@ -122,6 +126,22 @@ func LoadFilter(folder string, include []string) (*Filter, error) {
 	return loadFilter(folder, include)
 }
 
+// readRegularIgnoreFile treats sync policy as regular-file content, never as
+// the target of a symlink. Only a missing entry means no local rules; a
+// non-regular policy fails closed so exclusions cannot silently disappear.
+func readRegularIgnoreFile(folder string) ([]byte, error) {
+	abs := filepath.Join(folder, IgnoreFile)
+	f, _, err := store.OpenRegularUnderRoot(folder, abs)
+	if errors.Is(err, store.ErrNotRegular) {
+		return nil, fmt.Errorf("%s must be a regular file: %w", IgnoreFile, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
 // loadFilter builds the filter for a folder from its .bdriveignore (if any)
 // plus the include list from the .bdrive settings file.
 func loadFilter(folder string, include []string) (*Filter, error) {
@@ -131,7 +151,7 @@ func loadFilter(folder string, include []string) (*Filter, error) {
 			f.include = append(f.include, p)
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(folder, IgnoreFile))
+	data, err := readRegularIgnoreFile(folder)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return f, nil

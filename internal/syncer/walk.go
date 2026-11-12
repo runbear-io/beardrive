@@ -22,6 +22,10 @@ const (
 	vSymlink                 // a symbolic link: syncs as its target string, never its content
 )
 
+func syncsEntry(v verdict) bool {
+	return v == vSync || v == vSymlink
+}
+
 // walkFolder walks a mount applying the exact predicate the sync cycle uses.
 // fn sees every entry with its verdict; pruning happens here, so no caller can
 // descend where scan would not. This is the only copy of the rules: scan and
@@ -142,6 +146,8 @@ func walkFolderPathsFast(folder string, filter *Filter, roots []string, fastUnch
 				switch {
 				case !journal.SafePath(rel) || config.ReservedPath(rel) || filter.SkipUp(rel):
 					v = vSkipFile
+				case rel == IgnoreFile && d.Type()&fs.ModeSymlink != 0:
+					v = vSkipFile // shared sync policy is regular-file-only
 				case d.Type()&fs.ModeSymlink != 0:
 					v = vSymlink
 				case d.Type().IsRegular():
@@ -197,7 +203,7 @@ func SyncedFiles(folder string, include []string, accepted string) ([]string, er
 
 	var out []string
 	err = walkFolder(folder, filter, func(_, rel string, _ fs.DirEntry, v verdict) error {
-		if v == vSync {
+		if syncsEntry(v) {
 			out = append(out, rel)
 		}
 		return nil
@@ -224,7 +230,7 @@ func Measure(folder string, include []string) (files int, bytes int64, err error
 		return 0, 0, err
 	}
 	err = walkFolder(folder, filter, func(_, _ string, d fs.DirEntry, v verdict) error {
-		if v != vSync {
+		if !syncsEntry(v) {
 			return nil
 		}
 		info, err := d.Info()
