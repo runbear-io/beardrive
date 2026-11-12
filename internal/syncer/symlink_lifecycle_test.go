@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -661,36 +662,59 @@ func TestSymlink_ForestCleanReadOnlyUpdatesCreateNoLocalCopies(t *testing.T) {
 func TestSymlink_ForestLocalCopyCollisionProbingIsBounded(t *testing.T) {
 	for _, kind := range []string{"file", "link"} {
 		t.Run(kind, func(t *testing.T) {
-			s := newDevice(t, "devb", sharedRemote(t))
+			be := sharedRemote(t)
+			a := newDevice(t, "deva", be)
+			b := newDevice(t, "devb", scopedRemote{Backend: be, readOnly: []string{"locked/"}})
 			if kind == "link" {
-				lifecycleLink(t, s, "locked/entry", "mine")
+				lifecycleLink(t, a, "locked/entry", "project")
 			} else {
-				write(t, s.Folder, "locked/entry", "mine")
+				write(t, a.Folder, "locked/entry", "project")
 			}
-			outside := t.TempDir()
-			write(t, outside, "target", "outside")
-			lifecycleLink(t, s, "locked/entry (local, not synced)", filepath.Join(outside, "target"))
-			for n := 2; n <= 64; n++ {
-				write(t, s.Folder, fmt.Sprintf("locked/entry (local, not synced %d)", n), fmt.Sprint(n))
-			}
-			if err := lifecyclePreserve(s, "locked/entry"); err != nil {
-				t.Fatal(err)
-			}
+			cycle(t, a)
+			cycle(t, b)
+			lifecycleRemove(t, b, "locked/entry")
 			if kind == "link" {
-				lifecycleAssertLink(t, s, "locked/entry (local, not synced)", "mine")
+				lifecycleLink(t, b, "locked/entry", "65th local edit")
 			} else {
-				fi, err := os.Lstat(filepath.Join(s.Folder, "locked/entry (local, not synced)"))
-				if err != nil || !fi.Mode().IsRegular() {
-					t.Fatalf("base slot was not replaced atomically: %v, %v", fi, err)
+				write(t, b.Folder, "locked/entry", "65th local edit")
+			}
+			copies := make(map[string]string)
+			for n := 1; n <= 64; n++ {
+				rel := "locked/entry (local, not synced)"
+				if n > 1 {
+					rel = fmt.Sprintf("locked/entry (local, not synced %d)", n)
 				}
-				if got := read(t, s.Folder, "locked/entry (local, not synced)"); got != "mine" {
-					t.Errorf("fallback copy = %q", got)
+				value := fmt.Sprintf("kept local edit %d", n)
+				copies[rel] = value
+				if kind == "link" {
+					lifecycleLink(t, b, rel, value)
+				} else {
+					write(t, b.Folder, rel, value)
 				}
 			}
-			lifecycleAssertGone(t, s, "locked/entry (local, not synced 65)")
-			if got := read(t, outside, "target"); got != "outside" {
-				t.Errorf("fallback followed the prior symlink: %q", got)
+			for range 2 {
+				res := cycle(t, b)
+				if len(res.Reverted) != 0 || res.Materialized != 0 {
+					t.Errorf("exhausted preservation still overwrote local state: %+v", res)
+				}
+				for rel, want := range copies {
+					if kind == "link" {
+						target, err := os.Readlink(filepath.Join(b.Folder, rel))
+						if err != nil || target != want {
+							t.Errorf("prior copy %s changed: %q, %v", rel, target, err)
+						}
+					} else if got := read(t, b.Folder, rel); got != want {
+						t.Errorf("prior copy %s changed: %q", rel, got)
+					}
+				}
+				if kind == "link" {
+					lifecycleAssertLink(t, b, "locked/entry", "65th local edit")
+				} else if got := read(t, b.Folder, "locked/entry"); got != "65th local edit" {
+					t.Errorf("65th edit was overwritten: %q", got)
+				}
 			}
+			lifecycleAssertGone(t, b, "locked/entry (local, not synced 65)")
+			lifecycleAssertNoReadOnlyOps(t, b)
 		})
 	}
 }
@@ -992,5 +1016,46 @@ func TestSymlink_ReadOnlyIdenticalRegularFileCreatesNoLocalCopy(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestSymlink_IgnoreFIFOMeansNoLocalRules(t *testing.T) {
+	folder := t.TempDir()
+	abs := filepath.Join(folder, IgnoreFile)
+	if err := syscall.Mkfifo(abs, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := readRegularIgnoreFile(folder)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !os.IsNotExist(err) {
+			t.Fatalf("FIFO ignore rules = %v, want not-exist", err)
+		}
+	case <-time.After(5 * time.Second):
+		if writer, err := os.OpenFile(abs, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			writer.Close()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+			}
+		}
+		t.Fatal("ignore-rule read blocked on a FIFO")
+	}
+}
+
+func TestSymlink_IgnoreRegularPermissionErrorIsNotHidden(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read mode-000 regular files")
+	}
+	folder := t.TempDir()
+	if err := os.WriteFile(filepath.Join(folder, IgnoreFile), []byte("private/\n"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRegularIgnoreFile(folder); !os.IsPermission(err) {
+		t.Fatalf("regular ignore-file permission error = %v", err)
 	}
 }

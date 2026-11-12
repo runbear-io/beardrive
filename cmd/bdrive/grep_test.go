@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -334,5 +336,90 @@ func TestGrepDoesNotBlockOnTheVolumeLock(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("grep blocked on the volume lock")
+	}
+}
+
+// queryReadBounded also releases a regressed blocking FIFO open, so a failure
+// reports the leak/hang without leaving a test goroutine stuck in the kernel.
+func queryReadBounded(t *testing.T, fifo string, read func() (string, error)) (string, error) {
+	t.Helper()
+	type result struct {
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := read()
+		done <- result{out: out, err: err}
+	}()
+	select {
+	case got := <-done:
+		return got.out, got.err
+	case <-time.After(5 * time.Second):
+		t.Error("local query blocked on a FIFO")
+		writer, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			t.Fatalf("release blocked FIFO reader: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-done:
+			return got.out, got.err
+		case <-time.After(5 * time.Second):
+			t.Fatal("query did not finish after releasing its FIFO reader")
+			return "", nil
+		}
+	}
+}
+
+func TestGrepSkipsExternalSymlinkAndFIFO(t *testing.T) {
+	folder := grepMount(t)
+	outside := t.TempDir()
+	grepWrite(t, outside, "secret", "OUTSIDE_SECRET_NEEDLE\n")
+	grepWrite(t, folder, "inside.txt", "inside needle\n")
+	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(folder, "external.md")); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(folder, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("pipe", filepath.Join(folder, "fifo-link.md")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := queryReadBounded(t, fifo, func() (string, error) {
+		return grepRun(t, "inside needle|OUTSIDE_SECRET_NEEDLE", folder)
+	})
+	if err != nil {
+		t.Fatalf("grep: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "inside.txt:1: inside needle") {
+		t.Errorf("regular-file control missing:\n%s", out)
+	}
+	if strings.Contains(out, "OUTSIDE_SECRET_NEEDLE") || strings.Contains(out, "external.md") {
+		t.Errorf("grep followed an external symlink:\n%s", out)
+	}
+}
+
+func TestGrepFileSkipsFIFOReplacingCandidate(t *testing.T) {
+	folder := grepMount(t)
+	abs := filepath.Join(folder, "candidate.md")
+	grepWrite(t, folder, "candidate.md", "needle\n")
+	// The discovery snapshot named a regular file, but it changed before open.
+	if err := os.Remove(abs); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(abs, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var hits []hit
+	queryReadBounded(t, abs, func() (string, error) {
+		hits = grepFile(folder, abs, regexp.MustCompile("needle"), false)
+		return "", nil
+	})
+	if len(hits) != 0 {
+		t.Errorf("FIFO produced matches: %v", hits)
 	}
 }

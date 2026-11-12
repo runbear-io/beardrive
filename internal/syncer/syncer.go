@@ -2292,8 +2292,8 @@ const maxLocalCopyTries = 64
 // preserveLocalEntry keeps a displaced read-only entry beside its original,
 // under the same prefix and without a journal op. Link targets are copied as
 // strings, never opened. Directories and special entries are left untouched.
-// Identical copies are reused. After a bounded collision search, the base
-// sidecar is replaced atomically rather than minting unbounded numbered copies.
+// Identical copies are reused. When all bounded slots hold different edits,
+// preservation fails so materialization leaves both old copies and new work alone.
 func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
 	if !store.UnderRoot(s.Folder, filepath.Dir(abs)) {
 		return fmt.Errorf("resolves outside the mount root")
@@ -2315,7 +2315,7 @@ func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
 	dir, base := filepath.Split(abs)
 	ext := filepath.Ext(base)
 	baseCopy := filepath.Join(dir, strings.TrimSuffix(base, ext)+" (local, not synced)"+ext)
-	copyAbs := baseCopy
+	copyAbs := ""
 	for n := 1; n <= maxLocalCopyTries; n++ {
 		candidate := baseCopy
 		if n > 1 {
@@ -2338,6 +2338,9 @@ func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
 				return nil
 			}
 		}
+	}
+	if copyAbs == "" {
+		return fmt.Errorf("local copy limit (%d) reached for %s", maxLocalCopyTries, rel)
 	}
 	if link != "" {
 		return s.writeSymlink(copyAbs, link)

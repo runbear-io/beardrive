@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -429,5 +430,77 @@ func TestStaleFoldsAcrossDevicesAndClampsForgedStamps(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 outgrown doc, 2 stale references") {
 		t.Errorf("both references should count once, clamped:\n%s", out)
+	}
+}
+
+func TestStaleSkipsExternalSymlinkAndFIFO(t *testing.T) {
+	folder := staleProject(t, map[string]string{
+		"regular.md":                      "[synced alias](external.md)\n",
+		"secret/OUTSIDE_SECRET_NEEDLE.md": "ordinary local content\n",
+	}, map[string]time.Duration{
+		"regular.md":                      -60 * day,
+		"secret/OUTSIDE_SECRET_NEEDLE.md": -day,
+	})
+	outside := t.TempDir()
+	grepWrite(t, outside, "secret.md", "[external content](secret/OUTSIDE_SECRET_NEEDLE.md)\n")
+	external := filepath.Join(outside, "secret.md")
+	if err := os.Symlink(external, filepath.Join(folder, "external.md")); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(folder, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("pipe", filepath.Join(folder, "fifo-link.md")); err != nil {
+		t.Fatal(err)
+	}
+	proj, _, err := config.LoadProject(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vdir, err := config.VolumeDir(proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(vdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().Add(-40 * day)
+	if err := st.AppendOps("peer", []journal.Op{
+		{Device: "peer", Seq: 1, Lamport: 100, Kind: journal.KindPut, Path: "external.md", Link: external, Time: when, Mtime: when},
+		{Device: "peer", Seq: 2, Lamport: 101, Kind: journal.KindPut, Path: "fifo-link.md", Link: "pipe", Time: when, Mtime: when},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := queryReadBounded(t, fifo, func() (string, error) { return staleRun(t, folder) })
+	if err != nil {
+		t.Fatalf("stale: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "OUTSIDE_SECRET_NEEDLE") {
+		t.Errorf("stale parsed an external symlink target:\n%s", out)
+	}
+	if !strings.Contains(out, "regular.md") || !strings.Contains(out, "external.md") {
+		t.Errorf("synced symlink disappeared as a regular document's reference target:\n%s", out)
+	}
+}
+
+func TestStaleRefsSkipsFIFOReplacingCandidate(t *testing.T) {
+	folder := grepMount(t)
+	abs := filepath.Join(folder, "candidate.md")
+	grepWrite(t, folder, "candidate.md", "[target](target.md)\n")
+	if err := os.Remove(abs); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(abs, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var refs []string
+	queryReadBounded(t, abs, func() (string, error) {
+		refs = staleRefs(folder, abs, "candidate.md", map[string]bool{"target.md": true})
+		return "", nil
+	})
+	if len(refs) != 0 {
+		t.Errorf("FIFO produced stale references: %v", refs)
 	}
 }

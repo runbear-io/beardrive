@@ -130,7 +130,7 @@ func runGrep(cmd *cobra.Command, pattern string, folderArg []string, ignoreCase,
 	var lines, files int
 	truncated := false
 	for _, rel := range paths {
-		hits := grepFile(filepath.Join(folder, rel), re, filesOnly)
+		hits := grepFile(folder, filepath.Join(folder, rel), re, filesOnly)
 		if len(hits) == 0 {
 			continue
 		}
@@ -181,8 +181,8 @@ type hit struct {
 // grepFile returns the matching lines in one file, or nothing when the file is
 // binary or unreadable — an unreadable file is skipped, never fatal, the same
 // posture the scan takes. With filesOnly it stops at the first match.
-func grepFile(abs string, re *regexp.Regexp, filesOnly bool) []hit {
-	f, err := os.Open(abs)
+func grepFile(folder, abs string, re *regexp.Regexp, filesOnly bool) []hit {
+	f, _, err := store.OpenRegularUnderRoot(folder, abs)
 	if err != nil {
 		return nil
 	}

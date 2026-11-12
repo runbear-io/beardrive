@@ -1,9 +1,12 @@
 package store
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // UnderRoot reports whether p resolves inside root ON DISK — following every
@@ -42,4 +45,39 @@ func UnderRoot(root, p string) bool {
 		}
 		dir = parent
 	}
+}
+
+// ErrNotRegular marks an entry that must not be read as file content.
+var ErrNotRegular = errors.New("not a regular file")
+
+// OpenRegularUnderRoot opens a regular file without following its final entry
+// or blocking on a FIFO. The returned metadata describes the opened descriptor,
+// not a path that may have changed between inspection and opening.
+func OpenRegularUnderRoot(root, abs string) (*os.File, os.FileInfo, error) {
+	if !UnderRoot(root, filepath.Dir(abs)) {
+		return nil, nil, fmt.Errorf("%s resolves outside the mount root", abs)
+	}
+	f, err := os.OpenFile(abs, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK) {
+			return nil, nil, fmt.Errorf("%w: %s", ErrNotRegular, abs)
+		}
+		// Some non-regular entries (for example sockets) cannot be opened
+		// at all. Keep that classification distinct from a regular file's
+		// permission or I/O error.
+		if fi, statErr := os.Lstat(abs); statErr == nil && !fi.Mode().IsRegular() {
+			return nil, nil, fmt.Errorf("%w: %s", ErrNotRegular, abs)
+		}
+		return nil, nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, fmt.Errorf("%w: %s", ErrNotRegular, abs)
+	}
+	return f, fi, nil
 }
