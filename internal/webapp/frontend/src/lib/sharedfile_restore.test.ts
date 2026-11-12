@@ -2983,9 +2983,10 @@ test("buildExitSaveRequest: hub checkpoint, plain-folder save after an autosave,
   // The same words changed outside: the frame's document goes beside the file.
   const outside = v0.replace("Title", "Other");
   const mine = { ...h1, html: "Mine" };
-  const clash = buildExitSaveRequest({ ...state, savedText: outside, docText: outside }, [mine]);
+  const now = Date.parse("2026-08-18T12:34:56Z");
+  const clash = buildExitSaveRequest({ ...state, savedText: outside, docText: outside }, [mine], now);
   assert.ok(clash);
-  assert.ok(clash.url.startsWith("/api/upload/content?path=page.html.bdrive-conflict-tester-"));
+  assert.equal(clash.url, "/api/upload/content?path=page.html.bdrive-conflict-tester-20260818T123456Z");
   assert.equal(clash.headers["If-None-Match"], "*");
   assert.equal(clash.body, v0.replace("Title", "Mine"));
 

@@ -254,12 +254,16 @@ test("staleNote flags only hot-and-stale files, and says how long", () => {
   const hot = { agent: 14 };
   const cold = { agent: 2 };
 
-  assert.match(staleNote(hot, jan), /^stale · last changed \d+ months ago$/);
-  assert.equal(staleNote(hot, yesterday), ""); // hot but fresh
-  assert.equal(staleNote(cold, jan), ""); // stale but cold
+  assert.equal(staleNote(hot, jan, now), "stale · last changed 7 months ago");
+  assert.equal(staleNote(hot, yesterday, now), ""); // hot but fresh
+  assert.equal(staleNote(cold, jan, now), ""); // stale but cold
+  const beforeStale = new Date(now - (STALE_DAYS - 1) * 86400000).toISOString();
+  const exactlyStale = new Date(now - STALE_DAYS * 86400000).toISOString();
+  assert.equal(staleNote(hot, beforeStale, now), "");
+  assert.equal(staleNote(hot, exactlyStale, now), "stale · last changed 1 month ago");
   // Telemetry off (heatFor returns null) and a file with no mtime: no mark,
   // no throw — the surfaces call this unconditionally.
-  assert.equal(staleNote(null, jan), "");
-  assert.equal(staleNote(hot, undefined), "");
-  assert.equal(staleNote(FIXTURE["notes/untouched.md"], jan), "");
+  assert.equal(staleNote(null, jan, now), "");
+  assert.equal(staleNote(hot, undefined, now), "");
+  assert.equal(staleNote(FIXTURE["notes/untouched.md"], jan, now), "");
 });
