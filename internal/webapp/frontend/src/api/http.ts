@@ -3,7 +3,6 @@
 // resolution.
 
 import { track } from "../analytics";
-
 // Product events, derived from the write that just succeeded rather than
 // hand-fired at each button. Every mutating call in the app goes through
 // api() or postJSON(), so this table is the whole instrumentation surface —
@@ -207,6 +206,29 @@ function hold(map: Map<string, Held[]>, base: string, token: string, max: number
   map.set(base, list.slice(-max));
 }
 
+function holdJournal(base: string, token: string) {
+  const sep = token.lastIndexOf(":");
+  if (sep <= 0) return;
+  const dev = token.slice(0, sep);
+  const seq = Number(token.slice(sep + 1));
+  if (!Number.isSafeInteger(seq) || seq <= 0) return;
+  const now = Date.now();
+  const live = (journalReceipts.get(base) || []).filter((h) => now - h.at < RECEIPT_TTL_MS);
+  const next: Held[] = [];
+  let bestSeq = seq;
+  for (const h of live) {
+    const i = h.token.lastIndexOf(":");
+    if (i > 0 && h.token.slice(0, i) === dev) {
+      const prevSeq = Number(h.token.slice(i + 1));
+      if (Number.isSafeInteger(prevSeq) && prevSeq > bestSeq) bestSeq = prevSeq;
+      continue;
+    }
+    next.push(h);
+  }
+  next.push({ token: `${dev}:${bestSeq}`, at: now });
+  journalReceipts.set(base, next.slice(-MAX_JOURNAL_RECEIPTS));
+}
+
 function held(map: Map<string, Held[]>, base: string): string[] {
   const list = map.get(base);
   if (!list) return [];
@@ -217,12 +239,15 @@ function held(map: Map<string, Held[]>, base: string): string[] {
   return live.map((h) => h.token);
 }
 
-/* Record a journal receipt for a project. Exported for a write whose answer
-   does not come back through these helpers. */
+/* Record a journal receipt for a project (from an HTTP write or SSE change
+   frame). Supports comma-joined tokens and keeps the highest seq per device. */
 export function recordProjectReceipt(apiBase: string, receipt: string | null | undefined) {
-  if (receipt && JOURNAL_RECEIPT.test(receipt)) hold(journalReceipts, apiBase, receipt, MAX_JOURNAL_RECEIPTS);
+  if (!receipt) return;
+  for (const raw of receipt.split(",")) {
+    const tok = raw.trim();
+    if (JOURNAL_RECEIPT.test(tok)) holdJournal(apiBase, tok);
+  }
 }
-
 export function recordCommentReceipt(apiBase: string, key: string | null | undefined) {
   if (key && COMMENT_RECEIPT.test(key)) hold(commentReceipts, apiBase, key, MAX_COMMENT_RECEIPTS);
 }
@@ -243,7 +268,6 @@ function noteReceipts(url: string, r: Response) {
   recordProjectReceipt(p.base, r.headers.get("X-Bdrive-Receipt"));
   recordCommentReceipt(p.base, r.headers.get("X-Bdrive-Comment-Receipt"));
 }
-
 // The receipts a request to `url` should carry, as headers.
 function receiptHeaders(url: string): Record<string, string> {
   const p = projectRoute(url);

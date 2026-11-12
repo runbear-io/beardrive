@@ -57,6 +57,7 @@ const { parseConflict } = await import("./conflict.ts");
 const { merge3, merge3PreferRight, merge3ForPath, validMergedText } = await import("./merge3.ts");
 const { frameChannel, saveLocked } = await import("./frameflush.ts");
 const { ackEditedSpan, unackedExitPatches, applyRenderPatches, buildExitSaveRequest } = await import("./editbeacon.ts");
+const { latestProjectReceipt, recordProjectReceipt } = await import("../api/http.ts");
 
 /* toEqual's semantics: a property that is undefined is a property that is
    absent. Only plain objects and arrays are rebuilt; anything else (a
@@ -3010,4 +3011,13 @@ test("buildExitSaveRequest: hub checkpoint, plain-folder save after an autosave,
     docText: big,
   };
   assert.equal(buildExitSaveRequest(bigState, [{ ...para, html: "x" }]), null);
+});
+
+test("recordProjectReceipt deduplicates per device and keeps the highest seq across SSE and HTTP", () => {
+  const apiBase = "/api/p/proj-sse-receipt-test/";
+  recordProjectReceipt(apiBase, "hub-a:3");
+  recordProjectReceipt(apiBase, "hub-a:2"); // out-of-order older seq must not downgrade hub-a:3
+  recordProjectReceipt(apiBase, "dev-peer:11");
+  recordProjectReceipt(apiBase, "hub-a:4,dev-two:7");
+  assert.equal(latestProjectReceipt(apiBase), "dev-peer:11,hub-a:4,dev-two:7");
 });

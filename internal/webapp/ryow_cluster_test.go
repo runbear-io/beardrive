@@ -454,3 +454,50 @@ func TestRYOWUnchangedAckIsFencedOrRefused(t *testing.T) {
 		t.Fatalf("plain folder: %d receipt %q, want a bare 200", rec.Code, rec.Header().Get(receiptHeader))
 	}
 }
+
+// UX-SSE: a change frame published on one hub carries the write's journal
+// receipt, so a teammate's SSE-driven /tree or /file refetch that lands on a
+// sibling hub fences that sibling's stale snapshot immediately.
+func TestRYOWSSEChangeFrameFencesSiblingTreeRead(t *testing.T) {
+	a, b, p, _ := newRYOWHubPair(t)
+	base := "/api/p/" + p.ID
+
+	if rec := a.call(t, "PUT", base+"/upload/content?path=seed.md", []byte("seed"), nil); rec.Code != 200 {
+		t.Fatalf("seed: %d %s", rec.Code, rec.Body)
+	}
+	if rec := b.call(t, "GET", base+"/tree", nil, nil); rec.Code != 200 || !strings.Contains(rec.Body.String(), "seed.md") {
+		t.Fatalf("prime B: %d %s", rec.Code, rec.Body)
+	}
+
+	sub, ok := a.s.events().subscribe(p.ID, "peer@example.com")
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
+	defer a.s.events().unsubscribe(p.ID, sub)
+
+	if rec := a.call(t, "PUT", base+"/upload/content?path=live-peer.md", []byte("from peer"), nil); rec.Code != 200 {
+		t.Fatalf("peer write: %d %s", rec.Code, rec.Body)
+	}
+
+	var ev changeEvent
+	select {
+	case raw := <-sub.ch:
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			t.Fatalf("unmarshal frame: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SSE change frame")
+	}
+	if ev.Receipt == "" || !strings.HasPrefix(ev.Receipt, "hub-a:") {
+		t.Fatalf("SSE change frame missing causal receipt: %+v", ev)
+	}
+
+	// Without the SSE receipt, sibling B still serves its cached pre-event tree.
+	if rec := b.call(t, "GET", base+"/tree", nil, nil); strings.Contains(rec.Body.String(), "live-peer.md") {
+		t.Fatal("B cached tree unexpectedly already had live-peer.md")
+	}
+	// With the receipt learned from the SSE frame alone, B refolds and serves live-peer.md.
+	if rec := b.call(t, "GET", base+"/tree", nil, map[string]string{receiptHeader: ev.Receipt}); rec.Code != 200 || !strings.Contains(rec.Body.String(), "live-peer.md") {
+		t.Fatalf("B tree with SSE receipt %q: %d %s", ev.Receipt, rec.Code, rec.Body)
+	}
+}

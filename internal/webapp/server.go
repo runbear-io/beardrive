@@ -3351,6 +3351,29 @@ func (s *receiptSink) String() string {
 	return s.receipt.String()
 }
 
+// contextReceipt returns the receipt recorded on ctx's sink, or "".
+func contextReceipt(ctx context.Context) string {
+	sink, _ := ctx.Value(receiptSinkKey{}).(*receiptSink)
+	if sink == nil {
+		return ""
+	}
+	return sink.String()
+}
+
+// newOpsReceipt returns the receipt of the highest newly added op above storedMax.
+func newOpsReceipt(ops []journal.Op, storedMax int64) string {
+	var best journalReceipt
+	for _, op := range ops {
+		if op.Seq > storedMax && op.Device != "" && op.Seq > best.seq {
+			best = journalReceipt{dev: op.Device, seq: op.Seq}
+		}
+	}
+	if best.seq <= 0 {
+		return ""
+	}
+	return best.String()
+}
+
 // stampReceipt puts receipt on the response header and, when body is given,
 // in its "receipt" field. Either way nothing happens for "".
 func stampReceipt(w http.ResponseWriter, body map[string]any, receipt string) {

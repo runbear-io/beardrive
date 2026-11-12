@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,7 +100,8 @@ type changeEvent struct {
 	Device   string `json:"device,omitempty"`
 	User     string `json:"user,omitempty"`
 	UserName string `json:"user_name,omitempty"`
-	Kind     string `json:"kind,omitempty"` // "put" | "delete" for single-kind frames
+	Kind     string `json:"kind,omitempty"`    // "put" | "delete" for single-kind frames
+	Receipt  string `json:"receipt,omitempty"` // "<device>:<seq>" so SSE refetches fence sibling hubs
 }
 
 type subscriber struct {
@@ -170,6 +172,28 @@ func (s *Server) enrichChange(project string, ev *changeEvent) {
 	snap, err := v.current(context.Background())
 	if err != nil {
 		return
+	}
+	if ev.Receipt == "" {
+		var rcs []string
+		seenDev := map[string]int{}
+		bestSeq := map[string]int64{}
+		for _, p := range ev.Paths {
+			fi, ok := snap.files[p]
+			if !ok || fi.DeviceID == "" || fi.Seq <= 0 {
+				continue
+			}
+			if idx, dup := seenDev[fi.DeviceID]; dup {
+				if fi.Seq > bestSeq[fi.DeviceID] {
+					bestSeq[fi.DeviceID] = fi.Seq
+					rcs[idx] = fileReceipt(fi)
+				}
+			} else if len(rcs) < maxReceipts {
+				seenDev[fi.DeviceID] = len(rcs)
+				bestSeq[fi.DeviceID] = fi.Seq
+				rcs = append(rcs, fileReceipt(fi))
+			}
+		}
+		ev.Receipt = strings.Join(rcs, ",")
 	}
 	ev.Files = make([]changeFileDelta, 0, len(ev.Paths))
 	for _, p := range ev.Paths {
@@ -315,6 +339,7 @@ func changeEventFor(r *http.Request, source string, paths []string, puts, delete
 		Type: "change", Puts: puts, Deletes: deletes,
 		Source: source, Agent: source == "sync",
 		Device: deviceID(r), DeviceName: r.Header.Get("X-Bdrive-Device-Name"),
+		Receipt: contextReceipt(r.Context()),
 	}
 	if deletes > 0 && puts == 0 {
 		ev.Kind = "delete"
@@ -440,6 +465,9 @@ func frameFor(frame []byte, vis pathFilter) ([]byte, bool) {
 			}
 		}
 		ev.Paths, ev.Puts, ev.Deletes = kept, 0, 0
+		if len(kept) == 0 {
+			ev.Receipt = ""
+		}
 		if hidden {
 			ev.Files = nil
 		} else {

@@ -256,6 +256,7 @@ classDiagram
         +mermaid.ts hasMermaid renderMermaid Palette DARK LIGHT
         +theme.ts ThemePref Theme useTheme setThemePref initTheme (System/Light/Dark onto html data-theme)
         +utils.ts
+        +treedelta.ts applyTreeDeltas
     }
     note for lib "mermaid.ts is the one exception to 'pure, no React, unit-tested on node': it needs a DOM and a browser-only library, so its coverage is Playwright. html in → html out, so neither caller can be tempted to patch a live subtree. It imports mermaid only when hasMermaid() says a document has a fence — that gate is what keeps a diagram-free page from downloading any of it — and every failure (unparseable fence, render throw, chunk that never loads) returns the untouched &lt;pre&gt;&lt;code&gt; instead of throwing"
     note for lib "pure, no React, unit-tested on node (npm test) — diff.ts trims equal edges, uses bounded LCS for small gaps and splits large gaps on unique-line patience anchors; only an oversized gap without anchors falls back to replacement. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it. HEAT_DISCLOSURE sits beside that arithmetic for the same reason: a member's own views count toward the number, and four surfaces printing their own copy of that promise is four promises that can drift (BEA-61). The constant is NOT re-exported through useBrowse — surfaces import it straight from lib/heat, and a unit test asserts src/ holds exactly one copy of the sentence. The hot-and-stale VERDICT joined the totals for the same reason (BEA-119): HOT_READS/STALE_DAYS/isDanger were private to Insights.tsx, so the Dashboard was the only screen that could say a doc was hot and unmaintained — the file page and the folder listing showed the ingredients and no verdict. isDanger takes (reads, days) rather than a heat entry because only the Dashboard has a reader lens: it passes its lens-filtered count, the other two pass heatTotal. staleNote returns a STRING (empty when not flagged) so the badge stays pure and survives whichever component owns the meta line"
@@ -322,10 +323,9 @@ classDiagram
     api --> analytics : track(product event)
     Browser --> analytics : share_created (the one raw fetch)
     api --> http : projectFetch carries and records receipts
-    hooks --> http : latestProjectReceipt for frame URLs
-    components --> hooks : textQueryOptions for every live text reader and editor seed
+    hooks --> http : recordProjectReceipt (SSE) + latestProjectReceipt (frame URLs)
     components --> util : resolveWikiTarget (MarkdownView)
     Browser --> util : canonical path and heading navigation
     note for components "ConflictBanner compares versions on demand and resolves with a conditional write of the chosen copy over the original, followed by removing the copy, or removes the copy to keep the original. RestoreHost brackets a restore with file reads and updates the open document before its text query, so a live room cannot save the replaced bytes back. EditorInfo.jumpToLine drives action-item navigation in EditRail."
-    note for hooks "useProjectEvents applies complete per-path deltas to the tree and current history, including delete attribution from the server; incomplete or resync frames invalidate them. Comments keep their receipt-fenced refetch. This avoids rebuilding a loaded history feed for each complete frame."
+    note for hooks "useProjectEvents records causal journal receipts from SSE change frames so sibling-hub refetches are receipt-fenced, applies complete per-path deltas to the tree and cancels pre-event in-flight tree reads; incomplete, scope or resync frames invalidate cached listings and bodies."
 ```

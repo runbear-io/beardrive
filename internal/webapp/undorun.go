@@ -184,6 +184,7 @@ func undoNote(sel undoSel) string {
 // handleUndoRun serves POST /api/p/<id>/undo-run
 // {session|note, device, preview}.
 func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request) {
+	r, sink := withReceiptSink(r)
 	up := s.gateUpload(v, w) // a read-only hub stays read-only
 	if up == nil {
 		return
@@ -318,7 +319,9 @@ func (s *Server) handleUndoRun(v *volume, w http.ResponseWriter, r *http.Request
 	puts, deletes, paths := undoTotals(plan.Ops)
 	s.captureChange(r, "browser", puts, deletes)
 	s.publishChange(r, "browser", paths, puts, deletes)
-	writeJSON(w, undoResponse(plan))
+	resp := undoResponse(plan)
+	stampReceipt(w, resp, sink.String())
+	writeJSON(w, resp)
 }
 
 // undoTotals summarizes what an undo run wrote. Counted directly rather than

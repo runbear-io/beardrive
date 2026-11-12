@@ -390,6 +390,7 @@ classDiagram
         +Deletes int
         +Source sync or browser
         +Device string
+        +Receipt string
         +People roster, presence frames only
     }
     note for eventHub "GET {prefix}events, proj(PermRead) — reading the stream names paths, so it sits behind the same permission the tree does, and proj() already walls it by org membership. publish() is called from the FIVE write handlers beside captureChange, never inside it: that one is the PostHog path, whose contract is that &quot;nothing here carries a path or a file name&quot;, and whose signature is counts-only. publish sits on the sync push path, so it never blocks and never errors — it copies the subscriber set under the lock and sends outside it, and a full buffer marks the subscriber lost rather than waiting. Bounded (subBuffer 32, 256/project, 4096/hub) in the ratelimit.go mold. A SIXTH frame type joins change/resync/presence: publishScope, sent by folders.go and perms.go when a rule or a project level moves. It carries NO prefix — the same rule hides a subtree from one account and widens it for another, so naming it would leak a folder name to the people it exists to keep out — and each listener re-asks /scope, which answers per reader. It exists because the daemon now stands down beside a healthy stream, which stretched the window in which a device holds a stale scope from ~10s to ~5m; loadScope runs before the scan precisely so a scan cannot mint an op the hub would refuse with a 403 that wedges a journal"
