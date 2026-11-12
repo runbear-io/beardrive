@@ -213,8 +213,8 @@ export function agoLabel(days: number): string {
    string rather than a boolean keeps the badge pure, so it survives whichever
    component ends up owning the meta line. Callers add the ⚠ glyph in markup,
    where it can carry its own aria-label. */
-export function staleNote(e: HeatEntry | null, time: string | undefined): string {
-  const days = daysSince(time);
+export function staleNote(e: HeatEntry | null, time: string | undefined, now = Date.now()): string {
+  const days = daysSince(time, now);
   if (!e || days === null || !isDanger(heatTotal(e), days)) return "";
   return `stale · last changed ${agoLabel(days)}`;
 }

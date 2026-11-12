@@ -163,6 +163,7 @@ export type ExitSaveRequest = {
 export function buildExitSaveRequest(
   state: ExitWorkerState,
   patches: ReadonlyArray<ExitPatch>,
+  now = Date.now(),
 ): ExitSaveRequest | null {
   const renderedWant = applyRenderPatches(state.renderText, state.renderLen, state.allowedRanges, patches);
   if (renderedWant === null) return null;
@@ -232,7 +233,7 @@ export function buildExitSaveRequest(
     url:
       state.apiBase +
       "upload/content?path=" +
-      encodeURIComponent(conflictName(state.path, state.who || "browser", new Date())),
+      encodeURIComponent(conflictName(state.path, state.who || "browser", new Date(now))),
     method: "PUT",
     headers: { "Content-Type": text, "If-None-Match": "*", "X-Bdrive-Park-On-Conflict": "1" },
     body: renderedWant,
