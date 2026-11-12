@@ -10,21 +10,18 @@ import (
 	"testing"
 )
 
-/*
-Concurrent writers to one path, and the invariant that matters: no write
+/* Concurrent writers to one path, and the invariant that matters: no write
+   that the hub ACCEPTED may have been built on a version that was already
+   gone.
 
-	that the hub ACCEPTED may have been built on a version that was already
-	gone.
+   The check is a chain. Every 200 reports the sha it produced, and every
+   request declares the sha it was based on, so the accepted writes must link
+   end to end: base(n) == sha(n-1), all the way back to the file's first
+   version. A single break in that chain is a lost update — somebody's text
+   overwritten by a writer who never saw it, which is the failure two browsers
+   inflicted on each other every few seconds before If-Match existed.
 
-	The check is a chain. Every 200 reports the sha it produced, and every
-	request declares the sha it was based on, so the accepted writes must link
-	end to end: base(n) == sha(n-1), all the way back to the file's first
-	version. A single break in that chain is a lost update — somebody's text
-	overwritten by a writer who never saw it, which is the failure two browsers
-	inflicted on each other every few seconds before If-Match existed.
-
-	Run with -race: the whole point is a check-then-write under contention.
-*/
+   Run with -race: the whole point is a check-then-write under contention. */
 func TestStress_ConcurrentWritersNeverLoseAnUpdate(t *testing.T) {
 	const (
 		writers = 8

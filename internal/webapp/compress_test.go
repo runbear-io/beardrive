@@ -99,14 +99,12 @@ func (f *flushRecorder) Flush() {
 	f.ResponseRecorder.Flush()
 }
 
-/*
-An event stream is never compressed, and its flushes still reach the socket.
+/* An event stream is never compressed, and its flushes still reach the socket.
 
-	This is the regression that shipped once behind an analytics middleware:
-	a wrapper that buffers SSE leaves EventSource retrying a valid, empty,
-	closed 200 forever — live updates and co-editing both dead, with nothing in
-	any log to say so. See refuseUnstreamable in events.go.
-*/
+   This is the regression that shipped once behind an analytics middleware:
+   a wrapper that buffers SSE leaves EventSource retrying a valid, empty,
+   closed 200 forever — live updates and co-editing both dead, with nothing in
+   any log to say so. See refuseUnstreamable in events.go. */
 func TestEventStreamIsNeitherCompressedNorBuffered(t *testing.T) {
 	h := gzipResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -176,14 +174,12 @@ func TestAlreadyEncodedBodiesArePassedThrough(t *testing.T) {
 	}
 }
 
-/*
-The sync wire is skipped by PATH, not by inspecting what it answered.
+/* The sync wire is skipped by PATH, not by inspecting what it answered.
 
-	syncer.pull skips a journal that did not grow and then resumes at a byte
-	offset, so a length that means anything other than "bytes on this socket"
-	makes it re-download forever or resume mid-stream. store.go owns encoding
-	there, end to end.
-*/
+   syncer.pull skips a journal that did not grow and then resumes at a byte
+   offset, so a length that means anything other than "bytes on this socket"
+   makes it re-download forever or resume mid-stream. store.go owns encoding
+   there, end to end. */
 func TestStoreWireIsNeverTouched(t *testing.T) {
 	h := gzipResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -209,13 +205,11 @@ func TestAlreadyCompressedFormatsAreLeftAlone(t *testing.T) {
 	}
 }
 
-/*
-The tree revalidates instead of re-sending.
+/* The tree revalidates instead of re-sending.
 
-	The saving is the transfer, not the work: the body is still built and
-	hashed to answer a 304. On a real project that is ~150 KB compressed
-	against 30 bytes, every time a reload or the safety-net refetch asks.
-*/
+   The saving is the transfer, not the work: the body is still built and
+   hashed to answer a 304. On a real project that is ~150 KB compressed
+   against 30 bytes, every time a reload or the safety-net refetch asks. */
 func TestTreeRevalidatesWithAnETag(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.md"), []byte("# A"), 0o644); err != nil {
@@ -279,14 +273,12 @@ func TestETagMatchesHandlesTheHeaderAsSent(t *testing.T) {
 	}
 }
 
-/*
-Compressing a body destroys Content-Length, and something was reading it.
+/* Compressing a body destroys Content-Length, and something was reading it.
 
-	The file viewer decides a body is too large to render BEFORE reading it
-	(useBlob.ts fetchBlobText) — the difference between a "too large" card and
-	pulling a 50 MB file into a tab. The plaintext size moves aside under its
-	own name so that check survives.
-*/
+   The file viewer decides a body is too large to render BEFORE reading it
+   (useBlob.ts fetchBlobText) — the difference between a "too large" card and
+   pulling a 50 MB file into a tab. The plaintext size moves aside under its
+   own name so that check survives. */
 func TestCompressionKeepsTheSizeHintTheViewerNeeds(t *testing.T) {
 	body := strings.Repeat("# a markdown file, served to a browser\n", 500)
 	h := gzipResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -322,14 +314,12 @@ func TestRangeResponsesAreNotCompressed(t *testing.T) {
 	}
 }
 
-/*
-?slim=1 drops what the children chain already says.
+/* ?slim=1 drops what the children chain already says.
 
-	Every node's path is its ancestors' names plus its own, so re-sending it
-	was 29% of this response and 22% of it even after gzip. Opt-in, because a
-	tab running a cached bundle still refetches this tree and a field it reads
-	vanishing underneath it would break every link on the page.
-*/
+   Every node's path is its ancestors' names plus its own, so re-sending it
+   was 29% of this response and 22% of it even after gzip. Opt-in, because a
+   tab running a cached bundle still refetches this tree and a field it reads
+   vanishing underneath it would break every link on the page. */
 func TestSlimTreeOmitsDerivablePaths(t *testing.T) {
 	files := map[string]string{}
 	for i := 0; i < 40; i++ {

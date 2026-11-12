@@ -324,8 +324,8 @@ func TestUndoRunBadRequests(t *testing.T) {
 	before := journalsAt(t, dir)
 
 	for _, body := range []map[string]any{
-		{"session": "8f21e4"}, // no device
-		{"device": "seed"},    // neither session nor note
+		{"session": "8f21e4"},                                  // no device
+		{"device": "seed"},                                     // neither session nor note
 		{"device": "seed", "session": "8f21e4", "note": "n"},   // both
 		{"device": "not a device id", "session": "8f21e4"},     // malformed device
 		{"device": "seed", "session": "bad\x00session"},        // control character

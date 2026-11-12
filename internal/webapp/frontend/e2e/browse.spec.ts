@@ -18,7 +18,7 @@ test("tab title follows SPA navigation and browser history", async ({ page }) =>
 
   await page.click('#tree .row[data-path="index.md"]');
   await page.waitForURL(`/${pid}/index.md`);
-  await expect(page).toHaveTitle("index.md — wiki");
+  await expect(page).toHaveTitle("index — wiki");
 
   await page.click("#nav-activity");
   await page.waitForURL(`/${pid}/activity`);
@@ -26,7 +26,7 @@ test("tab title follows SPA navigation and browser history", async ({ page }) =>
 
   await page.goBack();
   await expect(page).toHaveURL(`/${pid}/index.md`);
-  await expect(page).toHaveTitle("index.md — wiki");
+  await expect(page).toHaveTitle("index — wiki");
 
   await page.goForward();
   await expect(page).toHaveURL(`/${pid}/activity`);

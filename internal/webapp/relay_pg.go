@@ -97,17 +97,14 @@ func (r *pgRelay) start(deliver func(project string, frame []byte)) error {
 	return nil
 }
 
-/*
-listen delivers notifications until the relay is closed, reconnecting when
+/* listen delivers notifications until the relay is closed, reconnecting when
+   the connection dies.
 
-	the connection dies.
-
-	Reconnecting matters more than it looks. A dropped listener is SILENT — the
-	hub keeps serving, keeps publishing, and simply stops hearing other
-	processes, so the symptom is "some people's tabs are stale" rather than an
-	error anybody sees. Cloud SQL will close an idle connection eventually, and
-	an idle listener is the normal state of a quiet hub.
-*/
+   Reconnecting matters more than it looks. A dropped listener is SILENT — the
+   hub keeps serving, keeps publishing, and simply stops hearing other
+   processes, so the symptom is "some people's tabs are stale" rather than an
+   error anybody sees. Cloud SQL will close an idle connection eventually, and
+   an idle listener is the normal state of a quiet hub. */
 func (r *pgRelay) listen(conn *pgx.Conn, deliver func(project string, frame []byte)) {
 	backoff := time.Second
 	for {

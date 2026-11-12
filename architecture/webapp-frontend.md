@@ -11,9 +11,17 @@ classDiagram
 
     class ErrorBoundary {
         getDerivedStateFromError
+        resetKey clears error on navigation
         renders a page with a way back
     }
-    note for ErrorBoundary "ErrorBoundary.tsx — the app's floor, mounted in main.tsx ABOVE QueryClientProvider so it covers every route. React unmounts the whole tree when a render throws and nothing catches it, and the address bar keeps the URL, so a reload reproduces the blank page: a permanent client-side DoS that another member's CONTENT can reach (a link in a teammate's markdown reaching decodePath, a folder named `constructor` reaching ProjectIcon). Deliberately the smallest thing that works — no reporting, no retry machine, no per-route boundaries"
+    note for ErrorBoundary "ErrorBoundary.tsx — catches render errors below App and offers a way back. RouteErrorBoundary passes the current URL as resetKey, so Back, Forward or another route clears the error; QueryClientProvider stays mounted and keeps its cache."
+    class RouteErrorBoundary {
+        useLocationPath() resetKey
+        ErrorBoundary wraps App
+    }
+    class QueryClientProvider {
+        shared QueryClient survives route recovery
+    }
 
     class shareMermaid {
         <<second Vite entry>>
@@ -61,6 +69,7 @@ classDiagram
         +readWidth: dragged reading width, tab memory only
         +Done: saves via editFlushRef (saveNow) before leaving; stays in the editor if the save fails or asks about a shrink
     }
+    note for Browser "A unique NFC-equivalent path redirects to the tree's stored spelling; ambiguous twins stay unresolved. #heading goals survive asynchronous rendering and Back/Forward, with NFC-aware lookup and manual scrolling retiring the goal. New files seed the tree and canonical text query from the acknowledged write before navigation. Conflict copies are offered on the original file as well as the copy."
     note for Browser "readWidth is the reading column's width as the reader drags it (components/WidthHandle.tsx), held in Browser's state and nowhere else: it follows the reader across files and in and out of fullscreen because Browser outlives both, and a reload or a new tab is the reset — no storage, by design. It reaches the DOM as ONE variable, --page-read on the .page element, so the file rail's placement arithmetic follows without its own rule. During a drag the handle writes that variable straight onto the element and commits to state only on release, so the file page is not re-rendered on every pointer move"
     note for Browser "Fullscreen is a QUERY PARAM on the file route (?full=1), for the reason ?v= is one: the first segment after the project id is reserved for view names, and a fullscreen file is the same page with different chrome. Two things the code forced: routeKey is withoutFull(useLocationPath()), because a ?full=1 push otherwise looks like a fresh route and arms a scroll goal of 0 — the reader is thrown to the top of the document the moment they ask for more of it; and the chrome is HIDDEN by a body class, never unmounted, so &lt;article id=content&gt; survives the toggle and keeps its scrollTop in both directions. display:none also takes the hidden controls out of the tab order and the accessibility tree together, which is what syncSidebarInert already encodes for the off-canvas sidebar. The Exit control is rendered by AppShell OUTSIDE the topbar it hides and painted over the content: the HTML sandbox is an opaque origin and the PDF viewer is the browser's own, so Esc can never reach the app from inside either one (BEA-195)"
     note for Browser "A missing path is decided from /tree alone — the file is never fetched — so the X-Bdrive-Canonical-Path header /file answers with would never reach the browser, and a moved FOLDER has no content fetch to hang a header on. The not-found branch asks GET /resolve?path= instead, then replaceState-navigates to the destination and prints one Moved from … line above it (BEA-81)"
@@ -107,11 +116,21 @@ classDiagram
         +PRODUCT_EVENTS method+path → event
         +prefetchForURL(queryClient, url)
         +bootRequests(route, isMarkdown)
+        +prefetchFile / prefetchEditText share textQueryOptions
         types.ts server contracts
     }
-    note for api "api/prefetch.ts — main.tsx calls prefetchForURL before React mounts: the requests a URL alone determines (projects, orgs, tree, heat, and render + comments for a markdown read) start under the SAME query keys the hooks use, so a mounting hook joins the request in flight. Config is deliberately excluded (its queryFn owns the signed-out redirect), and a prefetch never navigates — a failure is cached as an error the hook refetches through getJSON. bootRequests.ts is the import-free URL→requests mapping, so the node test runner can pin it"
+    note for api "api/prefetch.ts — main.tsx starts URL-determined requests before React mounts, under the hooks' query keys. File bodies use fetchBlobText in quiet mode and keep the canonical BlobText shape. Boot and hover prefetches load only the relevant source-editor or visual-editor chunk. Config retains its own signed-out redirect."
     note for api "api/http.ts — all URLs root-absolute so deep paths never break relative resolution. Every mutating call goes through api()/postJSON(), so one table there is the whole product-event surface: a new write is measured or it isn't, instead of depending on someone remembering a capture() call"
     note for api "syncCollab posts a staging checkpoint, a shrink confirmation or a peek to POST {prefix}ycollab/sync. putText and syncCollab take keepalive for the tab-close flush; it is set only for bodies up to KEEPALIVE_MAX_BYTES (60,000 bytes), below the 64 KiB browsers allow for in-flight keepalive bodies, past which they reject the fetch. A larger body goes out as a regular fetch, which the browser may cancel during unload."
+    class http {
+        <<api/http.ts>>
+        -journalReceipts, commentReceipts per-project maps
+        -Held token, at
+        +recordProjectReceipt / recordCommentReceipt
+        +latestProjectReceipt(apiBase) recent journal tokens
+        -projectFetch(url, init) send and collect receipts
+    }
+    note for http "Project response headers seed short-lived in-memory receipts: up to four journal ops and eight comment keys per project, for 30 seconds. Tree, file, render, resolve and frame requests echo journal receipts; comment requests echo both kinds. These freshness hints never change authorization. withReceipt carries journal tokens as ?r= for an iframe load."
 
     class analytics {
         +initAnalytics(config)
@@ -129,14 +148,17 @@ classDiagram
         +usePresence (announces on arrive/navigate/leave)
         +useTextAt (any URL) → useBlobText (sha-keyed, immutable)
         +fetchBlobText(url) BlobText
+        +textQueryOptions(url, immutable) canonical ["text", url] BlobText
+        +isTransientBlobError(error) retry policy
         +fileURLFor(apiBase, path, version) string
         +useFrameURL(apiBase, path, fileURL, version) the HTML iframe's signed URL
+        +withReceipt(url, apiBase) ?r= for iframe loads
     }
-    note for lib "collab.ts is a thin wrapper over y-websocket, and used to be ~250 lines of hand-rolled provider. The document is held by the hub, so the client neither seeds it nor replays a log to catch up: it connects, the sync protocol hands over what it is missing, and `sync` firing is the moment the editor may mount. What went with the relay is every compensation for not owning the document — the seed claim and its grace timer, the byte cap, the rebuild-on-full, the resync frame, and solo mode, which let a disconnected client edit its own copy and overwrite a teammate. A hub that cannot serve the route still leaves the editor open and saving; what it loses is LIVE collaboration, not the ability to write, and that is deliberately not a second CRDT path. peerCount() still tells a co-editor's presence from an outside write (a CLI, another device), which is the only case the peer-wrote banner should fire for"
+    note for lib "collab.ts wraps y-websocket against the hub-held document. A source Editor is already mounted while connecting; sync attaches the room to its existing view. peerCount distinguishes a co-editor from an outside writer. A project room that is slow keeps reconnecting and checkpoints staging text over HTTP; only a server with no room route uses solo saving."
     note for hooks "usePresence announces the path you are on and renders the roster the hub pushes back — the roster ARRIVES on useProjectEvents' stream (onPresence), not on the POST, which is used only for first paint so a tab opening into a quiet project still sees who is there. One EventSource carries both frame types: presence invalidates nothing. There is NO heartbeat: it was 10s per TAB — unlike the stream, which is leader-elected per browser — and ~19% of every request the hub served, sent by people who were reading (docs/hub-load-prd.md). Liveness is the stream itself now: the hub keys presence to that connection and drops you when your last one closes, so the uplink fires only on arrive, navigate and leave. Leaving is a SEPARATE effect that does not depend on path — folded into the other one it sent a leave racing the arrive behind it, dropping you off your own teammates' rosters. Every failure is swallowed: presence is decoration and must never surface an error"
-    note for hooks "useProjectEvents is the one non-polling source: an EventSource on {apiBase}events whose frames invalidate exactly what a peer's write touched (tree/history/heat always; render per named path; text wholesale). It is what makes an OPEN file update at all — useTextAt has no refetchInterval, so before this a body fetched once stayed on screen until the reader navigated away. A resync frame, a truncated path list, or an unparseable frame all fall back to invalidating every body rather than guessing. Errors are deliberately silent: EventSource retries itself and a 5-minute tree refetch is still underneath, so a hub restart or a sleeping laptop must not write a log line. That interval used to be 15s, for tree AND heat AND projects — belt-and-braces from before this stream existed, and on a real project it re-sent the whole 1.65 MB tree four times a minute to a client that already knew nothing had changed. What remains is insurance against a stream that dies quietly on a tab nobody touches, not a freshness mechanism (docs/network-efficiency-prd.md)"
+    note for hooks "useProjectEvents is the non-polling source: one EventSource on {apiBase}events patches complete tree/history deltas and invalidates affected render/text queries and heat. Incomplete, truncated, unparseable or resync frames invalidate the cached listings and bodies. EventSource reconnects silently; a five-minute tree refetch covers missed frames."
     note for hooks "ONE stream per browser, not per tab. Every tab of a project gets the identical fan-out, so tab two onward cost a slot at both ends for nothing: a permanently in-flight request against the hub's per-instance concurrency, and one of the browser's ~6 per-origin HTTP/1.1 sockets — which is how six tabs wedged the whole app, not just live updates. One tab holds the EventSource and relays each frame verbatim over a BroadcastChannel keyed per project; followers run the same handler on the same raw data string. Leadership is a Web Lock held for the leader's lifetime, so the browser reassigns it when that tab dies — a crash or force-quit included, which is the case a heartbeat-and-TTL scheme gets wrong. Frames lost in the handover gap are the poll's job, as they always were. Web Locks needs a secure context, so a plain-http LAN hub falls back to a stream per tab. /collab is deliberately NOT shared: two tabs editing one document are two distinct CRDT peers with their own awareness state"
-    note for hooks "TanStack Query wrappers over the viewer APIs. useTextAt fetches any URL and sniffs it — the Content-Length cheap-out lives here (HTTP), the byte decision in lib/sniff.ts (pure). A live path must not be cached immutable; a sha can be. fileURLFor is the one definition of a file page's byte URL, so Copy and FileView cannot drift; fetchBlobText is exported for Copy, which must NOT read the shared text cache — TextView stores a string there and SniffView a BlobText"
+    note for hooks "useBlob.ts owns the file-byte query contract: every [text, url] cache entry is a BlobText, including reading views, the editor seed, Copy and prefetches. textQueryOptions centralizes the key, decoder and retry policy, preventing the raw-string/BlobText collision that crashed React when leaving the editor. Content-addressed queries stay immutable; live paths retry transient failures. useFrameURL runs only for a surface that needs an iframe; withReceipt adds recent journal receipts to its URL."
 
     class components {
         FileView FileRail (DocHeader) FolderListing FileTree (TreeFilter, TreeActions row menu)
@@ -150,6 +172,28 @@ classDiagram
         OrgAdmin HubSettings ProjectSettings
         Palette Marked shell (RailBase RailButton) SignedOutBar WidthHandles ...
     }
+    class Editor {
+        one EditorView per document, mounted in useLayoutEffect
+        collabSlot, langSlot, meetingSlot, modeSlot Compartments
+        attach() splice room text, then enable yCollab
+        languageFor(path) Markdown JSON JS/TS Python HTML/SVG CSS
+        jumpToLine(number) selection and scroll
+    }
+    class EditorView {
+        <<CodeMirror>>
+        local history while staging
+        Y.UndoManager when attached to the room
+    }
+    Editor *-- EditorView : first frame through room attach
+    components ..> Editor : FileView loads the source editor on demand
+    Editor --> lib : openSharedFile, staging checkpoints, room readiness
+    note for Editor "The typeable view exists before first paint. Joining the room applies a minimal text splice while the binding is off, then enables collaboration through Compartment effects on the same view, preserving selection and scroll. Reconnects leave an attached binding alone. Syntax highlighting uses theme variables for light and dark backgrounds."
+    class RestoreHost {
+        <<EditRail.tsx callback contract>>
+        post() RestoreAnswer
+        returns reconciled
+    }
+    components ..> RestoreHost : EditView owns the restore, EditRail requests it
     note for components "FileRail.tsx is the markdown file page's DocHeader (frontmatter type / OKF chips, size, who-edited · device · date · reads/30d — provenance lives here, not in the top bar's #meta, which now carries only the editor's save state) and its right rail: On this page (h2/h3 read from the rendered HTML's goldmark ids, current section by #content scroll), Reads · 30 days (the path's /heat entry only: total, agent/human/share split, distinct readers — the API has no per-day series and no per-path reader identities, so there are no daily bars or top readers), and Properties (full frontmatter). ≥1400px it is an absolute aside beside .page.read; below, a closed <details> above the document; data-bd-ignore keeps all of it out of comment anchoring. The comments panel replaces it while open"
     note for components "NewProjectDialog replaced ProjectNav's name-only modalPrompt: name + starting point, POSTing {name, template}. Its options come from useConfig()'s `templates`, never a hardcoded list, so a hub shipping another template needs no frontend change; the initial selection is options[0].value — the same array element the RECOMMENDED badge indexes, so the badged row and the checked row are one row by construction (on a template-less hub that row is 'I already have a folder', which still creates an empty project). modal.tsx keeps its one-field API — teaching it about choices would tax every other caller"
     note for components "Home (the project root route) is derived entirely from existing routes: one history page (since-last-visit summary, the Everyone/Agents/People feed, and devices by last change — the hub exposes no device presence), the tree (conflict copies, freshness), heat (hot-but-stale files, reads per top-level folder) and the open-comments list the pin badges already fetch. Recents are per-browser (recents.ts). An empty project renders ConnectGuide in place of all of it"
@@ -171,7 +215,7 @@ classDiagram
 
     class lib {
         +anchor.ts squash locate bestMatch rangeFor describe cssPath hitTest
-        +diff.ts splitLines lcsDiff diffText
+        +diff.ts splitLines lcsDiff diffText (patience anchors split large ranges)
         +diff.ts textEdit (the one splice that folds an outside write in)
         +runs.ts groupRuns runFileCount
         +activity.ts dateWindow historyApiQuery dayLabel isAgent agentName
@@ -204,6 +248,7 @@ classDiagram
         +cm-slash.ts slashMenu (/ commands, @mention, [[ file)
         +sniff.ts sniffBytes BlobText MAX_BYTES
         +scroll.ts Goal armGoal applyGoal noteScroll MAX_APPLY
+        +scroll.ts anchorFromHash retarget (heading goal after render)
         +csv.ts parseDelimited Csv CSV_ROWS
         +fuzzy.ts prepare search Prepared Hit Range
         +prompt.ts INSTALL_DOC agentPrompt
@@ -213,7 +258,7 @@ classDiagram
         +utils.ts
     }
     note for lib "mermaid.ts is the one exception to 'pure, no React, unit-tested on node': it needs a DOM and a browser-only library, so its coverage is Playwright. html in → html out, so neither caller can be tempted to patch a live subtree. It imports mermaid only when hasMermaid() says a document has a fence — that gate is what keeps a diagram-free page from downloading any of it — and every failure (unparseable fence, render throw, chunk that never loads) returns the untouched &lt;pre&gt;&lt;code&gt; instead of throwing"
-    note for lib "pure, no React, unit-tested on node (npm test) — the line diff is ~40 lines, cheaper than auditing a diff package. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it. HEAT_DISCLOSURE sits beside that arithmetic for the same reason: a member's own views count toward the number, and four surfaces printing their own copy of that promise is four promises that can drift (BEA-61). The constant is NOT re-exported through useBrowse — surfaces import it straight from lib/heat, and a unit test asserts src/ holds exactly one copy of the sentence. The hot-and-stale VERDICT joined the totals for the same reason (BEA-119): HOT_READS/STALE_DAYS/isDanger were private to Insights.tsx, so the Dashboard was the only screen that could say a doc was hot and unmaintained — the file page and the folder listing showed the ingredients and no verdict. isDanger takes (reads, days) rather than a heat entry because only the Dashboard has a reader lens: it passes its lens-filtered count, the other two pass heatTotal. staleNote returns a STRING (empty when not flagged) so the badge stays pure and survives whichever component owns the meta line"
+    note for lib "pure, no React, unit-tested on node (npm test) — diff.ts trims equal edges, uses bounded LCS for small gaps and splits large gaps on unique-line patience anchors; only an oversized gap without anchors falls back to replacement. heat.ts is the one read-count arithmetic: every surface (file header, folder listing, Dashboard bar) totals and splits through it, so they cannot disagree; useBrowse re-exports it. HEAT_DISCLOSURE sits beside that arithmetic for the same reason: a member's own views count toward the number, and four surfaces printing their own copy of that promise is four promises that can drift (BEA-61). The constant is NOT re-exported through useBrowse — surfaces import it straight from lib/heat, and a unit test asserts src/ holds exactly one copy of the sentence. The hot-and-stale VERDICT joined the totals for the same reason (BEA-119): HOT_READS/STALE_DAYS/isDanger were private to Insights.tsx, so the Dashboard was the only screen that could say a doc was hot and unmaintained — the file page and the folder listing showed the ingredients and no verdict. isDanger takes (reads, days) rather than a heat entry because only the Dashboard has a reader lens: it passes its lens-filtered count, the other two pass heatTotal. staleNote returns a STRING (empty when not flagged) so the badge stays pure and survives whichever component owns the meta line"
     note for lib "scroll.ts is the per-route scroll goal, lifted out of Browser.tsx so it can be tested at all — the frontend suite is node --test over pure TS with no jsdom. A route change arms a goal (0 on a fresh navigation, the memoized offset on POP) and views re-apply it up to MAX_APPLY times as content grows after first paint; noteScroll RETIRES it the moment the reader scrolls, which is the choke point that stops any onRendered caller — a metadata refresh, a poll, anything added later — from moving a reader mid-read (BEA-155). Two clauses in that guard are load-bearing and each has its own test: scrollTo fires a scroll event of its own, so movement is measured against the goal and never against zero, and a page shorter than the last one makes the browser CLAMP the carried-over offset to the bottom, which is either the old page arriving or a goal that does not fit yet"
     note for lib "secrets.ts is the six credential rules in words, mirroring internal/secrets' Label map. It lived in Browser.tsx under a comment saying one caller did not justify a file; BEA-147 gave it a second one, and the two callers are the two surfaces that report the SAME finding — the share dialog that refuses to mint, and FileView's badge that only warns. One map is what makes 'wording consistent with the share dialog' mechanical rather than a copy-editing promise"
     note for lib "treeview.ts decides which rows the sidebar tree shows, as pure functions: conflict copies fold into a badge on an original that still exists, names matching SYSTEM_FILE_PATTERNS group under a collapsed System files row per folder, nested folders show their CHILD_CAP most recently changed children then Show N more (the selected path is always kept), and folders count files changed after the visit baseline. visits.ts holds that baseline and the pins in localStorage per project — client-side by design: it is one reader's view of a shared project. The baseline is fixed for a page session and moves when Activity opens; the stored marker also moves on pagehide/project switch"
@@ -222,8 +267,17 @@ classDiagram
     note for lib "prompt.ts is the agent paste-prompt — the single most important string in onboarding, and it was assembled by hand in ConnectGuide, EmptyState and Setup's Done frame, three wordings drifting independently. They differ only in what is being set up, so they are one function with one varying clause. Pure and origin-injected so the node suite can test it: each previous wording is pinned by a test, and one more pins that every variant still ASKS which folder, which is the runbook's hard gate"
     note for lib "csv.ts parses .csv/.tsv for FileView's table view — ~50 lines against RFC 4180, so no papaparse. It NEVER throws: null means 'not a table' (unterminated quote, no delimiter) and the caller falls back to the plain-text preview, which is why the fallback is a type-level guarantee rather than a try/catch someone can forget"
     note for lib "theme.ts owns the one appearance preference: System (default), Light or Dark, kept per browser in localStorage and resolved onto html[data-theme]. index.html's inline bootstrap applies it before first paint, so a light reader never sees a dark flash. The dark tokens stay the unprefixed :root default and light overrides them under :root[data-theme=light], which leaves tw.css's @theme literals — the ones web/docs and the cloud landing read — untouched. JS-side palettes (mermaid, toasts) read useTheme rather than the OS; the Insights charts paint only from CSS tokens (--viz-agent/human/share, --viz-fresh-1…4, --viz-cov-1…4), so they follow html[data-theme] with no JS, so the choice in the project menu (ProjectNav's SidebarMenu) reaches every surface"
+    class util {
+        +headingSlug(text) NFC Unicode ids matching markdown.go
+        +splitWikiTarget(target) file and fragment
+        +resolveWiki(target, files) stored file spelling
+        +resolveWikiTarget(target, files) path and fragment
+    }
+    note for util "util.ts compares wikilink paths and basenames in NFC and preserves #heading fragments, including same-file links. Heading slugs follow the server's Unicode rules; repeated-heading suffixes are determined by the rendered document."
 
-    ErrorBoundary --> App : wraps the whole tree
+    QueryClientProvider --> RouteErrorBoundary : cache stays outside recovery
+    RouteErrorBoundary --> ErrorBoundary : current URL resetKey
+    ErrorBoundary --> App : wraps the routed tree
     App --> HubApp
     App --> VolumeApp
     HubApp --> Browser
@@ -234,7 +288,7 @@ classDiagram
     components --> lib : buildRows filterTree (FileTree), sidebarSearch (ProjectNav)
     Browser --> components
     components --> lib : openSharedFile (Editor and VisualEdit share one room; both loaded on demand)
-    note for components "FileView loads Editor/VisualEdit by hand (loadEditor/useModule), not React.lazy: lazy suspends on its first render even for a module already fetched, and React then holds the fallback for at least 300 ms. Browser preloads them once a writable file has settled and on Edit hover/focus (preloadEditor), along with the file's text under EditView's own [text, url] key (prefetchEditText), so pressing Edit renders at once. Until the co-editing room answers, Editor shows the text as a plain <pre class=cm-preview> — not a second CodeMirror, so nothing looking for the editor finds it — and once onStalled fires it mounts a staging CodeMirror over the text the room join will start from. Comment writes update the cached thread list from the hub's answer and refetch in the background (useCommentActions.place); a delete leaves the list before the hub answers and a refusal is put back by the refetch"
+    note for components "FileView loads Editor/VisualEdit by hand through useModule; preloaded modules render on the first pass without React.lazy's fallback delay. preloadEditorForPath and prefetchFile load the surface and bytes the path needs. Editor mounts one styled CodeMirror before first paint and attaches the live room to it later. Comment writes update cached threads from the hub response while receipt-fenced background reads catch up."
     note for components "Editor binds Mod-s to saveNow. VisualEdit stages into a private Y.Doc (stageDoc) while the room is stalled and splices an edited element as the minimal change inside it (diffSplices) instead of replacing its whole range; both hand their SharedFile to FileView through handle. FileView fills Browser's flushRef with saveNow (Promise&lt;boolean&gt;) + askingShrink, and Done saves every edit, including any typed during the save, before leaving, and stays in the editor if the save fails or opens a shrink confirmation"
     note for lib "frameflush.ts is VisualEdit's side of the iframe's sealed message channel. frameChannel handles every message strictly in arrival order, each after the one before it finishes (anchoring is async), so an edit typed just before Done cannot still be queued when the save looks at the buffer. drain() posts bd-edit:flush with an id; inline-edit.ts posts any edit it still holds and then answers bd-edit:flushed with that id on the same channel, so once the answer is handled every earlier patch is in the document. A drain waits as long as the frame is there to answer, never on a timer, and gives up only when the frame is gone or the editor closes. Done's save goes through saveLocked(drain, save, unlock): the flush carries lock: true, so the frame stops accepting edits until bd-edit:unlock and nothing typed during the save can be left out of it. If saveNow returns false or throws (a failed save or an open shrink question, so the editor stays), saveLocked posts bd-edit:unlock; a save that lands leaves the frame locked because the editor is about to close. Concurrent Done calls share one saveLocked"
     note for components "EditView (FileView.tsx) is the editing page: a Write / Markdown / Preview segmented control over ONE Editor — Write and Markdown reconfigure the same CodeMirror through a Compartment, Preview hides it without unmounting, so the room, the cursor and the undo stack survive a switch and the /edit/ URL stays the invitation. The top bar's #editor-state reads Live · saved Ns ago / Offline · N edits pending, beside avatars of everyone in the room (awareness). EditRail is the markdown edit rail: attendee progress (meeting notes), action items from - [ ] … @owner lines (Copy as markdown), and recent versions with a one-click Restore that POSTs /restore — a new op, never a rewrite. ShrinkDialogHost is the blocking empty-save dialog: sharedfile raises it on the hub's 422 when this client saves, and — because a hub-held room's refusal never reaches a client — on seeing the document itself sharpShrink against the last known file text; Keep (the default) splices the file's current bytes back into the document, Save anyway PUTs the document as it stands with X-Bdrive-Confirm-Shrink. The ask belongs to its editor: destroying the SharedFile withdraws it (withdrawShrink closes the dialog without running either answer, and no parting save is written), and both answers are no-ops on a destroyed file. After a Restore, EditView reconciles the open document itself through the Editor's SharedFile handle (onRestored) instead of relying on the change stream: merge with held when the hub reports it folded the restore into the live room, as an ordinary outside write otherwise. Meeting notes (any daily-meetings/ folder) get cm-meeting's per-person sections: fold state is CodeMirror folding (view-only), status derives from awareness cursors and changes seen in this tab, and while the socket is down only your own section takes edits (meeting.ts offlineEditable) — the preamble, other sections, and the whole note when it has no section of yours are filtered before they reach the CRDT"
@@ -258,7 +312,7 @@ classDiagram
     components ..> inlineComment : postMessage via the ?comment=1 iframe
     hooks --> api
     App --> api : main.tsx startConfig, then prefetchForURL (same query keys as hooks)
-    Browser --> hooks : useTree useHeat useShares useProjectEvents useComments, fetchBlobText + fileURLFor (Copy)
+    Browser --> hooks : useTree useHeat useShares useProjectEvents useComments, textQueryOptions + fileURLFor (Copy)
     HubApp --> hooks
     HubApp --> Setup : desktop mode only, /setup/* frames
     HubApp --> McpConnections : /connections, account-level
@@ -267,4 +321,11 @@ classDiagram
     hooks --> analytics : initAnalytics + identify on config
     api --> analytics : track(product event)
     Browser --> analytics : share_created (the one raw fetch)
+    api --> http : projectFetch carries and records receipts
+    hooks --> http : latestProjectReceipt for frame URLs
+    components --> hooks : textQueryOptions for every live text reader and editor seed
+    components --> util : resolveWikiTarget (MarkdownView)
+    Browser --> util : canonical path and heading navigation
+    note for components "ConflictBanner compares versions on demand and resolves with a conditional write of the chosen copy over the original, followed by removing the copy, or removes the copy to keep the original. RestoreHost brackets a restore with file reads and updates the open document before its text query, so a live room cannot save the replaced bytes back. EditorInfo.jumpToLine drives action-item navigation in EditRail."
+    note for hooks "useProjectEvents applies complete per-path deltas to the tree and current history, including delete attribution from the server; incomplete or resync frames invalidate them. Comments keep their receipt-fenced refetch. This avoids rebuilding a loaded history feed for each complete frame."
 ```
