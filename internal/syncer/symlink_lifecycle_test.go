@@ -2,8 +2,11 @@ package syncer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -821,40 +824,139 @@ func TestSymlink_ForestDiscoveryAndDriftFollowEntryTypes(t *testing.T) {
 	lifecycleAssertDiscovery(t, s, "regular", "link")
 }
 
-func TestSymlink_ForestLocalIgnoreLinkIsNeitherFollowedNorSynced(t *testing.T) {
-	for _, live := range []bool{false, true} {
-		t.Run(fmt.Sprint(live), func(t *testing.T) {
-			be := sharedRemote(t)
-			a, b := newDevice(t, "deva", be), newDevice(t, "devb", be)
-			target := filepath.Join(t.TempDir(), "rules")
-			if live {
-				if err := os.WriteFile(target, []byte("secret.txt\n"), 0o600); err != nil {
+func TestSymlink_ForestNonRegularIgnoreFailsClosedAndRecovers(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		for _, kind := range []string{"symlink", "dangling", "fifo", "directory"} {
+			t.Run(fmt.Sprintf("existing=%t/%s", existing, kind), func(t *testing.T) {
+				be := sharedRemote(t)
+				a, b := newDevice(t, "deva", be), newDevice(t, "devb", be)
+				const secret = "PRIVATE_SECRET_ENV_CONTENT_331"
+				secretSHA := fmt.Sprintf("%x", sha256.Sum256([]byte(secret)))
+				write(t, a.Folder, "secret.env", secret)
+				if existing {
+					write(t, a.Folder, "public.md", "old public content")
+					write(t, a.Folder, IgnoreFile, "secret.env\n")
+					cycle(t, a)
+					lifecycleRemove(t, a, IgnoreFile)
+				}
+				st, err := a.Store.LoadSync()
+				if err != nil {
 					t.Fatal(err)
 				}
-			}
-			lifecycleLink(t, a, IgnoreFile, target)
-			write(t, a.Folder, "secret.txt", "must sync")
-			filter, err := loadFilter(a.Folder, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if filter.Skip("secret.txt") {
-				t.Error("followed .bdriveignore symlink into external rules")
-			}
-			lifecycleAssertDrift(t, a, map[string]store.CachedFile{}, [3]int{1, 0, 0})
-			lifecycleAssertDiscovery(t, a, "secret.txt")
-			cycle(t, a)
-			for _, op := range journalOps(t, a) {
-				if op.Path == IgnoreFile {
-					t.Errorf("journaled symlinked ignore file: %+v", op)
+				if (st.IgnoreAccepted != "") != existing {
+					t.Fatalf("fixture exclusion floor = %q, existing=%t", st.IgnoreAccepted, existing)
 				}
-			}
-			cycle(t, b)
-			lifecycleAssertGone(t, b, IgnoreFile)
-			if got := read(t, b.Folder, "secret.txt"); got != "must sync" {
-				t.Errorf("external rules suppressed data: %q", got)
-			}
-		})
+				write(t, a.Folder, "public.md", "safe public update")
+				target := filepath.Join(t.TempDir(), "shared-ignore")
+				if err := os.WriteFile(target, []byte("secret.env\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				switch kind {
+				case "symlink":
+					lifecycleLink(t, a, IgnoreFile, target)
+				case "dangling":
+					lifecycleLink(t, a, IgnoreFile, target+"-missing")
+				case "fifo":
+					if err := syscall.Mkfifo(filepath.Join(a.Folder, IgnoreFile), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				case "directory":
+					if err := os.Mkdir(filepath.Join(a.Folder, IgnoreFile), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := a.Store.DeviceOps(a.Device.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := a.Cycle(context.Background()); !errors.Is(err, store.ErrNotRegular) {
+					t.Errorf("Cycle = %v, want a non-regular policy error", err)
+				}
+				after, err := a.Store.DeviceOps(a.Device.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(after) != len(before) {
+					t.Errorf("failed policy check journaled %d new ops", len(after)-len(before))
+				}
+				for _, check := range []struct {
+					name string
+					run  func() error
+				}{
+					{"SyncedFiles", func() error { _, err := SyncedFiles(a.Folder, nil, st.IgnoreAccepted); return err }},
+					{"Explain", func() error { _, _, err := Explain(a.Folder, nil, st.IgnoreAccepted); return err }},
+					{"Measure", func() error { _, _, err := Measure(a.Folder, nil); return err }},
+					{"Drift", func() error {
+						_, _, _, err := Drift(a.Folder, nil, st.IgnoreAccepted, lifecycleCache(t, a))
+						return err
+					}},
+				} {
+					if err := check.run(); !errors.Is(err, store.ErrNotRegular) || os.IsNotExist(err) {
+						t.Errorf("%s = %v, want a fail-closed policy error", check.name, err)
+					}
+				}
+				assertNoSecret := func() {
+					t.Helper()
+					ops, err := a.Store.DeviceOps(a.Device.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, op := range ops {
+						if op.Path == "secret.env" {
+							t.Errorf("secret journaled locally: %+v", op)
+						}
+					}
+					if a.Store.HasBlob(secretSHA) {
+						t.Error("secret captured in the local blob store")
+					}
+					exists, err := be.Exists(context.Background(), "blobs/"+secretSHA)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if exists {
+						t.Error("secret blob uploaded")
+					}
+					objects, err := be.List(context.Background(), "journal/")
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, object := range objects {
+						reader, err := be.Get(context.Background(), object.Key)
+						if err != nil {
+							t.Fatal(err)
+						}
+						data, readErr := io.ReadAll(reader)
+						closeErr := reader.Close()
+						if readErr != nil || closeErr != nil {
+							t.Fatalf("read remote journal: %v; close: %v", readErr, closeErr)
+						}
+						ops, err := journal.Parse(data)
+						if err != nil {
+							t.Fatal(err)
+						}
+						for _, op := range ops {
+							if op.Path == "secret.env" {
+								t.Errorf("secret op uploaded: %+v", op)
+							}
+						}
+					}
+				}
+				assertNoSecret()
+
+				// Correcting the local policy unblocks sync without disclosing secrets.
+				lifecycleRemove(t, a, IgnoreFile)
+				write(t, a.Folder, IgnoreFile, "secret.env\n")
+				cycle(t, a)
+				cycle(t, b)
+				if got := read(t, b.Folder, "public.md"); got != "safe public update" {
+					t.Errorf("public recovery = %q", got)
+				}
+				if _, err := os.Lstat(filepath.Join(b.Folder, "secret.env")); !os.IsNotExist(err) {
+					t.Errorf("secret materialized on peer: %v", err)
+				}
+				assertNoSecret()
+			})
+		}
 	}
 }
 
@@ -1019,7 +1121,7 @@ func TestSymlink_ReadOnlyIdenticalRegularFileCreatesNoLocalCopy(t *testing.T) {
 	}
 }
 
-func TestSymlink_IgnoreFIFOMeansNoLocalRules(t *testing.T) {
+func TestSymlink_IgnoreFIFOFailsClosed(t *testing.T) {
 	folder := t.TempDir()
 	abs := filepath.Join(folder, IgnoreFile)
 	if err := syscall.Mkfifo(abs, 0o600); err != nil {
@@ -1032,8 +1134,8 @@ func TestSymlink_IgnoreFIFOMeansNoLocalRules(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		if !os.IsNotExist(err) {
-			t.Fatalf("FIFO ignore rules = %v, want not-exist", err)
+		if !errors.Is(err, store.ErrNotRegular) || os.IsNotExist(err) {
+			t.Fatalf("FIFO ignore rules = %v, want a fail-closed policy error", err)
 		}
 	case <-time.After(5 * time.Second):
 		if writer, err := os.OpenFile(abs, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {

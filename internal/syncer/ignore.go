@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -126,12 +127,13 @@ func LoadFilter(folder string, include []string) (*Filter, error) {
 }
 
 // readRegularIgnoreFile treats sync policy as regular-file content, never as
-// the target of a symlink. Missing and non-regular entries mean no local rules.
+// the target of a symlink. Only a missing entry means no local rules; a
+// non-regular policy fails closed so exclusions cannot silently disappear.
 func readRegularIgnoreFile(folder string) ([]byte, error) {
 	abs := filepath.Join(folder, IgnoreFile)
 	f, _, err := store.OpenRegularUnderRoot(folder, abs)
 	if errors.Is(err, store.ErrNotRegular) {
-		return nil, os.ErrNotExist
+		return nil, fmt.Errorf("%s must be a regular file: %w", IgnoreFile, err)
 	}
 	if err != nil {
 		return nil, err
