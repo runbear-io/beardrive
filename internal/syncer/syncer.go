@@ -2292,6 +2292,8 @@ const maxLocalCopyTries = 64
 // preserveLocalEntry keeps a displaced read-only entry beside its original,
 // under the same prefix and without a journal op. Link targets are copied as
 // strings, never opened. Directories and special entries are left untouched.
+// Regular copies retain the opened source's permissions; reused copies can
+// only lose permissions, never gain them.
 // Identical copies are reused. When all bounded slots hold different edits,
 // preservation fails so materialization leaves both old copies and new work alone.
 func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
@@ -2300,12 +2302,24 @@ func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
 	}
 	var link string
 	var data []byte
+	var mode os.FileMode
 	var err error
 	switch {
 	case fi.Mode()&os.ModeSymlink != 0:
 		link, err = os.Readlink(abs)
 	case fi.Mode().IsRegular():
-		data, err = os.ReadFile(abs)
+		f, openFi, openErr := store.OpenRegularUnderRoot(s.Folder, abs)
+		if openErr != nil {
+			return openErr
+		}
+		data, err = io.ReadAll(f)
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		mode = openFi.Mode().Perm()
+		if mode == 0 {
+			mode = 0o600
+		}
 	default:
 		return fmt.Errorf("cannot preserve non-file entry %s", rel)
 	}
@@ -2334,9 +2348,23 @@ func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
 				return nil
 			}
 		} else if link == "" && existing.Mode().IsRegular() {
-			if prior, err := os.ReadFile(candidate); err == nil && bytes.Equal(prior, data) {
-				return nil
+			f, existingFi, err := store.OpenRegularUnderRoot(s.Folder, candidate)
+			if err != nil {
+				continue
 			}
+			prior, readErr := io.ReadAll(f)
+			if readErr != nil || !bytes.Equal(prior, data) {
+				f.Close()
+				continue
+			}
+			existingMode := existingFi.Mode().Perm()
+			if existingMode&^mode != 0 {
+				if err := f.Chmod(existingMode & mode); err != nil {
+					f.Close()
+					return err
+				}
+			}
+			return f.Close()
 		}
 	}
 	if copyAbs == "" {
@@ -2345,7 +2373,7 @@ func (s *Session) preserveLocalEntry(abs, rel string, fi os.FileInfo) error {
 	if link != "" {
 		return s.writeSymlink(copyAbs, link)
 	}
-	return store.WriteFileAtomic(copyAbs, data, 0o644)
+	return store.WriteFileAtomic(copyAbs, data, mode)
 }
 
 // conflictName builds the copy's name. Both variable parts are bounded: the

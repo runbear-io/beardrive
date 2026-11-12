@@ -1294,3 +1294,163 @@ func TestSymlink_DeniedMaterializeSkipsRetainedTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestSymlink_ReadOnlyLocalCopyPreservesSourceMode(t *testing.T) {
+	for _, scenario := range []string{"untracked replacement", "dirty replacement", "dirty deletion"} {
+		for _, mode := range []os.FileMode{0o600, 0o640, 0o700} {
+			t.Run(fmt.Sprintf("%s/%o", scenario, mode), func(t *testing.T) {
+				be := sharedRemote(t)
+				a := newDevice(t, "deva", be)
+				b := newDevice(t, "devb", scopedRemote{Backend: be, readOnly: []string{"locked/"}})
+				write(t, a.Folder, "locked/private.key", "original project bytes")
+				cycle(t, a)
+				if scenario != "untracked replacement" {
+					cycle(t, b)
+				}
+				write(t, b.Folder, "locked/private.key", "private local fixture bytes")
+				if err := os.Chmod(filepath.Join(b.Folder, "locked/private.key"), mode); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "dirty replacement" {
+					write(t, a.Folder, "locked/private.key", "new project bytes")
+					cycle(t, a)
+				} else if scenario == "dirty deletion" {
+					lifecycleRemove(t, a, "locked/private.key")
+					cycle(t, a)
+				}
+				cycle(t, b)
+				copyRel := "locked/private (local, not synced).key"
+				fi, err := os.Lstat(filepath.Join(b.Folder, copyRel))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fi.Mode().Perm() != mode {
+					t.Errorf("local-copy permissions = %o, want original %o", fi.Mode().Perm(), mode)
+				}
+				if got := read(t, b.Folder, copyRel); got != "private local fixture bytes" {
+					t.Errorf("preserved bytes = %q", got)
+				}
+				if scenario == "dirty deletion" {
+					lifecycleAssertGone(t, b, "locked/private.key")
+				} else {
+					want := "original project bytes"
+					if scenario == "dirty replacement" {
+						want = "new project bytes"
+					}
+					if got := read(t, b.Folder, "locked/private.key"); got != want {
+						t.Errorf("project replacement = %q", got)
+					}
+				}
+				lifecycleAssertNoReadOnlyOps(t, b)
+			})
+		}
+	}
+}
+
+func TestSymlink_LocalCopyReuseOnlyTightensPermissions(t *testing.T) {
+	for _, existingMode := range []os.FileMode{0o600, 0o644, 0o400, 0o440, 0o755} {
+		t.Run(fmt.Sprintf("%o", existingMode), func(t *testing.T) {
+			s := newDevice(t, "devb", sharedRemote(t))
+			write(t, s.Folder, "locked/entry", "private fixture")
+			if err := os.Chmod(filepath.Join(s.Folder, "locked/entry"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			copyRel := "locked/entry (local, not synced)"
+			write(t, s.Folder, copyRel, "private fixture")
+			if err := os.Chmod(filepath.Join(s.Folder, copyRel), existingMode); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Lstat(filepath.Join(s.Folder, copyRel))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := lifecyclePreserve(s, "locked/entry"); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.Lstat(filepath.Join(s.Folder, copyRel))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := existingMode & 0o600; after.Mode().Perm() != want {
+				t.Errorf("reused sidecar mode = %o, want %o", after.Mode().Perm(), want)
+			}
+			if !os.SameFile(before, after) {
+				t.Error("identical sidecar was replaced rather than tightened in place")
+			}
+			entries, err := os.ReadDir(filepath.Join(s.Folder, "locked"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 2 {
+				t.Errorf("identical sidecar was duplicated: %v", entries)
+			}
+		})
+	}
+}
+
+func TestSymlink_LocalCopyReadsOpenedSourcePermissions(t *testing.T) {
+	s := newDevice(t, "devb", sharedRemote(t))
+	write(t, s.Folder, "locked/entry", "private fixture")
+	abs := filepath.Join(s.Folder, "locked/entry")
+	staleInfo, err := os.Lstat(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(abs, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.preserveLocalEntry(abs, "locked/entry", staleInfo); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(filepath.Join(s.Folder, "locked/entry (local, not synced)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("copy used stale path permissions: %o", fi.Mode().Perm())
+	}
+}
+
+func TestSymlink_LocalCopyRejectsSourceSwappedToLink(t *testing.T) {
+	s := newDevice(t, "devb", sharedRemote(t))
+	write(t, s.Folder, "locked/entry", "local fixture")
+	abs := filepath.Join(s.Folder, "locked/entry")
+	staleInfo, err := os.Lstat(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	write(t, outside, "secret", "OUTSIDE_SECRET_NEEDLE")
+	lifecycleRemove(t, s, "locked/entry")
+	lifecycleLink(t, s, "locked/entry", filepath.Join(outside, "secret"))
+	if err := s.preserveLocalEntry(abs, "locked/entry", staleInfo); !errors.Is(err, store.ErrNotRegular) {
+		t.Errorf("source replaced by a symlink was read: %v", err)
+	}
+	lifecycleAssertGone(t, s, "locked/entry (local, not synced)")
+}
+
+func TestSymlink_LocalCopyZeroModeStaysPrivate(t *testing.T) {
+	s := newDevice(t, "devb", sharedRemote(t))
+	write(t, s.Folder, "locked/entry", "private fixture")
+	if err := os.Chmod(filepath.Join(s.Folder, "locked/entry"), 0); err != nil {
+		t.Fatal(err)
+	}
+	err := lifecyclePreserve(s, "locked/entry")
+	if os.Geteuid() != 0 {
+		if !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("unreadable source = %v, want permission error", err)
+		}
+		lifecycleAssertGone(t, s, "locked/entry (local, not synced)")
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(filepath.Join(s.Folder, "locked/entry (local, not synced)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("zero-mode fallback permissions = %o, want 600", fi.Mode().Perm())
+	}
+}
