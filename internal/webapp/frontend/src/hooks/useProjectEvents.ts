@@ -192,11 +192,8 @@ export function useProjectEvents(
       }
       if (ev.type === "scope") {
         pendingCancelDeltas.length = 0;
-        cancelRequiredReceipts.clear();
-        lastUnfencedDeltaAt = 0;
-        if (unfencedTreeTimer) {
-          window.clearTimeout(unfencedTreeTimer);
-          unfencedTreeTimer = null;
+        if (lastUnfencedDeltaAt > 0 && Date.now() - lastUnfencedDeltaAt < UNFENCED_TREE_MS) {
+          scheduleUnfencedTreeRefetch();
         }
         qc.invalidateQueries({ queryKey: ["tree", apiBase] });
         qc.invalidateQueries({ queryKey: ["emptied", apiBase] });
@@ -260,7 +257,7 @@ export function useProjectEvents(
           }
           const unfencedWindowClear =
             lastUnfencedDeltaAt === 0 || Date.now() - lastUnfencedDeltaAt >= UNFENCED_TREE_MS;
-          if (allFenced && unfencedWindowClear && coversProjectReceipts(apiBase, required)) {
+          if (allFenced && unfencedWindowClear && (required.size === 0 || coversProjectReceipts(apiBase, required))) {
             if (unfencedTreeTimer) {
               window.clearTimeout(unfencedTreeTimer);
               unfencedTreeTimer = null;
