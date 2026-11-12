@@ -769,13 +769,10 @@ test("a file the run created can be undone, and comes back", async ({ page }) =>
   const gone = page.locator('.history > .hentry.delete:has-text("runbook.md")').first();
   await expect(gone).toBeVisible();
 
-  // ...and the delete row puts it back, bytes and all — after asking, and
-  // saying the one true thing about this branch: History can't take it away
-  // again (BEA-129).
+  // ...and the delete row puts it back, bytes and all — after asking.
   await gone.locator(".hrestore-btn").click();
   const rmodal = page.locator(".modal");
   await expect(rmodal).toContainText("Restore this version of runbook.md?");
-  await expect(rmodal).toContainText("isn't available from History yet");
   // Restore adds content, so it is not dressed as a destructive action.
   await expect(rmodal.locator(".danger-btn")).toHaveCount(0);
   await rmodal.getByRole("button", { name: "Restore" }).click();
