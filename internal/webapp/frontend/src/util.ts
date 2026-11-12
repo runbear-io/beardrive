@@ -79,19 +79,33 @@ export function splitWikiTarget(target: string): { file: string; fragment: strin
    place and get tested without a browser (node --test has no DOM, so this
    cannot live in FileView). */
 export function resolveWiki<F extends { path: string; name: string }>(target: string, files: F[]): F | undefined {
-  const want = splitWikiTarget(target).file.normalize("NFC").toLowerCase();
+  const raw = splitWikiTarget(target).file;
+  const want = raw.normalize("NFC").toLowerCase();
   if (!want) return undefined;
+  const rawLower = raw.toLowerCase();
+  const exactRaw = files.filter((f) => {
+    const p = f.path.toLowerCase();
+    return p === rawLower || p === rawLower + ".md";
+  });
+  if (exactRaw.length === 1) return exactRaw[0];
   const fold = (s: string) => s.normalize("NFC").toLowerCase();
-  return (
-    files.find((f) => {
-      const p = fold(f.path);
-      return p === want || p === want + ".md";
-    }) ||
-    files.find((f) => {
-      const n = fold(f.name);
-      return n === want || n === want + ".md";
-    })
-  );
+  const byPath = files.filter((f) => {
+    const p = fold(f.path);
+    return p === want || p === want + ".md";
+  });
+  if (byPath.length === 1) return byPath[0];
+  if (byPath.length > 1) return undefined;
+  const exactBase = files.filter((f) => {
+    const n = f.name.toLowerCase();
+    return n === rawLower || n === rawLower + ".md";
+  });
+  if (exactBase.length === 1) return exactBase[0];
+  const byBase = files.filter((f) => {
+    const n = fold(f.name);
+    return n === want || n === want + ".md";
+  });
+  if (byBase.length === 1) return byBase[0];
+  return undefined;
 }
 
 /* A wikilink target resolved to the file's ACTUAL path (its own Unicode

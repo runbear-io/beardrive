@@ -123,17 +123,35 @@ export default function Browser(props: {
      (NFD), a typed or pasted URL is composed (NFC): /notes/한글.md and the
      synced file look identical and compare unequal. The tree's own spelling
      wins — it is what the hub stores — so the address is rewritten to it. */
-  const nfcTwin = useMemo(() => {
-    if (!path || !loaded || isDir || isFile) return undefined;
+  const nfcCandidates = useMemo(() => {
+    if (!path || !loaded || isDir || isFile) return [];
     const want = path.normalize("NFC");
-    if (want === path && !/[^\x00-\x7f]/.test(path)) return undefined;
-    for (const d of dirIndex.keys()) if (d.normalize("NFC") === want) return d;
-    return flatFiles.find((f) => f.path.normalize("NFC") === want)?.path;
+    if (want === path && !/[^\x00-\x7f]/.test(path)) return [];
+    const seen = new Set<string>();
+    const out: Array<{ path: string; kind: "dir" | "file" }> = [];
+    for (const d of dirIndex.keys()) {
+      if (d.normalize("NFC") === want && !seen.has(d)) {
+        seen.add(d);
+        out.push({ path: d, kind: "dir" });
+      }
+    }
+    for (const f of flatFiles) {
+      if (f.path.normalize("NFC") === want && !seen.has(f.path)) {
+        seen.add(f.path);
+        out.push({ path: f.path, kind: "file" });
+      }
+    }
+    return out;
   }, [path, loaded, isDir, isFile, dirIndex, flatFiles]);
-  const isMissing = !!path && loaded && !isDir && !isFile && !version && !nfcTwin;
+  const nfcTwin = nfcCandidates.length === 1 ? nfcCandidates[0] : undefined;
+  const ambiguousNfcTwins = nfcCandidates.length > 1 ? nfcCandidates : undefined;
+  const isMissing = !!path && loaded && !isDir && !isFile && !version && !nfcTwin && !ambiguousNfcTwins;
   useEffect(() => {
     if (!nfcTwin) return;
-    navigate(urlForPath(nfcTwin, project?.id, version, route.full, route.editing) + window.location.hash, { replace: true });
+    navigate(
+      urlForPath(nfcTwin.path, project?.id, version, route.full, nfcTwin.kind === "file" && route.editing) + window.location.hash,
+      { replace: true },
+    );
   }, [nfcTwin, project?.id, version, route.full, route.editing]);
   const listingShowing = isDir && !route.view;
   // Home's "Jump back in": the current version of a file, opened in a project.
@@ -918,20 +936,35 @@ export default function Browser(props: {
       const name = (await modalPrompt("New file", "File name", "untitled.md", "Create"))?.trim().replace(/^\/+/, "");
       if (!name) return;
       const p = (folder ? folder + "/" : "") + name;
+      if (dirIndex.has(p)) {
+        toast(p + " already exists", true);
+        return;
+      }
+      if (flatFiles.some((f) => f.path === p)) {
+        navigate(urlForPath(p, project?.id, undefined, route.full, true));
+        closeSidebarOnMobile();
+        return;
+      }
       const normalized = p.normalize("NFC");
-      const existing = flatFiles.find((f) => f.path.normalize("NFC") === normalized);
-      if (existing) {
-        navigate(urlForPath(existing.path, project?.id, undefined, route.full, true));
+      for (const d of dirIndex.keys()) {
+        if (d.normalize("NFC") === normalized) {
+          toast(d + " already exists", true);
+          return;
+        }
+      }
+      const nfcMatches = flatFiles.filter((f) => f.path.normalize("NFC") === normalized);
+      if (nfcMatches.length > 1) {
+        toast(`Multiple files already match "${p}" in different Unicode forms — choose one from the file tree`, true);
+        return;
+      }
+      if (nfcMatches.length === 1) {
+        navigate(urlForPath(nfcMatches[0].path, project?.id, undefined, route.full, true));
         closeSidebarOnMobile();
         return;
       }
       const caseTwin = flatFiles.find((f) => f.path.normalize("NFC").toLowerCase() === normalized.toLowerCase());
       if (caseTwin) {
         toast(`A file named "${caseTwin.path}" already exists — macOS and Windows treat uppercase/lowercase names as the same file`, true);
-        return;
-      }
-      if (dirIndex.has(p)) {
-        toast(p + " already exists", true);
         return;
       }
       try {
@@ -1065,8 +1098,35 @@ export default function Browser(props: {
       />
     );
   } else if (path) {
-    if (!loaded) {
+    if (!loaded || nfcTwin) {
       view = MD_EXT.test(path) ? <FileSkeleton /> : <div className="empty">Loading…</div>;
+    } else if (ambiguousNfcTwins) {
+      const unicodeForm = (s: string) =>
+        s === s.normalize("NFC") ? "NFC" : s === s.normalize("NFD") ? "NFD" : "mixed Unicode";
+      view = (
+        <div className="notfound" id="ambiguous-nfc">
+          <h1>Multiple entries match this name</h1>
+          <p>
+            <code>{path}</code> matches {ambiguousNfcTwins.length} stored paths with different Unicode normalization. Choose the exact entry to open:
+          </p>
+          <div className="vb-actions" style={{ justifyContent: "center", flexWrap: "wrap", marginTop: 12 }}>
+            {ambiguousNfcTwins.map((c) => (
+              <button
+                key={c.path}
+                type="button"
+                className="pbtn"
+                onClick={() =>
+                  navigate(
+                    urlForPath(c.path, project?.id, version, route.full, c.kind === "file" && route.editing) + window.location.hash,
+                  )
+                }
+              >
+                {c.kind === "dir" ? `${c.path}/` : c.path} ({unicodeForm(c.path)})
+              </button>
+            ))}
+          </div>
+        </div>
+      );
     } else if (isMissing) {
       // The tree polls every few seconds, so a file that's mid-upload (or
       // mid-sync from a teammate's device) appears here on its own.

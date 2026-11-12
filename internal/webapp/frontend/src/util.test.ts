@@ -119,6 +119,18 @@ test("wikilinks match across NFC/NFD and return the tree's own path", () => {
   assert.equal(resolveWiki("회의록", files)?.path, nfd); // NFC target, NFD file
   assert.equal(resolveWiki("notes/회의록".normalize("NFD"), files)?.path, nfd);
   assert.deepEqual(resolveWikiTarget("회의록#안건", files), { path: nfd, fragment: "#안건" });
+
+  // Two stored files whose NFC forms collide: exact spelling resolves, a third mixed spelling refuses to guess.
+  const mixedA = "한".normalize("NFC") + "글.md".normalize("NFD");
+  const mixedB = "한".normalize("NFD") + "글.md".normalize("NFC");
+  const third = "한글.md".normalize("NFC");
+  const twins = [
+    { path: `notes/${mixedA}`, name: mixedA },
+    { path: `notes/${mixedB}`, name: mixedB },
+  ];
+  assert.equal(resolveWiki(`notes/${mixedA}`, twins)?.path, `notes/${mixedA}`);
+  assert.equal(resolveWiki(`notes/${third}`, twins), undefined);
+  assert.equal(resolveWiki(third, twins), undefined);
 });
 
 test("storage that throws is swallowed on both sides", () => {
