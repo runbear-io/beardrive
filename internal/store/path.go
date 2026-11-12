@@ -56,23 +56,43 @@ var ErrNotRegular = errors.New("not a regular file")
 // is opened nonblocking and checked as a regular file before it can be read.
 // The caller owns the returned file.
 func OpenRegularUnderRoot(root, abs string) (*os.File, os.FileInfo, error) {
-	root, abs = filepath.Clean(root), filepath.Clean(abs)
-	rel, err := filepath.Rel(root, abs)
+	// Resolve relative inputs against Go's working-directory spelling before
+	// the kernel interprets ".." through a symlinked working directory.
+	var err error
+	root, err = filepath.Abs(root)
 	if err != nil {
 		return nil, nil, err
 	}
+	abs, err = filepath.Abs(abs)
+	if err != nil {
+		return nil, nil, err
+	}
+	rel, err := filepath.Rel(root, abs)
 	separator := string(filepath.Separator)
-	if rel == ".." || strings.HasPrefix(rel, ".."+separator) {
-		// Resolve only the trusted mount root, never the candidate path.
-		// This permits aliases such as /tmp and /private/tmp.
-		realRoot, err := filepath.EvalSymlinks(root)
-		if err != nil {
-			return nil, nil, err
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+separator) {
+		// Resolve the trusted root first, never the candidate leaf.
+		realRoot, rootErr := filepath.EvalSymlinks(root)
+		if rootErr != nil {
+			return nil, nil, rootErr
 		}
 		rel, err = filepath.Rel(realRoot, abs)
-		if err != nil {
-			return nil, nil, err
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+separator) {
+			// Both paths can use different aliases of an ancestor, such as
+			// /var and /private/var. Find the equivalent root directory and
+			// recover the lexical tail below it without resolving the leaf.
+			for cur := filepath.Dir(abs); ; cur = filepath.Dir(cur) {
+				if realCur, evalErr := filepath.EvalSymlinks(cur); evalErr == nil && realCur == realRoot {
+					rel, err = filepath.Rel(cur, abs)
+					break
+				}
+				if filepath.Dir(cur) == cur {
+					return nil, nil, fmt.Errorf("%s is not a descendant of the mount root", abs)
+				}
+			}
 		}
+	}
+	if err != nil {
+		return nil, nil, err
 	}
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+separator) || filepath.IsAbs(rel) {
 		return nil, nil, fmt.Errorf("%s is not a descendant of the mount root", abs)

@@ -34,7 +34,22 @@ func TestSymlink_OpenRegularUnderRootReadsRegularFile(t *testing.T) {
 func TestSymlink_OpenRegularUnderRootRejectsNonRegularEntries(t *testing.T) {
 	for _, kind := range []string{"live link", "dangling link", "directory", "fifo", "socket"} {
 		t.Run(kind, func(t *testing.T) {
-			root := t.TempDir()
+			var root string
+			if kind == "socket" {
+				// Darwin's sun_path limit is shorter than CI's long TMPDIR.
+				var err error
+				root, err = os.MkdirTemp("/tmp", "bdsock")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := os.RemoveAll(root); err != nil {
+						t.Errorf("remove short socket directory: %v", err)
+					}
+				})
+			} else {
+				root = t.TempDir()
+			}
 			abs := filepath.Join(root, "entry")
 			switch kind {
 			case "live link", "dangling link":
@@ -56,6 +71,7 @@ func TestSymlink_OpenRegularUnderRootRejectsNonRegularEntries(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "socket":
+				abs = filepath.Join(root, "s")
 				listener, err := net.Listen("unix", abs)
 				if err != nil {
 					t.Fatal(err)
@@ -234,5 +250,79 @@ func TestSymlink_OpenRegularUnderRootRejectsIntermediateLinkInsideMount(t *testi
 	}
 	if err == nil || errors.Is(err, ErrNotRegular) {
 		t.Fatalf("intermediate symlink = %v, want a parent-walk error", err)
+	}
+}
+
+func TestSymlink_OpenRegularUnderRootAllowsAliasedMountAncestors(t *testing.T) {
+	physical := t.TempDir()
+	tempAlias := filepath.Join(t.TempDir(), "tmp")
+	if err := os.Symlink(physical, tempAlias); err != nil {
+		t.Fatal(err)
+	}
+	mount := filepath.Join(tempAlias, "project")
+	if err := os.MkdirAll(filepath.Join(mount, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"note.txt", "sub/note.txt"} {
+		if err := os.WriteFile(filepath.Join(mount, rel), []byte("inside"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mountAlias := filepath.Join(t.TempDir(), "mount")
+	if err := os.Symlink(mount, mountAlias); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"note.txt", "sub/note.txt"} {
+		f, _, err := OpenRegularUnderRoot(mountAlias, filepath.Join(mount, rel))
+		if err != nil {
+			t.Fatalf("open through aliased mount ancestor: %v", err)
+		}
+		data, readErr := io.ReadAll(f)
+		closeErr := f.Close()
+		if readErr != nil || closeErr != nil || string(data) != "inside" {
+			t.Fatalf("read aliased mount ancestor = %q, %v; close: %v", data, readErr, closeErr)
+		}
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "note.txt"), []byte("OUTSIDE_SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(mount, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	f, _, err := OpenRegularUnderRoot(mountAlias, filepath.Join(mount, "escape", "note.txt"))
+	if f != nil {
+		f.Close()
+	}
+	if err == nil || errors.Is(err, ErrNotRegular) {
+		t.Fatalf("aliased root allowed a descendant symlink: %v", err)
+	}
+}
+
+func TestSymlink_OpenRegularUnderRootAllowsRelativeMountAlias(t *testing.T) {
+	realMount := t.TempDir()
+	mountAlias := filepath.Join(t.TempDir(), "mount")
+	if err := os.WriteFile(filepath.Join(realMount, "note.txt"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realMount, mountAlias); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeAlias, err := filepath.Rel(cwd, mountAlias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _, err := OpenRegularUnderRoot(relativeAlias, filepath.Join(realMount, "note.txt"))
+	if err != nil {
+		t.Fatalf("open relative mount alias: %v", err)
+	}
+	data, readErr := io.ReadAll(f)
+	closeErr := f.Close()
+	if readErr != nil || closeErr != nil || string(data) != "inside" {
+		t.Fatalf("read relative mount alias = %q, %v; close: %v", data, readErr, closeErr)
 	}
 }
